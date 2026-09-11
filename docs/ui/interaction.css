@@ -1,0 +1,78 @@
+/* Interaction definition only. Intentionally low-fidelity; visual tokens belong to the next phase. */
+
+:root {
+  color: #202020;
+  font-family: system-ui, sans-serif;
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, a { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }
+
+.wireframe { background: #f7f7f7; min-height: 100vh; }
+.wireframe-header { align-items: center; background: white; border-bottom: 1px solid #bbb; display: flex; gap: 20px; justify-content: space-between; padding: 12px 20px; }
+.wireframe-header a { color: inherit; font-weight: 800; }
+.wireframe-header span { font-size: 12px; }
+.wireframe-header button, .wireframe button, .wireframe .link-button { background: white; border: 1px solid #777; border-radius: 4px; min-height: 36px; padding: 6px 10px; }
+.wireframe .link-button { color: inherit; display: inline-block; text-decoration: none; }
+.wireframe-main { display: grid; gap: 16px; grid-template-columns: 220px minmax(420px, 1fr) 280px; margin: 0 auto; max-width: 1440px; padding: 20px; }
+.region { background: white; border: 1px solid #aaa; padding: 16px; }
+.region--tasks { align-self: start; }
+.region--current { min-width: 0; }
+.region--attention { align-self: start; }
+.region--implicit { grid-column: 2 / -1; }
+.region-heading { align-items: start; display: flex; gap: 12px; justify-content: space-between; }
+.region-kicker { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 4px; text-transform: uppercase; }
+h1, h2, h3 { margin: 0; }
+h1 { font-size: 16px; }
+h2 { font-size: 22px; }
+h3 { font-size: 15px; margin-bottom: 10px; }
+.task-link { align-items: start; display: flex; flex-direction: column; gap: 3px; margin-top: 8px; text-align: start; width: 100%; }
+.task-link.is-selected { border-width: 2px; }
+.task-link small { font-size: 11px; }
+.state-label { border: 1px solid #777; border-radius: 999px; font-size: 12px; padding: 4px 9px; white-space: nowrap; }
+.interaction-block { border-top: 1px solid #aaa; margin-top: 22px; padding-top: 18px; }
+.interaction-block:first-of-type { margin-top: 18px; }
+.interaction-block dl, .implicit-body dl { display: grid; gap: 10px; margin: 0; }
+.interaction-block dl > div, .implicit-body dl > div { display: grid; gap: 2px; grid-template-columns: 105px 1fr; }
+dt { font-size: 12px; font-weight: 700; }
+dd { margin: 0; }
+.decision-state, .attention-item { border: 1px solid #777; padding: 12px; }
+.decision-state p, .attention-item p { margin: 0 0 12px; }
+.action-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.action-primary { border-width: 2px !important; font-weight: 800; }
+.action-feedback { font-size: 12px; margin: 10px 0 0; }
+.empty-decision { border: 1px dashed #aaa; margin: 0; padding: 12px; }
+.empty-decision[hidden] { display: none; }
+.timeline { display: grid; gap: 10px; margin: 0; padding-inline-start: 22px; }
+.timeline li { display: grid; gap: 8px; grid-template-columns: 80px 1fr; }
+.timeline time { font-size: 11px; }
+.attention-kind { font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.attention-item h3 { margin-bottom: 8px; }
+.human-rule { border-left: 3px solid #777; font-size: 12px; margin: 16px 0 0; padding-left: 10px; }
+.region--implicit details { border: 1px dashed #777; padding: 10px; }
+.region--implicit summary { cursor: pointer; font-weight: 700; }
+.implicit-body { border-top: 1px solid #aaa; margin-top: 10px; padding-top: 12px; }
+.implicit-body > p { font-size: 12px; }
+.implicit-body dl { border-block: 1px solid #aaa; margin: 12px 0; padding: 12px 0; }
+.mobile-navigation { display: none; }
+dialog { border: 1px solid #555; max-width: min(520px, calc(100vw - 32px)); padding: 18px; width: 520px; }
+dialog::backdrop { background: rgb(0 0 0 / 35%); }
+pre { background: #f0f0f0; overflow: auto; padding: 12px; white-space: pre-wrap; }
+
+@media (max-width: 760px) {
+  .wireframe-header { align-items: start; flex-direction: column; gap: 8px; padding: 12px 14px; }
+  .wireframe-main { display: block; padding: 14px 12px 72px; }
+  .region { margin-bottom: 12px; padding: 13px; }
+  .region--tasks { display: none; }
+  .region--attention { margin-top: 12px; }
+  .region--implicit { margin-top: 12px; }
+  .interaction-block dl > div, .implicit-body dl > div { grid-template-columns: 90px 1fr; }
+  .action-row > button { flex: 1 1 140px; }
+  .mobile-navigation { background: white; border-top: 1px solid #aaa; bottom: 0; display: grid; gap: 4px; grid-template-columns: repeat(4, 1fr); left: 0; padding: 8px; position: fixed; right: 0; z-index: 2; }
+  .mobile-navigation button { min-height: 44px; }
+  .mobile-navigation .is-selected { font-weight: 800; }
+}

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent 工作总览交互定义" />
+    <title>HumanAgent · Dashboard</title>
+    <link rel="stylesheet" href="./dashboard.css" />
+  </head>
+  <body>
+    <div class="dashboard-wireframe">
+      <header class="dashboard-header" data-region="global-navigation">
+        <div>
+          <a href="#main-content">HumanAgent</a>
+          <span>工作总览</span>
+        </div>
+        <nav aria-label="Dashboard 导航">
+          <a href="./tasks.html">任务列表</a>
+          <a href="./task.html?task=new">新建任务</a>
+        </nav>
+      </header>
+
+      <main id="main-content" class="dashboard-main">
+        <section class="region region--welcome" aria-labelledby="dashboard-title">
+          <div>
+            <span class="region-kicker">今天</span>
+            <h1 id="dashboard-title">工作总览</h1>
+            <p class="dashboard-summary"><strong>1</strong> 项待处理 <span aria-hidden="true">·</span> <strong>2</strong> 项正在运行</p>
+          </div>
+          <a class="action-primary link-button" href="./task.html?task=new">新建任务</a>
+        </section>
+
+        <section class="region region--pending" aria-labelledby="pending-title" data-region="pending-items">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">需要你处理</span>
+              <h2 id="pending-title">待处理事项</h2>
+            </div>
+            <span class="section-meta">1 项</span>
+          </header>
+          <article class="pending-item">
+            <div class="pending-item-copy"><span class="task-state task-state--waiting">需要你选择</span><strong>整理周报证据</strong><p>已经收集本周变更和验证结果，建议补齐证据并保持不发布。</p></div>
+            <a class="action-primary link-button" href="./task.html?task=weekly-report#task-interaction">查看并选择</a>
+          </article>
+        </section>
+
+        <section class="region" aria-labelledby="online-title" data-region="running-tasks">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">现在</span>
+              <h2 id="online-title">正在处理的任务</h2>
+            </div>
+            <a href="./tasks.html?scope=current">查看全部</a>
+          </header>
+          <ul class="task-list">
+            <li>
+              <a class="task-row" href="./task-dashboard.html?task=export-index">
+                <span class="task-state task-state--active">运行中</span>
+                <span class="task-copy"><strong>重建导出索引</strong><small>已检查导出目录，发现 2 个分片需要重建 · 2 分钟前</small></span>
+                <span class="task-side">查看看板</span>
+              </a>
+            </li>
+            <li><a class="task-row" href="./task-dashboard.html?task=change-summary"><span class="task-state task-state--active">运行中</span><span class="task-copy"><strong>生成项目变更摘要</strong><small>已读取本周提交和测试结果，正在合并摘要 · 8 分钟前</small></span><span class="task-side">查看看板</span></a></li>
+          </ul>
+        </section>
+
+        <section class="region" aria-labelledby="inbox-title" data-region="recent-inputs">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">最近发生</span>
+              <h2 id="inbox-title">最近输入</h2>
+            </div>
+            <span class="section-meta">来自你 · 来自任务</span>
+          </header>
+          <ol class="inbox-list">
+            <li><span class="input-source input-source--user">来自你</span><time>4 分钟前</time><span>先把周报证据补齐，沿用现在这项任务，不要发布。</span><small>已整理成一项待处理事项</small></li>
+            <li><span class="input-source input-source--task">来自任务</span><time>现在</time><span>导出目录权限发生变化，部分分片需要重新校验。</span><small>已关联到“重建导出索引”</small></li>
+            <li><span class="input-source input-source--task">来自任务</span><time>11 分钟前</time><span>旧会话已有可恢复的保存点。</span><small>已记录到“迁移旧会话”</small></li>
+          </ol>
+        </section>
+
+        <section class="region" aria-labelledby="history-title" data-region="history-tasks">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">过去</span>
+              <h2 id="history-title">历史任务</h2>
+            </div>
+            <a href="./tasks.html?scope=history">查看全部</a>
+          </header>
+          <ul class="task-list task-list--history">
+            <li>
+              <a class="task-row" href="./task.html?task=legacy-session">
+                <span class="task-state task-state--stopped">已停止</span>
+                <span class="task-copy"><strong>迁移旧会话</strong><small>昨天 18:42 · 可恢复</small></span>
+                <span class="task-side">查看</span>
+              </a>
+            </li>
+            <li>
+              <a class="task-row" href="./task.html?task=archive-cleanup">
+                <span class="task-state task-state--done">已完成</span>
+                <span class="task-copy"><strong>归档过期 artifact</strong><small>昨天 16:08 · 输出已交付</small></span>
+                <span class="task-side">查看</span>
+              </a>
+            </li>
+          </ul>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

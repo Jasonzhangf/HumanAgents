@@ -1,0 +1,31 @@
+# HumanAgent
+
+器官式长程 Harness：每轮开始从 checkpoint recall 恢复，每轮结束以 checkpoint completion 收拢；后台器官持续承担恢复责任，前台显意识立即暴露错误。
+
+## 当前状态
+
+`DESIGN-BOOTSTRAP`（2026-09-10）。本目录原为空目录，目前只建立项目规则、架构设计和初始报告；没有运行时代码、测试、Git 基线或 DSH 适配器。
+
+## 核心决定
+
+高层拥有自己的领域模型和 Organ Journal。HumanAgent 以 Cordis Host 组装固定 Harness Kernel 和可替换模块；Agent 通过统一的 Template + Driver + Runtime 抽象执行。DSH 只是一个可替换的 Agent/Execution provider，通过 `ExecutionRuntimePort` 接入，负责具体模型/工具执行和 DSH 原生 session 证据，但不拥有 HumanAgent 的任务状态、checkpoint 或恢复语义。
+
+Memory 由用户可交互的 Memory Interaction Surface、后台 Memory Operations Backend 和受 Harness 控制的 Agent Context Injection 接口组成。Index 是可重建的查询投影，不是状态真源；基础检索、比较和按来源 inspect 不要求 AI 对话。
+
+UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和控制操作；DSH WebUI 不作为整套产品壳复用，只在版本和 license 证据通过后选择性复用纯视觉 primitives。
+
+阅读顺序：
+
+1. [初始报告](docs/initial-report.md)
+2. [MVP → Milestone 1/2/3 计划](docs/goals/mvp-to-milestones.md)
+3. [器官运行时架构](docs/architecture/organ-runtime.md)
+4. [Agent 流程](docs/architecture/agent-flows.md)
+5. [Agent 模板系统](docs/architecture/agent-templates.md)
+6. [宿主、启动和 Cordis 插件化](docs/architecture/host-and-cordis.md)
+7. [Memory System](docs/architecture/memory-system.md)
+8. [生命周期与故障归属](docs/architecture/lifecycle-and-failure-ownership.md)
+9. [项目规则](AGENTS.md)
+
+## 当前未完成
+
+DSH 设计基线中的提交号在当前 DSH checkout 不可读取；当前 checkout 还有大量未跟踪生成物。因此 DSH 接口目前是设计级契约，不是已验证的源码绑定。真实 DSH 适配、Cordis bridge、持久化故障恢复、steer 同入口停止和长程 replay 仍待后续任务。第一版设计完成后将先做文档检查和 Astra 只读 review，经用户审批后才在远端仓库建立基线并提交。

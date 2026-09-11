@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent 任务执行看板交互定义" />
+    <title>HumanAgent · 任务执行看板</title>
+    <link rel="stylesheet" href="./task-dashboard.css" />
+  </head>
+  <body>
+    <div class="task-dashboard" data-task-state="running">
+      <header class="task-dashboard-header" data-region="global-navigation">
+        <div class="brand-line">
+          <a href="./dashboard.html">HumanAgent</a>
+          <span>任务执行看板</span>
+        </div>
+        <nav aria-label="任务看板导航">
+          <a href="./tasks.html?scope=current">返回运行列表</a>
+          <a href="./observation.html?task=export-index">深入观测</a>
+        </nav>
+      </header>
+
+      <main id="main-content" class="task-dashboard-main">
+        <section class="dashboard-heading" aria-labelledby="task-dashboard-title">
+          <div>
+            <span class="eyebrow">当前任务</span>
+            <h1 id="task-dashboard-title">重建导出索引</h1>
+            <p>查看这项任务里各个 agent 正在处理什么，以及最近产生了什么结果。</p>
+          </div>
+          <div class="dashboard-heading-status">
+            <span class="task-state task-state--running">运行中</span>
+            <span>2 分钟前更新</span>
+          </div>
+        </section>
+
+        <section class="task-summary" aria-labelledby="summary-title">
+          <div class="section-heading"><div><span class="eyebrow">任务摘要</span><h2 id="summary-title">当前任务在做什么</h2></div></div>
+          <div class="summary-grid">
+            <div><span>用户输入</span><strong>重建导出索引，先检查现有分片。</strong></div>
+            <div><span>任务目标</span><strong>恢复完整索引，并校验导出结果。</strong></div>
+            <div><span>当前状态</span><strong>已检查目录，正在处理第 2/4 个分片。</strong></div>
+          </div>
+        </section>
+
+        <section class="agent-section" aria-labelledby="agents-title">
+          <header class="section-heading section-heading--with-action">
+            <div><span class="eyebrow">执行情况</span><h2 id="agents-title">各 agent 的输入与输出</h2></div>
+            <span class="section-note">点击卡片查看动态过程</span>
+          </header>
+
+          <div class="agent-grid">
+            <article class="agent-card agent-card--active" data-agent-card data-agent="input">
+              <header class="agent-card-header"><div><span class="agent-role">交互 agent</span><h3>输入与任务目标</h3></div><span class="agent-status">已完成整理</span></header>
+              <dl class="agent-preview"><div><dt>输入</dt><dd>“重建导出索引，先检查现有分片。”</dd></div><div><dt>输出</dt><dd>目标明确，进入当前任务。</dd></div></dl>
+              <button type="button" class="agent-card-trigger" data-agent-trigger="input">查看处理过程 <span aria-hidden="true">→</span></button>
+            </article>
+
+            <article class="agent-card agent-card--active" data-agent-card data-agent="routing">
+              <header class="agent-card-header"><div><span class="agent-role">任务编排 agent</span><h3>任务检查与派发</h3></div><span class="agent-status">正在跟进</span></header>
+              <dl class="agent-preview"><div><dt>输入</dt><dd>收到任务目标和目录检查结果。</dd></div><div><dt>输出</dt><dd>派发索引整理，等待分片反馈。</dd></div></dl>
+              <button type="button" class="agent-card-trigger" data-agent-trigger="routing">查看处理过程 <span aria-hidden="true">→</span></button>
+            </article>
+
+            <article class="agent-card" data-agent-card data-agent="memory">
+              <header class="agent-card-header"><div><span class="agent-role">记忆 agent</span><h3>经验与 skill 整理</h3></div><span class="agent-status">待判断</span></header>
+              <dl class="agent-preview"><div><dt>输入</dt><dd>当前任务的处理结果和异常记录。</dd></div><div><dt>输出</dt><dd>可整理 skill 候选并提交 review；当前暂无候选。</dd></div></dl>
+              <button type="button" class="agent-card-trigger" data-agent-trigger="memory">查看处理过程 <span aria-hidden="true">→</span></button>
+            </article>
+
+            <article class="agent-card agent-card--active" data-agent-card data-agent="index-worker">
+              <header class="agent-card-header"><div><span class="agent-role">索引整理 agent</span><h3>重建导出分片</h3></div><span class="agent-status">运行中</span></header>
+              <dl class="agent-preview"><div><dt>输入</dt><dd>导出目录和第 2 个分片。</dd></div><div><dt>输出</dt><dd>已完成 2/4 个分片，正在写入索引。</dd></div></dl>
+              <button type="button" class="agent-card-trigger" data-agent-trigger="index-worker">查看动态过程 <span aria-hidden="true">→</span></button>
+            </article>
+
+            <article class="agent-card" data-agent-card data-agent="verification">
+              <header class="agent-card-header"><div><span class="agent-role">校验 agent</span><h3>等待索引结果</h3></div><span class="agent-status">等待输入</span></header>
+              <dl class="agent-preview"><div><dt>输入</dt><dd>等待完整索引和分片结果。</dd></div><div><dt>输出</dt><dd>尚未开始校验。</dd></div></dl>
+              <button type="button" class="agent-card-trigger" data-agent-trigger="verification">查看处理过程 <span aria-hidden="true">→</span></button>
+            </article>
+          </div>
+        </section>
+
+        <section class="task-feedback" aria-labelledby="feedback-title">
+          <header class="section-heading"><div><span class="eyebrow">任务反馈</span><h2 id="feedback-title">当前是否需要你处理</h2></div></header>
+          <div class="feedback-row"><span class="feedback-mark" aria-hidden="true">—</span><div><strong>暂时不需要</strong><p>任务正在继续。若出现权限变化或需要改变目标，会在这里询问你。</p></div></div>
+        </section>
+      </main>
+
+      <dialog class="agent-dialog" data-agent-dialog aria-labelledby="agent-dialog-title">
+        <form method="dialog">
+          <header class="dialog-header"><div><span class="eyebrow">动态过程摘要</span><h2 id="agent-dialog-title">索引整理 agent</h2></div><button type="submit" aria-label="关闭 agent 详情">关闭</button></header>
+          <p class="dialog-intro" data-dialog-intro>这里显示当前 agent 的输入、处理摘要和输出，不展示私有思维链。</p>
+          <ol class="process-list" data-process-list></ol>
+          <section class="dialog-output"><span class="eyebrow">当前输出</span><p data-dialog-output>已完成 2/4 个分片，正在写入索引。</p></section>
+        </form>
+      </dialog>
+    </div>
+    <script src="./task-dashboard.js"></script>
+  </body>
+</html>

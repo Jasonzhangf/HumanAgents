@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent 任务处理与任务观测交互定义" />
+    <title>HumanAgent · Task Detail</title>
+    <link rel="stylesheet" href="./task.css" />
+  </head>
+  <body>
+    <div class="task-wireframe" data-task-state="intent">
+      <header class="task-header" data-region="global-navigation">
+        <div class="brand-line">
+          <a href="./dashboard.html">HumanAgent</a>
+          <span>任务详情</span>
+        </div>
+        <nav aria-label="任务详情导航">
+          <a href="./tasks.html">返回任务列表</a>
+          <a href="./dashboard.html">返回总览</a>
+          <a href="./observation.html?task=weekly-report">任务观测</a>
+        </nav>
+      </header>
+
+      <main id="main-content" class="task-main">
+        <section class="region region--task-heading" aria-labelledby="task-title" data-region="task-heading">
+          <div class="task-heading-row">
+            <div>
+              <span class="region-kicker">任务</span>
+              <h1 id="task-title">整理周报证据</h1>
+              <p>把最近一周的变更、验证结果和未决事项整理成可确认的周报输入。</p>
+            </div>
+            <span class="state-label" data-task-status>等待你的意图确认</span>
+          </div>
+          <div class="task-meta" aria-label="任务状态">
+            <span>状态 <strong data-task-lifecycle>等待确认</strong></span>
+            <span data-overall-progress>等待你的选择</span>
+            <span>刚刚更新</span>
+          </div>
+        </section>
+
+        <section class="region region--current" aria-labelledby="current-title" data-region="current-location">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">当前状态</span>
+              <h2 id="current-title">这项任务现在是什么情况</h2>
+            </div>
+            <div class="heading-actions"><a href="./observation.html?task=weekly-report">进入任务观测</a></div>
+          </header>
+          <article class="node-card node-card--current" data-current-card>
+            <div class="node-card-heading"><span class="node-status">当前状态</span><span class="node-owner">等待你的选择</span></div>
+            <h3 data-current-node-label>正在确认怎么处理</h3>
+            <p data-current-node-summary>已收到“先把周报证据补齐，沿用现在这项任务，不要发布”。相关任务和当前状态已经查清，现在只需要确认是否按这个方案继续。</p>
+            <div class="card-focus-line"><strong data-current-task-focus>整理周报证据 · 等待确认</strong><span data-current-node-backend>尚未开始处理</span></div>
+            <button class="node-card-trigger" type="button" data-node-trigger="intent.query">打开当前处理记录</button>
+          </article>
+        </section>
+
+        <section class="region" aria-labelledby="past-title" data-region="past-work">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">已有信息</span>
+              <h2 id="past-title">输入和调查结果</h2>
+            </div>
+            <button type="button" data-action="open-history">查看历史详情</button>
+          </header>
+          <div class="fact-list" aria-label="输入和调查结果">
+            <button class="fact-row" type="button" data-node-trigger="input.received"><span class="fact-label">输入</span><span><strong>先补齐周报证据，不要发布</strong><small>4 分钟前 · 沿用当前任务</small></span><span class="fact-arrow" aria-hidden="true">›</span></button>
+            <button class="fact-row" type="button" data-node-trigger="task.match"><span class="fact-label">调查</span><span><strong>当前任务是“整理周报证据”</strong><small>刚刚 · 已找到最匹配的任务</small></span><span class="fact-arrow" aria-hidden="true">›</span></button>
+            <button class="fact-row" type="button" data-node-trigger="status.lookup"><span class="fact-label">状态</span><span><strong>可以继续，但还没有执行</strong><small>刚刚 · 周报草稿和 12 条证据已找到</small></span><span class="fact-arrow" aria-hidden="true">›</span></button>
+          </div>
+        </section>
+
+        <section class="region" aria-labelledby="next-title" data-region="next-work">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">建议方案</span>
+              <h2 id="next-title">根据调查结果，建议这样处理</h2>
+            </div>
+            <button type="button" data-node-trigger="requirement.dispatch">查看建议依据</button>
+          </header>
+          <article class="node-card node-card--next" data-next-card>
+            <div class="node-card-heading"><span class="node-status">建议</span><span class="node-owner">基于当前调查</span></div>
+            <strong data-next-node-label>沿用当前任务，补齐证据，不发布</strong>
+            <p data-next-node-summary>已有输入和任务状态支持这个方案。补齐证据、整理结果和必要检查不需要额外批准；只有改变目标、发布范围或创建新任务时，才需要你重新选择。</p>
+            <div class="card-focus-line"><strong>补齐证据 · 保持不发布</strong><span>没有额外批准时直接继续</span></div>
+          </article>
+        </section>
+
+        <section id="task-interaction" class="region region--user-action" aria-labelledby="user-action-title" data-region="user-action">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">需要你决定</span>
+              <h2 id="user-action-title">选择是否按建议继续</h2>
+            </div>
+            <span class="state-label" data-interaction-state>需要你选择意图</span>
+          </header>
+          <p class="interaction-intro">无需批准的步骤会直接继续。请确认目标、范围或处理方式。</p>
+          <form data-brain-input-form>
+            <label for="brain-input">补充或修改你的输入</label>
+            <textarea id="brain-input" name="brain-input" rows="4">先把周报证据补齐，沿用现在这项任务，不要发布。</textarea>
+            <div class="input-actions">
+              <button class="action-primary" type="submit">重新分析</button>
+              <span class="action-feedback" role="status" aria-live="polite" data-action-feedback>当前理解已完成，等待你的意图确认。</span>
+            </div>
+          </form>
+
+          <article class="action-card" data-analysis>
+            <div class="choice-summary"><span>建议</span><strong data-action-focus>补齐证据 · 保持不发布</strong></div>
+            <fieldset class="intent-choice">
+              <legend>你希望怎么处理？</legend>
+              <label><input type="radio" name="intent" value="append" checked /> 按建议执行：补齐证据，不发布</label>
+              <label><input type="radio" name="intent" value="change" /> 调整当前任务的目标</label>
+              <label><input type="radio" name="intent" value="new" /> 另建一项任务</label>
+              <label><input type="radio" name="intent" value="status" /> 只查看当前状态</label>
+              <label><input type="radio" name="intent" value="custom" /> 自定义处理方式</label>
+            </fieldset>
+            <p class="feedback-summary" data-brain-feedback>建议沿用“整理周报证据”，补齐已有证据并保持不发布。</p>
+            <div class="confirmation-bar">
+                <div class="action-row">
+                  <button type="button" data-action="edit-understanding">修改整理结果</button>
+                  <button class="action-primary" type="button" data-action="confirm-dispatch">按此方案继续</button>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="region" aria-labelledby="output-title" data-region="task-output">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">当前结果</span>
+              <h2 id="output-title">任务输出摘要</h2>
+            </div>
+            <button type="button" data-node-trigger="task.output">查看输出详情</button>
+          </header>
+          <article class="node-card node-card--result">
+            <div class="node-card-heading"><span class="node-status">部分结果可用</span><span class="node-owner">output</span></div>
+            <strong>周报证据草稿</strong>
+            <p>已有证据可以审阅；发布范围仍未确认，当前结果不会自动发布。</p>
+            <div class="card-focus-line"><strong>整理周报证据 · 等待确认</strong><span>已有草稿</span></div>
+          </article>
+        </section>
+
+      </main>
+
+      <dialog class="node-drawer" data-dialog="node-detail" aria-labelledby="drawer-title">
+        <form method="dialog">
+          <header class="drawer-header">
+            <div>
+              <span class="region-kicker">节点历史与详情 · 只读</span>
+              <h2 id="drawer-title">当前在哪里</h2>
+            </div>
+            <button type="submit" aria-label="关闭节点详情">关闭</button>
+          </header>
+          <section class="drawer-path-section" aria-labelledby="path-title">
+            <h3 id="path-title">任务处理路径</h3>
+            <p>这里展示这项任务的处理记录和定位信息，主页面只保留对你有用的内容。</p>
+            <div class="drawer-path-viewport">
+              <ol class="drawer-path" aria-label="任务处理路径" data-drawer-path></ol>
+            </div>
+          </section>
+          <section class="drawer-priority" aria-labelledby="drawer-focus-title">
+            <span class="region-kicker">当前重点</span>
+            <h3 id="drawer-focus-title" data-drawer-focus>询问你的意图</h3>
+            <p data-drawer-current>整理周报证据 · 等待确认</p>
+          </section>
+          <div class="drawer-order">
+            <section class="drawer-block"><h3>当前处理位置</h3><p data-drawer-location>正在确认这项任务接下来怎么处理。</p></section>
+            <section class="drawer-block"><h3>已有记录</h3><p data-drawer-past>已收到输入、找到相关任务，并完成状态调查。</p></section>
+            <section class="drawer-block"><h3>后续处理</h3><p data-drawer-next>根据建议方案继续处理；如果需要你选择，会在任务页面显示选项。</p></section>
+            <section class="drawer-block"><h3>需要你做什么</h3><p data-drawer-user>如果方案涉及目标、范围或处理方式变化，请选择一个选项或填写自定义内容。</p></section>
+          </div>
+          <dl class="drawer-details" data-node-details>
+            <div><dt>状态</dt><dd>等待用户</dd></div>
+            <div><dt>输入引用</dt><dd>human-input:08</dd></div>
+            <div><dt>输出引用</dt><dd>draft:intent:08</dd></div>
+            <div><dt>证据</dt><dd>evidence:interaction:08</dd></div>
+            <div><dt>处理环节</dt><dd>输入整理与任务处理</dd></div>
+          </dl>
+          <p class="drawer-note">抽屉只读展示历史和证据，不提供消费、重试、变更队列或 steer。</p>
+        </form>
+      </dialog>
+    </div>
+    <script src="./task.js"></script>
+  </body>
+</html>

@@ -1,0 +1,51 @@
+# HumanAgent 项目规则
+
+## 项目定位
+
+HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指令、执行轮次、操作、checkpoint、错误策略和恢复责任；DSH 只是可替换的执行后端。
+
+当前项目处于 `DESIGN-BOOTSTRAP`：工作目录原为空目录，没有项目 Git 基线、运行时代码、测试入口或已注册的 DSH 适配器。本阶段只建立架构真源和开案清单。
+
+## 唯一 owner
+
+- 高层领域状态、生命周期、错误策略、steer 和恢复：`packages/core`。
+- Brain/需求队列规则和健康状态分类：`packages/core`；显式输入整理、隐式分类/准入和 Pipeline 编排：`packages/runtime`。
+- 调度、checkpoint 编排、窗口装配和恢复流程：`packages/runtime`。
+- Organ 基础功能探针执行：`packages/runtime`；具体外部能力探针：对应 adapter；健康快照不是控制真源。
+- 权威历史：`packages/adapters/jsonl` 实现的 Organ Journal。
+- 历史查询：`packages/adapters/sqlite` 的可重建 Index；Index 不是状态真源。
+- 不可变大对象和工具输出：`packages/adapters/filesystem`。
+- DSH 会话、模型、工具执行和取消映射：`packages/adapters/dsh`；不得把 DSH 类型上提为领域类型。
+- 进程、文件、远端等副作用：`packages/adapters/operations`。
+- UI 领域 view model、投影和产品壳：`packages/ui`；UI 不直接读取 Journal/DSH Session，也不拥有运行时状态。
+- 组装入口：`packages/app`。
+- Task 输入输出契约和节点观测 projection：`packages/contracts` / `packages/ui/projection`；Dashboard/Task Detail、Organ Console 和 Pipeline Observation 的产品界面：`packages/ui`。
+
+## 硬约束
+
+- 高层设计必须可脱离 DSH；高层不得导入 DSH 的 `SessionId`、事件类型或日志格式作为自身身份和状态。
+- UI 必须可在没有 DSH 的情况下呈现 Organ/Task/Cycle/Checkpoint/Attention；DSH WebUI 只能作为可选的视觉实现或执行细节面。
+- Organ Journal 决定任务状态和恢复责任；DSH Session Log 只证明模型请求、工具调用和具体执行过程。两者不得互相冒充。
+- 控制面与业务 payload 分离。retry、degrade、steer、continuation、health、debug、checkpoint 等控制真相不得写入请求/响应业务字段、metadata 或日志后再重建。
+- `steer` 只能启动标准停止 operation；取消模型请求不等于停止完成。停止必须有收拢 checkpoint 和实际副作用结果。
+- 后台错误默认分层处置、局部降级并保留恢复责任；前台错误立即反馈。降级不能降低权限、正确性或验收标准。
+- 恢复状态必须准确且可独立读取；上下文窗口和汇报窗口可以有界淘汰。摘要不能代替恢复状态。
+- 显式 Brain 负责感知输入整理、任务匹配、状态查询、意图确认和整理反馈；只有用户确认后才形成并按 FIFO 投递 `RequirementEnvelope`。隐式 Brain 负责分类队列、运行任务更新、资源准入和 Pipeline 创建。steer/停止/权限撤销等控制命令不得混入业务需求队列或 task payload。
+- 潜意识必须可观测但默认不直接呈现给人：Pipeline Observation 只读展示节点树、状态、输入/输出和证据，支持 drawer、递归 scope、面包屑返回；不能在观测界面消费需求、修改队列、重试 operation 或执行 steer。
+- Index 可删除后重建；Journal 追加记录、资产引用和提交关系必须可校验。
+- 未完成 DSH 当前源码复核和真实停止/崩溃恢复验证前，不得宣称 DSH 适配完成。
+
+## 工作边界
+
+- 设计与文档：`docs/`、`README.md`、`note.md`。
+- 未来实现：`packages/`；未完成接口设计前不得添加运行时代码。
+- DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
+- 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行；当前目录尚无 Git，因此尚未进入代码 worktree 流程。
+
+## 开案与交付门禁
+
+1. 先更新 `docs/architecture/organ-runtime.md` 和 `docs/initial-report.md`，锁定目标、非目标、owner、接口和证据。
+2. 先建立 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
+3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
+4. DSH adapter 必须通过 fake backend、录制 session replay、真实 DSH 同入口验证三层证据；单一 TypeScript 编译不算接入完成。
+5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。

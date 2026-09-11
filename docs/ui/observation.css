@@ -1,0 +1,88 @@
+:root {
+  --page: #f7f7f5;
+  --surface: #fff;
+  --surface-muted: #efefec;
+  --ink: #1d1d1b;
+  --ink-soft: #5f5f5b;
+  --ink-faint: #888884;
+  --line: #d7d7d2;
+  --line-strong: #b9b9b3;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: var(--page); }
+button, a { color: inherit; cursor: pointer; font: inherit; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid #111; outline-offset: 3px; }
+
+.observation-wireframe { min-height: 100vh; }
+.observation-header { align-items: center; border-bottom: 1px solid var(--line); display: flex; gap: 24px; justify-content: space-between; padding: 12px clamp(16px, 4vw, 48px); }
+.observation-header > div, .observation-header nav { align-items: center; display: flex; gap: 14px; }
+.observation-header a { font-size: 14px; font-weight: 750; text-decoration: none; }
+.observation-header span, .observation-header nav { color: var(--ink-soft); font-size: 12px; }
+.observation-header nav a { align-items: center; display: inline-flex; min-height: 36px; }
+
+.observation-main { display: grid; gap: 36px 48px; grid-template-columns: minmax(0, 1fr) 280px; margin: 0 auto; max-width: 1180px; padding: 0 clamp(16px, 4vw, 48px) 56px; }
+.region { min-width: 0; }
+.scope-header { border-bottom: 1px solid var(--line); grid-column: 1 / -1; padding: 25px 0 22px; }
+.breadcrumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 17px; }
+.breadcrumbs a { color: var(--ink-soft); font-size: 11px; }
+.scope-heading, .region-heading { align-items: baseline; display: flex; gap: 14px; justify-content: space-between; }
+.region-kicker { color: var(--ink-faint); display: block; font-size: 10px; font-weight: 750; letter-spacing: .1em; margin-bottom: 5px; text-transform: uppercase; }
+h1, h2, h3 { margin: 0; }
+h1 { font-size: clamp(24px, 4vw, 32px); letter-spacing: -.035em; line-height: 1.1; }
+h2 { font-size: 17px; letter-spacing: -.015em; line-height: 1.2; }
+h3 { font-size: 14px; }
+.scope-heading p { color: var(--ink-soft); font-size: 13px; margin-top: 8px; }
+.scope-heading button, .observation-wireframe button { background: var(--surface); border: 1px solid var(--line-strong); min-height: 38px; padding: 0 12px; transition: background 160ms var(--ease), border-color 160ms var(--ease), transform 160ms var(--ease); }
+.scope-heading button:hover, .observation-wireframe button:hover { background: var(--surface-muted); border-color: var(--ink-soft); }
+.scope-heading button:active, .observation-wireframe button:active { transform: scale(.97); }
+.scope-heading button:disabled { cursor: not-allowed; opacity: .5; }
+.observation-rule { border-inline-start: 3px solid var(--ink); color: var(--ink-soft); font-size: 12px; margin: 17px 0 0; padding-inline-start: 10px; }
+.scope-seq { color: var(--ink-faint); font-size: 11px; white-space: nowrap; }
+
+.node-list { border-top: 1px solid var(--line); display: grid; gap: 0; list-style: none; margin: 15px 0 0; padding: 0; }
+.node-list li { border-bottom: 1px solid var(--line); position: relative; }
+.node-list li:not(:last-child)::after { border-inline-start: 1px solid var(--line-strong); bottom: -1px; content: ""; inset-inline-start: 18px; position: absolute; top: 51px; }
+.pipeline-node { align-items: center; background: transparent; border: 0 !important; display: grid; gap: 12px; grid-template-columns: 28px minmax(0, 1fr) auto; min-height: 64px !important; padding: 9px 2px !important; text-align: start; width: 100%; }
+.pipeline-node:hover { background: var(--surface-muted); }
+.pipeline-node > span:nth-child(2) { display: grid; gap: 2px; }
+.pipeline-node small { color: var(--ink-soft); font-size: 11px; }
+.node-index { color: var(--ink-faint); font-size: 11px; }
+.node-status { border: 1px solid var(--line-strong); color: var(--ink-soft); font-size: 11px; padding: 3px 7px; white-space: nowrap; }
+.node-status--active { border-color: var(--ink); color: var(--ink); font-weight: 750; }
+.action-feedback { color: var(--ink-soft); font-size: 12px; margin: 12px 0 0; }
+
+.observation-summary { align-self: start; border-inline-start: 1px solid var(--line); padding-inline-start: 18px; }
+.observation-summary dl, .drawer-facts { display: grid; gap: 10px; margin: 15px 0 0; }
+.observation-summary dl > div, .drawer-facts > div { border-bottom: 1px solid var(--line); display: grid; gap: 2px; padding-bottom: 9px; }
+dt { color: var(--ink-soft); font-size: 11px; font-weight: 700; }
+dd { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+
+.node-drawer { background: var(--surface); border: 0; border-inline-start: 1px solid var(--line-strong); height: 100vh; inset-block: 0; inset-inline-end: 0; margin: 0; max-height: 100vh; max-width: min(560px, 100vw); overflow-y: auto; padding: 22px; width: min(560px, 100vw); }
+.node-drawer::backdrop { background: rgb(0 0 0 / 32%); }
+.node-drawer section { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }
+.node-drawer ul { margin: 0; padding-inline-start: 20px; }
+.node-drawer pre { background: var(--surface-muted); border: 1px solid var(--line); overflow: auto; padding: 12px; white-space: pre-wrap; }
+.enter-scope { border-color: var(--ink) !important; font-weight: 750; margin-top: 18px; width: 100%; }
+
+@media (max-width: 760px) {
+  .observation-header { align-items: flex-start; flex-direction: column; gap: 5px; padding-block: 11px; }
+  .observation-header nav { flex-wrap: wrap; gap: 11px; }
+  .observation-main { display: block; padding-bottom: 36px; }
+  .scope-header { padding-block: 27px 21px; }
+  .scope-heading, .region-heading { align-items: flex-start; flex-direction: column; }
+  .observation-summary { border-inline-start: 0; border-top: 1px solid var(--line); margin-top: 29px; padding: 21px 0 0; }
+  .pipeline-node { grid-template-columns: 25px minmax(0, 1fr); }
+  .node-status { grid-column: 2; justify-self: start; }
+  .node-list li:not(:last-child)::after { inset-inline-start: 15px; }
+  .node-drawer { padding: 15px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent 任务后台观测交互定义" />
+    <title>HumanAgent · 任务后台观测</title>
+    <link rel="stylesheet" href="./observation.css" />
+  </head>
+  <body>
+    <div class="observation-wireframe">
+      <header class="observation-header">
+        <div>
+          <a href="./dashboard.html">HumanAgent</a>
+          <span>任务后台观测 · 只读交互定义</span>
+        </div>
+        <nav aria-label="观测导航">
+          <a href="./interaction.html">运行控制</a>
+          <a href="./dashboard.html">工作总览</a>
+          <a href="./tasks.html">任务列表</a>
+          <a href="./task.html">任务详情</a>
+        </nav>
+      </header>
+
+      <main id="main-content" class="observation-main">
+        <section class="region scope-header" aria-labelledby="scope-title">
+          <nav class="breadcrumbs" aria-label="当前观测路径" data-breadcrumbs>
+            <a href="#root" data-scope-link="root">任务处理流水</a>
+          </nav>
+          <div class="scope-heading">
+            <div>
+              <span class="region-kicker">后台 · 只读</span>
+              <h1 id="scope-title" data-scope-title>任务处理流水</h1>
+              <p data-scope-summary>从输入到任务结果的完整处理记录。</p>
+            </div>
+            <button type="button" data-action="back" disabled>返回上一级</button>
+          </div>
+          <p class="observation-rule">节点可以查看和递归进入，但不能在此消费需求、修改队列、重试 operation 或执行 steer。</p>
+        </section>
+
+        <section class="region" aria-labelledby="flow-title">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">当前 scope</span>
+              <h2 id="flow-title">节点流水</h2>
+            </div>
+            <span class="scope-seq" data-scope-seq>projection seq 184</span>
+          </header>
+          <ol class="node-list" data-node-list>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="sensory.inbox">
+                <span class="node-index">01</span><span><strong>接收感知输入</strong><small>sensory.inbox</small></span><span class="node-status node-status--done">已完成</span>
+              </button>
+            </li>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="explicit.normalize">
+                <span class="node-index">02</span><span><strong>整理任务输入</strong><small>explicit.normalize</small></span><span class="node-status node-status--done">已完成</span>
+              </button>
+            </li>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="implicit.classify">
+                <span class="node-index">03</span><span><strong>分类和安排任务</strong><small>implicit.classify</small></span><span class="node-status node-status--active">处理中</span>
+              </button>
+            </li>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="task.correlate">
+                <span class="node-index">04</span><span><strong>关联或更新运行任务</strong><small>task.correlate</small></span><span class="node-status node-status--waiting">等待上一步</span>
+              </button>
+            </li>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="resource.admission">
+                <span class="node-index">05</span><span><strong>资源准入检查</strong><small>resource.admission</small></span><span class="node-status node-status--waiting">等待上一步</span>
+              </button>
+            </li>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="pipeline.execute">
+                <span class="node-index">06</span><span><strong>创建执行流水线</strong><small>pipeline.execute</small></span><span class="node-status node-status--waiting">尚未开始</span>
+              </button>
+            </li>
+            <li>
+              <button class="pipeline-node" type="button" data-node-id="task.output">
+                <span class="node-index">07</span><span><strong>交付任务输出</strong><small>task.output</small></span><span class="node-status node-status--waiting">尚未开始</span>
+              </button>
+            </li>
+          </ol>
+          <p class="action-feedback" role="status" aria-live="polite" data-feedback>点击节点查看详情；有子节点的节点可以进入下一层观测。</p>
+        </section>
+
+        <aside class="region observation-summary" aria-labelledby="summary-title">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">完整观测摘要</span>
+              <h2 id="summary-title">当前处理链</h2>
+            </div>
+          </header>
+          <dl>
+            <div><dt>输入来源</dt><dd>notification · human input</dd></div>
+            <div><dt>待处理内容</dt><dd>1 项任务等待条件检查</dd></div>
+            <div><dt>任务类别</dt><dd>execution · 1 item</dd></div>
+            <div><dt>处理条件</dt><dd>尚未完成</dd></div>
+            <div><dt>控制面</dt><dd>只读观测；控制回到运行控制页</dd></div>
+          </dl>
+        </aside>
+      </main>
+
+      <dialog class="node-drawer" data-node-drawer aria-labelledby="drawer-title">
+        <form method="dialog">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">节点详情 · 只读</span>
+              <h2 id="drawer-title" data-drawer-title>节点详情</h2>
+            </div>
+            <button type="submit" aria-label="关闭节点详情">关闭</button>
+          </header>
+          <p data-drawer-summary></p>
+          <dl class="drawer-facts">
+            <div><dt>节点类型</dt><dd data-drawer-kind></dd></div>
+            <div><dt>状态</dt><dd data-drawer-status></dd></div>
+            <div><dt>责任者</dt><dd data-drawer-owner></dd></div>
+            <div><dt>更新时间</dt><dd data-drawer-updated></dd></div>
+          </dl>
+          <section>
+            <h3>输入 / 输出引用</h3>
+            <ul data-drawer-refs></ul>
+          </section>
+          <section>
+            <h3>证据</h3>
+            <pre data-drawer-evidence></pre>
+          </section>
+          <button type="button" class="enter-scope" data-action="enter-scope" hidden>进入此节点的下一层观测</button>
+        </form>
+      </dialog>
+    </div>
+    <script src="./observation.js"></script>
+  </body>
+</html>

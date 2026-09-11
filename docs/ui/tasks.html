@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent 任务列表交互定义" />
+    <title>HumanAgent · 任务列表</title>
+    <link rel="stylesheet" href="./tasks.css" />
+  </head>
+  <body>
+    <div class="tasks-wireframe">
+      <header class="tasks-header" data-region="global-navigation">
+        <div class="brand-line">
+          <a href="./dashboard.html">HumanAgent</a>
+          <span>任务列表</span>
+        </div>
+        <nav aria-label="任务列表导航">
+          <a href="./dashboard.html">总览</a>
+          <a href="./task.html?task=new">新建任务</a>
+        </nav>
+      </header>
+
+      <main id="main-content" class="tasks-main">
+        <section class="tasks-intro" aria-labelledby="tasks-title">
+          <div>
+            <h1 id="tasks-title">任务</h1>
+            <p>正在运行、需要你决定和历史记录。</p>
+          </div>
+          <a class="action-primary link-button" href="./task.html?task=new">新建任务</a>
+        </section>
+
+        <section class="task-controls" aria-label="筛选任务">
+          <div class="scope-switcher" role="group" aria-label="任务范围">
+            <button type="button" class="scope-button is-active" data-scope-filter="all" aria-pressed="true">全部</button>
+            <button type="button" class="scope-button" data-scope-filter="current" aria-pressed="false">当前运行</button>
+            <button type="button" class="scope-button" data-scope-filter="decision" aria-pressed="false">需要我决策</button>
+            <button type="button" class="scope-button" data-scope-filter="history" aria-pressed="false">历史任务</button>
+          </div>
+          <div class="filter-fields">
+            <label for="task-search">搜索任务</label>
+            <input id="task-search" type="search" placeholder="搜索任务、节点或状态" autocomplete="off" data-task-search />
+            <label for="status-filter">状态</label>
+            <select id="status-filter" data-status-filter>
+              <option value="all">全部状态</option>
+              <option value="running">运行中</option>
+              <option value="waiting">等待中</option>
+              <option value="blocked">受阻</option>
+              <option value="stopped">已停止</option>
+              <option value="succeeded">已完成</option>
+            </select>
+            <button type="button" class="clear-button" data-clear-filters hidden>清除筛选</button>
+          </div>
+          <p class="filter-feedback" role="status" aria-live="polite" data-filter-feedback>显示全部任务</p>
+        </section>
+
+        <div class="task-groups" data-task-groups>
+          <section class="task-group" data-group="current" aria-labelledby="current-tasks-title">
+            <header class="group-heading">
+              <div><h2 id="current-tasks-title">当前运行</h2></div>
+              <span class="group-count" data-group-count="current">2 项</span>
+            </header>
+            <div class="task-table task-table--running" role="table" aria-label="当前运行任务">
+              <div class="task-table-head task-table-head--running" role="row"><span role="columnheader">任务</span><span role="columnheader">状态</span><span role="columnheader">负责</span><span role="columnheader">正在处理</span><span role="columnheader">当前进度</span><span role="columnheader">最近更新</span><span role="columnheader">详情</span></div>
+              <a class="task-table-row task-table-row--running" role="row" href="./task-dashboard.html?task=export-index" data-task-row data-scope="current" data-status="running" data-search="重建导出索引 运行中 索引整理 agent 正在重建导出分片 已检查目录 2/4 分片 2 分钟前 查看详情"><span class="task-cell task-cell--title" role="cell"><strong>重建导出索引</strong></span><span class="task-cell task-cell--status" role="cell"><span class="task-state task-state--running">运行中</span></span><span class="task-cell task-cell--owner" role="cell">索引整理 agent</span><span class="task-cell task-cell--work" role="cell"><strong>正在重建导出分片</strong></span><span class="task-cell task-cell--progress" role="cell">已检查目录 · 2/4 分片</span><span class="task-cell task-cell--time" role="cell"><time datetime="PT2M">2 分钟前</time></span><span class="task-cell task-cell--next" role="cell">查看详情</span></a>
+              <a class="task-table-row task-table-row--running" role="row" href="./task-dashboard.html?task=change-summary" data-task-row data-scope="current" data-status="running" data-search="生成项目变更摘要 运行中 变更摘要 agent 正在合并测试结果 已读取本周提交 8 分钟前 查看详情"><span class="task-cell task-cell--title" role="cell"><strong>生成项目变更摘要</strong></span><span class="task-cell task-cell--status" role="cell"><span class="task-state task-state--running">运行中</span></span><span class="task-cell task-cell--owner" role="cell">变更摘要 agent</span><span class="task-cell task-cell--work" role="cell"><strong>正在合并测试结果</strong></span><span class="task-cell task-cell--progress" role="cell">已读取本周提交</span><span class="task-cell task-cell--time" role="cell"><time datetime="PT8M">8 分钟前</time></span><span class="task-cell task-cell--next" role="cell">查看详情</span></a>
+            </div>
+            <p class="group-empty" data-group-empty="current" hidden>没有符合条件的当前运行任务。</p>
+          </section>
+
+          <section class="task-group task-group--decision" data-group="decision" aria-labelledby="decision-tasks-title">
+          <header class="group-heading"><div><h2 id="decision-tasks-title">需要你决策</h2></div><span class="group-count group-count--attention" data-group-count="decision">2 项</span></header>
+            <div class="decision-list" aria-label="需要用户决策的任务">
+              <article class="decision-item" data-task-row data-scope="decision" data-status="waiting" data-search="整理周报证据 等待确认 已收集本周变更 3 条验证结果 建议补齐证据 不发布 按建议执行 调整目标 另建任务 只查看 自定义 4 分钟前">
+                <div class="decision-item-head"><div><span class="task-state task-state--waiting">等待你的选择</span><h3>整理周报证据</h3></div><time datetime="PT4M">4 分钟前</time></div>
+                <p class="decision-item-situation">已收集本周变更，还有 3 条验证结果需要补齐。</p>
+                <div class="decision-item-proposal"><span>建议</span><strong>补齐证据，不发布。</strong></div>
+                <div class="decision-item-action"><span>你可以选择：按建议执行、调整目标、另建任务、只查看或自定义。</span><a class="action-primary link-button" href="./task.html?task=weekly-report#task-interaction">进入处理</a></div>
+              </article>
+              <article class="decision-item" data-task-row data-scope="decision" data-status="blocked" data-search="通知权限复核 受阻 发现导出目录权限变化 部分分片暂时无法写入 建议允许继续 调整范围 按建议执行 调整目标 另建任务 只查看 自定义 15 分钟前">
+                <div class="decision-item-head"><div><span class="task-state task-state--blocked">需要你确认</span><h3>通知权限复核</h3></div><time datetime="PT15M">15 分钟前</time></div>
+                <p class="decision-item-situation">发现导出目录权限变化，部分分片暂时无法写入。</p>
+                <div class="decision-item-proposal"><span>建议</span><strong>允许继续，并复核受影响分片。</strong></div>
+                <div class="decision-item-action"><span>你可以选择：按建议执行、调整目标、另建任务、只查看或自定义。</span><a class="action-primary link-button" href="./task.html?task=permission-review#task-interaction">进入处理</a></div>
+              </article>
+            </div>
+            <p class="group-empty" data-group-empty="decision" hidden>没有需要你决策的任务。</p>
+          </section>
+
+          <section class="task-group" data-group="history" aria-labelledby="history-tasks-title">
+          <header class="group-heading"><div><h2 id="history-tasks-title">历史任务</h2></div><span class="group-count" data-group-count="history">3 项</span></header>
+            <div class="task-table task-table--history" role="table" aria-label="历史任务">
+              <div class="task-table-head" role="row"><span role="columnheader">任务</span><span role="columnheader">状态</span><span role="columnheader">已完成内容</span><span role="columnheader">结果</span><span role="columnheader">最近更新</span><span role="columnheader">入口</span></div>
+              <a class="task-table-row" role="row" href="./task.html?task=legacy-session" data-task-row data-scope="history" data-status="stopped" data-search="迁移旧会话 已停止 停止收拢完成 可恢复 昨天"><span class="task-cell task-cell--title" role="cell"><strong>迁移旧会话</strong></span><span class="task-cell" role="cell"><span class="task-state task-state--stopped">已停止</span></span><span class="task-cell" role="cell"><strong>停止收拢完成</strong><small>checkpoint 已保存</small></span><span class="task-cell" role="cell">可从 checkpoint 恢复</span><span class="task-cell task-cell--time" role="cell"><time datetime="2026-09-09T18:42:00-07:00">昨天 18:42</time></span><span class="task-cell task-cell--next" role="cell">查看历史</span></a>
+              <a class="task-table-row" role="row" href="./task.html?task=completed-report" data-task-row data-scope="history" data-status="succeeded" data-search="发布月报 已完成 输出已交付 artifact 查看结果 昨天"><span class="task-cell task-cell--title" role="cell"><strong>发布月报</strong></span><span class="task-cell" role="cell"><span class="task-state task-state--succeeded">已完成</span></span><span class="task-cell" role="cell"><strong>输出已交付</strong><small>执行流水线结束</small></span><span class="task-cell" role="cell">结果可查看</span><span class="task-cell task-cell--time" role="cell"><time datetime="2026-09-09T16:08:00-07:00">昨天 16:08</time></span><span class="task-cell task-cell--next" role="cell">查看结果</span></a>
+              <a class="task-table-row" role="row" href="./task.html?task=old-index" data-task-row data-scope="history" data-status="succeeded" data-search="旧索引整理 已完成 输出已交付 索引 查看结果 前天"><span class="task-cell task-cell--title" role="cell"><strong>旧索引整理</strong></span><span class="task-cell" role="cell"><span class="task-state task-state--succeeded">已完成</span></span><span class="task-cell" role="cell"><strong>输出已交付</strong><small>checkpoint 链完整</small></span><span class="task-cell" role="cell">结果已归档</span><span class="task-cell task-cell--time" role="cell"><time datetime="2026-09-08T11:24:00-07:00">前天 11:24</time></span><span class="task-cell task-cell--next" role="cell">查看结果</span></a>
+            </div>
+            <p class="group-empty" data-group-empty="history" hidden>没有符合条件的历史任务。</p>
+          </section>
+        </div>
+
+        <p class="no-results" data-no-results hidden>没有符合当前筛选条件的任务。请清除筛选，或换一个关键词。</p>
+      </main>
+    </div>
+    <script src="./tasks.js"></script>
+  </body>
+</html>
