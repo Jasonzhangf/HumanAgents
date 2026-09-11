@@ -1,0 +1,15 @@
+{
+  "name": "humanagent",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.31.0",
+  "devDependencies": {
+    "@humanagent/contracts": "workspace:*",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json",
+    "test": "pnpm build && node --test dist/tests/tests/contracts/*.test.js"
+  }
+}
