@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   CoreError,
+  CheckpointError,
   EpochError,
   HealthError,
   PermissionError,
@@ -9,6 +10,7 @@ import {
   assertHarnessHealthPublisher,
   assertHealthSnapshotOwnership,
   assertCheckpointOutcome,
+  assertCheckpointRecoveryStateRef,
   assertCheckpointRecoveryResponsibility,
   assertSteerPermission,
   canTransitionLifecycle,
@@ -64,6 +66,7 @@ test('lifecycle allows only explicit work and organ transitions', () => {
   assert.equal(canTransitionLifecycle('created', 'admitted'), true);
   assert.equal(transitionLifecycle('admitted', 'running'), 'running');
   assert.equal(canTransitionLifecycle('running', 'settling'), true);
+  assert.equal(canTransitionLifecycle('settling', 'running'), true);
   assert.equal(canTransitionLifecycle('running', 'succeeded'), false);
   assert.equal(canTransitionLifecycle('running', 'stopped'), false);
   assert.equal(canTransitionLifecycle('settling', 'stopped'), true);
@@ -75,6 +78,14 @@ test('lifecycle allows only explicit work and organ transitions', () => {
   assert.equal(canTransitionOrgan('ready', 'stopped'), false);
   assert.equal(canTransitionOrgan('ready', 'stopping'), true);
   assert.equal(canTransitionOrgan('stopping', 'stopped'), true);
+});
+
+test('checkpoint recovery references reject equal values with mismatched scope kinds', () => {
+  const malformedCheckpointScope = {
+    ...scope,
+    taskId: { scope: 'organ', value: task.value } as never,
+  };
+  assert.throws(() => assertCheckpointRecoveryStateRef(malformedCheckpointScope, evidence('malformed-scope')), CheckpointError);
 });
 
 test('epoch fence accepts the current execution only and marks late events stale', () => {

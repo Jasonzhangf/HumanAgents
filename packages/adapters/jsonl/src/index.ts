@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
-import { assertCheckpointLink, assertSameScope, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
+import { assertCheckpointLink, assertEvidenceRef, assertSameScope, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
 
 export type JournalRecordKind = 'checkpoint' | 'event';
 
@@ -54,7 +54,15 @@ function validateRecord(record: JournalRecord, previous: JournalRecord | null, p
     assertSameScope(record.scope, record.checkpoint.scope);
     if (record.checkpoint.scope.cycleId && record.checkpoint.scope.cycleId.value !== record.checkpoint.cycleId.value) throw new JournalIntegrityError('checkpoint cycle scope mismatch');
     if (record.scope.cycleId && record.scope.cycleId.value !== record.checkpoint.cycleId.value) throw new JournalIntegrityError('checkpoint cycle scope mismatch');
-    assertJournalContract(() => assertCheckpointLink(record.checkpoint!, previousCheckpoint));
+    assertJournalContract(() => {
+      assertEvidenceRef(record.checkpoint!.recoveryStateRef);
+      assertSameScope(record.checkpoint!.scope, record.checkpoint!.recoveryStateRef.scope);
+      for (const evidenceRef of record.checkpoint!.evidenceRefs) {
+        assertEvidenceRef(evidenceRef);
+        assertSameScope(record.checkpoint!.scope, evidenceRef.scope);
+      }
+      assertCheckpointLink(record.checkpoint!, previousCheckpoint);
+    });
   } else if (record.checkpoint) throw new JournalIntegrityError('event record cannot contain checkpoint');
   else if (record.payload === undefined) throw new JournalIntegrityError('event record missing payload');
 }
@@ -111,7 +119,15 @@ export class JsonlOrganJournal {
     if (input.kind === 'checkpoint') {
       if (!input.checkpoint) throw new JournalIntegrityError('checkpoint record missing checkpoint');
       if (input.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
-      assertJournalContract(() => assertCheckpointLink(input.checkpoint!, lastCheckpoint));
+      assertJournalContract(() => {
+        assertEvidenceRef(input.checkpoint!.recoveryStateRef);
+        assertSameScope(input.checkpoint!.scope, input.checkpoint!.recoveryStateRef.scope);
+        for (const evidenceRef of input.checkpoint!.evidenceRefs) {
+          assertEvidenceRef(evidenceRef);
+          assertSameScope(input.checkpoint!.scope, evidenceRef.scope);
+        }
+        assertCheckpointLink(input.checkpoint!, lastCheckpoint);
+      });
     }
     const record = { ...recordWithoutDigest, recordDigest: digestRecord(recordWithoutDigest) };
     validateRecord(record, previous, lastCheckpoint);

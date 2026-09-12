@@ -1,12 +1,12 @@
 # HumanAgent 开案初始报告
 
 日期：2026-09-11  
-阶段：`DESIGN-BOOTSTRAP`  
-报告范围：项目初始化、固定 Harness、Cordis 第一层插件宿主、Agent Driver、Agent 模板、Memory 双层系统和 DSH 解耦边界
+阶段：`MVP-IMPLEMENTATION / WAVE-2-CLOSED`
+报告范围：项目初始化档案、固定 Harness、Cordis 第一层插件宿主、Agent Driver、Agent 模板、Memory 双层系统、DSH 解耦边界，以及已批准 MVP 实现阶段状态
 
 ## 1. 结论
 
-项目可以开案，但当前只能进入“架构确认”而不是“实现开发”。工作目录原为空目录；本轮已建立项目规则、设计真源、交接摘要和忽略边界。高层采用独立 Organ Runtime，Cordis 是 HumanAgent 的第一层插件宿主，固定 Harness 是不可绕过的编排内核，DSH 只是可替换的 Agent/Execution provider。Memory 由用户交互面、后台 Operations Backend 和受 Harness 控制的 Agent Context Injection 接缝组成。
+项目已进入用户批准的 MVP 实现阶段：Wave 0/1/2 fixed Harness Runtime 已完成并进入 main，Wave 2 通过 commit-bound Astra gate 收口。本文档保留初始开案档案，同时把实现边界和当前证据收敛为“已批准 MVP implementation”，不声称 DSH 已接入。高层采用独立 Organ Runtime，Cordis 是 HumanAgent 的第一层插件宿主，固定 Harness 是不可绕过的编排内核，DSH 只是可替换的 Agent/Execution provider。Memory 由用户交互面、后台 Operations Backend 和受 Harness 控制的 Agent Context Injection 接缝组成。
 
 当前 UI 责任基线已经冻结。Agent 流程、模板/skills/tools、宿主启动、Cordis plugin tree、Memory 分层和生命周期/故障 owner 已分别收口到 [`docs/architecture/agent-flows.md`](architecture/agent-flows.md)、[`docs/architecture/agent-templates.md`](architecture/agent-templates.md)、[`docs/architecture/host-and-cordis.md`](architecture/host-and-cordis.md)、[`docs/architecture/memory-system.md`](architecture/memory-system.md) 和 [`docs/architecture/lifecycle-and-failure-ownership.md`](architecture/lifecycle-and-failure-ownership.md)。
 
@@ -28,8 +28,8 @@
 
 ## 3. 非目标
 
-- 本阶段不实现模型调用、工具调用、调度器、持久化 adapter 或 DSH plugin。
-- 本阶段不安装、升级或启动真实 DSH；只定义独立安装、专用 profile、Cordis bridge 和失败闭环。
+- MVP 当前不实现真实模型调用、DSH plugin、SQLite、vector/RAG 或生产部署能力；确定性 fake/测试执行不属于跳过边界的 DSH 接入。
+- 当前不安装、升级或启动真实 DSH；只保留独立安装、专用 profile、Cordis bridge 和失败闭环作为后续 Milestone 边界。
 - 不把 DSH SessionEvent、SessionId 或 DSH on-disk format 作为高层领域模型。
 - 不为“永不停歇”实现无上限重试；必须有局部上限、换层/等待条件和升级责任。
 - 不把降级实现为静默成功、证据缺失的成功或绕过权限/验收。
@@ -39,7 +39,7 @@
 
 | 项目 | 证据 | 结论 |
 |---|---|---|
-| 新项目目录 | `/Volumes/extension/code/humanagent` 初始为空目录 | 没有现存实现可复用或可回归 |
+| 新项目目录 | 初始空目录，已演进为 Git worktree 管理 | 项目已从设计开案进入已批准 MVP 实现 |
 | 项目规则 | 本次新增 `AGENTS.md` | 已锁定 owner、边界和首轮门禁 |
 | 架构设计 | `docs/architecture/organ-runtime.md` | 高层领域模型、模块和 ports 已整理为设计契约 |
 | Agent 模板设计 | `docs/architecture/agent-templates.md` | system prompt、skills、tools、模板版本和 runtime manifest 已分层隔离 |
@@ -49,7 +49,7 @@
 | 静态界面定义 | `docs/ui/tasks.html`、`dashboard.html`、`task.html`、`task-dashboard.html`、`interaction.html`、`observation.html` | 已分离任务列表、简洁状态入口、显式交互、运行任务看板、运行控制和只读观测；当前 UI 责任基线已冻结 |
 | DSH checkout | `/Volumes/extension/code/dsh` 当前分支 `dsh-memory/alpha5`，工作树有大量未跟踪生成物；已读取 Cordis/profile/plugin 文档 | 只能作为待复核外部证据，不能作为 clean 基线 |
 | 设计中 DSH 基线 | 对话记录中的 `c291e7961a515f6d7af9304e7fd1d257929aef26` | 当前 checkout 无法读取该对象；版本绑定未验证 |
-| 实现/测试 | 未发现 | 尚未实现，不能宣称运行时或适配器完成 |
+| 实现/测试 | Wave 0/1/2 runtime 代码/测试已存在于 `packages/`、`tests/`；Wave 2 candidate `d8d5c751ecf487dbefcc07b1ede5514b0b1ceea5` 已 squash 到 main 为 `7b00181c893a0394c79b67e9c3bafd8af66b417d` | Wave 2 通过 `humanagent-wave2-astra-r25` commit-bound PASS；不能据此宣称 DSH 接入 |
 
 ## 5. 架构收敛
 
@@ -112,21 +112,21 @@ Cordis Host
 ## 7. 当前阻塞与开放决定
 
 1. DSH 适配需要一个可读取的 clean commit 或发布包；当前设计中的 commit 对象不可用。
-2. 需要确定首个实现语言/包管理器；在此决定前不创建 runtime 骨架。
+2. 首个实现语言/包管理器已进入 TypeScript + pnpm；runtime 骨架已建立。
 3. 需要确定 Journal 记录的校验策略（链 hash、文件 segment、资产 digest 的组合）和 fsync/rename 提交语义。
 4. 需要确定 checkpoint 历史保留政策：哪些恢复字段永久保留，哪些原始工具输出可归档或清理。
 5. 需要确定第一种 DSH 接入形态：优先评估子进程/IPC，再与同进程 plugin、独立服务比较；这只影响 adapter，不改变高层 port。
-6. 远端仓库已由用户提供为 [`Jasonzhangf/HumanAgents`](https://github.com/Jasonzhangf/HumanAgents)。设计完成后先进行文档一致性检查和 Astra 只读 review，用户审批后才建立 clean 基线、提交和推送。
+6. 远端仓库已由用户提供为 [`Jasonzhangf/HumanAgents`](https://github.com/Jasonzhangf/HumanAgents)。当前只做本地 candidate/review-fix 提交；push、Astra PASS 和 main 集成不在此轮自动放行。
 
 ## 8. MVP 路线
 
 MVP 不接 DSH provider，先用最小 HumanAgent Cordis Host + fixed Harness Kernel + fake Agent Driver + deterministic Memory Operations Backend + 标准 Agent Template Loader + 静态显式 Brain Task List/Dashboard/Task Detail 验证高层生命周期、固定节点、输入理解、任务匹配、意图确认、任务输入输出、分层 Memory Context Injection、基础自诊断、插件/模板校验和状态可见性；页面先完成静态 HTML 交互定义，再进入视觉设计。Milestone 1 接真实 DSH Agent Driver 和 Cordis bridge；Milestone 2 做长程耐久、恢复、可重建 Index、context snapshot、插件/template snapshot 和健康趋势；Milestone 3 做多任务、多器官、资源、安全、远端 Memory provider、插件发布和部署交付。每个阶段都必须有成功/等待/阻塞/失败/取消的闭环和唯一 owner，完整计划见 [`docs/goals/mvp-to-milestones.md`](goals/mvp-to-milestones.md)。
 
-## 9. 首轮验收
+## 9. 当前验收边界
 
 本轮完成 iff：
 
-- 目标、非目标、唯一 owner 和禁止边界已写入项目真源。
+- 已批准 MVP 的阶段、唯一 owner 和禁止边界已写入项目真源；Wave 2 candidate 状态为 pending review，不伪造 main。
 - 高层模块图、生命周期、错误策略、checkpoint/Index 关系和 ports 已写入设计文档。
 - 高层领域模型不携带 DSH 类型；所有 DSH 具体依赖集中在 adapter 边界，并明确当前未验证事实。
 - 显式 Brain → FIFO 需求入口 → 隐式 Brain 分类/准入 → Pipeline 节点观测链、Organ 自诊断和 Task List/Dashboard/Task Detail 的责任边界已写入设计真源。
@@ -142,4 +142,4 @@ MVP 不接 DSH provider，先用最小 HumanAgent Cordis Host + fixed Harness Ke
 - 生命周期/故障已收口：每阶段拥有 owner、正常/等待/阻塞/失败/取消出口、证据和下一动作；runtime 意外进入 ManagedIssue/Attention，不留无 owner 的悬挂状态。
 - 首批任务拥有可判定的完成条件和证据条件。
 
-本轮不声称：代码完成、Cordis runtime 已实现、DSH 接通、真实工具停止完成、崩溃恢复完成、Memory RAG 已接通、Git/CI 已建立、Astra review 已通过或远端已提交。
+本轮不声称：DSH adapter 已接入、真实工具停止完成、崩溃恢复完成、Memory RAG 已接通、Wave 2 已入 main、Astra review 已通过或远端已提交。

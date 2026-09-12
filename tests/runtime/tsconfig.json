@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../..",
+    "outDir": "../../dist/tests",
+    "noEmitOnError": true
+  },
+  "include": [
+    "integration/**/*.ts",
+    "../../packages/contracts/src/**/*.ts",
+    "../../packages/core/src/**/*.ts",
+    "../../packages/runtime/src/**/*.ts",
+    "../../packages/adapters/testing/src/**/*.ts",
+    "../../packages/adapters/memory/src/**/*.ts"
+  ]
+}

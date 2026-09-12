@@ -14,7 +14,7 @@ const WORK_TRANSITIONS: Readonly<Record<LifecycleState, readonly LifecycleState[
   created: ['admitted', 'cancelled', 'failed'],
   admitted: ['running', 'settling', 'waiting', 'blocked', 'cancelled', 'failed', 'unknown'],
   running: ['settling'],
-  settling: ['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown'],
+  settling: ['running', 'succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown'],
   waiting: ['admitted', 'running', 'settling', 'blocked', 'cancelled', 'failed', 'stopped'],
   blocked: ['admitted', 'waiting', 'settling', 'failed', 'cancelled', 'stopped'],
   succeeded: [],

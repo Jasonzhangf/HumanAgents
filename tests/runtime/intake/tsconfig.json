@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests-runtime-intake",
+    "noEmitOnError": true
+  },
+  "include": [
+    "**/*.ts",
+    "../../../packages/runtime/src/intake/**/*.ts",
+    "../../../packages/contracts/src/**/*.ts"
+  ]
+}

@@ -214,6 +214,52 @@ type ManagedIssue = {
 
 阶段 review 不只审查 happy path；缺任一异常闭环证据就不能通过。
 
+### 8.1 阶段性、可重入的治理 Gate
+
+Gate 是可恢复的阶段记录，不是每次从头执行的脚本。每个候选都按固定阶段推进，并为每个阶段保存一条可校验记录：
+
+```text
+stage
+  → candidateDigest
+  → input/toolchain/dependency digests
+  → status: pending | running | passed | invalidated | failed | blocked
+  → evidenceRefs + completedAt
+  → owner + nextAction
+```
+
+当前候选的最小阶段顺序是：
+
+```text
+source/diff check
+  → focused validation
+  → required build/full validation
+  → ordinary review
+  → milestone/Astra review
+  → delivery gate
+```
+
+每个阶段必须满足以下重入规则：
+
+1. `passed` 只有在候选内容、阶段输入、工具链/依赖和前置阶段证据指纹都未变化时才可复用；重入从第一个 `pending`、`failed`、`blocked` 或 `invalidated` 阶段继续。
+2. 代码、测试、配置或依赖变化只使受影响阶段及其下游失效；没有影响映射时按保守规则使下游全部失效，不得凭感觉复用。
+3. 未受影响的 focused test、build、review 和已固定的证据可以跳过；跳过必须引用原阶段记录，不能把“上次跑过”当作当前证据。
+4. `full validation` 不是每次重入的默认动作：首次候选需要它；之后只有公共契约、构建配置、依赖/工具链、跨模块 owner 或影响映射要求时才重跑。局部改动只跑对应 focused validation 和必要构建。
+5. review 的候选范围或代码/配置输入发生变化时，旧 review 只能标记 `invalidated`，不能沿用 PASS；仅阶段重入且输入指纹不变时可复用原 review。
+6. `milestone/Astra review` 必须在所有适用前置阶段为当前候选 `passed` 后执行；Astra FAIL 只回到受影响的实现/验证/review 阶段，不重置无关阶段。
+7. 任何阶段都必须有唯一 owner、失败原因、下一动作、恢复条件或升级目标。进程中断后依据阶段记录重入，不能以“重新开始”掩盖已完成证据或未收口责任。
+
+最小影响映射如下：
+
+| 变化 | 必须失效 | 可以保留 |
+|---|---|---|
+| 单模块源代码 | 该模块 focused validation 及所有下游 review/delivery | 其他模块的独立 focused validation |
+| 测试文件或测试断言 | 对应测试阶段及下游 review | 未受影响的源代码 build 证据 |
+| contracts、公共类型、生命周期或控制协议 | 全部编译/运行验证及下游 review | 仅与候选无关的文档检查 |
+| package、锁文件、编译配置或工具链 | 全部适用 build/test/review | 与候选完全无关的静态文档检查 |
+| 仅治理文档或阶段记录 | 文档检查；若改变验收契约则使相关实现/review 失效 | 不受契约影响的运行验证 |
+
+Gate 收口时必须同时报告：本次执行的阶段、复用的阶段、被失效的阶段、每个 PASS 的证据引用，以及尚未执行的阶段。这样“跳过”是有依据的证据复用，不是省略验证。
+
 ## 9. 与提交闸门的关系
 
 第一版设计完成后，顺序固定为：

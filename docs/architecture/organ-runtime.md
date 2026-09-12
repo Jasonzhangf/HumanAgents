@@ -1,6 +1,6 @@
 # Organ Runtime 架构设计
 
-状态：`BASELINE-FROZEN / FLOW-DESIGN-NEXT`  
+状态：`MVP-IMPLEMENTATION / WAVE-2-PENDING-ASTRA`
 日期：2026-09-11  
 高层原则：HumanAgent 拥有领域状态；DSH 是可替换执行后端。
 

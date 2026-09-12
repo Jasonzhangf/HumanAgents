@@ -99,6 +99,7 @@ test('rejects invalid assignment and result input/output', () => {
     assert.throws(() => validateWorkAssignment({ ...assignment, inputRevision }), ContractError);
   }
   assert.throws(() => validateWorkResult({ ...successfulResult(), executionEpoch: 2 }, assignment), ContractError);
+  assert.throws(() => validateWorkResult({ ...successfulResult(), agentId: ' ' }, assignment), ContractError);
   assert.throws(() => validateWorkResult({ ...successfulResult(), outputRefs: ['unrelated-output'] }, assignment), ContractError);
   assert.throws(() => validateWorkResult({ ...successfulResult(), outputRefs: ['output-a', 'unrelated-output'] }, assignment), ContractError);
   assert.throws(() => validateWorkResult({ ...successfulResult(), producedArtifactDigests: [] }, assignment), ContractError);

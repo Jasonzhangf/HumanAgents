@@ -1,5 +1,5 @@
-import type { Checkpoint, LifecycleState, NextAction } from '../../contracts/src/index.js';
-import { assertCheckpointLink, assertSameScope } from '../../contracts/src/index.js';
+import type { Checkpoint, EvidenceRef, LifecycleState, NextAction, ScopeRef } from '../../contracts/src/index.js';
+import { assertCheckpointLink, assertEvidenceRef, assertSameScope } from '../../contracts/src/index.js';
 import { CheckpointError } from './errors.js';
 
 const CHECKPOINT_OUTCOMES: readonly Checkpoint['outcome'][] = [
@@ -43,6 +43,28 @@ export function assertCheckpointNextAction(outcome: Checkpoint['outcome'], next:
   }
 }
 
+export function assertCheckpointRecoveryStateRef(scope: ScopeRef, recoveryStateRef: EvidenceRef): void {
+  try {
+    assertEvidenceRef(recoveryStateRef);
+    assertSameScope(scope, recoveryStateRef.scope);
+  } catch (error) {
+    if (error instanceof CheckpointError) throw error;
+    throw new CheckpointError(error instanceof Error ? error.message : 'invalid checkpoint recovery state reference');
+  }
+}
+
+export function assertCheckpointEvidenceRefs(scope: ScopeRef, evidenceRefs: readonly EvidenceRef[]): void {
+  for (const evidenceRef of evidenceRefs) {
+    try {
+      assertEvidenceRef(evidenceRef);
+      assertSameScope(scope, evidenceRef.scope);
+    } catch (error) {
+      if (error instanceof CheckpointError) throw error;
+      throw new CheckpointError(error instanceof Error ? error.message : 'invalid checkpoint evidence reference');
+    }
+  }
+}
+
 export function assertCheckpointRecoveryResponsibility(input: {
   readonly checkpoint: Checkpoint;
   readonly previous: Checkpoint | null;
@@ -52,9 +74,8 @@ export function assertCheckpointRecoveryResponsibility(input: {
   assertCheckpointOutcome(input.checkpoint.outcome);
   assertCheckpointNextAction(input.checkpoint.outcome, input.checkpoint.next);
   if (!input.ownerId.trim()) throw new CheckpointError('checkpoint owner is required');
-  if (!input.checkpoint.recoveryStateRef.locator.trim() || !input.checkpoint.recoveryStateRef.source.trim()) {
-    throw new CheckpointError('checkpoint recovery state reference is required');
-  }
+  assertCheckpointRecoveryStateRef(input.checkpoint.scope, input.checkpoint.recoveryStateRef);
+  assertCheckpointEvidenceRefs(input.checkpoint.scope, input.checkpoint.evidenceRefs);
   if (input.checkpoint.outcome === 'waiting') {
     if (input.checkpoint.next.kind !== 'wait' || !hasReference(input.checkpoint.next.ref)) {
       throw new CheckpointError('waiting checkpoint requires an explicit recovery condition');
@@ -67,7 +88,6 @@ export function assertCheckpointRecoveryResponsibility(input: {
   if (input.checkpoint.outcome === 'stopped' && input.checkpoint.evidenceRefs.length === 0) {
     throw new CheckpointError('stopped checkpoint requires settle evidence');
   }
-  assertSameScope(input.checkpoint.scope, input.checkpoint.recoveryStateRef.scope);
 }
 
 export function assertCheckpointSequence(checkpoints: readonly (Checkpoint & { readonly ownerId: string })[]): void {

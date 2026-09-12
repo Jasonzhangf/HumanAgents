@@ -4,7 +4,7 @@
 
 HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指令、执行轮次、操作、checkpoint、错误策略和恢复责任；DSH 只是可替换的执行后端。
 
-当前项目处于 `DESIGN-BOOTSTRAP`：工作目录原为空目录，没有项目 Git 基线、运行时代码、测试入口或已注册的 DSH 适配器。本阶段只建立架构真源和开案清单。
+当前项目处于 `MVP-IMPLEMENTATION`：用户已批准 MVP；Wave 0/1/2 fixed Harness Runtime 已完成并进入 main，Wave 2 已通过 commit-bound Astra gate。DSH 仍只是可替换执行后端；MVP 不接 DSH provider。
 
 ## 唯一 owner
 
@@ -38,14 +38,15 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 ## 工作边界
 
 - 设计与文档：`docs/`、`README.md`、`note.md`。
-- 未来实现：`packages/`；未完成接口设计前不得添加运行时代码。
+- 已批准 MVP 实现代码在 `packages/`、`tests/`；当前阶段已经进入 runtime 实现。
+- 未获批准的 DSH adapter、SQLite、vector/RAG、daemon 和生产部署能力不得作为 MVP 放行结果声称。
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
-- 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行；当前目录尚无 Git，因此尚未进入代码 worktree 流程。
+- 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行；本轮 review-fix 从 clean worktree HEAD `4ec6313cfad75c00363bbbedd6234928234121dd` 开始。
 
-## 开案与交付门禁
+## 已批准 MVP 交付门禁
 
-1. 先更新 `docs/architecture/organ-runtime.md` 和 `docs/initial-report.md`，锁定目标、非目标、owner、接口和证据。
-2. 先建立 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
+1. Wave 2 candidate 只有在 focused tests、runtime integration 和独立 Codex/Astra review 通过后才可进入 main；不得伪造已入 main。
+2. 先保持 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
 3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
 4. DSH adapter 必须通过 fake backend、录制 session replay、真实 DSH 同入口验证三层证据；单一 TypeScript 编译不算接入完成。
 5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。

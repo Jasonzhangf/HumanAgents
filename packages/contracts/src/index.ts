@@ -228,7 +228,7 @@ export interface MemoryOperationsPort {
 }
 
 export interface OrganHealthSnapshot { readonly organId: OrganId; readonly checkedAt: string; readonly expiresAt: string; readonly overall: HealthState; readonly functions: readonly { readonly functionId: string; readonly status: 'healthy' | 'degraded' | 'failed' | 'unknown'; readonly measurements: readonly { readonly name: string; readonly value: string | number; readonly unit?: string }[]; readonly evidenceRefs: readonly EvidenceRef[] }[]; }
-export interface Attention { readonly attentionId: string; readonly scope: ScopeRef; readonly severity: 'info' | 'attention' | 'blocker'; readonly state: 'open' | 'recovering' | 'resolved'; readonly message: string; readonly evidenceRefs: readonly EvidenceRef[]; }
+export interface Attention { readonly attentionId: string; readonly scope: ScopeRef; readonly severity: 'info' | 'attention' | 'blocker'; readonly state: 'open' | 'recovering' | 'resolved'; readonly message: string; readonly evidenceRefs: readonly EvidenceRef[]; readonly ownerId?: string; readonly nextAction?: NextAction; readonly relatedAttentionId?: string; }
 export interface TaskInputRequest { readonly requestId: string; readonly taskId: TaskId; readonly schemaRef: string; readonly reason: string; readonly impact: string; readonly expiresAt?: string; }
 export interface TaskInput { readonly taskId: TaskId; readonly inputRevision: number; readonly payload: BusinessPayload; readonly source: 'human' | 'notification' | 'agent'; }
 export interface TaskOutput { readonly taskId: TaskId; readonly state: 'partial' | 'succeeded' | 'failed' | 'waiting'; readonly summary: string; readonly result: BusinessPayload; readonly artifactRefs: readonly string[]; readonly evidenceRefs: readonly EvidenceRef[]; }
@@ -259,6 +259,16 @@ export function assertSameScope(...refs: ScopeRef[]): void {
   if (refs.length < 2) return;
   const first = refs[0];
   for (const ref of refs.slice(1)) if (!sameScopedId(first.organId, ref.organId) || !sameScopedId(first.taskId, ref.taskId) || !sameScopedId(first.cycleId, ref.cycleId) || !sameScopedId(first.operationId, ref.operationId)) throw new ContractError('scope mismatch');
+}
+export function assertEvidenceRef(ref: EvidenceRef): void {
+  if (ref.evidenceId.scope !== 'evidence' || !ref.evidenceId.value.trim()) throw new ContractError('evidence id is required');
+  if (!['execution', 'tool', 'operation', 'external'].includes(ref.kind)) throw new ContractError('evidence kind is invalid');
+  if (!ref.source.trim() || !ref.locator.trim()) throw new ContractError('evidence source and locator are required');
+  if (ref.digest !== undefined && (typeof ref.digest !== 'string' || !ref.digest.trim())) throw new ContractError('evidence digest must be a non-empty string');
+  if (ref.scope.organId.scope !== 'organ' || !ref.scope.organId.value.trim()) throw new ContractError('evidence organ scope is required');
+  if (ref.scope.taskId && (ref.scope.taskId.scope !== 'task' || !ref.scope.taskId.value.trim())) throw new ContractError('evidence task scope is invalid');
+  if (ref.scope.cycleId && (ref.scope.cycleId.scope !== 'cycle' || !ref.scope.cycleId.value.trim())) throw new ContractError('evidence cycle scope is invalid');
+  if (ref.scope.operationId && (ref.scope.operationId.scope !== 'operation' || !ref.scope.operationId.value.trim())) throw new ContractError('evidence operation scope is invalid');
 }
 function assertPositiveSafeInteger(value: number, label: string): void { if (!Number.isSafeInteger(value) || value < 1) throw new ContractError(`${label} must be a positive safe integer`); }
 function assertNonEmptyReference(value: string, label: string): void { if (!value || !value.trim()) throw new ContractError(`${label} must be a non-empty reference`); }
@@ -302,7 +312,7 @@ export function validateWorkAssignment(input: WorkAssignment): void {
   if (!input.objective || !input.acceptanceCriteriaDigest || input.successCriteria.length === 0) throw new ContractError('invalid work assignment');
 }
 export function validateWorkResult(input: WorkResult, assignment: WorkAssignment): void {
-  validateWorkAssignment(assignment); assertScope(input.taskId, 'task'); assertExecutionEpoch(input.executionEpoch);
+  validateWorkAssignment(assignment); assertNonEmptyReference(input.agentId, 'work result agent id'); assertScope(input.taskId, 'task'); assertExecutionEpoch(input.executionEpoch);
   assertPositiveSafeInteger(input.attempt, 'work result attempt');
   assertPositiveSafeInteger(input.inputRevision, 'work result inputRevision');
   if (input.taskId.value !== assignment.taskId.value || input.assignmentId !== assignment.assignmentId || input.pipelineNodeId !== assignment.pipelineNodeId || input.attempt !== assignment.attempt || input.executionEpoch !== assignment.executionEpoch || input.inputRevision !== assignment.inputRevision) throw new ContractError('work result does not match assignment');
