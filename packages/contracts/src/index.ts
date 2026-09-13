@@ -312,7 +312,22 @@ export function assertContextBudget(context: AgentMemoryContext, budget: number)
   if (total > budget) throw new ContractError('context exceeds token budget');
 }
 export function assertBusinessPayload(payload: BusinessPayload): void {
-  for (const key of Object.keys(payload)) if (CONTROL_KEYS.has(key)) throw new ContractError(`control field leaked into business payload: ${key}`);
+  const ancestors = new WeakSet<object>();
+  const visit = (value: JsonValue): void => {
+    if (value === null || typeof value !== 'object') return;
+    if (ancestors.has(value)) throw new ContractError('cyclic business payload');
+    ancestors.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+    } else {
+      for (const [key, nested] of Object.entries(value)) {
+        if (CONTROL_KEYS.has(key)) throw new ContractError(`control field leaked into business payload: ${key}`);
+        visit(nested);
+      }
+    }
+    ancestors.delete(value);
+  };
+  visit(payload);
 }
 export function validateRequirementEnvelope(input: RequirementEnvelope): void {
   if (!input.requirementId || !input.draftId || !input.normalizedInput || !input.confirmedBy) throw new ContractError('invalid requirement envelope');
@@ -627,6 +642,13 @@ function assertProviderExecutionIdentity(input: ProviderExecutionIdentityRef): v
   assertScope(input.operationId, 'operation');
   assertExecutionEpoch(input.executionEpoch);
 }
+function assertProviderEvidenceMatchesExecution(ref: EvidenceRef, execution: ProviderExecutionIdentityRef, label: string): void {
+  if (ref.scope.taskId && !sameScopedId(ref.scope.taskId, execution.taskId)) throw new ContractError(`${label} task scope mismatch`);
+  if (ref.scope.operationId && !sameScopedId(ref.scope.operationId, execution.operationId)) throw new ContractError(`${label} operation scope mismatch`);
+}
+function assertProviderCompletionEvidenceRefs(refs: readonly EvidenceRef[], execution: ProviderExecutionIdentityRef, label: string): void {
+  for (const ref of refs) assertProviderEvidenceMatchesExecution(ref, execution, label);
+}
 function assertOptionalProviderOwner(input: { readonly ownerId?: string; readonly nextAction?: NextAction }): void {
   if (input.ownerId !== undefined) assertNonEmptyReference(input.ownerId, 'provider ownerId');
   if (input.nextAction !== undefined) assertNextAction(input.nextAction);
@@ -655,7 +677,7 @@ export function validateProviderCapabilities(input: ProviderCapabilities): void 
   assertNonEmptyReference(input.digest, 'provider capability digest');
   assertValidTime(input.checkedAt, 'capability checkedAt');
   assertValidTime(input.expiresAt, 'capability expiresAt');
-  assertProviderEvidenceRefs(input.evidenceRefs, 'provider capability evidenceRefs');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider capability');
 }
 export function validateProviderReadiness(input: ProviderReadiness): void {
   assertNonEmptyReference(input.bindingId, 'readiness bindingId');
@@ -669,6 +691,7 @@ export function validateProviderReadiness(input: ProviderReadiness): void {
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider readiness evidenceRefs');
   if (input.failure) validateProviderError(input.failure);
   if (input.state === 'ready') {
+    assertProviderEvidenceRefsPresent(input.evidenceRefs, 'ready provider readiness');
     if (input.failure) throw new ContractError('ready provider readiness cannot carry a failure');
   } else {
     if (input.evidenceRefs.length === 0) throw new ContractError('non-ready provider readiness requires evidence refs');
@@ -730,7 +753,10 @@ export function validateProviderRecoveryResult(input: ProviderRecoveryResult): v
   if (input.staleRejected && input.recovered) throw new ContractError('stale provider recovery cannot be recovered');
   if (input.staleRejected && input.rejectedEpoch === undefined) throw new ContractError('stale provider recovery requires rejected epoch');
   if (input.rejectedEpoch !== undefined) assertPositiveSafeInteger(input.rejectedEpoch, 'provider recovery rejectedEpoch');
-  if (!input.recovered && !input.staleRejected && !input.error) throw new ContractError('failed provider recovery requires error');
+  if (input.recovered && input.error) throw new ContractError('successful provider recovery cannot carry an error');
+  if (input.recovered && input.rejectedEpoch !== undefined) throw new ContractError('successful provider recovery cannot carry rejection details');
+  if (input.staleRejected && !input.error) throw new ContractError('stale provider recovery requires error');
+  if (!input.recovered && (!input.error || !input.ownerId || !input.nextAction)) throw new ContractError('unfinished provider recovery requires error, owner, and next action');
   assertEvidenceRef(input.recoveryStateRef);
   assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider recovery');
   if (input.error) validateProviderError(input.error);
@@ -834,10 +860,13 @@ export function validateProviderSettlement(input: ProviderSettlement): void {
   assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider settlement');
   validateProviderResourceResult(input.resourceRelease);
   validateProviderPersistenceResult(input.persistence);
+  assertProviderCompletionEvidenceRefs(input.evidenceRefs, input, 'provider settlement');
+  assertProviderCompletionEvidenceRefs(input.resourceRelease.evidenceRefs, input, 'provider resource release');
+  assertProviderCompletionEvidenceRefs(input.persistence.evidenceRefs, input, 'provider persistence');
   if (input.error) validateProviderError(input.error);
   if ((input.state === 'failed' || input.state === 'blocked' || input.state === 'unknown') && !input.error) throw new ContractError('provider non-terminal settlement requires error');
   if (input.error && (input.state === 'succeeded' || input.state === 'stopped' || input.state === 'cancelled')) throw new ContractError('provider completed settlement cannot carry an error');
-  if (input.state === 'stopped' || input.state === 'succeeded') {
+  if (input.state === 'stopped' || input.state === 'succeeded' || input.state === 'cancelled') {
     if (input.resourceRelease.state !== 'released') throw new ContractError('provider completed settlement requires released resources');
     if (input.persistence.state !== 'committed') throw new ContractError('provider completed settlement requires committed persistence');
   }
@@ -854,6 +883,7 @@ export function validateProviderCloseResult(input: ProviderCloseResult): void {
   if (input.state === 'failed' || input.state === 'unknown') {
     if (!input.error) throw new ContractError('provider failed close requires error');
   }
+  if (input.state === 'pending' && (!input.ownerId || !input.nextAction)) throw new ContractError('provider pending close requires owner and next action');
   if (input.error && input.state === 'closed') throw new ContractError('provider closed result cannot carry an error');
   assertOptionalProviderOwner(input);
 }
@@ -866,6 +896,7 @@ export function assertProviderBindingMatch(binding: ProviderBinding, expected: P
 export function assertProviderReadinessBinding(readiness: ProviderReadiness, binding: ProviderBinding): void {
   validateProviderReadiness(readiness);
   assertProviderBindingMatch(binding, { bindingId: readiness.bindingId, providerId: readiness.providerId, protocol: readiness.protocol });
+  if (readiness.capabilityDigest !== binding.capabilityDigest) throw new ContractError('provider readiness capability digest mismatch');
 }
 export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionIdentityRef, expected: ProviderExecutionIdentityRef): void {
   assertProviderExecutionIdentity(actual);

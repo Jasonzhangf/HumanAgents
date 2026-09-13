@@ -9,7 +9,7 @@ import {
   validateProviderSettleInput, validateProviderSettlement, validateProviderStartInput, validateProviderStartReceipt, validateProviderStopReceipt,
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
   validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
-  type Checkpoint, type ExecutionBinding, type ExecutionRuntimePort, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
+  type BusinessPayload, type Checkpoint, type ExecutionBinding, type ExecutionRuntimePort, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
@@ -160,8 +160,14 @@ test('rejects undeclared capabilities and over-budget context', () => {
   }
 });
 
-test('rejects control fields in business payloads', () => {
+test('rejects control fields in business payloads recursively', () => {
   assert.throws(() => assertBusinessPayload({ answer: 'ok', steer: true }), ContractError);
+  assert.throws(() => assertBusinessPayload({ nested: { steer: true } }), ContractError);
+  assert.throws(() => assertBusinessPayload({ nested: [{ executionEpoch: 1 }] }), ContractError);
+  assert.doesNotThrow(() => assertBusinessPayload({ nested: { steerFaith: 'not-control' }, list: [{ checkpointAt: 'not-control' }] }));
+  const cyclic = {} as Record<string, unknown>;
+  cyclic.self = cyclic;
+  assert.throws(() => assertBusinessPayload(cyclic as BusinessPayload), ContractError);
 });
 
 test('validates requirement payload references, revisions, FIFO sequence, and confirmation time', () => {
@@ -307,7 +313,11 @@ test('rejects external evidence used as runtime identity and binding identity mi
     provider: providerBinding(),
     externalExecutionRef: externalEvidence(),
   }), ContractError);
+  assert.doesNotThrow(() => assertProviderReadinessBinding(readiness(), providerBinding()));
   assert.throws(() => assertProviderReadinessBinding({ ...readiness(), protocol: 'anthropic' }, providerBinding()), ContractError);
+  assert.throws(() => assertProviderReadinessBinding({ ...readiness(), capabilityDigest: 'sha256:capability-b' }, providerBinding()), ContractError);
+  assert.throws(() => validateProviderReadiness({ ...readiness(), evidenceRefs: [] }), ContractError);
+  assert.throws(() => validateProviderCapabilities({ ...capabilities(), evidenceRefs: [] }), ContractError);
   assert.throws(() => assertProviderBindingMatch(providerBinding(), { providerId: 'cc-sol', protocol: 'responses' }), ContractError);
   assert.throws(() => assertProviderBindingMatch(providerBinding(), { bindingId: 'binding-b', protocol: 'responses' }), ContractError);
 });
@@ -321,6 +331,21 @@ test('rejects stale execution epoch events before they advance runtime', () => {
   assert.throws(() => validateProviderResumeInput({ ...resumeInput(), checkpointExecutionEpoch: 0 }), ContractError);
   assert.throws(() => validateProviderRecoveryResult({ ...recoveryResult(), recovered: true, staleRejected: true, rejectedEpoch: 1 }), ContractError);
   assert.throws(() => validateProviderRecoveryResult({ ...recoveryResult(), staleRejected: true, rejectedEpoch: NaN }), ContractError);
+  assert.throws(() => validateProviderRecoveryResult({ ...recoveryResult(), recovered: true, error: providerError() }), ContractError);
+  assert.throws(() => validateProviderRecoveryResult({ ...recoveryResult(), recovered: true, rejectedEpoch: 1 }), ContractError);
+  assert.throws(() => validateProviderRecoveryResult({ ...recoveryResult(), recovered: false, staleRejected: false, error: providerError() }), ContractError);
+  assert.throws(() => validateProviderRecoveryResult({ ...recoveryResult(), recovered: false, staleRejected: true, rejectedEpoch: 1, error: providerError() }), ContractError);
+  assert.doesNotThrow(() => validateProviderRecoveryResult(recoveryResult()));
+  assert.doesNotThrow(() => validateProviderRecoveryResult({
+    ...recoveryResult({ recovered: false, staleRejected: false, error: providerError() }),
+    ownerId: 'provider-adapter',
+    nextAction: { kind: 'recover', ref: 'provider-adapter' },
+  }));
+  assert.doesNotThrow(() => validateProviderRecoveryResult({
+    ...recoveryResult({ recovered: false, staleRejected: true, rejectedEpoch: 1, error: providerError() }),
+    ownerId: 'provider-adapter',
+    nextAction: { kind: 'recover', ref: 'provider-adapter' },
+  }));
   assert.deepEqual(checkProviderEventEpoch(providerEvent({ executionEpoch: 2 }), 2), { accepted: true });
   const mismatch = checkProviderEventEpoch(providerEvent({ executionEpoch: 3 }), 2);
   assert.equal(mismatch.accepted, false);
@@ -344,6 +369,9 @@ test('settle requires settlement evidence and resource/persistence results', () 
   assert.throws(() => validateProviderSettlement({ ...settlement(), persistence: { state: 'committed', evidenceRefs: [] } }), ContractError);
   assert.throws(() => validateProviderSettlement({ ...settlement(), resourceRelease: { state: 'pending', evidenceRefs: [providerEvidence('resource')] } }), ContractError);
   assert.throws(() => validateProviderSettlement({ ...settlement(), persistence: { state: 'pending', evidenceRefs: [providerEvidence('persistence')] } }), ContractError);
+  assert.throws(() => validateProviderSettlement({ ...settlement({ state: 'cancelled' }), resourceRelease: { state: 'pending', evidenceRefs: [providerEvidence('cancelled-resource')] } }), ContractError);
+  assert.throws(() => validateProviderSettlement({ ...settlement({ state: 'cancelled' }), persistence: { state: 'pending', evidenceRefs: [providerEvidence('cancelled-persistence')] } }), ContractError);
+  assert.doesNotThrow(() => validateProviderSettlement({ ...settlement({ state: 'cancelled' }) }));
   const failed = settlement({
     state: 'failed',
     error: providerError(),
@@ -355,11 +383,38 @@ test('settle requires settlement evidence and resource/persistence results', () 
   assert.throws(() => validateProviderSettlement({ ...settlement(), state: 'failed', error: undefined }), ContractError);
 });
 
+test('settlement completion evidence is bound to the settlement execution scope', () => {
+  assert.doesNotThrow(() => validateProviderSettlement({ ...settlement({ state: 'stopped' }) }));
+  assert.throws(() => validateProviderSettlement({
+    ...settlement({ state: 'stopped' }),
+    evidenceRefs: [{ ...providerEvidence('settle-other-task'), scope: { ...operationScope, taskId: id('task', 'task-b') } }],
+  }), ContractError);
+  assert.throws(() => validateProviderSettlement({
+    ...settlement({ state: 'stopped' }),
+    resourceRelease: { state: 'released', evidenceRefs: [{ ...providerEvidence('resource-other-operation'), scope: { ...scope, operationId: id('operation', 'operation-b') } }] },
+  }), ContractError);
+  assert.throws(() => validateProviderSettlement({
+    ...settlement({ state: 'stopped' }),
+    persistence: { state: 'committed', evidenceRefs: [{ ...providerEvidence('persistence-other-task'), scope: { ...operationScope, taskId: id('task', 'task-b') } }] },
+  }), ContractError);
+});
+
 test('control fields cannot enter provider business payloads', () => {
   assert.throws(() => validateProviderSubmitInput({ ...submitInput(), payload: { steer: true } }), ContractError);
   assert.throws(() => validateProviderStartInput({ ...startInput(), payload: { checkpoint: 'cp-a' } }), ContractError);
   assert.throws(() => validateProviderSubmitResult({ ...submitResult(), payload: { executionEpoch: 1 } }), ContractError);
   assert.doesNotThrow(() => validateProviderSubmitInput({ ...submitInput(), payload: { steerFaith: 'not-control' } }));
+});
+
+test('pending close requires owner and next action', () => {
+  assert.doesNotThrow(() => validateProviderCloseResult({
+    ...closeResult({ state: 'pending' }),
+    ownerId: 'close-owner',
+    nextAction: { kind: 'wait', ref: 'cleanup' },
+  }));
+  assert.throws(() => validateProviderCloseResult({ ...closeResult({ state: 'pending' }) }), ContractError);
+  assert.throws(() => validateProviderCloseResult({ ...closeResult({ state: 'pending' }), ownerId: 'close-owner' }), ContractError);
+  assert.throws(() => validateProviderCloseResult({ ...closeResult({ state: 'pending' }), nextAction: { kind: 'wait', ref: 'cleanup' } }), ContractError);
 });
 
 test('tool, error, and terminal events preserve evidence refs and owner', () => {
