@@ -355,3 +355,525 @@ export function validateWorkResult(input: WorkResult, assignment: WorkAssignment
     if (expected.size !== delivered.size || ![...expected].every((ref) => delivered.has(ref))) throw new ContractError('work result outputs must match expected outputs');
   }
 }
+
+export type ProviderProtocol = 'responses' | 'anthropic' | 'other-explicit';
+export type ProviderReadinessState = 'ready' | 'degraded' | 'not-ready' | 'unknown' | 'capability-unavailable' | 'dependency-missing';
+export type ProviderEventKind = 'model' | 'output' | 'tool' | 'error' | 'terminal' | 'attention' | 'transport';
+export type ProviderTerminalState = 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown';
+export type ProviderSettleState = ProviderTerminalState;
+export type ProviderErrorPhase = 'probe' | 'start' | 'resume' | 'submit' | 'observe' | 'tool' | 'stop' | 'settle' | 'close' | 'unknown';
+export type ProviderErrorCategory = 'provider' | 'protocol' | 'transport' | 'timeout' | 'capability' | 'configuration' | 'permission' | 'validation' | 'runtime' | 'unknown';
+export type ProviderRetryability = 'retryable' | 'terminal' | 'manual';
+export type ProviderAttentionClass = 'foreground' | 'background' | 'recovery';
+export type ProviderStopReceiptStatus = 'requested' | 'accepted' | 'rejected';
+export type ProviderResourceState = 'released' | 'pending' | 'failed' | 'unknown';
+export type ProviderPersistenceState = 'committed' | 'pending' | 'failed' | 'blocked' | 'unknown';
+export type ProviderCloseState = 'closed' | 'pending' | 'failed' | 'unknown';
+export type ProviderToolStatus = 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+export type ProviderSubmitStatus = 'accepted' | 'completed' | 'blocked' | 'failed' | 'unknown';
+export type AgentRuntimeId = string;
+
+export interface ProviderBinding {
+  readonly bindingId: string;
+  readonly providerId: string;
+  readonly protocol: ProviderProtocol;
+  readonly endpointRef: string;
+  readonly modelRef: string;
+  readonly configDigest: string;
+  readonly capabilityDigest: string;
+}
+
+export interface ExecutionBinding {
+  readonly runtimeId: AgentRuntimeId;
+  readonly provider: ProviderBinding;
+  readonly externalExecutionRef?: EvidenceRef;
+}
+
+export interface ProviderCapabilities {
+  readonly bindingId: string;
+  readonly providerId: string;
+  readonly protocol: ProviderProtocol;
+  readonly capabilities: readonly string[];
+  readonly version: string;
+  readonly digest: string;
+  readonly checkedAt: string;
+  readonly expiresAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface ProviderReadiness {
+  readonly bindingId: string;
+  readonly providerId: string;
+  readonly protocol: ProviderProtocol;
+  readonly state: ProviderReadinessState;
+  readonly capabilityDigest: string;
+  readonly version?: string;
+  readonly checkedAt: string;
+  readonly expiresAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly failure?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderExecutionIdentityRef {
+  readonly runtimeId: AgentRuntimeId;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+}
+
+export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
+  readonly inputRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly payload?: BusinessPayload;
+}
+
+export interface ProviderStartInput extends ProviderExecutionInput {}
+export interface ProviderResumeInput extends ProviderExecutionInput {
+  readonly checkpointId: CheckpointId;
+  readonly checkpointExecutionEpoch: number;
+}
+export interface ProviderSubmitInput extends ProviderExecutionInput {
+  readonly payload: BusinessPayload;
+}
+export interface ProviderObserveInput extends ProviderExecutionIdentityRef {}
+export interface ProviderSettleInput extends ProviderExecutionIdentityRef {
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export interface ProviderStartReceipt extends ProviderExecutionIdentityRef {
+  readonly startedAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly externalExecutionRef?: EvidenceRef;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderRecoveryResult extends ProviderExecutionIdentityRef {
+  readonly checkpointId: CheckpointId;
+  readonly recovered: boolean;
+  readonly staleRejected: boolean;
+  readonly rejectedEpoch?: number;
+  readonly recoveryStateRef: EvidenceRef;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderSubmitResult extends ProviderExecutionIdentityRef {
+  readonly status: ProviderSubmitStatus;
+  readonly outputRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly payload?: BusinessPayload;
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderEvent extends ProviderExecutionIdentityRef {
+  readonly eventId: string;
+  readonly kind: ProviderEventKind;
+  readonly terminalState?: ProviderTerminalState;
+  readonly outputRefs?: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderToolResult extends ProviderExecutionIdentityRef {
+  readonly toolId: string;
+  readonly callId: string;
+  readonly status: ProviderToolStatus;
+  readonly outputRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderError {
+  readonly errorId: string;
+  readonly code: string;
+  readonly category: ProviderErrorCategory;
+  readonly phase: ProviderErrorPhase;
+  readonly message: string;
+  readonly ownerId: string;
+  readonly retryable: ProviderRetryability;
+  readonly attention: ProviderAttentionClass;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly externalRef?: EvidenceRef;
+  readonly nextAction: NextAction;
+}
+
+export interface ProviderStopRequest extends ProviderExecutionIdentityRef {
+  readonly reason: string;
+  readonly ownerId: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export interface ProviderStopReceipt extends ProviderExecutionIdentityRef {
+  readonly status: ProviderStopReceiptStatus;
+  readonly receivedAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderResourceResult {
+  readonly state: ProviderResourceState;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly failure?: ProviderError;
+}
+
+export interface ProviderPersistenceResult {
+  readonly state: ProviderPersistenceState;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly failure?: ProviderError;
+}
+
+export interface ProviderSettlement extends ProviderExecutionIdentityRef {
+  readonly state: ProviderSettleState;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly resourceRelease: ProviderResourceResult;
+  readonly persistence: ProviderPersistenceResult;
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderCloseResult {
+  readonly bindingId: string;
+  readonly providerId: string;
+  readonly protocol: ProviderProtocol;
+  readonly state: ProviderCloseState;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+  readonly nextAction?: NextAction;
+}
+
+export interface ProviderBindingMatchTarget {
+  readonly bindingId?: string;
+  readonly providerId?: string;
+  readonly protocol?: ProviderProtocol;
+}
+
+export interface ExecutionRuntimePort {
+  readonly kind: 'humanagent.execution-runtime-port';
+  probe(binding: ProviderBinding): Promise<ProviderReadiness>;
+  capabilities(binding: ProviderBinding): Promise<ProviderCapabilities>;
+  start(input: ProviderStartInput): Promise<ProviderStartReceipt>;
+  resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult>;
+  submit(input: ProviderSubmitInput): Promise<ProviderSubmitResult>;
+  observe(input: ProviderObserveInput): AsyncIterable<ProviderEvent>;
+  requestStop(input: ProviderStopRequest): Promise<ProviderStopReceipt>;
+  settle(input: ProviderSettleInput): Promise<ProviderSettlement>;
+  close(binding: ProviderBinding): Promise<ProviderCloseResult>;
+}
+
+export type ProviderEventEpochDecision =
+  | { readonly accepted: true }
+  | { readonly accepted: false; readonly rejected: true; readonly reason: 'stale' | 'future' | 'mismatch'; readonly expectedExecutionEpoch: number; readonly receivedExecutionEpoch: number };
+
+const PROVIDER_PROTOCOLS = new Set<string>(['responses', 'anthropic', 'other-explicit']);
+const PROVIDER_READINESS_STATES = new Set<string>(['ready', 'degraded', 'not-ready', 'unknown', 'capability-unavailable', 'dependency-missing']);
+const PROVIDER_EVENT_KINDS = new Set<string>(['model', 'output', 'tool', 'error', 'terminal', 'attention', 'transport']);
+const PROVIDER_TERMINAL_STATES = new Set<string>(['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown']);
+const PROVIDER_ERROR_PHASES = new Set<string>(['probe', 'start', 'resume', 'submit', 'observe', 'tool', 'stop', 'settle', 'close', 'unknown']);
+const PROVIDER_ERROR_CATEGORIES = new Set<string>(['provider', 'protocol', 'transport', 'timeout', 'capability', 'configuration', 'permission', 'validation', 'runtime', 'unknown']);
+const PROVIDER_RETRYABILITY = new Set<string>(['retryable', 'terminal', 'manual']);
+const PROVIDER_ATTENTION_CLASSES = new Set<string>(['foreground', 'background', 'recovery']);
+const PROVIDER_STOP_RECEIPT_STATES = new Set<string>(['requested', 'accepted', 'rejected']);
+const PROVIDER_RESOURCE_STATES = new Set<string>(['released', 'pending', 'failed', 'unknown']);
+const PROVIDER_PERSISTENCE_STATES = new Set<string>(['committed', 'pending', 'failed', 'blocked', 'unknown']);
+const PROVIDER_CLOSE_STATES = new Set<string>(['closed', 'pending', 'failed', 'unknown']);
+const PROVIDER_TOOL_STATES = new Set<string>(['succeeded', 'failed', 'blocked', 'cancelled', 'unknown']);
+const PROVIDER_SUBMIT_STATES = new Set<string>(['accepted', 'completed', 'blocked', 'failed', 'unknown']);
+const NEXT_ACTION_KINDS = new Set<string>(['continue', 'wait', 'stop', 'recover']);
+
+export function runtimeId(value: string): AgentRuntimeId {
+  assertAgentRuntimeId(value);
+  return value;
+}
+export function assertAgentRuntimeId(value: string): asserts value is AgentRuntimeId {
+  assertNonEmptyReference(value, 'agent runtime id');
+}
+function assertNextAction(action: NextAction): void {
+  if (!action || !NEXT_ACTION_KINDS.has(action.kind)) throw new ContractError('invalid next action');
+  if (action.ref !== undefined) assertNonEmptyReference(action.ref, 'next action ref');
+}
+function assertRefList(refs: readonly string[], label: string): void {
+  for (const ref of refs) assertNonEmptyReference(ref, label);
+}
+function assertProviderEvidenceRefs(refs: readonly EvidenceRef[], label: string): void {
+  for (const ref of refs) assertEvidenceRef(ref);
+}
+function assertProviderEvidenceRefsPresent(refs: readonly EvidenceRef[], label: string): void {
+  if (refs.length === 0) throw new ContractError(`${label} evidence refs are required`);
+  assertProviderEvidenceRefs(refs, label);
+}
+function assertExternalEvidenceRef(ref: EvidenceRef, runtimeIdValue: AgentRuntimeId, label: string): void {
+  assertEvidenceRef(ref);
+  if (ref.kind !== 'external') throw new ContractError(`${label} must use external evidence`);
+  if (ref.locator === runtimeIdValue || ref.evidenceId.value === runtimeIdValue) throw new ContractError(`${label} cannot be used as runtime identity`);
+}
+function assertProviderExecutionIdentity(input: ProviderExecutionIdentityRef): void {
+  assertAgentRuntimeId(input.runtimeId);
+  assertScope(input.taskId, 'task');
+  assertScope(input.operationId, 'operation');
+  assertExecutionEpoch(input.executionEpoch);
+}
+function assertOptionalProviderOwner(input: { readonly ownerId?: string; readonly nextAction?: NextAction }): void {
+  if (input.ownerId !== undefined) assertNonEmptyReference(input.ownerId, 'provider ownerId');
+  if (input.nextAction !== undefined) assertNextAction(input.nextAction);
+}
+
+export function validateProviderBinding(input: ProviderBinding): void {
+  assertNonEmptyReference(input.bindingId, 'provider bindingId');
+  assertNonEmptyReference(input.providerId, 'provider providerId');
+  if (!PROVIDER_PROTOCOLS.has(input.protocol)) throw new ContractError('provider protocol is invalid');
+  assertNonEmptyReference(input.endpointRef, 'provider endpointRef');
+  assertNonEmptyReference(input.modelRef, 'provider modelRef');
+  assertNonEmptyReference(input.configDigest, 'provider configDigest');
+  assertNonEmptyReference(input.capabilityDigest, 'provider capabilityDigest');
+}
+export function validateExecutionBinding(input: ExecutionBinding): void {
+  assertAgentRuntimeId(input.runtimeId);
+  validateProviderBinding(input.provider);
+  if (input.externalExecutionRef) assertExternalEvidenceRef(input.externalExecutionRef, input.runtimeId, 'external execution ref');
+}
+export function validateProviderCapabilities(input: ProviderCapabilities): void {
+  assertNonEmptyReference(input.bindingId, 'capability bindingId');
+  assertNonEmptyReference(input.providerId, 'capability providerId');
+  if (!PROVIDER_PROTOCOLS.has(input.protocol)) throw new ContractError('provider protocol is invalid');
+  assertRefList(input.capabilities, 'provider capabilities');
+  assertNonEmptyReference(input.version, 'provider capability version');
+  assertNonEmptyReference(input.digest, 'provider capability digest');
+  assertValidTime(input.checkedAt, 'capability checkedAt');
+  assertValidTime(input.expiresAt, 'capability expiresAt');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider capability evidenceRefs');
+}
+export function validateProviderReadiness(input: ProviderReadiness): void {
+  assertNonEmptyReference(input.bindingId, 'readiness bindingId');
+  assertNonEmptyReference(input.providerId, 'readiness providerId');
+  if (!PROVIDER_PROTOCOLS.has(input.protocol)) throw new ContractError('provider protocol is invalid');
+  if (!PROVIDER_READINESS_STATES.has(input.state)) throw new ContractError('provider readiness state is invalid');
+  assertNonEmptyReference(input.capabilityDigest, 'readiness capabilityDigest');
+  if (input.version !== undefined) assertNonEmptyReference(input.version, 'readiness version');
+  assertValidTime(input.checkedAt, 'readiness checkedAt');
+  assertValidTime(input.expiresAt, 'readiness expiresAt');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider readiness evidenceRefs');
+  if (input.failure) validateProviderError(input.failure);
+  if (input.state === 'ready') {
+    if (input.failure) throw new ContractError('ready provider readiness cannot carry a failure');
+  } else {
+    if (input.evidenceRefs.length === 0) throw new ContractError('non-ready provider readiness requires evidence refs');
+    if (!input.failure || !input.ownerId || !input.nextAction) throw new ContractError('non-ready provider readiness requires failure, owner, and next action');
+  }
+  assertOptionalProviderOwner(input);
+}
+export function validateProviderError(input: ProviderError): void {
+  assertNonEmptyReference(input.errorId, 'provider errorId');
+  assertNonEmptyReference(input.code, 'provider error code');
+  if (!PROVIDER_ERROR_CATEGORIES.has(input.category)) throw new ContractError('provider error category is invalid');
+  if (!PROVIDER_ERROR_PHASES.has(input.phase)) throw new ContractError('provider error phase is invalid');
+  assertNonEmptyReference(input.message, 'provider error message');
+  assertNonEmptyReference(input.ownerId, 'provider error ownerId');
+  if (!PROVIDER_RETRYABILITY.has(input.retryable)) throw new ContractError('provider error retryability is invalid');
+  if (!PROVIDER_ATTENTION_CLASSES.has(input.attention)) throw new ContractError('provider error attention class is invalid');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider error');
+  if (input.externalRef) assertEvidenceRef(input.externalRef);
+  assertNextAction(input.nextAction);
+}
+function validateProviderExecutionInput(input: ProviderExecutionInput): void {
+  assertProviderExecutionIdentity(input);
+  assertRefList(input.inputRefs, 'provider inputRefs');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider execution evidenceRefs');
+  if (input.payload !== undefined) assertBusinessPayload(input.payload);
+}
+export function validateProviderStartInput(input: ProviderStartInput): void {
+  validateProviderExecutionInput(input);
+}
+export function validateProviderResumeInput(input: ProviderResumeInput): void {
+  validateProviderExecutionInput(input);
+  assertScope(input.checkpointId, 'checkpoint');
+  assertExecutionEpoch(input.checkpointExecutionEpoch);
+  if (input.checkpointExecutionEpoch !== input.executionEpoch) throw new ContractError('provider resume checkpoint epoch is stale');
+}
+export function validateProviderSubmitInput(input: ProviderSubmitInput): void {
+  validateProviderExecutionInput(input);
+  if (!input.payload) throw new ContractError('provider submit payload is required');
+  assertBusinessPayload(input.payload);
+}
+export function validateProviderObserveInput(input: ProviderObserveInput): void {
+  assertProviderExecutionIdentity(input);
+}
+export function validateProviderSettleInput(input: ProviderSettleInput): void {
+  assertProviderExecutionIdentity(input);
+  if (input.evidenceRefs !== undefined) assertProviderEvidenceRefs(input.evidenceRefs, 'provider settle evidenceRefs');
+}
+export function validateProviderStartReceipt(input: ProviderStartReceipt): void {
+  assertProviderExecutionIdentity(input);
+  assertValidTime(input.startedAt, 'provider start startedAt');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider start');
+  if (input.externalExecutionRef) assertExternalEvidenceRef(input.externalExecutionRef, input.runtimeId, 'provider start external execution ref');
+  assertOptionalProviderOwner(input);
+}
+export function validateProviderRecoveryResult(input: ProviderRecoveryResult): void {
+  assertProviderExecutionIdentity(input);
+  assertScope(input.checkpointId, 'checkpoint');
+  if (typeof input.recovered !== 'boolean' || typeof input.staleRejected !== 'boolean') throw new ContractError('provider recovery flags must be boolean');
+  if (input.staleRejected && input.recovered) throw new ContractError('stale provider recovery cannot be recovered');
+  if (input.staleRejected && input.rejectedEpoch === undefined) throw new ContractError('stale provider recovery requires rejected epoch');
+  if (input.rejectedEpoch !== undefined) assertPositiveSafeInteger(input.rejectedEpoch, 'provider recovery rejectedEpoch');
+  if (!input.recovered && !input.staleRejected && !input.error) throw new ContractError('failed provider recovery requires error');
+  assertEvidenceRef(input.recoveryStateRef);
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider recovery');
+  if (input.error) validateProviderError(input.error);
+  assertOptionalProviderOwner(input);
+}
+export function validateProviderSubmitResult(input: ProviderSubmitResult): void {
+  assertProviderExecutionIdentity(input);
+  if (!PROVIDER_SUBMIT_STATES.has(input.status)) throw new ContractError('provider submit status is invalid');
+  assertRefList(input.outputRefs, 'provider outputRefs');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider submit evidenceRefs');
+  if (input.payload !== undefined) assertBusinessPayload(input.payload);
+  if (input.error) validateProviderError(input.error);
+  if (input.status === 'completed') {
+    assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider completed submit');
+    if (input.outputRefs.length === 0) throw new ContractError('provider completed submit requires output refs');
+    if (input.error) throw new ContractError('provider completed submit cannot carry an error');
+  }
+  if (input.status === 'accepted') {
+    assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider accepted submit');
+    if (input.error) throw new ContractError('provider accepted submit cannot carry an error');
+  }
+  if (input.status === 'blocked' || input.status === 'failed' || input.status === 'unknown') {
+    if (!input.error) throw new ContractError('provider non-success submit requires error');
+    if (input.evidenceRefs.length === 0) throw new ContractError('provider non-success submit requires evidence refs');
+  }
+  assertOptionalProviderOwner(input);
+}
+export function validateProviderEvent(input: ProviderEvent): void {
+  assertProviderExecutionIdentity(input);
+  assertNonEmptyReference(input.eventId, 'provider eventId');
+  if (!PROVIDER_EVENT_KINDS.has(input.kind)) throw new ContractError('provider event kind is invalid');
+  if (input.terminalState && !PROVIDER_TERMINAL_STATES.has(input.terminalState)) throw new ContractError('provider terminal state is invalid');
+  if (input.terminalState && input.kind !== 'terminal') throw new ContractError('provider terminal state requires terminal event kind');
+  if (input.kind === 'terminal' && !input.terminalState) throw new ContractError('provider terminal event requires terminal state');
+  if (input.kind === 'terminal') assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider terminal event');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider event evidenceRefs');
+  if (input.outputRefs !== undefined) assertRefList(input.outputRefs, 'provider event outputRefs');
+  if (input.error) validateProviderError(input.error);
+  if (input.kind === 'error' && !input.error) throw new ContractError('provider error event requires error');
+  if (input.error && input.kind !== 'error') throw new ContractError('provider error payload requires error event kind');
+  if (['tool', 'error', 'terminal'].includes(input.kind) && input.evidenceRefs.length === 0) throw new ContractError('provider tool/error/terminal event requires evidence refs');
+  if (['tool', 'error', 'terminal', 'attention'].includes(input.kind) && (!input.ownerId || !input.nextAction)) throw new ContractError('provider event requires owner and next action');
+  assertOptionalProviderOwner(input);
+}
+export function checkProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): ProviderEventEpochDecision {
+  if (event.executionEpoch === expectedExecutionEpoch) return { accepted: true };
+  const reason = event.executionEpoch < expectedExecutionEpoch ? 'stale' : 'future';
+  return { accepted: false, rejected: true, reason, expectedExecutionEpoch, receivedExecutionEpoch: event.executionEpoch };
+}
+export function assertProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): void {
+  const decision = checkProviderEventEpoch(event, expectedExecutionEpoch);
+  if (!decision.accepted) throw new ContractError(`provider event epoch is ${decision.reason}`);
+}
+export function validateProviderToolResult(input: ProviderToolResult): void {
+  assertProviderExecutionIdentity(input);
+  assertNonEmptyReference(input.toolId, 'provider toolId');
+  assertNonEmptyReference(input.callId, 'provider tool callId');
+  if (!PROVIDER_TOOL_STATES.has(input.status)) throw new ContractError('provider tool status is invalid');
+  assertRefList(input.outputRefs, 'provider tool outputRefs');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider tool evidenceRefs');
+  if (input.error) validateProviderError(input.error);
+  if (input.status !== 'succeeded' && !input.error) throw new ContractError('provider non-success tool result requires error');
+  if (input.status !== 'succeeded' && input.evidenceRefs.length === 0) throw new ContractError('provider non-success tool result requires evidence refs');
+  if (input.status === 'succeeded' && input.error) throw new ContractError('provider succeeded tool result cannot carry an error');
+  assertOptionalProviderOwner(input);
+}
+export function validateProviderStopRequest(input: ProviderStopRequest): void {
+  assertProviderExecutionIdentity(input);
+  assertNonEmptyReference(input.reason, 'provider stop reason');
+  assertNonEmptyReference(input.ownerId, 'provider stop ownerId');
+  if (input.evidenceRefs !== undefined) assertProviderEvidenceRefs(input.evidenceRefs, 'provider stop evidenceRefs');
+}
+export function validateProviderStopReceipt(input: ProviderStopReceipt): void {
+  assertProviderExecutionIdentity(input);
+  if ('state' in input || 'settled' in input) throw new ContractError('provider stop receipt cannot carry settled state');
+  if (!PROVIDER_STOP_RECEIPT_STATES.has(input.status)) throw new ContractError('provider stop receipt status is invalid');
+  assertValidTime(input.receivedAt, 'provider stop receivedAt');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider stop receipt');
+  if (input.error) validateProviderError(input.error);
+  if (input.status === 'rejected' && !input.error) throw new ContractError('rejected provider stop requires error');
+  if (input.error && input.status !== 'rejected') throw new ContractError('accepted provider stop cannot carry an error');
+  assertOptionalProviderOwner(input);
+}
+function validateProviderResourceResult(input: ProviderResourceResult): void {
+  if (!PROVIDER_RESOURCE_STATES.has(input.state)) throw new ContractError('provider resource state is invalid');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider resource release');
+  if (input.failure) validateProviderError(input.failure);
+  if (input.state === 'failed' && !input.failure) throw new ContractError('provider resource failure requires error');
+  if (input.failure && input.state !== 'failed') throw new ContractError('provider resource error requires failed state');
+}
+function validateProviderPersistenceResult(input: ProviderPersistenceResult): void {
+  if (!PROVIDER_PERSISTENCE_STATES.has(input.state)) throw new ContractError('provider persistence state is invalid');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider persistence');
+  if (input.failure) validateProviderError(input.failure);
+  if ((input.state === 'failed' || input.state === 'blocked') && !input.failure) throw new ContractError('provider persistence failure requires error');
+  if (input.failure && input.state !== 'failed' && input.state !== 'blocked') throw new ContractError('provider persistence error requires failed or blocked state');
+}
+export function validateProviderSettlement(input: ProviderSettlement): void {
+  assertProviderExecutionIdentity(input);
+  if (!PROVIDER_TERMINAL_STATES.has(input.state)) throw new ContractError('provider settlement state is invalid');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider settlement');
+  validateProviderResourceResult(input.resourceRelease);
+  validateProviderPersistenceResult(input.persistence);
+  if (input.error) validateProviderError(input.error);
+  if ((input.state === 'failed' || input.state === 'blocked' || input.state === 'unknown') && !input.error) throw new ContractError('provider non-terminal settlement requires error');
+  if (input.error && (input.state === 'succeeded' || input.state === 'stopped' || input.state === 'cancelled')) throw new ContractError('provider completed settlement cannot carry an error');
+  if (input.state === 'stopped' || input.state === 'succeeded') {
+    if (input.resourceRelease.state !== 'released') throw new ContractError('provider completed settlement requires released resources');
+    if (input.persistence.state !== 'committed') throw new ContractError('provider completed settlement requires committed persistence');
+  }
+  if (input.state === 'waiting' && (!input.ownerId || !input.nextAction)) throw new ContractError('provider waiting settlement requires owner and next action');
+  assertOptionalProviderOwner(input);
+}
+export function validateProviderCloseResult(input: ProviderCloseResult): void {
+  assertNonEmptyReference(input.bindingId, 'close bindingId');
+  assertNonEmptyReference(input.providerId, 'close providerId');
+  if (!PROVIDER_PROTOCOLS.has(input.protocol)) throw new ContractError('provider protocol is invalid');
+  if (!PROVIDER_CLOSE_STATES.has(input.state)) throw new ContractError('provider close state is invalid');
+  assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider close');
+  if (input.error) validateProviderError(input.error);
+  if (input.state === 'failed' || input.state === 'unknown') {
+    if (!input.error) throw new ContractError('provider failed close requires error');
+  }
+  if (input.error && input.state === 'closed') throw new ContractError('provider closed result cannot carry an error');
+  assertOptionalProviderOwner(input);
+}
+export function assertProviderBindingMatch(binding: ProviderBinding, expected: ProviderBindingMatchTarget): void {
+  validateProviderBinding(binding);
+  if (expected.bindingId !== undefined && binding.bindingId !== expected.bindingId) throw new ContractError('provider binding id mismatch');
+  if (expected.providerId !== undefined && binding.providerId !== expected.providerId) throw new ContractError('provider binding provider mismatch');
+  if (expected.protocol !== undefined && binding.protocol !== expected.protocol) throw new ContractError('provider binding protocol mismatch');
+}
+export function assertProviderReadinessBinding(readiness: ProviderReadiness, binding: ProviderBinding): void {
+  validateProviderReadiness(readiness);
+  assertProviderBindingMatch(binding, { bindingId: readiness.bindingId, providerId: readiness.providerId, protocol: readiness.protocol });
+}
+export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionIdentityRef, expected: ProviderExecutionIdentityRef): void {
+  assertProviderExecutionIdentity(actual);
+  assertProviderExecutionIdentity(expected);
+  if (actual.runtimeId !== expected.runtimeId
+    || actual.taskId.value !== expected.taskId.value
+    || actual.operationId.value !== expected.operationId.value
+    || actual.executionEpoch !== expected.executionEpoch) {
+    throw new ContractError('provider execution identity mismatch');
+  }
+}

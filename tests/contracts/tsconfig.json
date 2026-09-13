@@ -5,6 +5,10 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "skipLibCheck": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@humanagent/contracts": ["./packages/contracts/src/index.ts"]
+    },
     "noEmit": false,
     "rootDir": "../..",
     "outDir": "../../dist/tests",

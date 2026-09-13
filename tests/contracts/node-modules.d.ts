@@ -3,6 +3,7 @@ declare module 'node:assert/strict' {
     throws(fn: () => unknown, error?: new (...args: never[]) => Error | RegExp): void;
     doesNotThrow(fn: () => unknown): void;
     deepEqual(actual: unknown, expected: unknown, message?: string): void;
+    equal(actual: unknown, expected: unknown, message?: string): void;
   }
   const assert: Assert;
   export = assert;
@@ -10,4 +11,7 @@ declare module 'node:assert/strict' {
 declare module 'node:test' {
   const test: (name: string, fn: () => void) => void;
   export default test;
+}
+declare module 'node:fs' {
+  export function readFileSync(path: string | URL, encoding?: string): string;
 }
