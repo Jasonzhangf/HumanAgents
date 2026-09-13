@@ -1,6 +1,6 @@
 # Organ Runtime 架构设计
 
-状态：`MVP-IMPLEMENTATION / WAVE-2-PENDING-ASTRA`
+状态：`MVP-IMPLEMENTATION / M1-PREPARATION`
 日期：2026-09-11  
 高层原则：HumanAgent 拥有领域状态；DSH 是可替换执行后端。
 
@@ -750,7 +750,7 @@ packages/adapters/dsh/
 5. plugin/package 的公开 entrypoint；禁止引用 checkout-relative `src/*`。
 6. 同进程插件与子进程/IPC 的错误、超时和退出码边界。
 
-当前这些项目没有得到 clean DSH commit 的证据，因此保持 `UNVERIFIED`。
+clean DSH commit/tree 基线已经锁定；上述 public entrypoint、依赖、profile/plugin、取消、持久化和真实执行语义仍保持 `UNVERIFIED`，待 Milestone 1 的 M1-0 复核。基线证据见 [`dsh-baseline.md`](dsh-baseline.md)。
 
 ## 9. 关键时序
 

@@ -47,9 +47,9 @@
 | Memory 设计 | `docs/architecture/memory-system.md` | Interaction Surface、Operations Backend、可重建 Index、分层 Context Injection 和无 AI 基线已定义 |
 | 生命周期/故障设计 | `docs/architecture/lifecycle-and-failure-ownership.md` | 阶段终态、故障 owner、Attention、恢复和提交闸门已定义 |
 | 静态界面定义 | `docs/ui/tasks.html`、`dashboard.html`、`task.html`、`task-dashboard.html`、`interaction.html`、`observation.html` | 已分离任务列表、简洁状态入口、显式交互、运行任务看板、运行控制和只读观测；当前 UI 责任基线已冻结 |
-| DSH checkout | `/Volumes/extension/code/dsh` 当前分支 `dsh-memory/alpha5`，工作树有大量未跟踪生成物；已读取 Cordis/profile/plugin 文档 | 只能作为待复核外部证据，不能作为 clean 基线 |
-| 设计中 DSH 基线 | 对话记录中的 `c291e7961a515f6d7af9304e7fd1d257929aef26` | 当前 checkout 无法读取该对象；版本绑定未验证 |
-| 实现/测试 | Wave 0/1/2 runtime 代码/测试已存在于 `packages/`、`tests/`；Wave 2 candidate `d8d5c751ecf487dbefcc07b1ede5514b0b1ceea5` 已 squash 到 main 为 `7b00181c893a0394c79b67e9c3bafd8af66b417d` | Wave 2 通过 `humanagent-wave2-astra-r25` commit-bound PASS；不能据此宣称 DSH 接入 |
+| DSH checkout | `/Volumes/extension/code/dsh` 当前 checkout 仍有大量未跟踪生成物；另以 detached worktree 复核上游 `master` | 原 checkout 不作为基线；clean 基线记录在 [`dsh-baseline.md`](architecture/dsh-baseline.md) |
+| DSH 基线 | 上游 `master@c291e7961a515f6d7af9304e7fd1d257929aef26`，tree `e482b49bef64726be8f79380bb35bae569dc3c48`，describe `dsh-v0.1.5-rc.2-139-gc291e7961a` | 源码 commit/tree 已锁定；adapter 和真实入口仍未实现 |
+| 实现/测试 | Wave 0/1/2 runtime 代码/测试已存在于 `packages/`、`tests/`；当前 main 为 `9c2a94364e6e4a86539df38622847f0211909bdb` | 当前 main 已包含 Wave 2 runtime 和启动链；不能据此宣称 DSH 接入 |
 
 ## 5. 架构收敛
 
@@ -111,12 +111,12 @@ Cordis Host
 
 ## 7. 当前阻塞与开放决定
 
-1. DSH 适配需要一个可读取的 clean commit 或发布包；当前设计中的 commit 对象不可用。
+1. DSH clean 源码 commit 已锁定；仍需在 Milestone 1 复核 public entrypoints、依赖、profile/plugin、取消和持久化能力。
 2. 首个实现语言/包管理器已进入 TypeScript + pnpm；runtime 骨架已建立。
 3. 需要确定 Journal 记录的校验策略（链 hash、文件 segment、资产 digest 的组合）和 fsync/rename 提交语义。
 4. 需要确定 checkpoint 历史保留政策：哪些恢复字段永久保留，哪些原始工具输出可归档或清理。
 5. 需要确定第一种 DSH 接入形态：优先评估子进程/IPC，再与同进程 plugin、独立服务比较；这只影响 adapter，不改变高层 port。
-6. 远端仓库已由用户提供为 [`Jasonzhangf/HumanAgents`](https://github.com/Jasonzhangf/HumanAgents)。当前只做本地 candidate/review-fix 提交；push、Astra PASS 和 main 集成不在此轮自动放行。
+6. 远端仓库 [`Jasonzhangf/HumanAgents`](https://github.com/Jasonzhangf/HumanAgents) 已收到当前 main 基线；DSH 适配仍须按 [`dsh-baseline.md`](architecture/dsh-baseline.md) 的 M1 门禁推进。
 
 ## 8. MVP 路线
 
@@ -126,7 +126,7 @@ MVP 不接 DSH provider，先用最小 HumanAgent Cordis Host + fixed Harness Ke
 
 本轮完成 iff：
 
-- 已批准 MVP 的阶段、唯一 owner 和禁止边界已写入项目真源；Wave 2 candidate 状态为 pending review，不伪造 main。
+- 已批准 MVP 的阶段、唯一 owner 和禁止边界已写入项目真源；Wave 2 已通过既有 review、集成到 main 并推送，不能把该事实扩展为 DSH 已接入。
 - 高层模块图、生命周期、错误策略、checkpoint/Index 关系和 ports 已写入设计文档。
 - 高层领域模型不携带 DSH 类型；所有 DSH 具体依赖集中在 adapter 边界，并明确当前未验证事实。
 - 显式 Brain → FIFO 需求入口 → 隐式 Brain 分类/准入 → Pipeline 节点观测链、Organ 自诊断和 Task List/Dashboard/Task Detail 的责任边界已写入设计真源。
@@ -136,10 +136,10 @@ MVP 不接 DSH provider，先用最小 HumanAgent Cordis Host + fixed Harness Ke
 - `task-dashboard.html` 已固定为单个运行任务的 agent 看板：展示各 agent 输入/输出预览，点击进入动态过程摘要；运行看板不承担用户决策。
 - agent 流程已独立收口：交互 agent 负责确认前输入整理和确认后派发，Runtime Coordinator 负责 FIFO 分类/关联/准入，任务编排 agent 负责阶段计划/assignment/推进，执行 agent 负责节点输出，记忆 agent 负责 skill candidate，健康诊断和 steer 走独立控制路径。
 - 五类 agent 已收口为统一模板协议：system prompt、skills、tools、policy、input/output schema 分目录隔离，Harness 负责 validate → compile → load，运行实例记录实际 digest。
-- 宿主/插件边界已收口：固定编排由 HumanAgent core/runtime 拥有，MVP 使用 fake backend，Milestone 1 通过专用 DSH profile + Cordis bridge 接入；插件不能跳过确认、准入、review、memory、health 或 stop gate。
+- 宿主/插件边界已收口：固定编排由 HumanAgent core/runtime 拥有，MVP 使用 fake backend，Milestone 1 计划通过专用 DSH profile + Cordis bridge 接入；插件不能跳过确认、准入、review、memory、health 或 stop gate。
 - Cordis 定位已纠正：它是 HumanAgent 第一层插件宿主；固定 Harness Kernel、节点策略、Agent Driver、Memory UI/Backend、Journal/Index 和 UI projection 都通过受控 seam 组装，DSH 只是一个 provider。
 - Memory 定位已纠正：交互面和后台操作端分离；Index 可重建；Agent context 通过分层接口注入；无 AI 时基础记忆操作仍可运行。
 - 生命周期/故障已收口：每阶段拥有 owner、正常/等待/阻塞/失败/取消出口、证据和下一动作；runtime 意外进入 ManagedIssue/Attention，不留无 owner 的悬挂状态。
 - 首批任务拥有可判定的完成条件和证据条件。
 
-本轮不声称：DSH adapter 已接入、真实工具停止完成、崩溃恢复完成、Memory RAG 已接通、Wave 2 已入 main、Astra review 已通过或远端已提交。
+本轮不声称：DSH adapter 已接入、真实工具停止完成、崩溃恢复完成、Memory RAG 已接通，或 DSH 的真实 start/resume/stop/replay 已完成；Wave 2 的既有 main、review 和远端推送事实不属于本轮未完成项。

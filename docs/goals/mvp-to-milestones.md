@@ -1,8 +1,8 @@
 # HumanAgent MVP → Milestone 1/2/3 计划
 
-状态：`PLANNING`  
-日期：2026-09-10  
-前置状态：`DESIGN-BOOTSTRAP`  
+状态：`MVP-IMPLEMENTATION / M1-PREPARATION`
+日期：2026-09-13
+前置状态：`MVP-IMPLEMENTATION`
 唯一目标：先交付一个可独立验证的器官式运行时最小闭环，再按证据逐层扩大到真实 DSH、长程耐久和可交付运行时。
 
 ## 1. 规划结论
@@ -318,20 +318,18 @@ Milestone 3 delivery review
 - 没有恢复、压缩、引用完整性证据，不进入多任务和部署。
 - review PASS 只说明当前变更通过 review，不自动授权 commit、merge、push、发布或生产变更。
 
-## 8. 当前开案动作
+## 8. 当前推进动作
 
-当前只做以下动作：
+MVP 基线已经进入 `origin/main`；当前只推进 DSH 基线复核和 Milestone 1 准备：
 
-1. 评审并锁定本计划的 MVP 边界、模板系统、宿主/插件边界和生命周期/故障 owner 矩阵。
-2. 决定首个实现语言、包管理器和 standalone 入口形式。
-3. 明确授权后初始化项目 Git 基线；从最新 `origin/main` 建立 `playground/<task>` clean worktree。当前目录尚无 Git，不能直接进入代码实现。
-4. 评审并锁定 `dashboard.html`、`task.html`、`interaction.html`、`observation.html` 四个静态交互定义；视觉设计继续延后。
-5. 在 MVP 实现前补充 contracts/test map、AgentTemplate/Plugin/RequirementEnvelope/PipelineObservation/Health schema map 和 Journal/checkpoint schema map；只绑定受影响路径。
-6. 先实现 MVP；创建最小 Cordis Host、fake Agent Driver、deterministic Memory Backend 和 `packages/ui`，不提前创建 DSH adapter、SQLite、daemon 或完整产品 UI。
+1. 以 [`dsh-baseline.md`](architecture/dsh-baseline.md) 的精确 commit 作为 M1-0 输入。
+2. 只读复核 DSH public entrypoints、依赖、Cordis profile、session、工具、取消和持久化能力。
+3. 在 adapter 实现前提交 capability matrix、profile/lock 方案和验证用例；任何不确定能力都进入 `capability-unavailable`，不静默 fallback。
+4. 未完成 M1-0 和用户批准前，不开始 `packages/adapters/dsh`、Cordis bridge 或真实 provider 运行。
 
 ## 9. 计划之外的风险
 
-- DSH clean baseline 仍未确认；Milestone 1 不能提前声称可执行。
+- DSH clean baseline 已确认；Milestone 1 仍不能提前声称 adapter 或真实执行链已完成。
 - 首个语言/包管理器未定；这会影响类型、JSONL、进程和测试入口，但不改变高层分层。
 - Journal 的 durability 语义未定；MVP 可先限定本地单进程，但必须把限制写进验收证据。
 - 首批 queue taxonomy、Task 关联/更新冲突规则、Pipeline Observation 的节点持久化粒度和 health probe TTL 尚未锁定。

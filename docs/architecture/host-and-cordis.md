@@ -1,10 +1,10 @@
 # HumanAgent 宿主、启动和 Cordis 插件化架构
 
-状态：`DESIGN-BOOTSTRAP / HOSTING-DESIGN-DRAFT`  
+状态：`MVP-IMPLEMENTATION / DSH-BASELINE-LOCKED`
 日期：2026-09-11  
 适用阶段：MVP → Milestone 3
 
-本文定义 HumanAgent 如何以 Cordis 为第一层插件宿主独立启动，如何装载固定 Harness 内核和可替换模块，如何在外部安装 DSH，以及如何把 DSH 作为一种 Agent/Execution provider 接入。DSH 当前源码仅作为外部设计证据读取；真实 adapter 仍需 clean DSH 版本、公开入口和同入口验证后才能实现。
+本文定义 HumanAgent 如何以 Cordis 为第一层插件宿主独立启动，如何装载固定 Harness 内核和可替换模块，如何在外部安装 DSH，以及如何把 DSH 作为一种 Agent/Execution provider 接入。当前 DSH 源码基线已锁定；真实 adapter 仍需公开入口、profile、能力和同入口验证后才能实现，详见 [`dsh-baseline.md`](dsh-baseline.md)。
 
 ## 1. 设计结论
 
@@ -369,11 +369,13 @@ health probe or provider error
 - 多任务下插件能力、资源 lease 和 Journal scope 不串线；
 - 没有签名/兼容性/权限证据时不允许加载生产插件。
 
-## 9. 当前未锁定
+## 9. 已锁定与待验证
+
+已锁定的 DSH 源码基线、tree 和最近发布标记见 [`dsh-baseline.md`](dsh-baseline.md)。以下项目仍属于 Milestone 1 的适配验证，不得提前写成实现事实：
 
 - HumanAgent host 与 DSH provider 使用子进程 IPC 还是本机服务 transport；
 - 首个 Host Plugin API 的语言/包格式和 manifest 签名方案；
-- DSH clean baseline、最小支持版本和真实 session stop 语义；
+- DSH 最小支持版本、公开 package entrypoint 和真实 session stop 语义；
 - DSH profile 的实际目录、环境变量和凭据边界；
 - 插件更新时正在运行任务的等待、迁移或禁止更新策略。
 

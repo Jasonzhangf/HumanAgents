@@ -24,11 +24,12 @@ UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和�
 6. [宿主、启动和 Cordis 插件化](docs/architecture/host-and-cordis.md)
 7. [Memory System](docs/architecture/memory-system.md)
 8. [生命周期与故障归属](docs/architecture/lifecycle-and-failure-ownership.md)
-9. [项目规则](AGENTS.md)
+9. [DSH 基线与 Milestone 1 适配准备](docs/architecture/dsh-baseline.md)
+10. [项目规则](AGENTS.md)
 
 ## 当前未完成
 
-DSH 设计基线中的提交号在当前 DSH checkout 不可读取；当前 checkout 还有大量未跟踪生成物。因此 DSH 接口目前是设计级契约，不是已验证的源码绑定。真实 DSH 适配、Cordis bridge、持久化故障恢复、steer 同入口停止和长程 replay 仍待后续任务。第一版设计完成后将先做文档检查和 Astra 只读 review，经用户审批后才在远端仓库建立基线并提交。
+DSH 源码基线已锁定到上游 `master@c291e7961a515f6d7af9304e7fd1d257929aef26`，并记录了 tree、最近发布标记和 clean checkout 证据。真实 DSH 适配、Cordis bridge、持久化故障恢复、steer 同入口停止和长程 replay 仍待 Milestone 1；当前只完成基线和计划，不声称 adapter 已接入。
 
 ## 本地启动与增量编译
 
