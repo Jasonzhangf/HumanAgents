@@ -4,6 +4,7 @@ Status: `M1-0-REVIEW-RECORDED / NOT-PASS`
 Review time: `2026-09-13T07:14:30-0700` (local), `2026-09-13T14:14:30Z` (UTC)
 Candidate base: `41adc33e62629ae56c7b4eba667d13bd6cb358b8`
 DSH input: commit `c291e7961a515f6d7af9304e7fd1d257929aef26`, tree `e482b49bef64726be8f79380bb35bae569dc3c48`
+Source expansion rechecked: `2026-09-13T07:42:55-0700` (local), `2026-09-13T14:42:55Z` (UTC)
 
 This is a read-only M1-0 record. It does not implement an adapter, install a
 plugin, make a provider request, or prove M1-0 PASS. Native Astra review and
@@ -34,6 +35,10 @@ performed in this review.
 | 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:package.json` | Root declares version `0.1.5-rc.2`, MIT, `pnpm@11.7.0`, Node `^22.19.0 || >=24.0.0`, workspaces, and host build/test scripts. Source declaration only. |
 | 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:apps/cli/package.json` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`, MIT, and workspace dependencies including Cordis, app boot, agent, headless, session, tool, and LLM packages. Dependency installation is unverified. |
 | 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:apps/cli/src/bin.ts` and `src/args.ts` | Public launcher has profile boot, `web` alias, `plugin`, and config dump modes; inner app args are passed to the booted profile. `--resume` is an app argument, not a HumanAgent contract. |
+| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/llm/llm-pi-ai/package.json`, `src/config.ts`, `src/provider.ts`, `src/index.ts`, `src/catalog.ts` | Confirmed package exports, `PiAiProviderProfile` / `Config.providers`, protocol table, `buildProvider`, and route model/base URL resolution. Source object evidence only. |
+| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/core/agent/src/index.ts`, `packages/core/agent-loop/src/index.ts` | Confirmed `AgentRegistry.create`/`resume`, `AgentHandle.dispose`, agent-loop create/resume preconditions, rollback, and publish path. Source object evidence only. |
+| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/api/session-controller/src/index.ts`, `src/commands.ts`, `src/types.ts`, `src/history.ts` | Confirmed `cancel` is an admission receipt, `follow` emits snapshot plus event frames, and cancel/create failure exits. Source object evidence only. |
+| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/session/session-persistence-jsonl/src/index.ts`, `src/lease.ts` | Confirmed required `root`, lazy create, read/write open, not-found/already-exists/already-owned/corruption failure classes. Source object evidence only. |
 
 The original `/Volumes/extension/code/dsh` checkout was not used as clean
 evidence. The previously recorded clean-baseline verification is the project
@@ -67,15 +72,48 @@ capability in this review.
 | Dependencies | `package.json` workspace, pnpm and Node declarations; CLI dependencies include Cordis, app boot, agent/headless/session/tool/LLM packages | `declared; install-unverified` | DSH adapter owner: lock installed dependency tree and compatibility result. |
 | Profile seam | `apps/cli/src/args.ts` supports `--profile`, `--from-default-profile`, ordered `--patch`; `profile-boot.ts` is the boot path | `source-present; boot-unverified` | DSH profile owner: create and lock dedicated `humanagent` profile; do not alter default profile. |
 | Plugin seam | `plugin` command forwards profile plugin arguments to pnpm; CLI package exposes Cordis loader/include/HMR dependencies | `source-present; install/load-unverified` | DSH/plugin owner: identify approved bundle entry, version, digest and dispose behavior. |
-| Session create | DSH CLI profile boot and agent/session packages are declared; no adapter-facing create API was locked in this review | `unverified` | DSH adapter owner: identify public create/session API and record a receipt. |
-| Session resume | `args.ts` passes `--resume` to the booted app; no HumanAgent-compatible resume receipt verified | `partial-source; runtime-unverified` | DSH adapter owner: prove resume against persisted session and map only to `EvidenceRef`. |
-| Events | Agent/session packages and session event test inventory exist in the commit; event-to-HumanAgent mapping not verified | `unverified` | DSH adapter owner: record ordered model/tool/error/terminal events and epoch mapping. |
+| Session create | `packages/api/session-controller/src/index.ts:244-247` delegates `SessionCommandController.create`; `commands.ts:87-126` validates `workspaceId`/`cwd`, resolves workspace, calls `ensureSession`, attaches workspace, and maps failures in `commands.ts:519-539`; `core/agent/src/index.ts:388-398` requires registered factory and delegates `AgentFactory.createAgent`; `core/agent-loop/src/index.ts:765-836` runs create/setup/publish with rollback | `source-proven; runtime-unverified` | DSH adapter owner: run one real same-entry create receipt, then map to HumanAgent session identity. |
+| Session resume | `core/agent/src/index.ts:401-413` requires factory and delegates `AgentFactory.resume`; `core/agent-loop/src/index.ts:844-927` requires `ctx.sessionPersistence`, opens persisted session for write, reads and repairs interrupted turns, then setup/publishes; failure exits include missing persistence (`:847-848`) and setup/owner abort paths | `source-proven; persistence-runtime-unverified` | DSH adapter owner: prove resume against a real persisted session and map only to `EvidenceRef`. |
+| Events | `api/session-controller/src/index.ts:400-403` delegates `follow`; `history.ts:119-149` subscribes to `session/event` and emits a complete opening snapshot followed by durable event frames plus opted-in assistant frames; `types.ts:427-437` defines `SessionWireEvent`; `types.ts:514-526` defines `SessionFollowFrame` | `source-proven; mapping/runtime-unverified` | DSH adapter owner: record ordered model/tool/error/terminal events and epoch mapping from a real stream. |
 | Tools | CLI dependencies include tool packages; filesystem, bash, web, todo, ask-user and other tool packages are declared | `declared; enabled-set-unverified` | DSH adapter owner: lock one representative tool and its permission/schema/result evidence. |
-| Cancel / close / settle | Process shutdown and session/checkpoint packages are present; no verified public DSH cancel-close-settle contract or real receipt | `unverified` | Stop controller owner: prove cancel request is distinct from settle and stopped checkpoint. |
-| Persistence / session log | Session persistence, session-log and JSONL-related packages are declared in CLI devDependencies; no runtime file or replay was run | `declared; persistence-unverified` | DSH evidence owner: record session log path/digest, append/restore semantics and Journal separation. |
+| Cancel / close / settle | `api/session-controller/src/commands.ts:497-511` requires live attached agent, rejects not-found/subagent-owner, calls `agent.cancel(..., { keepInbox: true })`, and returns only `SessionCancelValue.accepted: true` (`types.ts:356-359`); `core/agent/src/index.ts:146-163` documents `AgentHandle.dispose()` as stopping the loop, awaiting exit, unregistering, removing the session, and unwinding scope; `client/contract/events.ts:177-192` shows a settlement event, but no public stopped-checkpoint receipt was found in the audited API | `source-proven; cancel-receipt-only; runtime-unverified` | Stop controller owner: prove cancel request is distinct from settle and stopped checkpoint. |
+| Persistence / session log | `session/session-persistence-jsonl/src/index.ts:87-99` requires explicit `root`; `:229-239` registers `ctx.sessionPersistence`; `:299-327` lazy `create` with `SessionAlreadyExistsError`; `:336-406` read/write `open` with `SessionPersistenceNotFoundError` and lock-release cleanup; `:495-499` requires stored log; failure classes include `SessionAlreadyOwnedError`, `SessionPersistenceCorruptionError`, and `SessionFormatUnsupportedError` | `source-proven; filesystem/replay-unverified` | DSH evidence owner: record session log path/digest, append/restore semantics and Journal separation from a real backend. |
 | License | Root `LICENSE` and root/CLI package declarations state MIT; third-party notices are present | `source-verified` | Release owner: verify any selected plugin/bundle dependency licenses before use. |
-| Endpoint / protocol / model binding | DSH source shows configurable profile/plugin layers, but no audited binding to RCC endpoint/protocol/model was produced | `unverified` | Provider + DSH owners: produce lock with endpoint ref, protocol, model ref, config digest and capability digest. |
+| Endpoint / protocol / model binding | `llm-pi-ai/package.json:16-23` exports the package; `src/index.ts:76,82,88,145` exports `Config`, `PiAiProviderProfile`, `supportedProtocols`, and `apply`; `src/config.ts:90-109,221-227` defines provider routes with `api`, `baseURL`, `models`, `modelOverrides`; `src/provider.ts:47-51,172-191` is the auditable protocol table and provider build path; see "Locked DSH Source Seam" below | `source-proven; binding/runtime-unverified` | Provider + DSH owners: produce lock with endpoint ref, protocol, model ref, config digest and capability digest. |
 | Profile/plugin compatibility | No dedicated HumanAgent profile or approved execution bundle was installed or loaded | `dependency-missing for M1 execution` | DSH profile owner: resolve approved package and compatibility evidence; do not fallback to fake. |
+
+## Locked DSH Source Seam
+
+This section records the endpoint/protocol/model configuration seam from locked
+DSH commit objects, not from the dirty `/Volumes/extension/code/dsh` checkout.
+
+- Package export: `packages/llm/llm-pi-ai/package.json:16-23` exports the root
+  package types/default and exposes `./src/*`.
+- Plugin/profile config: `packages/llm/llm-pi-ai/src/index.ts:76` exports
+  `Config`, `:82` exports `PiAiProviderProfile`, `:88` exports
+  `supportedProtocols`, and `:145` exports `apply(ctx, config)`. The package
+  installs one generic adapter and a settings section for `providers`
+  (`src/index.ts:279-291`, `:295-336`).
+- Provider route shape: `packages/llm/llm-pi-ai/src/config.ts:90-109` defines
+  `PiAiProviderProfile`; the `providers` dict key is the route
+  (`config.ts:221-227`, `:187-188`). `api` is the wire-protocol override,
+  `baseURL` is the endpoint override, `models` replaces the catalog, and
+  `modelOverrides` reshapes individual catalog models.
+- Default and override sources: `config.ts:97-103` says omitted `api` keeps each
+  catalog model protocol and omitted `baseURL` defaults to the installed catalog
+  endpoint. `catalog.ts:888` resolves model `api` as route override, then
+  catalog model, then route catalog; `catalog.ts:893` resolves model `baseURL`
+  as route override, then catalog model, then provider base URL. Missing api or
+  base URL on an undescribed route is refused (`catalog.ts:889-895`).
+- Protocol consumption: `provider.ts:47-51` contains the only protocol table for
+  configured routes: `openai-completions`, `openai-responses`, and
+  `anthropic-messages`. `provider.ts:172-191` reuses a catalog provider when the
+  route keeps its catalog protocol and otherwise builds with `createProvider`,
+  throwing `PiAiCatalogError` for unsupported protocol names.
+- Explicit unavailable conclusion: the locked `llm-pi-ai` source does not name
+  RCC, `cc`, `cc-sol`, `goaichat`, `~/.rcc`, or `4444`. It provides generic
+  provider routes; the specific RCC endpoint/protocol/model bindings remain
+  configuration/runtime evidence and are still `unverified`.
 
 ## OrganHealthProbePort Boundary
 
@@ -112,6 +150,9 @@ Planned/required checks for this artifact:
 ```sh
 git diff --check
 git diff -- docs/architecture/m1-0-capability-matrix.md
+git status --short --branch
+git diff --cached --check
+git diff --cached --name-only
 ```
 
 The checks validate only document whitespace and scope. They do not validate
