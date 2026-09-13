@@ -79,6 +79,15 @@ export interface AgentTemplateLoadInput {
   readonly driverCapabilities: readonly string[];
 }
 
+export interface ConfiguredAgentBinding {
+  readonly roleId: AgentRole;
+  readonly templateRef: string;
+  readonly driverRef: string;
+  readonly skills: readonly string[];
+  readonly tools: readonly string[];
+  readonly permissions: readonly string[];
+}
+
 export interface AgentTemplateValidation {
   readonly manifest: AgentTemplateManifest;
   readonly capabilityRefs: readonly string[];

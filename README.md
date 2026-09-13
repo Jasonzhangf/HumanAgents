@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-`DESIGN-BOOTSTRAP`（2026-09-10）。本目录原为空目录，目前只建立项目规则、架构设计和初始报告；没有运行时代码、测试、Git 基线或 DSH 适配器。
+`MVP-IMPLEMENTATION`（2026-09-13）。已具备独立的启动/config/session 链和带 checkpoint 的本地编译链；DSH 仍是后续可替换执行后端。
 
 ## 核心决定
 
@@ -29,3 +29,21 @@ UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和�
 ## 当前未完成
 
 DSH 设计基线中的提交号在当前 DSH checkout 不可读取；当前 checkout 还有大量未跟踪生成物。因此 DSH 接口目前是设计级契约，不是已验证的源码绑定。真实 DSH 适配、Cordis bridge、持久化故障恢复、steer 同入口停止和长程 replay 仍待后续任务。第一版设计完成后将先做文档检查和 Astra 只读 review，经用户审批后才在远端仓库建立基线并提交。
+
+## 本地启动与增量编译
+
+```sh
+pnpm build
+pnpm test
+node dist/app/app/src/cli.js doctor --workspace /absolute/project
+node dist/app/app/src/cli.js run --workspace /absolute/project --plan default
+node dist/app/app/src/cli.js resume --workspace /absolute/project --session <session-id>
+node dist/app/app/src/cli.js session list --workspace /absolute/project
+node dist/app/app/src/cli.js session inspect --workspace /absolute/project --session <session-id>
+pnpm build:release
+pnpm release:check
+pnpm smoke
+```
+
+`pnpm build:release` 使用 `~/.humanagent/build/checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke` 的 stage checkpoint。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
+`pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。

@@ -8,6 +8,7 @@ import {
   type AgentTemplateOwner,
   type AgentTemplateRegistry,
   type AgentTemplateValidation,
+  type ConfiguredAgentBinding,
   type CompiledAgentTemplate,
   type DriverRequirements,
   type LoadedAgentTemplate,
@@ -43,6 +44,13 @@ const ROLE_TOOLS: Readonly<Record<AgentRole, readonly string[]>> = {
 const MEMORY_SCOPES: readonly MemoryContextScope[] = ['task', 'organ', 'approved-global'];
 const MEMORY_LAYERS: readonly MemoryContextLayer[] = ['current', 'task-recent', 'related', 'approved-long-term', 'raw'];
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const ROLE_PERMISSIONS: Readonly<Record<AgentRole, readonly string[]>> = {
+  interaction: ['task.read', 'task.propose'],
+  orchestration: ['task.read', 'assignment.create', 'review.schedule'],
+  execution: ['task.read', 'assignment.execute', 'workspace.read', 'workspace.write'],
+  review: ['task.read', 'review.read'],
+  memory: ['task.read', 'memory.read', 'memory.propose'],
+};
 
 function assertNonEmpty(value: string, label: string): void {
   if (!value || !value.trim()) throw new AgentTemplateError(`${label} is required`);
@@ -237,4 +245,19 @@ export function assertUniqueTemplateOwners(owners: readonly AgentTemplateOwner[]
     roleVersions.add(roleVersion);
     ownerIds.add(owner.ownerId);
   }
+}
+
+export function validateConfiguredAgentBinding(binding: ConfiguredAgentBinding): void {
+  if (!AGENT_ROLE_IDS.includes(binding.roleId)) throw new AgentTemplateError(`invalid configured agent role: ${binding.roleId}`);
+  const expectedPrefix = `builtin/${binding.roleId}@`;
+  if (binding.templateRef !== `${expectedPrefix}1.0.0`) {
+    throw new AgentTemplateError(`template ref is not locked to the configured role: ${binding.templateRef}`);
+  }
+  if (binding.driverRef !== 'fake') throw new AgentTemplateError(`driver is not enabled in the MVP host: ${binding.driverRef}`);
+  assertSubset(binding.skills, ROLE_SKILLS[binding.roleId], 'skill');
+  assertSubset(binding.tools, ROLE_TOOLS[binding.roleId], 'tool');
+  assertSubset(binding.permissions, ROLE_PERMISSIONS[binding.roleId], 'permission');
+  assertUnique(binding.skills, 'skill');
+  assertUnique(binding.tools, 'tool');
+  assertUnique(binding.permissions, 'permission');
 }

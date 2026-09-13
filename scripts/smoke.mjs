@@ -1,0 +1,26 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const root = await mkdtemp(join(tmpdir(), 'humanagent-smoke-'));
+const workspace = join(root, 'workspace');
+const controlRoot = join(root, 'control');
+await mkdir(workspace);
+await mkdir(controlRoot);
+const canonicalControlRoot = await realpath(controlRoot);
+const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+const env = { ...process.env, HUMANAGENT_HOME: controlRoot };
+const doctor = execFileSync(process.execPath, [cli, 'doctor', '--workspace', workspace, '--control-root', controlRoot], { encoding: 'utf8', env });
+const run = execFileSync(process.execPath, [cli, 'run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'smoke-1'], { encoding: 'utf8', env });
+const resume = execFileSync(process.execPath, [cli, 'resume', '--workspace', workspace, '--control-root', controlRoot, '--session', 'smoke-1'], { encoding: 'utf8', env });
+const sessionList = execFileSync(process.execPath, [cli, 'session', 'list', '--workspace', workspace, '--control-root', controlRoot], { encoding: 'utf8', env });
+const sessionInspect = execFileSync(process.execPath, [cli, 'session', 'inspect', '--workspace', workspace, '--control-root', controlRoot, '--session', 'smoke-1'], { encoding: 'utf8', env });
+const parsedDoctor = JSON.parse(doctor);
+const parsedRun = JSON.parse(run);
+const parsedResume = JSON.parse(resume);
+const parsedList = JSON.parse(sessionList);
+const parsedInspect = JSON.parse(sessionInspect);
+if (parsedDoctor.controlRoot !== canonicalControlRoot || parsedDoctor.agentCwd !== canonicalControlRoot) throw new Error('smoke: explicit agent cwd escaped control root');
+if (parsedRun.state !== 'ready' || parsedResume.state !== 'ready' || parsedInspect.state !== 'ready' || parsedList[0]?.sessionId !== 'smoke-1') throw new Error('smoke: session lifecycle was not persisted, resumable, and inspectable');
+console.log(JSON.stringify({ doctor: parsedDoctor, run: parsedRun, resume: parsedResume, sessionList: parsedList, sessionInspect: { sessionId: parsedInspect.sessionId, state: parsedInspect.state, recoverableTail: parsedInspect.recoverableTail } }, null, 2));

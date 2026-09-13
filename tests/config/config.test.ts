@@ -1,0 +1,399 @@
+import assert from 'node:assert/strict';
+import { symlinkSync } from 'node:fs';
+import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { ensureControlLayout, loadConfiguration, parseToml, resolveRuntimePaths, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
+
+test('parses agent array tables and sections', () => {
+  const value = parseToml('schemaVersion = 1\n[[agents]]\nagentId = "one"\nroleId = "interaction"\ntemplateRef = "t"\ndriverRef = "fake"\nskills = ["a"]\ntools = ["b"]\npermissions = ["c"]\nmemoryScopes = ["task"]\nresourceClass = "foreground"\n[project]\nreviewRequired = true\n');
+  assert.equal((value.agents as unknown[]).length, 1);
+  assert.equal((value.project as { reviewRequired: boolean }).reviewRequired, true);
+});
+
+test('rejects duplicate TOML keys and table declarations', () => {
+  assert.throws(() => parseToml('schemaVersion = 1\nschemaVersion = 1\n'), /duplicate key/);
+  assert.throws(() => parseToml('[project]\nreviewRequired = true\n[project]\n'), /duplicate table/);
+  assert.throws(() => parseToml('[[agents]]\nagentId = "one"\nagentId = "two"\n'), /duplicate key/);
+});
+
+test('resolves all persistence below control root and keeps workspace separate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  assert.equal(paths.agentCwd, paths.controlRoot);
+  assert.equal(paths.projectRoot.startsWith(paths.controlRoot), true);
+  assert.equal(paths.workspaceCwd, await realpath(workspace));
+  assert.equal(paths.projectKey, (await realpath(workspace)).replaceAll('/', '-') || '-');
+  const loaded = await loadConfiguration(paths);
+  assert.equal(loaded.agentRoster.length, 2);
+});
+
+test('uses HUMANAGENT_HOME when no explicit control root is provided', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-env-home-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'configured-control');
+  await mkdir(workspace);
+  const previous = process.env.HUMANAGENT_HOME;
+  process.env.HUMANAGENT_HOME = controlRoot;
+  try {
+    const paths = await resolveRuntimePaths({ workspace });
+    assert.equal(paths.controlRoot, await realpath(controlRoot));
+    assert.equal(paths.agentCwd, paths.controlRoot);
+    await ensureControlLayout(paths);
+    assert.equal(paths.projectRoot.startsWith(paths.controlRoot), true);
+  } finally {
+    if (previous === undefined) delete process.env.HUMANAGENT_HOME;
+    else process.env.HUMANAGENT_HOME = previous;
+  }
+});
+
+test('concurrent first startup converges on one control layout', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-concurrent-start-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  await mkdir(workspace);
+  const [first, second] = await Promise.all([
+    resolveRuntimePaths({ controlRoot, workspace }),
+    resolveRuntimePaths({ controlRoot, workspace }),
+  ]);
+  await Promise.all([ensureControlLayout(first), ensureControlLayout(second)]);
+  const loaded = await loadConfiguration(first);
+  assert.equal(loaded.paths.projectKey, first.projectKey);
+  assert.equal((await loadConfiguration(second)).paths.projectKey, second.projectKey);
+});
+
+test('derives project persistence from the validated internal sessionRoot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-session-root-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  await mkdir(controlRoot, { recursive: true });
+  await writeFile(join(controlRoot, 'internal.toml'), [
+    'schemaVersion = 1',
+    'controlRoot = "~/.humanagent"',
+    'agentCwd = "~/.humanagent"',
+    'sessionRoot = "runtime-state"',
+    'pluginManifest = "plugins/manifest.json"',
+    'releaseChannel = "stable"',
+    'configPolicy = "internal-overrides-user"',
+    '',
+  ].join('\n'), 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  assert.equal(paths.projectRoot, join(paths.controlRoot, 'runtime-state', paths.projectKey));
+  await ensureControlLayout(paths);
+  const loaded = await loadConfiguration(paths);
+  assert.equal(loaded.internal.sessionRoot, join(paths.controlRoot, 'runtime-state'));
+  assert.equal(loaded.paths.projectRoot, join(loaded.internal.sessionRoot, paths.projectKey));
+});
+
+test('rejects an internal sessionRoot outside the control root', () => {
+  assert.throws(() => validateInternalConfig({
+    schemaVersion: 1,
+    controlRoot: '~/.humanagent',
+    agentCwd: '~/.humanagent',
+    sessionRoot: '../outside',
+    pluginManifest: 'plugins/manifest.json',
+    releaseChannel: 'stable',
+    configPolicy: 'internal-overrides-user',
+  }, '/tmp/humanagent-control'), /sessionRoot must remain below/);
+});
+
+test('rejects misspelled internal configuration keys', () => {
+  assert.throws(() => validateInternalConfig({
+    schemaVersion: 1,
+    controlRoot: '~/.humanagent',
+    agentCwd: '~/.humanagent',
+    sessionRoot: 'project',
+    pluginManifest: 'plugins/manifest.json',
+    releaseChannel: 'stable',
+    configPolicy: 'internal-overrides-user',
+    sesssionRoot: 'ignored-by-accident',
+  }, '/tmp/humanagent-control'), /internal config contains unsupported key: sesssionRoot/);
+});
+
+test('rejects symlinked control and session roots', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-symlink-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const actualControlRoot = join(root, 'actual-control');
+  const outside = join(root, 'outside');
+  await mkdir(workspace);
+  await mkdir(controlRoot, { recursive: true });
+  await mkdir(actualControlRoot, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  symlinkSync(actualControlRoot, join(root, 'control-link'));
+  let controlError: unknown;
+  try {
+    await resolveRuntimePaths({ controlRoot: join(root, 'control-link'), workspace });
+  } catch (error) {
+    controlError = error;
+  }
+  assert.equal(String(controlError).includes('control root cannot be a symlink'), true);
+  symlinkSync(outside, join(controlRoot, 'storage'));
+  await writeFile(join(controlRoot, 'internal.toml'), [
+    'schemaVersion = 1',
+    'controlRoot = "~/.humanagent"',
+    'agentCwd = "~/.humanagent"',
+    'sessionRoot = "storage"',
+    'pluginManifest = "plugins/manifest.json"',
+    'releaseChannel = "stable"',
+    'configPolicy = "internal-overrides-user"',
+    '',
+  ].join('\n'), 'utf8');
+  let sessionError: unknown;
+  try {
+    await resolveRuntimePaths({ controlRoot, workspace });
+  } catch (error) {
+    sessionError = error;
+  }
+  assert.equal(String(sessionError).includes('sessionRoot cannot be a symlink'), true);
+});
+
+test('rejects missing controlled paths below an in-root symlink ancestor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-symlink-ancestor-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const actualStorage = join(controlRoot, 'actual-storage');
+  await mkdir(workspace);
+  await mkdir(actualStorage, { recursive: true });
+  symlinkSync(actualStorage, join(controlRoot, 'storage'));
+
+  await writeFile(join(controlRoot, 'internal.toml'), [
+    'schemaVersion = 1',
+    'controlRoot = "~/.humanagent"',
+    'agentCwd = "~/.humanagent"',
+    'sessionRoot = "storage/missing-projects"',
+    'pluginManifest = "plugins/manifest.json"',
+    'releaseChannel = "stable"',
+    'configPolicy = "internal-overrides-user"',
+    '',
+  ].join('\n'), 'utf8');
+  await assert.rejects(() => resolveRuntimePaths({ controlRoot, workspace }), /controlled path cannot traverse a symlink/);
+
+  await writeFile(join(controlRoot, 'internal.toml'), [
+    'schemaVersion = 1',
+    'controlRoot = "~/.humanagent"',
+    'agentCwd = "~/.humanagent"',
+    'sessionRoot = "projects"',
+    'pluginManifest = "storage/missing-plugins/manifest.json"',
+    'releaseChannel = "stable"',
+    'configPolicy = "internal-overrides-user"',
+    '',
+  ].join('\n'), 'utf8');
+  await assert.rejects(() => resolveRuntimePaths({ controlRoot, workspace }), /controlled path cannot traverse a symlink/);
+});
+
+test('rejects a symlinked project persistence namespace before writing outside control root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-project-symlink-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const outside = join(root, 'outside');
+  await mkdir(workspace);
+  await mkdir(controlRoot, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(controlRoot, 'internal.toml'), [
+    'schemaVersion = 1',
+    'controlRoot = "~/.humanagent"',
+    'agentCwd = "~/.humanagent"',
+    'sessionRoot = "runtime-state"',
+    'pluginManifest = "plugins/manifest.json"',
+    'releaseChannel = "stable"',
+    'configPolicy = "internal-overrides-user"',
+    '',
+  ].join('\n'), 'utf8');
+  await mkdir(join(controlRoot, 'runtime-state'), { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  symlinkSync(outside, paths.projectRoot);
+  await assert.rejects(() => ensureControlLayout(paths), /persistence path cannot contain a symlink/);
+});
+
+test('rejects any caller-supplied persistence path outside the control root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-layout-boundary-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const outside = join(root, 'outside');
+  await mkdir(workspace);
+  await mkdir(outside);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await assert.rejects(() => ensureControlLayout({ ...paths, sessionsRoot: outside }), /persistence path escaped control root/);
+});
+
+test('rejects managed configuration files symlinked outside the control root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-file-symlink-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const outside = join(root, 'outside');
+  await mkdir(workspace);
+  await mkdir(controlRoot, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, 'internal.toml'), 'schemaVersion = 1\n', 'utf8');
+  symlinkSync(join(outside, 'internal.toml'), join(controlRoot, 'internal.toml'));
+  await assert.rejects(() => resolveRuntimePaths({ controlRoot, workspace }), /managed file cannot be a symlink/);
+
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'second-control'), workspace });
+  await writeFile(join(outside, 'config.toml'), 'schemaVersion = 1\n', 'utf8');
+  symlinkSync(join(outside, 'config.toml'), join(paths.controlRoot, 'config.toml'));
+  await assert.rejects(() => loadConfiguration(paths), /symlink/);
+});
+
+test('rejects a regular file as the execution workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-file-workspace-'));
+  const workspace = join(root, 'workspace-file');
+  await writeFile(workspace, 'not a directory\n', 'utf8');
+  await assert.rejects(() => resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace }), /workspace is not a directory/);
+});
+
+test('rejects internal override in user config', async () => {
+  assert.throws(() => {
+    const value = parseToml('schemaVersion = 1\ncontrolRoot = "/tmp"\n');
+    validateUserConfig(value);
+  }, /internal key/);
+});
+
+test('loads project overrides without allowing a second agent roster', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-project-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[project]\ndefaultAgent = "interaction-default"\n[execution]\nmaxConcurrentTasks = 1\n', 'utf8');
+  const loaded = await loadConfiguration(paths);
+  assert.equal(loaded.projectOverride?.project?.defaultAgent, 'interaction-default');
+  assert.equal(loaded.projectOverride?.execution?.maxConcurrentTasks, 1);
+  assert.equal(loaded.effective.execution?.maxConcurrentTasks, 1);
+});
+
+test('rejects project overrides that widen concurrency or disable required review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-policy-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[project]\nreviewRequired = false\n[execution]\nmaxConcurrentTasks = 2\n', 'utf8');
+  let reviewError: unknown;
+  try {
+    await loadConfiguration(paths);
+  } catch (error) {
+    reviewError = error;
+  }
+  assert.equal(String(reviewError).includes('cannot disable the user review requirement'), true);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[execution]\nmaxConcurrentTasks = 2\n', 'utf8');
+  let concurrencyError: unknown;
+  try {
+    await loadConfiguration(paths);
+  } catch (error) {
+    concurrencyError = error;
+  }
+  assert.equal(String(concurrencyError).includes('cannot exceed the user limit'), true);
+});
+
+test('separates colliding readable project keys with a canonical-path suffix', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-collision-'));
+  const controlRoot = join(root, 'control');
+  const firstWorkspace = join(root, 'workspace', 'a-b');
+  const secondWorkspace = join(root, 'workspace', 'a', 'b');
+  await mkdir(firstWorkspace, { recursive: true });
+  await mkdir(secondWorkspace, { recursive: true });
+  const first = await resolveRuntimePaths({ controlRoot, workspace: firstWorkspace });
+  await ensureControlLayout(first);
+  const second = await resolveRuntimePaths({ controlRoot, workspace: secondWorkspace });
+  assert.equal(first.projectKey === second.projectKey, false);
+  assert.equal(/--[0-9a-f]{16}$/.test(second.projectKey), true);
+  await ensureControlLayout(second);
+});
+
+test('separates colliding project keys below a non-default session root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-session-collision-'));
+  const controlRoot = join(root, 'control');
+  const firstWorkspace = join(root, 'workspace', 'a-b');
+  const secondWorkspace = join(root, 'workspace', 'a', 'b');
+  await mkdir(firstWorkspace, { recursive: true });
+  await mkdir(secondWorkspace, { recursive: true });
+  await mkdir(controlRoot, { recursive: true });
+  await writeFile(join(controlRoot, 'internal.toml'), [
+    'schemaVersion = 1',
+    'controlRoot = "~/.humanagent"',
+    'agentCwd = "~/.humanagent"',
+    'sessionRoot = "runtime-state"',
+    'pluginManifest = "plugins/manifest.json"',
+    'releaseChannel = "stable"',
+    'configPolicy = "internal-overrides-user"',
+    '',
+  ].join('\n'), 'utf8');
+  const first = await resolveRuntimePaths({ controlRoot, workspace: firstWorkspace });
+  await ensureControlLayout(first);
+  const second = await resolveRuntimePaths({ controlRoot, workspace: secondWorkspace });
+  assert.match(second.projectKey, /--[0-9a-f]{16}$/);
+  await ensureControlLayout(second);
+});
+
+test('rejects agent capabilities outside the role and permission ceiling', () => {
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{
+      agentId: 'unsafe',
+      roleId: 'interaction',
+      templateRef: 'builtin/interaction@1.0.0',
+      driverRef: 'fake',
+      skills: ['input-normalization'],
+      tools: ['input.receive'],
+      permissions: ['admin'],
+      memoryScopes: ['task'],
+      resourceClass: 'foreground',
+    }],
+  }), /permission is not allowed/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{
+      agentId: 'unverified-template',
+      roleId: 'interaction',
+      templateRef: 'builtin/interaction@999.999.999',
+      driverRef: 'fake',
+      skills: ['input-normalization'],
+      tools: ['input.receive'],
+      permissions: ['task.read'],
+      memoryScopes: ['task'],
+      resourceClass: 'foreground',
+    }],
+  }), /template ref is not locked/);
+});
+
+test('rejects misspelled user and project configuration keys', async () => {
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    typo: true,
+  }), /user config contains unsupported key: typo/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{
+      agentId: 'interaction-test',
+      roleId: 'interaction',
+      templateRef: 'builtin/interaction@1.0.0',
+      driverRef: 'fake',
+      skills: ['input-normalization', 'task-matching', 'confirmation'],
+      tools: ['input.receive', 'task.query', 'proposal.render'],
+      permissions: ['task.read', 'task.propose'],
+      memoryScopes: ['task'],
+      resourceClass: 'foreground',
+    }],
+    project: { reviewRequred: false },
+  }), /user project config contains unsupported key: reviewRequred/);
+
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-project-typo-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[execution]\nmaxConcurrntTasks = 2\n', 'utf8');
+  let projectError: unknown;
+  try {
+    await loadConfiguration(paths);
+  } catch (error) {
+    projectError = error;
+  }
+  assert.equal(String(projectError).includes('project execution config contains unsupported key: maxConcurrntTasks'), true);
+});

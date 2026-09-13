@@ -17,6 +17,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 不可变大对象和工具输出：`packages/adapters/filesystem`。
 - DSH 会话、模型、工具执行和取消映射：`packages/adapters/dsh`；不得把 DSH 类型上提为领域类型。
 - 进程、文件、远端等副作用：`packages/adapters/operations`。
+- internal/user/project 配置解析、校验、编译和 control-root/project 路径派生：`packages/config`；不得让 UI 或 adapter 各自解析 TOML。
 - UI 领域 view model、投影和产品壳：`packages/ui`；UI 不直接读取 Journal/DSH Session，也不拥有运行时状态。
 - 组装入口：`packages/app`。
 - Task 输入输出契约和节点观测 projection：`packages/contracts` / `packages/ui/projection`；Dashboard/Task Detail、Organ Console 和 Pipeline Observation 的产品界面：`packages/ui`。
@@ -25,6 +26,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 
 - 高层设计必须可脱离 DSH；高层不得导入 DSH 的 `SessionId`、事件类型或日志格式作为自身身份和状态。
 - UI 必须可在没有 DSH 的情况下呈现 Organ/Task/Cycle/Checkpoint/Attention；DSH WebUI 只能作为可选的视觉实现或执行细节面。
+- `~/.humanagent` 是全部持久化数据的唯一 root；project workspace 只提供执行上下文，禁止在其中持久化 session、journal、checkpoint、index、artifact、memory、user profile 或 runtime lock。
 - Organ Journal 决定任务状态和恢复责任；DSH Session Log 只证明模型请求、工具调用和具体执行过程。两者不得互相冒充。
 - 控制面与业务 payload 分离。retry、degrade、steer、continuation、health、debug、checkpoint 等控制真相不得写入请求/响应业务字段、metadata 或日志后再重建。
 - `steer` 只能启动标准停止 operation；取消模型请求不等于停止完成。停止必须有收拢 checkpoint 和实际副作用结果。
@@ -37,7 +39,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 
 ## 工作边界
 
-- 设计与文档：`docs/`、`README.md`、`note.md`。
+- 设计与文档：`docs/`、`README.md`、`note.md`；启动/release gate：`scripts/`、`tests/release/`。
 - 已批准 MVP 实现代码在 `packages/`、`tests/`；当前阶段已经进入 runtime 实现。
 - 未获批准的 DSH adapter、SQLite、vector/RAG、daemon 和生产部署能力不得作为 MVP 放行结果声称。
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。

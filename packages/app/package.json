@@ -1,0 +1,11 @@
+{
+  "name": "@humanagent/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/app/src/index.js",
+  "types": "./dist/app/src/index.d.ts",
+  "dependencies": {
+    "@humanagent/config": "workspace:*"
+  }
+}
