@@ -76,7 +76,7 @@ capability in this review.
 | Session resume | `core/agent/src/index.ts:401-413` requires factory and delegates `AgentFactory.resume`; `core/agent-loop/src/index.ts:844-927` requires `ctx.sessionPersistence`, opens persisted session for write, reads and repairs interrupted turns, then setup/publishes; failure exits include missing persistence (`:847-848`) and setup/owner abort paths | `source-proven; persistence-runtime-unverified` | DSH adapter owner: prove resume against a real persisted session and map only to `EvidenceRef`. |
 | Events | `api/session-controller/src/index.ts:400-403` delegates `follow`; `history.ts:119-149` subscribes to `session/event` and emits a complete opening snapshot followed by durable event frames plus opted-in assistant frames; `types.ts:427-437` defines `SessionWireEvent`; `types.ts:514-526` defines `SessionFollowFrame` | `source-proven; mapping/runtime-unverified` | DSH adapter owner: record ordered model/tool/error/terminal events and epoch mapping from a real stream. |
 | Tools | CLI dependencies include tool packages; filesystem, bash, web, todo, ask-user and other tool packages are declared | `declared; enabled-set-unverified` | DSH adapter owner: lock one representative tool and its permission/schema/result evidence. |
-| Cancel / close / settle | `api/session-controller/src/commands.ts:497-511` requires live attached agent, rejects not-found/subagent-owner, calls `agent.cancel(..., { keepInbox: true })`, and returns only `SessionCancelValue.accepted: true` (`types.ts:356-359`); `core/agent/src/index.ts:146-163` documents `AgentHandle.dispose()` as stopping the loop, awaiting exit, unregistering, removing the session, and unwinding scope; `client/contract/events.ts:177-192` shows a settlement event, but no public stopped-checkpoint receipt was found in the audited API | `source-proven; cancel-receipt-only; runtime-unverified` | Stop controller owner: prove cancel request is distinct from settle and stopped checkpoint. |
+| Cancel / close / settle | `api/session-controller/src/commands.ts:497-511` requires live attached agent, rejects not-found/subagent-owner, calls `agent.cancel(..., { keepInbox: true })`, and returns only `SessionCancelValue.accepted: true` (`types.ts:356-359`); `packages/core/agent/src/index.ts:146-163` documents the `AgentHandle.dispose()` interface contract, while the concrete implementation is `packages/core/agent-loop/src/index.ts:573-619`; `packages/api/session-controller/src/client/contract/events.ts:177-195` defines `settleAssistant` as a client message-window projection only, not stop/teardown settle evidence; see "Stop / Teardown Source Seam" below | `source-proven; cancel-receipt-only; teardown-source-only; runtime-unverified` | Stop controller owner: prove cancel request is distinct from settle and stopped checkpoint. |
 | Persistence / session log | `session/session-persistence-jsonl/src/index.ts:87-99` requires explicit `root`; `:229-239` registers `ctx.sessionPersistence`; `:299-327` lazy `create` with `SessionAlreadyExistsError`; `:336-406` read/write `open` with `SessionPersistenceNotFoundError` and lock-release cleanup; `:495-499` requires stored log; failure classes include `SessionAlreadyOwnedError`, `SessionPersistenceCorruptionError`, and `SessionFormatUnsupportedError` | `source-proven; filesystem/replay-unverified` | DSH evidence owner: record session log path/digest, append/restore semantics and Journal separation from a real backend. |
 | License | Root `LICENSE` and root/CLI package declarations state MIT; third-party notices are present | `source-verified` | Release owner: verify any selected plugin/bundle dependency licenses before use. |
 | Endpoint / protocol / model binding | `llm-pi-ai/package.json:16-23` exports the package; `src/index.ts:76,82,88,145` exports `Config`, `PiAiProviderProfile`, `supportedProtocols`, and `apply`; `src/config.ts:90-109,221-227` defines provider routes with `api`, `baseURL`, `models`, `modelOverrides`; `src/provider.ts:47-51,172-191` is the auditable protocol table and provider build path; see "Locked DSH Source Seam" below | `source-proven; binding/runtime-unverified` | Provider + DSH owners: produce lock with endpoint ref, protocol, model ref, config digest and capability digest. |
@@ -114,6 +114,34 @@ DSH commit objects, not from the dirty `/Volumes/extension/code/dsh` checkout.
   RCC, `cc`, `cc-sol`, `goaichat`, `~/.rcc`, or `4444`. It provides generic
   provider routes; the specific RCC endpoint/protocol/model bindings remain
   configuration/runtime evidence and are still `unverified`.
+
+### Stop / Teardown Source Seam
+
+The `AgentHandle.dispose()` text at `packages/core/agent/src/index.ts:146-163`
+is interface/documentation semantics only. The concrete teardown is the
+memoized reverse-teardown implementation at
+`packages/core/agent-loop/src/index.ts:573-619`:
+
+- It aborts lifecycle, then for an existing machine calls
+  `machine.cancel({ kind: 'disposed' })`, awaits `machine.whenIdle()`, and
+  awaits `machine.scope.dispose()`.
+- It then awaits `handle?.close()` to drain committed closing events and
+  release the session write path.
+- It calls `detachAgent?.()` and `detachSession?.()` to leave the registries,
+  then in `finally` runs `untrack()` and, unless owner-triggered,
+  `await unfollowOwner()` to release ownership bookkeeping.
+- Teardown failures are collected while cleanup proceeds to quiescence. One
+  failure throws directly; multiple failures use `AggregateError`; a
+  `handle.close()` failure is retained rather than swallowed.
+
+This chain is source-object evidence only. It does not prove a runtime
+teardown, close, resource release, or stopped checkpoint. The
+`settleAssistant` function at
+`packages/api/session-controller/src/client/contract/events.ts:177-195`
+removes one attempt's transient rows, optionally inserts a durable assistant
+entry, and publishes `kind: 'settle-assistant'`; it is client message-window
+projection evidence, not evidence that the Agent is idle or that teardown has
+completed.
 
 ## OrganHealthProbePort Boundary
 
