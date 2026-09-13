@@ -449,6 +449,108 @@ test('stop control settles through the assembled checkpoint and attention ports'
   assert.equal(attention.published.length, 0);
 });
 
+test('stop control accepts a business-scoped predecessor and commits an operation-scoped stopped checkpoint', async () => {
+  const delegate = new FakeAgentDriver({ 'assignment-stop-predecessor': 'stopped' });
+  const runtime = new AgentRuntime(delegate, {
+    runtimeId: 'runtime-stop-predecessor',
+    taskId: task,
+    assignmentId: 'assignment-stop-predecessor',
+    executionEpoch: 4,
+    ownerRef: 'agent-runtime-owner',
+  });
+  await runtime.start();
+  await runtime.submit({ request: 'stop after business checkpoint' });
+  const operation = delegate.replay().at(-1);
+  assert.ok(operation);
+  assert.equal(runtime.snapshot().state, 'running');
+
+  const stopCycle = id('cycle', 'cycle-wave2-stop-predecessor');
+  const businessScope: ScopeRef = { organId: organ, taskId: task, cycleId: stopCycle };
+  const previousCheckpointId = id('checkpoint', 'checkpoint-business-predecessor');
+  const previousCheckpoint: Checkpoint = {
+    id: previousCheckpointId,
+    scope: businessScope,
+    cycleId: stopCycle,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 4,
+    outcome: 'succeeded',
+    summary: 'ordinary business checkpoint before stop',
+    recoveryStateRef: evidence('business-recovery', businessScope),
+    evidenceRefs: [evidence('business-evidence', businessScope)],
+    next: { kind: 'continue', ref: 'next-business-cycle' },
+  };
+  const journal = new TestCheckpointJournal();
+  await completeCheckpoint(journal, {
+    ownerId: 'control-owner',
+    context: { scope: businessScope, cycleId: stopCycle, executionEpoch: 4, directiveRevision: 1 },
+    previous: null,
+    checkpoint: previousCheckpoint,
+  });
+  const recalled = await recallCheckpoint(journal, { ownerId: 'control-owner', scope: businessScope });
+  assert.ok(recalled);
+  assert.equal(recalled.checkpoint.id.value, previousCheckpointId.value);
+  assert.equal(recalled.checkpoint.scope.operationId, undefined);
+  assert.equal(journal.appended.length, 1);
+  assert.deepEqual(journal.latest?.checkpoint, previousCheckpoint);
+
+  const stopScope: ScopeRef = {
+    organId: organ,
+    taskId: task,
+    cycleId: stopCycle,
+    operationId: operation.operationId,
+  };
+  const stopEvidenceRef = evidence('stop-predecessor', stopScope);
+  const stopRecoveryRef = evidence('stop-predecessor-recovery', stopScope);
+  const driver = scopedStopEvidenceDriver(delegate, stopEvidenceRef);
+  bindAgentDriver(runtime, driver);
+  const store = checkpointPort();
+  const attention = attentionPort();
+  const result = await executeStopControl({
+    command: {
+      source: 'control',
+      command: 'steer.request-stop',
+      actorKind: 'human-operator',
+      hasStopPermission: true,
+      organId: organ,
+      taskId: task,
+      executionEpoch: 4,
+      currentState: 'running',
+      runtimeId: 'runtime-stop-predecessor',
+    },
+    driver,
+    checkpointPort: store.port,
+    attentionPort: attention.port,
+    currentOrganId: organ,
+    currentTaskId: task,
+    currentEpoch: 4,
+    operationId: operation.operationId,
+    scope: stopScope,
+    cycleId: stopCycle,
+    ownerId: 'control-owner',
+    previousCheckpoint: recalled.checkpoint,
+    checkpointSeq: 2,
+    directiveRevision: 1,
+    stopReason: 'operator-steer',
+    recoveryStateRef: stopRecoveryRef,
+    runtime,
+  });
+
+  assert.equal(result.state, 'stopped');
+  if (result.state !== 'stopped') throw new Error('expected stopped checkpoint');
+  assert.equal(result.checkpoint.outcome, 'stopped');
+  assert.equal(result.checkpoint.previousCheckpointId?.value, previousCheckpointId.value);
+  assert.deepEqual(result.checkpoint.scope, stopScope);
+  assert.deepEqual(result.checkpoint.recoveryStateRef, stopRecoveryRef);
+  assert.deepEqual(result.checkpoint.evidenceRefs, [stopEvidenceRef]);
+  assert.equal(store.commits.length, 1);
+  assert.deepEqual(store.commits[0]?.scope, stopScope);
+  assert.deepEqual(store.commits[0]?.recoveryStateRef, stopRecoveryRef);
+  assert.deepEqual(store.commits[0]?.evidenceRefs, [stopEvidenceRef]);
+  assert.equal(attention.published.length, 0);
+});
+
 test('stop control closes the bound AgentRuntime work entry after stopped settle', async () => {
   const delegate = new FakeAgentDriver({ 'assignment-stop-runtime': 'stopped' });
   const runtime = new AgentRuntime(delegate, {
