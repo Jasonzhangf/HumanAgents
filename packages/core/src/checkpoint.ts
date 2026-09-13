@@ -88,6 +88,9 @@ export function assertCheckpointRecoveryResponsibility(input: {
   if (input.checkpoint.outcome === 'stopped' && input.checkpoint.evidenceRefs.length === 0) {
     throw new CheckpointError('stopped checkpoint requires settle evidence');
   }
+  if (input.previous?.outcome === 'stopped' && input.checkpoint.next.kind === 'continue') {
+    throw new CheckpointError('stopped checkpoint cannot be followed by an ordinary continue');
+  }
 }
 
 export function assertCheckpointSequence(checkpoints: readonly (Checkpoint & { readonly ownerId: string })[]): void {

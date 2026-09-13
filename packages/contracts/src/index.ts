@@ -260,6 +260,19 @@ export function assertSameScope(...refs: ScopeRef[]): void {
   const first = refs[0];
   for (const ref of refs.slice(1)) if (!sameScopedId(first.organId, ref.organId) || !sameScopedId(first.taskId, ref.taskId) || !sameScopedId(first.cycleId, ref.cycleId) || !sameScopedId(first.operationId, ref.operationId)) throw new ContractError('scope mismatch');
 }
+export function assertCheckpointIdentity(a: ScopeRef, b: ScopeRef): void {
+  if (!sameScopedId(a.organId, b.organId) || !sameScopedId(a.taskId, b.taskId) || !sameScopedId(a.cycleId, b.cycleId) || !sameScopedId(a.operationId, b.operationId)) {
+    throw new ContractError('checkpoint identity mismatch');
+  }
+}
+export function assertCheckpointStopPredecessor(current: ScopeRef, previous: ScopeRef): void {
+  if (!sameScopedId(current.organId, previous.organId) || !sameScopedId(current.taskId, previous.taskId) || !sameScopedId(current.cycleId, previous.cycleId)) {
+    throw new ContractError('checkpoint identity mismatch');
+  }
+  if (previous.operationId && (!current.operationId || !sameScopedId(current.operationId, previous.operationId))) {
+    throw new ContractError('checkpoint operation mismatch');
+  }
+}
 export function assertEvidenceRef(ref: EvidenceRef): void {
   if (ref.evidenceId.scope !== 'evidence' || !ref.evidenceId.value.trim()) throw new ContractError('evidence id is required');
   if (!['execution', 'tool', 'operation', 'external'].includes(ref.kind)) throw new ContractError('evidence kind is invalid');
@@ -282,7 +295,11 @@ export function assertCheckpointLink(current: Checkpoint, previous: Checkpoint |
   if (!previous) throw new ContractError('broken checkpoint predecessor');
   assertPositiveSafeInteger(previous.seq, 'previous checkpoint seq');
   if (previous.id.value !== current.previousCheckpointId.value || previous.seq !== current.seq - 1) throw new ContractError('broken checkpoint predecessor');
-  assertSameScope(current.scope, previous.scope);
+  if (current.outcome === 'stopped') {
+    assertCheckpointStopPredecessor(current.scope, previous.scope);
+  } else {
+    assertCheckpointIdentity(current.scope, previous.scope);
+  }
 }
 export function assertCapabilities(required: readonly string[], available: readonly string[]): void { for (const capability of required) if (!available.includes(capability)) throw new ContractError(`undeclared capability: ${capability}`); }
 export function assertContextBudget(context: AgentMemoryContext, budget: number): void {

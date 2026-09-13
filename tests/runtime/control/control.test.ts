@@ -238,6 +238,24 @@ test('control command validation rejects malformed discriminated control inputs'
       next: { kind: 'wait', ref: 'approval' },
     },
   }));
+  assert.doesNotThrow(() => assertControlCommand({
+    ...settle,
+    checkpointSeq: 2,
+    previousCheckpoint: {
+      id: id('checkpoint', 'checkpoint-business'),
+      scope,
+      cycleId: cycle,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: 1,
+      executionEpoch: 3,
+      outcome: 'waiting',
+      summary: 'business checkpoint before stop',
+      recoveryStateRef: evidence('previous-business', scope),
+      evidenceRefs: [evidence('previous-business-operation', scope)],
+      next: { kind: 'wait', ref: 'approval' },
+    },
+  }));
 
   const malformed: readonly unknown[] = [
     null,
@@ -274,6 +292,24 @@ test('control command validation rejects malformed discriminated control inputs'
     { ...settle, directiveRevision: 0 },
     { ...settle, stopReason: '' },
     { ...settle, previousCheckpoint: {} },
+    {
+      ...settle,
+      checkpointSeq: 2,
+      previousCheckpoint: {
+        id: id('checkpoint', 'checkpoint-wrong-operation'),
+        scope: { ...settleScope, operationId: id('operation', 'operation-b') },
+        cycleId: cycle,
+        seq: 1,
+        previousCheckpointId: null,
+        directiveRevision: 1,
+        executionEpoch: 3,
+        outcome: 'waiting',
+        summary: 'wrong operation predecessor',
+        recoveryStateRef: evidence('previous-wrong-operation', { ...settleScope, operationId: id('operation', 'operation-b') }),
+        evidenceRefs: [evidence('previous-wrong-operation', { ...settleScope, operationId: id('operation', 'operation-b') })],
+        next: { kind: 'wait', ref: 'approval' },
+      },
+    },
   ];
 
   for (const value of malformed) {

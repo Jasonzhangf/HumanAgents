@@ -17,3 +17,67 @@ test('rejects invalid scope and invalid record/checkpoint relationships', async 
 test('rejects malformed checkpoint evidence before appending to the journal', async () => { const { journal } = await fixture(); const scope = { organId: organ, taskId: task }; const invalidRecovery = { ...checkpoint(1, null), recoveryStateRef: { ...checkpoint(1, null).recoveryStateRef, digest: 17 as unknown as string } }; await assert.rejects(() => journal.append({ kind: 'checkpoint', scope, checkpoint: invalidRecovery }), JournalIntegrityError); const invalidEvidence = { ...checkpoint(1, null), evidenceRefs: [{ evidenceId: id('evidence', 'invalid-evidence-digest'), kind: 'operation' as const, source: 'test', locator: 'invalid', digest: 17 as unknown as string, scope }] }; await assert.rejects(() => journal.append({ kind: 'checkpoint', scope, checkpoint: invalidEvidence }), JournalIntegrityError); });
 test('rejects recovery state references outside the checkpoint scope before append and verify', async () => { const { journal, file } = await fixture(); const otherTask = id('task', 'task-b'); const invalid = { ...checkpoint(1, null), recoveryStateRef: { ...checkpoint(1, null).recoveryStateRef, scope: { organId: organ, taskId: otherTask } } }; await assert.rejects(() => journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: invalid }), JournalIntegrityError); const valid = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); const raw = JSON.parse(await readFile(file, 'utf8')) as { checkpoint: Checkpoint; recordDigest: string }; const tampered = { ...raw, checkpoint: invalid }; const digest = (await import('node:crypto')).createHash('sha256').update(JSON.stringify({ ...tampered, recordDigest: undefined })).digest('hex'); await writeFile(file, `${JSON.stringify({ ...tampered, recordDigest: `sha256:${digest}` })}\n`, 'utf8'); const result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /scope mismatch/); assert.equal(valid.checkpoint!.scope.taskId!.value, task.value); });
 test('reports incomplete trailing line without silently committing it', async () => { const { journal, file } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); const line = await readFile(file, 'utf8'); await appendFile(file, line.slice(0, -1), 'utf8'); const result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /trailing/); await assert.rejects(() => journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { ignored: true } }), JournalIntegrityError); });
+test('appends and verifies an operation-scoped stopped checkpoint after a business predecessor', async () => {
+  const { journal } = await fixture();
+  const businessScope = { organId: organ, taskId: task, cycleId: cycle };
+  const operationId = id('operation', 'operation-stop-a');
+  const operationScope = { ...businessScope, operationId };
+  const businessEvidence = (label: string) => ({
+    evidenceId: id('evidence', `business-${label}`),
+    kind: 'operation' as const,
+    source: 'test',
+    locator: label,
+    scope: businessScope,
+  });
+  const operationEvidence = (label: string) => ({
+    evidenceId: id('evidence', `operation-${label}`),
+    kind: 'operation' as const,
+    source: 'test',
+    locator: label,
+    scope: operationScope,
+  });
+  const first = await journal.append({
+    kind: 'checkpoint',
+    scope: businessScope,
+    checkpoint: {
+      id: id('checkpoint', 'business-before-stop'),
+      scope: businessScope,
+      cycleId: cycle,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'waiting',
+      summary: 'business checkpoint before stop',
+      recoveryStateRef: businessEvidence('recovery'),
+      evidenceRefs: [],
+      next: { kind: 'wait', ref: 'approval' },
+    },
+  });
+  const stopped = await journal.append({
+    kind: 'checkpoint',
+    scope: operationScope,
+    checkpoint: {
+      id: id('checkpoint', 'operation-stop'),
+      scope: operationScope,
+      cycleId: cycle,
+      seq: 2,
+      previousCheckpointId: first.checkpoint!.id,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'stopped',
+      summary: 'operation-scoped stopped checkpoint',
+      recoveryStateRef: operationEvidence('recovery'),
+      evidenceRefs: [operationEvidence('settle')],
+      next: { kind: 'stop', ref: 'stopped' },
+    },
+  });
+  const verified = await journal.verify();
+  const replayed = await journal.replay();
+  assert.equal(verified.valid, true);
+  assert.equal(replayed.length, 2);
+  assert.equal(stopped.scope.operationId?.value, operationId.value);
+  assert.equal(stopped.checkpoint!.scope.operationId?.value, operationId.value);
+  assert.equal(replayed[1]!.scope.operationId?.value, operationId.value);
+  assert.equal(replayed[1]!.checkpoint!.scope.operationId?.value, operationId.value);
+});

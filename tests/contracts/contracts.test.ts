@@ -113,9 +113,26 @@ test('rejects invalid assignment and result input/output', () => {
   assert.throws(() => validateWorkResult({ ...assignment, assignmentId: 'other', agentId: 'agent-a', producedArtifactRefs: [], producedArtifactDigests: [], status: 'failed', summary: 'failed', outputRefs: [], evidenceRefs: [], nextAction: 'attention', failureRef: 'failure-a' }, assignment), ContractError);
 });
 
-test('compares operation scope and exposes typed plugin registration seams', async () => {
+test('checkpoint links allow operation-bearing stops after business checkpoints and keep strict scope checks', async () => {
+  const first = checkpoint(1, null);
   assert.doesNotThrow(() => assertCheckpointLink({ ...checkpoint(1, null), scope: operationScope }, null));
+  assert.doesNotThrow(() => assertCheckpointLink({ ...checkpoint(2, first.id), scope: operationScope, outcome: 'stopped', next: { kind: 'stop', ref: 'stopped' } }, first));
+  assert.throws(() => assertCheckpointLink({ ...checkpoint(2, first.id), scope: operationScope }, first), ContractError);
+  const operationFirst = { ...checkpoint(1, null), scope: operationScope };
+  assert.throws(() => assertCheckpointLink({
+    ...checkpoint(2, operationFirst.id),
+    scope: { ...scope, operationId: id('operation', 'operation-b') },
+    outcome: 'stopped',
+    next: { kind: 'stop', ref: 'stopped' },
+  }, operationFirst), ContractError);
   assert.throws(() => assertSameScope(scope, operationScope), ContractError);
+  for (const mismatch of [
+    { ...scope, organId: id('organ', 'organ-b') },
+    { ...scope, taskId: id('task', 'task-b') },
+    { ...scope, cycleId: id('cycle', 'cycle-b') },
+  ]) {
+    assert.throws(() => assertCheckpointLink({ ...checkpoint(2, first.id), scope: mismatch }, first), ContractError);
+  }
   const registered: { drivers: AgentDriver[]; memory: MemoryOperationsPort[]; context: AgentMemoryContextInjectionPort[] } = { drivers: [], memory: [], context: [] };
   const context: HarnessPluginContext = {
     registerCapability: () => undefined,

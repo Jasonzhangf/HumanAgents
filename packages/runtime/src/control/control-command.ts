@@ -1,6 +1,6 @@
 import {
   assertBusinessPayload,
-  assertSameScope,
+  assertCheckpointStopPredecessor,
   type BusinessPayload,
   type Checkpoint,
   type EvidenceRef,
@@ -221,7 +221,7 @@ function assertSettleStopCommand(record: Record<string, unknown>): void {
     if (previousCheckpoint.seq !== checkpointSeq - 1) fail('settle-stop checkpoint sequence must follow previous checkpoint');
     if (previousCheckpoint.cycleId.value !== cycleId.value) fail('settle-stop previous checkpoint cycle id does not match command cycle id');
     try {
-      assertSameScope(scope, previousCheckpoint.scope);
+      assertCheckpointStopPredecessor(scope, previousCheckpoint.scope);
     } catch {
       fail('settle-stop previous checkpoint scope does not match command scope');
     }

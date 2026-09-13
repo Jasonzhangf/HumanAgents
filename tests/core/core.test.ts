@@ -34,13 +34,13 @@ const task = id('task', 'task-a');
 const scope: ScopeRef = { organId: organ, taskId: task };
 const operation = id('operation', 'operation-a');
 
-function evidence(label: string): EvidenceRef {
+function evidence(label: string, scopeRef: ScopeRef = scope): EvidenceRef {
   return {
     evidenceId: id('evidence', `evidence-${label}`),
     kind: 'operation',
     source: 'test',
     locator: label,
-    scope,
+    scope: scopeRef,
   };
 }
 
@@ -241,6 +241,29 @@ test('checkpoint rules enforce chain, recovery responsibility, next action, and 
     next: { kind: 'continue', ref: 'next-node' },
   });
   assert.doesNotThrow(() => assertCheckpointRecoveryResponsibility({ checkpoint: second, previous: first, ownerId: 'task-owner' }));
+
+  const operationScope: ScopeRef = { ...scope, operationId: operation };
+  const businessFirst = checkpoint(1, null);
+  const stoppedAfterBusiness = checkpoint(2, businessFirst.id, {
+    scope: operationScope,
+    outcome: 'stopped',
+    recoveryStateRef: evidence('recovery-stopped', operationScope),
+    evidenceRefs: [evidence('settle-stopped', operationScope)],
+    next: { kind: 'stop', ref: 'stopped' },
+  });
+  assert.doesNotThrow(() => assertCheckpointRecoveryResponsibility({ checkpoint: stoppedAfterBusiness, previous: businessFirst, ownerId: 'task-owner' }));
+  assert.throws(() => assertCheckpointRecoveryResponsibility({ checkpoint: { ...stoppedAfterBusiness, recoveryStateRef: evidence('recovery-mismatch') }, previous: businessFirst, ownerId: 'task-owner' }), CheckpointError);
+  assert.throws(() => assertCheckpointRecoveryResponsibility({ checkpoint: { ...stoppedAfterBusiness, evidenceRefs: [evidence('evidence-mismatch')] }, previous: businessFirst, ownerId: 'task-owner' }), CheckpointError);
+  assert.throws(() => assertCheckpointRecoveryResponsibility({
+    checkpoint: checkpoint(3, stoppedAfterBusiness.id, {
+      scope: operationScope,
+      outcome: 'succeeded',
+      recoveryStateRef: evidence('recovery-after-stopped', operationScope),
+      next: { kind: 'continue', ref: 'next-node' },
+    }),
+    previous: stoppedAfterBusiness,
+    ownerId: 'task-owner',
+  }), CheckpointError);
 });
 
 test('health classification is Harness-owned, dimensionally aggregated, and TTL-aware', () => {
