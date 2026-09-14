@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/index.js';
 import {
+  ContractError,
   id,
   type EvidenceRef,
   type ProviderBinding,
@@ -25,6 +30,9 @@ import {
   ProviderAdapter,
   ProviderAdapterError,
   ResponsesProviderCodec,
+  filesystemProviderEvidenceSink,
+  type ProviderEvidenceSink,
+  type ProviderEvidenceWrite,
   type ProviderTransport,
   type ProviderWireEvent,
   type ResponsesWireTool,
@@ -135,18 +143,18 @@ function capabilities(provider: ProviderBinding): ProviderCapabilities {
   };
 }
 
-function startReceipt(provider: ProviderBinding): ProviderStartReceipt {
+function startReceipt(provider: ProviderBinding, idRef = execution()): ProviderStartReceipt {
   return {
-    ...execution(),
+    ...idRef,
     startedAt: '2026-09-13T00:00:00Z',
     evidenceRefs: [evidence('start-receipt')],
     externalExecutionRef: { ...evidence('external'), kind: 'external', locator: `external/${provider.providerId}` },
   };
 }
 
-function recoveryResult(): ProviderRecoveryResult {
+function recoveryResult(idRef = execution()): ProviderRecoveryResult {
   return {
-    ...execution(),
+    ...idRef,
     checkpointId: id('checkpoint', 'cp-provider'),
     recovered: true,
     staleRejected: false,
@@ -155,9 +163,9 @@ function recoveryResult(): ProviderRecoveryResult {
   };
 }
 
-function submitResult(): ProviderSubmitResult {
+function submitResult(idRef = execution()): ProviderSubmitResult {
   return {
-    ...execution(),
+    ...idRef,
     status: 'completed',
     outputRefs: ['output-a'],
     evidenceRefs: [evidence('submit-result')],
@@ -165,18 +173,18 @@ function submitResult(): ProviderSubmitResult {
   };
 }
 
-function stopReceipt(): ProviderStopReceipt {
+function stopReceipt(idRef = execution()): ProviderStopReceipt {
   return {
-    ...execution(),
+    ...idRef,
     status: 'accepted',
     receivedAt: '2026-09-13T00:00:00Z',
     evidenceRefs: [evidence('stop-receipt')],
   };
 }
 
-function settlement(overrides: Partial<ProviderSettlement> = {}): ProviderSettlement {
+function settlement(overrides: Partial<ProviderSettlement> = {}, idRef = execution()): ProviderSettlement {
   return {
-    ...execution(),
+    ...idRef,
     state: 'succeeded',
     evidenceRefs: [evidence('settle')],
     resourceRelease: { state: 'released', evidenceRefs: [evidence('resource')] },
@@ -192,6 +200,41 @@ function closeResult(provider: ProviderBinding): ProviderCloseResult {
     protocol: provider.protocol,
     state: 'closed',
     evidenceRefs: [evidence('close')],
+  };
+}
+
+function memoryEvidenceSink(): ProviderEvidenceSink {
+  const store = new Map<string, string>();
+  return {
+    async write(input: ProviderEvidenceWrite) {
+      const content = typeof input.content === 'string' ? input.content : JSON.stringify(input.content);
+      const digest = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+      const evidenceId = id('evidence', `provider-${`${input.type}-${input.locator}-${digest}`.replace(/[^A-Za-z0-9]/g, '')}`.slice(0, 128));
+      store.set(evidenceId.value, content);
+      return {
+        evidenceId,
+        kind: input.kind,
+        source: 'test-provider',
+        locator: input.locator,
+        digest,
+        scope: input.scope,
+      };
+    },
+    async read(ref: EvidenceRef) {
+      return new TextEncoder().encode(store.get(ref.evidenceId.value) ?? '');
+    },
+  };
+}
+
+function codecContext() {
+  let sequence = 0;
+  const sink = memoryEvidenceSink();
+  return {
+    execution: execution(),
+    scope: operationScope,
+    evidence: sink,
+    sink,
+    nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
   };
 }
 
@@ -211,11 +254,11 @@ function makeTransport(provider: ProviderBinding, overrides: Partial<ProviderTra
 }
 
 function responsesAdapter(transport: ProviderTransport, provider = ccBinding) {
-  return new ProviderAdapter({ binding: provider, routeRef: `${provider.providerId}-route`, codec: new ResponsesProviderCodec(), transport });
+  return new ProviderAdapter({ binding: provider, routeRef: `${provider.providerId}-route`, codec: new ResponsesProviderCodec(), transport, evidence: memoryEvidenceSink() });
 }
 
 function anthropicAdapter(transport: ProviderTransport, provider = goaichatBinding) {
-  return new ProviderAdapter({ binding: provider, routeRef: `${provider.providerId}-route`, codec: new AnthropicProviderCodec(4096), transport });
+  return new ProviderAdapter({ binding: provider, routeRef: `${provider.providerId}-route`, codec: new AnthropicProviderCodec(4096), transport, evidence: memoryEvidenceSink() });
 }
 
 test('responses and anthropic codecs keep independent explicit wire contracts', () => {
@@ -235,15 +278,15 @@ test('responses and anthropic codecs keep independent explicit wire contracts', 
   assert.equal(Object.is(responsesRequest, anthropicRequest), false);
 });
 
-test('responses codec maps terminal, tool, and error wire events', () => {
+test('responses codec maps terminal, tool, and error wire events', async () => {
   const codec = new ResponsesProviderCodec();
-  const context = { execution: execution(), scope: operationScope };
+  const context = codecContext();
 
-  const completed = codec.decodeEvent({ protocol: 'responses', type: 'response.completed', response: { id: 'response-1' } }, context);
+  const completed = await codec.decodeEvent({ protocol: 'responses', type: 'response.completed', response: { id: 'response-1' } }, context);
   assert.equal(completed.events[0].kind, 'terminal');
   assert.equal(completed.events[0].terminalState, 'succeeded');
 
-  const tool = codec.decodeEvent({
+  const tool = await codec.decodeEvent({
     protocol: 'responses',
     type: 'response.output_item.added',
     output_index: 0,
@@ -251,7 +294,7 @@ test('responses codec maps terminal, tool, and error wire events', () => {
   }, context);
   assert.equal(tool.events[0].kind, 'tool');
 
-  const error = codec.decodeEvent({ protocol: 'responses', type: 'error', error: { code: 'wire.error', message: 'boom' } }, context);
+  const error = await codec.decodeEvent({ protocol: 'responses', type: 'error', error: { code: 'wire.error', message: 'boom' } }, context);
   assert.equal(error.events[0].kind, 'error');
   assert.equal(error.events[0].error?.code, 'wire.error');
 });
@@ -280,16 +323,16 @@ test('responses and anthropic resume codecs keep checkpoint control truth off bu
   assert.equal(anthropicResume.execution.executionEpoch, 1);
 });
 
-test('responses wire shape uses nested response id and real tool parameters', () => {
+test('responses wire shape uses nested response id and real tool parameters', async () => {
   const codec = new ResponsesProviderCodec();
-  const context = { execution: execution(), scope: operationScope };
+  const context = codecContext();
 
-  const created = codec.decodeEvent({
+  const created = await codec.decodeEvent({
     protocol: 'responses',
     type: 'response.created',
     response: { id: 'response-1', model: 'model-cc' },
   }, context);
-  assert.equal(created.events[0].eventId, 'event-response.created');
+  assert.match(created.events[0].eventId, /^event-response\.created/);
 
   const toolSchema: ResponsesWireTool = {
     type: 'function',
@@ -300,16 +343,16 @@ test('responses wire shape uses nested response id and real tool parameters', ()
   assert.deepEqual(toolSchema.parameters.properties, { key: { type: 'string' } });
 });
 
-test('anthropic codec maps terminal, tool, and error wire events', () => {
+test('anthropic codec maps terminal, tool, and error wire events', async () => {
   const codec = new AnthropicProviderCodec(4096);
-  const context = { execution: execution(), scope: operationScope };
+  const context = codecContext();
 
-  codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } }, context);
-  const completed = codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } }, context);
+  const completed = await codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
   assert.equal(completed.events[0].kind, 'terminal');
   assert.equal(completed.events[0].terminalState, 'succeeded');
 
-  const tool = codec.decodeEvent({
+  const tool = await codec.decodeEvent({
     protocol: 'anthropic',
     type: 'content_block_start',
     index: 0,
@@ -317,48 +360,48 @@ test('anthropic codec maps terminal, tool, and error wire events', () => {
   }, context);
   assert.equal(tool.events[0].kind, 'tool');
 
-  const error = codec.decodeEvent({ protocol: 'anthropic', type: 'error', error: { type: 'wire_error', message: 'boom' } }, context);
+  const error = await codec.decodeEvent({ protocol: 'anthropic', type: 'error', error: { type: 'wire_error', message: 'boom' } }, context);
   assert.equal(error.events[0].kind, 'error');
   assert.equal(error.events[0].error?.code, 'wire_error');
 });
 
-test('anthropic codec accepts legal empty content fields and maps stop_reason', () => {
+test('anthropic codec accepts legal empty content fields and maps stop_reason', async () => {
   const codec = new AnthropicProviderCodec(4096);
-  const context = { execution: execution(), scope: operationScope };
+  const context = codecContext();
 
-  assert.doesNotThrow(() => codec.decodeEvent({
+  await codec.decodeEvent({
     protocol: 'anthropic',
     type: 'content_block_start',
     index: 0,
     content_block: { type: 'text', text: '' },
-  }, context));
-  assert.doesNotThrow(() => codec.decodeEvent({
+  }, context);
+  await codec.decodeEvent({
     protocol: 'anthropic',
     type: 'content_block_start',
     index: 1,
     content_block: { type: 'thinking', thinking: '', signature: '' },
-  }, context));
-  assert.doesNotThrow(() => codec.decodeEvent({
+  }, context);
+  await codec.decodeEvent({
     protocol: 'anthropic',
     type: 'content_block_delta',
     index: 0,
     delta: { type: 'text_delta', text: '' },
-  }, context));
+  }, context);
 
-  codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'max_tokens' } }, context);
-  const incomplete = codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'max_tokens' } }, context);
+  const incomplete = await codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
   assert.equal(incomplete.events[0].terminalState, 'waiting');
 
-  codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } }, context);
-  const completed = codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
+  await codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } }, context);
+  const completed = await codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
   assert.equal(completed.events[0].terminalState, 'succeeded');
 });
 
-test('codec evidence refs preserve provider wire content digests instead of fake wire refs', () => {
+test('codec evidence refs preserve provider wire content digests instead of fake wire refs', async () => {
   const codec = new ResponsesProviderCodec();
-  const context = { execution: execution(), scope: operationScope };
+  const context = codecContext();
 
-  const delta = codec.decodeEvent({
+  const delta = await codec.decodeEvent({
     protocol: 'responses',
     type: 'response.output_text.delta',
     item_id: 'item-1',
@@ -367,7 +410,7 @@ test('codec evidence refs preserve provider wire content digests instead of fake
   assert.equal(delta.events[0].outputRefs?.[0].startsWith('wire://'), false);
   assert.equal(typeof delta.events[0].evidenceRefs[0].digest, 'string');
 
-  const tool = codec.decodeEvent({
+  const tool = await codec.decodeEvent({
     protocol: 'responses',
     type: 'response.output_item.added',
     output_index: 0,
@@ -488,9 +531,181 @@ test('provider adapter maps transport exceptions to typed provider errors with c
   });
 });
 
+test('provider adapter binds immutable execution snapshots across epochs', async () => {
+  const transport = makeTransport(ccBinding, {
+    start: async (input) => startReceipt(ccBinding, input),
+    observe: async function* () {
+      yield { protocol: 'responses', type: 'response.created', response: { id: 'response-old' } };
+    },
+    settle: async (input) => settlement({}, input),
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await adapter.start(startInput({ executionEpoch: 1 }));
+  await adapter.start(startInput({ executionEpoch: 2 }));
+
+  const observed: ProviderEvent[] = [];
+  for await (const event of adapter.observe(startInput({ executionEpoch: 1 }))) observed.push(event);
+  assert.equal(observed[0].executionEpoch, 1);
+
+  await adapter.settle(startInput({ executionEpoch: 1 }));
+  const settledNew = await adapter.settle(startInput({ executionEpoch: 2 }));
+  assert.equal(settledNew.executionEpoch, 2);
+});
+
+test('provider adapter rejects close while settlement is pending and allows recovery before close', async () => {
+  const waiting = settlement({
+    state: 'waiting',
+    ownerId: 'humanagent.provider-adapter',
+    nextAction: { kind: 'wait', ref: 'condition-a' },
+    resourceRelease: { state: 'pending', evidenceRefs: [evidence('resource-pending')] },
+    persistence: { state: 'pending', evidenceRefs: [evidence('persistence-pending')] },
+  });
+  let settleCalls = 0;
+  const transport = makeTransport(ccBinding, {
+    settle: async (input) => {
+      settleCalls += 1;
+      return settleCalls === 1 ? waiting : settlement({}, input);
+    },
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await adapter.start(startInput());
+  await adapter.settle(execution());
+  await assert.rejects(() => adapter.close(ccBinding), /active executions/);
+
+  await adapter.settle(execution());
+  assert.equal((await adapter.close(ccBinding)).state, 'closed');
+});
+
+test('provider adapter wraps ContractError validation failures with typed provider errors and cause', async () => {
+  const transport = makeTransport(ccBinding, {
+    resume: async () => ({ ...recoveryResult(), recovered: true, staleRejected: true }),
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await assert.rejects(() => adapter.resume(resumeInput()), (error) => {
+    assert.ok(error instanceof ProviderAdapterError);
+    assert.equal(error.providerError.phase, 'resume');
+    assert.ok((error as Error & { cause?: unknown }).cause instanceof ContractError);
+    return true;
+  });
+});
+
+test('provider adapter preserves structured non-Error transport rejection cause', async () => {
+  const transport = makeTransport(ccBinding, {
+    start: async () => {
+      throw { code: 'wire.reject', detail: 'x' };
+    },
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await assert.rejects(() => adapter.start(startInput()), (error) => {
+    assert.ok(error instanceof ProviderAdapterError);
+    assert.deepEqual((error as Error & { cause?: unknown }).cause, { code: 'wire.reject', detail: 'x' });
+    return true;
+  });
+});
+
+test('provider adapter verifies resume checkpoint and recovery evidence scope', async () => {
+  const checkpointMismatch = responsesAdapter(makeTransport(ccBinding, {
+    resume: async () => ({ ...recoveryResult(), checkpointId: id('checkpoint', 'cp-other') }),
+  }), ccBinding);
+  await assert.rejects(() => checkpointMismatch.resume(resumeInput()), (error) => {
+    assert.ok(error instanceof ProviderAdapterError);
+    assert.equal(error.providerError.code, 'resume.checkpoint.mismatch');
+    return true;
+  });
+
+  const badRecoveryScope = responsesAdapter(makeTransport(ccBinding, {
+    resume: async () => ({
+      ...recoveryResult(),
+      recoveryStateRef: { ...evidence('recovery-state'), scope: { ...operationScope, taskId: id('task', 'task-b') } },
+    }),
+  }), ccBinding);
+  await assert.rejects(() => badRecoveryScope.resume(resumeInput()), (error) => {
+    assert.ok(error instanceof ProviderAdapterError);
+    assert.match(error.providerError.message, /recovery state/);
+    return true;
+  });
+});
+
+test('codecs consume legal wire events and preserve real error fields', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+
+  const part = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.content_part.added',
+    item_id: 'item-1',
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'output_text', text: 'part' },
+  }, context);
+  assert.equal(part.events[0].kind, 'output');
+
+  const done = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.done',
+    item_id: 'item-1',
+    output_index: 0,
+    content_index: 0,
+    text: 'done',
+  }, context);
+  assert.equal(done.events[0].kind, 'output');
+
+  const incomplete = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.incomplete',
+    response: { id: 'response-1', incomplete_details: { reason: 'max_output_tokens' } },
+  }, context);
+  assert.equal(incomplete.events[0].terminalState, 'waiting');
+
+  const failed = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.failed',
+    response: { id: 'response-1', error: { code: 'server_error', message: 'boom', param: 'model' } },
+  }, context);
+  assert.equal(failed.events[0].error?.code, 'server_error');
+
+  const anthropic = new AnthropicProviderCodec(4096);
+  const anthropicContext = codecContext();
+  const ping = await anthropic.decodeEvent({ protocol: 'anthropic', type: 'ping' }, anthropicContext);
+  assert.equal(ping.events[0].kind, 'model');
+});
+
+test('codec evidence refs remain readable through the injected content sink', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+
+  const delta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.delta',
+    item_id: 'item-1',
+    delta: 'hello',
+  }, context);
+  assert.equal(new TextDecoder().decode(await context.sink.read(delta.events[0].evidenceRefs[0])), 'hello');
+  assert.equal(delta.events[0].outputRefs?.[0].startsWith('wire://'), false);
+});
+
+test('filesystem provider evidence sink writes immutable readable content', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-evidence-'));
+  const store = new ImmutableAssetStore(root);
+  const sink = filesystemProviderEvidenceSink(store);
+
+  const ref = await sink.write({
+    scope: operationScope,
+    kind: 'execution',
+    type: 'response.output_text.delta',
+    locator: 'text/item-1',
+    content: 'hello',
+  });
+  assert.equal(new TextDecoder().decode(await store.readEvidence(ref)), 'hello');
+});
+
 test('protocol mismatch, missing readiness evidence, unknown event, and missing fields fail explicitly', async () => {
   assert.throws(
-    () => new ProviderAdapter({ binding: goaichatBinding, routeRef: 'goaichat-route', codec: new ResponsesProviderCodec(), transport: makeTransport(goaichatBinding) }),
+    () => new ProviderAdapter({ binding: goaichatBinding, routeRef: 'goaichat-route', codec: new ResponsesProviderCodec(), transport: makeTransport(goaichatBinding), evidence: memoryEvidenceSink() }),
     /protocol/,
   );
 
@@ -520,7 +735,7 @@ test('protocol mismatch, missing readiness evidence, unknown event, and missing 
 });
 
 test('provider adapter source avoids dsh/rcc/sdk imports, network calls, and secret patterns', async () => {
-  const files = ['adapter.ts', 'codecs.ts', 'errors.ts', 'index.ts', 'wire.ts'];
+  const files = ['adapter.ts', 'codecs.ts', 'errors.ts', 'evidence.ts', 'index.ts', 'wire.ts'];
   const forbidden = [
     /[\s('"]dsh/i,
     /[\s('"]rcc/i,

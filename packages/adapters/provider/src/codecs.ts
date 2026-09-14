@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   id,
   type EvidenceRef,
@@ -15,6 +14,7 @@ import {
   type ScopeRef,
 } from '../../../contracts/src/index.js';
 import { ProviderAdapterError } from './errors.js';
+import type { ProviderEvidenceSink } from './evidence.js';
 import type {
   AnthropicWireCancelRequest,
   AnthropicWireContentBlock,
@@ -39,6 +39,8 @@ const OWNER = SOURCE;
 export interface DecodeContext {
   readonly execution: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
+  readonly evidence: ProviderEvidenceSink;
+  readonly nextEventId: (type: string, locator: string) => string;
 }
 
 export interface ProviderDecodedEvent {
@@ -51,7 +53,7 @@ export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireReque
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): W;
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): W;
   encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): ProviderWireStopRequest;
-  decodeEvent(raw: ProviderWireEvent, context: DecodeContext): ProviderDecodedEvent;
+  decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent>;
 }
 
 function evidence(scope: ScopeRef, label: string, kind: EvidenceRef['kind'] = 'execution'): EvidenceRef {
@@ -68,21 +70,18 @@ function sanitizeRefPart(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
-function artifactRef(type: string, locator: string): string {
-  return `${SOURCE}:${type}:${sanitizeRefPart(locator)}`;
+function artifactRef(type: string, locator: string, digest?: string): string {
+  return `${SOURCE}:${type}:${sanitizeRefPart(locator)}${digest ? `:${digest.slice(0, 12)}` : ''}`;
 }
 
-function wireEvidence(scope: ScopeRef, type: string, locator: string, value?: unknown): EvidenceRef {
-  const content = value === undefined ? undefined : typeof value === 'string' ? value : JSON.stringify(value);
-  const digest: string | undefined = content === undefined ? undefined : createHash('sha256').update(content).digest('hex').toString();
-  return {
-    evidenceId: id('evidence', `provider-${sanitizeRefPart(type)}-${sanitizeRefPart(locator)}-${digest?.slice(0, 12) ?? 'node'}`),
-    kind: 'execution',
-    source: SOURCE,
-    locator: `${type}/${sanitizeRefPart(locator)}`,
-    ...(digest === undefined ? {} : { digest }),
-    scope,
-  };
+async function captureEvidence(context: DecodeContext, type: string, locator: string, value?: unknown, kind: EvidenceRef['kind'] = 'execution'): Promise<EvidenceRef> {
+  return context.evidence.write({
+    scope: context.scope,
+    kind,
+    type,
+    locator,
+    content: value ?? `${type}:${locator}`,
+  });
 }
 
 function providerError(
@@ -91,6 +90,7 @@ function providerError(
   code: string,
   message: string,
   category: ProviderError['category'] = 'provider',
+  evidenceRefs?: readonly EvidenceRef[],
 ): ProviderError {
   return {
     errorId: `provider.observe.${code}`,
@@ -101,9 +101,13 @@ function providerError(
     ownerId: OWNER,
     retryable: 'manual',
     attention: 'foreground',
-    evidenceRefs: [evidence(scope, `error-${code}`)],
+    evidenceRefs: evidenceRefs ?? [evidence(scope, `error-${code}`)],
     nextAction: { kind: 'recover', ref: OWNER },
   };
+}
+
+function eventId(context: DecodeContext, type: string, locator: string): string {
+  return context.nextEventId(type, locator);
 }
 
 function eventBase(
@@ -269,7 +273,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     };
   }
 
-  decodeEvent(raw: ProviderWireEvent, context: DecodeContext): ProviderDecodedEvent {
+  async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
     if (raw.protocol !== 'responses') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -285,8 +289,8 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireString(response, 'id', context.execution, raw.type);
-        const evidenceRefs = [wireEvidence(context.scope, raw.type, `response/${responseId}`)];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, evidenceRefs)] };
+        const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`)];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs)] };
       }
       case 'response.output_item.added': {
         requireNumber(record, 'output_index', context.execution, raw.type);
@@ -297,7 +301,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           requireString(item, 'id', context.execution, raw.type);
           const name = requireString(item, 'name', context.execution, raw.type);
           const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `tool/${callId}`, { name, arguments: argumentsJson })];
+          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { name, arguments: argumentsJson })];
           return {
             events: [
               ownedEvent(
@@ -305,36 +309,64 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
                 context.scope,
                 'tool',
                 raw.type,
-                `event-tool-${callId}`,
+                eventId(context, raw.type, `tool/${callId}`),
                 `tool-${callId}`,
                 { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`)], evidenceRefs },
+                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs },
               ),
             ],
           };
         }
         const itemId = requireString(item, 'id', context.execution, raw.type);
-        const evidenceRefs = [wireEvidence(context.scope, raw.type, `output/${itemId}`, item)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [artifactRef(raw.type, `output/${itemId}`)], evidenceRefs)] };
+        const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
       }
       case 'response.output_text.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
-        const evidenceRefs = [wireEvidence(context.scope, raw.type, `text/${itemId}`, delta)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [artifactRef(raw.type, `text/${itemId}`)], evidenceRefs)] };
+        const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, delta)];
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+      }
+      case 'response.output_text.done': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const text = requireStringValue(record, 'text', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, text)];
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+      }
+      case 'response.content_part.added': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        requireNumber(record, 'output_index', context.execution, raw.type);
+        requireNumber(record, 'content_index', context.execution, raw.type);
+        const part = requireObject(record, 'part', context.execution, raw.type);
+        const partType = requireString(part, 'type', context.execution, raw.type);
+        if (partType !== 'output_text') {
+          throw new ProviderAdapterError({
+            code: 'unknown.content.part',
+            category: 'protocol',
+            phase: 'observe',
+            message: `unknown responses content part type ${partType}`,
+            scope: context.execution,
+          });
+        }
+        const text = requireStringValue(part, 'text', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
       }
       case 'response.function_call_arguments.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
-        const evidenceRefs = [wireEvidence(context.scope, raw.type, `arguments/${itemId}`, delta)];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, evidenceRefs)] };
+        const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, delta)];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), evidenceRefs)] };
       }
       case 'response.completed':
       case 'response.incomplete': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireString(response, 'id', context.execution, raw.type);
-        const reason = raw.type === 'response.incomplete' ? requireString(record, 'reason', context.execution, raw.type) : undefined;
-        const evidenceRefs = [wireEvidence(context.scope, raw.type, `response/${responseId}`, reason)];
+        const incompleteDetails = raw.type === 'response.incomplete'
+          ? requireObject(response, 'incomplete_details', context.execution, raw.type)
+          : undefined;
+        const reason = incompleteDetails === undefined ? undefined : requireString(incompleteDetails, 'reason', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, reason)];
         const next = raw.type === 'response.incomplete'
           ? { kind: 'wait' as const, ref: `provider-incomplete-${reason ?? 'unknown'}` }
           : { kind: 'continue' as const };
@@ -345,7 +377,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
               context.scope,
               'terminal',
               raw.type,
-              `event-${raw.type}`,
+              eventId(context, raw.type, `response/${responseId}`),
               raw.type,
               next,
               { terminalState: raw.type === 'response.incomplete' ? 'waiting' : 'succeeded', evidenceRefs },
@@ -356,14 +388,15 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.failed': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireString(response, 'id', context.execution, raw.type);
-        const errorRecord = requireObject(record, 'error', context.execution, raw.type);
+        const errorRecord = requireObject(response, 'error', context.execution, raw.type);
         const code = requireString(errorRecord, 'code', context.execution, raw.type);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
-        const error = providerError(context.execution, context.scope, code, message, 'provider');
+        const errorEvidence = await captureEvidence(context, raw.type, `error/${responseId}`, errorRecord);
+        const error = providerError(context.execution, context.scope, code, message, 'provider', [errorEvidence]);
         return {
           events: [
-            ownedEvent(context.execution, context.scope, 'error', raw.type, `event-error-${responseId}`, `error-${responseId}`, { kind: 'recover', ref: OWNER }, { error }),
-            ownedEvent(context.execution, context.scope, 'terminal', raw.type, `event-terminal-${responseId}`, `terminal-${responseId}`, { kind: 'recover', ref: OWNER }, { terminalState: 'failed' }),
+            ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${responseId}`), `error-${responseId}`, { kind: 'recover', ref: OWNER }, { error }),
+            ownedEvent(context.execution, context.scope, 'terminal', raw.type, eventId(context, raw.type, `terminal/${responseId}`), `terminal-${responseId}`, { kind: 'recover', ref: OWNER }, { terminalState: 'failed' }),
           ],
         };
       }
@@ -371,9 +404,11 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);
         const code = requireString(errorRecord, 'code', context.execution, raw.type);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
-        const error = providerError(context.execution, context.scope, code, message, 'protocol');
+        const param = typeof errorRecord.param === 'string' ? errorRecord.param : undefined;
+        const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, { code, message, ...(param === undefined ? {} : { param }) });
+        const error = providerError(context.execution, context.scope, code, message, 'protocol', [errorEvidence]);
         return {
-          events: [ownedEvent(context.execution, context.scope, 'error', raw.type, `event-error`, `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
+          events: [ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
         };
       }
       default:
@@ -451,7 +486,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     };
   }
 
-  decodeEvent(raw: ProviderWireEvent, context: DecodeContext): ProviderDecodedEvent {
+  async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
     if (raw.protocol !== 'anthropic') {
       throw new ProviderAdapterError({
         code: 'protocol.mismatch',
@@ -467,7 +502,8 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       {
         const message = requireObject(record, 'message', context.execution, raw.type);
         const messageId = requireString(message, 'id', context.execution, raw.type);
-        return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [wireEvidence(context.scope, raw.type, `message/${messageId}`)])] };
+        const evidenceRefs = [await captureEvidence(context, raw.type, `message/${messageId}`)];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs)] };
       }
       case 'content_block_start': {
         requireNumber(record, 'index', context.execution, raw.type);
@@ -477,7 +513,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
           const callId = requireString(blockRecord, 'id', context.execution, raw.type);
           const name = requireString(blockRecord, 'name', context.execution, raw.type);
           const input = requireObject(blockRecord, 'input', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `tool/${callId}`, { name, input })];
+          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { name, input })];
           return {
             events: [
               ownedEvent(
@@ -485,24 +521,24 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
                 context.scope,
                 'tool',
                 raw.type,
-                `event-tool-${callId}`,
+                eventId(context, raw.type, `tool/${callId}`),
                 `tool-${callId}`,
                 { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`)], evidenceRefs },
+                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs },
               ),
             ],
           };
         }
         if (blockType === 'text') {
           const text = requireStringValue(blockRecord, 'text', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `block/${String(record.index)}`, text)];
-          return { events: [outputEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [artifactRef(raw.type, `block/${String(record.index)}`)], evidenceRefs)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `block/${String(record.index)}`, text)];
+          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(record.index)}`), [artifactRef(raw.type, `block/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs)] };
         }
         if (blockType === 'thinking') {
           const thinking = requireStringValue(blockRecord, 'thinking', context.execution, raw.type);
           const signature = requireStringValue(blockRecord, 'signature', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `thinking/${String(record.index)}`, { thinking, signature })];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, evidenceRefs)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, { thinking, signature })];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs)] };
         }
         throw new ProviderAdapterError({
           code: 'unknown.event',
@@ -518,23 +554,23 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const deltaType = requireString(deltaRecord, 'type', context.execution, raw.type);
         if (deltaType === 'text_delta') {
           const text = requireStringValue(deltaRecord, 'text', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `text/${String(record.index)}`, text)];
-          return { events: [outputEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [artifactRef(raw.type, `text/${String(record.index)}`)], evidenceRefs)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `text/${String(record.index)}`, text)];
+          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${String(record.index)}`), [artifactRef(raw.type, `text/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs)] };
         }
         if (deltaType === 'thinking_delta') {
           const thinking = requireStringValue(deltaRecord, 'thinking', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `thinking/${String(record.index)}`, thinking)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, evidenceRefs)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, thinking)];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs)] };
         }
         if (deltaType === 'signature_delta') {
           const signature = requireStringValue(deltaRecord, 'signature', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `signature/${String(record.index)}`, signature)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, evidenceRefs)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `signature/${String(record.index)}`, signature)];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `signature/${String(record.index)}`), evidenceRefs)] };
         }
         if (deltaType === 'input_json_delta') {
           const partialJson = requireStringValue(deltaRecord, 'partial_json', context.execution, raw.type);
-          const evidenceRefs = [wireEvidence(context.scope, raw.type, `input-json/${String(record.index)}`, partialJson)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, evidenceRefs)] };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `input-json/${String(record.index)}`, partialJson)];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `input-json/${String(record.index)}`), evidenceRefs)] };
         }
         throw new ProviderAdapterError({
           code: 'unknown.event',
@@ -546,19 +582,19 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       }
       case 'content_block_stop':
         requireNumber(record, 'index', context.execution, raw.type);
-        return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [wireEvidence(context.scope, raw.type, `block/${String(record.index)}`)])] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(record.index)}`), [await captureEvidence(context, raw.type, `block/${String(record.index)}`)])] };
       case 'message_delta':
       {
         const delta = requireObject(record, 'delta', context.execution, raw.type);
         const stopReason = typeof delta.stop_reason === 'string' ? delta.stop_reason : undefined;
         if (stopReason) this.stopReasons.set(this.stopReasonKey(context.execution), stopReason);
-        return { events: [modelEvent(context.execution, context.scope, raw.type, `event-${raw.type}`, [wireEvidence(context.scope, raw.type, `delta/${stopReason ?? 'none'}`)])] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `delta/${stopReason ?? 'none'}`), [await captureEvidence(context, raw.type, `delta/${stopReason ?? 'none'}`)])] };
       }
       case 'message_stop': {
         const stopReason = this.stopReasons.get(this.stopReasonKey(context.execution));
         this.stopReasons.delete(this.stopReasonKey(context.execution));
         const mapped = mapAnthropicStopReason(stopReason);
-        const evidenceRefs = [wireEvidence(context.scope, raw.type, `stop/${stopReason ?? 'unknown'}`, stopReason)];
+        const evidenceRefs = [await captureEvidence(context, raw.type, `stop/${stopReason ?? 'unknown'}`, stopReason)];
         return {
           events: [
             ownedEvent(
@@ -566,7 +602,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
               context.scope,
               'terminal',
               raw.type,
-              `event-${raw.type}`,
+              eventId(context, raw.type, `stop/${stopReason ?? 'unknown'}`),
               raw.type,
               mapped.nextAction,
               { terminalState: mapped.state, evidenceRefs },
@@ -574,13 +610,18 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
           ],
         };
       }
+      case 'ping': {
+        const evidenceRefs = [await captureEvidence(context, raw.type, 'ping')];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, 'ping'), evidenceRefs)] };
+      }
       case 'error': {
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);
         const code = requireString(errorRecord, 'type', context.execution, raw.type);
         const message = requireString(errorRecord, 'message', context.execution, raw.type);
-        const error = providerError(context.execution, context.scope, code, message, 'provider');
+        const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, errorRecord);
+        const error = providerError(context.execution, context.scope, code, message, 'provider', [errorEvidence]);
         return {
-          events: [ownedEvent(context.execution, context.scope, 'error', raw.type, `event-error`, `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
+          events: [ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error })],
         };
       }
       default:

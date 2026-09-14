@@ -29,11 +29,13 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.created'; readonly response: { readonly id: string; readonly model?: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.in_progress'; readonly response: { readonly id: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.added'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
-  | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id: string; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.output_text.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly text: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.content_part.added'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
   | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id: string; readonly delta: string }
   | { readonly protocol: 'responses'; readonly type: 'response.completed'; readonly response: { readonly id: string } }
-  | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response: { readonly id: string }; readonly reason: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response: { readonly id: string }; readonly error: ResponsesWireError }
+  | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response: { readonly id: string; readonly incomplete_details?: { readonly reason: string } } }
+  | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response: { readonly id: string; readonly error: ResponsesWireError } }
   | { readonly protocol: 'responses'; readonly type: 'error'; readonly error: ResponsesWireError };
 
 export type ResponsesWireOutputItem =
@@ -97,6 +99,7 @@ export type AnthropicWireEvent =
   | { readonly protocol: 'anthropic'; readonly type: 'content_block_stop'; readonly index: number }
   | { readonly protocol: 'anthropic'; readonly type: 'message_delta'; readonly delta: { readonly stop_reason?: string } }
   | { readonly protocol: 'anthropic'; readonly type: 'message_stop' }
+  | { readonly protocol: 'anthropic'; readonly type: 'ping' }
   | { readonly protocol: 'anthropic'; readonly type: 'error'; readonly error: AnthropicWireError };
 
 export type AnthropicWireContentBlockStart =
