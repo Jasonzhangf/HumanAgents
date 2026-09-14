@@ -8,10 +8,12 @@ import {
   type EvidenceRef,
   type ExecutionRuntimePort,
   type ProviderBinding,
+  type ProviderCloseResult,
   type ProviderEvent,
   type ProviderObserveInput,
   type ProviderRecoveryResult,
   type ProviderResumeInput,
+  type ProviderSettleInput,
   type ProviderSettlement,
   type ProviderStartInput,
   type ProviderStartReceipt,
@@ -19,6 +21,7 @@ import {
   type ProviderStopRequest,
   type ProviderSubmitInput,
   type ProviderSubmitResult,
+  type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import {
   DshAdapterError,
@@ -50,13 +53,16 @@ const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const operation = id('operation', 'operation-a');
 const operationScope = { organId: organ, taskId: task, operationId: operation };
+const foreignOrgan = id('organ', 'organ-foreign');
+const foreignTask = id('task', 'task-foreign');
+const foreignCycle = id('cycle', 'cycle-foreign');
 
-const providerEvidence = (label: string): EvidenceRef => ({
+const providerEvidence = (label: string, scope: ScopeRef = operationScope): EvidenceRef => ({
   evidenceId: id('evidence', `ev-${label}`),
   kind: 'execution',
   source: 'dsh-test-transport',
   locator: `dsh://evidence/${label}`,
-  scope: operationScope,
+  scope,
 });
 
 const probeEvidence: DshProbeEvidence = {
@@ -64,12 +70,12 @@ const probeEvidence: DshProbeEvidence = {
   evidenceRefs: [providerEvidence('probe-dependency')],
 };
 
-const externalEvidence = (label: string, session: string): EvidenceRef => ({
+const externalEvidence = (label: string, session: string, scope: ScopeRef = operationScope): EvidenceRef => ({
   evidenceId: id('evidence', `ext-${label}`),
   kind: 'external',
   source: 'dsh-test-transport',
   locator: `dsh://session/${session}`,
-  scope: operationScope,
+  scope,
 });
 
 const plugin: DshPluginLock = {
@@ -249,7 +255,7 @@ class StubTransport implements DshTransport {
     };
   }
 
-  async close(context: DshTransportContext) {
+  async close(context: DshTransportContext): Promise<ProviderCloseResult> {
     return {
       bindingId: context.binding.bindingId,
       providerId: context.binding.providerId,
@@ -400,6 +406,148 @@ class ReadinessExpiresAfterCapabilitiesTransport extends StubTransport {
 class WrongCloseBindingTransport extends StubTransport {
   async close(context: DshTransportContext) {
     return { ...(await super.close(context)), bindingId: 'wrong-binding' };
+  }
+}
+
+class ForeignStartExternalTransport extends StubTransport {
+  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    return { ...(await super.start(input)), externalExecutionRef: externalEvidence('start-session-foreign', 'sess-foreign', { ...operationScope, organId: foreignOrgan }) };
+  }
+}
+
+class ForeignStartEvidenceTransport extends StubTransport {
+  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    return { ...(await super.start(input)), evidenceRefs: [providerEvidence('start-foreign-task', { ...operationScope, taskId: foreignTask })] };
+  }
+}
+
+class ForeignResumeStateTransport extends StubTransport {
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    return {
+      ...(await super.resume(input)),
+      recoveryStateRef: externalEvidence('resume-session-foreign-state', 'sess-foreign-state', { ...operationScope, cycleId: foreignCycle }),
+    };
+  }
+}
+
+class ForeignResumeEvidenceTransport extends StubTransport {
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    return {
+      ...(await super.resume(input)),
+      evidenceRefs: [providerEvidence('resume-foreign-evidence', { ...operationScope, organId: foreignOrgan })],
+    };
+  }
+}
+
+type SettlementEvidenceField = 'settlement' | 'resourceRelease' | 'persistence';
+
+class ForeignSettlementEvidenceTransport extends StubTransport {
+  constructor(
+    private readonly field: SettlementEvidenceField,
+    private readonly foreignScope: ScopeRef,
+  ) {
+    super();
+  }
+
+  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    const settlement = await super.settle(input);
+    const foreign = providerEvidence(`settle-${this.field}-foreign`, this.foreignScope);
+    if (this.field === 'settlement') return { ...settlement, evidenceRefs: [foreign] };
+    if (this.field === 'resourceRelease') return { ...settlement, resourceRelease: { ...settlement.resourceRelease, evidenceRefs: [foreign] } };
+    return { ...settlement, persistence: { ...settlement.persistence, evidenceRefs: [foreign] } };
+  }
+}
+
+class MalformedSettlementEvidenceTransport extends StubTransport {
+  constructor(private readonly field: SettlementEvidenceField) {
+    super();
+  }
+
+  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    const settlement = await super.settle(input);
+    const malformed = {} as EvidenceRef;
+    if (this.field === 'settlement') return { ...settlement, evidenceRefs: [malformed] };
+    if (this.field === 'resourceRelease') return { ...settlement, resourceRelease: { ...settlement.resourceRelease, evidenceRefs: [malformed] } };
+    return { ...settlement, persistence: { ...settlement.persistence, evidenceRefs: [malformed] } };
+  }
+}
+
+class MutableSettlementTransport extends StubTransport {
+  lastSettlement: ProviderSettlement | undefined;
+
+  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    const settlement = await super.settle(input);
+    this.lastSettlement = settlement;
+    return settlement;
+  }
+}
+
+class DeferredOpeningTransport extends StubTransport {
+  startCalls = 0;
+  resumeCalls = 0;
+  private releaseStart: (() => void) | undefined;
+  private releaseResume: (() => void) | undefined;
+
+  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.startCalls += 1;
+    await new Promise<void>((resolve) => {
+      this.releaseStart = resolve;
+    });
+    return super.start(input);
+  }
+
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    this.resumeCalls += 1;
+    await new Promise<void>((resolve) => {
+      this.releaseResume = resolve;
+    });
+    return super.resume(input);
+  }
+
+  releaseOpening(): void {
+    this.releaseStart?.();
+    this.releaseResume?.();
+  }
+
+}
+
+class FailingOpeningTransport extends StubTransport {
+  startCalls = 0;
+
+  async start(): Promise<ProviderStartReceipt> {
+    this.startCalls += 1;
+    throw new Error('opening failed');
+  }
+}
+
+class DeferredCloseTransport extends StubTransport {
+  closeCalls = 0;
+  private releaseClose: (() => void) | undefined;
+
+  async close(context: DshTransportContext): Promise<ProviderCloseResult> {
+    this.closeCalls += 1;
+    await new Promise<void>((resolve) => {
+      this.releaseClose = resolve;
+    });
+    return super.close(context);
+  }
+
+  release(): void {
+    this.releaseClose?.();
+  }
+}
+
+class ReusableCloseTransport extends StubTransport {
+  readonly closeResult: ProviderCloseResult = {
+    bindingId: providerBinding.bindingId,
+    providerId: providerBinding.providerId,
+    protocol: providerBinding.protocol,
+    state: 'closed',
+    evidenceRefs: [providerEvidence('close-reusable')],
+  };
+
+  async close(): Promise<ProviderCloseResult> {
+    return this.closeResult;
   }
 }
 
@@ -659,6 +807,193 @@ test('DSH resume only registers active instances for recovered executions', asyn
     port.settle(executionIdentity),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'settle',
   );
+});
+
+test('DSH start rejects foreign input/result evidence scope without registering active', async () => {
+  await assert.rejects(
+    createPort().start(startInput({
+      evidenceRefs: [providerEvidence('start-input-foreign-cycle', { ...operationScope, cycleId: foreignCycle })],
+    })),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+
+  const foreignStartExternalPort = createPort({ transport: new ForeignStartExternalTransport() });
+  await assert.rejects(
+    foreignStartExternalPort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+  await assert.rejects(
+    foreignStartExternalPort.submit(submitInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+
+  const foreignStartEvidencePort = createPort({ transport: new ForeignStartEvidenceTransport() });
+  await assert.rejects(
+    foreignStartEvidencePort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+  await assert.rejects(
+    foreignStartEvidencePort.submit(submitInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+});
+
+test('DSH concurrent start and start/resume opens reject duplicates and recover the opening fence', async () => {
+  const startTransport = new DeferredOpeningTransport();
+  const startPort = createPort({ transport: startTransport });
+  const firstStart = startPort.start(startInput());
+  await assert.rejects(
+    startPort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+  await assert.rejects(
+    startPort.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  assert.equal(startTransport.startCalls, 1);
+  assert.equal(startTransport.resumeCalls, 0);
+  startTransport.releaseOpening();
+  await firstStart;
+
+  const resumeTransport = new DeferredOpeningTransport();
+  const resumePort = createPort({ transport: resumeTransport });
+  const firstResume = resumePort.resume(resumeInput());
+  await assert.rejects(
+    resumePort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+  await assert.rejects(
+    resumePort.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  assert.equal(resumeTransport.startCalls, 0);
+  assert.equal(resumeTransport.resumeCalls, 1);
+  resumeTransport.releaseOpening();
+  await firstResume;
+
+  const failingTransport = new FailingOpeningTransport();
+  const failingPort = createPort({ transport: failingTransport });
+  await assert.rejects(
+    failingPort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'start',
+  );
+  await assert.rejects(
+    failingPort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'start',
+  );
+  assert.equal(failingTransport.startCalls, 2);
+});
+
+test('DSH resume rejects foreign recovery state or evidence scope without registering active', async () => {
+  const port = createPort({ transport: new ForeignResumeStateTransport() });
+  await assert.rejects(
+    port.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  await assert.rejects(
+    port.submit(submitInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+
+  const evidencePort = createPort({ transport: new ForeignResumeEvidenceTransport() });
+  await assert.rejects(
+    evidencePort.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  await assert.rejects(
+    evidencePort.submit(submitInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+});
+
+test('DSH settlement rejects malformed top-level and nested evidence with typed errors and keeps the active fence', async () => {
+  for (const field of ['settlement', 'resourceRelease', 'persistence'] as const) {
+    const port = createPort({ transport: new MalformedSettlementEvidenceTransport(field) });
+    await port.start(startInput());
+    await assert.rejects(
+      port.settle(executionIdentity),
+      (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'settle',
+    );
+    const submitted = await port.submit(submitInput());
+    assert.equal(submitted.status, 'completed');
+  }
+});
+
+test('DSH settlement rejects foreign top-level and nested evidence scope without dropping the active fence', async () => {
+  for (const field of ['settlement', 'resourceRelease', 'persistence'] as const) {
+    const port = createPort({ transport: new ForeignSettlementEvidenceTransport(field, { ...operationScope, organId: foreignOrgan }) });
+    await port.start(startInput());
+    await assert.rejects(
+      port.settle(executionIdentity),
+      (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'settle',
+    );
+    const submitted = await port.submit(submitInput());
+    assert.equal(submitted.status, 'completed');
+  }
+});
+
+test('DSH settlement returns detached evidence snapshots after transport mutation', async () => {
+  const transport = new MutableSettlementTransport();
+  const port = createPort({ transport });
+  await port.start(startInput());
+  const settled = await port.settle(executionIdentity);
+  const rawSettlement = transport.lastSettlement;
+  assert.ok(rawSettlement);
+  (rawSettlement.evidenceRefs[0] as { locator: string }).locator = 'dsh://evidence/mutated';
+  (rawSettlement.resourceRelease.evidenceRefs[0] as { locator: string }).locator = 'dsh://evidence/resource-mutated';
+  (rawSettlement.persistence.evidenceRefs[0] as { locator: string }).locator = 'dsh://evidence/persistence-mutated';
+  assert.equal(settled.evidenceRefs[0].locator, 'dsh://evidence/settle');
+  assert.equal(settled.resourceRelease.evidenceRefs[0].locator, 'dsh://evidence/resource');
+  assert.equal(settled.persistence.evidenceRefs[0].locator, 'dsh://evidence/persistence');
+});
+
+test('DSH close stays pending with recovery responsibility until settlement is final', async () => {
+  const port = createPort();
+  await port.start(startInput());
+  const pendingClose = await port.close(providerBinding);
+  assert.equal(pendingClose.state === 'closed', false);
+  assert.equal(pendingClose.state, 'pending');
+  assert.equal(pendingClose.ownerId, 'dsh-adapter');
+  assert.deepEqual(pendingClose.nextAction, { kind: 'recover', ref: 'dsh-adapter' });
+
+  await port.settle(executionIdentity);
+  const closed = await port.close(providerBinding);
+  assert.equal(closed.state, 'closed');
+});
+
+test('DSH close stays pending while settlement is only waiting', async () => {
+  const port = createPort({ transport: new WaitingSettleTransport() });
+  await port.start(startInput());
+  const settled = await port.settle(executionIdentity);
+  assert.equal(settled.state, 'waiting');
+  const pendingClose = await port.close(providerBinding);
+  assert.equal(pendingClose.state === 'closed', false);
+});
+
+test('DSH concurrent close rejects the second call until the first close validation and state update complete', async () => {
+  const transport = new DeferredCloseTransport();
+  const port = createPort({ transport });
+  const firstClose = port.close(providerBinding);
+  await assert.rejects(
+    port.close(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'close',
+  );
+  assert.equal(transport.closeCalls, 1);
+  transport.release();
+  const closed = await firstClose;
+  assert.equal(closed.state, 'closed');
+  await assert.rejects(
+    port.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+});
+
+test('DSH close result snapshot mutation cannot alter the returned result', async () => {
+  const transport = new ReusableCloseTransport();
+  const port = createPort({ transport });
+  const closed = await port.close(providerBinding);
+  (transport.closeResult.evidenceRefs[0] as { locator: string }).locator = 'dsh://evidence/mutated';
+  assert.equal(closed.evidenceRefs[0].locator, 'dsh://evidence/close-reusable');
 });
 
 test('DSH identity comparisons use immutable snapshots even when transport mutates its input', async () => {

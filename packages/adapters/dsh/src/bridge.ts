@@ -1,5 +1,6 @@
 import type {
   ExecutionRuntimePort,
+  EvidenceRef,
   ProviderBinding,
   ProviderCloseResult,
   ProviderErrorPhase,
@@ -15,8 +16,10 @@ import type {
   ProviderStopRequest,
   ProviderSubmitInput,
   ProviderSubmitResult,
+  ScopeRef,
 } from '../../../contracts/src/index.js';
 import {
+  assertSameScope,
   assertProviderBindingMatch,
   assertProviderExecutionIdentityMatch,
   validateProviderBinding,
@@ -117,6 +120,30 @@ function executionSnapshot(input: ProviderExecutionIdentityRef): ProviderExecuti
   };
 }
 
+function scopeSnapshot(input: ScopeRef): ScopeRef {
+  return {
+    organId: { scope: input.organId.scope, value: input.organId.value },
+    ...(input.taskId ? { taskId: { scope: input.taskId.scope, value: input.taskId.value } } : {}),
+    ...(input.cycleId ? { cycleId: { scope: input.cycleId.scope, value: input.cycleId.value } } : {}),
+    ...(input.operationId ? { operationId: { scope: input.operationId.scope, value: input.operationId.value } } : {}),
+  };
+}
+
+function cloneDetached<T>(input: T): T {
+  return structuredClone(input);
+}
+
+function executionScopeFromInput(input: ProviderStartInput | ProviderResumeInput, phase: ProviderErrorPhase, ownerId: string): ScopeRef {
+  const ref = input.evidenceRefs[0];
+  if (!ref) {
+    throw new DshAdapterError('configuration-invalid', 'DSH execution requires evidence scope before binding a provider execution', ownerId, { kind: 'recover', ref: ownerId }, {
+      phase,
+      identity: input,
+    });
+  }
+  return scopeSnapshot({ ...ref.scope, taskId: input.taskId, operationId: input.operationId });
+}
+
 function isFinalSettlement(settlement: ProviderSettlement): boolean {
   return (settlement.state === 'succeeded' || settlement.state === 'stopped' || settlement.state === 'cancelled')
     && settlement.resourceRelease.state === 'released'
@@ -139,21 +166,86 @@ function settleSnapshot(input: ProviderSettleInput): ProviderExecutionIdentityRe
 } {
   return {
     ...executionSnapshot(input),
-    evidenceRefs: input.evidenceRefs,
+    evidenceRefs: input.evidenceRefs ? cloneDetached(input.evidenceRefs) : undefined,
   };
 }
 
 export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): ExecutionRuntimePort {
   assertDshLockDescriptor(inputs.lock);
-  const activeInstances = new Set<string>();
+  interface ExecutionFence {
+    readonly scope: ScopeRef;
+    readonly evidenceRefs: readonly EvidenceRef[];
+  }
+  const openingInstances = new Map<string, ExecutionFence>();
+  const activeInstances = new Map<string, ExecutionFence>();
+  let closeInFlight = false;
+  let closed = false;
 
-  function assertActive(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): void {
-    if (!activeInstances.has(executionKey(identity))) {
+  function assertScopeMatch(expected: ScopeRef, actual: ScopeRef, phase: ProviderErrorPhase, identity: ProviderExecutionIdentityRef, label: string): void {
+    try {
+      assertSameScope(expected, actual);
+    } catch (error) {
+      throw new DshAdapterError('identity-mismatch', `DSH ${label} does not match current execution scope`, inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+        phase,
+        identity,
+        cause: error,
+      });
+    }
+  }
+
+  function assertEvidenceScopeMatches(expected: ScopeRef, ref: EvidenceRef, phase: ProviderErrorPhase, identity: ProviderExecutionIdentityRef, label: string): void {
+    assertScopeMatch(expected, ref.scope, phase, identity, label);
+  }
+
+  function assertInputEvidenceScopeMatches(input: { readonly evidenceRefs: readonly EvidenceRef[] }, expected: ScopeRef, phase: ProviderErrorPhase): void {
+    for (const ref of input.evidenceRefs) assertEvidenceScopeMatches(expected, ref, phase, input as unknown as ProviderExecutionIdentityRef, 'input evidence');
+  }
+
+  function assertActive(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase, evidenceRefs: readonly EvidenceRef[] = []): ScopeRef {
+    const active = activeInstances.get(executionKey(identity));
+    if (!active) {
       throw new DshAdapterError('identity-mismatch', 'DSH execution is not active; start or resume must open the instance first', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
         phase,
         identity,
       });
     }
+    for (const ref of evidenceRefs) assertEvidenceScopeMatches(active.scope, ref, phase, identity, 'active execution evidence');
+    return scopeSnapshot(active.scope);
+  }
+
+  function assertNotOpening(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): void {
+    if (!openingInstances.has(executionKey(identity))) return;
+    throw new DshAdapterError('identity-mismatch', 'DSH execution is already opening; concurrent start or resume is rejected', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+      phase,
+      identity,
+    });
+  }
+
+  function assertOpenable(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): void {
+    if (!closeInFlight && !closed) return;
+    throw new DshAdapterError('identity-mismatch', closed ? 'DSH transport is closed; execution cannot become active' : 'DSH transport close is in progress; execution cannot open', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+      phase,
+      identity,
+    });
+  }
+
+  function currentFence(): ExecutionFence | undefined {
+    return activeInstances.values().next().value as ExecutionFence | undefined
+      ?? openingInstances.values().next().value as ExecutionFence | undefined;
+  }
+
+  function pendingClose(binding: ProviderBinding, fence: ExecutionFence): ProviderCloseResult {
+    const result: ProviderCloseResult = {
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: binding.protocol,
+      state: 'pending',
+      evidenceRefs: cloneDetached(fence.evidenceRefs),
+      ownerId: inputs.ownerId,
+      nextAction: { kind: 'recover', ref: inputs.ownerId },
+    };
+    validateSeamResult(result, 'close', validateProviderCloseResult, { binding });
+    return result;
   }
 
   function validateSeamBinding(binding: ProviderBinding, phase: ProviderErrorPhase): void {
@@ -214,49 +306,94 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     async start(input) {
       validateSeamInput(input, 'start', validateProviderStartInput);
       const snapshot = executionSnapshot(input);
-      const transportInput = { ...input, ...snapshot };
-      const receipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).start(transportInput));
-      validateSeamResult(receipt, 'start', validateProviderStartReceipt, { identity: snapshot });
-      assertDshExecutionResult(receipt, snapshot, 'start', inputs.ownerId);
-      if (!receipt.externalExecutionRef) {
-        throw new DshAdapterError('configuration-invalid', 'DSH start receipt must carry an external execution evidence ref', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+      const scope = executionScopeFromInput(input, 'start', inputs.ownerId);
+      assertInputEvidenceScopeMatches(input, scope, 'start');
+      assertOpenable(snapshot, 'start');
+      const active = activeInstances.get(executionKey(snapshot));
+      if (active) {
+        assertScopeMatch(active.scope, scope, 'start', snapshot, 'active execution');
+        throw new DshAdapterError('identity-mismatch', 'DSH execution is already active; concurrent start is rejected', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
           phase: 'start',
           identity: snapshot,
         });
       }
+      assertNotOpening(snapshot, 'start');
+      const transport = requireTransport(inputs);
+      const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
+      openingInstances.set(executionKey(snapshot), fence);
       try {
-        assertDshExternalSession({ evidenceRef: receipt.externalExecutionRef }, snapshot.runtimeId);
-      } catch (error) {
-        throw dshSeamError('identity-mismatch', error, { phase: 'start', ownerId: inputs.ownerId, identity: snapshot });
+        const transportInput = cloneDetached({ ...input, ...snapshot });
+        const rawReceipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => transport.start(transportInput));
+        const receipt = cloneDetached(rawReceipt);
+        validateSeamResult(receipt, 'start', validateProviderStartReceipt, { identity: snapshot });
+        assertDshExecutionResult(receipt, snapshot, 'start', inputs.ownerId);
+        for (const ref of receipt.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'start', snapshot, 'start evidence');
+        if (!receipt.externalExecutionRef) {
+          throw new DshAdapterError('configuration-invalid', 'DSH start receipt must carry an external execution evidence ref', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+            phase: 'start',
+            identity: snapshot,
+          });
+        }
+        assertEvidenceScopeMatches(scope, receipt.externalExecutionRef, 'start', snapshot, 'external execution evidence');
+        try {
+          assertDshExternalSession({ evidenceRef: receipt.externalExecutionRef }, snapshot.runtimeId);
+        } catch (error) {
+          throw dshSeamError('identity-mismatch', error, { phase: 'start', ownerId: inputs.ownerId, identity: snapshot });
+        }
+        activeInstances.set(executionKey(snapshot), { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(receipt.evidenceRefs) });
+        return cloneDetached(receipt);
+      } finally {
+        if (openingInstances.get(executionKey(snapshot)) === fence) openingInstances.delete(executionKey(snapshot));
       }
-      activeInstances.add(executionKey(snapshot));
-      return receipt;
     },
     async resume(input) {
       validateSeamInput(input, 'resume', validateProviderResumeInput);
       const snapshot = resumeSnapshot(input);
-      const transportInput = { ...input, ...snapshot };
-      const result: ProviderRecoveryResult = await runDsh('resume', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).resume(transportInput));
-      validateSeamResult(result, 'resume', validateProviderRecoveryResult, { identity: snapshot });
-      assertDshExecutionResult(result, snapshot, 'resume', inputs.ownerId);
-      if (result.checkpointId.value !== snapshot.checkpointId.value || result.checkpointId.scope !== snapshot.checkpointId.scope) {
-        throw new DshAdapterError('identity-mismatch', 'DSH resume checkpoint mismatch', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
-          phase: 'resume',
-          identity: snapshot,
-        });
+      const scope = executionScopeFromInput(input, 'resume', inputs.ownerId);
+      assertInputEvidenceScopeMatches(input, scope, 'resume');
+      assertOpenable(snapshot, 'resume');
+      const active = activeInstances.get(executionKey(snapshot));
+      if (active) {
+        assertScopeMatch(active.scope, scope, 'resume', snapshot, 'active execution');
+      } else {
+        assertNotOpening(snapshot, 'resume');
       }
+      const transport = requireTransport(inputs);
+      const fence: ExecutionFence | undefined = active
+        ? undefined
+        : { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
+      if (fence) openingInstances.set(executionKey(snapshot), fence);
       try {
-        assertDshExternalSession({ evidenceRef: result.recoveryStateRef }, snapshot.runtimeId);
-      } catch (error) {
-        throw dshSeamError('identity-mismatch', error, { phase: 'resume', ownerId: inputs.ownerId, identity: snapshot });
+        const transportInput = cloneDetached({ ...input, ...snapshot });
+        const rawResult: ProviderRecoveryResult = await runDsh('resume', inputs.ownerId, { identity: snapshot }, async () => transport.resume(transportInput));
+        const result = cloneDetached(rawResult);
+        validateSeamResult(result, 'resume', validateProviderRecoveryResult, { identity: snapshot });
+        assertDshExecutionResult(result, snapshot, 'resume', inputs.ownerId);
+        if (result.checkpointId.value !== snapshot.checkpointId.value || result.checkpointId.scope !== snapshot.checkpointId.scope) {
+          throw new DshAdapterError('identity-mismatch', 'DSH resume checkpoint mismatch', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+            phase: 'resume',
+            identity: snapshot,
+          });
+        }
+        assertEvidenceScopeMatches(scope, result.recoveryStateRef, 'resume', snapshot, 'recovery state evidence');
+        for (const ref of result.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'resume', snapshot, 'recovery evidence');
+        try {
+          assertDshExternalSession({ evidenceRef: result.recoveryStateRef }, snapshot.runtimeId);
+        } catch (error) {
+          throw dshSeamError('identity-mismatch', error, { phase: 'resume', ownerId: inputs.ownerId, identity: snapshot });
+        }
+        if (result.recovered && !result.staleRejected) {
+          activeInstances.set(executionKey(snapshot), { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(result.evidenceRefs) });
+        }
+        return cloneDetached(result);
+      } finally {
+        if (fence && openingInstances.get(executionKey(snapshot)) === fence) openingInstances.delete(executionKey(snapshot));
       }
-      if (result.recovered && !result.staleRejected) activeInstances.add(executionKey(snapshot));
-      return result;
     },
     async submit(input) {
       validateSeamInput(input, 'submit', validateProviderSubmitInput);
       const snapshot = executionSnapshot(input);
-      assertActive(snapshot, 'submit');
+      assertActive(snapshot, 'submit', input.evidenceRefs);
       const transportInput = { ...input, ...snapshot };
       const result: ProviderSubmitResult = await runDsh('submit', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).submit(transportInput));
       validateSeamResult(result, 'submit', validateProviderSubmitResult, { identity: snapshot });
@@ -281,7 +418,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     async requestStop(input) {
       validateSeamInput(input, 'stop', validateProviderStopRequest);
       const snapshot = executionSnapshot(input);
-      assertActive(snapshot, 'stop');
+      assertActive(snapshot, 'stop', input.evidenceRefs ?? []);
       const transportInput = { ...input, ...snapshot };
       const receipt: ProviderStopReceipt = await runDsh('stop', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).requestStop(transportInput));
       validateSeamResult(receipt, 'stop', validateProviderStopReceipt, { identity: snapshot });
@@ -291,28 +428,47 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     async settle(input) {
       validateSeamInput(input, 'settle', validateProviderSettleInput);
       const snapshot = settleSnapshot(input);
-      assertActive(snapshot, 'settle');
-      const transportInput = { ...input, ...snapshot };
-      const settlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
+      const scope = assertActive(snapshot, 'settle', input.evidenceRefs ?? []);
+      const transportInput = cloneDetached({ ...input, ...snapshot });
+      const rawSettlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
+      const settlement = cloneDetached(rawSettlement);
       validateSeamResult(settlement, 'settle', validateProviderSettlement, { identity: snapshot });
       assertDshExecutionResult(settlement, snapshot, 'settle', inputs.ownerId);
+      for (const ref of settlement.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'settlement evidence');
+      for (const ref of settlement.resourceRelease.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'resource release evidence');
+      for (const ref of settlement.persistence.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'persistence evidence');
       if (isFinalSettlement(settlement)) activeInstances.delete(executionKey(snapshot));
-      return settlement;
+      return cloneDetached(settlement);
     },
     async close(binding) {
       validateSeamBinding(binding, 'close');
-      const result: ProviderCloseResult = await runDsh('close', inputs.ownerId, { binding }, async () => requireTransport(inputs).close(contextFor(inputs, binding)));
-      validateSeamResult(result, 'close', validateProviderCloseResult, { binding });
-      try {
-        assertProviderBindingMatch(binding, {
-          bindingId: result.bindingId,
-          providerId: result.providerId,
-          protocol: result.protocol,
+      if (closeInFlight) {
+        throw new DshAdapterError('identity-mismatch', 'DSH transport close is already in progress; concurrent close is rejected', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+          phase: 'close',
+          binding,
         });
-      } catch (error) {
-        throw dshSeamError('identity-mismatch', error, { phase: 'close', ownerId: inputs.ownerId, binding });
       }
-      return result;
+      const fence = currentFence();
+      if (fence) return pendingClose(binding, fence);
+      closeInFlight = true;
+      try {
+        const rawResult: ProviderCloseResult = await runDsh('close', inputs.ownerId, { binding }, async () => requireTransport(inputs).close(contextFor(inputs, binding)));
+        const result = cloneDetached(rawResult);
+        validateSeamResult(result, 'close', validateProviderCloseResult, { binding });
+        try {
+          assertProviderBindingMatch(binding, {
+            bindingId: result.bindingId,
+            providerId: result.providerId,
+            protocol: result.protocol,
+          });
+        } catch (error) {
+          throw dshSeamError('identity-mismatch', error, { phase: 'close', ownerId: inputs.ownerId, binding });
+        }
+        if (result.state === 'closed') closed = true;
+        return cloneDetached(result);
+      } finally {
+        closeInFlight = false;
+      }
     },
   };
 }
