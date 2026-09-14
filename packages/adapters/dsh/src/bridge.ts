@@ -36,7 +36,7 @@ import {
 } from '../../../contracts/src/index.js';
 import { capabilitiesDsh } from './capabilities.js';
 import { DshAdapterError, dshSeamError } from './errors.js';
-import { classifyDshProfile, probeDshReadiness } from './probe.js';
+import { classifyDshProfile, probeDshReadiness, type DshProbeEvidence } from './probe.js';
 import type { DshTransport } from './transport.js';
 import {
   assertDshExternalSession,
@@ -51,6 +51,7 @@ export interface DshBridgeInputs {
   readonly transport: DshTransport | null;
   readonly requiredCapabilities: readonly string[];
   readonly ownerId: string;
+  readonly probeEvidence?: DshProbeEvidence;
 }
 
 function requireTransport(inputs: DshBridgeInputs): DshTransport {
@@ -107,14 +108,81 @@ function executionKey(input: ProviderExecutionIdentityRef): string {
   return `${input.runtimeId}:${input.taskId.value}:${input.operationId.value}:${input.executionEpoch}`;
 }
 
+function executionSnapshot(input: ProviderExecutionIdentityRef): ProviderExecutionIdentityRef {
+  return {
+    runtimeId: input.runtimeId,
+    taskId: { scope: input.taskId.scope, value: input.taskId.value },
+    operationId: { scope: input.operationId.scope, value: input.operationId.value },
+    executionEpoch: input.executionEpoch,
+  };
+}
+
+function resumeSnapshot(input: ProviderResumeInput): ProviderExecutionIdentityRef & {
+  readonly checkpointId: ProviderResumeInput['checkpointId'];
+  readonly checkpointExecutionEpoch: number;
+} {
+  return {
+    ...executionSnapshot(input),
+    checkpointId: { scope: input.checkpointId.scope, value: input.checkpointId.value },
+    checkpointExecutionEpoch: input.checkpointExecutionEpoch,
+  };
+}
+
+function settleSnapshot(input: ProviderSettleInput): ProviderExecutionIdentityRef & {
+  readonly evidenceRefs?: ProviderSettleInput['evidenceRefs'];
+} {
+  return {
+    ...executionSnapshot(input),
+    evidenceRefs: input.evidenceRefs,
+  };
+}
+
 export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): ExecutionRuntimePort {
   assertDshLockDescriptor(inputs.lock);
-  const stopRequests = new Set<string>();
+  const activeInstances = new Set<string>();
+
+  function assertActive(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): void {
+    if (!activeInstances.has(executionKey(identity))) {
+      throw new DshAdapterError('identity-mismatch', 'DSH execution is not active; start or resume must open the instance first', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+        phase,
+        identity,
+      });
+    }
+  }
+
+  function validateSeamBinding(binding: ProviderBinding, phase: ProviderErrorPhase): void {
+    try {
+      validateProviderBinding(binding);
+    } catch (error) {
+      throw dshSeamError('configuration-invalid', error, { phase, ownerId: inputs.ownerId, binding });
+    }
+  }
+
+  function validateSeamInput<T>(input: T, phase: ProviderErrorPhase, validate: (value: T) => void, binding?: ProviderBinding): void {
+    try {
+      validate(input);
+    } catch (error) {
+      throw dshSeamError('configuration-invalid', error, {
+        phase,
+        ownerId: inputs.ownerId,
+        binding,
+        identity: input && typeof input === 'object' ? input as unknown as ProviderExecutionIdentityRef : undefined,
+      });
+    }
+  }
+
+  function validateSeamResult<T>(result: T, phase: ProviderErrorPhase, validate: (value: T) => void, options: { readonly binding?: ProviderBinding; readonly identity?: ProviderExecutionIdentityRef } = {}): void {
+    try {
+      validate(result);
+    } catch (error) {
+      throw dshSeamError('transport-failure', error, { phase, ownerId: inputs.ownerId, binding: options.binding, identity: options.identity });
+    }
+  }
 
   return {
     kind: 'humanagent.execution-runtime-port',
     async probe(binding) {
-      validateProviderBinding(binding);
+      validateSeamBinding(binding, 'probe');
       return probeDshReadiness({
         binding,
         lock: inputs.lock,
@@ -122,10 +190,11 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
         transport: inputs.transport,
         requiredCapabilities: inputs.requiredCapabilities,
         ownerId: inputs.ownerId,
+        probeEvidence: inputs.probeEvidence,
       });
     },
     async capabilities(binding) {
-      validateProviderBinding(binding);
+      validateSeamBinding(binding, 'probe');
       return capabilitiesDsh({
         binding,
         lock: inputs.lock,
@@ -133,81 +202,101 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
         transport: inputs.transport,
         requiredCapabilities: inputs.requiredCapabilities,
         ownerId: inputs.ownerId,
+        probeEvidence: inputs.probeEvidence,
       });
     },
     async start(input) {
-      validateProviderStartInput(input);
-      const receipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: input }, async () => requireTransport(inputs).start(input));
-      validateProviderStartReceipt(receipt);
-      assertDshExecutionResult(receipt, input, 'start', inputs.ownerId);
+      validateSeamInput(input, 'start', validateProviderStartInput);
+      const snapshot = executionSnapshot(input);
+      const transportInput = { ...input, ...snapshot };
+      const receipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).start(transportInput));
+      validateSeamResult(receipt, 'start', validateProviderStartReceipt, { identity: snapshot });
+      assertDshExecutionResult(receipt, snapshot, 'start', inputs.ownerId);
       if (!receipt.externalExecutionRef) {
         throw new DshAdapterError('configuration-invalid', 'DSH start receipt must carry an external execution evidence ref', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
           phase: 'start',
-          identity: input,
+          identity: snapshot,
         });
       }
-      assertDshExternalSession({ evidenceRef: receipt.externalExecutionRef }, input.runtimeId);
+      try {
+        assertDshExternalSession({ evidenceRef: receipt.externalExecutionRef }, snapshot.runtimeId);
+      } catch (error) {
+        throw dshSeamError('identity-mismatch', error, { phase: 'start', ownerId: inputs.ownerId, identity: snapshot });
+      }
+      activeInstances.add(executionKey(snapshot));
       return receipt;
     },
     async resume(input) {
-      validateProviderResumeInput(input);
-      const result: ProviderRecoveryResult = await runDsh('resume', inputs.ownerId, { identity: input }, async () => requireTransport(inputs).resume(input));
-      validateProviderRecoveryResult(result);
-      assertDshExecutionResult(result, input, 'resume', inputs.ownerId);
-      if (result.checkpointId.value !== input.checkpointId.value) {
+      validateSeamInput(input, 'resume', validateProviderResumeInput);
+      const snapshot = resumeSnapshot(input);
+      const transportInput = { ...input, ...snapshot };
+      const result: ProviderRecoveryResult = await runDsh('resume', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).resume(transportInput));
+      validateSeamResult(result, 'resume', validateProviderRecoveryResult, { identity: snapshot });
+      assertDshExecutionResult(result, snapshot, 'resume', inputs.ownerId);
+      if (result.checkpointId.value !== snapshot.checkpointId.value || result.checkpointId.scope !== snapshot.checkpointId.scope) {
         throw new DshAdapterError('identity-mismatch', 'DSH resume checkpoint mismatch', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
           phase: 'resume',
-          identity: input,
+          identity: snapshot,
         });
       }
-      assertDshExternalSession({ evidenceRef: result.recoveryStateRef }, input.runtimeId);
+      try {
+        assertDshExternalSession({ evidenceRef: result.recoveryStateRef }, snapshot.runtimeId);
+      } catch (error) {
+        throw dshSeamError('identity-mismatch', error, { phase: 'resume', ownerId: inputs.ownerId, identity: snapshot });
+      }
+      activeInstances.add(executionKey(snapshot));
       return result;
     },
     async submit(input) {
-      validateProviderSubmitInput(input);
-      const result: ProviderSubmitResult = await runDsh('submit', inputs.ownerId, { identity: input }, async () => requireTransport(inputs).submit(input));
-      validateProviderSubmitResult(result);
-      assertDshExecutionResult(result, input, 'submit', inputs.ownerId);
+      validateSeamInput(input, 'submit', validateProviderSubmitInput);
+      const snapshot = executionSnapshot(input);
+      assertActive(snapshot, 'submit');
+      const transportInput = { ...input, ...snapshot };
+      const result: ProviderSubmitResult = await runDsh('submit', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).submit(transportInput));
+      validateSeamResult(result, 'submit', validateProviderSubmitResult, { identity: snapshot });
+      assertDshExecutionResult(result, snapshot, 'submit', inputs.ownerId);
       return result;
     },
     async *observe(input) {
-      validateProviderObserveInput(input);
+      validateSeamInput(input, 'observe', validateProviderObserveInput);
+      const snapshot = executionSnapshot(input);
+      assertActive(snapshot, 'observe');
       try {
-        const events = requireTransport(inputs).observe(input);
+        const events = requireTransport(inputs).observe({ ...input, ...snapshot });
         for await (const event of events) {
-          validateProviderEvent(event);
-          assertDshExecutionResult(event, input, 'observe', inputs.ownerId);
+          validateSeamResult(event, 'observe', validateProviderEvent, { identity: snapshot });
+          assertDshExecutionResult(event, snapshot, 'observe', inputs.ownerId);
           yield event;
         }
       } catch (error) {
-        throw dshSeamError('transport-failure', error, { phase: 'observe', ownerId: inputs.ownerId, identity: input });
+        throw dshSeamError('transport-failure', error, { phase: 'observe', ownerId: inputs.ownerId, identity: snapshot });
       }
     },
     async requestStop(input) {
-      validateProviderStopRequest(input);
-      const receipt: ProviderStopReceipt = await runDsh('stop', inputs.ownerId, { identity: input }, async () => requireTransport(inputs).requestStop(input));
-      validateProviderStopReceipt(receipt);
-      assertDshExecutionResult(receipt, input, 'stop', inputs.ownerId);
-      if (receipt.status !== 'rejected') stopRequests.add(executionKey(input));
+      validateSeamInput(input, 'stop', validateProviderStopRequest);
+      const snapshot = executionSnapshot(input);
+      assertActive(snapshot, 'stop');
+      const transportInput = { ...input, ...snapshot };
+      const receipt: ProviderStopReceipt = await runDsh('stop', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).requestStop(transportInput));
+      validateSeamResult(receipt, 'stop', validateProviderStopReceipt, { identity: snapshot });
+      assertDshExecutionResult(receipt, snapshot, 'stop', inputs.ownerId);
       return receipt;
     },
     async settle(input) {
-      validateProviderSettleInput(input);
-      const settlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: input }, async () => requireTransport(inputs).settle(input));
-      validateProviderSettlement(settlement);
-      assertDshExecutionResult(settlement, input, 'settle', inputs.ownerId);
-      if (settlement.state === 'stopped' && !stopRequests.has(executionKey(input))) {
-        throw new DshAdapterError('identity-mismatch', 'DSH settlement reports stopped without a prior non-rejected stop request', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
-          phase: 'settle',
-          identity: input,
-        });
-      }
+      validateSeamInput(input, 'settle', validateProviderSettleInput);
+      const snapshot = settleSnapshot(input);
+      assertActive(snapshot, 'settle');
+      const transportInput = { ...input, ...snapshot };
+      const settlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
+      validateSeamResult(settlement, 'settle', validateProviderSettlement, { identity: snapshot });
+      assertDshExecutionResult(settlement, snapshot, 'settle', inputs.ownerId);
+      activeInstances.delete(executionKey(snapshot));
       return settlement;
     },
     async close(binding) {
-      validateProviderBinding(binding);
+      validateSeamBinding(binding, 'close');
       const result: ProviderCloseResult = await runDsh('close', inputs.ownerId, { binding }, async () => requireTransport(inputs).close(contextFor(inputs, binding)));
-      validateProviderCloseResult(result);
+      validateSeamResult(result, 'close', validateProviderCloseResult, { binding });
       try {
         assertProviderBindingMatch(binding, {
           bindingId: result.bindingId,

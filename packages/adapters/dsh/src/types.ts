@@ -12,12 +12,20 @@ function explicit(value: string, label: string): boolean {
   return value.trim().length > 0 && value !== 'default' && value !== 'implicit' && value !== 'web';
 }
 
+const GENERIC_HOME_NAMES = new Set(['HOME', 'PWD', 'TMP', 'TEMP', 'TMPDIR', 'USERPROFILE', 'DEFAULT', 'IMPLICIT', 'UNKNOWN', 'WEB']);
+
 function explicitHomeRef(value: string): boolean {
   const homeRef = value.trim();
   if (!homeRef || homeRef === 'default' || homeRef === 'implicit' || homeRef === 'web' || homeRef === 'unknown') return false;
   if (/^(~|\.|\/|[A-Za-z]:[\\/])/.test(homeRef)) return false;
   if (/[\\/]$/.test(homeRef)) return false;
-  return /^(env|ref|config):[A-Za-z][A-Za-z0-9._-]*$/.test(homeRef);
+  const match = /^(env|ref|config):([A-Za-z][A-Za-z0-9._-]*)$/.exec(homeRef);
+  if (!match) return false;
+  const kind = match[1];
+  const name = match[2].toUpperCase();
+  if (GENERIC_HOME_NAMES.has(name)) return false;
+  if (kind === 'env') return name === 'DSH_HOME' || name.startsWith('HUMANAGENT_') || name.startsWith('DSH_');
+  return name.includes('DSH') || name.includes('HUMANAGENT');
 }
 
 export interface DshLockDescriptor {
@@ -73,7 +81,7 @@ export function assertDshProfileDescriptor(profile: DshProfileDescriptor): void 
   }
   nonEmpty(profile.homeRef, 'DSH home reference');
   if (!explicitHomeRef(profile.homeRef)) {
-    throw new DshAdapterError('configuration-invalid', 'DSH_HOME must be a dedicated explicit env/ref/config reference, not default, implicit, unknown, or a path', 'dsh-adapter');
+    throw new DshAdapterError('configuration-invalid', 'DSH_HOME must be a dedicated HumanAgent env/ref/config reference, not generic HOME/PWD, default, implicit, unknown, or a path', 'dsh-adapter');
   }
   if (!profile.plugin) throw new DshAdapterError('configuration-invalid', 'DSH profile plugin lock is required', 'dsh-adapter');
   assertDshPluginLock(profile.plugin);

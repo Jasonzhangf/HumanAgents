@@ -5,11 +5,12 @@ import type {
   ProviderReadiness,
   ScopeRef,
 } from '../../../contracts/src/index.js';
-import { createHash } from 'node:crypto';
 import {
+  assertEvidenceRef,
   assertNotExpired,
   assertProviderBindingMatch,
   assertProviderReadinessBinding,
+  assertSameScope,
   validateProviderBinding,
   validateProviderCapabilities,
   validateProviderReadiness,
@@ -31,6 +32,12 @@ export interface DshReadinessInputs {
   readonly transport: DshTransport | null;
   readonly requiredCapabilities: readonly string[];
   readonly ownerId: string;
+  readonly probeEvidence?: DshProbeEvidence | null;
+}
+
+export interface DshProbeEvidence {
+  readonly scope: ScopeRef;
+  readonly evidenceRefs: readonly EvidenceRef[];
 }
 
 export type DshProfileStatus =
@@ -53,16 +60,30 @@ export function classifyDshProfile(profile: DshProfileDescriptor | undefined): D
   }
 }
 
-function evidenceToken(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || 'probe';
-}
-
 function probeValidity(): { readonly checkedAt: string; readonly expiresAt: string } {
   const now = Date.now();
   return {
     checkedAt: new Date(now).toISOString(),
     expiresAt: new Date(now + 60_000).toISOString(),
   };
+}
+
+function assertDshProbeEvidence(inputs: DshReadinessInputs): DshProbeEvidence | null {
+  const evidence = inputs.probeEvidence ?? null;
+  if (!evidence) return null;
+  try {
+    if (evidence.evidenceRefs.length === 0) {
+      throw new DshAdapterError('dependency-missing', 'DSH probe evidence was provided without evidence refs', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+        phase: 'probe',
+        binding: inputs.binding,
+      });
+    }
+    for (const ref of evidence.evidenceRefs) assertEvidenceRef(ref);
+    assertSameScope(evidence.scope, ...evidence.evidenceRefs.map((ref) => ref.scope));
+    return evidence;
+  } catch (error) {
+    throw dshSeamError('configuration-invalid', error, { phase: 'probe', ownerId: inputs.ownerId, binding: inputs.binding });
+  }
 }
 
 export function assertDshCapabilitiesForBinding(capabilities: ProviderCapabilities, binding: ProviderBinding, ownerId: string): void {
@@ -93,33 +114,14 @@ export function assertDshCapabilitiesForBinding(capabilities: ProviderCapabiliti
   }
 }
 
-function probeScope(inputs: DshReadinessInputs): ScopeRef {
-  const bindingToken = evidenceToken(inputs.binding.bindingId);
-  return {
-    organId: { scope: 'organ', value: `dsh-probe:${bindingToken}` },
-    taskId: { scope: 'task', value: `dsh-probe:${bindingToken}` },
-    operationId: { scope: 'operation', value: `dsh-probe:${inputs.binding.protocol}` },
-  };
-}
-
-function probeEvidence(label: string, message: string, inputs: DshReadinessInputs): EvidenceRef {
-  const bindingToken = evidenceToken(inputs.binding.bindingId);
-  const now = Date.now();
-  const digest = createHash('sha256').update(`${label}|${message}|${inputs.binding.bindingId}|${now}`).digest('hex');
-  return {
-    evidenceId: {
-      scope: 'evidence',
-      value: `dsh-probe-${bindingToken}-${label}-${now}`,
-    },
-    kind: 'external',
-    source: `dsh-bridge:${inputs.ownerId}`,
-    locator: `humanagent://dsh-probe/${encodeURIComponent(inputs.ownerId)}/${encodeURIComponent(inputs.binding.bindingId)}/${now}`,
-    digest: `sha256:${digest}`,
-    scope: probeScope(inputs),
-  };
-}
-
 function failureFor(state: 'dependency-missing' | 'capability-unavailable', message: string, inputs: DshReadinessInputs): ProviderError {
+  const evidence = assertDshProbeEvidence(inputs);
+  if (!evidence) {
+    throw new DshAdapterError('dependency-missing', `DSH probe evidence is missing: ${message}`, inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+      phase: 'probe',
+      binding: inputs.binding,
+    });
+  }
   return {
     errorId: `dsh.${state}.probe`,
     code: `dsh.${state}`,
@@ -129,7 +131,7 @@ function failureFor(state: 'dependency-missing' | 'capability-unavailable', mess
     ownerId: inputs.ownerId,
     retryable: 'manual',
     attention: 'foreground',
-    evidenceRefs: [probeEvidence(state, message, inputs)],
+    evidenceRefs: evidence.evidenceRefs,
     nextAction: { kind: 'recover', ref: inputs.ownerId },
   };
 }
@@ -160,6 +162,7 @@ export function readinessForMissing(
 export async function probeDshReadiness(inputs: DshReadinessInputs): Promise<ProviderReadiness> {
   assertDshLockDescriptor(inputs.lock);
   validateProviderBinding(inputs.binding);
+  assertDshProbeEvidence(inputs);
   const status = classifyDshProfile(inputs.profile);
   if (status.kind === 'missing-profile') {
     return readinessForMissing('dependency-missing', 'DSH profile is missing; cannot probe readiness', inputs);
@@ -201,8 +204,19 @@ export async function probeDshReadiness(inputs: DshReadinessInputs): Promise<Pro
     throw dshSeamError('transport-failure', error, { phase: 'probe', ownerId: inputs.ownerId, binding: inputs.binding });
   }
   assertDshCapabilitiesForBinding(capabilities, inputs.binding, inputs.ownerId);
+  try {
+    assertNotExpired(readiness.expiresAt);
+  } catch (error) {
+    throw dshSeamError('configuration-invalid', error, { phase: 'probe', ownerId: inputs.ownerId, binding: inputs.binding });
+  }
   const missing = inputs.requiredCapabilities.filter((capability) => !capabilities.capabilities.includes(capability));
   if (missing.length > 0) {
+    try {
+      assertNotExpired(readiness.expiresAt);
+      assertDshCapabilitiesForBinding(capabilities, inputs.binding, inputs.ownerId);
+    } catch (error) {
+      throw dshSeamError('configuration-invalid', error, { phase: 'probe', ownerId: inputs.ownerId, binding: inputs.binding });
+    }
     const message = `DSH provider is missing required capability: ${missing.join(', ')}`;
     const failure: ProviderError = {
       errorId: 'dsh.capability-missing',
@@ -223,6 +237,12 @@ export async function probeDshReadiness(inputs: DshReadinessInputs): Promise<Pro
       ownerId: inputs.ownerId,
       nextAction: { kind: 'recover', ref: inputs.ownerId },
     };
+  }
+  try {
+    assertNotExpired(readiness.expiresAt);
+    assertDshCapabilitiesForBinding(capabilities, inputs.binding, inputs.ownerId);
+  } catch (error) {
+    throw dshSeamError('configuration-invalid', error, { phase: 'probe', ownerId: inputs.ownerId, binding: inputs.binding });
   }
   return readiness;
 }

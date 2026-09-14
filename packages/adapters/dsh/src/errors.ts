@@ -55,11 +55,17 @@ export function dshSeamError(
     readonly identity?: ProviderExecutionIdentityRef;
   },
 ): DshAdapterError {
-  if (error instanceof DshAdapterError) return error;
+  if (error instanceof DshAdapterError) {
+    return new DshAdapterError(error.code, error.message, options.ownerId, error.nextAction, {
+      cause: error.cause ?? error,
+      phase: error.phase ?? options.phase,
+      binding: error.binding ?? options.binding,
+      identity: error.identity ?? options.identity,
+    });
+  }
   const message = error instanceof Error ? error.message : String(error);
-  const cause = error instanceof Error ? error : new Error(String(error));
   return new DshAdapterError(code, message, options.ownerId, { kind: 'recover', ref: options.ownerId }, {
-    cause,
+    cause: error,
     phase: options.phase,
     binding: options.binding,
     identity: options.identity,
