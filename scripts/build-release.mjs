@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { runStages } from './checkpoint-runner.mjs';
+import { checkpointStages } from './checkpoint-stages.mjs';
 import { digest, treeDigest } from './digests.mjs';
 import { configuredReleaseVersion } from './release-version.mjs';
 
@@ -11,20 +13,19 @@ function option(args, name, fallback) {
 }
 
 const projectRoot = resolve(option(process.argv.slice(2), '--project-root', process.cwd()));
-const releaseVersion = configuredReleaseVersion();
+const releaseVersion = process.env.HUMANAGENT_RELEASE_VERSION || configuredReleaseVersion();
 const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: projectRoot, encoding: 'utf8' }).trim();
 if (dirty && process.env.HUMANAGENT_ALLOW_DIRTY_RELEASE !== '1') {
   throw new Error('release source is dirty; commit or use HUMANAGENT_ALLOW_DIRTY_RELEASE=1 for a local candidate');
 }
-const stages = [
-  { name: 'typecheck', owner: 'compile', command: ['pnpm', 'run', 'typecheck'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: 'tsconfig.json' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'tests' }, { kind: 'path', value: 'scripts' }] },
-  { name: 'compile', owner: 'compile', dependsOn: ['typecheck'], command: ['pnpm', 'run', 'build'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'tests' }, { kind: 'path', value: 'scripts' }], outputs: [{ kind: 'path', value: 'dist/app' }] },
-  { name: 'regression', owner: 'regression', dependsOn: ['compile'], command: ['pnpm', 'run', 'test'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'tests' }, { kind: 'path', value: 'scripts' }] },
-  { name: 'ci', owner: 'ci', dependsOn: ['regression'], command: ['pnpm', 'run', 'ci:check'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: '.gitignore' }, { kind: 'path', value: 'scripts' }, { kind: 'path', value: 'tests/release' }] },
-  { name: 'package', owner: 'release-packager', dependsOn: ['ci'], command: ['pnpm', 'run', 'package:candidate'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'scripts' }, { kind: 'path', value: 'dist/app' }], outputs: [{ kind: 'path', value: `dist/release/humanagent-cli-${releaseVersion}.tgz` }] },
-  { name: 'package-smoke', owner: 'release-smoke', dependsOn: ['package'], command: ['pnpm', 'run', 'package:smoke'], env: { HUMANAGENT_RELEASE_VERSION: releaseVersion }, inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'scripts' }] },
-];
-const result = await runStages({ projectRoot, stages });
+const stages = checkpointStages({ includePackaging: true, releaseVersion });
+const controlRoot = process.env.HUMANAGENT_HOME || join(homedir(), '.humanagent');
+const result = await runStages({
+  projectRoot,
+  checkpointRoot: join(controlRoot, 'build', 'checkpoints'),
+  lockRoot: join(controlRoot, 'build', 'locks'),
+  stages,
+});
 if (result.overall !== 'pass') {
   console.error(JSON.stringify(result, null, 2));
   process.exitCode = 1;
