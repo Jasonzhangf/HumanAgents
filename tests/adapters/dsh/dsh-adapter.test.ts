@@ -10,6 +10,7 @@ import {
   type ExecutionRuntimePort,
   type ProviderBinding,
   type ProviderEvent,
+  type ProviderObserveInput,
   type ProviderRecoveryResult,
   type ProviderResumeInput,
   type ProviderSettlement,
@@ -36,6 +37,14 @@ import {
 } from '../../../packages/adapters/dsh/src/index.js';
 
 const digest = (): string => `sha256:${'ab'.repeat(32)}`;
+const otherDigest = (): string => `sha256:${'cd'.repeat(32)}`;
+const validity = (): { checkedAt: string; expiresAt: string } => {
+  const now = Date.now();
+  return {
+    checkedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 60_000).toISOString(),
+  };
+};
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -130,19 +139,21 @@ class StubTransport implements DshTransport {
   requiredCapabilities = ['dsh.session', 'dsh.model'];
 
   async probe(context: DshTransportContext) {
+    const times = validity();
     return {
       bindingId: context.binding.bindingId,
       providerId: context.binding.providerId,
       protocol: context.binding.protocol,
       state: 'ready' as const,
       capabilityDigest: context.binding.capabilityDigest,
-      checkedAt: '2026-09-13T00:00:00Z',
-      expiresAt: '2099-01-01T00:00:00Z',
+      checkedAt: times.checkedAt,
+      expiresAt: times.expiresAt,
       evidenceRefs: [providerEvidence('probe')],
     };
   }
 
   async capabilities(context: DshTransportContext) {
+    const times = validity();
     return {
       bindingId: context.binding.bindingId,
       providerId: context.binding.providerId,
@@ -150,8 +161,8 @@ class StubTransport implements DshTransport {
       capabilities: this.requiredCapabilities,
       version: '0.1.5-rc.2',
       digest: context.binding.capabilityDigest,
-      checkedAt: '2026-09-13T00:00:00Z',
-      expiresAt: '2099-01-01T00:00:00Z',
+      checkedAt: times.checkedAt,
+      expiresAt: times.expiresAt,
       evidenceRefs: [providerEvidence('capabilities')],
     };
   }
@@ -195,12 +206,12 @@ class StubTransport implements DshTransport {
     };
   }
 
-  async *observe() {
+  async *observe(input: ProviderObserveInput) {
     const event: ProviderEvent = {
-      runtimeId: 'runtime-a',
-      taskId: task,
-      operationId: operation,
-      executionEpoch: 1,
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
       eventId: 'event-a',
       kind: 'model',
       evidenceRefs: [providerEvidence('observe')],
@@ -244,6 +255,85 @@ class StubTransport implements DshTransport {
   }
 }
 
+class WrongStartIdentityTransport extends StubTransport {
+  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    return { ...(await super.start(input)), runtimeId: 'wrong-runtime' };
+  }
+}
+
+class WrongResumeCheckpointTransport extends StubTransport {
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    return { ...(await super.resume(input)), checkpointId: id('checkpoint', 'cp-wrong') };
+  }
+}
+
+class WrongObserveTransport extends StubTransport {
+  async *observe(input: ProviderObserveInput) {
+    const event: ProviderEvent = {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch + 1,
+      eventId: 'event-wrong-epoch',
+      kind: 'model',
+      evidenceRefs: [providerEvidence('observe-wrong')],
+    };
+    yield event;
+  }
+}
+
+class RejectingTransport extends StubTransport {
+  async submit(): Promise<ProviderSubmitResult> {
+    throw new Error('submit transport exploded');
+  }
+
+  async *observe(input: ProviderObserveInput) {
+    throw new Error('observe iter exploded');
+  }
+}
+
+class TypedErrorTransport extends StubTransport {
+  async start(): Promise<ProviderStartReceipt> {
+    throw new DshAdapterError('capability-unavailable', 'typed transport failure', 'dsh-adapter');
+  }
+}
+
+class WrongReadinessBindingTransport extends StubTransport {
+  async probe(context: DshTransportContext) {
+    return { ...(await super.probe(context)), providerId: 'wrong-provider' };
+  }
+}
+
+class ExpiredReadinessTransport extends StubTransport {
+  async probe(context: DshTransportContext) {
+    return { ...(await super.probe(context)), expiresAt: new Date(Date.now() - 1_000).toISOString() };
+  }
+}
+
+class WrongCapabilitiesBindingTransport extends StubTransport {
+  async capabilities(context: DshTransportContext) {
+    return { ...(await super.capabilities(context)), providerId: 'wrong-provider' };
+  }
+}
+
+class WrongCapabilitiesDigestTransport extends StubTransport {
+  async capabilities(context: DshTransportContext) {
+    return { ...(await super.capabilities(context)), digest: otherDigest() };
+  }
+}
+
+class ExpiredCapabilitiesTransport extends StubTransport {
+  async capabilities(context: DshTransportContext) {
+    return { ...(await super.capabilities(context)), expiresAt: new Date(Date.now() - 1_000).toISOString() };
+  }
+}
+
+class WrongCloseBindingTransport extends StubTransport {
+  async close(context: DshTransportContext) {
+    return { ...(await super.close(context)), bindingId: 'wrong-binding' };
+  }
+}
+
 function createPort(overrides: {
   profile?: DshProfileDescriptor;
   transport?: DshTransport | null;
@@ -273,7 +363,13 @@ test('DSH default and implicit route/provider/profile values are rejected', () =
   assert.doesNotThrow(() => assertDshProviderBinding({ ...dshProviderBinding, protocol: 'other-explicit' }));
   assert.throws(() => assertDshProviderBinding({ ...dshProviderBinding, protocol: 'openai' } as unknown as DshProviderBinding), DshAdapterError);
   assert.throws(() => assertDshProfileDescriptor({ ...profile, homeRef: 'default' }), DshAdapterError);
+  assert.throws(() => assertDshProfileDescriptor({ ...profile, homeRef: 'implicit' }), DshAdapterError);
+  assert.throws(() => assertDshProfileDescriptor({ ...profile, homeRef: 'unknown' }), DshAdapterError);
+  assert.throws(() => assertDshProfileDescriptor({ ...profile, homeRef: '~/.dsh' }), DshAdapterError);
+  assert.throws(() => assertDshProfileDescriptor({ ...profile, homeRef: '/tmp/humanagent-dsh' }), DshAdapterError);
+  assert.throws(() => assertDshProfileDescriptor({ ...profile, homeRef: './.dsh' }), DshAdapterError);
   assert.throws(() => assertDshProfileDescriptor({ ...profile, routeRef: 'implicit' }), DshAdapterError);
+  assert.doesNotThrow(() => assertDshProfileDescriptor({ ...profile, homeRef: 'env:DSH_HOME' }));
 });
 
 test('missing profile, bundle, transport, and capability are explicit readiness failures', async () => {
@@ -281,6 +377,10 @@ test('missing profile, bundle, transport, and capability are explicit readiness 
   const missingProfileProbe = await noProfile.probe(providerBinding);
   assert.equal(missingProfileProbe.state, 'dependency-missing');
   assert.equal(missingProfileProbe.ownerId, 'dsh-adapter');
+  assert.ok(missingProfileProbe.checkedAt !== '2026-09-13T00:00:00Z');
+  assert.ok(missingProfileProbe.expiresAt !== '2099-01-01T00:00:00Z');
+  assert.ok(Date.parse(missingProfileProbe.expiresAt) > Date.parse(missingProfileProbe.checkedAt));
+  assert.ok(missingProfileProbe.failure?.evidenceRefs[0].scope.organId.value !== 'organ-unknown');
   await assert.rejects(noProfile.start(startInput()), (error) => error instanceof DshAdapterError && error.code === 'dependency-missing');
 
   const noBundle = createPort({ profile: { ...profile, plugin: undefined } });
@@ -339,9 +439,85 @@ test('DSH execution lifecycle keeps session evidence external and stop separate 
   assert.equal(closed.state, 'closed');
 });
 
+test('DSH bridge fences transport result identity, resume checkpoint, and observed epochs', async () => {
+  await assert.rejects(
+    createPort({ transport: new WrongStartIdentityTransport() }).start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
+  );
+  await assert.rejects(
+    createPort({ transport: new WrongResumeCheckpointTransport() }).resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  await assert.rejects(
+    (async () => {
+      for await (const _ of createPort({ transport: new WrongObserveTransport() }).observe(executionIdentity)) {
+        // noop
+      }
+    })(),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'observe',
+  );
+});
+
+test('DSH transport rejection maps to typed errors and existing typed errors are preserved', async () => {
+  const rejecting = createPort({ transport: new RejectingTransport() });
+  await assert.rejects(
+    rejecting.submit(submitInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'submit' && error.cause instanceof Error && error.cause.message === 'submit transport exploded',
+  );
+  await assert.rejects(
+    (async () => {
+      for await (const _ of rejecting.observe(executionIdentity)) {
+        // noop
+      }
+    })(),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'observe' && /observe iter exploded/.test(String(error.cause instanceof Error ? error.cause.message : error.cause)),
+  );
+  await assert.rejects(
+    createPort({ transport: new TypedErrorTransport() }).start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'capability-unavailable' && error.message === 'typed transport failure',
+  );
+});
+
+test('DSH stopped settlement requires a prior non-rejected stop receipt', async () => {
+  await assert.rejects(
+    createPort().settle(executionIdentity),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'settle',
+  );
+  const port = createPort();
+  await port.requestStop(stopRequest());
+  await port.settle(executionIdentity);
+});
+
+test('DSH readiness, capabilities, and close reject wrong binding, digest, or expiry', async () => {
+  await assert.rejects(
+    createPort({ transport: new WrongReadinessBindingTransport() }).probe(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'probe',
+  );
+  await assert.rejects(
+    createPort({ transport: new ExpiredReadinessTransport() }).probe(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'configuration-invalid' && error.phase === 'probe',
+  );
+  await assert.rejects(
+    createPort({ transport: new WrongCapabilitiesBindingTransport() }).capabilities(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'probe',
+  );
+  await assert.rejects(
+    createPort({ transport: new WrongCapabilitiesDigestTransport() }).capabilities(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'probe',
+  );
+  await assert.rejects(
+    createPort({ transport: new ExpiredCapabilitiesTransport() }).capabilities(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'configuration-invalid' && error.phase === 'probe',
+  );
+  await assert.rejects(
+    createPort({ transport: new WrongCloseBindingTransport() }).close(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'close',
+  );
+});
+
 test('DSH identity mismatch cannot be hidden by external session refs', async () => {
   const port = createPort();
-  await assert.rejects(port.start(startInput({ runtimeId: 'dsh://session/sess-123' })), (error) => error instanceof ContractError);
+  await assert.rejects(port.start(startInput({ runtimeId: 'dsh://session/sess-123' })), ContractError);
   await assert.rejects(port.resume(resumeInput({ checkpointExecutionEpoch: 2 })), ContractError);
   await assert.rejects(port.submit(submitInput({ executionEpoch: 0 })), ContractError);
 });

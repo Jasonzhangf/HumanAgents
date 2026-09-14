@@ -12,6 +12,14 @@ function explicit(value: string, label: string): boolean {
   return value.trim().length > 0 && value !== 'default' && value !== 'implicit' && value !== 'web';
 }
 
+function explicitHomeRef(value: string): boolean {
+  const homeRef = value.trim();
+  if (!homeRef || homeRef === 'default' || homeRef === 'implicit' || homeRef === 'web' || homeRef === 'unknown') return false;
+  if (/^(~|\.|\/|[A-Za-z]:[\\/])/.test(homeRef)) return false;
+  if (/[\\/]$/.test(homeRef)) return false;
+  return /^(env|ref|config):[A-Za-z][A-Za-z0-9._-]*$/.test(homeRef);
+}
+
 export interface DshLockDescriptor {
   readonly source: string;
   readonly reference: string;
@@ -64,7 +72,9 @@ export function assertDshProfileDescriptor(profile: DshProfileDescriptor): void 
     throw new DshAdapterError('configuration-invalid', `DSH profile name must be explicit: ${profile.profileName}`, 'dsh-adapter');
   }
   nonEmpty(profile.homeRef, 'DSH home reference');
-  if (profile.homeRef === 'default') throw new DshAdapterError('configuration-invalid', 'DSH_HOME reference must not be default', 'dsh-adapter');
+  if (!explicitHomeRef(profile.homeRef)) {
+    throw new DshAdapterError('configuration-invalid', 'DSH_HOME must be a dedicated explicit env/ref/config reference, not default, implicit, unknown, or a path', 'dsh-adapter');
+  }
   if (!profile.plugin) throw new DshAdapterError('configuration-invalid', 'DSH profile plugin lock is required', 'dsh-adapter');
   assertDshPluginLock(profile.plugin);
   nonEmpty(profile.routeRef, 'DSH route reference');
