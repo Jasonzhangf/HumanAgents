@@ -1,0 +1,518 @@
+import {
+  id,
+  type EvidenceRef,
+  type ProviderBinding,
+  type ProviderCapabilities,
+  type ProviderCloseResult,
+  type ProviderError,
+  type ProviderExecutionIdentityRef,
+  type ProviderReadiness,
+  type ProviderRecoveryResult,
+  type ProviderObserveInput,
+  type ProviderResumeInput,
+  type ProviderSettleInput,
+  type ProviderSettlement,
+  type ProviderStartInput,
+  type ProviderStartReceipt,
+  type ProviderStopReceipt,
+  type ProviderStopRequest,
+  type ProviderSubmitInput,
+  type ProviderSubmitResult,
+  type ScopeRef,
+} from '../../../contracts/src/index.js';
+import { ProviderAdapterError } from './errors.js';
+import type { ProviderEvidenceSink } from './evidence.js';
+import type {
+  AnthropicWireRequest,
+  ProviderWireEvent,
+  ProviderWireRequest,
+  ProviderWireStopRequest,
+  ResponsesWireRequest,
+} from './wire.js';
+import type { ProviderTransport } from './adapter.js';
+
+const OWNER = 'humanagent.provider-adapter.rcc-v3';
+const DEFAULT_MAX_EVENT_BYTES = 1024 * 1024;
+const DEFAULT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+
+export interface RccV3FetchInit {
+  readonly method: 'GET' | 'POST';
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body?: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface RccV3FetchResponse {
+  readonly status: number;
+  readonly headers?: { readonly get: (name: string) => string | null };
+  readonly body: AsyncIterable<Uint8Array> | null;
+  readonly text: () => Promise<string>;
+}
+
+export type RccV3Fetch = (url: string, init: RccV3FetchInit) => Promise<RccV3FetchResponse>;
+
+export interface RccV3ProviderTransportOptions {
+  readonly binding: ProviderBinding;
+  readonly baseUrl: string;
+  readonly evidence: ProviderEvidenceSink;
+  readonly fetch?: RccV3Fetch;
+  readonly maxEventBytes?: number;
+  readonly maxBufferBytes?: number;
+}
+
+interface ActiveExecution {
+  readonly identity: ProviderExecutionIdentityRef;
+  readonly controller: AbortController;
+  readonly body: AsyncIterable<Uint8Array>;
+  readonly protocol: 'responses' | 'anthropic';
+  readonly evidenceScope: ScopeRef;
+  stopRequested: boolean;
+  observed: boolean;
+  streamDone: boolean;
+  terminalState?: 'succeeded' | 'waiting' | 'failed' | 'stopped';
+  terminalError?: ProviderError;
+}
+
+interface SseFrame {
+  readonly event?: string;
+  readonly data: string;
+}
+
+function defaultFetch(url: string, init: RccV3FetchInit): Promise<RccV3FetchResponse> {
+  return globalThis.fetch(url, init as RequestInit).then(async (response) => ({
+    status: response.status,
+    headers: response.headers,
+    body: response.body ? readableStreamToAsyncIterable(response.body) : null,
+    text: () => response.text(),
+  }));
+}
+
+async function* readableStreamToAsyncIterable(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function executionKey(execution: ProviderExecutionIdentityRef): string {
+  return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
+}
+
+function scopeFor(execution: ProviderExecutionIdentityRef, scope?: ScopeRef): ScopeRef {
+  return {
+    ...(scope ?? { organId: id('organ', 'provider-adapter') }),
+    taskId: execution.taskId,
+    operationId: execution.operationId,
+  };
+}
+
+function protocolOf(request: ProviderWireRequest): 'responses' | 'anthropic' {
+  if (request.protocol === 'responses' || request.protocol === 'anthropic') return request.protocol;
+  throw new ProviderAdapterError({
+    code: 'capability.unavailable',
+    category: 'capability',
+    phase: 'start',
+    message: 'RCC v3 does not implement the requested provider protocol',
+  });
+}
+
+function endpointPath(protocol: 'responses' | 'anthropic'): string {
+  return protocol === 'responses' ? '/v1/responses' : '/v1/messages';
+}
+
+function errorEvidence(scope: ScopeRef, label: string): EvidenceRef {
+  return {
+    evidenceId: id('evidence', `rcc-v3-${label.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+    kind: 'external',
+    source: OWNER,
+    locator: `rcc-v3://${label}`,
+    scope,
+  };
+}
+
+function providerError(
+  scope: ScopeRef,
+  phase: ProviderError['phase'],
+  code: string,
+  message: string,
+  category: ProviderError['category'] = 'transport',
+  nextAction: ProviderError['nextAction'] = { kind: 'recover', ref: OWNER },
+): ProviderError {
+  return {
+    errorId: `provider.${phase}.${code}`,
+    code,
+    category,
+    phase,
+    message,
+    ownerId: OWNER,
+    retryable: category === 'transport' || category === 'timeout' ? 'retryable' : 'manual',
+    attention: 'foreground',
+    evidenceRefs: [errorEvidence(scope, `${phase}-${code}`)],
+    nextAction,
+  };
+}
+
+function isTerminalEvent(protocol: 'responses' | 'anthropic', type: string): boolean {
+  return protocol === 'responses'
+    ? ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(type)
+    : ['message_stop', 'error'].includes(type);
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('RCC v3 SSE data must be a JSON object');
+  }
+  return value as Record<string, unknown>;
+}
+
+async function* parseSse(
+  body: AsyncIterable<Uint8Array>,
+  maxEventBytes: number,
+  maxBufferBytes: number,
+): AsyncIterable<SseFrame> {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let event: string | undefined;
+  let data: string[] = [];
+
+  const emit = (): SseFrame | undefined => {
+    if (event === undefined && data.length === 0) return undefined;
+    const frame = { event, data: data.join('\n') };
+    event = undefined;
+    data = [];
+    return frame;
+  };
+
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    if (buffer.length > maxBufferBytes) throw new Error('RCC v3 SSE buffer exceeded limit');
+    let boundary = buffer.indexOf('\n');
+    while (boundary >= 0) {
+      let line = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 1);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      if (line === '') {
+        const frame = emit();
+        if (frame) yield frame;
+      } else if (!line.startsWith(':')) {
+        const separator = line.indexOf(':');
+        const field = separator < 0 ? line : line.slice(0, separator);
+        let value = separator < 0 ? '' : line.slice(separator + 1);
+        if (value.startsWith(' ')) value = value.slice(1);
+        if (field === 'event') event = value;
+        if (field === 'data') {
+          data.push(value);
+          if (data.join('\n').length > maxEventBytes) throw new Error('RCC v3 SSE event exceeded limit');
+        }
+      }
+      boundary = buffer.indexOf('\n');
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.length > maxBufferBytes) throw new Error('RCC v3 SSE buffer exceeded limit');
+  if (buffer.length > 0) throw new Error('RCC v3 SSE stream ended with an incomplete frame');
+  const frame = emit();
+  if (frame) yield frame;
+}
+
+function responsesPayload(request: ResponsesWireRequest): Record<string, unknown> {
+  return {
+    model: request.model,
+    instructions: request.instructions,
+    input: request.input.map((item) => item.type === 'message'
+      ? { type: 'message', role: item.role, content: [{ type: 'input_text', text: item.content }] }
+      : { type: 'function_call_output', call_id: item.call_id, output: item.output }),
+    ...(request.tools ? {
+      tools: request.tools.map((tool) => ({
+        type: 'function',
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      })),
+    } : {}),
+    stream: true,
+  };
+}
+
+function anthropicPayload(request: AnthropicWireRequest): Record<string, unknown> {
+  return {
+    model: request.model,
+    max_tokens: request.max_tokens,
+    ...(request.system ? { system: request.system } : {}),
+    messages: request.messages,
+    ...(request.tools ? { tools: request.tools } : {}),
+    stream: true,
+  };
+}
+
+function requestPayload(request: ProviderWireRequest): Record<string, unknown> {
+  return request.protocol === 'responses' ? responsesPayload(request) : anthropicPayload(request);
+}
+
+function urlFor(baseUrl: string, path: string): string {
+  return new URL(path, `${baseUrl.replace(/\/$/, '')}/`).toString();
+}
+
+export class RccV3ProviderTransport implements ProviderTransport {
+  readonly readiness?: ProviderReadiness;
+  readonly capabilities?: ProviderCapabilities;
+  private readonly fetcher: RccV3Fetch;
+  private readonly maxEventBytes: number;
+  private readonly maxBufferBytes: number;
+  private readonly executions = new Map<string, ActiveExecution>();
+
+  constructor(private readonly options: RccV3ProviderTransportOptions) {
+    if (options.binding.protocol !== 'responses' && options.binding.protocol !== 'anthropic') {
+      throw new ProviderAdapterError({
+        code: 'capability.unavailable',
+        category: 'capability',
+        phase: 'start',
+        message: `RCC v3 transport does not support ${options.binding.protocol}`,
+        scope: options.binding,
+      });
+    }
+    try {
+      new URL(`${options.baseUrl.replace(/\/$/, '')}/`);
+    } catch (cause) {
+      throw new ProviderAdapterError({
+        code: 'configuration.invalid.endpoint',
+        category: 'configuration',
+        phase: 'start',
+        message: 'RCC v3 transport requires an absolute base URL',
+        scope: options.binding,
+        cause,
+      });
+    }
+    if (!options.evidence) {
+      throw new ProviderAdapterError({
+        code: 'missing.evidence',
+        category: 'validation',
+        phase: 'start',
+        message: 'RCC v3 transport requires an immutable evidence sink',
+        scope: options.binding,
+      });
+    }
+    this.fetcher = options.fetch ?? defaultFetch;
+    this.maxEventBytes = options.maxEventBytes ?? DEFAULT_MAX_EVENT_BYTES;
+    this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
+  }
+
+  async start(input: ProviderStartInput, request: ProviderWireRequest): Promise<ProviderStartReceipt> {
+    const key = executionKey(input);
+    if (this.executions.has(key)) {
+      throw new ProviderAdapterError({ code: 'runtime.already.started', category: 'runtime', phase: 'start', message: 'RCC v3 execution is already active', scope: input });
+    }
+    const protocol = protocolOf(request);
+    this.assertProtocol(protocol);
+    const controller = new AbortController();
+    const response = await this.send(protocol, request, controller);
+    const body = response.body;
+    if (!body) {
+      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'start', message: 'RCC v3 returned no streaming body', scope: input });
+    }
+    const evidenceScope = scopeFor(input, input.evidenceRefs[0]?.scope);
+    const execution: ActiveExecution = {
+      identity: { ...input },
+      controller,
+      body,
+      protocol,
+      evidenceScope,
+      stopRequested: false,
+      observed: false,
+      streamDone: false,
+    };
+    let ref: EvidenceRef;
+    try {
+      ref = await this.writeEvidence(evidenceScope, 'start', {
+        status: response.status,
+        endpoint: endpointPath(protocol),
+        protocol,
+        model: request.model,
+      });
+    } catch (cause) {
+      controller.abort('start evidence persistence failed');
+      throw cause;
+    }
+    this.executions.set(key, execution);
+    return { ...input, startedAt: new Date().toISOString(), evidenceRefs: [ref] };
+  }
+
+  async resume(input: ProviderResumeInput, _request: ProviderWireRequest): Promise<ProviderRecoveryResult> {
+    const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
+    const error = providerError(scope, 'resume', 'resume.unsupported', 'RCC v3 HTTP transport cannot resume a provider stream from a HumanAgent checkpoint', 'capability', { kind: 'recover', ref: OWNER });
+    const ref = await this.writeEvidence(scope, 'resume-unsupported', error);
+    return {
+      ...input,
+      checkpointId: input.checkpointId,
+      recovered: false,
+      staleRejected: false,
+      recoveryStateRef: ref,
+      evidenceRefs: [ref],
+      error: { ...error, evidenceRefs: [ref] },
+      ownerId: OWNER,
+      nextAction: { kind: 'recover', ref: OWNER },
+    };
+  }
+
+  async submit(input: ProviderSubmitInput, _request: ProviderWireRequest): Promise<ProviderSubmitResult> {
+    const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
+    const error = providerError(scope, 'submit', 'submit.unsupported', 'RCC v3 transport has no provider-neutral tool submit endpoint', 'capability');
+    const ref = await this.writeEvidence(scope, 'submit-unsupported', error);
+    return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } };
+  }
+
+  async *observe(input: ProviderObserveInput): AsyncIterable<ProviderWireEvent> {
+    const active = this.active(input);
+    if (active.observed) throw new ProviderAdapterError({ code: 'runtime.observe.repeated', category: 'runtime', phase: 'observe', message: 'RCC v3 stream can only be observed once', scope: input });
+    active.observed = true;
+    try {
+      for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
+        if (!frame.data || frame.data === '[DONE]') continue;
+        let record: Record<string, unknown>;
+        try {
+          record = readRecord(JSON.parse(frame.data));
+        } catch (cause) {
+          const error = providerError(active.evidenceScope, 'observe', 'protocol.invalid-sse-json', cause instanceof Error ? cause.message : 'RCC v3 returned invalid SSE JSON', 'protocol');
+          active.terminalError = error;
+          active.terminalState = 'failed';
+          throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input, cause });
+        }
+        const type = typeof record.type === 'string' ? record.type : frame.event;
+        if (!type) throw new ProviderAdapterError({ code: 'protocol.missing-event-type', category: 'protocol', phase: 'observe', message: 'RCC v3 SSE event has no type', scope: input });
+        const raw = { protocol: active.protocol, ...record, type } as unknown as ProviderWireEvent;
+        if (isTerminalEvent(active.protocol, type)) {
+          if (type === 'error' || type.endsWith('.failed')) {
+            const errorRecord = type.endsWith('.failed')
+              ? (readRecord(record.response).error ?? {})
+              : (record.error ?? {});
+            const providerCode = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).code === 'string'
+              ? (errorRecord as Record<string, unknown>).code as string
+              : typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).type === 'string'
+                ? (errorRecord as Record<string, unknown>).type as string
+                : 'provider.failed';
+            const providerMessage = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).message === 'string'
+              ? (errorRecord as Record<string, unknown>).message as string
+              : 'RCC v3 provider reported a failure';
+            active.terminalError = providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
+            active.terminalState = 'failed';
+          } else {
+            active.terminalState = active.stopRequested
+              ? 'stopped'
+              : type === 'response.incomplete' ? 'waiting' : 'succeeded';
+          }
+        }
+        yield raw;
+      }
+      if (!active.terminalState) {
+        const error = providerError(active.evidenceScope, 'observe', 'stream.missing-terminal', 'RCC v3 SSE stream ended without a terminal event', 'protocol');
+        active.terminalError = error;
+        active.terminalState = 'failed';
+        throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input });
+      }
+      active.streamDone = true;
+    } catch (cause) {
+      active.streamDone = true;
+      if (active.stopRequested) {
+        active.terminalState = 'stopped';
+        return;
+      } else if (!active.terminalError) {
+        const errorMessage = cause instanceof Error ? cause.message : 'RCC v3 stream failed';
+        active.terminalError = providerError(active.evidenceScope, 'observe', 'transport.failure', errorMessage, 'transport');
+        active.terminalState = 'failed';
+      }
+      throw cause;
+    }
+  }
+
+  async requestStop(input: ProviderStopRequest, _request: ProviderWireStopRequest): Promise<ProviderStopReceipt> {
+    const active = this.active(input);
+    const scope = active.evidenceScope;
+    if (active.streamDone) {
+      const error = providerError(scope, 'stop', 'stop.after-terminal', 'RCC v3 stream is already settled', 'runtime');
+      const ref = await this.writeEvidence(scope, 'stop-rejected', error);
+      return { ...input, status: 'rejected', receivedAt: new Date().toISOString(), evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'continue' } };
+    }
+    active.stopRequested = true;
+    active.controller.abort(input.reason);
+    const ref = await this.writeEvidence(scope, 'stop-requested', { remoteStopSupported: false, transportAbort: true, reason: input.reason });
+    return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'wait', ref: 'rcc-v3.settle' } };
+  }
+
+  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    const active = this.active(input);
+    const scope = active.evidenceScope;
+    const state = active.streamDone ? (active.terminalState ?? 'unknown') : 'waiting';
+    const evidenceRef = await this.writeEvidence(scope, 'settle', { state, streamDone: active.streamDone, stopRequested: active.stopRequested });
+    if (state === 'waiting') {
+      return {
+        ...input,
+        state,
+        evidenceRefs: [evidenceRef],
+        resourceRelease: { state: 'pending', evidenceRefs: [evidenceRef] },
+        persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
+        ownerId: OWNER,
+        nextAction: { kind: 'continue', ref: 'rcc-v3.observe' },
+      };
+    }
+    const error = state === 'failed' || state === 'unknown' ? active.terminalError : undefined;
+    const settlement: ProviderSettlement = {
+      ...input,
+      state,
+      evidenceRefs: [evidenceRef],
+      resourceRelease: { state: 'released', evidenceRefs: [evidenceRef] },
+      persistence: { state: 'committed', evidenceRefs: [evidenceRef] },
+      ...(error ? { error: { ...error, evidenceRefs: [evidenceRef] } } : {}),
+      ...(error ? { ownerId: OWNER, nextAction: { kind: 'recover' as const, ref: OWNER } } : {}),
+    };
+    this.executions.delete(executionKey(input));
+    return settlement;
+  }
+
+  async close(binding: ProviderBinding): Promise<ProviderCloseResult> {
+    if (this.executions.size > 0) {
+      const ref = errorEvidence({ organId: id('organ', 'provider-adapter') }, 'close-pending');
+      return { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'pending', evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'continue', ref: 'rcc-v3.settle' } };
+    }
+    const scope = { organId: id('organ', 'provider-adapter') };
+    const ref = await this.writeEvidence(scope, 'close', { endpoint: this.options.baseUrl, bindingId: binding.bindingId });
+    return { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'closed', evidenceRefs: [ref] };
+  }
+
+  private active(input: ProviderExecutionIdentityRef): ActiveExecution {
+    const active = this.executions.get(executionKey(input));
+    if (!active) throw new ProviderAdapterError({ code: 'missing.active.execution', category: 'runtime', phase: 'observe', message: 'RCC v3 execution is not active', scope: input });
+    return active;
+  }
+
+  private assertProtocol(protocol: 'responses' | 'anthropic'): void {
+    if (protocol !== this.options.binding.protocol) throw new ProviderAdapterError({ code: 'protocol.mismatch', category: 'protocol', phase: 'start', message: 'RCC request protocol does not match binding', scope: this.options.binding });
+  }
+
+  private async send(protocol: 'responses' | 'anthropic', request: ProviderWireRequest, controller: AbortController): Promise<RccV3FetchResponse> {
+    const response = await this.fetcher(urlFor(this.options.baseUrl, endpointPath(protocol)), {
+      method: 'POST',
+      headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify(requestPayload(request)),
+      signal: controller.signal,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      const body = (await response.text()).slice(0, this.maxEventBytes);
+      throw new ProviderAdapterError({ code: `http.${response.status}`, category: 'provider', phase: 'start', message: `RCC v3 returned HTTP ${response.status}${body ? `: ${body}` : ''}`, scope: this.options.binding });
+    }
+    return response;
+  }
+
+  private async writeEvidence(scope: ScopeRef, type: string, content: unknown): Promise<EvidenceRef> {
+    return this.options.evidence.write({ scope, kind: 'external', type, locator: `rcc-v3://${type}`, content });
+  }
+}
+
+export function createRccV3ProviderTransport(options: RccV3ProviderTransportOptions): RccV3ProviderTransport {
+  return new RccV3ProviderTransport(options);
+}
