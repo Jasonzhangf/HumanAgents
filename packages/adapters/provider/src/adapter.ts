@@ -48,6 +48,7 @@ import type { ProviderWireEvent, ProviderWireRequest, ProviderWireStopRequest } 
 export interface ProviderTransport {
   readonly readiness?: ProviderReadiness;
   readonly capabilities?: ProviderCapabilities;
+  readonly probe?: (binding: ProviderBinding) => Promise<ProviderProbeResult>;
   start(input: ProviderStartInput, request: ProviderWireRequest): Promise<ProviderStartReceipt>;
   resume(input: ProviderResumeInput, request: ProviderWireRequest): Promise<ProviderRecoveryResult>;
   submit(input: ProviderSubmitInput, request: ProviderWireRequest): Promise<ProviderSubmitResult>;
@@ -55,6 +56,11 @@ export interface ProviderTransport {
   requestStop(input: ProviderStopRequest, request: ProviderWireStopRequest): Promise<ProviderStopReceipt>;
   settle(input: ProviderSettleInput): Promise<ProviderSettlement>;
   close(binding: ProviderBinding): Promise<ProviderCloseResult>;
+}
+
+export interface ProviderProbeResult {
+  readonly readiness: ProviderReadiness;
+  readonly capabilities?: ProviderCapabilities;
 }
 
 export interface ProviderAdapterOptions {
@@ -86,6 +92,16 @@ function executionKey(execution: ProviderExecutionIdentityRef): string {
   return `${execution.runtimeId}:${execution.taskId.value}:${execution.operationId.value}:${execution.executionEpoch}`;
 }
 
+function probeExpired(result: ProviderProbeResult): boolean {
+  try {
+    assertNotExpired(result.readiness.expiresAt);
+    if (result.capabilities) assertNotExpired(result.capabilities.expiresAt);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 interface ActiveExecution {
   readonly identity: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
@@ -110,6 +126,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
   readonly kind = 'humanagent.execution-runtime-port' as const;
 
   private readonly sessions = new Map<string, ActiveExecution>();
+  private lastProbe?: { readonly binding: ProviderBinding; readonly result: ProviderProbeResult };
 
   constructor(private readonly options: ProviderAdapterOptions) {
     try {
@@ -175,16 +192,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
   async probe(binding: ProviderBinding): Promise<ProviderReadiness> {
     return this.guard('probe', binding, async () => {
       this.assertSameBinding(binding, 'probe');
-      const readiness = this.options.transport.readiness;
-      if (!readiness) {
-        throw new ProviderAdapterError({
-          code: 'missing.readiness.evidence',
-          category: 'validation',
-          phase: 'probe',
-          message: 'provider readiness requires readiness evidence; none was provided',
-          scope: binding,
-        });
-      }
+      const readiness = (await this.loadProbe(binding, true)).readiness;
       assertProviderReadinessBinding(readiness, binding);
       try {
         assertNotExpired(readiness.expiresAt);
@@ -204,13 +212,13 @@ export class ProviderAdapter implements ExecutionRuntimePort {
   async capabilities(binding: ProviderBinding): Promise<ProviderCapabilities> {
     return this.guard('probe', binding, async () => {
       this.assertSameBinding(binding, 'probe');
-      const capabilities = this.options.transport.capabilities;
+      const capabilities = (await this.loadProbe(binding, false)).capabilities;
       if (!capabilities) {
         throw new ProviderAdapterError({
-          code: 'missing.capability.evidence',
-          category: 'validation',
+          code: 'capability.unavailable',
+          category: 'capability',
           phase: 'probe',
-          message: 'provider capabilities require externally supplied evidence; none was provided',
+          message: 'provider capabilities are unavailable for the current binding',
           scope: binding,
         });
       }
@@ -240,6 +248,27 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       }
       return capabilities;
     });
+  }
+
+  private async loadProbe(binding: ProviderBinding, refresh: boolean): Promise<ProviderProbeResult> {
+    if (this.options.transport.probe) {
+      const cached = this.lastProbe;
+      if (cached && sameProviderBinding(cached.binding, binding) && !refresh && !probeExpired(cached.result)) return cached.result;
+      const result = await this.callTransport('probe', binding, () => this.options.transport.probe!(binding));
+      this.lastProbe = { binding: { ...binding }, result };
+      return result;
+    }
+    const readiness = this.options.transport.readiness;
+    if (!readiness) {
+      throw new ProviderAdapterError({
+        code: 'missing.readiness.evidence',
+        category: 'validation',
+        phase: 'probe',
+        message: 'provider readiness requires readiness evidence; none was provided',
+        scope: binding,
+      });
+    }
+    return { readiness, capabilities: this.options.transport.capabilities };
   }
 
   async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {

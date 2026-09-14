@@ -1,5 +1,5 @@
 export { ProviderAdapter } from './adapter.js';
-export type { ProviderAdapterOptions, ProviderTransport } from './adapter.js';
+export type { ProviderAdapterOptions, ProviderProbeResult, ProviderTransport } from './adapter.js';
 export { AnthropicProviderCodec, ResponsesProviderCodec } from './codecs.js';
 export type { DecodeContext, ProviderCodec, ProviderDecodedEvent } from './codecs.js';
 export { filesystemProviderEvidenceSink } from './evidence.js';
