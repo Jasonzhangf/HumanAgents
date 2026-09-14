@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "../../../dist",
+    "rootDir": "../../../",
+    "noEmitOnError": true
+  },
+  "include": [
+    "../node-modules.d.ts",
+    "../../../packages/adapters/dsh/src/**/*.ts",
+    "./**/*.ts"
+  ]
+}
