@@ -5,8 +5,62 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { closeRuntime, openRuntime, resumeRuntime } from '../../packages/app/src/index.js';
+import { closeRuntime, openRuntime, probeExecutionRuntime, resumeRuntime, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import type { EvidenceRef, ExecutionRuntimePort, ProviderBinding, ProviderCloseResult, ProviderEvent, ProviderReadiness, ProviderRecoveryResult, ProviderSettlement, ProviderStartReceipt, ProviderStopReceipt, ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
+
+const providerBinding: ProviderBinding = {
+  bindingId: 'binding-integration',
+  providerId: 'provider-integration',
+  protocol: 'responses',
+  endpointRef: 'endpoint-integration',
+  modelRef: 'model-integration',
+  configDigest: 'sha256:integration-config',
+  capabilityDigest: 'sha256:integration-capability',
+};
+
+const readiness: ProviderReadiness = {
+  bindingId: providerBinding.bindingId,
+  providerId: providerBinding.providerId,
+  protocol: providerBinding.protocol,
+  state: 'ready',
+  capabilityDigest: providerBinding.capabilityDigest,
+  checkedAt: '2026-01-01T00:00:00.000Z',
+  expiresAt: '2099-01-01T00:00:00.000Z',
+  evidenceRefs: [],
+};
+
+function executionPort(readinessResult: ProviderReadiness = readiness): ExecutionRuntimePort {
+  const identity = { runtimeId: 'runtime-integration', taskId: { scope: 'task' as const, value: 'task-integration' }, operationId: { scope: 'operation' as const, value: 'operation-integration' }, executionEpoch: 1 };
+  const evidenceRefs: readonly EvidenceRef[] = [];
+  const port: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: async () => readinessResult,
+    capabilities: async () => ({ ...readinessResult, capabilities: ['integration'], version: 'test', digest: providerBinding.capabilityDigest }),
+    start: async (): Promise<ProviderStartReceipt> => ({ ...identity, startedAt: '2026-01-01T00:00:00.000Z', evidenceRefs }),
+    resume: async (): Promise<ProviderRecoveryResult> => ({ ...identity, checkpointId: { scope: 'checkpoint', value: 'checkpoint-integration' }, recovered: true, staleRejected: false, recoveryStateRef: { evidenceId: { scope: 'evidence', value: 'recovery' }, kind: 'execution', source: 'test', locator: 'recovery', scope: { organId: { scope: 'organ', value: 'organ-integration' }, taskId: identity.taskId, operationId: identity.operationId } }, evidenceRefs }),
+    submit: async (): Promise<ProviderSubmitResult> => ({ ...identity, status: 'completed', outputRefs: ['output-integration'], evidenceRefs }),
+    observe: async function* (): AsyncIterable<ProviderEvent> { yield { ...identity, eventId: 'event-integration', kind: 'terminal', terminalState: 'succeeded', evidenceRefs }; },
+    requestStop: async (): Promise<ProviderStopReceipt> => ({ ...identity, status: 'accepted', receivedAt: '2026-01-01T00:00:00.000Z', evidenceRefs }),
+    settle: async (): Promise<ProviderSettlement> => ({ ...identity, state: 'succeeded', evidenceRefs, resourceRelease: { state: 'released', evidenceRefs }, persistence: { state: 'committed', evidenceRefs } }),
+    close: async (): Promise<ProviderCloseResult> => ({ bindingId: providerBinding.bindingId, providerId: providerBinding.providerId, protocol: providerBinding.protocol, state: 'closed', evidenceRefs }),
+  };
+  return port;
+}
+
+function runtimeBinding(port = executionPort()): RuntimeExecutionBinding {
+  return { binding: { runtimeId: 'runtime-integration', provider: providerBinding }, port };
+}
+
+async function createConfiguredWorkspace(prefix: string): Promise<{ root: string; controlRoot: string; workspace: string }> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  return { root, controlRoot, workspace };
+}
 
 test('CLI config failures preserve structured owner and next action evidence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-error-'));
@@ -36,6 +90,50 @@ test('CLI host failures remain structured', async () => {
     assert.equal(typeof parsed.error.nextAction, 'string');
     return true;
   });
+});
+
+test('app composes a provider-neutral execution port and preserves adapter ownership', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-execution-');
+  const port = executionPort();
+  const handle = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-execution',
+    execution: runtimeBinding(port),
+  });
+  assert.equal(handle.execution?.port, port);
+  assert.equal(handle.execution?.binding.provider.providerId, 'provider-integration');
+  const observedReadiness = await probeExecutionRuntime(handle.execution!);
+  assert.equal(observedReadiness.state, 'ready');
+  await handle.lock.release();
+  const resumed = await resumeRuntime({ controlRoot, workspace, sessionId: 'session-execution', execution: runtimeBinding(port) });
+  assert.equal(resumed.execution?.port, port);
+  await closeRuntime(resumed, 'checkpoint:execution');
+});
+
+test('app rejects an invalid adapter binding before acquiring a session lock', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-execution-invalid-');
+  const invalidBinding = { ...runtimeBinding(), binding: { ...runtimeBinding().binding, provider: { ...providerBinding, protocol: 'invalid' as never } } };
+  let caught: unknown;
+  try {
+    await openRuntime({ controlRoot, workspace, plan: 'default', sessionId: 'session-invalid-execution', execution: invalidBinding });
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal((caught as { code?: string }).code, 'execution-binding-invalid');
+  assert.equal((caught as { ownerId?: string }).ownerId, 'execution-runtime');
+  assert.equal(typeof (caught as { nextAction?: string }).nextAction, 'string');
+  assert.equal((caught as { cause?: unknown }).cause instanceof Error, true);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const store = new SessionStore(paths);
+  await assert.rejects(() => store.open('session-invalid-execution'), /session does not exist/);
+});
+
+test('app assembly remains DSH-neutral at the source boundary', async () => {
+  const source = await readFile(join(process.cwd(), 'packages/app/src/execution.ts'), 'utf8');
+  assert.equal(/adapters[\\/]dsh|from ['\"]dsh['\"]|require\\(['\"]dsh['\"]\\)/i.test(source), false);
+  assert.equal(/SessionId|SessionEvent/.test(source), false);
 });
 
 test('session lifecycle is persisted below control root and keeps agent cwd separate', async () => {

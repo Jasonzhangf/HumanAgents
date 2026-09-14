@@ -9,6 +9,7 @@
   "include": [
     "**/*.ts",
     "../../packages/app/src/**/*.ts",
-    "../../packages/config/src/**/*.ts"
+    "../../packages/config/src/**/*.ts",
+    "../../packages/contracts/src/**/*.ts"
   ]
 }

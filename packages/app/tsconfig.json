@@ -8,6 +8,7 @@
   },
   "include": [
     "src/**/*.ts",
-    "../config/src/**/*.ts"
+    "../config/src/**/*.ts",
+    "../contracts/src/**/*.ts"
   ]
 }

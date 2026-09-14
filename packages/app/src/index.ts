@@ -1,5 +1,6 @@
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type LoadedConfiguration, type RuntimePaths } from '../../config/src/index.js';
 import { AppLifecycleError } from './errors.js';
+import { bindExecutionRuntime, type RuntimeExecutionBinding } from './execution.js';
 import { SessionStore, type SessionLock, type SessionSnapshot } from './session-store.js';
 
 export interface RuntimeHandle {
@@ -7,30 +8,33 @@ export interface RuntimeHandle {
   readonly configuration: LoadedConfiguration;
   readonly session: SessionSnapshot;
   readonly lock: SessionLock;
+  readonly execution?: RuntimeExecutionBinding;
 }
 
-export async function openRuntime(input: { readonly workspace: string; readonly controlRoot?: string; readonly plan: string; readonly sessionId: string }): Promise<RuntimeHandle> {
+export async function openRuntime(input: { readonly workspace: string; readonly controlRoot?: string; readonly plan: string; readonly sessionId: string; readonly execution?: RuntimeExecutionBinding }): Promise<RuntimeHandle> {
   const paths = await resolveRuntimePaths({ workspace: input.workspace, controlRoot: input.controlRoot });
   await ensureControlLayout(paths);
   const configuration = await loadConfiguration(paths);
   if (!configuration.agentRoster.length) throw new AppLifecycleError('agent-roster-empty', 'no agent is configured', 'add at least one agent to config.toml', 'config-loader');
+  const execution = input.execution ? bindExecutionRuntime(input.execution) : undefined;
   const store = new SessionStore(paths);
   const lock = await store.acquire(input.sessionId);
   try {
     const created = await store.create({ sessionId: input.sessionId, plan: input.plan }, lock);
     const ready = await store.append(input.sessionId, { type: 'session.state', state: 'ready' }, lock);
-    return { paths, configuration, lock, session: ready.records.length > created.records.length ? ready : created };
+    return { paths, configuration, lock, session: ready.records.length > created.records.length ? ready : created, execution };
   } catch (error) {
     await lock.release();
     throw error;
   }
 }
 
-export async function resumeRuntime(input: { readonly workspace: string; readonly controlRoot?: string; readonly sessionId: string }): Promise<RuntimeHandle> {
+export async function resumeRuntime(input: { readonly workspace: string; readonly controlRoot?: string; readonly sessionId: string; readonly execution?: RuntimeExecutionBinding }): Promise<RuntimeHandle> {
   const paths = await resolveRuntimePaths({ workspace: input.workspace, controlRoot: input.controlRoot });
   await ensureControlLayout(paths);
   const configuration = await loadConfiguration(paths);
   if (!configuration.agentRoster.length) throw new AppLifecycleError('agent-roster-empty', 'no agent is configured', 'add at least one agent to config.toml', 'config-loader');
+  const execution = input.execution ? bindExecutionRuntime(input.execution) : undefined;
   const store = new SessionStore(paths);
   const lock = await store.acquire(input.sessionId);
   try {
@@ -38,7 +42,7 @@ export async function resumeRuntime(input: { readonly workspace: string; readonl
     if (session.state === 'stopped' || session.state === 'failed') {
       throw new AppLifecycleError('session-terminal', 'cannot resume a terminal session', 'start a new session or resume from its checkpoint', 'session-store');
     }
-    return { paths, configuration, lock, session };
+    return { paths, configuration, lock, session, execution };
   } catch (error) {
     await lock.release();
     throw error;
@@ -57,5 +61,7 @@ export async function closeRuntime(handle: RuntimeHandle, checkpointRef?: string
 }
 
 export { AppLifecycleError } from './errors.js';
+export { bindExecutionRuntime, probeExecutionRuntime } from './execution.js';
+export type { RuntimeExecutionBinding } from './execution.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
