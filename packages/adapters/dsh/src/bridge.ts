@@ -74,6 +74,18 @@ function requireTransport(inputs: DshBridgeInputs): DshTransport {
   return inputs.transport;
 }
 
+function requireTransportWithSeam(
+  inputs: DshBridgeInputs,
+  phase: ProviderErrorPhase,
+  identity: ProviderExecutionIdentityRef,
+): DshTransport {
+  try {
+    return requireTransport(inputs);
+  } catch (error) {
+    throw dshSeamError('transport-failure', error, { phase, ownerId: inputs.ownerId, identity });
+  }
+}
+
 function contextFor(inputs: DshBridgeInputs, binding: ProviderBinding): Parameters<DshTransport['probe']>[0] {
   const status = classifyDshProfile(inputs.profile);
   if (status.kind !== 'ready') throw new DshAdapterError('dependency-missing', 'DSH profile is not ready; cannot construct transport context', inputs.ownerId);
@@ -336,7 +348,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
         });
       }
       assertNotInFlight(snapshot, 'start');
-      const transport = requireTransport(inputs);
+      const transport = requireTransportWithSeam(inputs, 'start', snapshot);
       const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
       inFlightInstances.set(executionKey(snapshot), fence);
       try {
@@ -375,7 +387,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       if (active) {
         assertScopeMatch(active.scope, scope, 'resume', snapshot, 'active execution');
       }
-      const transport = requireTransport(inputs);
+      const transport = requireTransportWithSeam(inputs, 'resume', snapshot);
       const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
       inFlightInstances.set(executionKey(snapshot), fence);
       try {

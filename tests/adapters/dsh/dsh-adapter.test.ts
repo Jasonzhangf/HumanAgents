@@ -748,6 +748,45 @@ test('missing profile, bundle, transport, and capability are explicit readiness 
   await assert.rejects(missingCapability.capabilities(providerBinding), (error) => error instanceof DshAdapterError && error.code === 'capability-unavailable');
 });
 
+test('DSH start and resume dependency failures retain seam phase and immutable identity', async () => {
+  const cases: ReadonlyArray<{
+    readonly overrides: Parameters<typeof createPort>[0];
+    readonly code: 'dependency-missing' | 'capability-unavailable';
+  }> = [
+    { overrides: { profile: undefined }, code: 'dependency-missing' },
+    { overrides: { profile: { ...profile, plugin: undefined } }, code: 'capability-unavailable' },
+    { overrides: { transport: null }, code: 'dependency-missing' },
+  ];
+
+  for (const { overrides, code } of cases) {
+    await assert.rejects(createPort(overrides).start(startInput()), (error) => {
+      assert.ok(error instanceof DshAdapterError);
+      assert.equal(error.code, code);
+      assert.equal(error.phase, 'start');
+      assert.deepEqual(error.identity, executionIdentity);
+      assert.equal(error.ownerId, 'dsh-adapter');
+      assert.deepEqual(error.nextAction, { kind: 'recover', ref: 'dsh-adapter' });
+      return true;
+    });
+
+    const input = resumeInput();
+    const resumeIdentitySnapshot = {
+      ...executionIdentity,
+      checkpointId: input.checkpointId,
+      checkpointExecutionEpoch: input.checkpointExecutionEpoch,
+    };
+    await assert.rejects(createPort(overrides).resume(input), (error) => {
+      assert.ok(error instanceof DshAdapterError);
+      assert.equal(error.code, code);
+      assert.equal(error.phase, 'resume');
+      assert.deepEqual(error.identity, resumeIdentitySnapshot);
+      assert.equal(error.ownerId, 'dsh-adapter');
+      assert.deepEqual(error.nextAction, { kind: 'recover', ref: 'dsh-adapter' });
+      return true;
+    });
+  }
+});
+
 test('DSH execution lifecycle keeps session evidence external and stop separate from settle', async () => {
   const port = createPort();
   const probe = await port.probe(providerBinding);
