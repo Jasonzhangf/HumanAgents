@@ -9,6 +9,7 @@ import {
 import {
   AnthropicProviderCodec,
   ProviderAdapter,
+  ProviderAdapterError,
   ResponsesProviderCodec,
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
@@ -108,13 +109,28 @@ function startInput() {
 
 function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec()) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const writes: ProviderEvidenceWrite[] = [];
   const transport = createV3ProviderHttpTransport({
     binding: provider,
     baseUrl: 'http://127.0.0.1:4444',
-    evidence: sink(),
+    evidence: {
+      async write(input) {
+        writes.push(input);
+        return {
+          evidenceId: id('evidence', `rcc-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+          kind: input.kind,
+          source: 'rcc-v3-transport-test',
+          locator: input.locator,
+          scope: input.scope,
+        };
+      },
+      async read() {
+        return new Uint8Array();
+      },
+    },
     fetch: async (url, init) => fetch(url, init),
   });
-  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls };
+  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes };
 }
 
 function probeAdapter(fetch: V3ProviderFetch, writes: Array<ProviderEvidenceWrite>, provider = binding) {
@@ -147,7 +163,7 @@ function probeAdapter(fetch: V3ProviderFetch, writes: Array<ProviderEvidenceWrit
   return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec: new ResponsesProviderCodec(), transport, evidence }), calls };
 }
 
-test('RCC v3 probe verifies health and requested model before reporting ready', async () => {
+test('RCC v3 probe keeps listener and model discovery but does not infer protocol readiness', async () => {
   const writes: ProviderEvidenceWrite[] = [];
   const built = probeAdapter(async (url) => {
     if (url.endsWith('/health')) return jsonResponse({ status: 'ok', version: '0.90.4785' });
@@ -156,27 +172,15 @@ test('RCC v3 probe verifies health and requested model before reporting ready', 
   }, writes);
 
   const readiness = await built.adapter.probe(binding);
-  assert.equal(readiness.state, 'ready');
-  const capabilities = await built.adapter.capabilities(binding);
-  assert.deepEqual(capabilities.capabilities, ['model:provider.model', 'responses:stream', 'observe', 'stop', 'settle', 'close']);
+  assert.equal(readiness.state, 'capability-unavailable');
+  assert.equal(readiness.failure?.code, 'capability.protocol-unverified');
+  assert.equal(readiness.failure?.ownerId, 'humanagent.provider-adapter.rcc-v3');
+  await assert.rejects(() => built.adapter.capabilities(binding), /capabilities are unavailable/);
   assert.deepEqual(built.calls.map((call) => [call.init.method, call.url]), [
     ['GET', 'http://127.0.0.1:4444/health'],
     ['GET', 'http://127.0.0.1:4444/v1/models'],
   ]);
-  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models']);
-});
-
-test('ProviderAdapter refreshes an explicit probe while reusing an unexpired capability result', async () => {
-  const writes: ProviderEvidenceWrite[] = [];
-  const built = probeAdapter(async (url) => url.endsWith('/health')
-    ? jsonResponse({ status: 'ok', version: '0.90.4785' })
-    : jsonResponse({ data: [{ id: 'provider.model' }] }), writes);
-
-  await built.adapter.probe(binding);
-  await built.adapter.capabilities(binding);
-  assert.equal(built.calls.length, 2);
-  await built.adapter.probe(binding);
-  assert.equal(built.calls.length, 4);
+  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models', 'probe-capability-unverified']);
 });
 
 test('RCC v3 probe reports capability-unavailable for an empty model list', async () => {
@@ -265,6 +269,46 @@ test('RCC v3 transport maps Anthropic wire to /v1/messages and preserves SSE chu
   assert.equal(events.at(-1)?.terminalState, 'succeeded');
 });
 
+test('RCC v3 transport preserves explicit route binding in evidence without stuffing payload', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const body = chunks([
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1"}}\n\n',
+  ]);
+  const built = adapter(fetchStub(body, calls));
+  await built.adapter.start(startInput());
+  const request = JSON.parse(calls[0].init.body!);
+
+  assert.equal(request.route, undefined);
+  assert.equal(request.execution, undefined);
+  assert.equal(JSON.stringify(request).includes('cc:test-route'), false);
+  assert.equal((built.writes.find((write) => write.type === 'start')?.content as { route?: string } | undefined)?.route, 'cc:test-route');
+});
+
+test('RCC v3 transport rejects route bindings that do not match the provider', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const provider = { ...binding, providerId: 'cc-sol', bindingId: 'binding-cc-sol' };
+  const transport = createV3ProviderHttpTransport({
+    binding: binding,
+    baseUrl: 'http://127.0.0.1:4444',
+    evidence: sink(),
+    fetch: fetchStub(chunks([]), calls),
+  });
+  const wrongRouteAdapter = new ProviderAdapter({
+    binding: provider,
+    routeRef: 'test-route',
+    codec: new ResponsesProviderCodec(),
+    transport,
+    evidence: sink(),
+  });
+
+  await assert.rejects(() => wrongRouteAdapter.start(startInput()), (error) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    assert.match(String(error instanceof Error ? error.message : error), /bind provider/i);
+    return true;
+  });
+});
+
 test('RCC v3 transport exposes provider error and rejects incomplete SSE without terminal', async () => {
   const errorBody = chunks(['event: error\ndata: {"type":"error","error":{"code":"overloaded","message":"busy"}}\n\n']);
   const built = adapter(fetchStub(errorBody, []));
@@ -282,6 +326,25 @@ test('RCC v3 transport exposes provider error and rejects incomplete SSE without
   }, /incomplete|terminal/);
   const incompleteSettlement = await incomplete.adapter.settle(execution);
   assert.equal(incompleteSettlement.state, 'failed');
+});
+
+test('Anthropic waiting outcomes remain waiting through RCC settle', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const body = chunks([
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"provider.model","role":"assistant"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ]);
+  const anthropicBinding = { ...binding, bindingId: 'binding-anthropic', providerId: 'goaichat', protocol: 'anthropic' as const };
+  const built = adapter(fetchStub(body, calls), anthropicBinding, new AnthropicProviderCodec(4096));
+  await built.adapter.start(startInput());
+  const events = [];
+  for await (const event of built.adapter.observe(execution)) events.push(event);
+
+  assert.equal(events.at(-1)?.terminalState, 'waiting');
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'waiting');
+  assert.equal(settled.resourceRelease.state, 'pending');
 });
 
 test('RCC v3 stop receipt is distinct from settle and does not claim remote cancellation', async () => {
@@ -326,4 +389,47 @@ test('RCC v3 stop swallows the transport abort and settles stopped', async () =>
   for await (const _event of built.adapter.observe(execution)) void _event;
   const settled = await built.adapter.settle(execution);
   assert.equal(settled.state, 'stopped');
+});
+
+test('RCC v3 stop does not mask non-abort transport failures as stopped', async () => {
+  const abortAwareFetch: V3ProviderFetch = async (_url, init) => ({
+    status: 200,
+    body: {
+      async *[Symbol.asyncIterator]() {
+        if (init.signal?.aborted) throw new Error('socket hang up');
+        await new Promise<never>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('socket hang up')), { once: true });
+        });
+      },
+    },
+    text: async () => 'rcc-test-response',
+  });
+  const built = adapter(abortAwareFetch);
+  await built.adapter.start(startInput());
+  await built.adapter.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' });
+
+  await assert.rejects(async () => {
+    for await (const _event of built.adapter.observe(execution)) void _event;
+  }, /socket hang up/);
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.resourceRelease.state, 'pending');
+  assert.equal(settled.persistence.state, 'pending');
+  await assert.rejects(() => built.adapter.close(binding), /active executions/);
+});
+
+test('RCC v3 early observe cleanup prevents permanent waiting settlement', async () => {
+  const body = chunks([
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
+  ]);
+  const built = adapter(fetchStub(body, []));
+  await built.adapter.start(startInput());
+
+  for await (const _event of built.adapter.observe(execution)) break;
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.resourceRelease.state, 'pending');
+  await assert.rejects(async () => {
+    for await (const _event of built.adapter.observe(execution)) void _event;
+  }, /observed once/);
 });

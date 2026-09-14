@@ -654,6 +654,35 @@ test('codecs consume legal wire events and preserve real error fields', async ()
   }, context);
   assert.equal(done.events[0].kind, 'output');
 
+  const partDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.content_part.done',
+    item_id: 'item-1',
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'output_text', text: 'part-done' },
+  }, context);
+  assert.equal(partDone.events[0].kind, 'output');
+  assert.equal(partDone.events[0].evidenceRefs.length, 1);
+
+  const itemDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'message', id: 'item-1', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+  }, context);
+  assert.equal(itemDone.events[0].kind, 'output');
+  assert.equal(itemDone.events[0].evidenceRefs.length, 1);
+
+  const argsDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.function_call_arguments.done',
+    item_id: 'item-1',
+    arguments: '{"q":"x"}',
+  }, context);
+  assert.equal(argsDone.events[0].kind, 'output');
+  assert.equal(argsDone.events[0].outputRefs?.length, 1);
+
   const incomplete = await codec.decodeEvent({
     protocol: 'responses',
     type: 'response.incomplete',

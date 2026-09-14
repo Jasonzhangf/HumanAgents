@@ -403,6 +403,53 @@ class WrongCloseBindingTransport extends StubTransport {
   }
 }
 
+class WaitingSettleTransport extends StubTransport {
+  async settle(input: { runtimeId: string; taskId: typeof task; operationId: typeof operation; executionEpoch: number }): Promise<ProviderSettlement> {
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      state: 'waiting',
+      evidenceRefs: [providerEvidence('settle-waiting')],
+      resourceRelease: { state: 'pending', evidenceRefs: [providerEvidence('resource-waiting')] },
+      persistence: { state: 'pending', evidenceRefs: [providerEvidence('persistence-waiting')] },
+      ownerId: 'dsh-adapter',
+      nextAction: { kind: 'continue', ref: 'dsh.observe' },
+    };
+  }
+}
+
+class NotRecoveredTransport extends StubTransport {
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      checkpointId: input.checkpointId,
+      recovered: false,
+      staleRejected: false,
+      recoveryStateRef: externalEvidence('resume-session', 'sess-123'),
+      evidenceRefs: [providerEvidence('resume')],
+      error: {
+        errorId: 'dsh.resume.unsupported',
+        code: 'resume.unsupported',
+        category: 'capability',
+        phase: 'resume',
+        message: 'DSH resume did not recover this provider execution',
+        ownerId: 'dsh-adapter',
+        retryable: 'manual',
+        attention: 'foreground',
+        evidenceRefs: [providerEvidence('resume-error')],
+        nextAction: { kind: 'recover', ref: 'dsh-adapter' },
+      },
+      ownerId: 'dsh-adapter',
+      nextAction: { kind: 'recover', ref: 'dsh-adapter' },
+    };
+  }
+}
+
 function createPort(overrides: {
   profile?: DshProfileDescriptor;
   transport?: DshTransport | null;
@@ -585,6 +632,32 @@ test('DSH settlement validates provider evidence and removes the active fence wi
   await assert.rejects(
     port.submit(submitInput()),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+});
+
+test('DSH bridge keeps the active fence until settlement is final', async () => {
+  const port = createPort({ transport: new WaitingSettleTransport() });
+  await port.start(startInput());
+  const settled = await port.settle(executionIdentity);
+  assert.equal(settled.state, 'waiting');
+
+  const submitted = await port.submit(submitInput());
+  assert.equal(submitted.status, 'completed');
+  const settledAgain = await port.settle(executionIdentity);
+  assert.equal(settledAgain.state, 'waiting');
+});
+
+test('DSH resume only registers active instances for recovered executions', async () => {
+  const port = createPort({ transport: new NotRecoveredTransport() });
+  const resume = await port.resume(resumeInput());
+  assert.equal(resume.recovered, false);
+  await assert.rejects(
+    port.submit(submitInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+  await assert.rejects(
+    port.settle(executionIdentity),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'settle',
   );
 });
 

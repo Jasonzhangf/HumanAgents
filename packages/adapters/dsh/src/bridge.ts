@@ -117,6 +117,12 @@ function executionSnapshot(input: ProviderExecutionIdentityRef): ProviderExecuti
   };
 }
 
+function isFinalSettlement(settlement: ProviderSettlement): boolean {
+  return (settlement.state === 'succeeded' || settlement.state === 'stopped' || settlement.state === 'cancelled')
+    && settlement.resourceRelease.state === 'released'
+    && settlement.persistence.state === 'committed';
+}
+
 function resumeSnapshot(input: ProviderResumeInput): ProviderExecutionIdentityRef & {
   readonly checkpointId: ProviderResumeInput['checkpointId'];
   readonly checkpointExecutionEpoch: number;
@@ -244,7 +250,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       } catch (error) {
         throw dshSeamError('identity-mismatch', error, { phase: 'resume', ownerId: inputs.ownerId, identity: snapshot });
       }
-      activeInstances.add(executionKey(snapshot));
+      if (result.recovered && !result.staleRejected) activeInstances.add(executionKey(snapshot));
       return result;
     },
     async submit(input) {
@@ -290,7 +296,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       const settlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
       validateSeamResult(settlement, 'settle', validateProviderSettlement, { identity: snapshot });
       assertDshExecutionResult(settlement, snapshot, 'settle', inputs.ownerId);
-      activeInstances.delete(executionKey(snapshot));
+      if (isFinalSettlement(settlement)) activeInstances.delete(executionKey(snapshot));
       return settlement;
     },
     async close(binding) {
