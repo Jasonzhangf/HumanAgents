@@ -1,0 +1,122 @@
+import type { BusinessPayload } from '../../../contracts/src/index.js';
+
+export type ProviderProtocol = 'responses' | 'anthropic' | 'other-explicit';
+
+export interface ResponsesWireRequest {
+  readonly protocol: 'responses';
+  readonly type: 'responses.request';
+  readonly route: string;
+  readonly model: string;
+  readonly instructions: string;
+  readonly input: readonly ResponsesWireInputItem[];
+  readonly tools?: readonly ResponsesWireTool[];
+}
+
+export type ResponsesWireInputItem =
+  | { readonly type: 'message'; readonly role: 'user' | 'system'; readonly content: string }
+  | { readonly type: 'function_call_output'; readonly call_id: string; readonly output: string };
+
+export interface ResponsesWireTool {
+  readonly type: 'function';
+  readonly name: string;
+  readonly description: string;
+  readonly input_schema: BusinessPayload;
+}
+
+export type ResponsesWireEvent =
+  | { readonly protocol: 'responses'; readonly type: 'response.created'; readonly response_id: string; readonly model: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.in_progress'; readonly response_id: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.output_item.added'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
+  | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id: string; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id: string; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.completed'; readonly response_id: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response_id: string; readonly reason: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response_id: string; readonly error: ResponsesWireError }
+  | { readonly protocol: 'responses'; readonly type: 'error'; readonly error: ResponsesWireError };
+
+export type ResponsesWireOutputItem =
+  | {
+      readonly type: 'message';
+      readonly id: string;
+      readonly role: 'assistant';
+      readonly content: readonly { readonly type: 'output_text'; readonly text: string }[];
+    }
+  | { readonly type: 'function_call'; readonly id: string; readonly call_id: string; readonly name: string; readonly arguments: string };
+
+export interface ResponsesWireError {
+  readonly code: string;
+  readonly message: string;
+  readonly param?: string;
+}
+
+export interface ResponsesWireCancelRequest {
+  readonly protocol: 'responses';
+  readonly type: 'responses.cancel';
+  readonly route: string;
+  readonly model: string;
+  readonly reason: string;
+}
+
+export interface AnthropicWireRequest {
+  readonly protocol: 'anthropic';
+  readonly type: 'anthropic.request';
+  readonly route: string;
+  readonly model: string;
+  readonly max_tokens: number;
+  readonly system: string;
+  readonly messages: readonly AnthropicWireMessage[];
+  readonly tools?: readonly AnthropicWireTool[];
+}
+
+export interface AnthropicWireMessage {
+  readonly role: 'user' | 'assistant';
+  readonly content: readonly AnthropicWireContentBlock[];
+}
+
+export type AnthropicWireContentBlock =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'thinking'; readonly thinking: string; readonly signature: string }
+  | { readonly type: 'tool_use'; readonly id: string; readonly name: string; readonly input: BusinessPayload }
+  | { readonly type: 'tool_result'; readonly tool_use_id: string; readonly content: string };
+
+export interface AnthropicWireTool {
+  readonly name: string;
+  readonly description: string;
+  readonly input_schema: BusinessPayload;
+}
+
+export type AnthropicWireEvent =
+  | { readonly protocol: 'anthropic'; readonly type: 'message_start'; readonly message: { readonly id: string; readonly model: string; readonly role: 'assistant' } }
+  | { readonly protocol: 'anthropic'; readonly type: 'content_block_start'; readonly index: number; readonly content_block: AnthropicWireContentBlockStart }
+  | { readonly protocol: 'anthropic'; readonly type: 'content_block_delta'; readonly index: number; readonly delta: AnthropicWireDelta }
+  | { readonly protocol: 'anthropic'; readonly type: 'content_block_stop'; readonly index: number }
+  | { readonly protocol: 'anthropic'; readonly type: 'message_delta'; readonly delta: { readonly stop_reason?: string } }
+  | { readonly protocol: 'anthropic'; readonly type: 'message_stop' }
+  | { readonly protocol: 'anthropic'; readonly type: 'error'; readonly error: AnthropicWireError };
+
+export type AnthropicWireContentBlockStart =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'thinking'; readonly thinking: string; readonly signature: string }
+  | { readonly type: 'tool_use'; readonly id: string; readonly name: string; readonly input: BusinessPayload };
+export type AnthropicWireDelta =
+  | { readonly type: 'text_delta'; readonly text: string }
+  | { readonly type: 'thinking_delta'; readonly thinking: string }
+  | { readonly type: 'signature_delta'; readonly signature: string }
+  | { readonly type: 'input_json_delta'; readonly partial_json: string };
+
+export interface AnthropicWireError {
+  readonly type: string;
+  readonly message: string;
+}
+
+export interface AnthropicWireCancelRequest {
+  readonly protocol: 'anthropic';
+  readonly type: 'anthropic.cancel';
+  readonly route: string;
+  readonly model: string;
+  readonly reason: string;
+}
+
+export type ProviderWireRequest = ResponsesWireRequest | AnthropicWireRequest;
+export type ProviderWireStopRequest = ResponsesWireCancelRequest | AnthropicWireCancelRequest;
+export type ProviderWireEvent = ResponsesWireEvent | AnthropicWireEvent;
