@@ -194,7 +194,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     readonly scope: ScopeRef;
     readonly evidenceRefs: readonly EvidenceRef[];
   }
-  const openingInstances = new Map<string, ExecutionFence>();
+  const inFlightInstances = new Map<string, ExecutionFence>();
   const activeInstances = new Map<string, ExecutionFence>();
   let closeInFlight = false;
   let closed = false;
@@ -219,7 +219,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     for (const ref of input.evidenceRefs) assertEvidenceScopeMatches(expected, ref, phase, input as unknown as ProviderExecutionIdentityRef, 'input evidence');
   }
 
-  function assertActive(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase, evidenceRefs: readonly EvidenceRef[] = []): ScopeRef {
+  function assertActive(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase, evidenceRefs: readonly EvidenceRef[] = []): ExecutionFence {
     const active = activeInstances.get(executionKey(identity));
     if (!active) {
       throw new DshAdapterError('identity-mismatch', 'DSH execution is not active; start or resume must open the instance first', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
@@ -228,12 +228,12 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       });
     }
     for (const ref of evidenceRefs) assertEvidenceScopeMatches(active.scope, ref, phase, identity, 'active execution evidence');
-    return scopeSnapshot(active.scope);
+    return active;
   }
 
-  function assertNotOpening(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): void {
-    if (!openingInstances.has(executionKey(identity))) return;
-    throw new DshAdapterError('identity-mismatch', 'DSH execution is already opening; concurrent start or resume is rejected', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+  function assertNotInFlight(identity: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): void {
+    if (!inFlightInstances.has(executionKey(identity))) return;
+    throw new DshAdapterError('identity-mismatch', 'DSH execution is already in flight; concurrent lifecycle operation is rejected', inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
       phase,
       identity,
     });
@@ -248,7 +248,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
   }
 
   function currentFence(): ExecutionFence | undefined {
-    return openingInstances.values().next().value as ExecutionFence | undefined
+    return inFlightInstances.values().next().value as ExecutionFence | undefined
       ?? activeInstances.values().next().value as ExecutionFence | undefined;
   }
 
@@ -335,10 +335,10 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
           identity: snapshot,
         });
       }
-      assertNotOpening(snapshot, 'start');
+      assertNotInFlight(snapshot, 'start');
       const transport = requireTransport(inputs);
       const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
-      openingInstances.set(executionKey(snapshot), fence);
+      inFlightInstances.set(executionKey(snapshot), fence);
       try {
         const transportInput = cloneDetached({ ...input, ...snapshot });
         const rawReceipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => transport.start(transportInput));
@@ -361,7 +361,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
         activeInstances.set(executionKey(snapshot), { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(receipt.evidenceRefs) });
         return cloneDetached(receipt);
       } finally {
-        if (openingInstances.get(executionKey(snapshot)) === fence) openingInstances.delete(executionKey(snapshot));
+        if (inFlightInstances.get(executionKey(snapshot)) === fence) inFlightInstances.delete(executionKey(snapshot));
       }
     },
     async resume(input) {
@@ -370,14 +370,14 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       const scope = executionScopeFromInput(input, 'resume', inputs.ownerId);
       assertInputEvidenceScopeMatches(input, scope, 'resume');
       assertOpenable(snapshot, 'resume');
-      assertNotOpening(snapshot, 'resume');
+      assertNotInFlight(snapshot, 'resume');
       const active = activeInstances.get(executionKey(snapshot));
       if (active) {
         assertScopeMatch(active.scope, scope, 'resume', snapshot, 'active execution');
       }
       const transport = requireTransport(inputs);
       const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
-      openingInstances.set(executionKey(snapshot), fence);
+      inFlightInstances.set(executionKey(snapshot), fence);
       try {
         const transportInput = cloneDetached({ ...input, ...snapshot });
         const rawResult: ProviderRecoveryResult = await runDsh('resume', inputs.ownerId, { identity: snapshot }, async () => transport.resume(transportInput));
@@ -403,7 +403,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
         }
         return cloneDetached(result);
       } finally {
-        if (openingInstances.get(executionKey(snapshot)) === fence) openingInstances.delete(executionKey(snapshot));
+        if (inFlightInstances.get(executionKey(snapshot)) === fence) inFlightInstances.delete(executionKey(snapshot));
       }
     },
     async submit(input) {
@@ -444,18 +444,27 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     async settle(input) {
       validateSeamInput(input, 'settle', validateProviderSettleInput);
       const snapshot = settleSnapshot(input);
-      assertNotOpening(snapshot, 'settle');
-      const scope = assertActive(snapshot, 'settle', input.evidenceRefs ?? []);
-      const transportInput = cloneDetached({ ...input, ...snapshot });
-      const rawSettlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
-      const settlement = cloneRawResult(rawSettlement, 'settle', inputs.ownerId, { identity: snapshot });
-      validateSeamResult(settlement, 'settle', validateProviderSettlement, { identity: snapshot });
-      assertDshExecutionResult(settlement, snapshot, 'settle', inputs.ownerId);
-      for (const ref of settlement.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'settlement evidence');
-      for (const ref of settlement.resourceRelease.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'resource release evidence');
-      for (const ref of settlement.persistence.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'persistence evidence');
-      if (isFinalSettlement(settlement)) activeInstances.delete(executionKey(snapshot));
-      return cloneDetached(settlement);
+      assertNotInFlight(snapshot, 'settle');
+      const active = assertActive(snapshot, 'settle', input.evidenceRefs ?? []);
+      const key = executionKey(snapshot);
+      const fence: ExecutionFence = { scope: scopeSnapshot(active.scope), evidenceRefs: cloneDetached(active.evidenceRefs) };
+      inFlightInstances.set(key, fence);
+      try {
+        const transportInput = cloneDetached({ ...input, ...snapshot });
+        const rawSettlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
+        const settlement = cloneRawResult(rawSettlement, 'settle', inputs.ownerId, { identity: snapshot });
+        validateSeamResult(settlement, 'settle', validateProviderSettlement, { identity: snapshot });
+        assertDshExecutionResult(settlement, snapshot, 'settle', inputs.ownerId);
+        for (const ref of settlement.evidenceRefs) assertEvidenceScopeMatches(active.scope, ref, 'settle', snapshot, 'settlement evidence');
+        for (const ref of settlement.resourceRelease.evidenceRefs) assertEvidenceScopeMatches(active.scope, ref, 'settle', snapshot, 'resource release evidence');
+        for (const ref of settlement.persistence.evidenceRefs) assertEvidenceScopeMatches(active.scope, ref, 'settle', snapshot, 'persistence evidence');
+        if (isFinalSettlement(settlement) && activeInstances.get(key) === active && inFlightInstances.get(key) === fence) {
+          activeInstances.delete(key);
+        }
+        return cloneDetached(settlement);
+      } finally {
+        if (inFlightInstances.get(key) === fence) inFlightInstances.delete(key);
+      }
     },
     async close(binding) {
       validateSeamBinding(binding, 'close');

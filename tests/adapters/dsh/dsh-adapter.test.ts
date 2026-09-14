@@ -528,6 +528,29 @@ class DeferredActiveResumeTransport extends StubTransport {
   }
 }
 
+class DeferredSettlementTransport extends StubTransport {
+  resumeCalls = 0;
+  settleCalls = 0;
+  private releaseSettlement: (() => void) | undefined;
+
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    this.resumeCalls += 1;
+    return super.resume(input);
+  }
+
+  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    this.settleCalls += 1;
+    await new Promise<void>((resolve) => {
+      this.releaseSettlement = resolve;
+    });
+    return super.settle(input);
+  }
+
+  releaseSettlementCall(): void {
+    this.releaseSettlement?.();
+  }
+}
+
 type UncloneableResultKind = 'start' | 'resume' | 'settle' | 'close';
 
 class UncloneableResultTransport extends StubTransport {
@@ -979,6 +1002,30 @@ test('DSH active resume holds an owned fence through transport and publication a
   const submitted = await port.submit(submitInput());
   assert.equal(submitted.status, 'completed');
   await port.settle(executionIdentity);
+  const closed = await port.close(providerBinding);
+  assert.equal(closed.state, 'closed');
+});
+
+test('DSH settlement fence rejects resume publication and keeps close pending until final settlement', async () => {
+  const transport = new DeferredSettlementTransport();
+  const port = createPort({ transport });
+  await port.start(startInput());
+
+  const firstSettlement = port.settle(executionIdentity);
+  assert.equal(transport.settleCalls, 1);
+  await assert.rejects(
+    port.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  assert.equal(transport.resumeCalls, 0);
+
+  const pendingClose = await port.close(providerBinding);
+  assert.equal(pendingClose.state, 'pending');
+
+  transport.releaseSettlementCall();
+  const settled = await firstSettlement;
+  assert.equal(settled.state, 'stopped');
+
   const closed = await port.close(providerBinding);
   assert.equal(closed.state, 'closed');
 });
