@@ -1,4 +1,5 @@
 import {
+  assertNotExpired,
   assertProviderEventEpoch,
   assertProviderExecutionIdentityMatch,
   assertProviderReadinessBinding,
@@ -22,6 +23,7 @@ import {
   type ProviderCapabilities,
   type ProviderCloseResult,
   type ProviderEvent,
+  type EvidenceRef,
   type ProviderExecutionIdentityRef,
   type ProviderObserveInput,
   type ProviderReadiness,
@@ -71,6 +73,19 @@ function sameProviderBinding(a: ProviderBinding, b: ProviderBinding): boolean {
     && a.capabilityDigest === b.capabilityDigest;
 }
 
+function sameExecutionIdentity(a: ProviderExecutionIdentityRef, b: ProviderExecutionIdentityRef): boolean {
+  return a.runtimeId === b.runtimeId
+    && a.taskId.value === b.taskId.value
+    && a.operationId.value === b.operationId.value
+    && a.executionEpoch === b.executionEpoch;
+}
+
+interface ActiveExecution {
+  readonly identity: ProviderExecutionIdentityRef;
+  readonly scope: ScopeRef;
+  readonly externalExecutionRef?: EvidenceRef;
+}
+
 function scopeFromEvidence(input: ProviderStartInput | ProviderResumeInput): ScopeRef {
   const ref = input.evidenceRefs[0];
   if (!ref) {
@@ -88,7 +103,7 @@ function scopeFromEvidence(input: ProviderStartInput | ProviderResumeInput): Sco
 export class ProviderAdapter implements ExecutionRuntimePort {
   readonly kind = 'humanagent.execution-runtime-port' as const;
 
-  private readonly sessions = new Map<string, ScopeRef>();
+  private readonly sessions = new Map<string, ActiveExecution>();
 
   constructor(private readonly options: ProviderAdapterOptions) {
     validateProviderBinding(options.binding);
@@ -143,6 +158,17 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       });
     }
     assertProviderReadinessBinding(readiness, binding);
+    try {
+      assertNotExpired(readiness.expiresAt);
+    } catch {
+      throw new ProviderAdapterError({
+        code: 'readiness.expired',
+        category: 'capability',
+        phase: 'probe',
+        message: 'provider readiness evidence expired',
+        scope: binding,
+      });
+    }
     return readiness;
   }
 
@@ -159,6 +185,17 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       });
     }
     validateProviderCapabilities(capabilities);
+    try {
+      assertNotExpired(capabilities.expiresAt);
+    } catch {
+      throw new ProviderAdapterError({
+        code: 'capability.expired',
+        category: 'capability',
+        phase: 'probe',
+        message: 'provider capability evidence expired',
+        scope: binding,
+      });
+    }
     if (capabilities.bindingId !== binding.bindingId
       || capabilities.providerId !== binding.providerId
       || capabilities.protocol !== binding.protocol
@@ -187,10 +224,11 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     }
     const scope = scopeFromEvidence(input);
     const request = this.options.codec.encodeStart(input, this.options.binding, this.options.routeRef);
-    const receipt = await this.options.transport.start(input, request);
+    const receipt = await this.callTransport('start', input, () => this.options.transport.start(input, request));
     validateProviderStartReceipt(receipt);
     assertProviderExecutionIdentityMatch(receipt, input);
-    this.sessions.set(input.runtimeId, scope);
+    if (receipt.externalExecutionRef) this.assertExternalEvidenceMatches(receipt.externalExecutionRef, input, scope, 'start');
+    this.sessions.set(input.runtimeId, { identity: { ...input }, scope, externalExecutionRef: receipt.externalExecutionRef });
     return receipt;
   }
 
@@ -198,30 +236,43 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     validateProviderResumeInput(input);
     const existing = this.sessions.get(input.runtimeId);
     if (existing) {
-      if (existing.taskId?.value !== input.taskId.value || existing.operationId?.value !== input.operationId.value) {
+      if (!sameExecutionIdentity(existing.identity, input)) {
         throw new ProviderAdapterError({
-          code: 'resume.scope.mismatch',
+          code: 'resume.identity.mismatch',
           category: 'protocol',
           phase: 'resume',
-          message: 'provider resume input does not match active execution scope',
+          message: 'provider resume input does not match active execution identity',
           scope: input,
         });
       }
     }
     const scope = scopeFromEvidence(input);
     const request = this.options.codec.encodeResume(input, this.options.binding, this.options.routeRef);
-    const result = await this.options.transport.resume(input, request);
+    const result = await this.callTransport('resume', input, () => this.options.transport.resume(input, request));
     validateProviderRecoveryResult(result);
     assertProviderExecutionIdentityMatch(result, input);
-    if (result.recovered) this.sessions.set(input.runtimeId, scope);
+    if (result.staleRejected) {
+      throw new ProviderAdapterError({
+        code: 'resume.stale.rejected',
+        category: 'protocol',
+        phase: 'resume',
+        message: result.error?.message ?? 'provider resume rejected stale execution',
+        scope: input,
+        cause: result.error,
+      });
+    }
+    if (result.recovered) {
+      const previous = this.sessions.get(input.runtimeId);
+      this.sessions.set(input.runtimeId, { identity: { ...input }, scope, externalExecutionRef: previous?.externalExecutionRef });
+    }
     return result;
   }
 
   async submit(input: ProviderSubmitInput): Promise<ProviderSubmitResult> {
     validateProviderSubmitInput(input);
-    this.requireScope(input);
+    this.requireActive(input, 'submit');
     const request = this.options.codec.encodeSubmit(input, this.options.binding, this.options.routeRef);
-    const result = await this.options.transport.submit(input, request);
+    const result = await this.callTransport('submit', input, () => this.options.transport.submit(input, request));
     validateProviderSubmitResult(result);
     assertProviderExecutionIdentityMatch(result, input);
     return result;
@@ -229,7 +280,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
 
   async *observe(input: ProviderObserveInput): AsyncIterable<ProviderEvent> {
     validateProviderObserveInput(input);
-    const scope = this.requireScope(input);
+    const active = this.requireActive(input, 'observe');
     if (!this.options.transport.observe) {
       throw new ProviderAdapterError({
         code: 'missing.observe',
@@ -239,22 +290,34 @@ export class ProviderAdapter implements ExecutionRuntimePort {
         scope: input,
       });
     }
-    for await (const raw of this.options.transport.observe(input)) {
-      const decoded: ProviderDecodedEvent = this.options.codec.decodeEvent(raw, { execution: input, scope });
-      for (const event of decoded.events) {
-        validateProviderEvent(event);
-        assertProviderEventEpoch(event, input.executionEpoch);
-        assertProviderExecutionIdentityMatch(event, input);
-        yield event;
+    try {
+      for await (const raw of this.options.transport.observe(input)) {
+        const decoded: ProviderDecodedEvent = this.options.codec.decodeEvent(raw, { execution: active.identity, scope: active.scope });
+        for (const event of decoded.events) {
+          validateProviderEvent(event);
+          assertProviderEventEpoch(event, input.executionEpoch);
+          assertProviderExecutionIdentityMatch(event, input);
+          yield event;
+        }
       }
+    } catch (error) {
+      if (error instanceof ProviderAdapterError) throw error;
+      throw new ProviderAdapterError({
+        code: 'transport.failure',
+        category: 'transport',
+        phase: 'observe',
+        message: error instanceof Error ? error.message : 'provider transport observe failed',
+        scope: active.scope ?? input,
+        cause: error,
+      });
     }
   }
 
   async requestStop(input: ProviderStopRequest): Promise<ProviderStopReceipt> {
     validateProviderStopRequest(input);
-    this.requireScope(input);
+    this.requireActive(input, 'stop');
     const request = this.options.codec.encodeStop(input, this.options.binding, this.options.routeRef);
-    const receipt = await this.options.transport.requestStop(input, request);
+    const receipt = await this.callTransport('stop', input, () => this.options.transport.requestStop(input, request));
     validateProviderStopReceipt(receipt);
     assertProviderExecutionIdentityMatch(receipt, input);
     return receipt;
@@ -262,33 +325,117 @@ export class ProviderAdapter implements ExecutionRuntimePort {
 
   async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
     validateProviderSettleInput(input);
-    this.requireScope(input);
-    const result = await this.options.transport.settle(input);
+    this.requireActive(input, 'settle');
+    const result = await this.callTransport('settle', input, () => this.options.transport.settle(input));
     validateProviderSettlement(result);
     assertProviderExecutionIdentityMatch(result, input);
-    this.sessions.delete(input.runtimeId);
+    if (this.isFinalSettlement(result)) this.sessions.delete(input.runtimeId);
     return result;
   }
 
   async close(binding: ProviderBinding): Promise<ProviderCloseResult> {
     this.assertSameBinding(binding, 'close');
-    const result = await this.options.transport.close(binding);
+    const result = await this.callTransport('close', binding, () => this.options.transport.close(binding));
     validateProviderCloseResult(result);
+    if (result.bindingId !== binding.bindingId || result.providerId !== binding.providerId || result.protocol !== binding.protocol) {
+      throw new ProviderAdapterError({
+        code: 'close.binding.mismatch',
+        category: 'protocol',
+        phase: 'close',
+        message: 'provider close result does not match binding identity',
+        scope: binding,
+      });
+    }
+    if (result.state === 'closed') this.sessions.clear();
     return result;
   }
 
-  private requireScope(input: ProviderExecutionIdentityRef): ScopeRef {
-    const scope = this.sessions.get(input.runtimeId);
-    if (!scope) {
+  private requireActive(input: ProviderExecutionIdentityRef, phase: ProviderErrorPhase): ActiveExecution {
+    const active = this.sessions.get(input.runtimeId);
+    if (!active) {
       throw new ProviderAdapterError({
         code: 'missing.active.execution',
         category: 'runtime',
-        phase: 'observe',
+        phase,
         message: 'provider operation has no active execution scope',
         scope: input,
       });
     }
-    return scope;
+    if (!sameExecutionIdentity(active.identity, input)) {
+      throw new ProviderAdapterError({
+        code: 'runtime.identity.mismatch',
+        category: 'runtime',
+        phase,
+        message: 'provider operation does not match active execution identity',
+        scope: input,
+      });
+    }
+    return active;
+  }
+
+  private isFinalSettlement(result: ProviderSettlement): boolean {
+    return (result.state === 'succeeded' || result.state === 'stopped' || result.state === 'cancelled')
+      && result.resourceRelease.state === 'released'
+      && result.persistence.state === 'committed';
+  }
+
+  private async callTransport<T>(
+    phase: ProviderErrorPhase,
+    scope: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      if (error instanceof ProviderAdapterError) throw error;
+      throw new ProviderAdapterError({
+        code: 'transport.failure',
+        category: 'transport',
+        phase,
+        message: error instanceof Error ? error.message : 'provider transport call failed',
+        scope,
+        cause: error,
+      });
+    }
+  }
+
+  private assertExternalEvidenceMatches(ref: EvidenceRef, execution: ProviderExecutionIdentityRef, scope: ScopeRef, phase: ProviderErrorPhase): void {
+    if (ref.scope.organId.value !== scope.organId.value) {
+      throw new ProviderAdapterError({
+        code: 'external.binding.scope.mismatch',
+        category: 'protocol',
+        phase,
+        message: 'provider external execution binding does not match organ',
+        scope: execution,
+      });
+    }
+    if (ref.scope.taskId && ref.scope.taskId.value !== execution.taskId.value) {
+      throw new ProviderAdapterError({
+        code: 'external.binding.scope.mismatch',
+        category: 'protocol',
+        phase,
+        message: 'provider external execution binding does not match task',
+        scope: execution,
+      });
+    }
+    if (ref.scope.operationId && ref.scope.operationId.value !== execution.operationId.value) {
+      throw new ProviderAdapterError({
+        code: 'external.binding.scope.mismatch',
+        category: 'protocol',
+        phase,
+        message: 'provider external execution binding does not match operation',
+        scope: execution,
+      });
+    }
+    if (ref.scope.cycleId && scope.cycleId && ref.scope.cycleId.value !== scope.cycleId.value) {
+      throw new ProviderAdapterError({
+        code: 'external.binding.scope.mismatch',
+        category: 'protocol',
+        phase,
+        message: 'provider external execution binding does not match cycle',
+        scope: execution,
+      });
+    }
   }
 
   private assertSameBinding(binding: ProviderBinding, phase: ProviderErrorPhase): void {

@@ -27,6 +27,7 @@ import {
   ResponsesProviderCodec,
   type ProviderTransport,
   type ProviderWireEvent,
+  type ResponsesWireTool,
 } from '../../../packages/adapters/provider/src/index.js';
 
 const organ = id('organ', 'organ-a');
@@ -173,13 +174,14 @@ function stopReceipt(): ProviderStopReceipt {
   };
 }
 
-function settlement(): ProviderSettlement {
+function settlement(overrides: Partial<ProviderSettlement> = {}): ProviderSettlement {
   return {
     ...execution(),
     state: 'succeeded',
     evidenceRefs: [evidence('settle')],
     resourceRelease: { state: 'released', evidenceRefs: [evidence('resource')] },
     persistence: { state: 'committed', evidenceRefs: [evidence('persistence')] },
+    ...overrides,
   };
 }
 
@@ -237,7 +239,7 @@ test('responses codec maps terminal, tool, and error wire events', () => {
   const codec = new ResponsesProviderCodec();
   const context = { execution: execution(), scope: operationScope };
 
-  const completed = codec.decodeEvent({ protocol: 'responses', type: 'response.completed', response_id: 'response-1' }, context);
+  const completed = codec.decodeEvent({ protocol: 'responses', type: 'response.completed', response: { id: 'response-1' } }, context);
   assert.equal(completed.events[0].kind, 'terminal');
   assert.equal(completed.events[0].terminalState, 'succeeded');
 
@@ -254,10 +256,55 @@ test('responses codec maps terminal, tool, and error wire events', () => {
   assert.equal(error.events[0].error?.code, 'wire.error');
 });
 
+test('responses and anthropic resume codecs keep checkpoint control truth off business payload', () => {
+  const responses = new ResponsesProviderCodec();
+  const anthropic = new AnthropicProviderCodec(4096);
+
+  const responsesResume = responses.encodeResume(resumeInput(), ccBinding, 'cc-route');
+  const anthropicResume = anthropic.encodeResume(resumeInput(), goaichatBinding, 'goaichat-route');
+
+  const responsesInput = responsesResume.input[0];
+  assert.equal(responsesInput.type, 'message');
+  const responsesContent = responsesInput.type === 'message' ? responsesInput.content : '';
+  assert.equal(responsesContent.includes('cp-provider'), false);
+  assert.equal(responsesContent.includes('checkpoint'), false);
+  assert.equal(responsesResume.checkpointId?.value, 'cp-provider');
+  assert.equal(responsesResume.execution.executionEpoch, 1);
+
+  const anthropicContent = anthropicResume.messages[0].content[0];
+  assert.equal(anthropicContent.type, 'text');
+  const anthropicText = anthropicContent.type === 'text' ? anthropicContent.text : '';
+  assert.equal(anthropicText.includes('cp-provider'), false);
+  assert.equal(anthropicText.includes('checkpoint'), false);
+  assert.equal(anthropicResume.checkpointId?.value, 'cp-provider');
+  assert.equal(anthropicResume.execution.executionEpoch, 1);
+});
+
+test('responses wire shape uses nested response id and real tool parameters', () => {
+  const codec = new ResponsesProviderCodec();
+  const context = { execution: execution(), scope: operationScope };
+
+  const created = codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.created',
+    response: { id: 'response-1', model: 'model-cc' },
+  }, context);
+  assert.equal(created.events[0].eventId, 'event-response.created');
+
+  const toolSchema: ResponsesWireTool = {
+    type: 'function',
+    name: 'lookup',
+    description: 'lookup a value',
+    parameters: { type: 'object', properties: { key: { type: 'string' } } },
+  };
+  assert.deepEqual(toolSchema.parameters.properties, { key: { type: 'string' } });
+});
+
 test('anthropic codec maps terminal, tool, and error wire events', () => {
   const codec = new AnthropicProviderCodec(4096);
   const context = { execution: execution(), scope: operationScope };
 
+  codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } }, context);
   const completed = codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
   assert.equal(completed.events[0].kind, 'terminal');
   assert.equal(completed.events[0].terminalState, 'succeeded');
@@ -275,6 +322,61 @@ test('anthropic codec maps terminal, tool, and error wire events', () => {
   assert.equal(error.events[0].error?.code, 'wire_error');
 });
 
+test('anthropic codec accepts legal empty content fields and maps stop_reason', () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = { execution: execution(), scope: operationScope };
+
+  assert.doesNotThrow(() => codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'text', text: '' },
+  }, context));
+  assert.doesNotThrow(() => codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_start',
+    index: 1,
+    content_block: { type: 'thinking', thinking: '', signature: '' },
+  }, context));
+  assert.doesNotThrow(() => codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'text_delta', text: '' },
+  }, context));
+
+  codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'max_tokens' } }, context);
+  const incomplete = codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
+  assert.equal(incomplete.events[0].terminalState, 'waiting');
+
+  codec.decodeEvent({ protocol: 'anthropic', type: 'message_delta', delta: { stop_reason: 'end_turn' } }, context);
+  const completed = codec.decodeEvent({ protocol: 'anthropic', type: 'message_stop' }, context);
+  assert.equal(completed.events[0].terminalState, 'succeeded');
+});
+
+test('codec evidence refs preserve provider wire content digests instead of fake wire refs', () => {
+  const codec = new ResponsesProviderCodec();
+  const context = { execution: execution(), scope: operationScope };
+
+  const delta = codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.delta',
+    item_id: 'item-1',
+    delta: 'hello',
+  }, context);
+  assert.equal(delta.events[0].outputRefs?.[0].startsWith('wire://'), false);
+  assert.equal(typeof delta.events[0].evidenceRefs[0].digest, 'string');
+
+  const tool = codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'lookup', arguments: '{"q":"x"}' },
+  }, context);
+  assert.equal(tool.events[0].outputRefs?.[0].startsWith('wire://'), false);
+  assert.equal(typeof tool.events[0].evidenceRefs[0].digest, 'string');
+});
+
 test('provider adapter binds cc, cc-sol, and goaichat as distinct explicit routes', async () => {
   const cc = responsesAdapter(makeTransport(ccBinding), ccBinding);
   const ccSol = responsesAdapter(makeTransport(ccSolBinding), ccSolBinding);
@@ -289,9 +391,9 @@ test('provider adapter binds cc, cc-sol, and goaichat as distinct explicit route
 
 test('provider adapter runs start, observe, stop receipt, settle, and close', async () => {
   const events: ProviderWireEvent[] = [
-    { protocol: 'responses', type: 'response.created', response_id: 'response-1', model: 'model-cc' },
+    { protocol: 'responses', type: 'response.created', response: { id: 'response-1', model: 'model-cc' } },
     { protocol: 'responses', type: 'response.output_text.delta', item_id: 'item-1', delta: 'hello' },
-    { protocol: 'responses', type: 'response.completed', response_id: 'response-1' },
+    { protocol: 'responses', type: 'response.completed', response: { id: 'response-1' } },
   ];
   const transport = makeTransport(ccBinding, {
     observe: async function* () { yield* events; },
@@ -309,6 +411,81 @@ test('provider adapter runs start, observe, stop receipt, settle, and close', as
   const settled = await adapter.settle(execution());
   assert.equal(settled.state, 'succeeded');
   assert.equal((await adapter.close(ccBinding)).state, 'closed');
+});
+
+test('provider adapter fences full active execution identity and refuses mismatched operations', async () => {
+  const transport = makeTransport(ccBinding, {
+    observe: async function* () {
+      yield { protocol: 'responses', type: 'response.output_text.delta', item_id: 'item-1', delta: 'x' };
+    },
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await adapter.start(startInput());
+  await assert.rejects(() => adapter.submit(submitInput({ executionEpoch: 2 })), /identity/);
+  await assert.rejects(() => adapter.requestStop(stopRequest({ operationId: id('operation', 'operation-b') })), /identity/);
+  await assert.rejects(() => adapter.settle({ ...execution(), taskId: id('task', 'task-b') }), /identity/);
+  for await (const _event of adapter.observe(execution())) void _event;
+});
+
+test('provider adapter keeps active execution until settlement is final', async () => {
+  const waiting = settlement({
+    state: 'waiting',
+    ownerId: 'humanagent.provider-adapter',
+    nextAction: { kind: 'wait', ref: 'condition-a' },
+    resourceRelease: { state: 'pending', evidenceRefs: [evidence('resource-pending')] },
+    persistence: { state: 'pending', evidenceRefs: [evidence('persistence-pending')] },
+  });
+  const transport = makeTransport(ccBinding, {
+    observe: async function* () {
+      yield { protocol: 'responses', type: 'response.output_text.delta', item_id: 'item-1', delta: 'x' };
+    },
+    settle: async () => waiting,
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await adapter.start(startInput());
+  const settled = await adapter.settle(execution());
+  assert.equal(settled.state, 'waiting');
+
+  const observed: ProviderEvent[] = [];
+  for await (const event of adapter.observe(execution())) observed.push(event);
+  assert.ok(observed.length > 0);
+});
+
+test('provider adapter rejects expired readiness/capability evidence and mismatched close receipts', async () => {
+  const expiredReadiness = responsesAdapter(makeTransport(ccBinding, {
+    readiness: { ...readiness(ccBinding), expiresAt: '2000-01-01T00:00:00Z' },
+  }), ccBinding);
+  await assert.rejects(() => expiredReadiness.probe(ccBinding), /expired/);
+
+  const expiredCapabilities = responsesAdapter(makeTransport(ccBinding, {
+    capabilities: { ...capabilities(ccBinding), expiresAt: '2000-01-01T00:00:00Z' },
+  }), ccBinding);
+  await assert.rejects(() => expiredCapabilities.capabilities(ccBinding), /expired/);
+
+  const badClose = responsesAdapter(makeTransport(ccBinding, {
+    close: async () => closeResult(ccSolBinding),
+  }), ccBinding);
+  await assert.rejects(() => badClose.close(ccBinding), /binding identity/);
+});
+
+test('provider adapter maps transport exceptions to typed provider errors with cause', async () => {
+  const transport = makeTransport(ccBinding, {
+    start: async () => {
+      throw new Error('network down');
+    },
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await assert.rejects(() => adapter.start(startInput()), (error) => {
+    assert.ok(error instanceof ProviderAdapterError);
+    assert.equal(error.providerError.phase, 'start');
+    assert.equal(error.providerError.ownerId, 'humanagent.provider-adapter');
+    assert.equal(error.providerError.nextAction.ref, 'humanagent.provider-adapter');
+    assert.equal((error as Error & { cause?: Error }).cause?.message, 'network down');
+    return true;
+  });
 });
 
 test('protocol mismatch, missing readiness evidence, unknown event, and missing fields fail explicitly', async () => {
@@ -329,12 +506,12 @@ test('protocol mismatch, missing readiness evidence, unknown event, and missing 
   }, /unknown/);
 
   const missingFieldAdapter = responsesAdapter(makeTransport(ccBinding, {
-    observe: async function* () { yield { protocol: 'responses', type: 'response.completed' } as unknown as ProviderWireEvent; },
+    observe: async function* () { yield { protocol: 'responses', type: 'response.completed', response: {} } as unknown as ProviderWireEvent; },
   }), ccBinding);
   await missingFieldAdapter.start(startInput());
   await assert.rejects(async () => {
     for await (const _event of missingFieldAdapter.observe(execution())) void _event;
-  }, /missing response_id/);
+  }, /missing id/);
 
   const noActiveExecution = responsesAdapter(makeTransport(ccBinding), ccBinding);
   await assert.rejects(async () => {

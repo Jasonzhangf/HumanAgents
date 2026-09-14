@@ -1,4 +1,4 @@
-import type { BusinessPayload } from '../../../contracts/src/index.js';
+import type { BusinessPayload, CheckpointId, ProviderExecutionIdentityRef } from '../../../contracts/src/index.js';
 
 export type ProviderProtocol = 'responses' | 'anthropic' | 'other-explicit';
 
@@ -10,6 +10,8 @@ export interface ResponsesWireRequest {
   readonly instructions: string;
   readonly input: readonly ResponsesWireInputItem[];
   readonly tools?: readonly ResponsesWireTool[];
+  readonly execution: ProviderExecutionIdentityRef;
+  readonly checkpointId?: CheckpointId;
 }
 
 export type ResponsesWireInputItem =
@@ -20,18 +22,18 @@ export interface ResponsesWireTool {
   readonly type: 'function';
   readonly name: string;
   readonly description: string;
-  readonly input_schema: BusinessPayload;
+  readonly parameters: BusinessPayload;
 }
 
 export type ResponsesWireEvent =
-  | { readonly protocol: 'responses'; readonly type: 'response.created'; readonly response_id: string; readonly model: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.in_progress'; readonly response_id: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.created'; readonly response: { readonly id: string; readonly model?: string } }
+  | { readonly protocol: 'responses'; readonly type: 'response.in_progress'; readonly response: { readonly id: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.added'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
   | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id: string; readonly delta: string }
   | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id: string; readonly delta: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.completed'; readonly response_id: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response_id: string; readonly reason: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response_id: string; readonly error: ResponsesWireError }
+  | { readonly protocol: 'responses'; readonly type: 'response.completed'; readonly response: { readonly id: string } }
+  | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response: { readonly id: string }; readonly reason: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response: { readonly id: string }; readonly error: ResponsesWireError }
   | { readonly protocol: 'responses'; readonly type: 'error'; readonly error: ResponsesWireError };
 
 export type ResponsesWireOutputItem =
@@ -55,6 +57,7 @@ export interface ResponsesWireCancelRequest {
   readonly route: string;
   readonly model: string;
   readonly reason: string;
+  readonly execution: ProviderExecutionIdentityRef;
 }
 
 export interface AnthropicWireRequest {
@@ -66,6 +69,8 @@ export interface AnthropicWireRequest {
   readonly system: string;
   readonly messages: readonly AnthropicWireMessage[];
   readonly tools?: readonly AnthropicWireTool[];
+  readonly execution: ProviderExecutionIdentityRef;
+  readonly checkpointId?: CheckpointId;
 }
 
 export interface AnthropicWireMessage {
@@ -115,6 +120,7 @@ export interface AnthropicWireCancelRequest {
   readonly route: string;
   readonly model: string;
   readonly reason: string;
+  readonly execution: ProviderExecutionIdentityRef;
 }
 
 export type ProviderWireRequest = ResponsesWireRequest | AnthropicWireRequest;

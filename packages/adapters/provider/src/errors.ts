@@ -53,6 +53,7 @@ export class ProviderAdapterError extends Error {
   constructor(input: ProviderAdapterErrorInput) {
     super(input.message);
     this.name = 'ProviderAdapterError';
+    if (input.cause !== undefined) this.cause = input.cause;
     this.providerError = {
       errorId: `provider.${input.phase}.${input.code}`,
       code: input.code,
