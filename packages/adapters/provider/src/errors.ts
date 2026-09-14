@@ -45,6 +45,7 @@ export interface ProviderAdapterErrorInput {
   readonly attention?: ProviderAttentionClass;
   readonly nextAction?: NextAction;
   readonly cause?: unknown;
+  readonly evidenceRefs?: readonly EvidenceRef[];
 }
 
 export class ProviderAdapterError extends Error {
@@ -63,7 +64,7 @@ export class ProviderAdapterError extends Error {
       ownerId: OWNER_ID,
       retryable: input.retryable ?? 'manual',
       attention: input.attention ?? 'foreground',
-      evidenceRefs: [errorEvidence(input.scope, `${input.phase}-${input.code}`)],
+      evidenceRefs: input.evidenceRefs ?? [errorEvidence(input.scope, `${input.phase}-${input.code}`)],
       nextAction: input.nextAction ?? { kind: 'recover', ref: OWNER_ID },
     };
   }

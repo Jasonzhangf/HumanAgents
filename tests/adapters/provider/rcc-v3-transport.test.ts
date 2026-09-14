@@ -110,59 +110,70 @@ function startInput() {
 function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec()) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const writes: ProviderEvidenceWrite[] = [];
+  const contentByRef = new Map<EvidenceRef, Uint8Array>();
+  const transportEvidence: ProviderEvidenceSink = {
+    async write(input) {
+      const ref = {
+        evidenceId: id('evidence', `rcc-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+        kind: input.kind,
+        source: 'rcc-v3-transport-test',
+        locator: input.locator,
+        scope: input.scope,
+      };
+      writes.push(input);
+      contentByRef.set(ref, new TextEncoder().encode(typeof input.content === 'string' ? input.content : JSON.stringify(input.content)));
+      return ref;
+    },
+    async read(ref) {
+      const content = contentByRef.get(ref);
+      if (!content) throw new Error(`missing evidence ${ref.locator}`);
+      return content;
+    },
+  };
   const transport = createV3ProviderHttpTransport({
     binding: provider,
     baseUrl: 'http://127.0.0.1:4444',
-    evidence: {
-      async write(input) {
-        writes.push(input);
-        return {
-          evidenceId: id('evidence', `rcc-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
-          kind: input.kind,
-          source: 'rcc-v3-transport-test',
-          locator: input.locator,
-          scope: input.scope,
-        };
-      },
-      async read() {
-        return new Uint8Array();
-      },
-    },
+    evidence: transportEvidence,
     fetch: async (url, init) => fetch(url, init),
   });
-  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes };
+  return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes, evidence: transportEvidence };
 }
 
 function transportHarness() {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const writes: ProviderEvidenceWrite[] = [];
   const refs: EvidenceRef[] = [];
+  const contentByRef = new Map<EvidenceRef, Uint8Array>();
+  const evidence: ProviderEvidenceSink = {
+    async write(input) {
+      writes.push(input);
+      const ref = {
+        evidenceId: id('evidence', `rcc-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+        kind: input.kind,
+        source: 'rcc-v3-transport-test',
+        locator: input.locator,
+        scope: input.scope,
+      };
+      refs.push(ref);
+      contentByRef.set(ref, new TextEncoder().encode(typeof input.content === 'string' ? input.content : JSON.stringify(input.content)));
+      return ref;
+    },
+    async read(ref) {
+      const content = contentByRef.get(ref);
+      if (!content) throw new Error(`missing evidence ${ref.locator}`);
+      return content;
+    },
+  };
   const transport = createV3ProviderHttpTransport({
     binding,
     baseUrl: 'http://127.0.0.1:4444',
-    evidence: {
-      async write(input) {
-        writes.push(input);
-        const ref = {
-          evidenceId: id('evidence', `rcc-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
-          kind: input.kind,
-          source: 'rcc-v3-transport-test',
-          locator: input.locator,
-          scope: input.scope,
-        };
-        refs.push(ref);
-        return ref;
-      },
-      async read() {
-        return new Uint8Array();
-      },
-    },
+    evidence,
     fetch: async (url, init) => {
       calls.push({ url, init });
       throw new Error(`unexpected fetch: ${url}`);
     },
   });
-  return { transport, calls, writes, refs };
+  return { transport, calls, writes, refs, evidence };
 }
 
 function executionKey(input = execution): string {
@@ -289,13 +300,22 @@ test('RCC v3 start fails closed because route selection is unavailable', async (
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const built = adapter(fetchStub(chunks([]), calls));
 
-  await assert.rejects(() => built.adapter.start(startInput()), (error) => {
-    assert.equal(error instanceof ProviderAdapterError, true);
-    assert.equal((error as ProviderAdapterError).providerError.code, 'capability.route-selection-unavailable');
-    assert.equal((error as ProviderAdapterError).providerError.category, 'capability');
-    assert.equal((error as ProviderAdapterError).providerError.nextAction.kind, 'recover');
-    return true;
-  });
+  let caught: unknown;
+  try {
+    await built.adapter.start(startInput());
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught instanceof ProviderAdapterError, true);
+  const providerError = (caught as ProviderAdapterError).providerError;
+  assert.equal(providerError.code, 'capability.route-selection-unavailable');
+  assert.equal(providerError.category, 'capability');
+  assert.equal(providerError.nextAction.kind, 'recover');
+  const ref = providerError.evidenceRefs[0];
+  assert.ok(ref);
+  assert.equal(ref.locator, 'rcc-v3://route-selection-unavailable');
+  const readable = await built.evidence.read(ref);
+  assert.match(new TextDecoder().decode(readable), /cc:test-route/);
   assert.equal(calls.length, 0);
   assert.deepEqual(built.writes.map((write) => write.type), ['route-selection-unavailable']);
   assert.equal((built.writes[0].content as { route?: string }).route, 'cc:test-route');
@@ -434,6 +454,53 @@ test('RCC v3 stop swallows the exact controller cancellation identity', async ()
   for await (const _event of built.transport.observe(execution)) void _event;
   const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'stopped');
+});
+
+test('RCC v3 provider failure remains failed when exact stop abort closes observation', async () => {
+  const built = transportHarness();
+  let controller!: AbortController;
+  let resolveErrorSeen!: () => void;
+  const errorSeen = new Promise<void>((resolve) => {
+    resolveErrorSeen = resolve;
+  });
+  const providerFailureBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      yield new TextEncoder().encode('event: error\ndata: {"type":"error","error":{"code":"overloaded","message":"busy"}}\n\n');
+      if (controller.signal.aborted) throw controller.signal.reason;
+      await new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+      });
+    },
+  };
+  controller = seedActive(built.transport, providerFailureBody).controller;
+  const observing = (async () => {
+    for await (const event of built.transport.observe(execution)) {
+      if (event.type === 'error') resolveErrorSeen();
+    }
+  })();
+
+  await errorSeen;
+  const stop = await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'operator stop',
+    execution,
+  });
+  await observing;
+
+  assert.equal(stop.status, 'accepted');
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'overloaded');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'pending');
+  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), true);
+  const errorRef = settled.error?.evidenceRefs[0];
+  assert.ok(errorRef);
+  const readable = await built.evidence.read(errorRef);
+  assert.match(new TextDecoder().decode(readable), /overloaded/);
 });
 
 test('RCC v3 stop does not mask an ordinary Error containing abort as stopped', async () => {

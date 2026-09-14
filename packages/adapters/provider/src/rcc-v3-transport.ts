@@ -425,7 +425,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     const route = requestRoute(request);
     this.assertRouteBinding(route, this.options.binding.providerId);
     const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
-    await this.writeEvidence(scope, 'route-selection-unavailable', {
+    const evidenceRef = await this.writeEvidence(scope, 'route-selection-unavailable', {
       route,
       protocol,
       model: request.model,
@@ -437,6 +437,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       message: 'RCC v3 has no verified route-selection control; refusing to start with a recorded route label',
       scope: input,
       nextAction: { kind: 'recover', ref: OWNER },
+      evidenceRefs: [evidenceRef],
     });
   }
 
@@ -525,7 +526,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     } catch (cause) {
       active.streamDone = true;
       if (isExpectedStopAbort(cause, active)) {
-        active.terminalState = 'stopped';
+        if (!active.terminalError) active.terminalState = 'stopped';
         active.resourceReleased = true;
         return;
       } else if (!active.terminalError) {
