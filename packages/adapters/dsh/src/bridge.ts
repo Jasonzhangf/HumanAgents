@@ -133,6 +133,24 @@ function cloneDetached<T>(input: T): T {
   return structuredClone(input);
 }
 
+function cloneRawResult<T>(
+  input: T,
+  phase: ProviderErrorPhase,
+  ownerId: string,
+  options: { readonly binding?: ProviderBinding; readonly identity?: ProviderExecutionIdentityRef },
+): T {
+  try {
+    return cloneDetached(input);
+  } catch (error) {
+    throw dshSeamError('transport-failure', error, {
+      phase,
+      ownerId,
+      binding: options.binding,
+      identity: options.identity,
+    });
+  }
+}
+
 function executionScopeFromInput(input: ProviderStartInput | ProviderResumeInput, phase: ProviderErrorPhase, ownerId: string): ScopeRef {
   const ref = input.evidenceRefs[0];
   if (!ref) {
@@ -230,8 +248,8 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
   }
 
   function currentFence(): ExecutionFence | undefined {
-    return activeInstances.values().next().value as ExecutionFence | undefined
-      ?? openingInstances.values().next().value as ExecutionFence | undefined;
+    return openingInstances.values().next().value as ExecutionFence | undefined
+      ?? activeInstances.values().next().value as ExecutionFence | undefined;
   }
 
   function pendingClose(binding: ProviderBinding, fence: ExecutionFence): ProviderCloseResult {
@@ -324,7 +342,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       try {
         const transportInput = cloneDetached({ ...input, ...snapshot });
         const rawReceipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => transport.start(transportInput));
-        const receipt = cloneDetached(rawReceipt);
+        const receipt = cloneRawResult(rawReceipt, 'start', inputs.ownerId, { identity: snapshot });
         validateSeamResult(receipt, 'start', validateProviderStartReceipt, { identity: snapshot });
         assertDshExecutionResult(receipt, snapshot, 'start', inputs.ownerId);
         for (const ref of receipt.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'start', snapshot, 'start evidence');
@@ -352,21 +370,18 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       const scope = executionScopeFromInput(input, 'resume', inputs.ownerId);
       assertInputEvidenceScopeMatches(input, scope, 'resume');
       assertOpenable(snapshot, 'resume');
+      assertNotOpening(snapshot, 'resume');
       const active = activeInstances.get(executionKey(snapshot));
       if (active) {
         assertScopeMatch(active.scope, scope, 'resume', snapshot, 'active execution');
-      } else {
-        assertNotOpening(snapshot, 'resume');
       }
       const transport = requireTransport(inputs);
-      const fence: ExecutionFence | undefined = active
-        ? undefined
-        : { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
-      if (fence) openingInstances.set(executionKey(snapshot), fence);
+      const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
+      openingInstances.set(executionKey(snapshot), fence);
       try {
         const transportInput = cloneDetached({ ...input, ...snapshot });
         const rawResult: ProviderRecoveryResult = await runDsh('resume', inputs.ownerId, { identity: snapshot }, async () => transport.resume(transportInput));
-        const result = cloneDetached(rawResult);
+        const result = cloneRawResult(rawResult, 'resume', inputs.ownerId, { identity: snapshot });
         validateSeamResult(result, 'resume', validateProviderRecoveryResult, { identity: snapshot });
         assertDshExecutionResult(result, snapshot, 'resume', inputs.ownerId);
         if (result.checkpointId.value !== snapshot.checkpointId.value || result.checkpointId.scope !== snapshot.checkpointId.scope) {
@@ -383,11 +398,12 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
           throw dshSeamError('identity-mismatch', error, { phase: 'resume', ownerId: inputs.ownerId, identity: snapshot });
         }
         if (result.recovered && !result.staleRejected) {
+          assertOpenable(snapshot, 'resume');
           activeInstances.set(executionKey(snapshot), { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(result.evidenceRefs) });
         }
         return cloneDetached(result);
       } finally {
-        if (fence && openingInstances.get(executionKey(snapshot)) === fence) openingInstances.delete(executionKey(snapshot));
+        if (openingInstances.get(executionKey(snapshot)) === fence) openingInstances.delete(executionKey(snapshot));
       }
     },
     async submit(input) {
@@ -428,10 +444,11 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
     async settle(input) {
       validateSeamInput(input, 'settle', validateProviderSettleInput);
       const snapshot = settleSnapshot(input);
+      assertNotOpening(snapshot, 'settle');
       const scope = assertActive(snapshot, 'settle', input.evidenceRefs ?? []);
       const transportInput = cloneDetached({ ...input, ...snapshot });
       const rawSettlement: ProviderSettlement = await runDsh('settle', inputs.ownerId, { identity: snapshot }, async () => requireTransport(inputs).settle(transportInput));
-      const settlement = cloneDetached(rawSettlement);
+      const settlement = cloneRawResult(rawSettlement, 'settle', inputs.ownerId, { identity: snapshot });
       validateSeamResult(settlement, 'settle', validateProviderSettlement, { identity: snapshot });
       assertDshExecutionResult(settlement, snapshot, 'settle', inputs.ownerId);
       for (const ref of settlement.evidenceRefs) assertEvidenceScopeMatches(scope, ref, 'settle', snapshot, 'settlement evidence');
@@ -453,7 +470,7 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       closeInFlight = true;
       try {
         const rawResult: ProviderCloseResult = await runDsh('close', inputs.ownerId, { binding }, async () => requireTransport(inputs).close(contextFor(inputs, binding)));
-        const result = cloneDetached(rawResult);
+        const result = cloneRawResult(rawResult, 'close', inputs.ownerId, { binding });
         validateSeamResult(result, 'close', validateProviderCloseResult, { binding });
         try {
           assertProviderBindingMatch(binding, {

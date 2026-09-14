@@ -511,6 +511,51 @@ class DeferredOpeningTransport extends StubTransport {
 
 }
 
+class DeferredActiveResumeTransport extends StubTransport {
+  resumeCalls = 0;
+  private releaseResume: (() => void) | undefined;
+
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    this.resumeCalls += 1;
+    await new Promise<void>((resolve) => {
+      this.releaseResume = resolve;
+    });
+    return super.resume(input);
+  }
+
+  releaseResumeCall(): void {
+    this.releaseResume?.();
+  }
+}
+
+type UncloneableResultKind = 'start' | 'resume' | 'settle' | 'close';
+
+class UncloneableResultTransport extends StubTransport {
+  constructor(private readonly kind: UncloneableResultKind) {
+    super();
+  }
+
+  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    const result = await super.start(input);
+    return this.kind === 'start' ? { ...result, evidenceRefs: [() => undefined] as unknown as EvidenceRef[] } : result;
+  }
+
+  async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
+    const result = await super.resume(input);
+    return this.kind === 'resume' ? { ...result, evidenceRefs: [() => undefined] as unknown as EvidenceRef[] } : result;
+  }
+
+  async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    const settlement = await super.settle(input);
+    return this.kind === 'settle' ? { ...settlement, evidenceRefs: [() => undefined] as unknown as EvidenceRef[] } : settlement;
+  }
+
+  async close(context: DshTransportContext): Promise<ProviderCloseResult> {
+    const result = await super.close(context);
+    return this.kind === 'close' ? { ...result, evidenceRefs: [() => undefined] as unknown as EvidenceRef[] } : result;
+  }
+}
+
 class FailingOpeningTransport extends StubTransport {
   startCalls = 0;
 
@@ -903,6 +948,86 @@ test('DSH resume rejects foreign recovery state or evidence scope without regist
   await assert.rejects(
     evidencePort.submit(submitInput()),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'submit',
+  );
+});
+
+test('DSH active resume holds an owned fence through transport and publication and rejects concurrent resume and close', async () => {
+  const transport = new DeferredActiveResumeTransport();
+  const port = createPort({ transport });
+  await port.start(startInput());
+
+  const firstResume = port.resume(resumeInput());
+  await assert.rejects(
+    port.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+  assert.equal(transport.resumeCalls, 1);
+
+  const pendingClose = await port.close(providerBinding);
+  assert.equal(pendingClose.state, 'pending');
+  assert.equal(pendingClose.ownerId, 'dsh-adapter');
+  assert.deepEqual(pendingClose.nextAction, { kind: 'recover', ref: 'dsh-adapter' });
+  await assert.rejects(
+    port.settle(executionIdentity),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'settle',
+  );
+
+  transport.releaseResumeCall();
+  const resumed = await firstResume;
+  assert.equal(resumed.recovered, true);
+
+  const submitted = await port.submit(submitInput());
+  assert.equal(submitted.status, 'completed');
+  await port.settle(executionIdentity);
+  const closed = await port.close(providerBinding);
+  assert.equal(closed.state, 'closed');
+});
+
+test('DSH late resume cannot reactivate a closed transport', async () => {
+  const port = createPort();
+  await port.start(startInput());
+  await port.settle(executionIdentity);
+  const closed = await port.close(providerBinding);
+  assert.equal(closed.state, 'closed');
+  await assert.rejects(
+    port.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
+  );
+});
+
+test('DSH raw-result snapshot failures map to typed transport errors and retain the fence', async () => {
+  const startPort = createPort({ transport: new UncloneableResultTransport('start') });
+  await assert.rejects(
+    startPort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'start' && error.ownerId === 'dsh-adapter',
+  );
+  await assert.rejects(
+    startPort.start(startInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'start',
+  );
+
+  const resumePort = createPort({ transport: new UncloneableResultTransport('resume') });
+  await resumePort.start(startInput());
+  await assert.rejects(
+    resumePort.resume(resumeInput()),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'resume' && error.ownerId === 'dsh-adapter',
+  );
+  const submittedAfterResume = await resumePort.submit(submitInput());
+  assert.equal(submittedAfterResume.status, 'completed');
+
+  const settlePort = createPort({ transport: new UncloneableResultTransport('settle') });
+  await settlePort.start(startInput());
+  await assert.rejects(
+    settlePort.settle(executionIdentity),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'settle' && error.ownerId === 'dsh-adapter',
+  );
+  const submittedAfterSettle = await settlePort.submit(submitInput());
+  assert.equal(submittedAfterSettle.status, 'completed');
+
+  const closePort = createPort({ transport: new UncloneableResultTransport('close') });
+  await assert.rejects(
+    closePort.close(providerBinding),
+    (error) => error instanceof DshAdapterError && error.code === 'transport-failure' && error.phase === 'close' && error.ownerId === 'dsh-adapter' && error.binding === providerBinding,
   );
 });
 
