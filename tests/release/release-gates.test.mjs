@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runStages } from '../../scripts/checkpoint-runner.mjs';
+import { checkpointStages } from '../../scripts/checkpoint-stages.mjs';
 import { digest, treeDigest } from '../../scripts/digests.mjs';
 import { assemblePackage } from '../../scripts/package-assembly.mjs';
 import { validateReleaseVersion } from '../../scripts/release-version.mjs';
@@ -222,6 +223,51 @@ test('concurrent checkpoint runs reject the second writer and release the lock',
   assert.equal(first.overall, 'pass');
   const second = await runStages({ ...fixtureValue, stages });
   assert.equal(second.stages[0].status, 'reused');
+});
+
+test('build, ci, and release checkpoint roots share one project write lock', async () => {
+  const fixtureValue = await fixture();
+  const lockRoot = join(fixtureValue.root, 'control', 'build', 'locks');
+  const firstCheckpointRoot = join(fixtureValue.root, 'control', 'build', 'checkpoints', 'build');
+  const secondCheckpointRoot = join(fixtureValue.root, 'control', 'build', 'checkpoints', 'ci');
+  const marker = join(fixtureValue.projectRoot, 'shared-lock-started.txt');
+  const stages = [{
+    name: 'compile',
+    owner: 'compile',
+    command: command(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started\\n"); setTimeout(() => process.exit(0), 250)`),
+  }];
+  const firstRun = runStages({ ...fixtureValue, checkpointRoot: firstCheckpointRoot, lockRoot, stages });
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await access(marker);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  await assert.rejects(
+    () => runStages({ ...fixtureValue, checkpointRoot: secondCheckpointRoot, lockRoot, stages }),
+    /checkpoint is already running/,
+  );
+  const first = await firstRun;
+  assert.equal(first.overall, 'pass');
+  const second = await runStages({ ...fixtureValue, checkpointRoot: secondCheckpointRoot, lockRoot, stages });
+  assert.equal(second.overall, 'pass');
+});
+
+test('compile checkpoint owns every raw build output and excludes release output', () => {
+  const stages = checkpointStages();
+  const compile = stages.find((stage) => stage.name === 'compile');
+  const regression = stages.find((stage) => stage.name === 'regression');
+  assert.deepEqual(compile.command, ['pnpm', 'run', 'build:raw']);
+  assert.deepEqual(compile.outputs.map((output) => output.value), [
+    'dist/app',
+    'dist/config',
+    'dist/tests',
+    'dist/tests-runtime-intake',
+    'packages/contracts/dist',
+  ]);
+  assert.deepEqual(regression.command, ['pnpm', 'run', 'test:compiled']);
 });
 
 test('assembled CLI bin remains executable', async () => {

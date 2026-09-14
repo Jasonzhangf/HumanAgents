@@ -219,7 +219,9 @@ export async function runStages(options) {
     : readableProjectKey;
   const root = join(checkpointBase, checkpointProjectKey);
   const manifestPath = join(root, 'manifest.json');
-  const releaseCheckpointLock = await acquireCheckpointLock(root);
+  const lockBase = options.lockRoot ? resolve(options.lockRoot) : checkpointBase;
+  const lockRoot = join(lockBase, collisionSafeProjectKey(readableProjectKey, canonicalProjectRoot));
+  const releaseCheckpointLock = await acquireCheckpointLock(lockRoot);
   try {
   const previous = await readManifest(manifestPath);
   const previousStages = new Map((previous?.stages || []).map((stage) => [stage.name, stage]));

@@ -34,17 +34,28 @@ DSH 源码基线已锁定到上游 `master@c291e7961a515f6d7af9304e7fd1d257929ae
 ## 本地启动与增量编译
 
 ```sh
-pnpm build
-pnpm test
-node dist/app/app/src/cli.js doctor --workspace /absolute/project
-node dist/app/app/src/cli.js run --workspace /absolute/project --plan default
-node dist/app/app/src/cli.js resume --workspace /absolute/project --session <session-id>
-node dist/app/app/src/cli.js session list --workspace /absolute/project
-node dist/app/app/src/cli.js session inspect --workspace /absolute/project --session <session-id>
-pnpm build:release
-pnpm release:check
-pnpm smoke
+pnpm run build
+pnpm run test
+pnpm run doctor -- --workspace /absolute/project
+pnpm run run -- --workspace /absolute/project --plan default
+pnpm run resume -- --workspace /absolute/project --session <session-id>
+pnpm run smoke
 ```
 
-`pnpm build:release` 使用 `~/.humanagent/build/checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke` 的 stage checkpoint。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
+`pnpm build` 使用 `~/.humanagent/build/checkpoints/build/<project-key>/manifest.json` 保存 `typecheck → compile` 的 stage checkpoint；`pnpm run ci` 使用独立的 `.../checkpoints/ci/<project-key>/manifest.json`；`pnpm build:release` 使用独立的 `.../checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke`。三条链共享 `~/.humanagent/build/locks/<project-key>/.run.lock`，不会并发改写同一工作树的编译产物。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
 `pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。
+
+日常入口：
+
+```sh
+pnpm run doctor -- --workspace /absolute/project
+pnpm run run -- --workspace /absolute/project --plan default
+pnpm run resume -- --workspace /absolute/project --session <session-id>
+pnpm run ci
+pnpm run release
+pnpm run package
+```
+
+`ci` 通过 checkpoint runner 在 `~/.humanagent/build/checkpoints/ci/<project-key>/manifest.json` 执行 `typecheck → compile → regression → ci`；已通过且输入/输出 digest 未变的 stage 会复用，失败从首个失效 stage 继续。需要强制全量诊断时才直接运行 `pnpm run ci:check`。发布使用独立的 release checkpoint：先运行 `pnpm run build:release` 生成 candidate，再为该 candidate 写入 review receipt，最后运行 `pnpm run release`（只执行 `release:check`）；这样不会覆盖已有 review 状态。`package` 只消费已通过 `release:check` 的 manifest。
+
+checkpoint 的 `regression` 阶段运行 `test:compiled`，只消费 compile 已生成的测试产物，不在下游重新编译并污染 compile 输出；`pnpm run test` 仍是需要强制重编译的全量诊断入口。
