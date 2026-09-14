@@ -668,7 +668,11 @@ interface TaskInteractionCommandPort {
 
 Memory 的两个用户/后台入口和 Agent 上下文插入协议见 [`memory-system.md`](memory-system.md)。`runtime/memory-context.ts` 只负责按 Harness scope、role、layer 和 budget 调用该协议；它不直接读取 Index 或 RAG 数据库。
 
-`ExecutionRuntimePort` 是 DSH 的唯一高层接缝。它的事件必须携带 HumanAgent `executionEpoch`/`operationId`，不能仅返回 DSH session ID。
+`ExecutionRuntimePort` 是所有外部执行后端的唯一高层接缝；DSH 是其中一个实现。
+Provider-neutral binding/codec 属于 adapter 边界，不能把 DSH 或 RCC 类型上提到
+该端口。它的事件必须携带 HumanAgent `executionEpoch`/`operationId`，不能仅返回
+DSH session ID 或 RCC request/session ID。RCC `responses`/`anthropic` 协议适配
+的独立边界见 [`provider-adapters.md`](provider-adapters.md)。
 
 `OrganHealthProbePort` 负责执行可声明的基础探针；`OrganHealthProjectionPort` 只读返回带有效期的诊断快照。它们不能直接改变生命周期状态。健康策略由 core/runtime 统一决定是否产生 `degraded`、等待或 Attention。
 
@@ -728,6 +732,10 @@ SQLite 或其他查询存储只保存从 Journal 投影的 `seq`、范围、标�
 - DSH 原生 session log 保留为执行证据；高层恢复只读取 HumanAgent 自己已提交的 checkpoint recovery state。adapter 的 `recoveryStateRef` 只能定位外部执行证据/会话细节，不能成为高层恢复真相。
 - adapter 不得通过请求 metadata、prompt 隐藏字段或 debug 日志传递高层控制状态。
 - DSH 不可用时，standalone/fake backend 可以用于测试；生产路径不得静默切换到 fake 或未授权 fallback。
+- Provider protocol adapter 不属于 `core/runtime`；它只把明确绑定的协议事实
+  映射到 provider-neutral execution event。DSH bridge 可以消费该 port，也可以
+  在经批准的 direct-provider 验证路径中由 Host 装载，但两者都不能改变高层
+  lifecycle owner。
 
 ### 8.2 建议 adapter 内部结构
 
@@ -739,6 +747,12 @@ packages/adapters/dsh/
   dsh-stop-controller.ts     DSH cancel/close → stop operation
   dsh-evidence-reader.ts     session log / tool result 引用
   dsh-capabilities.ts        启动时能力探测，失败显式暴露
+
+packages/adapters/provider/
+  provider-binding.ts        Provider-neutral binding/capability
+  responses-adapter.ts       cc/cc-sol Responses codec
+  anthropic-adapter.ts       goaichat Anthropic codec
+  provider-readiness.ts      listener/protocol readiness
 ```
 
 ### 8.3 需要从 DSH 当前源码确认的接口

@@ -1,6 +1,6 @@
 # DSH 基线与 Milestone 1 适配准备
 
-状态：`BASELINE-LOCKED / ADAPTER-NOT-STARTED`
+状态：`BASELINE-LOCKED / M1-DESIGN / ADAPTER-NOT-STARTED`
 日期：2026-09-13
 
 本文是 DSH 外部源码基线的唯一项目记录。它只锁定可复现的 DSH 输入和适配计划，不代表 HumanAgent 已经实现或接入 DSH adapter。
@@ -45,31 +45,60 @@
 - DSH WebUI 接入；
 - start/resume/stop/crash-recovery 运行验证。
 
+## 2.1 Milestone 1 的临时 Provider 绑定
+
+Milestone 1 暂时使用本机 RCC v3 的 `4444` listener 作为 Provider 执行入口。
+当前只读事实和协议边界见 [`provider-adapters.md`](provider-adapters.md)。
+
+```text
+HumanAgent ProviderAdapter / DSH bridge
+             ↓ 明确的 binding
+          RCC v3 :4444
+             ├── cc / cc-sol → responses codec
+             └── goaichat    → anthropic codec
+```
+
+`4444` 是 listener，不是协议身份。`cc`/`cc-sol` 可共享 Responses codec，但
+必须保留各自的 provider/route binding；`goaichat` 使用独立 Anthropic codec。
+不得因为它们都经过 4444 就共用 request、stream、tool-call、error 或
+cancel/settle 语义。`~/.rcc` 不是 HumanAgent 配置真源；本项目只读取非敏感
+capability/lock 摘要，不修改 RCC 配置、不写入凭据，也不以 listener 可连接
+作为适配完成证据。
+
 ## 3. Milestone 1 适配计划
 
 ### M1-0：入口和能力复核
 
 Owner：DSH adapter owner。
 输入：本文件锁定的 commit。
-输出：public entrypoint、包依赖、Cordis profile、session 创建/恢复、事件、工具、取消、settle、持久化和 license 的证据矩阵。
+输出：DSH public entrypoint、包依赖、Cordis profile、session 创建/恢复、事件、
+工具、取消、settle、持久化、license，以及 RCC 4444 listener、`responses`、
+`anthropic` capability 的证据矩阵。必须记录 DSH 是否能以可审计方式绑定
+Provider endpoint、protocol 和 model。
 
 失败时停止在 `dependency-missing`、`entrypoint-unavailable` 或 `capability-unavailable`，不得用 fake backend 伪造成功。
 
 ### M1-1：高层 port contract
 
 Owner：`packages/contracts` / `packages/adapters/dsh`。
-先让 fake driver 与 DSH driver 共用同一组高层 contract：
+先让 fake driver、Provider adapter 与 DSH driver 共用同一组高层 contract：
 
 ```text
 start → resume → submit/observe → requestStop → settle
 ```
 
 DSH 类型只能存在 adapter 边界。DSH `SessionId` 只能进入 `EvidenceRef`，不能成为 `TaskId`、`CheckpointId` 或 `AgentRuntimeId`。
+Provider `providerId`、route、model 和外部 session/request id 同样不能成为高层身份。
 
-### M1-2：独立 DSH profile 与 Cordis bridge
+### M1-2：`cc` / `goaichat` 协议 adapter 与独立 DSH profile
 
-Owner：`packages/app` / DSH provider adapter。
-使用独立 `DSH_HOME` 和 `humanagent` profile；HumanAgent 只做版本、profile、plugin、capability 和 readiness 检查，不静默下载或升级 DSH。默认 profile 不得被修改。
+Owner：`packages/adapters/provider` 负责 binding、Responses/Anthropic codec 和
+Provider readiness；`packages/adapters/dsh` 负责 DSH profile/Cordis bridge；
+`packages/app` 只负责组装和生命周期接线。
+先实现并分别验证 `responses`（`cc`/`cc-sol`）和 `anthropic`（`goaichat`）
+协议 seam，再使用独立 `DSH_HOME` 和 `humanagent` profile；HumanAgent 只做
+版本、profile、plugin、capability 和 readiness 检查，不静默下载或升级 DSH。
+默认 profile 不得被修改。
 
 优先验证受监督的外部 provider 进程和 typed local transport；transport 选择不能改变高层 `ExecutionRuntimePort`。
 
@@ -84,17 +113,20 @@ Owner：DSH adapter。
 - cancel receipt 不直接等价于 stopped；
 - 只有真实 settle 和 stopped checkpoint 才能关闭 stop operation；
 - DSH debug log 不用于重建 HumanAgent 控制状态。
+- Responses 与 Anthropic 的 stream/tool/error/cancel 事件分别经过各自 codec，
+  不能用另一协议的字段猜测缺失事件。
 
-### M1-4：三层验证
+### M1-4：四层验证
 
 Owner：独立验证 owner。
 按顺序执行：
 
 1. fake backend contract tests；
-2. recorded DSH session replay；
-3. 真实 DSH 同入口 `start/resume/tool-result/error/requestStop/settle`；
-4. provider crash、transport close、plugin incompatibility 和 stop timeout；
-5. checkpoint recall、Attention、恢复和 Journal/Session Log 分离证据。
+2. recorded Provider/DSH session replay，分别覆盖 Responses 与 Anthropic；
+3. 真实 RCC 4444 同入口 `start/resume/tool-result/error/requestStop/settle`；
+4. 真实 DSH profile 同入口（仅在 M1-0 证明该绑定能力可用时）；
+5. provider crash、transport close、plugin incompatibility、stop timeout、
+   checkpoint recall、Attention、恢复和 Journal/Session Log 分离证据。
 
 每个失败、等待、阻塞、取消和成功出口都必须有 owner、下一动作和证据。
 
@@ -103,15 +135,38 @@ Owner：独立验证 owner。
 Owner：项目集成 owner。
 放行前必须同时满足：
 
-- adapter 只位于 `packages/adapters/dsh` 与受控 app/plugin 边界；
+- Provider adapter 只位于 `packages/adapters/provider`；DSH bridge 只位于
+  `packages/adapters/dsh` 与受控 app/plugin 边界；
 - 高层 contracts/core/runtime 没有 DSH 类型泄漏；
 - DSH 版本、依赖、profile、plugin 和 patch 都有 lock/digest；
-- fake、recorded、real 三层证据齐全；
+- fake、recorded、real RCC、real DSH 四层证据齐全；
 - Astra review 通过；
 - 用户批准后才 commit、push 或进入下一个 milestone。
 
+### 3.1 每个小阶段的 Astra gate
+
+M1 不允许跨阶段带病前进。每个小阶段都必须在其自身候选范围内完成 focused
+validation 和独立 Astra review；Astra PASS 只证明当前候选满足审查标准，不
+自动授予 merge、commit、push 或发布权限。
+
+| 小阶段 | 独立交付 | 最小证据 | Astra gate |
+|---|---|---|---|
+| M1-0 | DSH/RCC 能力矩阵和失败矩阵 | clean DSH baseline、4444 listener、协议/入口证据 | `Astra-M1-0` PASS 后才可写 adapter |
+| M1-1 | Provider-neutral binding/port | fake contract、负向 identity/protocol tests | `Astra-M1-1` PASS |
+| M1-2 | Responses/Anthropic adapter seams + DSH profile seam | codec fixtures、readiness、lock 摘要 | `Astra-M1-2` PASS |
+| M1-3 | event/evidence/error/stop mapping | recorded replay、epoch/settle/Attention tests | `Astra-M1-3` PASS |
+| M1-4 | real same-entry execution | RCC 4444 与 DSH start/resume/stop/recovery 证据 | `Astra-M1-4` PASS |
+| M1-5 | closeout candidate | clean tree、digest、全 receipts、限制清单 | `Astra-M1-5` PASS 后才可放行 |
+
+每个 receipt 必须绑定候选 commit、scope、验证命令、reviewer task/result、
+findings 和修复后的重验结果。review 失败回到对应 owner；不得换通道取 PASS，
+不得用下一阶段的结果掩盖当前阶段缺证据。
+
 ## 4. 适配阶段的非目标
 
-Milestone 1 只验证一个 DSH profile、一个 provider/model 路径和一个代表性工具。不做多 provider 路由、多 profile、长程压缩、高可用、生产部署或额外 DSH WebUI 产品范围。
+Milestone 1 只验证一个 DSH profile、一个代表性工具、两种协议和三个独立的
+ProviderBinding（Responses 的 `cc`、`cc-sol` 与 Anthropic 的 `goaichat`）。不做多
+provider 路由策略、多 profile、长程压缩、高可用、生产部署或额外 DSH WebUI
+产品范围。
 
 完整的阶段退出条件沿用 [`mvp-to-milestones.md`](../goals/mvp-to-milestones.md#43-退出条件)；本文件只补充当前锁定的 DSH 输入。

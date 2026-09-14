@@ -4,7 +4,7 @@
 日期：2026-09-11  
 适用阶段：MVP → Milestone 3
 
-本文定义 HumanAgent 如何以 Cordis 为第一层插件宿主独立启动，如何装载固定 Harness 内核和可替换模块，如何在外部安装 DSH，以及如何把 DSH 作为一种 Agent/Execution provider 接入。当前 DSH 源码基线已锁定；真实 adapter 仍需公开入口、profile、能力和同入口验证后才能实现，详见 [`dsh-baseline.md`](dsh-baseline.md)。
+本文定义 HumanAgent 如何以 Cordis 为第一层插件宿主独立启动，如何装载固定 Harness 内核和可替换模块，如何在外部安装 DSH，以及如何把 DSH 作为一种 Agent/Execution provider 接入。Provider 协议和 RCC v3 临时绑定由 [`provider-adapters.md`](provider-adapters.md) 唯一维护。当前 DSH 源码基线已锁定；真实 adapter 仍需公开入口、profile、能力和同入口验证后才能实现，详见 [`dsh-baseline.md`](dsh-baseline.md)。
 
 ## 1. 设计结论
 
@@ -70,6 +70,25 @@ DSH execution provider
 - 对 cancel/close/settle 提供真实后置结果。
 
 DSH provider 不能直接写 Organ Journal、修改 Task lifecycle、发布 HumanAgent Attention、创建 review 或修改模板 registry。它的 session ID 只能作为 adapter 生成的 evidence locator。
+
+### Milestone 1 的 RCC Provider 绑定
+
+Milestone 1 暂时允许 DSH provider 通过本机 RCC v3 `4444` listener 获取模型
+执行，但这只是一个外部 endpoint binding，不改变 DSH 或 HumanAgent 的身份边界：
+
+```text
+HumanAgent Host
+  → DSH/Provider adapter
+    → RCC v3 :4444
+       ├── cc / cc-sol: Responses
+       └── goaichat: Anthropic
+```
+
+`cc`/`cc-sol` 可以复用 Responses codec；`goaichat` 必须使用独立 Anthropic
+codec。Host 不把 RCC route、model、auth alias 或 session id 写入高层 Task、
+checkpoint 或业务 payload。`~/.rcc` 由外部 RCC 管理，HumanAgent 只做只读
+readiness/capability 检查和非敏感 lock 摘要；协议未知或绑定不可证明时必须
+停在 `capability-unavailable`，不能猜测 codec 或静默切换 provider。
 
 MVP 可以把 fake backend 放在同一个 standalone 进程中，以减少安装面；这不改变上述端口边界。
 
@@ -357,7 +376,7 @@ health probe or provider error
 - DSH 以独立安装物存在，HumanAgent 不静默安装或升级它；
 - 使用专用 DSH profile 安装 approved bundle，默认 profile 不被修改；
 - clean DSH 版本、公开 package entrypoint、bundle patch、license 和 lock 有证据；
-- Host ↔ DSH bridge 通过 fake、recorded replay、真实同入口三层验证；
+- Host ↔ DSH bridge 通过 fake contract、recorded replay、真实 RCC 4444 同入口和真实 DSH 同入口四层验证；
 - DSH plugin 变化后通过重启加载；若旧 Task 仍绑定被替换的 plugin，M1 必须阻止更新或继续保留旧 profile，不以 digest 代替完整模板/plugin snapshot；
 - DSH session log 只是 execution evidence，不替代高层 Journal。
 

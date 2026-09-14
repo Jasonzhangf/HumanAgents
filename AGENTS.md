@@ -15,6 +15,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 权威历史：`packages/adapters/jsonl` 实现的 Organ Journal。
 - 历史查询：`packages/adapters/sqlite` 的可重建 Index；Index 不是状态真源。
 - 不可变大对象和工具输出：`packages/adapters/filesystem`。
+- Provider binding、协议 codec、readiness 和外部 Provider stop/settle 映射：`packages/adapters/provider`；`cc`/`cc-sol` 的 Responses 与 `goaichat` 的 Anthropic 必须保持独立协议实现。
 - DSH 会话、模型、工具执行和取消映射：`packages/adapters/dsh`；不得把 DSH 类型上提为领域类型。
 - 进程、文件、远端等副作用：`packages/adapters/operations`。
 - internal/user/project 配置解析、校验、编译和 control-root/project 路径派生：`packages/config`；不得让 UI 或 adapter 各自解析 TOML。
@@ -36,6 +37,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 潜意识必须可观测但默认不直接呈现给人：Pipeline Observation 只读展示节点树、状态、输入/输出和证据，支持 drawer、递归 scope、面包屑返回；不能在观测界面消费需求、修改队列、重试 operation 或执行 steer。
 - Index 可删除后重建；Journal 追加记录、资产引用和提交关系必须可校验。
 - 未完成 DSH 当前源码复核和真实停止/崩溃恢复验证前，不得宣称 DSH 适配完成。
+- RCC `~/.rcc` 是外部 Provider 配置真源；HumanAgent 只做非敏感 capability/lock 读取和验证，不修改 RCC 配置，不提交凭据，不把 RCC route/model/session 当作 HumanAgent 身份。
 
 ## 工作边界
 
@@ -50,5 +52,5 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 1. Wave 2 candidate 只有在 focused tests、runtime integration 和独立 Codex/Astra review 通过后才可进入 main；不得伪造已入 main。
 2. 先保持 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
 3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
-4. DSH adapter 必须通过 fake backend、录制 session replay、真实 DSH 同入口验证三层证据；单一 TypeScript 编译不算接入完成。
+4. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
 5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。

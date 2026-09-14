@@ -28,7 +28,7 @@ DSH 从 Milestone 1 开始接入。原因：如果 MVP 直接依赖 DSH，生命
 | 阶段 | 交付主题 | 运行形态 | 核心新增证据 | 明确不做 |
 |---|---|---|---|---|
 | MVP | 单器官最小纵切面 + 显式 Brain 交互与任务 I/O | HumanAgent Cordis Host + fixed Harness Kernel + fake Agent Driver + Agent Template Loader + deterministic Memory Operations Backend + Task List/Dashboard/Task Detail/Task Dashboard + Operator Console | Journal replay、checkpoint recall/completion、steer 收拢、错误策略、输入理解确认、任务输入输出、WorkResult、skill review、基础自诊断、模板/插件校验、Memory context injection 和阶段故障闭环 | DSH provider、远端 provider、向量/RAG、并发多器官、SQLite、完整产品 UI、生产插件签名 |
-| Milestone 1 | 真实执行后端和 DSH Cordis bridge | standalone HumanAgent Cordis Host + 独立 DSH profile + DSH Agent Driver | clean DSH 版本绑定、专用 profile/plugin 安装、真实同入口 start/resume/stop、Session Log 证据分离、provider 意外闭环 | 长程压缩策略、生产部署、多租户、多 provider 路由 |
+| Milestone 1 | 真实执行后端、RCC Provider adapter 和 DSH Cordis bridge | standalone HumanAgent Cordis Host + 独立 DSH profile + `cc`/`goaichat` protocol adapters + DSH Agent Driver | clean DSH 版本绑定、RCC v3 `4444` readiness、Responses/Anthropic 分离、专用 profile/plugin 安装、真实同入口 start/resume/stop、Session Log 证据分离、provider 意外闭环、每个小阶段 Astra receipt | 长程压缩策略、生产部署、多租户、多 provider 路由 |
 | Milestone 2 | 长程耐久、恢复和插件状态持久化 | daemon/worker 可重启运行 | 崩溃恢复、Index 重建、历史压缩/归档、监督恢复、有限重试、template/plugin snapshot 恢复 | 多节点调度、完整产品 UI、跨租户治理 |
 | Milestone 3 | 可交付运行时 | 可部署、多任务、多器官、多 profile | 真实入口、并发/背压、安全、可观测、插件发布/签名/回滚证据 | 未经验证的跨节点一致性和无限规模承诺 |
 
@@ -176,7 +176,7 @@ UI 必须分两道门：
 
 ### 4.1 目标
 
-在不改变 HumanAgent 高层 contracts/core/runtime 的前提下，接入一个真实 DSH adapter，完成一条真实执行链：
+在不改变 HumanAgent 既有领域语义、生命周期 owner 和控制真相的前提下，接入一个真实 DSH adapter；允许 M1-1 在 `packages/contracts` 补充协议无关的 Provider-neutral contract，但不得引入 DSH/RCC 类型，完成一条真实执行链：
 
 ```text
 HumanAgent standalone
@@ -193,13 +193,42 @@ HumanAgent standalone
 - 使用方独立安装 DSH；HumanAgent 只执行版本/能力检查，不静默下载、升级或替换 DSH。
 - 创建专用 DSH profile，使用 DSH 官方 `dsh plugin --profile <name> add <package>` 流程安装经批准的 HumanAgent execution bundle；不修改用户默认 profile。
 - 复核 DSH public entrypoints、session 创建/恢复、事件、工具、取消和 session log。
-- 实现 `adapters/dsh` + Cordis bridge：session mapping、event mapping、stop controller、evidence reader、capability probe 和 provider readiness。
+- 实现 `packages/adapters/provider` 的 binding、协议 codec、provider readiness 和外部 stop/settle 映射；实现 `packages/adapters/dsh` + Cordis bridge 的 session mapping、event mapping、DSH stop controller、evidence reader 和 DSH capability mapping。DSH bridge 消费 Provider readiness，不重复拥有它。
 - 将 DSH capability probe 接入 `OrganHealthProbePort`；只报告真实可证明的 session/model/tool/取消能力，不把 DSH debug 状态当健康真相。
 - 评估 `dsh-client-ui-primitives`；只有公开版本、MIT license、token 兼容和实际 bundle 证据齐备后，才允许作为 `packages/ui/kit` 的实现依赖。
-- 只支持一个 DSH execution profile、一个 provider/model 路径和一个代表性工具。
+- 只支持一个 DSH execution profile、两种协议、三个独立且受限的 ProviderBinding（Responses 的 `cc`、`cc-sol` 与 Anthropic 的 `goaichat`）和一个代表性工具。
 - 保留 DSH Session Log 为执行证据；不让 DSH session ID 替代高层 ID。
 - 真实同入口验证 start、resume、tool result、error、requestStop、settle。
 - 关闭和 plugin/profile 变更采用 restart-only 生命周期，不在 active execution 中热换 provider。
+
+### 4.2.1 RCC Provider 适配策略
+
+M1 暂时使用本机 `~/.rcc` 的 RCC v3 `4444` listener，但 RCC 只是一层外部
+Provider 入口，不能成为 HumanAgent 的高层状态或配置真源。当前非敏感基线、
+协议差异和配置边界见 [`../architecture/provider-adapters.md`](../architecture/provider-adapters.md)。
+
+M1 的最小协议范围是：
+
+| binding | codec | 说明 |
+|---|---|---|
+| `cc` / `cc-sol` | `responses` | 可以复用 codec；provider/route identity 仍分开锁定 |
+| `goaichat` | `anthropic` | 独立 request、stream、tool、error、cancel/settle codec |
+
+适配顺序固定为：
+
+```text
+RCC listener/readiness
+  → protocol-neutral ProviderAdapterPort
+  → Responses / Anthropic codec fixtures
+  → fake contract
+  → recorded replay
+  → real RCC same-entry request
+  → DSH profile binding and same-entry execution
+```
+
+4444 可连接不等于 Provider 适配完成。无法证明协议、模型绑定、错误语义或
+stop/settle 的阶段必须停在 `capability-unavailable`、`health-blocked` 或
+`dependency-missing`，不准使用另一个协议或 fake backend 静默替代。
 
 ### 4.3 退出条件
 
@@ -211,11 +240,29 @@ HumanAgent standalone
 - DSH execution detail 可以作为可选 UI panel；HumanAgent Organ Console 仍由 `packages/ui` 拥有。
 - Dashboard / Task Detail 可以展示 DSH 执行产生的任务输出，但不能暴露 DSH Session 作为任务身份或控制入口。
 - DSH provider 崩溃、plugin 不兼容、transport close 和 stop timeout 都有明确 owner、Attention、settle 和 checkpoint 证据。
+- `cc`/`cc-sol` 的 Responses 和 `goaichat` 的 Anthropic 分别有 codec、stream、tool、error、cancel/settle 证据；不得以共用 4444 listener 代替协议验证。
+- RCC v3 `4444` 的 listener、协议 readiness、同入口请求和 DSH 绑定分别有证据；配置路径和凭据没有被复制进仓库或 HumanAgent Journal。
+- M1-0 至 M1-5 每个小阶段都有独立 Astra PASS receipt；review 失败会回到对应 owner 修复并重验，不跨阶段带病前进。
 - 不存在 checkout-relative `src/*` 依赖、静默 fake fallback 或控制字段写入业务 payload。
 
 ### 4.4 Milestone 1 不做
 
-不做多 provider 路由、多 DSH profile、长程历史压缩、跨进程高可用、额外的 DSH WebUI 产品范围和生产发布；继承 MVP HumanAgent UI，并只验证一个专用 DSH profile 和一个 Cordis bridge。
+不做多 provider 路由策略、多 DSH profile、长程历史压缩、跨进程高可用、额外的 DSH WebUI 产品范围和生产发布；不修改 `~/.rcc`；继承 MVP HumanAgent UI，并只验证一个专用 DSH profile、一个 Cordis bridge、两种协议和三个独立 ProviderBinding（Responses 的 `cc`、`cc-sol` 与 Anthropic 的 `goaichat`）。
+
+### 4.5 Milestone 1 小阶段与 Astra gates
+
+| 阶段 | 唯一 owner 与范围 | 完成 iff | 最小验证/证据 | Astra gate |
+|---|---|---|---|---|
+| M1-0 | adapter owner；只读 DSH/RCC 能力复核 | public entrypoint、DSH profile、RCC 4444、两种协议和失败矩阵已锁定 | clean DSH commit/tree、listener、非敏感配置摘要、未验证项清单 | `Astra-M1-0` PASS |
+| M1-1 | contracts/adapter owner；Provider-neutral port | fake 与未来 DSH/协议 adapter 共享 port；外部身份不泄漏 | 类型检查、identity/protocol 负向测试、binding digest | `Astra-M1-1` PASS |
+| M1-2 | `packages/adapters/provider`：Responses/Anthropic codec；`packages/adapters/dsh`：DSH profile/bridge；`packages/app`：组装 | `cc`、`cc-sol`、`goaichat` 三个 ProviderBinding 只能按显式 protocol 加载，DSH bridge 只消费 Provider readiness | codec fixture、readiness、tool/error/cancel contract、profile lock | `Astra-M1-2` PASS |
+| M1-3 | DSH mapping owner；session/event/evidence/stop | DSH 事件、Provider 事件、HumanAgent operation/epoch/attention 可追溯 | recorded replay、late-event、cancel≠stopped、settle/checkpoint 测试 | `Astra-M1-3` PASS |
+| M1-4 | validation owner；真实同入口 | RCC 4444 直连和 DSH profile 路径均覆盖允许的 start/resume/stop/recovery | fake、recorded、real RCC、real DSH 四层证据；tool/error、transport close、crash/stop timeout、Journal/Session Log 分离 | `Astra-M1-4` PASS |
+| M1-5 | integration/release owner；只做收口 | lock、限制、receipt、clean tree 和用户批准的交付范围完整 | 候选复核、文档范围检查、Astra receipt 汇总 | `Astra-M1-5` PASS |
+
+每个阶段都是可重入的：恢复时从最近一个未通过 gate 的阶段继续，已通过且
+输入版本未变化的阶段可复用 receipt；源、配置、环境、候选或协议事实变化
+时，必须从第一个受影响阶段重新验证，不强制无关阶段全量重跑。
 
 ## 5. Milestone 2：长程耐久和恢复
 
@@ -254,6 +301,17 @@ HumanAgent standalone
 
 不做跨节点一致性、无限扩展、多租户权限模型、复杂 UI 工作台和未验证的自动迁移。
 
+### 5.5 Milestone 2 小阶段与 Astra gates
+
+| 阶段 | 交付 | 最小验证/证据 | Astra gate |
+|---|---|---|---|
+| M2-0 | 长程输入、恢复和故障矩阵 | 受影响的 MVP/M1 receipt、输入版本和 owner map | `Astra-M2-0` PASS |
+| M2-1 | Index、Journal segment、资产引用和重建 | 删除 Index 后仅凭 Journal 重建、digest/seq 引用校验 | `Astra-M2-1` PASS |
+| M2-2 | checkpoint compaction、Working/Reporting Window | recovery state 独立准确、历史压缩不改变控制真相 | `Astra-M2-2` PASS |
+| M2-3 | crash recovery、supervision、有限重试和等待 | 写入/提交/停止/重启故障注入、无空转、每个异常有 owner | `Astra-M2-3` PASS |
+| M2-4 | template/plugin/memory context snapshot | 版本/digest/context receipt 可重放，旧 Task 不被新配置污染 | `Astra-M2-4` PASS |
+| M2-5 | Milestone 2 closeout | 多 cycle replay、真实 DSH/fake 语义一致、clean candidate | `Astra-M2-5` PASS |
+
 ## 6. Milestone 3：可交付运行时
 
 ### 6.1 目标
@@ -287,7 +345,29 @@ HumanAgent standalone
 
 不默认承诺跨地域高可用、跨节点强一致 Journal、无限吞吐、自动模型切换或未经真实证据支持的自治恢复。
 
+### 6.5 Milestone 3 小阶段与 Astra gates
+
+| 阶段 | 交付 | 最小验证/证据 | Astra gate |
+|---|---|---|---|
+| M3-0 | 多 Task/多 Organ scope、资源和权限模型 | scope/epoch/Journal 隔离、资源拒绝和控制/业务隔离 | `Astra-M3-0` PASS |
+| M3-1 | 并发、背压、取消和正式 Host 入口 | 实际入口下并发限制、背压、释放和 stopped checkpoint | `Astra-M3-1` PASS |
+| M3-2 | 安全、插件来源、依赖和配置迁移 | 权限失败、签名/来源、license、安装前校验和回滚 | `Astra-M3-2` PASS |
+| M3-3 | metrics、trace、Attention 运维投影 | 观测可追溯但不能成为控制真源，告警 owner 闭环 | `Astra-M3-3` PASS |
+| M3-4 | 发布包、安装、启动、升级和回滚 | 从安装包完成 start→run→attention→stop→restart/replay | `Astra-M3-4` PASS |
+| M3-5 | Milestone 3 closeout | 兼容矩阵、源/依赖/产物/环境绑定、独立 review 和限制清单 | `Astra-M3-5` PASS |
+
 ## 7. 依赖和闸门顺序
+
+### 7.0 子阶段 gate 规则
+
+每个 Milestone 的每个小阶段都必须有独立 owner、输入版本、allowed paths、
+正常/等待/阻塞/失败/取消出口、下一动作、focused validation 和 Astra review。
+Astra review 必须审查当前候选，不审查口头计划；无 PASS receipt 不得进入下
+一小阶段。PASS 不授予 Git、发布或生产权限。
+
+小阶段 gate 是可重入的：阶段完成后保存 receipt、候选 SHA、配置/环境摘要和
+验证结果；下一轮先比较这些输入，未变化则复用，变化则从最早受影响阶段
+重跑。失败必须保留原始错误和 owner，不能用更晚阶段的绿色结果覆盖。
 
 ```text
 设计锁定
