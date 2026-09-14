@@ -72,8 +72,10 @@ interface ActiveExecution {
   readonly model: string;
   readonly evidenceScope: ScopeRef;
   stopRequested: boolean;
+  stopCause?: unknown;
   observed: boolean;
   streamDone: boolean;
+  resourceReleased: boolean;
   terminalState?: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'stopped' | 'unknown';
   terminalError?: ProviderError;
 }
@@ -94,14 +96,22 @@ function defaultFetch(url: string, init: RccV3FetchInit): Promise<RccV3FetchResp
 
 async function* readableStreamToAsyncIterable(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
   const reader = stream.getReader();
+  let completed = false;
   try {
     while (true) {
       const next = await reader.read();
-      if (next.done) return;
+      if (next.done) {
+        completed = true;
+        return;
+      }
       yield next.value;
     }
   } finally {
-    reader.releaseLock();
+    try {
+      if (!completed) await reader.cancel();
+    } finally {
+      reader.releaseLock();
+    }
   }
 }
 
@@ -202,13 +212,10 @@ function terminalStateFor(
   return stopRequested ? 'stopped' : providerState;
 }
 
-function isExpectedStopAbort(cause: unknown, controller: AbortController): boolean {
-  if (!controller.signal.aborted) return false;
-  if (cause instanceof DOMException) return cause.name === 'AbortError';
-  const name = cause && typeof cause === 'object' ? (cause as { readonly name?: unknown }).name : undefined;
-  if (name === 'AbortError') return true;
-  const message = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : '';
-  return /abort/i.test(message);
+function isExpectedStopAbort(cause: unknown, active: ActiveExecution): boolean {
+  if (!active.stopRequested || !active.controller.signal.aborted) return false;
+  if (cause === active.stopCause || cause === active.controller.signal.reason) return true;
+  return cause instanceof DOMException && cause.name === 'AbortError';
 }
 
 function readRecord(value: unknown): Record<string, unknown> {
@@ -224,6 +231,7 @@ async function* parseSse(
   maxBufferBytes: number,
 ): AsyncIterable<SseFrame> {
   const decoder = new TextDecoder();
+  const iterator = body[Symbol.asyncIterator]();
   let buffer = '';
   let event: string | undefined;
   let data: string[] = [];
@@ -236,36 +244,42 @@ async function* parseSse(
     return frame;
   };
 
-  for await (const chunk of body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    if (buffer.length > maxBufferBytes) throw new Error('RCC v3 SSE buffer exceeded limit');
-    let boundary = buffer.indexOf('\n');
-    while (boundary >= 0) {
-      let line = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 1);
-      if (line.endsWith('\r')) line = line.slice(0, -1);
-      if (line === '') {
-        const frame = emit();
-        if (frame) yield frame;
-      } else if (!line.startsWith(':')) {
-        const separator = line.indexOf(':');
-        const field = separator < 0 ? line : line.slice(0, separator);
-        let value = separator < 0 ? '' : line.slice(separator + 1);
-        if (value.startsWith(' ')) value = value.slice(1);
-        if (field === 'event') event = value;
-        if (field === 'data') {
-          data.push(value);
-          if (data.join('\n').length > maxEventBytes) throw new Error('RCC v3 SSE event exceeded limit');
+  try {
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+      if (buffer.length > maxBufferBytes) throw new Error('RCC v3 SSE buffer exceeded limit');
+      let boundary = buffer.indexOf('\n');
+      while (boundary >= 0) {
+        let line = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 1);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (line === '') {
+          const frame = emit();
+          if (frame) yield frame;
+        } else if (!line.startsWith(':')) {
+          const separator = line.indexOf(':');
+          const field = separator < 0 ? line : line.slice(0, separator);
+          let value = separator < 0 ? '' : line.slice(separator + 1);
+          if (value.startsWith(' ')) value = value.slice(1);
+          if (field === 'event') event = value;
+          if (field === 'data') {
+            data.push(value);
+            if (data.join('\n').length > maxEventBytes) throw new Error('RCC v3 SSE event exceeded limit');
+          }
         }
+        boundary = buffer.indexOf('\n');
       }
-      boundary = buffer.indexOf('\n');
     }
+    buffer += decoder.decode();
+    if (buffer.length > maxBufferBytes) throw new Error('RCC v3 SSE buffer exceeded limit');
+    if (buffer.length > 0) throw new Error('RCC v3 SSE stream ended with an incomplete frame');
+    const frame = emit();
+    if (frame) yield frame;
+  } finally {
+    await iterator.return?.();
   }
-  buffer += decoder.decode();
-  if (buffer.length > maxBufferBytes) throw new Error('RCC v3 SSE buffer exceeded limit');
-  if (buffer.length > 0) throw new Error('RCC v3 SSE stream ended with an incomplete frame');
-  const frame = emit();
-  if (frame) yield frame;
 }
 
 function responsesPayload(request: ResponsesWireRequest): Record<string, unknown> {
@@ -410,40 +424,20 @@ export class RccV3ProviderTransport implements ProviderTransport {
     this.assertProtocol(protocol);
     const route = requestRoute(request);
     this.assertRouteBinding(route, this.options.binding.providerId);
-    const controller = new AbortController();
-    const response = await this.send(protocol, request, controller);
-    const body = response.body;
-    if (!body) {
-      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'start', message: 'RCC v3 returned no streaming body', scope: input });
-    }
-    const evidenceScope = scopeFor(input, input.evidenceRefs[0]?.scope);
-    const execution: ActiveExecution = {
-      identity: { ...input },
-      controller,
-      body,
-      protocol,
+    const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
+    await this.writeEvidence(scope, 'route-selection-unavailable', {
       route,
+      protocol,
       model: request.model,
-      evidenceScope,
-      stopRequested: false,
-      observed: false,
-      streamDone: false,
-    };
-    let ref: EvidenceRef;
-    try {
-      ref = await this.writeEvidence(evidenceScope, 'start', {
-        status: response.status,
-        endpoint: endpointPath(protocol),
-        protocol,
-        model: request.model,
-        route,
-      });
-    } catch (cause) {
-      controller.abort('start evidence persistence failed');
-      throw cause;
-    }
-    this.executions.set(key, execution);
-    return { ...input, startedAt: new Date().toISOString(), evidenceRefs: [ref] };
+    });
+    throw new ProviderAdapterError({
+      code: 'capability.route-selection-unavailable',
+      category: 'capability',
+      phase: 'start',
+      message: 'RCC v3 has no verified route-selection control; refusing to start with a recorded route label',
+      scope: input,
+      nextAction: { kind: 'recover', ref: OWNER },
+    });
   }
 
   async resume(input: ProviderResumeInput, _request: ProviderWireRequest): Promise<ProviderRecoveryResult> {
@@ -474,6 +468,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
     const active = this.active(input);
     if (active.observed) throw new ProviderAdapterError({ code: 'runtime.observe.repeated', category: 'runtime', phase: 'observe', message: 'RCC v3 stream can only be observed once', scope: input });
     active.observed = true;
+    let completed = false;
+    let failed = false;
     try {
       for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
         if (!frame.data || frame.data === '[DONE]') continue;
@@ -524,28 +520,40 @@ export class RccV3ProviderTransport implements ProviderTransport {
         throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input });
       }
       active.streamDone = true;
+      active.resourceReleased = true;
+      completed = true;
     } catch (cause) {
       active.streamDone = true;
-      if (isExpectedStopAbort(cause, active.controller)) {
+      if (isExpectedStopAbort(cause, active)) {
         active.terminalState = 'stopped';
+        active.resourceReleased = true;
         return;
       } else if (!active.terminalError) {
         const errorMessage = cause instanceof Error ? cause.message : 'RCC v3 stream failed';
         active.terminalError = providerError(active.evidenceScope, 'observe', 'transport.failure', errorMessage, 'transport');
         active.terminalState = 'failed';
       }
+      failed = true;
       throw cause;
     } finally {
-      if (!active.streamDone) {
+      if (!completed) {
+        if (!failed) {
+          if (!active.controller.signal.aborted) {
+            active.controller.abort(new DOMException('RCC v3 observe consumer stopped before stream completion', 'AbortError'));
+          }
+          active.resourceReleased = true;
+        }
         active.streamDone = true;
-        active.terminalState = 'failed';
-        active.terminalError = providerError(
-          active.evidenceScope,
-          'observe',
-          'stream.early-return',
-          'RCC v3 stream was not fully observed before resource cleanup',
-          'runtime',
-        );
+        if (!active.terminalState && !active.terminalError) {
+          active.terminalState = 'blocked';
+          active.terminalError = providerError(
+            active.evidenceScope,
+            'observe',
+            'observe.consumer-returned-early',
+            'RCC v3 stream was cancelled before it reached a provider terminal state',
+            'runtime',
+          );
+        }
       }
     }
   }
@@ -559,7 +567,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
       return { ...input, status: 'rejected', receivedAt: new Date().toISOString(), evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'continue' } };
     }
     active.stopRequested = true;
-    active.controller.abort(input.reason);
+    active.stopCause = new DOMException(input.reason, 'AbortError');
+    active.controller.abort(active.stopCause);
     const ref = await this.writeEvidence(scope, 'stop-requested', {
       remoteStopSupported: false,
       transportAbort: true,
@@ -581,17 +590,54 @@ export class RccV3ProviderTransport implements ProviderTransport {
       route: active.route,
       model: active.model,
     });
-    if (state === 'waiting' || state === 'blocked' || state === 'failed' || state === 'unknown') {
+    if (state === 'waiting' && active.streamDone) {
+      const error = await this.persistError(scope, providerError(
+        scope,
+        'settle',
+        'capability.continuation-unavailable',
+        'RCC v3 cannot continue a fully observed waiting execution: resume and submit are unsupported',
+        'capability',
+        { kind: 'recover', ref: OWNER },
+      ));
+      return {
+        ...input,
+        state: 'blocked',
+        evidenceRefs: [evidenceRef],
+        resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
+        persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
+        error,
+        ownerId: OWNER,
+        nextAction: { kind: 'recover' as const, ref: OWNER },
+      };
+    }
+    if (state === 'waiting') {
       return {
         ...input,
         state,
         evidenceRefs: [evidenceRef],
-        resourceRelease: { state: 'pending', evidenceRefs: [evidenceRef] },
+        resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
-        ...(state === 'waiting' ? { ownerId: OWNER, nextAction: { kind: 'continue' as const, ref: 'rcc-v3.observe' } } : {}),
-        ...(state === 'failed' || state === 'unknown' || state === 'blocked'
-          ? { error: active.terminalError ?? providerError(scope, 'settle', 'settle.requires-recovery', `RCC v3 settlement requires recovery for ${state}`, 'runtime'), ownerId: OWNER, nextAction: { kind: 'recover' as const, ref: OWNER } }
-          : {}),
+        ownerId: OWNER,
+        nextAction: { kind: 'continue', ref: 'rcc-v3.observe' },
+      };
+    }
+    if (state === 'blocked' || state === 'failed' || state === 'unknown') {
+      const error = await this.persistError(scope, active.terminalError ?? providerError(
+        scope,
+        'settle',
+        'settle.requires-recovery',
+        `RCC v3 settlement requires recovery for ${state}`,
+        'runtime',
+      ));
+      return {
+        ...input,
+        state,
+        evidenceRefs: [evidenceRef],
+        resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
+        persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
+        error,
+        ownerId: OWNER,
+        nextAction: { kind: 'recover' as const, ref: OWNER },
       };
     }
     const settlement: ProviderSettlement = {
@@ -660,6 +706,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
 
   private async writeEvidence(scope: ScopeRef, type: string, content: unknown): Promise<EvidenceRef> {
     return this.options.evidence.write({ scope, kind: 'external', type, locator: `rcc-v3://${type}`, content });
+  }
+
+  private async persistError(scope: ScopeRef, error: ProviderError): Promise<ProviderError> {
+    const ref = await this.writeEvidence(scope, 'settle-error', { ...error, evidenceRefs: [] });
+    return { ...error, evidenceRefs: [ref] };
   }
 
   private assertBinding(binding: ProviderBinding): void {

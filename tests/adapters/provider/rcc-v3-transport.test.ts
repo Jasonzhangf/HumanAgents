@@ -133,6 +133,67 @@ function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCode
   return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes };
 }
 
+function transportHarness() {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const writes: ProviderEvidenceWrite[] = [];
+  const refs: EvidenceRef[] = [];
+  const transport = createV3ProviderHttpTransport({
+    binding,
+    baseUrl: 'http://127.0.0.1:4444',
+    evidence: {
+      async write(input) {
+        writes.push(input);
+        const ref = {
+          evidenceId: id('evidence', `rcc-write-${input.type}-${input.locator.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+          kind: input.kind,
+          source: 'rcc-v3-transport-test',
+          locator: input.locator,
+          scope: input.scope,
+        };
+        refs.push(ref);
+        return ref;
+      },
+      async read() {
+        return new Uint8Array();
+      },
+    },
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+  });
+  return { transport, calls, writes, refs };
+}
+
+function executionKey(input = execution): string {
+  return `${input.runtimeId}:${input.taskId.value}:${input.operationId.value}:${input.executionEpoch}`;
+}
+
+// Start fails closed without a verified RCC selector; seed the owned execution
+// so post-start transport contracts remain testable without faking route success.
+function seedActive(
+  transport: ReturnType<typeof createV3ProviderHttpTransport>,
+  body: AsyncIterable<Uint8Array>,
+  protocol: 'responses' | 'anthropic' = 'responses',
+) {
+  const controller = new AbortController();
+  const active = {
+    identity: { ...execution },
+    controller,
+    body,
+    protocol,
+    route: `${binding.providerId}:test-route`,
+    model: binding.modelRef,
+    evidenceScope: scope,
+    stopRequested: false,
+    observed: false,
+    streamDone: false,
+    resourceReleased: false,
+  };
+  (transport as unknown as { executions: Map<string, typeof active> }).executions.set(executionKey(), active);
+  return { controller, active };
+}
+
 function probeAdapter(fetch: V3ProviderFetch, writes: Array<ProviderEvidenceWrite>, provider = binding) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const evidence: ProviderEvidenceSink = {
@@ -224,65 +285,20 @@ test('RCC v3 probe stops at health failure and preserves recovery ownership', as
   assert.deepEqual(writes.map((write) => write.type), ['probe-health']);
 });
 
-test('RCC v3 transport maps internal Responses wire to standard endpoint JSON', async () => {
+test('RCC v3 start fails closed because route selection is unavailable', async () => {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
-  const body = chunks([
-    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1"}}\n\n',
-  ]);
-  const built = adapter(fetchStub(body, calls));
-  await built.adapter.start(startInput());
-  const request = JSON.parse(calls[0].init.body!);
+  const built = adapter(fetchStub(chunks([]), calls));
 
-  assert.equal(calls[0].url, 'http://127.0.0.1:4444/v1/responses');
-  assert.equal(request.model, 'provider.model');
-  assert.equal(request.stream, true);
-  assert.equal(request.route, undefined);
-  assert.equal(request.execution, undefined);
-  assert.equal(request.checkpointId, undefined);
-  assert.equal(request.type, undefined);
-
-  const events = [];
-  for await (const event of built.adapter.observe(execution)) events.push(event);
-  assert.equal(events.at(-1)?.terminalState, 'succeeded');
-});
-
-test('RCC v3 transport maps Anthropic wire to /v1/messages and preserves SSE chunk boundaries', async () => {
-  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
-  const body = chunks([
-    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"provider.model","role":"assistant"}}\n\n',
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
-    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-  ]);
-  const anthropicBinding = { ...binding, bindingId: 'binding-anthropic', providerId: 'goaichat', protocol: 'anthropic' as const };
-  const built = adapter(fetchStub(body, calls), anthropicBinding, new AnthropicProviderCodec(4096));
-  await built.adapter.start(startInput());
-  const request = JSON.parse(calls[0].init.body!);
-
-  assert.equal(calls[0].url, 'http://127.0.0.1:4444/v1/messages');
-  assert.equal(request.model, 'provider.model');
-  assert.equal(request.stream, true);
-  assert.equal(request.execution, undefined);
-  assert.equal(request.checkpointId, undefined);
-  const events = [];
-  for await (const event of built.adapter.observe(execution)) events.push(event);
-  assert.equal(events.at(-1)?.terminalState, 'succeeded');
-});
-
-test('RCC v3 transport preserves explicit route binding in evidence without stuffing payload', async () => {
-  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
-  const body = chunks([
-    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
-    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1"}}\n\n',
-  ]);
-  const built = adapter(fetchStub(body, calls));
-  await built.adapter.start(startInput());
-  const request = JSON.parse(calls[0].init.body!);
-
-  assert.equal(request.route, undefined);
-  assert.equal(request.execution, undefined);
-  assert.equal(JSON.stringify(request).includes('cc:test-route'), false);
-  assert.equal((built.writes.find((write) => write.type === 'start')?.content as { route?: string } | undefined)?.route, 'cc:test-route');
+  await assert.rejects(() => built.adapter.start(startInput()), (error) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    assert.equal((error as ProviderAdapterError).providerError.code, 'capability.route-selection-unavailable');
+    assert.equal((error as ProviderAdapterError).providerError.category, 'capability');
+    assert.equal((error as ProviderAdapterError).providerError.nextAction.kind, 'recover');
+    return true;
+  });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(built.writes.map((write) => write.type), ['route-selection-unavailable']);
+  assert.equal((built.writes[0].content as { route?: string }).route, 'cc:test-route');
 });
 
 test('RCC v3 transport rejects route bindings that do not match the provider', async () => {
@@ -309,127 +325,166 @@ test('RCC v3 transport rejects route bindings that do not match the provider', a
   });
 });
 
-test('RCC v3 transport exposes provider error and rejects incomplete SSE without terminal', async () => {
+test('RCC v3 failed settlement persists and returns the configured error evidence ref', async () => {
   const errorBody = chunks(['event: error\ndata: {"type":"error","error":{"code":"overloaded","message":"busy"}}\n\n']);
-  const built = adapter(fetchStub(errorBody, []));
-  await built.adapter.start(startInput());
+  const built = transportHarness();
+  seedActive(built.transport, errorBody);
   const events = [];
-  for await (const event of built.adapter.observe(execution)) events.push(event);
-  assert.equal(events.at(-1)?.kind, 'error');
-  const failed = await built.adapter.settle(execution);
+  for await (const event of built.transport.observe(execution)) events.push(event);
+  assert.equal(events.at(-1)?.type, 'error');
+  const failed = await built.transport.settle(execution);
   assert.equal(failed.state, 'failed');
+  const errorEvidenceIndex = built.writes.findIndex((write) => write.type === 'settle-error');
+  assert.ok(errorEvidenceIndex >= 0);
+  assert.deepEqual(failed.error?.evidenceRefs, [built.refs[errorEvidenceIndex]]);
+  assert.equal(failed.error?.evidenceRefs[0]?.locator, 'rcc-v3://settle-error');
 
-  const incomplete = adapter(fetchStub(chunks(['data: {"type":"response.created"}']), []) );
-  await incomplete.adapter.start(startInput());
+  const incomplete = transportHarness();
+  seedActive(incomplete.transport, chunks(['data: {"type":"response.created"}']));
   await assert.rejects(async () => {
-    for await (const _event of incomplete.adapter.observe(execution)) void _event;
+    for await (const _event of incomplete.transport.observe(execution)) void _event;
   }, /incomplete|terminal/);
-  const incompleteSettlement = await incomplete.adapter.settle(execution);
+  const incompleteSettlement = await incomplete.transport.settle(execution);
   assert.equal(incompleteSettlement.state, 'failed');
+  assert.equal(incompleteSettlement.error?.evidenceRefs[0]?.locator, 'rcc-v3://settle-error');
 });
 
-test('Anthropic waiting outcomes remain waiting through RCC settle', async () => {
-  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
-  const body = chunks([
-    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"provider.model","role":"assistant"}}\n\n',
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}\n\n',
-    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-  ]);
-  const anthropicBinding = { ...binding, bindingId: 'binding-anthropic', providerId: 'goaichat', protocol: 'anthropic' as const };
-  const built = adapter(fetchStub(body, calls), anthropicBinding, new AnthropicProviderCodec(4096));
-  await built.adapter.start(startInput());
-  const events = [];
-  for await (const event of built.adapter.observe(execution)) events.push(event);
+for (const stopReason of ['tool_use', 'max_tokens', 'pause_turn'] as const) {
+  test(`RCC v3 Anthropic ${stopReason} becomes blocked capability-unavailable after observation`, async () => {
+    const built = transportHarness();
+    seedActive(built.transport, chunks([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-1","model":"provider.model","role":"assistant"}}\n\n',
+      `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"${stopReason}"}}\n\n`,
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]), 'anthropic');
+    for await (const _event of built.transport.observe(execution)) void _event;
 
-  assert.equal(events.at(-1)?.terminalState, 'waiting');
-  const settled = await built.adapter.settle(execution);
-  assert.equal(settled.state, 'waiting');
-  assert.equal(settled.resourceRelease.state, 'pending');
-});
+    const settled = await built.transport.settle(execution);
+    assert.equal(settled.state, 'blocked');
+    assert.equal(settled.resourceRelease.state, 'released');
+    assert.equal(settled.persistence.state, 'pending');
+    assert.equal(settled.error?.category, 'capability');
+    assert.equal(settled.error?.code, 'capability.continuation-unavailable');
+    assert.equal(settled.error?.ownerId, 'humanagent.provider-adapter.rcc-v3');
+    assert.equal(settled.error?.nextAction.kind, 'recover');
+    assert.equal(settled.nextAction?.kind, 'recover');
+    const errorEvidenceIndex = built.writes.findIndex((write) => write.type === 'settle-error');
+    assert.ok(errorEvidenceIndex >= 0);
+    assert.deepEqual(settled.error?.evidenceRefs, [built.refs[errorEvidenceIndex]]);
+  });
+}
 
 test('RCC v3 stop receipt is distinct from settle and does not claim remote cancellation', async () => {
-  const built = adapter(fetchStub(chunks([]), []));
-  await built.adapter.start(startInput());
-  const stop = await built.adapter.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' });
+  const built = transportHarness();
+  seedActive(built.transport, chunks([]));
+  const stop = await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'operator stop',
+    execution,
+  });
   assert.equal(stop.status, 'accepted');
   assert.equal('state' in stop, false);
-  const settled = await built.adapter.settle(execution);
+  const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'waiting');
   assert.equal(settled.resourceRelease.state, 'pending');
 });
 
 test('RCC v3 stop request remains stopped when the Responses stream later closes', async () => {
-  const built = adapter(fetchStub(chunks([
+  const built = transportHarness();
+  seedActive(built.transport, chunks([
     'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-stop"}}\n\n',
-  ]), []));
-  await built.adapter.start(startInput());
-  const stop = await built.adapter.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' });
+  ]));
+  const stop = await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'operator stop',
+    execution,
+  });
   assert.equal(stop.status, 'accepted');
-  for await (const _event of built.adapter.observe(execution)) void _event;
-  const settled = await built.adapter.settle(execution);
+  for await (const _event of built.transport.observe(execution)) void _event;
+  const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'stopped');
 });
 
-test('RCC v3 stop swallows the transport abort and settles stopped', async () => {
-  const abortAwareFetch: V3ProviderFetch = async (_url, init) => ({
-    status: 200,
-    body: {
-      async *[Symbol.asyncIterator]() {
-        if (init.signal?.aborted) throw new Error('AbortError');
-        await new Promise<never>((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('AbortError')), { once: true });
-        });
-      },
+test('RCC v3 stop swallows the exact controller cancellation identity', async () => {
+  const built = transportHarness();
+  let controller!: AbortController;
+  const abortingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      await new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+      });
     },
-    text: async () => 'rcc-test-response',
+  };
+  controller = seedActive(built.transport, abortingBody).controller;
+  await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'operator stop',
+    execution,
   });
-  const built = adapter(abortAwareFetch);
-  await built.adapter.start(startInput());
-  await built.adapter.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' });
-  for await (const _event of built.adapter.observe(execution)) void _event;
-  const settled = await built.adapter.settle(execution);
+  for await (const _event of built.transport.observe(execution)) void _event;
+  const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'stopped');
 });
 
-test('RCC v3 stop does not mask non-abort transport failures as stopped', async () => {
-  const abortAwareFetch: V3ProviderFetch = async (_url, init) => ({
-    status: 200,
-    body: {
-      async *[Symbol.asyncIterator]() {
-        if (init.signal?.aborted) throw new Error('socket hang up');
-        await new Promise<never>((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('socket hang up')), { once: true });
-        });
-      },
+test('RCC v3 stop does not mask an ordinary Error containing abort as stopped', async () => {
+  const built = transportHarness();
+  let controller!: AbortController;
+  const abortingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      if (controller.signal.aborted) throw new Error('AbortError');
+      await new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(new Error('AbortError')), { once: true });
+      });
     },
-    text: async () => 'rcc-test-response',
+  };
+  controller = seedActive(built.transport, abortingBody).controller;
+  await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'operator stop',
+    execution,
   });
-  const built = adapter(abortAwareFetch);
-  await built.adapter.start(startInput());
-  await built.adapter.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' });
 
   await assert.rejects(async () => {
-    for await (const _event of built.adapter.observe(execution)) void _event;
-  }, /socket hang up/);
-  const settled = await built.adapter.settle(execution);
+    for await (const _event of built.transport.observe(execution)) void _event;
+  }, /AbortError/);
+  const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'failed');
-  assert.equal(settled.resourceRelease.state, 'pending');
-  assert.equal(settled.persistence.state, 'pending');
-  await assert.rejects(() => built.adapter.close(binding), /active executions/);
 });
 
-test('RCC v3 early observe cleanup prevents permanent waiting settlement', async () => {
-  const body = chunks([
-    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-1"}}\n\n',
-  ]);
-  const built = adapter(fetchStub(body, []));
-  await built.adapter.start(startInput());
+test('RCC v3 early observe return cancels the response body and controller', async () => {
+  const built = transportHarness();
+  let bodyCancelled = false;
+  const body: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      try {
+        yield new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"resp-1"}}\n\n');
+        await new Promise<never>(() => {});
+      } finally {
+        bodyCancelled = true;
+      }
+    },
+  };
+  const { controller } = seedActive(built.transport, body);
 
-  for await (const _event of built.adapter.observe(execution)) break;
-  const settled = await built.adapter.settle(execution);
-  assert.equal(settled.state, 'failed');
-  assert.equal(settled.resourceRelease.state, 'pending');
-  await assert.rejects(async () => {
-    for await (const _event of built.adapter.observe(execution)) void _event;
-  }, /observed once/);
+  for await (const _event of built.transport.observe(execution)) break;
+  assert.equal(bodyCancelled, true);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(controller.signal.reason instanceof DOMException, true);
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'blocked');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.nextAction?.kind, 'recover');
 });
