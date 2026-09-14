@@ -299,6 +299,32 @@ test('responses codec maps terminal, tool, and error wire events', async () => {
   assert.equal(error.events[0].error?.code, 'wire.error');
 });
 
+test('responses codec accepts RCC transparent-proxy events with empty response and message ids', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+
+  const created = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.created',
+    response: { id: '' },
+  }, context);
+  const output = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'OK' }] },
+  } as unknown as ProviderWireEvent, context);
+  const completed = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.completed',
+    response: { id: '' },
+  }, context);
+
+  assert.equal(created.events[0].kind, 'model');
+  assert.equal(output.events[0].kind, 'output');
+  assert.equal(completed.events[0].terminalState, 'succeeded');
+});
+
 test('responses and anthropic resume codecs keep checkpoint control truth off business payload', () => {
   const responses = new ResponsesProviderCodec();
   const anthropic = new AnthropicProviderCodec(4096);
@@ -379,8 +405,8 @@ test('anthropic codec accepts legal empty content fields and maps stop_reason', 
     protocol: 'anthropic',
     type: 'content_block_start',
     index: 1,
-    content_block: { type: 'thinking', thinking: '', signature: '' },
-  }, context);
+    content_block: { type: 'thinking', thinking: '' },
+  } as unknown as ProviderWireEvent, context);
   await codec.decodeEvent({
     protocol: 'anthropic',
     type: 'content_block_delta',

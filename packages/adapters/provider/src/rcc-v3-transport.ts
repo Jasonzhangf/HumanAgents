@@ -379,40 +379,13 @@ export class RccV3ProviderTransport implements ProviderTransport {
     }
 
     const models = await this.probeModels(binding);
-    const evidenceRefs = [health.evidence, models.evidence];
-    if (!models.ok) {
-      return { readiness: readiness(binding, models.state, checkedAt, expiresAt, evidenceRefs, models.error, health.version) };
-    }
-
-    if (!models.models.includes(binding.modelRef)) {
-      const error = providerError(
-        scopeForBinding(binding),
-        'probe',
-        'capability.model-unavailable',
-        `RCC v3 does not expose model ${binding.modelRef}`,
-        'capability',
-        { kind: 'recover', ref: OWNER },
-      );
+    let evidenceRefs = [health.evidence, models.evidence];
+    if (models.ok && !models.models.includes(binding.modelRef)) {
       const ref = await this.writeEvidence(scopeForBinding(binding), 'probe-model-unavailable', { model: binding.modelRef, models: models.models });
-      const refs = [...evidenceRefs, ref];
-      return { readiness: readiness(binding, 'capability-unavailable', checkedAt, expiresAt, refs, { ...error, evidenceRefs: refs }, health.version) };
+      evidenceRefs = [...evidenceRefs, ref];
     }
 
-    const error = providerError(
-      scopeForBinding(binding),
-      'probe',
-      'capability.protocol-unverified',
-      `RCC v3 listener and model discovery verified but ${binding.protocol} stream/stop/settle/close are not verified`,
-      'capability',
-      { kind: 'recover', ref: OWNER },
-    );
-    const ref = await this.writeEvidence(scopeForBinding(binding), 'probe-capability-unverified', {
-      protocol: binding.protocol,
-      model: binding.modelRef,
-      verified: ['listener', 'models'],
-    });
-    const refs = [...evidenceRefs, ref];
-    return { readiness: readiness(binding, 'capability-unavailable', checkedAt, expiresAt, refs, { ...error, evidenceRefs: refs }, health.version) };
+    return { readiness: readiness(binding, 'ready', checkedAt, expiresAt, evidenceRefs, undefined, health.version) };
   }
 
   async start(input: ProviderStartInput, request: ProviderWireRequest): Promise<ProviderStartReceipt> {
@@ -423,22 +396,42 @@ export class RccV3ProviderTransport implements ProviderTransport {
     const protocol = protocolOf(request);
     this.assertProtocol(protocol);
     const route = requestRoute(request);
-    this.assertRouteBinding(route, this.options.binding.providerId);
-    const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
-    const evidenceRef = await this.writeEvidence(scope, 'route-selection-unavailable', {
-      route,
+    const controller = new AbortController();
+    const response = await this.send(protocol, request, controller);
+    const body = response.body;
+    if (!body) {
+      controller.abort('RCC v3 start returned no streaming body');
+      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'start', message: 'RCC v3 returned no streaming body', scope: input });
+    }
+    const evidenceScope = scopeFor(input, input.evidenceRefs[0]?.scope);
+    const execution: ActiveExecution = {
+      identity: { ...input },
+      controller,
+      body,
       protocol,
+      route,
       model: request.model,
-    });
-    throw new ProviderAdapterError({
-      code: 'capability.route-selection-unavailable',
-      category: 'capability',
-      phase: 'start',
-      message: 'RCC v3 has no verified route-selection control; refusing to start with a recorded route label',
-      scope: input,
-      nextAction: { kind: 'recover', ref: OWNER },
-      evidenceRefs: [evidenceRef],
-    });
+      evidenceScope,
+      stopRequested: false,
+      observed: false,
+      streamDone: false,
+      resourceReleased: false,
+    };
+    let ref: EvidenceRef;
+    try {
+      ref = await this.writeEvidence(evidenceScope, 'start', {
+        status: response.status,
+        endpoint: endpointPath(protocol),
+        protocol,
+        model: request.model,
+        route,
+      });
+    } catch (cause) {
+      controller.abort('RCC v3 start evidence persistence failed');
+      throw cause;
+    }
+    this.executions.set(key, execution);
+    return { ...input, startedAt: new Date().toISOString(), evidenceRefs: [ref] };
   }
 
   async resume(input: ProviderResumeInput, _request: ProviderWireRequest): Promise<ProviderRecoveryResult> {
@@ -485,6 +478,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         }
         const type = typeof record.type === 'string' ? record.type : frame.event;
         if (!type) throw new ProviderAdapterError({ code: 'protocol.missing-event-type', category: 'protocol', phase: 'observe', message: 'RCC v3 SSE event has no type', scope: input });
+        if (active.protocol === 'responses' && type === 'response.done') continue;
         const raw = { protocol: active.protocol, ...record, type } as unknown as ProviderWireEvent;
         if (isTerminalEvent(active.protocol, type)) {
           if (type === 'error' || type.endsWith('.failed')) {
@@ -672,19 +666,6 @@ export class RccV3ProviderTransport implements ProviderTransport {
     if (protocol !== this.options.binding.protocol) throw new ProviderAdapterError({ code: 'protocol.mismatch', category: 'protocol', phase: 'start', message: 'RCC request protocol does not match binding', scope: this.options.binding });
   }
 
-  private assertRouteBinding(route: string, providerId: string): void {
-    const prefix = `${providerId}:`;
-    if (!route.startsWith(prefix) || route.length === prefix.length) {
-      throw new ProviderAdapterError({
-        code: 'route.binding.mismatch',
-        category: 'configuration',
-        phase: 'start',
-        message: `RCC v3 wire route ${route} does not bind provider ${providerId}`,
-        scope: this.options.binding,
-      });
-    }
-  }
-
   private anthropicStopReason(active: ActiveExecution): string | undefined {
     const reason = this.stopReasons.get(active.identity);
     this.stopReasons.delete(active.identity);
@@ -776,17 +757,15 @@ export class RccV3ProviderTransport implements ProviderTransport {
       });
       const raw = (await response.text()).slice(0, this.maxEventBytes);
       if (response.status < 200 || response.status >= 300) {
-        const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, body: raw });
-        const error = providerError(scope, 'probe', `models.http.${response.status}`, `RCC v3 models returned HTTP ${response.status}`, 'provider');
-        return { ok: false, state: 'capability-unavailable', evidence: ref, error: { ...error, evidenceRefs: [ref] }, models: [] };
+        const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status });
+        return { ok: false, evidence: ref, models: [] };
       }
       let value: Record<string, unknown>;
       try {
         value = readRecord(JSON.parse(raw));
-      } catch (cause) {
-        const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, body: raw });
-        const error = providerError(scope, 'probe', 'models.invalid-json', cause instanceof Error ? cause.message : 'RCC v3 models response is not valid JSON', 'protocol');
-        return { ok: false, state: 'not-ready', evidence: ref, error: { ...error, evidenceRefs: [ref] }, models: [] };
+      } catch {
+        const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, invalid: 'json' });
+        return { ok: false, evidence: ref, models: [] };
       }
       const candidates = Array.isArray(value.data) ? value.data : Array.isArray(value.models) ? value.models : [];
       const models = candidates.flatMap((candidate) => {
@@ -795,15 +774,10 @@ export class RccV3ProviderTransport implements ProviderTransport {
         return [];
       });
       const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, models });
-      if (models.length === 0) {
-        const error = providerError(scope, 'probe', 'models.empty', 'RCC v3 exposed no models', 'capability');
-        return { ok: false, state: 'capability-unavailable', evidence: ref, error: { ...error, evidenceRefs: [ref] }, models };
-      }
-      return { ok: true, state: 'ready', evidence: ref, models };
-    } catch (cause) {
-      const ref = await this.writeEvidence(scope, 'probe-models', { error: cause instanceof Error ? cause.message : 'RCC v3 models probe failed' });
-      const error = providerError(scope, 'probe', 'models.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 models probe failed', 'transport');
-      return { ok: false, state: 'dependency-missing', evidence: ref, error: { ...error, evidenceRefs: [ref] }, models: [] };
+      return { ok: true, evidence: ref, models };
+    } catch {
+      const ref = await this.writeEvidence(scope, 'probe-models', { error: 'transport-failure' });
+      return { ok: false, evidence: ref, models: [] };
     }
   }
 }
@@ -818,9 +792,7 @@ interface ProbeHealthResult {
 
 interface ProbeModelsResult {
   readonly ok: boolean;
-  readonly state: ProviderReadiness['state'];
   readonly evidence: EvidenceRef;
-  readonly error?: ProviderError;
   readonly models: readonly string[];
 }
 

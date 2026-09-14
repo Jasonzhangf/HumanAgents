@@ -14,6 +14,7 @@ import {
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
   type ProviderCodec,
+  type ProviderWireEvent,
   type V3ProviderFetch,
   type V3ProviderFetchInit,
   type V3ProviderFetchResponse,
@@ -180,8 +181,8 @@ function executionKey(input = execution): string {
   return `${input.runtimeId}:${input.taskId.value}:${input.operationId.value}:${input.executionEpoch}`;
 }
 
-// Start fails closed without a verified RCC selector; seed the owned execution
-// so post-start transport contracts remain testable without faking route success.
+// Seed the owned execution so post-start transport contracts remain isolated
+// from the start request path.
 function seedActive(
   transport: ReturnType<typeof createV3ProviderHttpTransport>,
   body: AsyncIterable<Uint8Array>,
@@ -235,7 +236,7 @@ function probeAdapter(fetch: V3ProviderFetch, writes: Array<ProviderEvidenceWrit
   return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec: new ResponsesProviderCodec(), transport, evidence }), calls };
 }
 
-test('RCC v3 probe keeps listener and model discovery but does not infer protocol readiness', async () => {
+test('RCC v3 probe keeps listener and model discovery evidence without inferring capability', async () => {
   const writes: ProviderEvidenceWrite[] = [];
   const built = probeAdapter(async (url) => {
     if (url.endsWith('/health')) return jsonResponse({ status: 'ok', version: '0.90.4785' });
@@ -244,44 +245,58 @@ test('RCC v3 probe keeps listener and model discovery but does not infer protoco
   }, writes);
 
   const readiness = await built.adapter.probe(binding);
-  assert.equal(readiness.state, 'capability-unavailable');
-  assert.equal(readiness.failure?.code, 'capability.protocol-unverified');
-  assert.equal(readiness.failure?.ownerId, 'humanagent.provider-adapter.rcc-v3');
+  assert.equal(readiness.state, 'ready');
+  assert.equal(readiness.failure, undefined);
   await assert.rejects(() => built.adapter.capabilities(binding), /capabilities are unavailable/);
   assert.deepEqual(built.calls.map((call) => [call.init.method, call.url]), [
     ['GET', 'http://127.0.0.1:4444/health'],
     ['GET', 'http://127.0.0.1:4444/v1/models'],
   ]);
-  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models', 'probe-capability-unverified']);
+  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models']);
 });
 
-test('RCC v3 probe reports capability-unavailable for an empty model list', async () => {
+test('RCC v3 probe remains ready for an empty model list without claiming model capability', async () => {
   const writes: ProviderEvidenceWrite[] = [];
   const built = probeAdapter(async (url) => url.endsWith('/health')
     ? jsonResponse({ status: 'ok' })
     : jsonResponse({ data: [], models: [] }), writes);
 
   const readiness = await built.adapter.probe(binding);
-  assert.equal(readiness.state, 'capability-unavailable');
-  assert.equal(readiness.failure?.code, 'models.empty');
-  assert.equal(readiness.failure?.ownerId, 'humanagent.provider-adapter.rcc-v3');
-  assert.equal(readiness.evidenceRefs.length, 2);
+  assert.equal(readiness.state, 'ready');
+  assert.equal(readiness.failure, undefined);
+  assert.equal(readiness.evidenceRefs.length, 3);
   await assert.rejects(() => built.adapter.capabilities(binding), /capabilities are unavailable/);
   assert.equal(built.calls.length, 2);
-  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models']);
+  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models', 'probe-model-unavailable']);
+  assert.deepEqual(writes[2].content, { model: binding.modelRef, models: [] });
 });
 
-test('RCC v3 probe reports capability-unavailable when the requested model is absent', async () => {
+test('RCC v3 probe remains ready when the requested model is absent from discovery', async () => {
   const writes: ProviderEvidenceWrite[] = [];
   const built = probeAdapter(async (url) => url.endsWith('/health')
     ? jsonResponse({ status: 'ok' })
     : jsonResponse({ data: [{ id: 'another.model' }] }), writes);
 
   const readiness = await built.adapter.probe(binding);
-  assert.equal(readiness.state, 'capability-unavailable');
-  assert.equal(readiness.failure?.code, 'capability.model-unavailable');
+  assert.equal(readiness.state, 'ready');
+  assert.equal(readiness.failure, undefined);
   assert.equal(readiness.evidenceRefs.length, 3);
   assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models', 'probe-model-unavailable']);
+  assert.deepEqual(writes[2].content, { model: binding.modelRef, models: ['another.model'] });
+});
+
+test('RCC v3 probe keeps health readiness when optional model discovery fails', async () => {
+  const writes: ProviderEvidenceWrite[] = [];
+  const built = probeAdapter(async (url) => url.endsWith('/health')
+    ? jsonResponse({ status: 'ok' })
+    : textResponse('models unavailable', 503), writes);
+
+  const readiness = await built.adapter.probe(binding);
+  assert.equal(readiness.state, 'ready');
+  assert.equal(readiness.failure, undefined);
+  assert.equal(readiness.evidenceRefs.length, 2);
+  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models']);
+  assert.equal((writes[1].content as { status?: number }).status, 503);
 });
 
 test('RCC v3 probe stops at health failure and preserves recovery ownership', async () => {
@@ -296,32 +311,39 @@ test('RCC v3 probe stops at health failure and preserves recovery ownership', as
   assert.deepEqual(writes.map((write) => write.type), ['probe-health']);
 });
 
-test('RCC v3 start fails closed because route selection is unavailable', async () => {
+test('RCC v3 start sends the explicit request and returns a receipt', async () => {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
-  const built = adapter(fetchStub(chunks([]), calls));
+  const body = chunks([
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-1"}}\n\n',
+  ]);
+  const built = adapter(fetchStub(body, calls));
 
-  let caught: unknown;
-  try {
-    await built.adapter.start(startInput());
-  } catch (error) {
-    caught = error;
-  }
-  assert.equal(caught instanceof ProviderAdapterError, true);
-  const providerError = (caught as ProviderAdapterError).providerError;
-  assert.equal(providerError.code, 'capability.route-selection-unavailable');
-  assert.equal(providerError.category, 'capability');
-  assert.equal(providerError.nextAction.kind, 'recover');
-  const ref = providerError.evidenceRefs[0];
-  assert.ok(ref);
-  assert.equal(ref.locator, 'rcc-v3://route-selection-unavailable');
-  const readable = await built.evidence.read(ref);
-  assert.match(new TextDecoder().decode(readable), /cc:test-route/);
-  assert.equal(calls.length, 0);
-  assert.deepEqual(built.writes.map((write) => write.type), ['route-selection-unavailable']);
+  const receipt = await built.adapter.start(startInput());
+  assert.equal(receipt.runtimeId, execution.runtimeId);
+  assert.equal(receipt.taskId.value, execution.taskId.value);
+  assert.equal(receipt.operationId.value, execution.operationId.value);
+  assert.equal(receipt.executionEpoch, execution.executionEpoch);
+  assert.equal(receipt.ownerId, undefined);
+  assert.equal(receipt.nextAction, undefined);
+  assert.equal(receipt.evidenceRefs.length, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:4444/v1/responses');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].init.body!), {
+    model: binding.modelRef,
+    instructions: 'input-rcc',
+    input: [{
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: JSON.stringify({ inputRefs: ['input-rcc'], payload: {} }) }],
+    }],
+    stream: true,
+  });
+  assert.deepEqual(built.writes.map((write) => write.type), ['start']);
   assert.equal((built.writes[0].content as { route?: string }).route, 'cc:test-route');
 });
 
-test('RCC v3 transport rejects route bindings that do not match the provider', async () => {
+test('RCC v3 transport accepts a route label that does not match the final upstream provider', async () => {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const provider = { ...binding, providerId: 'cc-sol', bindingId: 'binding-cc-sol' };
   const transport = createV3ProviderHttpTransport({
@@ -338,11 +360,46 @@ test('RCC v3 transport rejects route bindings that do not match the provider', a
     evidence: sink(),
   });
 
-  await assert.rejects(() => wrongRouteAdapter.start(startInput()), (error) => {
+  const receipt = await wrongRouteAdapter.start(startInput());
+  assert.equal(receipt.runtimeId, execution.runtimeId);
+  assert.equal(calls.length, 1);
+});
+
+test('RCC v3 start exposes HTTP failure with owner, next action, and evidence', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const built = adapter(fetchStub(chunks([]), calls, 503));
+
+  await assert.rejects(() => built.adapter.start(startInput()), (error) => {
     assert.equal(error instanceof ProviderAdapterError, true);
-    assert.match(String(error instanceof Error ? error.message : error), /bind provider/i);
+    const providerError = (error as ProviderAdapterError).providerError;
+    assert.equal(providerError.code, 'http.503');
+    assert.equal(providerError.category, 'provider');
+    assert.equal(providerError.ownerId, 'humanagent.provider-adapter');
+    assert.equal(providerError.nextAction.kind, 'recover');
+    assert.equal(providerError.evidenceRefs.length, 1);
     return true;
   });
+  assert.equal(calls.length, 1);
+});
+
+test('RCC v3 start rejects a successful HTTP response without an SSE body', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const built = adapter(async (url, init) => {
+    calls.push({ url, init });
+    return { ...response(chunks([])), body: null };
+  });
+
+  await assert.rejects(() => built.adapter.start(startInput()), (error) => {
+    assert.equal(error instanceof ProviderAdapterError, true);
+    const providerError = (error as ProviderAdapterError).providerError;
+    assert.equal(providerError.code, 'transport.empty.body');
+    assert.equal(providerError.category, 'transport');
+    assert.equal(providerError.ownerId, 'humanagent.provider-adapter');
+    assert.equal(providerError.nextAction.kind, 'recover');
+    assert.equal(providerError.evidenceRefs.length, 1);
+    return true;
+  });
+  assert.equal(calls.length, 1);
 });
 
 test('RCC v3 failed settlement persists and returns the configured error evidence ref', async () => {
@@ -554,4 +611,19 @@ test('RCC v3 early observe return cancels the response body and controller', asy
   assert.equal(settled.state, 'blocked');
   assert.equal(settled.resourceRelease.state, 'released');
   assert.equal(settled.nextAction?.kind, 'recover');
+});
+
+test('RCC v3 ignores the duplicate response.done trailer emitted by the transparent proxy', async () => {
+  const built = transportHarness();
+  seedActive(built.transport, chunks([
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":""}}\n\n',
+    'event: response.done\ndata: {"type":"response.done","response":{"id":""}}\n\n',
+    'data: [DONE]\n\n',
+  ]));
+
+  const events: ProviderWireEvent[] = [];
+  for await (const event of built.transport.observe(execution)) events.push(event);
+  assert.deepEqual(events.map((event) => event.type), ['response.completed']);
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'succeeded');
 });

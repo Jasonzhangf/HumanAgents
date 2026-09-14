@@ -193,6 +193,31 @@ function requireString(record: Record<string, unknown>, key: string, execution: 
   return value;
 }
 
+function requireStringOrGenerated(
+  record: Record<string, unknown>,
+  key: string,
+  execution: ProviderExecutionIdentityRef,
+  type: string,
+  generated: string,
+): string {
+  const value = record[key];
+  if (typeof value !== 'string') {
+    throw new ProviderAdapterError({
+      code: 'missing.field',
+      category: 'protocol',
+      phase: 'observe',
+      message: `${type} event missing ${key}`,
+      scope: execution,
+    });
+  }
+  return value.trim() === '' ? generated : value;
+}
+
+function stringOrGenerated(record: Record<string, unknown>, key: string, generated: string): string {
+  const value = record[key];
+  return typeof value === 'string' && value.trim() !== '' ? value : generated;
+}
+
 function requireStringValue(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): string {
   const value = record[key];
   if (typeof value !== 'string') {
@@ -288,7 +313,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.created':
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);
-        const responseId = requireString(response, 'id', context.execution, raw.type);
+        const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`)];
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs)] };
       }
@@ -317,7 +342,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             ],
           };
         }
-        const itemId = requireString(item, 'id', context.execution, raw.type);
+        const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
         return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
       }
@@ -387,7 +412,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             ],
           };
         }
-        const itemId = requireString(item, 'id', context.execution, raw.type);
+        const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
         return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
       }
@@ -406,7 +431,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.completed':
       case 'response.incomplete': {
         const response = requireObject(record, 'response', context.execution, raw.type);
-        const responseId = requireString(response, 'id', context.execution, raw.type);
+        const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
         const incompleteDetails = raw.type === 'response.incomplete'
           ? requireObject(response, 'incomplete_details', context.execution, raw.type)
           : undefined;
@@ -581,8 +606,8 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         }
         if (blockType === 'thinking') {
           const thinking = requireStringValue(blockRecord, 'thinking', context.execution, raw.type);
-          const signature = requireStringValue(blockRecord, 'signature', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, { thinking, signature })];
+          const signature = typeof blockRecord.signature === 'string' ? blockRecord.signature : undefined;
+          const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, { thinking, ...(signature === undefined ? {} : { signature }) })];
           return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs)] };
         }
         throw new ProviderAdapterError({

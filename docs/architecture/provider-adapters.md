@@ -1,11 +1,12 @@
 # HumanAgent Provider Adapter 边界
 
-状态：`M1-DESIGN / ADAPTER-NOT-STARTED`  
-日期：2026-09-13
+状态：`M1-2 / RCC-ROUTER-ADAPTER-VERIFIED`
+日期：2026-09-14
 
 本文是 Provider 协议适配的唯一设计记录。它定义 HumanAgent 如何使用本机
 RCC v3 作为 Milestone 1 的临时执行入口，以及为什么 `cc` 与 `goaichat`
-必须由两条独立的协议适配链处理。本文不代表 Provider adapter 已经实现。
+必须由两条独立的协议适配链处理。本文记录当前 RCC adapter 的实现边界；DSH
+adapter 仍是后续独立阶段。
 
 ## 1. 当前临时 Provider 基线
 
@@ -21,8 +22,14 @@ RCC v3 作为 Milestone 1 的临时执行入口，以及为什么 `cc` 与 `goai
 | `cc-sol` Provider | `providerId = "cc-sol"`，`type = "responses"` | `~/.rcc/provider/cc-sol/config.v2.toml` |
 | `goaichat` Provider | `providerId = "goaichat"`，`type = "anthropic"` | `~/.rcc/provider/goaichat/config.v2.toml` |
 
+RCC 是透明路由入口：它可以按模型选择上游、重试并过滤不稳定 Provider。因此
+`/v1/models` 为空、请求模型未出现在发现列表，或响应里的最终 `model` 与请求
+不同，都不能单独阻断 HumanAgent 请求。HumanAgent 只把 `/health` 作为入口
+readiness，把模型发现作为可选 evidence，并以实际协议响应和生命周期闭环确认
+可用性。
+
 这些事实只证明本机配置和 listener 的存在，不能证明 HumanAgent 的 Provider
-请求、流式解码、工具调用或停止闭环已经成功。M1 必须分别完成：
+请求、流式解码、工具调用或停止闭环已经成功。适配验证必须分别完成：
 
 1. listener/config readiness；
 2. `responses` codec readiness；
@@ -57,8 +64,11 @@ DSH 和 RCC 是两个不同的边界：
   或 `CheckpointId`。
 
 HumanAgent 不能因为所有请求都经过 `127.0.0.1:4444` 就认为协议相同。4444
-是 listener，不是 codec；协议选择必须来自锁定的 Provider capability binding，
-探测不到时进入 `capability-unavailable`，不能猜测或静默 fallback。
+是透明路由 listener，不是最终 Provider 身份；协议选择仍必须来自锁定的
+Provider binding，但 route label 只表示请求入口，不得用来校验最终上游 Provider。
+`/health` 失败才阻断入口 readiness；模型发现失败、空列表或模型未列出时保留
+evidence，仍允许实际请求验证 RCC 的路由能力。不能猜测协议，也不能静默改用
+另一条协议。
 
 ## 3. Provider-neutral contract
 
@@ -207,4 +217,22 @@ HumanAgent lock 只记录：provider id、protocol、endpoint 的非敏感引用
 - RCC listener/protocol readiness 和 direct request 只要求在 real RCC 路径有
  真实证据；不能用 DSH 日志替代。
 
-无证据的“协议兼容”只能保持设计状态。
+## 8. M1-2 验证结果
+
+当前 RCC `4444` 已通过同一 HumanAgent ProviderAdapter 入口：
+
+```text
+probe → ready (rcc-v3)
+start → accepted
+observe → 3 events
+settle → succeeded / released / committed
+close → closed
+```
+
+本次真实响应的最终 `model` 为 `deepseek-v4-flash-0731`，与请求模型不同，未被
+HumanAgent 当作 binding mismatch 拒绝。RCC 返回的空 response/message id 和重复
+`response.done` trailer 由 adapter 做协议级兼容：生成本地观测引用并忽略重复
+trailer；真正缺少必需字段仍然失败。
+
+focused provider、replay 和 RCC tests：`49 passed, 0 failed`；TypeScript
+检查：通过。无证据的其他 Provider 或 DSH 兼容性仍保持未完成状态。
