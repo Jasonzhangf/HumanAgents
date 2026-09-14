@@ -1,0 +1,3 @@
+{"protocol":"responses","type":"response.created","response":{"id":"resp-replay-error","model":"model-cc"}}
+{"protocol":"responses","type":"response.output_text.delta","item_id":"msg-error","delta":"partial"}
+{"protocol":"responses","type":"error","error":{"code":"server_error","message":"provider exploded","param":"model"}}

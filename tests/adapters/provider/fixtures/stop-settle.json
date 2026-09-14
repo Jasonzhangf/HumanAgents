@@ -1,0 +1,106 @@
+{
+  "start": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "startedAt": "2026-09-13T00:00:00Z",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-stop-start" },
+        "kind": "external",
+        "source": "test-provider",
+        "locator": "dsh://evidence/stop-start",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ],
+    "externalExecutionRef": {
+      "evidenceId": { "scope": "evidence", "value": "ev-stop-session" },
+      "kind": "external",
+      "source": "test-provider",
+      "locator": "dsh://session/sess-stop-replay",
+      "scope": {
+        "organId": { "scope": "organ", "value": "organ-a" },
+        "taskId": { "scope": "task", "value": "task-a" },
+        "operationId": { "scope": "operation", "value": "operation-a" }
+      }
+    }
+  },
+  "stop": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "status": "accepted",
+    "receivedAt": "2026-09-13T00:00:01Z",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-stop-receipt" },
+        "kind": "external",
+        "source": "test-provider",
+        "locator": "dsh://evidence/stop-receipt",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ]
+  },
+  "settle": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "state": "stopped",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-stop-settle" },
+        "kind": "external",
+        "source": "test-provider",
+        "locator": "dsh://evidence/stop-settle",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ],
+    "resourceRelease": {
+      "state": "released",
+      "evidenceRefs": [
+        {
+          "evidenceId": { "scope": "evidence", "value": "ev-stop-resource" },
+          "kind": "external",
+          "source": "test-provider",
+          "locator": "dsh://evidence/stop-resource",
+          "scope": {
+            "organId": { "scope": "organ", "value": "organ-a" },
+            "taskId": { "scope": "task", "value": "task-a" },
+            "operationId": { "scope": "operation", "value": "operation-a" }
+          }
+        }
+      ]
+    },
+    "persistence": {
+      "state": "committed",
+      "evidenceRefs": [
+        {
+          "evidenceId": { "scope": "evidence", "value": "ev-stop-persistence" },
+          "kind": "external",
+          "source": "test-provider",
+          "locator": "dsh://evidence/stop-persistence",
+          "scope": {
+            "organId": { "scope": "organ", "value": "organ-a" },
+            "taskId": { "scope": "task", "value": "task-a" },
+            "operationId": { "scope": "operation", "value": "operation-a" }
+          }
+        }
+      ]
+    }
+  }
+}

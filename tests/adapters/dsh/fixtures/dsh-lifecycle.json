@@ -1,0 +1,271 @@
+{
+  "profile": {
+    "profileName": "humanagent",
+    "homeRef": "env:DSH_HOME",
+    "plugin": {
+      "bundleRef": "humanagent-dsh-bundle:approved",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "entry": "dist/index.js"
+    },
+    "routeRef": "explicit/dsh/route",
+    "patchRefs": []
+  },
+  "binding": {
+    "bindingId": "binding-dsh",
+    "providerId": "dsh",
+    "protocol": "responses",
+    "endpointRef": "local:dsh-transport",
+    "modelRef": "explicit/model",
+    "configDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capabilityDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "identity": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1
+  },
+  "scope": {
+    "organId": { "scope": "organ", "value": "organ-a" },
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" }
+  },
+  "start": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "startedAt": "2026-09-13T00:00:00Z",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-start" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-start",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ],
+    "externalExecutionRef": {
+      "evidenceId": { "scope": "evidence", "value": "ev-replay-session" },
+      "kind": "external",
+      "source": "dsh-replay-transport",
+      "locator": "dsh://session/sess-recorded",
+      "scope": {
+        "organId": { "scope": "organ", "value": "organ-a" },
+        "taskId": { "scope": "task", "value": "task-a" },
+        "operationId": { "scope": "operation", "value": "operation-a" }
+      }
+    }
+  },
+  "resume": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "checkpointId": { "scope": "checkpoint", "value": "cp-replay" },
+    "recovered": true,
+    "staleRejected": false,
+    "recoveryStateRef": {
+      "evidenceId": { "scope": "evidence", "value": "ev-replay-resume-session" },
+      "kind": "external",
+      "source": "dsh-replay-transport",
+      "locator": "dsh://session/sess-recorded-resume",
+      "scope": {
+        "organId": { "scope": "organ", "value": "organ-a" },
+        "taskId": { "scope": "task", "value": "task-a" },
+        "operationId": { "scope": "operation", "value": "operation-a" }
+      }
+    },
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-resume" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-resume",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ]
+  },
+  "submit": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "status": "completed",
+    "outputRefs": ["output-a"],
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-submit" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-submit",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ],
+    "payload": { "answer": "ok" }
+  },
+  "observe": [
+    {
+      "runtimeId": "runtime-a",
+      "taskId": { "scope": "task", "value": "task-a" },
+      "operationId": { "scope": "operation", "value": "operation-a" },
+      "executionEpoch": 1,
+      "eventId": "event-recorded-1",
+      "kind": "model",
+      "evidenceRefs": [
+        {
+          "evidenceId": { "scope": "evidence", "value": "ev-replay-observe" },
+          "kind": "external",
+          "source": "dsh-replay-transport",
+          "locator": "dsh://evidence/replay-observe",
+          "scope": {
+            "organId": { "scope": "organ", "value": "organ-a" },
+            "taskId": { "scope": "task", "value": "task-a" },
+            "operationId": { "scope": "operation", "value": "operation-a" }
+          }
+        }
+      ]
+    }
+  ],
+  "stop": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "status": "accepted",
+    "receivedAt": "2026-09-13T00:00:01Z",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-stop" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-stop",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ]
+  },
+  "settle": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "state": "stopped",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-settle" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-settle",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ],
+    "resourceRelease": {
+      "state": "released",
+      "evidenceRefs": [
+        {
+          "evidenceId": { "scope": "evidence", "value": "ev-replay-resource" },
+          "kind": "external",
+          "source": "dsh-replay-transport",
+          "locator": "dsh://evidence/replay-resource",
+          "scope": {
+            "organId": { "scope": "organ", "value": "organ-a" },
+            "taskId": { "scope": "task", "value": "task-a" },
+            "operationId": { "scope": "operation", "value": "operation-a" }
+          }
+        }
+      ]
+    },
+    "persistence": {
+      "state": "committed",
+      "evidenceRefs": [
+        {
+          "evidenceId": { "scope": "evidence", "value": "ev-replay-persistence" },
+          "kind": "external",
+          "source": "dsh-replay-transport",
+          "locator": "dsh://evidence/replay-persistence",
+          "scope": {
+            "organId": { "scope": "organ", "value": "organ-a" },
+            "taskId": { "scope": "task", "value": "task-a" },
+            "operationId": { "scope": "operation", "value": "operation-a" }
+          }
+        }
+      ]
+    }
+  },
+  "close": {
+    "bindingId": "binding-dsh",
+    "providerId": "dsh",
+    "protocol": "responses",
+    "state": "closed",
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-close" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-close",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ]
+  },
+  "wrongResumeCheckpoint": {
+    "runtimeId": "runtime-a",
+    "taskId": { "scope": "task", "value": "task-a" },
+    "operationId": { "scope": "operation", "value": "operation-a" },
+    "executionEpoch": 1,
+    "checkpointId": { "scope": "checkpoint", "value": "cp-wrong" },
+    "recovered": true,
+    "staleRejected": false,
+    "recoveryStateRef": {
+      "evidenceId": { "scope": "evidence", "value": "ev-replay-resume-wrong-session" },
+      "kind": "external",
+      "source": "dsh-replay-transport",
+      "locator": "dsh://session/sess-recorded-wrong",
+      "scope": {
+        "organId": { "scope": "organ", "value": "organ-a" },
+        "taskId": { "scope": "task", "value": "task-a" },
+        "operationId": { "scope": "operation", "value": "operation-a" }
+      }
+    },
+    "evidenceRefs": [
+      {
+        "evidenceId": { "scope": "evidence", "value": "ev-replay-resume-wrong" },
+        "kind": "external",
+        "source": "dsh-replay-transport",
+        "locator": "dsh://evidence/replay-resume-wrong",
+        "scope": {
+          "organId": { "scope": "organ", "value": "organ-a" },
+          "taskId": { "scope": "task", "value": "task-a" },
+          "operationId": { "scope": "operation", "value": "operation-a" }
+        }
+      }
+    ]
+  },
+  "failure": {
+    "phase": "settle",
+    "message": "crash-like transport failure"
+  }
+}

@@ -1,0 +1,3 @@
+{"protocol":"responses","type":"response.created","response":{"id":"resp-replay-success","model":"model-cc"}}
+{"protocol":"responses","type":"response.output_text.delta","item_id":"msg-1","delta":"hello"}
+{"protocol":"responses","type":"response.completed","response":{"id":"resp-replay-success"}}
