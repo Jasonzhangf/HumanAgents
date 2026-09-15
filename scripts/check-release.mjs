@@ -80,6 +80,12 @@ if (!Array.isArray(manifest.gateCommands)) throw new Error('release manifest mis
 if (manifest.pluginManifest?.status !== 'not-applicable' && typeof manifest.pluginManifest?.digest !== 'string') throw new Error('release manifest has invalid pluginManifest evidence');
 if (manifest.dshBaseline?.status !== 'not-applicable' && typeof manifest.dshBaseline?.baseline !== 'string') throw new Error('release manifest has invalid dshBaseline evidence');
 if (manifest.review?.status !== 'passed' || typeof manifest.review.reviewId !== 'string' || !manifest.review.reviewId) throw new Error('release review evidence is not passed');
+if (manifest.review.sourceCommit !== manifest.sourceCommit) throw new Error('release review is not bound to the source commit');
+if (manifest.review.stageManifestDigest !== manifest.stageManifestDigest) throw new Error('release review is not bound to the stage manifest');
+if (manifest.review.artifactDigest !== manifest.artifactDigest) throw new Error('release review is not bound to the release artifact');
+if (manifest.review.packageArtifactDigest !== manifest.packageArtifactDigest) throw new Error('release review is not bound to the package artifact');
+if (typeof manifest.review.receiptDigest !== 'string' || !manifest.review.receiptDigest) throw new Error('release review receipt digest is missing');
+timestamp(manifest.review.reviewedAt, 'review.reviewedAt');
 const unsigned = { ...manifest };
 delete unsigned.releaseManifestDigest;
 if (manifest.releaseManifestDigest !== digest(unsigned)) throw new Error('release manifest digest mismatch');

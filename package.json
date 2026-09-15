@@ -37,6 +37,7 @@
     "install:global": "node scripts/install-global.mjs",
     "uninstall:global": "node scripts/uninstall-global.mjs",
     "release:check": "node scripts/check-release.mjs",
+    "review:record": "node scripts/record-review.mjs",
     "smoke": "node scripts/smoke.mjs"
   }
 }

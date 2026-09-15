@@ -52,10 +52,14 @@ pnpm run doctor -- --workspace /absolute/project
 pnpm run run -- --workspace /absolute/project --plan default
 pnpm run resume -- --workspace /absolute/project --session <session-id>
 pnpm run ci
+pnpm run build:release
+pnpm run review:record -- --review-id <review-id>
 pnpm run release
 pnpm run package
 ```
 
-`ci` 通过 checkpoint runner 在 `~/.humanagent/build/checkpoints/ci/<project-key>/manifest.json` 执行 `typecheck → compile → regression → ci`；已通过且输入/输出 digest 未变的 stage 会复用，失败从首个失效 stage 继续。需要强制全量诊断时才直接运行 `pnpm run ci:check`。发布使用独立的 release checkpoint：先运行 `pnpm run build:release` 生成 candidate，再为该 candidate 写入 review receipt，最后运行 `pnpm run release`（只执行 `release:check`）；这样不会覆盖已有 review 状态。`package` 只消费已通过 `release:check` 的 manifest。
+`ci` 通过 checkpoint runner 在 `~/.humanagent/build/checkpoints/ci/<project-key>/manifest.json` 执行 `typecheck → compile → regression → ci`；已通过且输入/输出 digest 未变的 stage 会复用，失败从首个失效 stage 继续。需要强制全量诊断时才直接运行 `pnpm run ci:check`。
+
+发布使用独立的 release checkpoint：`pnpm run build:release` 生成 candidate 与 `dist/release/release-manifest.json`（`review.status = pending`）；`pnpm run review:record -- --review-id <review-id>` 读取 `.agent-collab/review/<review-id>/` 的独立 review receipt，校验其 commit 与当前 candidate 一致、且无 P0/P1/blocker/important finding 后写入 review 证据；最后 `pnpm run release` 只执行 `release:check`，校验 source commit、stage manifest、release artifact、package artifact 与 review 绑定全部一致。`review:record` 拒绝覆盖已 passed 的 review，`package` 只消费已通过 `release:check` 的 manifest。
 
 checkpoint 的 `regression` 阶段运行 `test:compiled`，只消费 compile 已生成的测试产物，不在下游重新编译并污染 compile 输出；`pnpm run test` 仍是需要强制重编译的全量诊断入口。
