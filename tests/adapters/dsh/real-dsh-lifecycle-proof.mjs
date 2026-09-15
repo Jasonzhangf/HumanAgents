@@ -8,7 +8,7 @@
  *
  *   stop     - a clean `shutdown` settles persistence and exits 0; the session
  *              log is on disk before the process is gone. This is the only real
- *              stop/settle DSH 0.1.5 exposes (no per-session cancel or close).
+ *              stop/settle DSH 0.1.6-alpha.1 exposes (no per-session cancel or close).
  *   continue - two prompts on the SAME live session share one model context.
  *   resume   - the SDK stdio entry cannot reopen a persisted session id in a
  *              fresh process; it answers `session "<id>" already exists`. DSH

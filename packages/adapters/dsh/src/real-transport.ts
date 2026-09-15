@@ -38,7 +38,7 @@ import type { DshLockDescriptor, DshProfileDescriptor } from './types.js';
  * Real DSH transport over the public out-of-process stdio JSON-RPC entry.
  *
  * Verified capability boundary (see `docs/architecture/dsh-entry-proof.md`):
- * DSH 0.1.5 exposes only `initialize`, `session/prompt`, and `shutdown`. There
+ * DSH 0.1.6-alpha.1 exposes only `initialize`, `session/prompt`, and `shutdown`. There
  * is no per-session cancel and no cross-process session resume, so this
  * transport maps `requestStop`/`settle`/`close` onto one physical action: a
  * clean runtime `shutdown` that disposes the root context, settles persistence,

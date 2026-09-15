@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "kind": "humanagent.dsh.lifecycle-proof",
-  "dshSource": "/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914",
-  "dshHome": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-i2GLOS/.dsh",
-  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-i2GLOS/workspace",
+  "dshSource": "/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915",
+  "dshHome": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-7TwkcC/.dsh",
+  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-7TwkcC/workspace",
   "profile": "sdk",
   "provider": "rcc",
   "model": "gpt-5.5",
@@ -27,12 +27,12 @@
       }
     },
     "prompt": {
-      "messageId": "d515afa0-5595-43c2-b7df-c8b3f9b1c0e3"
+      "messageId": "f7754c3b-b48d-4eb2-9ae0-3dc0305de2e3"
     },
     "turnEnd": {
       "kind": "completed"
     },
-    "assistantText": "I'll read the file once and reply with its second line only.\nfeature_flag=4ff8d0b0-f680-41ce-9ac7-1dd3ac842186",
+    "assistantText": "I'll read the file and reply with its second line.\nfeature_flag=7ee78350-a78b-419b-b966-3b4a5564ea1b",
     "shutdown": {},
     "exit": {
       "code": 0,
@@ -44,8 +44,8 @@
       "type": "session",
       "version": 3,
       "id": "main",
-      "createdAt": 1789444170194,
-      "cwd": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-i2GLOS/workspace",
+      "createdAt": 1789451887521,
+      "cwd": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-7TwkcC/workspace",
       "isSeeded": false,
       "delegationDepth": 0
     }
@@ -58,14 +58,14 @@
       }
     },
     "prompt": {
-      "messageId": "74335e95-3d32-4f75-87ec-c4debe0394ed"
+      "messageId": "84ab031d-c5d4-48b5-874f-40cc58c81a08"
     },
     "shutdown": {},
     "exit": {
       "code": 0,
       "signal": null
     },
-    "shutdownToExitMs": 291,
+    "shutdownToExitMs": 62,
     "sessionLogCount": 2
   },
   "continue": {
@@ -76,10 +76,10 @@
       }
     },
     "firstPrompt": {
-      "messageId": "45ed5b27-1d17-4ef5-808c-b9c1f3e5d787"
+      "messageId": "dd3c4c3e-cd66-4f27-b97f-5fc15269c182"
     },
     "secondPrompt": {
-      "messageId": "39a51a8a-98a7-411d-9537-d61fdc943227"
+      "messageId": "b1f34ddc-0baf-42c2-834a-2f9718737240"
     },
     "turnEnd": {
       "kind": "completed"
@@ -115,7 +115,7 @@
       }
     },
     "prompt": {
-      "messageId": "1a68ac5d-1fb4-40da-8be7-41e9a98229a0"
+      "messageId": "aa131b1d-d555-47ed-8cd2-b10ed8230609"
     },
     "exit": {
       "code": null,
@@ -129,7 +129,7 @@
       }
     },
     "recoveryPrompt": {
-      "messageId": "853af7f7-ed0f-46ea-bc77-6d365d545686"
+      "messageId": "18b81ee4-d3dc-4cdc-a5e8-69c01df14a4b"
     },
     "recoveryTurnEnd": {
       "kind": "completed"

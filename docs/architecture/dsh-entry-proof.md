@@ -18,19 +18,20 @@ DSH session log artifact 位于 `docs/evidence/real-single-dsh-agent/`；
 |---|---|
 | 上游仓库 | `https://github.com/deepseek-ai/deepseek-harness.git` |
 | ref | `refs/remotes/origin/master` |
-| commit | `c291e7961a515f6d7af9304e7fd1d257929aef26` |
-| Git tree | `e482b49bef64726be8f79380bb35bae569dc3c48` |
-| describe | `dsh-v0.1.5-rc.2-139-gc291e7961a` |
-| root version | `0.1.5-rc.2` |
-| commit 时间 | `2026-09-10T22:17:09+08:00` |
-| 干净 worktree | `/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914` |
+| commit | `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720` |
+| Git tree | `80b651cca20f29d587518cf07a978f2bc58bc2c1` |
+| describe | `dsh-v0.1.5-rc.2-805-g0d1f50007f` |
+| root version | `0.1.6-alpha.1` |
+| commit 时间 | `2026-09-15T11:16:06+08:00` |
+| 干净 worktree | `/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915` |
 | 包管理器 / Node | `pnpm@11.7.0` / `v22.22.2` |
 
-与 `docs/architecture/dsh-baseline.md` 锁定的 commit/tree 一致。本机安装的
-`dsh 0.1.2-alpha.5` 是旧版本，不作为适配目标，只作为历史证据保留。
+本机安装的 `dsh 0.1.2-alpha.5` 是旧版本，不作为适配目标，只作为历史证据
+保留。
 
 2026-09-14 从 canonical `~/code/dsh` 仓库重新执行 `git fetch origin master`
-后，`origin/master` 仍为 `c291e7961a515f6d7af9304e7fd1d257929aef26`。该路径的
+后，`origin/master` 已前移到 `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`。
+该路径的
 主 checkout 当前仍位于 dirty 的 `dsh-memory/alpha5`，因此所有构建和运行证据都
 来自上面的 clean detached worktree，而不是旧 checkout 或本机旧安装。
 
@@ -107,7 +108,7 @@ RCC 4444 的 `/v1/responses` 在工具调用时返回非标准终止状态
 `docs/evidence/real-single-dsh-agent/`）：
 
 ```text
-HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914 \
+HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 \
 HUMANAGENT_RECEIPT_PATH=dist/receipts/dsh-entry-proof.json \
 node tests/adapters/dsh/real-dsh-entry-proof.mjs
 ```
@@ -115,7 +116,7 @@ node tests/adapters/dsh/real-dsh-entry-proof.mjs
 HumanAgent CLI 同入口 receipt：
 
 ```text
-HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914 \
+HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 \
 HUMANAGENT_RECEIPT_PATH=dist/receipts/dsh-humanagent-cli-smoke.json \
 node tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs
 ```
@@ -133,7 +134,7 @@ node tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs
 
 ### 能力边界（决定 stop / recovery 语义）
 
-DSH `0.1.5` 的公开 SDK stdio wire 只有三个请求方法：
+DSH `0.1.6-alpha.1` 的公开 SDK stdio wire 只有三个请求方法：
 `initialize`、`session/prompt`、`shutdown`。没有 per-session close，也没有
 mid-turn prompt cancel：
 
@@ -170,8 +171,8 @@ mid-turn prompt cancel：
 P0-P6 已完成：真实
 transport、runtime/app/config 接线、stop/settle、crash recovery 和 UI
 projection 均已通过 focused tests 与真实入口证据。四层验证已执行；当前实现候选
-`8f22266b3b967a169f71f5bfbb520a5d0642c365`，tree
-`5c5240ffd5798ab1135fbcc15beee1b09202af5a`。当前证据提交和最终 commit
+`a74f55b9187ad5ec3b6a9b693041c18710392076`，tree
+`ac8da22193e51ec3e8325eb8be740cd1d1c9e631`。当前证据提交和最终 commit
 的独立只读 review 为 `PENDING`。
 
 candidate-bound receipts、gate manifest、HumanAgent checkpoint、DSH session log

@@ -18,9 +18,9 @@ cancel receipt 或进程退出单点当作 stopped。
   `origin/master` 的 commit/tree/describe 建立 detached clean worktree；
   禁止使用 `dsh-memory/alpha5`、本机旧安装或缓存版本。
 - 2026-09-14 已复核最新 `origin/master` 为
-  `c291e7961a515f6d7af9304e7fd1d257929aef26`（tree
-  `e482b49bef64726be8f79380bb35bae569dc3c48`，describe
-  `dsh-v0.1.5-rc.2-139-gc291e7961a`）。该值是当前参考锁，不是可长期复用的
+  `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`（tree
+  `80b651cca20f29d587518cf07a978f2bc58bc2c1`，describe
+  `dsh-v0.1.5-rc.2-805-g0d1f50007f`）。该值是当前参考锁，不是可长期复用的
   old pin：每次开始 DSH build/run 前必须重新 fetch；若 `origin/master` 前移，
   先同步 `packages/adapters/dsh/src/lock.ts`、入口证明和 receipts，再跑验证，
   不得继续运行旧 commit。

@@ -3,9 +3,9 @@ import type { DshLockDescriptor } from './types.js';
 export const dshBaselineLock: DshLockDescriptor = {
   source: 'https://github.com/deepseek-ai/deepseek-harness.git',
   reference: 'refs/remotes/origin/master',
-  commit: 'c291e7961a515f6d7af9304e7fd1d257929aef26',
-  tree: 'e482b49bef64726be8f79380bb35bae569dc3c48',
-  describe: 'dsh-v0.1.5-rc.2-139-gc291e7961a',
+  commit: '0d1f50007f9bca3f52b06e1c3074fa14d5fb0720',
+  tree: '80b651cca20f29d587518cf07a978f2bc58bc2c1',
+  describe: 'dsh-v0.1.5-rc.2-805-g0d1f50007f',
   versionTag: 'dsh-v0.1.5-rc.2',
-  recordedAt: '2026-09-13T05:24:14-07:00',
+  recordedAt: '2026-09-14T22:53:33-07:00',
 };

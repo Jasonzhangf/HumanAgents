@@ -23,15 +23,15 @@ Worktree：`playground/real-single-dsh-agent`
   `/Volumes/extension/code/dsh`），每次执行前先从该仓库 `git fetch origin
   master`，再锁定当时的最新 `origin/master`；不是本机旧安装
   `dsh 0.1.2-alpha.5`。当前锁定 commit
-  `c291e7961a515f6d7af9304e7fd1d257929aef26`，
-  tree `e482b49bef64726be8f79380bb35bae569dc3c48`，describe
-  `dsh-v0.1.5-rc.2-139-gc291e7961a`。
+  `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`，
+  tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`，describe
+  `dsh-v0.1.5-rc.2-805-g0d1f50007f`。
 - P6 已再次从 `~/code/dsh` 执行 `git fetch origin master`；当前最新
-  `origin/master` 仍与上述 commit/tree/describe 完全一致。若之后发生前移，
+  `origin/master` 与上述 commit/tree/describe 完全一致。若之后发生前移，
   必须先把 `packages/adapters/dsh/src/lock.ts`、入口证明和真实 receipts
   一起重锁，再继续验证；禁止继续用旧 commit 生成 PASS。
 - 干净源码 worktree
-  `/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914` 是唯一
+  `/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915` 是唯一
   DSH 构建/运行目标；`/Volumes/extension/code/dsh` 主 checkout 保持只读。
 - 源码入口为 `node --import tsx/esm apps/cli/src/bin.ts --profile sdk --patch
   apps/cli/src/sdk-source.cordis.patch.yml`；需先 `pnpm install` 与
@@ -39,7 +39,7 @@ Worktree：`playground/real-single-dsh-agent`
 - Provider 绑定固定为 `rcc` route → `openai-completions` →
   `http://127.0.0.1:4444/v1` → `gpt-5.5`。RCC 的 `/v1/responses` 在工具调用时
   返回非标准 `status: requires_action`，pi-ai `0.85.1` 拒绝，故不选 Responses。
-- DSH `0.1.5` 公开 SDK wire 只有 `initialize`/`session/prompt`/`shutdown`：
+- DSH `0.1.6-alpha.1` 公开 SDK wire 只有 `initialize`/`session/prompt`/`shutdown`：
   没有 per-session cancel、没有 mid-turn cancel、不能跨进程重开已持久化
   session。因此 stop 语义固定为 runtime shutdown settle，recovery 语义固定为
   HumanAgent checkpoint → 新 DSH session。
@@ -269,9 +269,9 @@ Owner：validation
 - 每层命令、退出码、artifact/receipt、限制和剩余风险。
 - 独立 review PASS；P0/P1 = 0；candidate、merge、push、release 分别报告。
 - `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 的 contracts
-  21/21、config 22/22、app 40/40、runtime 112/112；DSH focused 57/57；
+  21/21、config 22/22、app 40/40、runtime 112/112；DSH focused 63/63；
   `test:release` 18/18。
-- `HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914`
+- `HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915`
   下的 `proof:dsh-entry`、`proof:dsh-lifecycle`、`proof:dsh-cli` 均 exit `0`；
   candidate-bound receipts 为
   `docs/evidence/real-single-dsh-agent/dsh-entry-proof.json`、
@@ -284,10 +284,12 @@ Owner：validation
   `organId` / `cycleId` 传给 provider execution identity。当前候选由 app
   生成稳定 `agent-${agentId}` Organ，DSH adapter 只校验并转发，并新增
   scope negative tests。
-- 最终实现候选为 `8f22266b3b967a169f71f5bfbb520a5d0642c365`，tree
-  `5c5240ffd5798ab1135fbcc15beee1b09202af5a`；该候选修复了失败收口后
-  active instance 未释放、以及 CLI run 将 failed 会话错误暴露为 recoverable
-  的两个 P1。证据提交和最终 commit 的独立只读 review 当前为 `PENDING`；
+- 最终实现候选为 `a74f55b9187ad5ec3b6a9b693041c18710392076`，tree
+  `ac8da22193e51ec3e8325eb8be740cd1d1c9e631`；该候选在上一轮修复基础上，
+  将 DSH session identity 扩展到 runtime/task/operation/epoch，避免不同
+  operation 碰撞同一 session artifact；初始化失败时等待 bounded cleanup，
+  cleanup 未 settle 则保留 runtime entry并保留原始初始化错误，阻止重复启动。
+  证据提交和最终 commit 的独立只读 review 当前为 `PENDING`；
   PASS 后会在 `gates.json`记录精确 review receipt。
 - 该 candidate 尚未 merge、push 或 release。
 

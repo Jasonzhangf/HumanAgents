@@ -1,7 +1,7 @@
 # DSH 基线与 Milestone 1 适配准备
 
-状态：`BASELINE-LOCKED / ADAPTER-NOT-STARTED`
-日期：2026-09-13
+状态：`BASELINE-RE-LOCKED / REAL-SINGLE-DSH-AGENT`
+日期：2026-09-14
 
 本文是 DSH 外部源码基线的唯一项目记录。它只锁定可复现的 DSH 输入和适配计划，不代表 HumanAgent 已经实现或接入 DSH adapter。
 
@@ -12,18 +12,18 @@
 | 上游仓库 | `https://github.com/deepseek-ai/deepseek-harness.git` |
 | 上游 ref | `refs/heads/master` |
 | 验证 ref | `refs/remotes/origin/master` |
-| 锁定 commit | `c291e7961a515f6d7af9304e7fd1d257929aef26` |
-| Git tree | `e482b49bef64726be8f79380bb35bae569dc3c48` |
+| 锁定 commit | `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720` |
+| Git tree | `80b651cca20f29d587518cf07a978f2bc58bc2c1` |
 | 最近发布标记 | `dsh-v0.1.5-rc.2` |
-| describe | `dsh-v0.1.5-rc.2-139-gc291e7961a` |
-| commit 时间 | `2026-09-10T22:17:09+08:00` |
+| describe | `dsh-v0.1.5-rc.2-805-g0d1f50007f` |
+| commit 时间 | `2026-09-15T11:16:06+08:00` |
 | 基线性质 | 上游 master 源码快照，不是已发布的稳定包 |
 
-该 commit 已在干净 detached worktree `/Volumes/extension/code/humanagent/playground/dsh-baseline-20260913` 中验证，验证时间为 `2026-09-13T05:24:14-07:00`。验证命令为 `git status --porcelain`、`git rev-parse HEAD`、`git rev-parse HEAD^{tree}` 和 `git rev-parse refs/remotes/origin/master`；status 输出为空，验证 ref、commit/tree 与本表一致。原有 `/Volumes/extension/code/dsh` checkout 的 `git status --porcelain` 有 4500 行输出，仍保留其 dirty 状态，没有被覆盖、清理或当作基线。
+该 commit 已在干净 detached worktree `/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915` 中验证，验证时间为 `2026-09-14T22:53:33-07:00`。验证命令为 `git status --porcelain`、`git rev-parse HEAD`、`git rev-parse HEAD^{tree}` 和 `git rev-parse refs/remotes/origin/master`；status 输出为空，验证 ref、commit/tree 与本表一致。原有 `/Volumes/extension/code/dsh` checkout 的 `git status --porcelain` 有大量 dirty/untracked 输出，仍保留其 dirty 状态，没有被覆盖、清理或当作基线。
 
 ### 版本解释
 
-当前上游 master 已经合入 `dsh-v0.1.5-rc.2`，但在该 tag 之后还有 139 个提交。因此本项目锁定的是精确 commit，而不是把 `0.1.5-rc.2` 误写成当前 master 版本。
+当前上游 master 的 root package 版本已为 `0.1.6-alpha.1`，但最近发布 tag 仍为 `dsh-v0.1.5-rc.2`；describe 显示在该 tag 之后还有 805 个提交。因此本项目锁定的是精确 commit，而不是把 `0.1.6-alpha.1` 或 `0.1.5-rc.2` 误写成当前 master 版本。
 
 后续如果改用发布包，必须重新记录 package archive digest、依赖 lock、入口和 license；不能只把 commit 替换成一个 semver 字符串。
 

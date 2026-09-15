@@ -393,7 +393,7 @@ test('validates DSH execution config and keeps it user-owned', async () => {
     agents,
     execution: {
       dsh: {
-        sourceRoot: '/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914',
+        sourceRoot: '/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915',
         home: '~/.humanagent/dsh/home',
         profile: 'humanagent',
         provider: 'rcc',
