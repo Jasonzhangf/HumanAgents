@@ -52,6 +52,7 @@ import type { DshLockDescriptor, DshProfileDescriptor } from './types.js';
 const OWNER = 'humanagent.dsh-adapter.real';
 const DEFAULT_TURN_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 60 * 1000;
+const DEFAULT_START_CLEANUP_TIMEOUT_MS = 5 * 1000;
 const DEFAULT_PROBE_TTL_MS = 60 * 1000;
 const DSH_SESSION_FORMAT_VERSION = 3;
 const DSH_SESSION_LOG_FILENAME = `session.v${DSH_SESSION_FORMAT_VERSION}.jsonl.zstd`;
@@ -165,6 +166,7 @@ export interface DshRealTransportOptions {
   readonly env?: Readonly<Record<string, string>>;
   readonly turnTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
+  readonly startCleanupTimeoutMs?: number;
   readonly probeTtlMs?: number;
   readonly now?: () => Date;
   /**
@@ -203,8 +205,8 @@ interface SessionEventEnvelope {
 
 interface ExecutionIdentity {
   readonly runtimeId: string;
-  readonly taskId: { readonly value: string };
-  readonly operationId: { readonly value: string };
+  readonly taskId: ScopeRef['taskId'] & { readonly value: string };
+  readonly operationId: ScopeRef['operationId'] & { readonly value: string };
   readonly organId?: OrganId;
   readonly cycleId?: CycleId;
   readonly executionEpoch: number;
@@ -494,6 +496,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
   const now = options.now ?? (() => new Date());
   const turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  const startCleanupTimeoutMs = options.startCleanupTimeoutMs ?? DEFAULT_START_CLEANUP_TIMEOUT_MS;
   const probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
   const verifyPersistence = options.verifyPersistence ?? verifyDshSessionPersistence;
   const runtimes = new Map<string, RuntimeInstance>();
@@ -742,6 +745,15 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
       ...(cycleId ? { cycleId } : {}),
       executionEpoch: input.executionEpoch,
     };
+    const key = executionKey(identity);
+    if (runtimes.has(key)) {
+      throw new DshAdapterError(
+        'identity-mismatch',
+        'DSH execution identity is already active or awaiting failed-start cleanup',
+        OWNER,
+        { kind: 'recover', ref: OWNER },
+      );
+    }
     const command = options.nodePath ?? process.execPath;
     const spawner = options.spawnRuntime ?? spawn;
     const child = spawner(command, launchArgs(), {
@@ -760,7 +772,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
       child,
       scope,
       identity,
-      sessionId: `${input.runtimeId}:${input.taskId.value}:${input.executionEpoch}`,
+      sessionId: `${input.runtimeId}:${input.taskId.value}:${input.operationId.value}:${input.executionEpoch}`,
       nextRequestId: 1,
       pending: new Map(),
       events: [],
@@ -783,7 +795,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
       resolveExit({ code, signal });
     });
     attach(instance);
-    runtimes.set(executionKey(identity), instance);
+    runtimes.set(key, instance);
     return instance;
   }
 
@@ -817,6 +829,55 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
       );
     }
     return result;
+  }
+
+  async function cleanupFailedStart(
+    instance: RuntimeInstance,
+    cause: unknown,
+  ): Promise<never> {
+    const key = executionKey(instance.identity);
+    let cleanupError: Error | undefined;
+    if (!instance.exited) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        instance.child.kill('SIGTERM');
+      } catch (error) {
+        cleanupError = error instanceof Error ? error : new Error(String(error));
+      }
+      if (!cleanupError) {
+        const timeout = new Promise<never>((_settle, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`DSH runtime did not exit within ${startCleanupTimeoutMs}ms after failed start`));
+          }, startCleanupTimeoutMs);
+        });
+        try {
+          await Promise.race([instance.exit, timeout]);
+        } catch (error) {
+          cleanupError = error instanceof Error ? error : new Error(String(error));
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
+    }
+    if (cleanupError) {
+      void instance.exit.then(() => {
+        if (runtimes.get(key) === instance) runtimes.delete(key);
+      });
+      const message = `DSH initialization failed and runtime cleanup did not settle: ${cleanupError.message}; originalError=${cause instanceof Error ? cause.message : String(cause)}`;
+      throw new DshAdapterError('transport-failure', message, OWNER, { kind: 'recover', ref: OWNER }, {
+        cause,
+        phase: 'start',
+        binding: options.binding,
+        identity: instance.identity,
+      });
+    }
+    if (runtimes.get(key) === instance) runtimes.delete(key);
+    throw dshSeamError('transport-failure', cause, {
+      phase: 'start',
+      ownerId: OWNER,
+      binding: options.binding,
+      identity: instance.identity,
+    });
   }
 
   function validity(): { checkedAt: string; expiresAt: string } {
@@ -873,9 +934,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
       try {
         await initialize(instance);
       } catch (error) {
-        instance.child.kill('SIGTERM');
-        runtimes.delete(executionKey(input));
-        throw dshSeamError('transport-failure', error, { phase: 'start', ownerId: OWNER, binding: options.binding, identity: input });
+        await cleanupFailedStart(instance, error);
       }
       const sessionEvidence = evidence(instance.scope, 'external', 'session', `dsh://session/${instance.sessionId}`);
       return {

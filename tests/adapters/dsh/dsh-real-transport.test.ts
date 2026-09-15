@@ -39,6 +39,8 @@ const digest = (): string => `sha256:${'ab'.repeat(32)}`;
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const operation = id('operation', 'operation-a');
+const otherOperation = id('operation', 'operation-b');
+const runtimeSessionId = 'runtime-a:task-a:operation-a:1';
 const scope: ScopeRef = { organId: organ, taskId: task, operationId: operation };
 
 const binding: ProviderBinding = {
@@ -175,6 +177,27 @@ function makeTransport(child: FakeChild, overrides: Partial<DshRealTransportOpti
   });
 }
 
+function makeTransportFactory(children: readonly FakeChild[], overrides: Partial<DshRealTransportOptions> = {}) {
+  let nextChild = 0;
+  return createRealDshTransport({
+    binding,
+    lock: dshBaselineLock,
+    profile,
+    sourceRoot: '/dsh/source',
+    home: '/dsh/home',
+    workspace: '/dsh/workspace',
+    provider: 'rcc',
+    model: 'gpt-5.5',
+    patchFiles: ['/dsh/source/apps/cli/src/sdk-source.cordis.patch.yml'],
+    spawnRuntime: () => children[nextChild++] as never,
+    verifyPersistence: async ({ scope: verificationScope }) => ({
+      state: 'committed',
+      evidenceRef: persistenceEvidence(verificationScope, 'persistence-commit'),
+    }),
+    ...overrides,
+  });
+}
+
 function persistenceEvidence(scopeValue: ScopeRef, label: string): EvidenceRef {
   return {
     evidenceId: id('evidence', `ev-${label}`),
@@ -190,10 +213,27 @@ async function writeSessionArtifact(input: {
   readonly sessionId: string;
   readonly header: Record<string, unknown>;
 }): Promise<void> {
-  const directory = join(input.home, 'sessions', '--workspace--', 'runtime-a~003Atask-a~003A1');
+  const directory = join(
+    input.home,
+    'sessions',
+    '--workspace--',
+    encodeSessionSegment(input.sessionId),
+  );
   await mkdir(directory, { recursive: true });
   const bytes = zstdCompressSync(`${JSON.stringify(input.header)}\n`);
   await writeFile(join(directory, 'session.v3.jsonl.zstd'), bytes);
+}
+
+function encodeSessionSegment(raw: string): string {
+  let out = '';
+  for (let index = 0; index < raw.length; index += 1) {
+    const code = raw.charCodeAt(index);
+    const char = String.fromCharCode(code);
+    out += char !== '~' && /^[A-Za-z0-9._-]$/.test(char)
+      ? char
+      : `~${code.toString(16).toUpperCase().padStart(4, '0')}`;
+  }
+  return out;
 }
 
 function defaultHandlers(child: FakeChild) {
@@ -237,7 +277,7 @@ test('real DSH transport maps a model -> tool -> result -> continuation loop', a
   validateProviderSubmitResult(submit);
   assert.equal(submit.status, 'accepted');
 
-  const sessionId = 'runtime-a:task-a:1';
+  const sessionId = runtimeSessionId;
   child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId, event: { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: 'I will read it.' }] } } } } });
   child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId, event: { type: 'tool/call', seq: 2, data: { callId: 'call-1', name: 'read', arguments: '{}' } } } });
   child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId, event: { type: 'tool/result', seq: 3, data: { message: { content: [{ type: 'tool-result', toolCallId: 'call-1', isError: false }] } } } } });
@@ -259,6 +299,35 @@ test('real DSH transport maps a model -> tool -> result -> continuation loop', a
   // The tool result carries the same call id as its call, proving the pairing.
   assert.deepEqual(observed[1].outputRefs, ['call-1']);
   assert.deepEqual(observed[2].outputRefs, ['call-1']);
+});
+
+test('distinct operations in one runtime epoch cannot share a DSH session artifact', async () => {
+  const firstChild = makeChild();
+  const secondChild = makeChild();
+  const transport = makeTransportFactory([firstChild, secondChild]);
+
+  const first = await transport.start(startInput());
+  const second = await transport.start(startInput({ operationId: otherOperation }));
+
+  assert.notEqual(first.externalExecutionRef?.locator, second.externalExecutionRef?.locator);
+  assert.equal(first.externalExecutionRef?.locator, 'dsh://session/runtime-a:task-a:operation-a:1');
+  assert.equal(second.externalExecutionRef?.locator, 'dsh://session/runtime-a:task-a:operation-b:1');
+});
+
+test('failed initialization waits for runtime exit before allowing retry', async () => {
+  const failedChild = makeChild({
+    initialize: () => undefined,
+  });
+  const retryChild = makeChild();
+  const transport = makeTransportFactory([failedChild, retryChild], {
+    turnTimeoutMs: 20,
+  });
+
+  await assert.rejects(() => transport.start(startInput()), /initialize timed out/);
+  assert.equal(failedChild.exitCode, 0);
+
+  const retry = await transport.start(startInput());
+  validateProviderStartReceipt(retry);
 });
 
 test('cancel receipt is never a stopped settlement', async () => {
@@ -295,7 +364,7 @@ test('ordinary settle after shutdown is not a stopped settlement', async () => {
   const child = makeChild();
   const transport = makeTransport(child);
   await transport.start(startInput());
-  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } } });
+  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } } });
 
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
@@ -323,7 +392,7 @@ test('malformed turn/end evidence cannot settle as succeeded', async () => {
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 'bad', data: { reason: { kind: 'completed' } } } },
+    params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 'bad', data: { reason: { kind: 'completed' } } } },
   });
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
@@ -339,12 +408,12 @@ test('a later completed terminal cannot erase an earlier protocol failure', asyn
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 'bad', data: { reason: { kind: 'completed' } } } },
+    params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 'bad', data: { reason: { kind: 'completed' } } } },
   });
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
+    params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
   });
 
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
@@ -359,8 +428,8 @@ test('duplicate terminal evidence cannot overwrite a successful turn', async () 
   await transport.start(startInput());
 
   const event = { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } };
-  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: 'runtime-a:task-a:1', event } });
-  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: 'runtime-a:task-a:1', event } });
+  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: runtimeSessionId, event } });
+  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: runtimeSessionId, event } });
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
   assert.equal(settlement.state, 'unknown');
@@ -375,13 +444,13 @@ test('out-of-order session events cannot settle as succeeded', async () => {
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } } },
+    params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } } },
   });
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
     params: {
-      sessionId: 'runtime-a:task-a:1',
+      sessionId: runtimeSessionId,
       event: { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: 'late' }] } } },
     },
   });
@@ -399,7 +468,7 @@ test('unknown non-ignorable session events fail visibly', async () => {
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'plugin/unknown', seq: 1, data: {} } },
+    params: { sessionId: runtimeSessionId, event: { type: 'plugin/unknown', seq: 1, data: {} } },
   });
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
@@ -412,7 +481,7 @@ test('turn failure with clean exit settles failed instead of succeeded', async (
   const transport = makeTransport(child);
   await transport.start(startInput());
 
-  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'error', error: { message: 'provider rejected tool call' } } } } } });
+  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'error', error: { message: 'provider rejected tool call' } } } } } });
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
   assert.equal(settlement.state, 'failed');
@@ -430,7 +499,7 @@ test('pending persistence verification cannot settle as succeeded', async () => 
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
+    params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
   });
 
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
@@ -466,7 +535,7 @@ test('failed persistence verification preserves its error and blocks settlement'
   child.push({
     jsonrpc: '2.0',
     method: 'session.event',
-    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
+    params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
   });
 
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
@@ -479,7 +548,7 @@ test('failed persistence verification preserves its error and blocks settlement'
 
 test('persistence verifier validates the committed session artifact header', async () => {
   const home = await mkdtemp(join(tmpdir(), 'humanagent-persistence-verifier-'));
-  const sessionId = 'runtime-a:task-a:1';
+  const sessionId = runtimeSessionId;
   try {
     await writeSessionArtifact({
       home,
@@ -509,7 +578,7 @@ test('persistence verifier validates the committed session artifact header', asy
 
 test('persistence verifier rejects missing, corrupt, and mismatched artifacts', async () => {
   const home = await mkdtemp(join(tmpdir(), 'humanagent-persistence-verifier-'));
-  const sessionId = 'runtime-a:task-a:1';
+  const sessionId = runtimeSessionId;
   try {
     const missing = await verifyDshSessionPersistence({
       sessionId,
@@ -520,7 +589,7 @@ test('persistence verifier rejects missing, corrupt, and mismatched artifacts', 
     assert.equal(missing.state, 'failed');
     assert.match(missing.failure?.message ?? '', /missing/);
 
-    const directory = join(home, 'sessions', '--workspace--', 'runtime-a~003Atask-a~003A1');
+    const directory = join(home, 'sessions', '--workspace--', encodeSessionSegment(sessionId));
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, 'session.v3.jsonl.zstd'), 'not-zstd');
     const corrupt = await verifyDshSessionPersistence({
@@ -607,7 +676,7 @@ test('failed turn/end maps to valid error and terminal provider events', async (
   const transport = makeTransport(child);
   await transport.start(startInput());
 
-  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'error', error: { message: 'provider rejected tool call' } } } } } });
+  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'error', error: { message: 'provider rejected tool call' } } } } } });
   const observed: Array<{ readonly kind: string; readonly terminalState?: string }> = [];
   for await (const event of transport.observe({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 })) {
     validateProviderEvent(event);
@@ -623,7 +692,7 @@ test('turn failure is not masked as stopped when stop arrives before settle', as
   const transport = makeTransport(child);
   await transport.start(startInput());
 
-  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'error', error: { message: 'provider failure' } } } } } });
+  child.push({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: runtimeSessionId, event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'error', error: { message: 'provider failure' } } } } } });
   await transport.requestStop({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1, reason: 'operator', ownerId: 'test', evidenceRefs: [evidenceRef('stop-input')] });
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
