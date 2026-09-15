@@ -92,6 +92,7 @@ declare module 'node:fs' {
   export function appendFileSync(path: string, data: string, encoding?: string): void;
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
+  export function readFileSync(path: string): string;
   export function readFileSync(path: string, encoding: 'utf8'): string;
   export function realpathSync(path: string): string;
 }
