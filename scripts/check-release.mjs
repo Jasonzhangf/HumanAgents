@@ -80,6 +80,20 @@ if (!Array.isArray(manifest.gateCommands)) throw new Error('release manifest mis
 if (manifest.pluginManifest?.status !== 'not-applicable' && typeof manifest.pluginManifest?.digest !== 'string') throw new Error('release manifest has invalid pluginManifest evidence');
 if (manifest.dshBaseline?.status !== 'not-applicable' && typeof manifest.dshBaseline?.baseline !== 'string') throw new Error('release manifest has invalid dshBaseline evidence');
 if (manifest.review?.status !== 'passed' || typeof manifest.review.reviewId !== 'string' || !manifest.review.reviewId) throw new Error('release review evidence is not passed');
+if (manifest.review.sourceCommit !== manifest.sourceCommit) throw new Error('release review is not bound to the source commit');
+required(manifest.review.baseCommit, 'review.baseCommit');
+if (typeof manifest.review.receiptDigest !== 'string' || !manifest.review.receiptDigest) throw new Error('release review receipt digest is missing');
+timestamp(manifest.review.reviewedAt, 'review.reviewedAt');
+const reviewRoot = absolute(manifest.review.reviewRoot, 'review.reviewRoot');
+const receiptDir = absolute(join(reviewRoot, manifest.review.reviewId), 'review.receiptDir');
+const canonicalReviewRoot = await realpath(reviewRoot);
+const canonicalReceiptDir = await realpath(receiptDir).catch(() => {
+  throw new Error('release review receipt is missing');
+});
+if (!isWithin(canonicalReviewRoot, canonicalReceiptDir)) throw new Error('release review receipt escapes review root');
+const receiptStatus = JSON.parse(await readFile(join(canonicalReceiptDir, 'status.json'), 'utf8'));
+const receiptFinal = await readFile(join(canonicalReceiptDir, 'review.final.md'), 'utf8');
+if (manifest.review.receiptDigest !== digest({ status: receiptStatus, final: receiptFinal })) throw new Error('release review receipt digest mismatch');
 const unsigned = { ...manifest };
 delete unsigned.releaseManifestDigest;
 if (manifest.releaseManifestDigest !== digest(unsigned)) throw new Error('release manifest digest mismatch');
