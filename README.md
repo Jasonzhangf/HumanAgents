@@ -4,10 +4,11 @@
 
 ## 当前状态
 
-`MVP-IMPLEMENTATION`（2026-09-14）。已具备独立的启动/config/session 链、带
-checkpoint 的本地编译链，以及真实单 DSH Agent candidate：DSH stdio session、
-真实只读工具、RCC 4444 provider、同一 session continuation、stop/settle、
-crash recovery 和 UI projection 已接通；candidate 尚未 merge 或 release。
+`MVP-IMPLEMENTATION`（2026-09-15）。已具备独立的启动/config/session 链、带
+checkpoint 的本地编译链、真实单 DSH Agent 和 UI Provider Loop：DSH stdio
+session、真实只读工具、RCC 4444 provider、同一 session continuation、
+stop/settle、crash recovery、Runtime API、SSE、真实 Projection 和 UI stop
+收拢已接通；两个候选已进入 main，production release 尚未完成。
 
 ## 核心决定
 
@@ -34,15 +35,20 @@ UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和�
 
 DSH 源码基线锁定到上游
 `master@0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`，并使用 clean detached
-worktree 验证 commit/tree、源码 patch、真实 RCC 和真实 DSH 同入口。当前分支已
-完成 P0-P6；当前实现候选为
-`a74f55b9187ad5ec3b6a9b693041c18710392076`，当前证据提交和最终 commit 的
-独立 review 为 `PENDING`。候选绑定的 receipts、gate manifest、HumanAgent checkpoint、
-DSH session log 和 UI 截图见
+worktree 验证 commit/tree、源码 patch、真实 RCC 和真实 DSH 同入口。单 DSH
+Agent candidate `287a2f61cdfac79d321166b201a36b438d9d374b` 已通过独立 review
+（PASS，P0/P1 = 0）并入 main。候选绑定的 receipts、gate manifest、HumanAgent
+checkpoint、DSH session log 和 UI 截图见
 [`docs/evidence/real-single-dsh-agent/`](docs/evidence/real-single-dsh-agent/)，
 计划见
 [`docs/goals/real-single-dsh-agent-plan.md`](docs/goals/real-single-dsh-agent-plan.md)。
-该 candidate 尚未 merge、push 或 production release。
+
+UI Provider Loop 已接入 Runtime API、fake/RCC mode、SSE projection 和标准
+stop 收拢；`56840b3d62d1d9db943e4d5376ff3febe99d979c` 已通过独立 review
+（PASS，P0/P1 = 0），当前证据和计划见
+[`docs/evidence/ui-provider-loop/`](docs/evidence/ui-provider-loop/) 与
+[`docs/goals/ui-provider-loop-goal.md`](docs/goals/ui-provider-loop-goal.md)。
+两个候选均尚未形成 production release。
 
 ## 本地启动与增量编译
 
@@ -52,10 +58,37 @@ pnpm run test
 pnpm run doctor -- --workspace /absolute/project
 pnpm run run -- --workspace /absolute/project --plan default
 pnpm run resume -- --workspace /absolute/project --session <session-id>
+node dist/app/app/src/cli.js session list --workspace /absolute/project
+node dist/app/app/src/cli.js session inspect --workspace /absolute/project --session <session-id>
+node dist/app/app/src/cli.js serve --mode fake --workspace /absolute/project
+node dist/app/app/src/cli.js serve --mode rcc --workspace /absolute/project \
+  --binding rcc-entry --provider rcc --protocol responses \
+  --model MiniMax-M3 --route default \
+  --rcc-base-url http://127.0.0.1:4444
+node dist/app/app/src/cli.js serve --mode rcc --workspace /absolute/project \
+  --binding rcc-openai-entry --provider rcc --protocol openai \
+  --model MiniMax-M3 --route default \
+  --rcc-base-url http://127.0.0.1:4444
+pnpm build:release
+pnpm release:check
 pnpm run smoke
 ```
 
 `pnpm build` 使用 `~/.humanagent/build/checkpoints/build/<project-key>/manifest.json` 保存 `typecheck → compile` 的 stage checkpoint；`pnpm run ci` 使用独立的 `.../checkpoints/ci/<project-key>/manifest.json`；`pnpm build:release` 使用独立的 `.../checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke`。三条链共享 `~/.humanagent/build/locks/<project-key>/.run.lock`，不会并发改写同一工作树的编译产物。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
+
+`serve` 启动本地 HumanAgent Runtime API 和 `docs/ui`。`fake` 只使用固定 replay；
+`rcc` 通过同一个 Runtime API 连接 RCC v3 `127.0.0.1:4444`，失败会显式投影
+owner 和 next action，不会回退到 fake。`dsh` 在当前阶段保持关闭。
+RCC 是透明代理，本阶段 MVP验收覆盖两个入口协议：
+`responses -> /v1/responses` 和 `openai -> /v1/chat/completions`；
+`anthropic -> /v1/messages` 保留既有入口能力，但不属于本阶段 UI Provider
+Loop 验收范围。`providerId` 和 `--route` 都只是 HumanAgent 本地 binding /
+入口标签，不代表 RCC 最终上游 Provider 身份，也不会写入 RCC 请求体作为
+route selector；RCC 最终选择的 model 与请求 model 不同不构成 binding
+mismatch。
+`serve --host` 只接受 loopback（`127.0.0.1` 或 `::1`）：控制 API 目前没有鉴权，
+绑定非 loopback 地址会让任意可达客户端创建任务、发起执行和执行 stop，因此
+server 会拒绝启动而不是静默暴露控制面。
 `pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。
 
 日常入口：

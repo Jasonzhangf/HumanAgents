@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.ui-provider-loop.closeout-gates",
+  "candidate": {
+    "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
+    "sourceDigest": "sha256:d7f0728d6d9cf135b51fc4861ebad5a0502a960ead00852e3adb7592d82b93db",
+    "reviewedUiCommit": "56840b3d62d1d9db943e4d5376ff3febe99d979c",
+    "binding": "sourceDigest covers every tracked source file except docs/evidence/ui-provider-loop/, so the proof stays verifiable from both the implementation commit and the evidence commit"
+  },
+  "provider": {
+    "endpoint": "http://127.0.0.1:4444",
+    "entry": "CLI serve --mode rcc over the UI Runtime HTTP API",
+    "protocols": ["responses", "openai"],
+    "requestModel": "gpt-5.5",
+    "transparentRouting": "RCC route is a request entry label; the final upstream provider may differ and is not treated as a binding mismatch"
+  },
+  "commands": [
+    {
+      "command": "corepack pnpm@10.31.0 run typecheck",
+      "exitCode": 0,
+      "result": "PASS"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:app",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "57/57 app integration tests, including UI runtime lifecycle and stop recovery"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:ui",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "10/10 runtime projection tests"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:provider",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "67/67 provider adapter, codec, replay and RCC v3 transport tests"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run proof:ui-provider-loop",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "real RCC 4444, responses and openai entries, each probe/execute/stop/settle/checkpoint/close"
+    }
+  ],
+  "artifacts": {
+    "ui-provider-loop-proof.json": {
+      "sha256": "a0dd5359c70c3faf6c95f623172b3397fb7fec17834e7e81e8be71c67b8edaee",
+      "source": "dist/receipts/ui-provider-loop-proof.json"
+    }
+  },
+  "acceptance": {
+    "responses": {
+      "probe": "ready",
+      "execute": "succeeded",
+      "executeCheckpoint": "succeeded",
+      "executeTerminal": "execution succeeded; provider closed",
+      "stop": "stopped",
+      "stopCheckpoint": "stopped",
+      "stopTerminal": "execution stopped; provider closed"
+    },
+    "openai": {
+      "probe": "ready",
+      "execute": "succeeded",
+      "executeCheckpoint": "succeeded",
+      "executeTerminal": "execution succeeded; provider closed",
+      "stop": "stopped",
+      "stopCheckpoint": "stopped",
+      "stopTerminal": "execution stopped; provider closed"
+    }
+  },
+  "review": {
+    "reviewedCommit": "56840b3d62d1d9db943e4d5376ff3febe99d979c",
+    "reviewTaskId": "humanagent-ui-provider-loop-r7-56840b3",
+    "reviewVerdict": "pass",
+    "reviewFindings": { "P0": 0, "P1": 0 }
+  }
+}

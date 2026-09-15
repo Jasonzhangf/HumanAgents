@@ -10,9 +10,11 @@ declare module 'node:crypto' {
 declare module 'node:path' {
   export function basename(path: string): string;
   export function dirname(path: string): string;
+  export function extname(path: string): string;
   export function isAbsolute(path: string): boolean;
   export function join(...paths: string[]): string;
   export function normalize(path: string): string;
+  export function relative(from: string, to: string): string;
   export function resolve(...paths: string[]): string;
   export const sep: string;
 }
@@ -65,7 +67,7 @@ declare module 'node:events' {
 
 declare module 'node:fs/promises' {
   export interface FileHandle {
-    writeFile(data: string, encoding?: string): Promise<void>;
+    writeFile(data: string | Uint8Array, encoding?: string): Promise<void>;
     sync(): Promise<void>;
     close(): Promise<void>;
   }
@@ -84,16 +86,18 @@ declare module 'node:fs/promises' {
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function truncate(path: string, length: number): Promise<void>;
   export function writeFile(path: string, data: string, encoding?: string): Promise<void>;
+  export function realpath(path: string): Promise<string>;
+}
+declare module 'node:fs' {
+  export function appendFileSync(path: string, data: string, encoding?: string): void;
+  export function existsSync(path: string): boolean;
+  export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
+  export function readFileSync(path: string, encoding: 'utf8'): string;
+  export function realpathSync(path: string): string;
 }
 
 declare module 'node:zlib' {
   export function zstdDecompressSync(input: Uint8Array): Uint8Array;
-}
-
-declare module 'node:fs' {
-  export function existsSync(path: string): boolean;
-  export function readFileSync(path: string): string;
-  export function realpathSync(path: string): string;
 }
 
 declare const process: {

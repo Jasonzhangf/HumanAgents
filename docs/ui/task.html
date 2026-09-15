@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="HumanAgent 任务处理与任务观测交互定义" />
     <title>HumanAgent · Task Detail</title>
-    <link rel="stylesheet" href="./task.css" />
+    <link rel="stylesheet" href="./runtime.css" />
   </head>
   <body>
-    <div class="task-wireframe" data-task-state="intent">
+    <div class="task-wireframe" data-task-state="intent" hidden>
       <header class="task-header" data-region="global-navigation">
         <div class="brand-line">
           <a href="./dashboard.html">HumanAgent</a>
@@ -180,6 +180,6 @@
         </form>
       </dialog>
     </div>
-    <script src="./task.js"></script>
+    <script type="module" src="./task.js"></script>
   </body>
 </html>

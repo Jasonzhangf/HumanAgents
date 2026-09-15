@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="HumanAgent 任务列表交互定义" />
     <title>HumanAgent · 任务列表</title>
-    <link rel="stylesheet" href="./tasks.css" />
+    <link rel="stylesheet" href="./runtime.css" />
   </head>
   <body>
-    <div class="tasks-wireframe">
+    <div class="tasks-wireframe" hidden>
       <header class="tasks-header" data-region="global-navigation">
         <div class="brand-line">
           <a href="./dashboard.html">HumanAgent</a>
@@ -101,6 +101,6 @@
         <p class="no-results" data-no-results hidden>没有符合当前筛选条件的任务。请清除筛选，或换一个关键词。</p>
       </main>
     </div>
-    <script src="./tasks.js"></script>
+    <script type="module" src="./tasks.js"></script>
   </body>
 </html>

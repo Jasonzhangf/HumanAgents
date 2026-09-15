@@ -5,17 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="HumanAgent 任务后台观测交互定义" />
     <title>HumanAgent · 任务后台观测</title>
-    <link rel="stylesheet" href="./observation.css" />
+    <link rel="stylesheet" href="./runtime.css" />
   </head>
   <body>
-    <div class="observation-wireframe">
+    <div class="observation-wireframe" hidden>
       <header class="observation-header">
         <div>
           <a href="./dashboard.html">HumanAgent</a>
           <span>任务后台观测 · 只读交互定义</span>
         </div>
         <nav aria-label="观测导航">
-          <a href="./interaction.html">运行控制</a>
           <a href="./dashboard.html">工作总览</a>
           <a href="./tasks.html">任务列表</a>
           <a href="./task.html">任务详情</a>
@@ -131,6 +130,6 @@
         </form>
       </dialog>
     </div>
-    <script src="./observation.js"></script>
+    <script type="module" src="./observation.js"></script>
   </body>
 </html>

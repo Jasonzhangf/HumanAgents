@@ -8,6 +8,7 @@ import {
 } from '../../../packages/contracts/src/index.js';
 import {
   AnthropicProviderCodec,
+  OpenAIChatProviderCodec,
   ProviderAdapter,
   ProviderAdapterError,
   ResponsesProviderCodec,
@@ -138,6 +139,20 @@ function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCode
     fetch: async (url, init) => fetch(url, init),
   });
   return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes, evidence: transportEvidence };
+}
+
+function openAIAdapter(fetch: V3ProviderFetch) {
+  const provider: ProviderBinding = {
+    ...binding,
+    bindingId: 'binding-openai-rcc-test',
+    providerId: 'rcc-openai-entry',
+    protocol: 'openai',
+    endpointRef: 'rcc-v3-4444-openai',
+    modelRef: 'provider.model',
+    configDigest: 'sha256:openai-test-config',
+    capabilityDigest: 'sha256:openai-test-capability',
+  };
+  return adapter(fetch, provider, new OpenAIChatProviderCodec());
 }
 
 function transportHarness() {
@@ -285,18 +300,42 @@ test('RCC v3 probe remains ready when the requested model is absent from discove
   assert.deepEqual(writes[2].content, { model: binding.modelRef, models: ['another.model'] });
 });
 
-test('RCC v3 probe keeps health readiness when optional model discovery fails', async () => {
-  const writes: ProviderEvidenceWrite[] = [];
-  const built = probeAdapter(async (url) => url.endsWith('/health')
-    ? jsonResponse({ status: 'ok' })
-    : textResponse('models unavailable', 503), writes);
+test('RCC v3 probe reports model discovery failure as degraded readiness', async () => {
+  const cases = [
+    {
+      code: 'models.http.503',
+      fetch: async (url: string) => url.endsWith('/health')
+        ? jsonResponse({ status: 'ok' })
+        : textResponse('models unavailable', 503),
+    },
+    {
+      code: 'models.invalid-json',
+      fetch: async (url: string) => url.endsWith('/health')
+        ? jsonResponse({ status: 'ok' })
+        : textResponse('{'),
+    },
+    {
+      code: 'models.transport-failure',
+      fetch: async (url: string) => {
+        if (url.endsWith('/health')) return jsonResponse({ status: 'ok' });
+        throw new Error('models transport unavailable');
+      },
+    },
+  ] as const;
 
-  const readiness = await built.adapter.probe(binding);
-  assert.equal(readiness.state, 'ready');
-  assert.equal(readiness.failure, undefined);
-  assert.equal(readiness.evidenceRefs.length, 2);
-  assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models']);
-  assert.equal((writes[1].content as { status?: number }).status, 503);
+  for (const probeCase of cases) {
+    const writes: ProviderEvidenceWrite[] = [];
+    const built = probeAdapter(probeCase.fetch, writes);
+
+    const readiness = await built.adapter.probe(binding);
+    assert.equal(readiness.state, 'degraded');
+    assert.equal(readiness.failure?.code, probeCase.code);
+    assert.equal(readiness.failure?.phase, 'probe');
+    assert.equal(readiness.ownerId, 'humanagent.provider-adapter.rcc-v3');
+    assert.equal(readiness.nextAction?.kind, 'recover');
+    assert.equal(readiness.evidenceRefs.length, 2);
+    assert.deepEqual(writes.map((write) => write.type), ['probe-health', 'probe-models']);
+  }
 });
 
 test('RCC v3 probe stops at health failure and preserves recovery ownership', async () => {
@@ -308,6 +347,21 @@ test('RCC v3 probe stops at health failure and preserves recovery ownership', as
   assert.equal(readiness.failure?.code, 'health.http.503');
   assert.equal(readiness.nextAction?.kind, 'recover');
   assert.equal(built.calls.length, 1);
+  assert.deepEqual(writes.map((write) => write.type), ['probe-health']);
+});
+
+test('RCC v3 probe treats a non-ok health payload as not-ready', async () => {
+  const writes: ProviderEvidenceWrite[] = [];
+  const built = probeAdapter(async (url) => url.endsWith('/health')
+    ? jsonResponse({ status: 'error' })
+    : jsonResponse({ data: [{ id: 'provider.model' }] }), writes);
+
+  const readiness = await built.adapter.probe(binding);
+  assert.equal(readiness.state, 'not-ready');
+  assert.equal(readiness.failure?.code, 'health.not-ready');
+  assert.equal(readiness.ownerId, 'humanagent.provider-adapter.rcc-v3');
+  assert.equal(readiness.nextAction?.kind, 'recover');
+  assert.deepEqual(built.calls.map((call) => call.url), ['http://127.0.0.1:4444/health']);
   assert.deepEqual(writes.map((write) => write.type), ['probe-health']);
 });
 
@@ -341,6 +395,71 @@ test('RCC v3 start sends the explicit request and returns a receipt', async () =
   });
   assert.deepEqual(built.writes.map((write) => write.type), ['start']);
   assert.equal((built.writes[0].content as { route?: string }).route, 'cc:test-route');
+});
+
+test('RCC v3 openai entry sends Chat Completions and settles on [DONE]', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const built = openAIAdapter(fetchStub(chunks([
+    'data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"RCC_PROXY_ENTRY_OK"},"finish_reason":null}]}\n\n',
+    'data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n',
+  ]), calls));
+
+  const receipt = await built.adapter.start(startInput());
+  assert.equal(receipt.runtimeId, execution.runtimeId);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:4444/v1/chat/completions');
+  assert.deepEqual(JSON.parse(calls[0].init.body!), {
+    model: 'provider.model',
+    messages: [
+      { role: 'system', content: 'input-rcc' },
+      { role: 'user', content: JSON.stringify({ inputRefs: ['input-rcc'], payload: {} }) },
+    ],
+    stream: true,
+  });
+
+  const observed = [];
+  for await (const event of built.adapter.observe(execution)) observed.push(event);
+  assert.deepEqual(observed.map((event) => event.kind), ['output', 'terminal']);
+  assert.equal(observed[0].summary, 'RCC_PROXY_ENTRY_OK');
+  assert.equal(observed[1].terminalState, 'succeeded');
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'succeeded');
+});
+
+test('RCC v3 openai entry maps a provider error before settle', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const built = openAIAdapter(fetchStub(chunks([
+    'data: {"error":{"code":"server_error","message":"provider exploded"}}\n\n',
+  ]), calls));
+
+  await built.adapter.start(startInput());
+  const observed = [];
+  for await (const event of built.adapter.observe(execution)) observed.push(event);
+  assert.deepEqual(observed.map((event) => event.kind), ['error', 'terminal']);
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'server_error');
+  assert.equal(settled.error?.ownerId, 'humanagent.provider-adapter.rcc-v3');
+});
+
+test('RCC v3 openai content_filter finish reason becomes blocked', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const built = openAIAdapter(fetchStub(chunks([
+    'data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"harms"},"finish_reason":null}]}\n\n',
+    'data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}\n\n',
+    'data: [DONE]\n\n',
+  ]), calls));
+
+  await built.adapter.start(startInput());
+  const observed = [];
+  for await (const event of built.adapter.observe(execution)) observed.push(event);
+  assert.deepEqual(observed.map((event) => event.kind), ['output', 'error', 'terminal']);
+  assert.equal(observed.at(-1)?.terminalState, 'blocked');
+  assert.equal(observed.at(-2)?.error?.code, 'openai.finish_reason.content_filter');
+  const settled = await built.adapter.settle(execution);
+  assert.equal(settled.state, 'blocked');
+  assert.equal(settled.error?.code, 'openai.finish_reason.content_filter');
 });
 
 test('RCC v3 transport accepts a route label that does not match the final upstream provider', async () => {
@@ -451,7 +570,7 @@ for (const stopReason of ['tool_use', 'max_tokens', 'pause_turn'] as const) {
   });
 }
 
-test('RCC v3 stop receipt is distinct from settle and does not claim remote cancellation', async () => {
+test('RCC v3 stop-before-observe collapses to stopped without an observation loop', async () => {
   const built = transportHarness();
   seedActive(built.transport, chunks([]));
   const stop = await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
@@ -465,8 +584,8 @@ test('RCC v3 stop receipt is distinct from settle and does not claim remote canc
   assert.equal(stop.status, 'accepted');
   assert.equal('state' in stop, false);
   const settled = await built.transport.settle(execution);
-  assert.equal(settled.state, 'waiting');
-  assert.equal(settled.resourceRelease.state, 'pending');
+  assert.equal(settled.state, 'stopped');
+  assert.equal(settled.resourceRelease.state, 'released');
 });
 
 test('RCC v3 stop request remains stopped when the Responses stream later closes', async () => {
@@ -486,6 +605,38 @@ test('RCC v3 stop request remains stopped when the Responses stream later closes
   for await (const _event of built.transport.observe(execution)) void _event;
   const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'stopped');
+});
+
+test('RCC v3 stop request awaits the aborted stream before settle instead of reporting waiting', async () => {
+  const built = transportHarness();
+  let controller!: AbortController;
+  const abortingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      await new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+      });
+    },
+  };
+  controller = seedActive(built.transport, abortingBody).controller;
+  const observed: ProviderWireEvent[] = [];
+  const observing = (async () => {
+    for await (const event of built.transport.observe(execution)) observed.push(event);
+  })();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const stop = await built.transport.requestStop({ ...execution, reason: 'operator stop', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'operator stop',
+    execution,
+  });
+  assert.equal(stop.status, 'accepted');
+  const settled = await built.transport.settle(execution);
+  await observing;
+  assert.equal(settled.state, 'stopped');
+  assert.equal(settled.resourceRelease.state, 'released');
 });
 
 test('RCC v3 stop swallows the exact controller cancellation identity', async () => {

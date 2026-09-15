@@ -110,3 +110,12 @@ export { readRunManifest, writeRunManifest } from './run-manifest.js';
 export type { RunManifest } from './run-manifest.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
+
+export {
+  buildFakeExecutionPort,
+  buildRccExecutionPort,
+  startUiRuntime,
+  UiRuntimeApiError,
+  UiRuntimeService,
+} from './ui-runtime/index.js';
+export type { RccModeConfig, UiRuntime, UiRuntimeLaunchOptions } from './ui-runtime/index.js';

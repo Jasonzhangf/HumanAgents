@@ -1,58 +1,206 @@
-const dialog = document.querySelector('[data-agent-dialog]')
-const title = document.querySelector('#agent-dialog-title')
-const intro = document.querySelector('[data-dialog-intro]')
-const processList = document.querySelector('[data-process-list]')
-const output = document.querySelector('[data-dialog-output]')
-let lastTrigger = null
+import {
+  api,
+  clearNode,
+  element,
+  formatTime,
+  loadRuntimeStatus,
+  makePageShell,
+  observationHref,
+  renderRuntimeStatus,
+  stateTone,
+  taskIdFromQuery,
+} from './runtime-shell.js'
 
-const agentDetails = {
-  input: {
-    title: '交互 agent · 输入与任务目标',
-    intro: '把用户输入整理成当前任务可以继续处理的目标。',
-    steps: [['收到输入', '“重建导出索引，先检查现有分片。”'], ['确认任务', '匹配到“重建导出索引”，保留原始输入。'], ['交给任务编排', '任务目标已明确，不需要用户追加说明。']],
-    output: '目标明确，进入“重建导出索引”任务。',
-  },
-  routing: {
-    title: '任务编排 agent · 任务检查与派发',
-    intro: '检查任务现状、可用条件和已完成工作，再把可执行部分交给对应 agent。',
-    steps: [['收到任务', '接收任务目标和目录检查结果。'], ['检查条件', '确认目录可读，发现 4 个待处理分片。'], ['派发处理', '安排索引整理 agent 处理分片，并等待反馈。'], ['跟进结果', '收到 2/4 分片完成反馈，继续保持任务运行。']],
-    output: '索引整理 agent 正在工作，暂时不需要用户处理。',
-  },
-  memory: {
-    title: '记忆 agent · 经验与 skill 整理',
-    intro: '检查这项任务是否产生可复用的经验或 skill 整理候选。',
-    steps: [['接收记录', '等待任务产生完整处理结果。'], ['检查候选', '当前没有足够的新模式可以沉淀。'], ['保持等待', '任务结束后再次检查是否需要提交 review。']],
-    output: '暂未发现需要整理的新 skill。',
-  },
-  'index-worker': {
-    title: '索引整理 agent · 重建导出分片',
-    intro: '这里显示当前 agent 的输入、处理摘要和输出，不展示私有思维链。',
-    steps: [['接收输入', '导出目录和第 2 个分片。'], ['读取分片', '已完成目录检查，确认分片可读。'], ['写入索引', '正在写入第 2 个分片的索引。'], ['当前处理', '已完成 2/4 个分片，继续处理下一分片。']],
-    output: '已完成 2/4 个分片，正在写入索引。',
-  },
-  verification: {
-    title: '校验 agent · 等待索引结果',
-    intro: '等待上游结果后，检查索引与导出分片是否一致。',
-    steps: [['等待输入', '等待完整索引和分片结果。'], ['尚未开始', '没有可供校验的完整结果。']],
-    output: '尚未开始校验。',
-  },
+const taskId = taskIdFromQuery()
+const { main, status } = makePageShell(
+  'Task List',
+  'Task Dashboard',
+  '任务看板',
+  '当前状态、执行节点、事件、checkpoint 和操作都来自 HumanAgent Runtime API。',
+)
+
+let dashboard
+let stream
+let promptInput
+let actionStatus
+
+function renderDashboard() {
+  if (!dashboard) return
+  clearNode(main)
+
+  const heading = element('section', undefined, 'page-heading')
+  const copy = element('div')
+  copy.append(element('p', '当前任务', 'eyebrow'), element('h1', dashboard.taskTitle))
+  const stateChip = element('span', dashboard.stateLabel, 'state-chip')
+  stateChip.dataset.tone = stateTone(dashboard.state)
+  copy.append(stateChip)
+  heading.append(copy)
+  main.append(heading)
+
+  const facts = element('dl', undefined, 'detail-grid')
+  for (const [label, value] of [
+    ['当前状态', dashboard.stateLabel],
+    ['当前执行节点', dashboard.currentNode],
+    ['模式', dashboard.mode],
+    ['最近下一步', dashboard.nextStep],
+    ['输入', dashboard.input || '尚未输入'],
+    ['输出', dashboard.output || '尚无输出'],
+    ['错误 owner', dashboard.error ? `${dashboard.error.ownerId} · ${dashboard.error.nextAction}` : '无错误'],
+    ['Checkpoint', dashboard.checkpoint ? `${dashboard.checkpoint.outcome} · seq=${dashboard.checkpoint.seq} · ${dashboard.checkpoint.summary}` : '尚未提交'],
+  ]) {
+    const cell = element('div', undefined, 'detail-cell')
+    cell.append(element('dt', label), element('dd', value))
+    facts.append(cell)
+  }
+  main.append(facts)
+
+  const execution = element('section', undefined, 'section')
+  execution.append(element('h2', '执行操作'))
+  const panel = element('div', undefined, 'panel')
+  const form = element('form', undefined, 'form-grid')
+  const label = element('label', '本次执行输入')
+  promptInput = element('textarea')
+  promptInput.required = true
+  promptInput.placeholder = '输入要交给 Provider 的请求'
+  label.append(promptInput)
+  const actions = element('div', undefined, 'actions')
+  const startButton = element('button', `发起 ${dashboard.mode} 执行`, 'button button--primary')
+  startButton.type = 'submit'
+  startButton.disabled = !dashboard.allowedActions.includes('start')
+  const stopButton = element('button', 'Stop / 收拢', 'button button--danger')
+  stopButton.type = 'button'
+  stopButton.disabled = !dashboard.allowedActions.includes('stop')
+  stopButton.addEventListener('click', () => void stopExecution())
+  const retryStopButton = element('button', 'Retry Stop / 重试收拢', 'button button--danger')
+  retryStopButton.type = 'button'
+  retryStopButton.disabled = !dashboard.allowedActions.includes('retry-stop')
+  retryStopButton.addEventListener('click', () => void retryStopExecution())
+  actions.append(startButton, stopButton, retryStopButton)
+  actionStatus = element('p', '等待操作。', 'muted')
+  actionStatus.setAttribute('role', 'status')
+  actionStatus.setAttribute('aria-live', 'polite')
+  form.append(label, actions, actionStatus)
+  form.addEventListener('submit', (event) => {
+    event.preventDefault()
+    void startExecution()
+  })
+  panel.append(form)
+  execution.append(panel)
+  main.append(execution)
+
+  const events = element('section', undefined, 'section')
+  events.append(element('h2', '最近事件'))
+  const eventPanel = element('div', undefined, 'panel')
+  if (dashboard.recentEvents.length === 0) {
+    eventPanel.append(element('p', '尚无事件。', 'empty'))
+  } else {
+    const list = element('ol', undefined, 'event-list')
+    for (const event of dashboard.recentEvents) {
+      const row = element('li', undefined, 'event')
+      row.append(
+        element('time', formatTime(event.occurredAt)),
+        element('span', `${event.kind} · ${event.state}`, 'event-kind'),
+        element('span', `${event.summary}${event.ownerId ? ` · owner=${event.ownerId}` : ''}${event.nextAction ? ` · next=${event.nextAction}` : ''}`),
+      )
+      list.append(row)
+    }
+    eventPanel.append(list)
+  }
+  events.append(eventPanel)
+  main.append(events)
+
+  const observationLink = element('a', '打开只读 Observation', 'button')
+  observationLink.href = observationHref(taskId)
+  main.append(observationLink)
 }
 
-function openAgent(agent, trigger) {
-  const detail = agentDetails[agent]
-  if (!detail) return
-  lastTrigger = trigger
-  title.textContent = detail.title
-  intro.textContent = detail.intro
-  output.textContent = detail.output
-  processList.innerHTML = detail.steps.map(([label, summary], index) => `<li class="${index === detail.steps.length - 1 ? 'is-current' : ''}"><div><strong>${label}</strong><small>${summary}</small></div></li>`).join('')
-  dialog.showModal()
-  requestAnimationFrame(() => dialog.querySelector('button[type="submit"]')?.focus())
+async function refresh() {
+  dashboard = await api.taskDashboard(taskId)
+  renderDashboard()
 }
 
-document.addEventListener('click', (event) => {
-  const trigger = event.target.closest('[data-agent-trigger]')
-  if (trigger) openAgent(trigger.dataset.agentTrigger, trigger)
-})
+async function startExecution() {
+  const prompt = promptInput.value.trim()
+  if (!prompt) {
+    actionStatus.textContent = '请输入非空执行输入。'
+    promptInput.focus()
+    return
+  }
+  try {
+    actionStatus.textContent = '正在发起执行…'
+    const started = await api.startExecution(taskId, { mode: dashboard.mode, prompt })
+    actionStatus.textContent = `operation=${started.operationId} · epoch=${started.executionEpoch}`
+    await refresh()
+    subscribe(started.operationId)
+  } catch (error) {
+    actionStatus.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+  }
+}
 
-dialog.addEventListener('close', () => lastTrigger?.focus())
+async function stopExecution() {
+  try {
+    await refresh()
+    actionStatus.textContent = 'stopping · 正在请求 stop，等待 stopped checkpoint'
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    const result = await api.stop(taskId)
+    await refresh()
+    actionStatus.textContent = result.state === 'stopped'
+      ? `stopped · operation=${result.operationId}`
+      : `stop=${result.state} · operation=${result.operationId}`
+  } catch (error) {
+    actionStatus.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    await refresh().catch(() => {})
+  }
+}
+
+async function retryStopExecution() {
+  try {
+    actionStatus.textContent = 'retrying stop · 正在重试 stop 收拢'
+    const result = await api.retryStop(taskId)
+    await refresh()
+    actionStatus.textContent = result.state === 'stopped'
+      ? `stopped · operation=${result.operationId}`
+      : `stop=${result.state} · operation=${result.operationId}`
+  } catch (error) {
+    actionStatus.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    await refresh().catch(() => {})
+  }
+}
+
+function subscribe(operationId) {
+  stream?.close()
+  stream = new EventSource(api.eventsUrl(operationId))
+  for (const kind of [
+    'execution.started',
+    'provider.model',
+    'provider.output',
+    'provider.tool',
+    'provider.error',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+    'attention.opened',
+    'attention.resolved',
+  ]) {
+    stream.addEventListener(kind, () => {
+      void refresh().catch(() => {})
+    })
+  }
+  stream.onerror = () => {
+    actionStatus.textContent = 'SSE 已断开；页面将使用 Runtime projection 恢复。'
+  }
+}
+
+async function load() {
+  try {
+    const [{ status: runtimeStatus, error }] = await Promise.all([loadRuntimeStatus()])
+    renderRuntimeStatus(status, runtimeStatus, error)
+    await refresh()
+    if (dashboard.operationId && ['running', 'settling'].includes(dashboard.state)) subscribe(dashboard.operationId)
+  } catch (error) {
+    status.dataset.tone = 'danger'
+    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  }
+}
+
+void load()

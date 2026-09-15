@@ -15,6 +15,7 @@ import {
 } from '../../../contracts/src/index.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderEvidenceSink } from './evidence.js';
+import { mapOpenAIFinishReason } from './openai-finish-reason.js';
 import type {
   AnthropicWireCancelRequest,
   AnthropicWireContentBlock,
@@ -24,6 +25,11 @@ import type {
   AnthropicWireMessage,
   AnthropicWireRequest,
   AnthropicWireTool,
+  OpenAIChatCancelRequest,
+  OpenAIChatWireEvent,
+  OpenAIChatWireMessage,
+  OpenAIChatWireRequest,
+  OpenAIChatWireTool,
   ProviderWireEvent,
   ProviderWireRequest,
   ProviderWireStopRequest,
@@ -41,6 +47,7 @@ export interface DecodeContext {
   readonly scope: ScopeRef;
   readonly evidence: ProviderEvidenceSink;
   readonly nextEventId: (type: string, locator: string) => string;
+  readonly responsesOutputText: Map<string, string>;
 }
 
 export interface ProviderDecodedEvent {
@@ -48,7 +55,7 @@ export interface ProviderDecodedEvent {
 }
 
 export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireRequest> {
-  readonly protocol: 'responses' | 'anthropic';
+  readonly protocol: 'responses' | 'anthropic' | 'openai';
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): W;
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): W;
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): W;
@@ -72,6 +79,18 @@ function sanitizeRefPart(value: string): string {
 
 function artifactRef(type: string, locator: string, digest?: string): string {
   return `${SOURCE}:${type}:${sanitizeRefPart(locator)}${digest ? `:${digest.slice(0, 12)}` : ''}`;
+}
+
+function responsesTextSummary(context: DecodeContext, itemId: string, text: string, kind: 'delta' | 'snapshot'): string | undefined {
+  if (text.length === 0) return undefined;
+  const seen = context.responsesOutputText.get(itemId) ?? '';
+  if (kind === 'delta') {
+    context.responsesOutputText.set(itemId, `${seen}${text}`);
+    return text;
+  }
+  const delta = text.startsWith(seen) ? text.slice(seen.length) : text;
+  context.responsesOutputText.set(itemId, text);
+  return delta.length > 0 ? delta : undefined;
 }
 
 async function captureEvidence(context: DecodeContext, type: string, locator: string, value?: unknown, kind: EvidenceRef['kind'] = 'execution'): Promise<EvidenceRef> {
@@ -132,8 +151,21 @@ function modelEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, ty
   return { ...eventBase(execution, scope, type, eventId, type, evidenceRefs), kind: 'model' };
 }
 
-function outputEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, type: string, eventId: string, outputRefs: readonly string[], evidenceRefs?: readonly EvidenceRef[]): ProviderEvent {
-  return { ...eventBase(execution, scope, type, eventId, type, evidenceRefs), kind: 'output', outputRefs };
+function outputEvent(
+  execution: ProviderExecutionIdentityRef,
+  scope: ScopeRef,
+  type: string,
+  eventId: string,
+  outputRefs: readonly string[],
+  evidenceRefs?: readonly EvidenceRef[],
+  summary?: string,
+): ProviderEvent {
+  return {
+    ...eventBase(execution, scope, type, eventId, type, evidenceRefs),
+    kind: 'output',
+    outputRefs,
+    ...(summary === undefined ? {} : { summary }),
+  };
 }
 
 function ownedEvent(
@@ -144,7 +176,13 @@ function ownedEvent(
   eventId: string,
   label: string,
   nextAction: NextAction,
-  extra: { readonly terminalState?: ProviderEvent['terminalState']; readonly error?: ProviderError; readonly outputRefs?: readonly string[]; readonly evidenceRefs?: readonly EvidenceRef[] } = {},
+  extra: {
+    readonly terminalState?: ProviderEvent['terminalState'];
+    readonly error?: ProviderError;
+    readonly outputRefs?: readonly string[];
+    readonly evidenceRefs?: readonly EvidenceRef[];
+    readonly summary?: string;
+  } = {},
 ): ProviderEvent {
   return {
     ...eventBase(execution, scope, type, eventId, label),
@@ -155,6 +193,7 @@ function ownedEvent(
     ...(extra.error === undefined ? {} : { error: extra.error }),
     ...(extra.outputRefs === undefined ? {} : { outputRefs: extra.outputRefs }),
     ...(extra.evidenceRefs === undefined ? {} : { evidenceRefs: extra.evidenceRefs }),
+    ...(extra.summary === undefined ? {} : { summary: extra.summary }),
   };
 }
 
@@ -260,6 +299,16 @@ function requireObject(record: Record<string, unknown>, key: string, execution: 
   return value as Record<string, unknown>;
 }
 
+function responseItemText(item: Record<string, unknown>): string | undefined {
+  if (!Array.isArray(item.content)) return undefined;
+  const text = item.content
+    .filter((part): part is Record<string, unknown> => Boolean(part) && typeof part === 'object')
+    .filter((part) => part.type === 'output_text' && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join('');
+  return text.length > 0 ? text : undefined;
+}
+
 function asRecord(raw: ProviderWireEvent): Record<string, unknown> {
   if (!raw || typeof raw !== 'object') {
     throw new ProviderAdapterError({
@@ -344,19 +393,19 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         }
         const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, responseItemText(item) ?? '', 'snapshot'))] };
       }
       case 'response.output_text.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, delta)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, delta, 'delta'))] };
       }
       case 'response.output_text.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `text/${itemId}`, text)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${itemId}`), [artifactRef(raw.type, `text/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.content_part.added': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
@@ -375,7 +424,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         }
         const text = requireStringValue(part, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.content_part.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
@@ -385,7 +434,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const partType = requireString(part, 'type', context.execution, raw.type);
         const text = requireStringValue(part, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.output_item.done': {
         requireNumber(record, 'output_index', context.execution, raw.type);
@@ -414,7 +463,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         }
         const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };
+        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, responseItemText(item) ?? '', 'snapshot'))] };
       }
       case 'response.function_call_arguments.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
@@ -517,6 +566,263 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   }
 }
 
+export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequest> {
+  readonly protocol = 'openai' as const;
+
+  encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
+    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+  }
+
+  encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
+    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload, input.checkpointId);
+  }
+
+  encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
+    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+  }
+
+  encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): OpenAIChatCancelRequest {
+    return {
+      protocol: 'openai',
+      type: 'openai.cancel',
+      route: routeFor(binding, routeRef),
+      model: binding.modelRef,
+      reason: input.reason,
+      execution: input,
+    };
+  }
+
+  async decodeEvent(raw: ProviderWireEvent, context: DecodeContext): Promise<ProviderDecodedEvent> {
+    if (raw.protocol !== 'openai') {
+      throw new ProviderAdapterError({
+        code: 'protocol.mismatch',
+        category: 'protocol',
+        phase: 'observe',
+        message: 'openai codec received non-openai wire event',
+        scope: context.execution,
+      });
+    }
+    const record = asRecord(raw);
+    switch (raw.type) {
+      case 'openai.chat.completion': {
+        const id = requireStringOrGenerated(record, 'id', context.execution, raw.type, `rcc-chat-${context.execution.executionEpoch}`);
+        const choices = record.choices;
+        if (!Array.isArray(choices)) {
+          throw new ProviderAdapterError({
+            code: 'missing.field',
+            category: 'protocol',
+            phase: 'observe',
+            message: `${raw.type} event missing choices`,
+            scope: context.execution,
+          });
+        }
+        if (choices.length === 0) return { events: [] };
+        const events: ProviderEvent[] = [];
+        for (const candidate of choices) {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+            throw new ProviderAdapterError({
+              code: 'malformed.event',
+              category: 'protocol',
+              phase: 'observe',
+              message: `${raw.type} choice must be an object`,
+              scope: context.execution,
+            });
+          }
+          const choice = candidate as Record<string, unknown>;
+          const choiceIndex = requireNumber(choice, 'index', context.execution, raw.type);
+          const delta = choice.delta;
+          if (delta !== undefined && (!delta || typeof delta !== 'object' || Array.isArray(delta))) {
+            throw new ProviderAdapterError({
+              code: 'malformed.event',
+              category: 'protocol',
+              phase: 'observe',
+              message: `${raw.type} delta must be an object`,
+              scope: context.execution,
+            });
+          }
+          const deltaRecord = (delta ?? {}) as Record<string, unknown>;
+          const content = deltaRecord.content;
+          if (content !== undefined && content !== null && typeof content !== 'string') {
+            throw new ProviderAdapterError({
+              code: 'malformed.event',
+              category: 'protocol',
+              phase: 'observe',
+              message: `${raw.type} content must be a string or null`,
+              scope: context.execution,
+            });
+          }
+          if (typeof content === 'string' && content.length > 0) {
+            const evidenceRefs = [await captureEvidence(context, raw.type, `text/${id}/${choiceIndex}`, content)];
+            events.push(outputEvent(
+              context.execution,
+              context.scope,
+              raw.type,
+              eventId(context, raw.type, `text/${id}/${choiceIndex}`),
+              [artifactRef(raw.type, `text/${id}/${choiceIndex}`, evidenceRefs[0].digest)],
+              evidenceRefs,
+              content,
+            ));
+          }
+          const toolCalls = deltaRecord.tool_calls;
+          if (toolCalls !== undefined && !Array.isArray(toolCalls)) {
+            throw new ProviderAdapterError({
+              code: 'malformed.event',
+              category: 'protocol',
+              phase: 'observe',
+              message: `${raw.type} tool_calls must be an array`,
+              scope: context.execution,
+            });
+          }
+          for (const toolCall of toolCalls ?? []) {
+            if (!toolCall || typeof toolCall !== 'object' || Array.isArray(toolCall)) {
+              throw new ProviderAdapterError({
+                code: 'malformed.event',
+                category: 'protocol',
+                phase: 'observe',
+                message: `${raw.type} tool call must be an object`,
+                scope: context.execution,
+              });
+            }
+            const toolRecord = toolCall as Record<string, unknown>;
+            const toolIndex = requireNumber(toolRecord, 'index', context.execution, raw.type);
+            const functionRecord = toolRecord.function;
+            if (functionRecord !== undefined && (!functionRecord || typeof functionRecord !== 'object' || Array.isArray(functionRecord))) {
+              throw new ProviderAdapterError({
+                code: 'malformed.event',
+                category: 'protocol',
+                phase: 'observe',
+                message: `${raw.type} tool function must be an object`,
+                scope: context.execution,
+              });
+            }
+            const functionValue = (functionRecord ?? {}) as Record<string, unknown>;
+            const callId = typeof toolRecord.id === 'string' && toolRecord.id.trim() ? toolRecord.id : `tool-${id}-${toolIndex}`;
+            const name = typeof functionValue.name === 'string' && functionValue.name.trim() ? functionValue.name : undefined;
+            const argumentsDelta = typeof functionValue.arguments === 'string' ? functionValue.arguments : undefined;
+            if (name === undefined && argumentsDelta === undefined) continue;
+            const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, {
+              ...(name === undefined ? {} : { name }),
+              ...(argumentsDelta === undefined ? {} : { arguments: argumentsDelta }),
+            })];
+            events.push(ownedEvent(
+              context.execution,
+              context.scope,
+              'tool',
+              raw.type,
+              eventId(context, raw.type, `tool/${callId}/${toolIndex}`),
+              `tool-${callId}`,
+              { kind: 'continue' },
+              {
+                outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
+                evidenceRefs,
+                ...(name === undefined ? {} : { summary: name }),
+              },
+            ));
+          }
+          const finishReason = choice.finish_reason;
+          if (finishReason !== undefined && finishReason !== null && typeof finishReason !== 'string') {
+            throw new ProviderAdapterError({
+              code: 'malformed.event',
+              category: 'protocol',
+              phase: 'observe',
+              message: `${raw.type} finish_reason must be a string or null`,
+              scope: context.execution,
+            });
+          }
+          if (typeof finishReason === 'string') {
+            const evidenceRefs = [await captureEvidence(context, raw.type, `finish/${id}/${choiceIndex}`, finishReason)];
+            const mapping = mapOpenAIFinishReason(finishReason);
+            const error = mapping.errorCode
+              ? providerError(
+                  context.execution,
+                  context.scope,
+                  mapping.errorCode,
+                  mapping.errorMessage ?? `OpenAI chat finish_reason ${finishReason} stopped the stream`,
+                  'provider',
+                  evidenceRefs,
+                )
+              : undefined;
+            if (error) {
+              events.push(ownedEvent(
+                context.execution,
+                context.scope,
+                'error',
+                raw.type,
+                eventId(context, raw.type, `finish/${id}/${choiceIndex}/error`),
+                mapping.errorCode ?? 'openai.finish_reason.error',
+                mapping.nextAction,
+                { error, evidenceRefs },
+              ));
+            }
+            events.push(ownedEvent(
+              context.execution,
+              context.scope,
+              'terminal',
+              raw.type,
+              eventId(context, raw.type, `finish/${id}/${choiceIndex}`),
+              `finish-${finishReason}`,
+              mapping.nextAction,
+              { terminalState: mapping.terminalState, evidenceRefs },
+            ));
+          }
+        }
+        return { events };
+      }
+      case 'error': {
+        const errorRecord = requireObject(record, 'error', context.execution, raw.type);
+        const code = typeof errorRecord.code === 'string' && errorRecord.code.trim()
+          ? errorRecord.code
+          : typeof errorRecord.type === 'string' && errorRecord.type.trim()
+            ? errorRecord.type
+            : 'provider.failed';
+        const message = requireString(errorRecord, 'message', context.execution, raw.type);
+        const errorEvidence = await captureEvidence(context, raw.type, `error/${code}`, errorRecord);
+        const error = providerError(context.execution, context.scope, code, message, 'provider', [errorEvidence]);
+        return {
+          events: [
+            ownedEvent(context.execution, context.scope, 'error', raw.type, eventId(context, raw.type, `error/${code}`), `error-${code}`, { kind: 'recover', ref: OWNER }, { error }),
+            ownedEvent(context.execution, context.scope, 'terminal', raw.type, eventId(context, raw.type, `terminal/${code}`), `terminal-${code}`, { kind: 'recover', ref: OWNER }, { terminalState: 'failed' }),
+          ],
+        };
+      }
+      default:
+        throw new ProviderAdapterError({
+          code: 'unknown.event',
+          category: 'protocol',
+          phase: 'observe',
+          message: 'unknown openai wire event type',
+          scope: context.execution,
+        });
+    }
+  }
+
+  private encodeRequest(
+    binding: ProviderBinding,
+    routeRef: string,
+    execution: ProviderExecutionIdentityRef,
+    inputRefs: readonly string[],
+    payload: ProviderStartInput['payload'],
+    checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
+  ): OpenAIChatWireRequest {
+    const requestBody = { inputRefs, payload: payload ?? {} };
+    const messages: OpenAIChatWireMessage[] = [
+      ...(inputRefs.length === 0 ? [] : [{ role: 'system' as const, content: inputRefs.join('\n') }]),
+      { role: 'user', content: JSON.stringify(requestBody) },
+    ];
+    const tools: OpenAIChatWireTool[] = [];
+    return {
+      protocol: 'openai',
+      type: 'openai.chat.request',
+      route: routeFor(binding, routeRef),
+      model: binding.modelRef,
+      messages,
+      execution,
+      ...(checkpointId === undefined ? {} : { checkpointId }),
+      ...(tools.length === 0 ? {} : { tools }),
+    };
+  }
+}
+
 export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireRequest> {
   readonly protocol = 'anthropic' as const;
 
@@ -602,7 +908,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         if (blockType === 'text') {
           const text = requireStringValue(blockRecord, 'text', context.execution, raw.type);
           const evidenceRefs = [await captureEvidence(context, raw.type, `block/${String(record.index)}`, text)];
-          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(record.index)}`), [artifactRef(raw.type, `block/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs)] };
+          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `block/${String(record.index)}`), [artifactRef(raw.type, `block/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs, text)] };
         }
         if (blockType === 'thinking') {
           const thinking = requireStringValue(blockRecord, 'thinking', context.execution, raw.type);
@@ -625,7 +931,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         if (deltaType === 'text_delta') {
           const text = requireStringValue(deltaRecord, 'text', context.execution, raw.type);
           const evidenceRefs = [await captureEvidence(context, raw.type, `text/${String(record.index)}`, text)];
-          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${String(record.index)}`), [artifactRef(raw.type, `text/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs)] };
+          return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `text/${String(record.index)}`), [artifactRef(raw.type, `text/${String(record.index)}`, evidenceRefs[0].digest)], evidenceRefs, text)] };
         }
         if (deltaType === 'thinking_delta') {
           const thinking = requireStringValue(deltaRecord, 'thinking', context.execution, raw.type);
@@ -738,4 +1044,4 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   }
 }
 
-export type { AnthropicWireContentBlock, AnthropicWireContentBlockStart, AnthropicWireDelta, AnthropicWireEvent, AnthropicWireRequest, ResponsesWireEvent, ResponsesWireRequest };
+export type { AnthropicWireContentBlock, AnthropicWireContentBlockStart, AnthropicWireDelta, AnthropicWireEvent, AnthropicWireRequest, OpenAIChatWireEvent, OpenAIChatWireRequest, ResponsesWireEvent, ResponsesWireRequest };

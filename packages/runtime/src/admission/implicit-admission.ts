@@ -2,7 +2,7 @@ import {
   assertBusinessPayload,
   validateRequirementEnvelope,
   type RequirementEnvelope,
-} from '../../../../packages/contracts/src/index.js';
+} from '../../../contracts/src/index.js';
 import { AdmissionError } from './errors.js';
 import {
   ADMISSION_QUEUE_KINDS,

@@ -160,12 +160,16 @@ export class ProviderAdapter implements ExecutionRuntimePort {
         scope: options.binding,
       });
     }
-    if (options.binding.protocol !== 'responses' && options.binding.protocol !== 'anthropic') {
+    if (
+      options.binding.protocol !== 'responses'
+      && options.binding.protocol !== 'anthropic'
+      && options.binding.protocol !== 'openai'
+    ) {
       throw new ProviderAdapterError({
         code: 'capability.unavailable',
         category: 'capability',
         phase: 'start',
-        message: 'provider adapter currently requires an explicit responses or anthropic binding',
+        message: 'provider adapter currently requires an explicit responses, openai, or anthropic binding',
         scope: options.binding,
       });
     }
@@ -384,6 +388,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       execution: active.identity,
       scope: active.scope,
       evidence: this.options.evidence,
+      responsesOutputText: new Map<string, string>(),
       nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
     };
     try {

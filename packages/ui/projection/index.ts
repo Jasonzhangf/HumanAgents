@@ -598,3 +598,5 @@ export function projectMemoryInteraction(input: MemoryInteractionSurfaceInput): 
     compareEnabled: input.compareEnabled,
   };
 }
+
+export * from './runtime.js';

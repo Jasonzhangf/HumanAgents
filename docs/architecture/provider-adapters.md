@@ -4,9 +4,9 @@
 日期：2026-09-14
 
 本文是 Provider 协议适配的唯一设计记录。它定义 HumanAgent 如何使用本机
-RCC v3 作为 Milestone 1 的临时执行入口，以及为什么 `cc` 与 `goaichat`
-必须由两条独立的协议适配链处理。本文记录当前 RCC adapter 的实现边界；DSH
-adapter 仍是后续独立阶段。
+RCC v3 作为 Milestone 1 的临时执行入口，以及 HumanAgent 负责的入口协议边界。
+RCC 是透明代理，其上游 Provider 选择不属于 HumanAgent 的验收对象；本文记录
+当前 RCC adapter 的实现边界，DSH adapter 仍是后续独立阶段。
 
 ## 1. 当前临时 Provider 基线
 
@@ -17,10 +17,8 @@ adapter 仍是后续独立阶段。
 | 配置路径 | `~/.rcc` 是 `/Volumes/extension/.rcc` 的符号链接 | 只读路径检查 |
 | v3 入口 | `rccv3` 当前监听 `*:4444` | `lsof` 进程/监听检查 |
 | v3 传输声明 | `routecodex_v3_4444.execution.allowed_transports = ["json", "sse"]` | `~/.rcc/config.toml` 非敏感字段 |
-| 路由 | v3 路由中出现 `cc-sol` 与 `goaichat` | `~/.rcc/config.toml` route/use 字段 |
-| `cc` Provider | `providerId = "cc"`，`type = "responses"` | `~/.rcc/provider/cc/config.v2.toml` |
-| `cc-sol` Provider | `providerId = "cc-sol"`，`type = "responses"` | `~/.rcc/provider/cc-sol/config.v2.toml` |
-| `goaichat` Provider | `providerId = "goaichat"`，`type = "anthropic"` | `~/.rcc/provider/goaichat/config.v2.toml` |
+| 路由 | v3 listener `routecodex_v3_4444` 暴露 `default` 等入口 | `~/.rcc/config.toml` route 名称 |
+| 入口协议 | HumanAgent 显式选择 `responses` 或 `openai` | HumanAgent binding / 同入口验收 |
 
 RCC 是透明路由入口：它可以按模型选择上游、重试并过滤不稳定 Provider。因此
 `/v1/models` 为空、请求模型未出现在发现列表，或响应里的最终 `model` 与请求
@@ -33,7 +31,7 @@ readiness，把模型发现作为可选 evidence，并以实际协议响应和�
 
 1. listener/config readiness；
 2. `responses` codec readiness；
-3. `anthropic` codec readiness；
+3. `openai` codec readiness；
 4. 同一 HumanAgent 入口的请求、事件、错误和 stop/settle replay。
 
 `~/.rcc` 是外部 Provider 的配置真源，不是 HumanAgent 的配置真源。HumanAgent
@@ -65,7 +63,10 @@ DSH 和 RCC 是两个不同的边界：
 
 HumanAgent 不能因为所有请求都经过 `127.0.0.1:4444` 就认为协议相同。4444
 是透明路由 listener，不是最终 Provider 身份；协议选择仍必须来自锁定的
-Provider binding，但 route label 只表示请求入口，不得用来校验最终上游 Provider。
+Provider binding。`routeRef` / `--route` 只表示 HumanAgent 本地入口标签，用于
+binding、evidence 和审计关联；它不是 RCC 请求体或 header 中可由客户端选择的
+上游 route。RCC 4444 的上游路由由它自己的 typed request facts 分类决定，
+所以该标签也不得用来校验最终上游 Provider。
 `/health` 失败才阻断入口 readiness；模型发现失败、空列表或模型未列出时保留
 evidence，仍允许实际请求验证 RCC 的路由能力。不能猜测协议，也不能静默改用
 另一条协议。
@@ -79,7 +80,7 @@ evidence，仍允许实际请求验证 RCC 的路由能力。不能猜测协议�
 ProviderBinding
   bindingId
   providerId
-  protocol: responses | anthropic | other-explicit
+  protocol: responses | openai | anthropic | other-explicit
   endpointRef
   modelRef
   configDigest
@@ -107,13 +108,15 @@ ProviderAdapterPort
 - adapter 关闭、transport 断开、进程崩溃和 readiness 失败都必须有下一动作，
   不得留下无 owner 的 open operation。
 
-## 4. 两条独立协议适配链
+## 4. 协议适配链
 
-### 4.1 `cc` / `cc-sol`：Responses adapter
+本阶段 RCC 入口验收只覆盖 `responses` 和 `openai`。`anthropic` 保留为既有
+独立 adapter 边界，不属于本阶段 UI Provider Loop 的 RCC 验收路径。
 
-当前配置将 `cc` 和 `cc-sol` 声明为 `responses` 类型。它们可以复用同一个
-**Responses codec 实现**，但必须保留不同的 `ProviderBinding` 和 route/provider
-identity；复用 codec 不等于合并 provider 身份。
+### 4.1 Responses adapter
+
+`responses`入口使用独立 Responses codec，入口路径为 `/v1/responses`。
+`providerId`只表示本地 binding 标签，不参与最终上游 Provider 校验。
 
 Responses adapter 独立拥有：
 
@@ -123,10 +126,23 @@ Responses adapter 独立拥有：
 - Responses 特有的 continuation、previous response 或 tool result 语义；
 - Responses 特有的 cancel/close/settle 映射。
 
-### 4.2 `goaichat`：Anthropic adapter
+### 4.2 OpenAI Chat adapter
 
-当前配置将 `goaichat` 声明为 `anthropic` 类型。它必须使用独立的 Anthropic
-codec，不得把 Responses 的字段拼接后当作兼容层。
+`openai`入口使用独立 OpenAI Chat codec，入口路径为 `/v1/chat/completions`。
+不得把 Responses 或 Anthropic 的字段拼接后当作兼容层。
+
+OpenAI Chat adapter 独立拥有：
+
+- chat messages 和 function tools 的编码；
+- `chat.completion.chunk`、content delta、tool_calls 和 finish_reason 的事件
+  解码；
+- `[DONE]`、provider error 和停止后的终态映射；
+- OpenAI Chat 特有的 cancel/close/settle 映射。
+
+### 4.3 Anthropic adapter
+
+`anthropic`入口使用独立 Anthropic codec，入口路径为 `/v1/messages`。
+不得把 Responses 的字段拼接后当作兼容层。
 
 Anthropic adapter 独立拥有：
 
@@ -137,7 +153,7 @@ Anthropic adapter 独立拥有：
 - Anthropic 特有的 max tokens、system、stop reason 和 usage 语义；
 - Anthropic 特有的 cancel/close/settle 映射。
 
-两条 adapter 共享的只有：
+各 adapter 共享的只有：
 
 - `ProviderAdapterPort`；
 - binding/capability/readiness 结构；
@@ -210,8 +226,9 @@ HumanAgent lock 只记录：provider id、protocol、endpoint 的非敏感引用
 - 公共高层不变量（binding identity、epoch fence、operation/error owner、
   cancel≠stopped、settle/checkpoint）必须在 fake contract、recorded replay、
   real RCC 和 real DSH 四层保持一致；
-- Responses 错误、stream 和 tool-call 由 `cc`/`cc-sol` 的 Responses 链验证；
-- Anthropic 错误、stream 和 tool-call 由 `goaichat` 的 Anthropic 链验证；
+- Responses 错误、stream 和 tool-call 由 `responses` 入口路径验证；
+- OpenAI Chat 错误、stream 和 tool-call 由 `openai` 入口路径验证；
+- Anthropic 只保留既有 codec 边界，不是本阶段 RCC 入口验收项；
 - DSH session crash、plugin incompatibility 和 DSH profile dispose 只要求在
   real DSH 路径有真实证据；RCC 直连路径不伪造 DSH session；
 - RCC listener/protocol readiness 和 direct request 只要求在 real RCC 路径有

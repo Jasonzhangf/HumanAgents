@@ -1,15 +1,17 @@
-# HumanAgent 静态 Operator Console
+# HumanAgent Runtime Operator Console
 
-状态：`STATIC-BASELINE-FROZEN`  
+状态：`RUNTIME-CONNECTED`
 工作总览：[dashboard.html](dashboard.html)  
 任务列表第一入口：[tasks.html](tasks.html)  
 任务详情与输入决策：[task.html](task.html)  
 运行任务看板：[task-dashboard.html](task-dashboard.html)  
-运行控制：[interaction.html](interaction.html)  
 后台观测：[observation.html](observation.html)  
-参考视觉草稿（非主入口）：[index.html](index.html)
+历史视觉原型（非主入口）：[index.html](index.html)、[interaction.html](interaction.html)
 
-当前主入口是 `dashboard.html`、`tasks.html`、`task.html` 和 `task-dashboard.html`；`index.html` 保留为早期视觉草稿，不作为第二个 Dashboard 真源。当前视觉框架冻结，后续只增加流程状态和端口映射，不重新分配页面责任。
+当前主入口是 `dashboard.html`、`tasks.html`、`task.html`、`task-dashboard.html` 和
+`observation.html`。所有页面通过 `runtime-api.js` 消费 HumanAgent Runtime API，
+不读取 Journal、DSH Session、RCC raw frame 或 debug log。`index.html` 只重定向到
+Dashboard。
 
 ## UI brief
 
@@ -17,7 +19,8 @@
 - Mode：`operate + read`。
 - Audience：需要观察、判断和控制长程任务的使用者/operator。
 - Primary task：快速回答“现在发生什么、是否需要我决定、我能做什么”。
-- Product truth：页面只呈现静态投影示例；按钮不会连接 HumanAgent runtime。
+- Product truth：页面只呈现 Runtime typed projection；按钮只调用正式 Runtime
+  operation。`fake` 模式必须显示 `mode=fake`，不得伪装成真实 Provider 结果。
 
 ## 四个正常界面责任
 
@@ -113,7 +116,7 @@ Dashboard 只负责回答四个问题：有没有待处理事项、现在有哪�
 - 待处理事项、正在处理的任务、最近输入（来自你/来自任务）和历史任务。
 - 每个任务行进入对应 Task Detail；不显示内部职责、器官类比和决策链条。
 
-`interaction.html` 是运行控制次级入口。它用低保真 HTML 定义：
+`interaction.html` 是历史视觉原型，不作为当前 Runtime 入口。它用低保真 HTML 记录：
 
 - Desktop 三个主要区域：任务导航、当前任务、需要处理。
 - Mobile 单栏顺序：当前任务、需要处理、后台特殊入口；底部导航切换任务/待处理/历史的阅读焦点，诊断仍是特殊入口。
@@ -159,4 +162,6 @@ Dashboard 只负责回答四个问题：有没有待处理事项、现在有哪�
 
 ## 后续接入
 
-静态原型后续接入 `OrganUiProjectionPort` 和 `OrganUiCommandPort`。页面组件不得直接读取 Journal、DSH Session 或 debug log。
+页面通过 Runtime API 接入执行、SSE 和正式 stop operation；Observation 只读，
+不提供重试 operation、修改队列、steer 或改写 checkpoint。`rcc` 模式失败显式展示
+owner 和 next action，不静默回退 `fake`。

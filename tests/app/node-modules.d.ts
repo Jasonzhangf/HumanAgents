@@ -2,9 +2,10 @@ declare module 'node:assert/strict' {
   interface Assert {
     equal(actual: unknown, expected: unknown, message?: string): void;
     deepEqual(actual: unknown, expected: unknown, message?: string): void;
+    ok(actual: unknown, message?: string): void;
     match(actual: string, expected: RegExp, message?: string): void;
     throws(fn: () => unknown, error?: RegExp | ((error: unknown) => boolean)): void;
-    rejects(fn: () => Promise<unknown>, expected?: RegExp): Promise<void>;
+    rejects(fn: () => Promise<unknown>, expected?: RegExp | ((error: unknown) => boolean)): Promise<void>;
   }
   const assert: Assert;
   export = assert;
@@ -18,6 +19,7 @@ declare module 'node:fs/promises' {
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
   export function appendFile(path: string, data: string, encoding?: string): Promise<void>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
+  export function writeFile(path: string, data: string, encoding?: string): Promise<void>;
   export function realpath(path: string): Promise<string>;
   export function symlink(existingPath: string, newPath: string): Promise<void>;
 }
