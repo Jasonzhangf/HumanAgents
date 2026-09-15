@@ -52,7 +52,7 @@
       "command": "corepack pnpm@10.31.0 exec tsc -p tests/adapters/dsh/tsconfig.json && node --test dist/tests/adapters/dsh/dsh-adapter.test.js dist/tests/adapters/dsh/dsh-driver.test.js dist/tests/adapters/dsh/dsh-real-transport.test.js dist/tests/adapters/dsh/dsh-replay.test.js",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "63/63 focused DSH adapter, driver, transport, and replay tests"
+      "notes": "64/64 focused DSH adapter, driver, transport, and replay tests including abortStart cleanup"
     },
     {
       "command": "HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 corepack pnpm@10.31.0 run proof:dsh-entry",
@@ -75,23 +75,23 @@
   ],
   "artifacts": {
     "dsh-entry-proof.json": {
-      "sha256": "473b29a512b0f42ec13e35aa4502de8bd54c1d73616aee9fc7d055aff7c7042f",
+      "sha256": "863b54883a9651e2171f240bea6dbd53e90c5afb2625babc7f697d095cc9ed24",
       "source": "dist/receipts/dsh-entry-proof.json"
     },
     "dsh-lifecycle-proof.json": {
-      "sha256": "b9039dfeac2dc90fcb0e4813ebb34fa04cc2906e435ff84f5e49488e11d2eff1",
+      "sha256": "03d2a01f07605746dd50f0f0989be3440d8fcdba65e1debdcbced94ea7687f2f",
       "source": "dist/receipts/dsh-lifecycle-proof.json"
     },
     "dsh-humanagent-cli-smoke.json": {
-      "sha256": "ddca3ee60ebfe055dddb1564afa656cd7bff5fc81edab41fd713a57e01fa7a12",
+      "sha256": "ae9de4cbc2ecd091e3884e7426bdeba8642171982b3c420c291b5175a50d73d7",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
     },
     "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
-      "sha256": "c8481c6374eda899186b2b42e333db46b77ed488833f3ada2c7f9e746cbbe966",
+      "sha256": "c3a7785ff93daa043786a8ac7c69421728bc838476d6b75fa1755b22d6b7129c",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
     },
     "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
-      "sha256": "5f92c08a8ce5487ffcaf15236d64873a53abc93ccc8b42dcd6a72adaa7ced97f",
+      "sha256": "4222535199d4fcb4dedb9338b74216c04f324b4afcbbe05fdddb32078ba94fdb",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
     },
     "ui/dsh-dashboard-desktop.png": {
@@ -109,6 +109,15 @@
     "implementationFindings": null,
     "implementationReview": null,
     "priorReviews": [
+      {
+        "candidate": "8b5d6bb42b0554ab7ecb1a15b90c16f76185cb07",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-8b5d6bb/"
+      },
       {
         "candidate": "8b7de47717d1e8f4867bf74b04e4150a22041e84",
         "verdict": "FAIL",
@@ -221,6 +230,7 @@
       "clean runtime exit no longer claims persistence commit; settlement validates the locked DSH v3 session artifact, session identity, workspace, and digest",
       "DSH session identity includes runtimeId, taskId, operationId, and executionEpoch so distinct operations cannot collide on one session artifact",
       "failed DSH initialization waits for bounded child cleanup and retains the runtime fence when cleanup does not settle, preserving the original initialization error",
+      "bridge aborts a started DSH runtime when post-start validation/identity/evidence/proof fails, reusing the real shutdown path and preserving the original validation error",
       "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
     ],
     "finalCandidate": null,

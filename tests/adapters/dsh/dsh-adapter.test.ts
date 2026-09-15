@@ -267,8 +267,14 @@ class StubTransport implements DshTransport {
 }
 
 class WrongStartIdentityTransport extends StubTransport {
+  abortStartCalls = 0;
+
   async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
     return { ...(await super.start(input)), runtimeId: 'wrong-runtime' };
+  }
+
+  async abortStart(_input: ProviderStartInput): Promise<void> {
+    this.abortStartCalls += 1;
   }
 }
 
@@ -855,10 +861,12 @@ test('DSH execution lifecycle keeps session evidence external and stop separate 
 });
 
 test('DSH bridge fences transport result identity, resume checkpoint, and observed epochs', async () => {
+  const wrongStartTransport = new WrongStartIdentityTransport();
   await assert.rejects(
-    createPort({ transport: new WrongStartIdentityTransport() }).start(startInput()),
+    createPort({ transport: wrongStartTransport }).start(startInput()),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
   );
+  assert.equal(wrongStartTransport.abortStartCalls, 1);
   await assert.rejects(
     createPort({ transport: new WrongResumeCheckpointTransport() }).resume(resumeInput()),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',

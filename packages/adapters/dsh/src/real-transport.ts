@@ -948,6 +948,27 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
       };
     },
 
+    async abortStart(input: ProviderStartInput): Promise<void> {
+      const key = executionKey(input as ExecutionIdentity);
+      const instance = runtimes.get(key);
+      if (!instance) return;
+      try {
+        await shutdown(instance);
+      } catch (error) {
+        void instance.exit.then(() => {
+          if (runtimes.get(key) === instance) runtimes.delete(key);
+        });
+        throw new DshAdapterError(
+          'transport-failure',
+          `DSH failed to abort a validated-start failure: ${error instanceof Error ? error.message : String(error)}`,
+          OWNER,
+          { kind: 'recover', ref: OWNER },
+          { cause: error, phase: 'start', binding: options.binding, identity: instance.identity },
+        );
+      }
+      if (runtimes.get(key) === instance) runtimes.delete(key);
+    },
+
     async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
       // The public DSH SDK entry cannot reopen a persisted session, so recovery
       // starts a fresh DSH session from the HumanAgent checkpoint. The DSH log

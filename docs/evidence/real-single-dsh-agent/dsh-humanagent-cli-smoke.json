@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "humanagent.dsh.cli-smoke",
-  "generatedAt": "2026-09-15T06:00:55.010Z",
+  "generatedAt": "2026-09-15T07:44:28.013Z",
   "dshSource": "/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915",
   "dshRevision": {
     "commit": "0d1f50007f9bca3f52b06e1c3074fa14d5fb0720",
@@ -19,7 +19,7 @@
       "output",
       "terminal"
     ],
-    "targetSecondLine": "feature_flag=e9f7b8b0-0228-4ea5-a034-acf236cff6d5"
+    "targetSecondLine": "feature_flag=565a13d0-8e2b-47cb-a04a-e3fb6f3bfcea"
   },
   "rccHealth": {
     "status": 200,
@@ -28,16 +28,16 @@
   "cliRun": {
     "command": "run",
     "plan": "default",
-    "sessionId": "dsh-smoke-1789452055011",
-    "controlCwd": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cli-dsh-aX255f/control",
-    "workspaceCwd": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cli-dsh-aX255f/workspace",
-    "projectKey": "-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cli-dsh-aX255f-workspace",
+    "sessionId": "dsh-smoke-1789458268015",
+    "controlCwd": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cli-dsh-wEBDXA/control",
+    "workspaceCwd": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cli-dsh-wEBDXA/workspace",
+    "projectKey": "-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cli-dsh-wEBDXA-workspace",
     "state": "stopped",
-    "taskId": "dsh-smoke-1789452055011",
-    "operationId": "runtime-runtime-dsh-smoke-1789452055011-epoch-1",
+    "taskId": "dsh-smoke-1789458268015",
+    "operationId": "runtime-runtime-dsh-smoke-1789458268015-epoch-1",
     "executionEpoch": 1,
     "outcome": "succeeded",
-    "checkpointId": "dsh-smoke-1789452055011-1-1",
+    "checkpointId": "dsh-smoke-1789458268015-1-1",
     "observedKinds": [
       "output",
       "tool",
@@ -53,12 +53,12 @@
     "output",
     "terminal"
   ],
-  "checkpointId": "dsh-smoke-1789452055011-1-1",
+  "checkpointId": "dsh-smoke-1789458268015-1-1",
   "humanagentCheckpointCommitted": true,
   "humanagentCheckpointArtifact": "/Volumes/extension/code/humanagent/playground/real-single-dsh-agent/dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl",
   "dshSessionEvidence": [
     {
-      "file": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cli-dsh-aX255f/control/dsh/home/sessions/--private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cli-dsh-aX255f-workspace--/runtime-dsh-smoke-1789452055011~003Adsh-smoke-1789452055011~003Aruntime-runtime-dsh-smoke-1789452055011-epoch-1~003A1/session.v3.jsonl.zstd",
+      "file": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cli-dsh-wEBDXA/control/dsh/home/sessions/--private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cli-dsh-wEBDXA-workspace--/runtime-dsh-smoke-1789458268015~003Adsh-smoke-1789458268015~003Aruntime-runtime-dsh-smoke-1789458268015-epoch-1~003A1/session.v3.jsonl.zstd",
       "toolCallRead": true,
       "readCallCount": 1,
       "exactlyOneReadCall": true,

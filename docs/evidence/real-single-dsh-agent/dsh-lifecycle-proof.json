@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "kind": "humanagent.dsh.lifecycle-proof",
   "dshSource": "/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915",
-  "dshHome": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-7TwkcC/.dsh",
-  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-7TwkcC/workspace",
+  "dshHome": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-Fz0URU/.dsh",
+  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-Fz0URU/workspace",
   "profile": "sdk",
   "provider": "rcc",
   "model": "gpt-5.5",
@@ -27,12 +27,12 @@
       }
     },
     "prompt": {
-      "messageId": "f7754c3b-b48d-4eb2-9ae0-3dc0305de2e3"
+      "messageId": "0f7a67a3-b821-41ba-a2ef-5a118a8cf622"
     },
     "turnEnd": {
       "kind": "completed"
     },
-    "assistantText": "I'll read the file and reply with its second line.\nfeature_flag=7ee78350-a78b-419b-b966-3b4a5564ea1b",
+    "assistantText": "feature_flag=ea7aba4d-eb66-4a0d-80d3-13cfc94b2e54",
     "shutdown": {},
     "exit": {
       "code": 0,
@@ -44,8 +44,8 @@
       "type": "session",
       "version": 3,
       "id": "main",
-      "createdAt": 1789451887521,
-      "cwd": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-7TwkcC/workspace",
+      "createdAt": 1789458184254,
+      "cwd": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-Fz0URU/workspace",
       "isSeeded": false,
       "delegationDepth": 0
     }
@@ -58,14 +58,14 @@
       }
     },
     "prompt": {
-      "messageId": "84ab031d-c5d4-48b5-874f-40cc58c81a08"
+      "messageId": "fba99301-d3cc-43be-b9e2-7a26fc3f5783"
     },
     "shutdown": {},
     "exit": {
       "code": 0,
       "signal": null
     },
-    "shutdownToExitMs": 62,
+    "shutdownToExitMs": 57,
     "sessionLogCount": 2
   },
   "continue": {
@@ -76,10 +76,10 @@
       }
     },
     "firstPrompt": {
-      "messageId": "dd3c4c3e-cd66-4f27-b97f-5fc15269c182"
+      "messageId": "993be188-a7da-442b-b80f-327fddca6844"
     },
     "secondPrompt": {
-      "messageId": "b1f34ddc-0baf-42c2-834a-2f9718737240"
+      "messageId": "c14ac06d-75b4-49a9-bb1f-08cee97c5776"
     },
     "turnEnd": {
       "kind": "completed"
@@ -115,7 +115,7 @@
       }
     },
     "prompt": {
-      "messageId": "aa131b1d-d555-47ed-8cd2-b10ed8230609"
+      "messageId": "b0504dfe-982d-4ff4-a695-ccb19a4d3643"
     },
     "exit": {
       "code": null,
@@ -129,7 +129,7 @@
       }
     },
     "recoveryPrompt": {
-      "messageId": "18b81ee4-d3dc-4cdc-a5e8-69c01df14a4b"
+      "messageId": "bf504a00-f918-4312-9671-a2795e13fed5"
     },
     "recoveryTurnEnd": {
       "kind": "completed"

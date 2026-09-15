@@ -330,6 +330,23 @@ test('failed initialization waits for runtime exit before allowing retry', async
   validateProviderStartReceipt(retry);
 });
 
+test('abortStart shuts down a started runtime and releases its identity', async () => {
+  const firstChild = makeChild();
+  const retryChild = makeChild();
+  const transport = makeTransportFactory([firstChild, retryChild]);
+
+  await transport.start(startInput());
+  assert.equal(firstChild.written.some((frame) => frame.method === 'initialize'), true);
+
+  await transport.abortStart?.(startInput());
+  assert.equal(firstChild.written.some((frame) => frame.method === 'shutdown'), true);
+  assert.equal(firstChild.exitCode, 0);
+
+  const retry = await transport.start(startInput());
+  validateProviderStartReceipt(retry);
+  assert.equal(retryChild.written.some((frame) => frame.method === 'initialize'), true);
+});
+
 test('cancel receipt is never a stopped settlement', async () => {
   const child = makeChild();
   const transport = makeTransport(child);

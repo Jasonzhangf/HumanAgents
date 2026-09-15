@@ -350,9 +350,13 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
       const transport = requireTransportWithSeam(inputs, 'start', snapshot);
       const fence: ExecutionFence = { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(input.evidenceRefs) };
       inFlightInstances.set(executionKey(snapshot), fence);
+      let transportInput: typeof input | undefined;
+      let started = false;
       try {
-        const transportInput = cloneDetached({ ...input, ...snapshot });
-        const rawReceipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => transport.start(transportInput));
+        const startInputSnapshot = cloneDetached({ ...input, ...snapshot });
+        transportInput = startInputSnapshot;
+        const rawReceipt: ProviderStartReceipt = await runDsh('start', inputs.ownerId, { identity: snapshot }, async () => transport.start(startInputSnapshot));
+        started = true;
         const receipt = cloneRawResult(rawReceipt, 'start', inputs.ownerId, { identity: snapshot });
         validateSeamResult(receipt, 'start', validateProviderStartReceipt, { identity: snapshot });
         assertDshExecutionResult(receipt, snapshot, 'start', inputs.ownerId);
@@ -371,6 +375,20 @@ export function createDshExecutionRuntimePort(inputs: DshBridgeInputs): Executio
         }
         activeInstances.set(executionKey(snapshot), { scope: scopeSnapshot(scope), evidenceRefs: cloneDetached(receipt.evidenceRefs) });
         return cloneDetached(receipt);
+      } catch (error) {
+        if (started && transportInput !== undefined && transport.abortStart !== undefined) {
+          try {
+            await transport.abortStart(transportInput);
+          } catch (cleanupError) {
+            const message = `DSH start validation failed and abort cleanup also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}; originalError=${error instanceof Error ? error.message : String(error)}`;
+            throw new DshAdapterError('transport-failure', message, inputs.ownerId, { kind: 'recover', ref: inputs.ownerId }, {
+              cause: error,
+              phase: 'start',
+              identity: snapshot,
+            });
+          }
+        }
+        throw error;
       } finally {
         if (inFlightInstances.get(executionKey(snapshot)) === fence) inFlightInstances.delete(executionKey(snapshot));
       }
