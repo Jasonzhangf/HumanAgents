@@ -19,12 +19,10 @@ import {
   type EvidenceRef,
   type OperationId,
   type OrganId,
-  type ProviderBinding,
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
 import type { AgentConfig, LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
-import { dshExecutionOrganId, dshOperationIdFor } from '../../adapters/dsh/src/index.js';
 import { composeAgentDriver, ensureDshSettings, resolveDshHome, type ComposedAgentDriver } from './agent-driver-composition.js';
 import { openAgentExecution, type AgentExecutionSession, type AgentExecutionReceipt } from './agent-execution.js';
 import { createJsonlAttentionPort } from './attention-journal.js';
@@ -121,14 +119,11 @@ function selectAgent(input: OpenAgentOperationInput): AgentConfig {
 
 function scopeFor(input: {
   readonly agent: AgentConfig;
-  readonly providerBinding?: ProviderBinding;
   readonly taskId: TaskId;
   readonly operationId: OperationId;
   readonly cycleId: CycleId;
 }): ScopeRef {
-  const organId: OrganId = input.agent.driverRef === 'dsh' && input.providerBinding
-    ? dshExecutionOrganId(input.providerBinding)
-    : id('organ', `agent-${input.agent.driverRef}`);
+  const organId: OrganId = id('organ', `agent-${input.agent.agentId}`);
   return {
     organId,
     taskId: input.taskId,
@@ -137,9 +132,8 @@ function scopeFor(input: {
   };
 }
 
-function operationIdFor(input: OpenAgentOperationInput, agent: AgentConfig, runtimeId: string, executionEpoch: number): OperationId {
+function operationIdFor(input: OpenAgentOperationInput, runtimeId: string, executionEpoch: number): OperationId {
   if (input.operationId) return input.operationId;
-  if (agent.driverRef === 'dsh') return dshOperationIdFor({ runtimeId, executionEpoch });
   return id('operation', `runtime-${runtimeId}-epoch-${executionEpoch}`);
 }
 
@@ -152,7 +146,7 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
   const runtimeId = input.runtimeId ?? `runtime-${input.sessionId}`;
   const executionEpoch = input.executionEpoch ?? 1;
   const taskId = input.taskId ?? id('task', input.sessionId);
-  const operationId = operationIdFor(input, agent, runtimeId, executionEpoch);
+  const operationId = operationIdFor(input, runtimeId, executionEpoch);
   const cycleId = id('cycle', `${input.sessionId}-cycle-${executionEpoch}`);
   const directiveRevision = input.directiveRevision ?? 1;
   const composed = input.composed ?? composeAgentDriver({
@@ -170,7 +164,6 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
   }
   const scope = scopeFor({
     agent,
-    ...(composed.execution ? { providerBinding: composed.execution.provider } : {}),
     taskId,
     operationId,
     cycleId,

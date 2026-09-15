@@ -442,6 +442,7 @@ export interface ProviderExecutionIdentityRef {
   readonly taskId: TaskId;
   readonly operationId: OperationId;
   readonly organId?: OrganId;
+  readonly cycleId?: CycleId;
   readonly executionEpoch: number;
 }
 
@@ -647,11 +648,15 @@ function assertProviderExecutionIdentity(input: ProviderExecutionIdentityRef): v
   assertAgentRuntimeId(input.runtimeId);
   assertScope(input.taskId, 'task');
   assertScope(input.operationId, 'operation');
+  if (input.organId) assertScope(input.organId, 'organ');
+  if (input.cycleId) assertScope(input.cycleId, 'cycle');
   assertExecutionEpoch(input.executionEpoch);
 }
 function assertProviderEvidenceMatchesExecution(ref: EvidenceRef, execution: ProviderExecutionIdentityRef, label: string): void {
   if (ref.scope.taskId && !sameScopedId(ref.scope.taskId, execution.taskId)) throw new ContractError(`${label} task scope mismatch`);
   if (ref.scope.operationId && !sameScopedId(ref.scope.operationId, execution.operationId)) throw new ContractError(`${label} operation scope mismatch`);
+  if (execution.organId && ref.scope.organId && !sameScopedId(ref.scope.organId, execution.organId)) throw new ContractError(`${label} organ scope mismatch`);
+  if (execution.cycleId && ref.scope.cycleId && !sameScopedId(ref.scope.cycleId, execution.cycleId)) throw new ContractError(`${label} cycle scope mismatch`);
 }
 function assertProviderCompletionEvidenceRefs(refs: readonly EvidenceRef[], execution: ProviderExecutionIdentityRef, label: string): void {
   for (const ref of refs) assertProviderEvidenceMatchesExecution(ref, execution, label);
@@ -908,9 +913,19 @@ export function assertProviderReadinessBinding(readiness: ProviderReadiness, bin
 export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionIdentityRef, expected: ProviderExecutionIdentityRef): void {
   assertProviderExecutionIdentity(actual);
   assertProviderExecutionIdentity(expected);
+  const sameOptionalScope = (
+    left: { readonly scope: string; readonly value: string } | undefined,
+    right: { readonly scope: string; readonly value: string } | undefined,
+  ): boolean => left === undefined
+    ? right === undefined
+    : right !== undefined && left.scope === right.scope && left.value === right.value;
   if (actual.runtimeId !== expected.runtimeId
+    || actual.taskId.scope !== expected.taskId.scope
     || actual.taskId.value !== expected.taskId.value
+    || actual.operationId.scope !== expected.operationId.scope
     || actual.operationId.value !== expected.operationId.value
+    || !sameOptionalScope(actual.organId, expected.organId)
+    || !sameOptionalScope(actual.cycleId, expected.cycleId)
     || actual.executionEpoch !== expected.executionEpoch) {
     throw new ContractError('provider execution identity mismatch');
   }

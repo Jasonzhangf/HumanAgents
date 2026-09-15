@@ -139,6 +139,8 @@ export function createDshAgentDriver(options: DshAgentDriverOptions): AgentDrive
   const startInput = (input: AgentStartRequest, instance: DriverInstance) => ({
     runtimeId: instance.runtimeId,
     taskId: instance.taskId,
+    organId: instance.organId,
+    ...(instance.cycleId ? { cycleId: instance.cycleId } : {}),
     operationId: instance.operationId,
     executionEpoch: instance.executionEpoch,
     inputRefs: [instance.assignmentId],

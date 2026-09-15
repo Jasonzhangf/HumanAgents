@@ -92,11 +92,53 @@ class RejectPromptDriver extends FakeAgentDriver {
         kind: 'operation',
         source: 'test-reject-prompt',
         locator: `dsh://session/${input.assignmentId}/prompt-rejected`,
-        scope: { organId: id('organ', 'agent-fake'), taskId: input.taskId },
+        scope: { organId: id('organ', 'agent-execution-fake'), taskId: input.taskId },
       }],
     };
   }
 }
+
+test('HumanAgent operation identity is stable across driver and provider bindings', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stable-identity-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const agent = {
+    agentId: 'execution-stable',
+    roleId: 'execution' as const,
+    templateRef: 'builtin/execution@1.0.0',
+    skills: ['single-capability-worker'],
+    tools: ['search'],
+    permissions: ['task.read', 'workspace.read'],
+    memoryScopes: ['task'] as const,
+    resourceClass: 'foreground',
+  };
+  const fake = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stable-fake',
+    plan: 'default',
+    prompt: 'inspect the configuration',
+    agent: { ...agent, driverRef: 'fake' },
+    composed: { driver: new FakeAgentDriver() },
+  });
+  const dsh = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stable-dsh',
+    plan: 'default',
+    prompt: 'inspect the configuration',
+    agent: { ...agent, driverRef: 'dsh' },
+    composed: { driver: new FakeAgentDriver() },
+  });
+  assert.deepEqual(fake.snapshot().scope.organId, dsh.snapshot().scope.organId);
+  assert.equal(fake.snapshot().scope.organId.value, 'agent-execution-stable');
+
+  const source = await readFile(join(process.cwd(), 'packages/app/src/agent-operation.ts'), 'utf8');
+  assert.equal(/adapters[\\/]dsh|dshExecutionOrganId|dshOperationIdFor/.test(source), false);
+});
 
 test('CLI config failures preserve structured owner and next action evidence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-error-'));

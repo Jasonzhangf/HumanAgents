@@ -79,7 +79,11 @@ const rootEvidence = (label: string): EvidenceRef => ({
 /** Evidence scoped to one execution identity, as the bridge requires. */
 const execEvidence = (
   label: string,
-  execution: { readonly taskId: { readonly value: string }; readonly operationId: { readonly value: string } },
+  execution: {
+    readonly taskId: { readonly value: string };
+    readonly operationId: { readonly value: string };
+    readonly cycleId?: { readonly value: string };
+  },
   kind: EvidenceRef['kind'] = 'execution',
 ): EvidenceRef => ({
   evidenceId: id('evidence', `ev-${label}`),
@@ -89,6 +93,7 @@ const execEvidence = (
   scope: {
     organId: driverOrgan,
     taskId: id('task', execution.taskId.value),
+    ...(execution.cycleId ? { cycleId: id('cycle', execution.cycleId.value) } : {}),
     operationId: id('operation', execution.operationId.value),
   },
 });
@@ -102,6 +107,7 @@ const validity = (): { checkedAt: string; expiresAt: string } => {
 class LoopTransport implements DshTransport {
   private readonly events = new Map<string, ProviderEvent[]>();
   readonly settledOperations: string[] = [];
+  readonly startScopes: Array<{ readonly organId?: string; readonly cycleId?: string }> = [];
   startCalls = 0;
   private key(input: { readonly runtimeId: string; readonly taskId: { readonly value: string }; readonly executionEpoch: number }): string {
     return `${input.runtimeId}:${input.taskId.value}:${input.executionEpoch}`;
@@ -157,6 +163,10 @@ class LoopTransport implements DshTransport {
 
   async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
     this.startCalls += 1;
+    this.startScopes.push({
+      ...(input.organId ? { organId: input.organId.value } : {}),
+      ...(input.cycleId ? { cycleId: input.cycleId.value } : {}),
+    });
     this.events.set(this.key(input), []);
     return {
       runtimeId: input.runtimeId,
@@ -314,14 +324,17 @@ function makeDriver(transport: DshTransport) {
 test('driver bridges model -> tool -> result -> continuation into AgentDriver events', async () => {
   const transport = new LoopTransport();
   const driver = makeDriver(transport);
+  const cycle = id('cycle', 'cycle-a');
   await driver.start({
     runtimeId: 'runtime-a',
     taskId: task,
     executionEpoch: 1,
     assignmentId: 'assignment-a',
     organId: driverOrgan,
+    cycleId: cycle,
     operationId: operation,
   });
+  assert.deepEqual(transport.startScopes, [{ organId: driverOrgan.value, cycleId: cycle.value }]);
   await driver.submit({
     taskId: task,
     executionEpoch: 1,
