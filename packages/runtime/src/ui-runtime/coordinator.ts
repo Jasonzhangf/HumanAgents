@@ -64,6 +64,8 @@ export interface RuntimeTaskEvent {
 export interface RuntimeTaskSnapshot {
   readonly taskId: TaskId;
   readonly title: string;
+  readonly directive: string;
+  readonly directiveRevision: number;
   readonly state: LifecycleState;
   readonly currentState: string;
   readonly nextStep: string;
@@ -1132,6 +1134,8 @@ export class RuntimeTaskCoordinator {
     return {
       taskId: record.taskId,
       title: record.title,
+      directive: record.directive,
+      directiveRevision: record.directiveRevision,
       state: record.state,
       currentState: record.currentState,
       nextStep: record.nextStep,

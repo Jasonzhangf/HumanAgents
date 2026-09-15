@@ -430,6 +430,31 @@ test('journal replay rejects a projection event that cross-links another operati
   );
 });
 
+test('task snapshot keeps the stored directive instead of substituting the execution input', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-directive-'));
+  const coordinator = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+  });
+  const task = coordinator.createTask({ title: 'directive title', directive: 'directive objective' });
+
+  assert.equal(coordinator.taskSnapshot(task.taskId).directive, 'directive objective');
+  assert.equal(coordinator.taskSnapshot(task.taskId).directiveRevision, 1);
+  assert.equal(coordinator.taskSnapshot(task.taskId).input, '');
+
+  const restarted = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (taskId, cycle) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+  });
+  assert.equal(restarted.taskSnapshot(task.taskId).directive, 'directive objective');
+});
+
 test('restart restores a failed task error owner and next action from the app journal', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-failure-restart-'));
   const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
