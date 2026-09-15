@@ -47,6 +47,15 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
 - 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行；本轮 review-fix 从 clean worktree HEAD `4ec6313cfad75c00363bbbedd6234928234121dd` 开始。
 
+## Git 交付流程
+
+- 默认流程是标准交付，视为已授权，不需要逐项申请：候选提交 -> merge 到 main ->
+  重建产物并重启本地运行实例 -> 验证修复 -> push `origin/main`。
+- 进入该流程的前提不变：改动在独立 clean worktree 完成，适用 focused tests 与独立
+  review 通过，merge 后 main 保持可验证状态。
+- 需要单独授权的是超出该流程的操作：删除、回滚、迁移、清权限、生产变更、force push、
+  改写他人已推送历史、清理他人 worktree。
+
 ## 已批准 MVP 交付门禁
 
 1. Wave 2 candidate 只有在 focused tests、runtime integration 和独立 Codex/Astra review 通过后才可进入 main；不得伪造已入 main。
