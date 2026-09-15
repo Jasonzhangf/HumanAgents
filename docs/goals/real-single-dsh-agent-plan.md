@@ -1,6 +1,6 @@
 # 真实单 DSH Agent 执行计划
 
-状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-COMPLETE`
+状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-REVIEW-PENDING`
 基线：`origin/main @ 36528f4e7d05932d63ddd7a4308c8863be424138`
 Worktree：`playground/real-single-dsh-agent`
 分支：`codex/real-single-dsh-agent`

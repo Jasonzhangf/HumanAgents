@@ -1,6 +1,6 @@
 # 真实 DSH 入口证明（P0 / P1）
 
-状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-COMPLETE`
+状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-REVIEW-PENDING`
 日期：2026-09-14
 Owner：`packages/adapters/dsh` + `docs/architecture`
 
@@ -167,9 +167,9 @@ mid-turn prompt cancel：
 
 ## 5. 当前收口
 
-P0-P6 的实现与验证已完成：真实 transport、runtime/app/config 接线、stop/settle、
-crash recovery 和 UI projection 均已通过 focused tests 与真实入口证据。四层
-验证已执行；当前实现候选
+P0-P5 已完成，P6 实现与验证已完成但独立 review 仍为 `PENDING`：真实
+transport、runtime/app/config 接线、stop/settle、crash recovery 和 UI
+projection 均已通过 focused tests 与真实入口证据。四层验证已执行；当前实现候选
 `29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
 `957110c188acffc20f00c146131f6f296a92524f`，把 HumanAgent Organ 收回 app
 所有，DSH 只校验并转发 `organId` / `cycleId` / `operationId`。
