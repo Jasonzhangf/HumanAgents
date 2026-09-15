@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.dsh.closeout-gates",
+  "candidate": {
+    "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
+    "implementationCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "implementationTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed",
+    "evidenceCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "finalCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "finalTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed"
+  },
+  "dshLock": {
+    "source": "https://github.com/deepseek-ai/deepseek-harness.git",
+    "reference": "refs/remotes/origin/master",
+    "commit": "0d1f50007f9bca3f52b06e1c3074fa14d5fb0720",
+    "tree": "80b651cca20f29d587518cf07a978f2bc58bc2c1",
+    "describe": "dsh-v0.1.5-rc.2-805-g0d1f50007f",
+    "checkedAt": "2026-09-14T22:53:33-07:00"
+  },
+  "commands": [
+    {
+      "command": "corepack pnpm@10.31.0 run typecheck",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "candidate-bound after operation-scoped session and failed-start cleanup fix"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run build",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "contracts, config, app, and runtime build against the updated DSH lock"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "contracts 21/21, config 22/22, app 40/40, runtime 112/112"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:release",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "18/18 release gates"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:app",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "40/40 app integration tests"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 exec tsc -p tests/adapters/dsh/tsconfig.json && node --test dist/tests/adapters/dsh/dsh-adapter.test.js dist/tests/adapters/dsh/dsh-driver.test.js dist/tests/adapters/dsh/dsh-real-transport.test.js dist/tests/adapters/dsh/dsh-replay.test.js",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "64/64 focused DSH adapter, driver, transport, and replay tests including abortStart cleanup"
+    },
+    {
+      "command": "HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 corepack pnpm@10.31.0 run proof:dsh-entry",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "same locked DSH source; receipt is dsh-entry-proof.json"
+    },
+    {
+      "command": "HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 corepack pnpm@10.31.0 run proof:dsh-lifecycle",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "stop, mid-turn shutdown, continuation, resume boundary, crash recovery"
+    },
+    {
+      "command": "HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 corepack pnpm@10.31.0 run proof:dsh-cli",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "real CLI same-entry run with exactly one read, matching result, same-session continuation, RCC 4444, and HumanAgent checkpoint"
+    }
+  ],
+  "artifacts": {
+    "dsh-entry-proof.json": {
+      "sha256": "863b54883a9651e2171f240bea6dbd53e90c5afb2625babc7f697d095cc9ed24",
+      "source": "dist/receipts/dsh-entry-proof.json"
+    },
+    "dsh-lifecycle-proof.json": {
+      "sha256": "03d2a01f07605746dd50f0f0989be3440d8fcdba65e1debdcbced94ea7687f2f",
+      "source": "dist/receipts/dsh-lifecycle-proof.json"
+    },
+    "dsh-humanagent-cli-smoke.json": {
+      "sha256": "ae9de4cbc2ecd091e3884e7426bdeba8642171982b3c420c291b5175a50d73d7",
+      "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
+    },
+    "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
+      "sha256": "c3a7785ff93daa043786a8ac7c69421728bc838476d6b75fa1755b22d6b7129c",
+      "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
+    },
+    "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
+      "sha256": "4222535199d4fcb4dedb9338b74216c04f324b4afcbbe05fdddb32078ba94fdb",
+      "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
+    },
+    "ui/dsh-dashboard-desktop.png": {
+      "sha256": "406432868c60a5c711ad3c35c5e2bf0c39d62f3921a5357f33d53998536709c5",
+      "source": "dist/receipts/ui/dsh-dashboard-desktop.png"
+    },
+    "ui/dsh-dashboard-narrow.png": {
+      "sha256": "a200bc494b619859c055ecc126d97987a35440fe52610091280ff2f2f7dbcc97",
+      "source": "dist/receipts/ui/dsh-dashboard-narrow.png"
+    }
+  },
+  "review": {
+    "implementationCandidate": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "implementationVerdict": "PASS",
+    "implementationFindings": {
+      "P0": 0,
+      "P1": 0
+    },
+    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-287a2f6/review.final.md",
+    "priorReviews": [
+      {
+        "candidate": "8b5d6bb42b0554ab7ecb1a15b90c16f76185cb07",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-8b5d6bb/"
+      },
+      {
+        "candidate": "8b7de47717d1e8f4867bf74b04e4150a22041e84",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-8b7de47/"
+      },
+      {
+        "candidate": "9d6eb202ee961a525c9d41084f0f82480d783686",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 2
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-9d6eb20/"
+      },
+      {
+        "candidate": "9b67217774a05a5e4776d774e33993261460ea73",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 2
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-9b67217/"
+      },
+      {
+        "candidate": "6ebc2e51cb74e4732ed9f63921ca8e50142fcf05",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1,
+          "P2": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-6ebc2e5/"
+      },
+      {
+        "candidate": "287afc861573d99a7ccfa5d6eff0338998c41614",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-287afc8/"
+      },
+      {
+        "candidate": "da4aaf0351a3c5e1dd69767084ec05a3c63fec32",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-da4aaf0/"
+      },
+      {
+        "candidate": "0b85d4ab4b4762c3b35ca1380dfc122e74a7f9bf",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 3
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-0b85d4a/"
+      },
+      {
+        "candidate": "d0af1dea996bc96c1500e3a7c3a320bfba786073",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-d0af1de/"
+      },
+      {
+        "candidate": "ca858373e3ff6ae1cbe2705d8180f9aba88091fd",
+        "verdict": "PASS",
+        "findings": {
+          "P0": 0,
+          "P1": 0
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-ca85837/"
+      },
+      {
+        "candidate": "82c5bde80db160a06b32901fa26d7e8de001fb91",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-82c5bde/"
+      },
+      {
+        "candidate": "9f8d810f5d47dad67e5a9b9de3d3a8ffe8e3e7ac",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 2
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-9f8d810/"
+      }
+    ],
+    "fixes": [
+      "HumanAgent Organ identity is app-owned and stable across driver/provider bindings",
+      "DSH execution start forwards HumanAgent organId/cycleId/operationId unchanged",
+      "provider execution identity matching includes organ and cycle scope",
+      "DSH prompt submit requires the real server messageId instead of fabricating an output reference",
+      "CLI smoke requires exactly one read call, a matching tool result, and a post-result assistant nonce in the same session",
+      "final failed/unknown settlements release the active bridge and driver instance after resource release and persistence commit",
+      "CLI run and resume share failed-session outcome settlement instead of exposing failed operations as recoverable",
+      "clean runtime exit no longer claims persistence commit; settlement validates the locked DSH v3 session artifact, session identity, workspace, and digest",
+      "DSH session identity includes runtimeId, taskId, operationId, and executionEpoch so distinct operations cannot collide on one session artifact",
+      "failed DSH initialization waits for bounded child cleanup and retains the runtime fence when cleanup does not settle, preserving the original initialization error",
+      "bridge aborts a started DSH runtime when post-start validation/identity/evidence/proof fails, reusing the real shutdown path and preserving the original validation error",
+      "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
+    ],
+    "finalCandidate": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "finalVerdict": "PASS"
+  }
+}

@@ -13,9 +13,11 @@ import {
   type CheckpointId,
   type Checkpoint,
   type EvidenceRef,
+  type CycleId,
   type LifecycleState,
   type NextAction,
   type OperationId,
+  type OrganId,
   type StopRequestReceipt,
   type ScopeRef,
   type TaskId,
@@ -28,6 +30,9 @@ export interface AgentRuntimeBinding {
   readonly runtimeId: string;
   readonly taskId: TaskId;
   readonly assignmentId: string;
+  readonly organId?: OrganId;
+  readonly cycleId?: CycleId;
+  readonly operationId?: OperationId;
   readonly executionEpoch: number;
   readonly ownerRef: string;
   readonly waitConditionRef?: string;
@@ -50,6 +55,8 @@ export interface AgentRuntimeSnapshot {
   readonly taskId: TaskId;
   readonly assignmentId: string;
   readonly executionEpoch: number;
+  readonly operationId: OperationId;
+  readonly organId: OrganId;
   readonly state: LifecycleState;
   readonly handle?: AgentHandle;
   readonly closure?: AgentRuntimeClosure;
@@ -112,6 +119,8 @@ export function bindAgentDriver(runtime: AgentRuntime, driver: AgentDriver): Age
 }
 
 export class AgentRuntime {
+  readonly operationId: OperationId;
+  readonly organId: OrganId;
   private state: LifecycleState = 'created';
   private handle: AgentHandle | undefined;
   private closure: AgentRuntimeClosure | undefined;
@@ -130,6 +139,11 @@ export class AgentRuntime {
   ) {
     requireReference(binding.runtimeId, 'runtimeId');
     requireReference(binding.assignmentId, 'assignmentId');
+    this.operationId = binding.operationId
+      ?? { scope: 'operation', value: `runtime-${binding.runtimeId}-epoch-${binding.executionEpoch}` };
+    this.organId = binding.organId ?? { scope: 'organ', value: `runtime-${binding.runtimeId}` };
+    requireReference(this.operationId.value, 'operationId');
+    requireReference(this.organId.value, 'organId');
     requireReference(binding.ownerRef, 'agent runtime ownerRef');
     assertExecutionEpoch(binding.executionEpoch);
   }
@@ -142,6 +156,9 @@ export class AgentRuntime {
         taskId: this.binding.taskId,
         executionEpoch: this.binding.executionEpoch,
         assignmentId: this.binding.assignmentId,
+        organId: this.organId,
+        ...(this.binding.cycleId ? { cycleId: this.binding.cycleId } : {}),
+        operationId: this.operationId,
       });
       this.completeInitialization(handle);
       return handle;
@@ -159,6 +176,9 @@ export class AgentRuntime {
         taskId: this.binding.taskId,
         executionEpoch: this.binding.executionEpoch,
         assignmentId: this.binding.assignmentId,
+        organId: this.organId,
+        ...(this.binding.cycleId ? { cycleId: this.binding.cycleId } : {}),
+        operationId: this.operationId,
         checkpointId,
       });
       this.completeInitialization(handle);
@@ -253,6 +273,8 @@ export class AgentRuntime {
       taskId: this.binding.taskId,
       assignmentId: this.binding.assignmentId,
       executionEpoch: this.binding.executionEpoch,
+      operationId: this.operationId,
+      organId: this.organId,
       state: this.state,
       handle: this.handle ? structuredClone(this.handle) : undefined,
       closure: this.closure ? structuredClone(this.closure) : undefined,

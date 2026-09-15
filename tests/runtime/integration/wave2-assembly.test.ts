@@ -217,6 +217,9 @@ test('confirmed intake flows through admission, node execution, checkpoint, and 
     runtimeId: 'runtime-wave2',
     taskId: task,
     assignmentId: 'assignment-wave2',
+    organId: id('organ', 'fake-organ'),
+    cycleId: cycle,
+    operationId: id('operation', 'operation-wave2'),
     executionEpoch: 1,
     ownerRef: 'agent-runtime-owner',
     recoveryRef: 'runtime-recovery',
@@ -284,7 +287,7 @@ test('confirmed intake flows through admission, node execution, checkpoint, and 
   assert.equal(fakeEvidence.scope.organId.value, 'fake-organ');
   assert.equal(fakeEvidence.scope.taskId?.value, task.value);
   assert.ok(fakeEvidence.scope.operationId);
-  assert.equal(fakeEvidence.scope.cycleId, undefined);
+  assert.equal(fakeEvidence.scope.cycleId?.value, cycle.value);
 
   const checkpointEvidenceRefs = nodeClosure.evidenceRefs.filter(
     (evidenceRef) => evidenceRef === observationEvidence,

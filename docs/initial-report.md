@@ -1,5 +1,11 @@
 # HumanAgent 开案初始报告
 
+> 历史快照说明：本文记录的是 2026-09-11 的开案事实，不能被解释为当前 DSH
+> 接入状态。后续真实单 DSH Agent candidate、验证证据和当前收口以
+> [`README.md`](../README.md) 与
+> [`docs/goals/real-single-dsh-agent-plan.md`](goals/real-single-dsh-agent-plan.md)
+> 为准。
+
 日期：2026-09-11  
 阶段：`MVP-IMPLEMENTATION / WAVE-2-CLOSED`
 报告范围：项目初始化档案、固定 Harness、Cordis 第一层插件宿主、Agent Driver、Agent 模板、Memory 双层系统、DSH 解耦边界，以及已批准 MVP 实现阶段状态
@@ -48,8 +54,8 @@
 | 生命周期/故障设计 | `docs/architecture/lifecycle-and-failure-ownership.md` | 阶段终态、故障 owner、Attention、恢复和提交闸门已定义 |
 | 静态界面定义 | `docs/ui/tasks.html`、`dashboard.html`、`task.html`、`task-dashboard.html`、`interaction.html`、`observation.html` | 已分离任务列表、简洁状态入口、显式交互、运行任务看板、运行控制和只读观测；当前 UI 责任基线已冻结 |
 | DSH checkout | `/Volumes/extension/code/dsh` 当前 checkout 仍有大量未跟踪生成物；另以 detached worktree 复核上游 `master` | 原 checkout 不作为基线；clean 基线记录在 [`dsh-baseline.md`](architecture/dsh-baseline.md) |
-| DSH 基线 | 上游 `master@c291e7961a515f6d7af9304e7fd1d257929aef26`，tree `e482b49bef64726be8f79380bb35bae569dc3c48`，describe `dsh-v0.1.5-rc.2-139-gc291e7961a` | 源码 commit/tree 已锁定；adapter 和真实入口仍未实现 |
-| 实现/测试 | Wave 0/1/2 runtime 代码/测试已存在于 `packages/`、`tests/`；当前 main 为 `9c2a94364e6e4a86539df38622847f0211909bdb` | 当前 main 已包含 Wave 2 runtime 和启动链；不能据此宣称 DSH 接入 |
+| DSH 基线 | 上游 `master@c291e7961a515f6d7af9304e7fd1d257929aef26`，tree `e482b49bef64726be8f79380bb35bae569dc3c48`，describe `dsh-v0.1.5-rc.2-139-gc291e7961a` | 开案时已锁定源码基线；当时 adapter 和真实入口尚未实现 |
+| 实现/测试 | Wave 0/1/2 runtime 代码/测试已存在于 `packages/`、`tests/`；开案时 main 为 `9c2a94364e6e4a86539df38622847f0211909bdb` | 本文只记录开案时 main；DSH candidate 的后续状态见本轮真实单 DSH Agent 计划 |
 
 ## 5. 架构收敛
 

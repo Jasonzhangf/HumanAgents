@@ -253,7 +253,9 @@ export function validateConfiguredAgentBinding(binding: ConfiguredAgentBinding):
   if (binding.templateRef !== `${expectedPrefix}1.0.0`) {
     throw new AgentTemplateError(`template ref is not locked to the configured role: ${binding.templateRef}`);
   }
-  if (binding.driverRef !== 'fake') throw new AgentTemplateError(`driver is not enabled in the MVP host: ${binding.driverRef}`);
+  if (binding.driverRef !== 'fake' && binding.driverRef !== 'dsh') {
+    throw new AgentTemplateError(`driver is not enabled in the MVP host: ${binding.driverRef}`);
+  }
   assertSubset(binding.skills, ROLE_SKILLS[binding.roleId], 'skill');
   assertSubset(binding.tools, ROLE_TOOLS[binding.roleId], 'tool');
   assertSubset(binding.permissions, ROLE_PERMISSIONS[binding.roleId], 'permission');

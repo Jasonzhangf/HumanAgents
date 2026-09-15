@@ -1,0 +1,125 @@
+import {
+  recallCheckpoint,
+  type RecalledCheckpoint,
+} from '../../runtime/src/index.js';
+import {
+  type Checkpoint,
+  type CheckpointId,
+  type ScopeRef,
+  type TaskId,
+} from '../../contracts/src/index.js';
+import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
+import { checkpointJournal, openAgentOperation, type OpenAgentOperationInput, type RunAgentOperationResult } from './agent-operation.js';
+import { AppLifecycleError } from './errors.js';
+
+const OWNER = 'humanagent.app.run-operation';
+
+export interface RunAgentOperationInput extends OpenAgentOperationInput {}
+export type { RunAgentOperationResult } from './agent-operation.js';
+
+/**
+ * Runs one real HumanAgent operation: the app owns Task / Operation / execution
+ * epoch / checkpoint, and the adapter only supplies execution. The checkpoint
+ * is written from the actual settle evidence; DSH session logs never become
+ * HumanAgent state.
+ */
+export async function runAgentOperation(input: RunAgentOperationInput): Promise<RunAgentOperationResult> {
+  const controller = await openAgentOperation(input);
+  try {
+    await controller.start();
+    await controller.submit();
+    return await controller.complete();
+  } catch (error) {
+    try {
+      await controller.releaseExecution();
+    } catch {
+      // Preserve the original execution failure; releasing the runtime is a
+      // cleanup best-effort and must never mask why the operation failed.
+    }
+    try {
+      return await controller.fail(error);
+    } catch {
+      throw error;
+    }
+  }
+}
+
+export interface ResumeAgentOperationInput {
+  readonly paths: RuntimePaths;
+  readonly configuration: LoadedConfiguration;
+  readonly workspace: string;
+  readonly sessionId: string;
+  readonly plan: string;
+  readonly prompt: string;
+  readonly taskId: TaskId;
+  readonly cycleId: { readonly scope: 'cycle'; readonly value: string };
+  readonly scope: ScopeRef;
+  readonly executionEpoch: number;
+  readonly directiveRevision: number;
+  readonly agentId: string;
+  readonly driverRef: 'fake' | 'dsh';
+}
+
+export interface ResumeAgentOperationResult {
+  readonly recovered: RecalledCheckpoint | null;
+  readonly execution?: RunAgentOperationResult;
+  readonly waitingReason?: string;
+}
+
+/**
+ * Recovery uses the HumanAgent checkpoint as truth and starts a fresh DSH
+ * session. DSH cannot reopen a persisted session, so recovery never pretends
+ * the old session resumed.
+ */
+export async function resumeAgentOperation(input: ResumeAgentOperationInput): Promise<ResumeAgentOperationResult> {
+  const journal = checkpointJournal(input.paths);
+  const recovered = await recallCheckpoint(journal, { ownerId: OWNER, scope: input.scope });
+  if (!recovered) {
+    return { recovered: null as never, waitingReason: `no checkpoint exists for ${input.sessionId}` };
+  }
+  const checkpoint = recovered.checkpoint;
+  if (checkpoint.outcome === 'succeeded') {
+    return { recovered, waitingReason: `checkpoint is terminal: ${checkpoint.outcome}` };
+  }
+  if (checkpoint.outcome === 'stopped' || checkpoint.outcome === 'cancelled') {
+    return { recovered, waitingReason: `checkpoint is terminal: ${checkpoint.outcome}` };
+  }
+  const agent = input.configuration.agentRoster.find((candidate) => candidate.agentId === input.agentId);
+  if (!agent) {
+    throw new AppLifecycleError(
+      'run-manifest-agent-missing',
+      `run manifest references agent ${input.agentId} but it is no longer configured`,
+      'restore the original agent configuration before resuming this session',
+      OWNER,
+    );
+  }
+  if (agent.driverRef !== input.driverRef) {
+    throw new AppLifecycleError(
+      'run-manifest-driver-mismatch',
+      `run manifest requires driver ${input.driverRef} but agent ${input.agentId} now uses ${agent.driverRef}`,
+      'restore the original agent/driver configuration before resuming this session',
+      OWNER,
+    );
+  }
+  const nextEpoch = Math.max(checkpoint.executionEpoch, input.executionEpoch) + 1;
+  const execution = await runAgentOperation({
+    paths: input.paths,
+    configuration: input.configuration,
+    workspace: input.workspace,
+    sessionId: input.sessionId,
+    plan: input.plan,
+    prompt: input.prompt,
+    taskId: input.taskId,
+    executionEpoch: nextEpoch,
+    directiveRevision: input.directiveRevision,
+    agent,
+    // A cross-operation resume is a new checkpoint chain; the recovered
+    // checkpoint is the recovery evidence, not a predecessor link.
+    newChain: true,
+  });
+  return { recovered, execution };
+}
+
+export function checkpointIdFor(checkpoint: Checkpoint): CheckpointId {
+  return checkpoint.id;
+}

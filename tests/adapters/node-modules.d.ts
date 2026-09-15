@@ -12,6 +12,7 @@ declare module "node:assert/strict" {
     ): void;
     deepEqual<T>(actual: T, expected: T, message?: string): void;
     equal<T>(actual: T, expected: T, message?: string): void;
+    notEqual(actual: unknown, expected: unknown, message?: string): void;
     ok(value: unknown, message?: string): asserts value;
     rejects(
       promise: Promise<unknown> | (() => Promise<unknown>),
@@ -79,6 +80,11 @@ declare module "node:fs/promises" {
     writeFile(data: string | Uint8Array): Promise<void>;
     close(): Promise<void>;
   }
+  interface Dirent {
+    readonly name: string;
+    isDirectory(): boolean;
+    isFile(): boolean;
+  }
 
   function readFile(
     path: string | URL | FileHandle,
@@ -101,6 +107,13 @@ declare module "node:fs/promises" {
   ): Promise<string | undefined>;
   function mkdtemp(prefix: string): Promise<string>;
   function open(path: string | URL, flags?: string): Promise<FileHandle>;
+  function readdir(path: string | URL, options: { withFileTypes: true }): Promise<Dirent[]>;
+  function rm(path: string | URL, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+}
+
+declare module "node:zlib" {
+  function zstdCompressSync(input: string | Uint8Array): Uint8Array;
+  function zstdDecompressSync(input: Uint8Array): Uint8Array;
 }
 
 declare module "node:os" {
@@ -111,3 +124,52 @@ declare module "node:path" {
   export function dirname(path: string): string;
   export function join(...paths: string[]): string;
 }
+
+declare module "node:events" {
+  export class EventEmitter {
+    on(event: string, listener: (...args: any[]) => void): this;
+    once(event: string, listener: (...args: any[]) => void): this;
+    off(event: string, listener: (...args: any[]) => void): this;
+    removeListener(event: string, listener: (...args: any[]) => void): this;
+    emit(event: string, ...args: any[]): boolean;
+  }
+}
+
+declare module "node:child_process" {
+  import type { EventEmitter } from "node:events";
+
+  interface ReadableLike extends EventEmitter {
+    setEncoding(encoding: string): void;
+  }
+
+  interface WritableLike {
+    write(chunk: string): boolean;
+    end(): void;
+  }
+
+  interface ChildProcessLike extends EventEmitter {
+    readonly pid?: number;
+    readonly exitCode: number | null;
+    readonly signalCode: string | null;
+    readonly stdin: WritableLike;
+    readonly stdout: ReadableLike;
+    readonly stderr: ReadableLike;
+    kill(signal?: string): boolean;
+  }
+
+  interface SpawnOptions {
+    readonly cwd?: string;
+    readonly env?: Record<string, string | undefined>;
+    readonly stdio?: readonly string[];
+  }
+
+  export function spawn(command: string, args?: readonly string[], options?: SpawnOptions): ChildProcessLike;
+}
+
+declare const process: {
+  readonly argv: readonly string[];
+  readonly env: Record<string, string | undefined>;
+  readonly execPath: string;
+  readonly pid: number;
+  exitCode?: number;
+};

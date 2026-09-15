@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { UiCommandError, validateUiCommand, assertObservationReadOnly, type PipelineObservationCommand, type UiCommand } from '../../packages/ui/contracts/commands.js';
 import { UiProjectionError } from '../../packages/ui/contracts/models.js';
 import {
@@ -166,6 +168,44 @@ test('task dashboard maps agent roles without organ presentation language', () =
   assert.deepEqual(projection.feedback.required, true);
   assert.deepEqual(projection.feedback.entry, 'task-detail');
   assert.deepEqual(projection.agentCards.some((card) => card.title.includes('器官')), false);
+});
+
+test('task dashboard projects execution steps, checkpoint, and stop/recovery evidence', () => {
+  const projection = projectTaskDashboard({
+    source: readySource,
+    task: task({ state: 'settling', title: '检查配置问题' }),
+    userInput: '检查当前项目中是否存在配置问题',
+    objective: '读取配置并给出结论',
+    currentStatus: '正在收拢执行证据',
+    agentCards: [{
+      agentId: 'dsh-execution',
+      role: 'execution',
+      statusDisplay: '收拢中',
+      inputPreview: '检查配置问题',
+      outputPreview: '准备写入 checkpoint',
+    }],
+    executionSteps: [
+      { stepId: 'input-1', kind: 'input', summary: '用户输入', refs: ['humanagent://session/check/input/1'], evidenceRefs: [evidence('ev-input')] },
+      { stepId: 'tool-call-1', kind: 'tool-call', summary: '读取配置文件', refs: ['CONFIG-PROBE.txt'], evidenceRefs: [evidence('ev-tool-call')] },
+      { stepId: 'tool-result-1', kind: 'tool-result', summary: '配置项读取成功', refs: ['tool-result:read:1'], evidenceRefs: [evidence('ev-tool-result')] },
+      { stepId: 'output-1', kind: 'output', summary: '阶段性结论', refs: ['humanagent://session/check/output/1'], evidenceRefs: [evidence('ev-output')] },
+    ],
+    checkpoint: { checkpointId: 'check-1-1', executionEpoch: 1, outcome: 'stopped', ref: 'humanagent://session/check/checkpoint/1' },
+    stopRecovery: { mode: 'recovering', summary: '从 HumanAgent checkpoint 启动新 execution epoch', evidenceRefs: [evidence('ev-recovery')] },
+    requiresUserHandling: false,
+  });
+  assert.deepEqual(projection.surface, 'task-dashboard');
+  assert.deepEqual(projection.executionSteps.map((step) => step.kind), ['input', 'tool-call', 'tool-result', 'output']);
+  assert.equal(projection.executionSteps[1].refs[0], 'CONFIG-PROBE.txt');
+  assert.equal(projection.executionSteps[2].evidenceRefs[0].locator, 'evidence:ev-tool-result');
+  assert.equal(projection.checkpoint?.checkpointId, 'check-1-1');
+  assert.equal(projection.stopRecovery?.mode, 'recovering');
+  assert.equal(projection.stopRecovery?.evidenceRefs[0].locator, 'evidence:ev-recovery');
+});
+
+test('UI projection code does not read Journal or DSH session logs', async () => {
+  const source = await readFile(join(process.cwd(), 'packages', 'ui', 'projection', 'index.ts'), 'utf8');
+  assert.equal(/\bJsonlOrganJournal\b|DSH Session|DSH\s+Session\s+Log|sessionLog/i.test(source), false);
 });
 
 test('observation projection supports recursion, drawer details, return, and read-only rules', () => {

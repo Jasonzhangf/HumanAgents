@@ -267,8 +267,14 @@ class StubTransport implements DshTransport {
 }
 
 class WrongStartIdentityTransport extends StubTransport {
+  abortStartCalls = 0;
+
   async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
     return { ...(await super.start(input)), runtimeId: 'wrong-runtime' };
+  }
+
+  async abortStart(_input: ProviderStartInput): Promise<void> {
+    this.abortStartCalls += 1;
   }
 }
 
@@ -636,6 +642,36 @@ class WaitingSettleTransport extends StubTransport {
   }
 }
 
+class FailedSettledTransport extends StubTransport {
+  async settle(input: { runtimeId: string; taskId: typeof task; operationId: typeof operation; executionEpoch: number }): Promise<ProviderSettlement> {
+    const failure = {
+      errorId: 'dsh.turn.failed',
+      code: 'turn-failed',
+      category: 'provider' as const,
+      phase: 'settle' as const,
+      message: 'turn failed after resource release',
+      ownerId: 'dsh-adapter',
+      retryable: 'manual' as const,
+      attention: 'foreground' as const,
+      evidenceRefs: [providerEvidence('settle-failed')],
+      nextAction: { kind: 'recover' as const, ref: 'dsh-adapter' },
+    };
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      state: 'failed',
+      evidenceRefs: failure.evidenceRefs,
+      resourceRelease: { state: 'released', evidenceRefs: [providerEvidence('resource-released')] },
+      persistence: { state: 'committed', evidenceRefs: [providerEvidence('persistence-committed')] },
+      error: failure,
+      ownerId: 'dsh-adapter',
+      nextAction: { kind: 'recover', ref: 'dsh-adapter' },
+    };
+  }
+}
+
 class NotRecoveredTransport extends StubTransport {
   async resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult> {
     return {
@@ -825,10 +861,12 @@ test('DSH execution lifecycle keeps session evidence external and stop separate 
 });
 
 test('DSH bridge fences transport result identity, resume checkpoint, and observed epochs', async () => {
+  const wrongStartTransport = new WrongStartIdentityTransport();
   await assert.rejects(
-    createPort({ transport: new WrongStartIdentityTransport() }).start(startInput()),
+    createPort({ transport: wrongStartTransport }).start(startInput()),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'start',
   );
+  assert.equal(wrongStartTransport.abortStartCalls, 1);
   await assert.rejects(
     createPort({ transport: new WrongResumeCheckpointTransport() }).resume(resumeInput()),
     (error) => error instanceof DshAdapterError && error.code === 'identity-mismatch' && error.phase === 'resume',
@@ -1168,6 +1206,17 @@ test('DSH close stays pending with recovery responsibility until settlement is f
   assert.deepEqual(pendingClose.nextAction, { kind: 'recover', ref: 'dsh-adapter' });
 
   await port.settle(executionIdentity);
+  const closed = await port.close(providerBinding);
+  assert.equal(closed.state, 'closed');
+});
+
+test('DSH failed settlement releases resources and permits close', async () => {
+  const port = createPort({ transport: new FailedSettledTransport() });
+  await port.start(startInput());
+  const settled = await port.settle(executionIdentity);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'committed');
   const closed = await port.close(providerBinding);
   assert.equal(closed.state, 'closed');
 });

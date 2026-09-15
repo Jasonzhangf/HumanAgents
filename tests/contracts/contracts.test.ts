@@ -297,6 +297,22 @@ test('provider-neutral execution runtime fixtures validate and expose a typed fa
   assert.equal(closed.state, 'closed');
 });
 
+test('provider execution identity carries and matches HumanAgent organ and cycle scope', () => {
+  const organ = id('organ', 'organ-provider');
+  const cycle = id('cycle', 'cycle-provider');
+  const identity = { ...executionIdentity, organId: organ, cycleId: cycle };
+  assert.doesNotThrow(() => validateProviderStartInput({ ...startInput(), ...identity }));
+  assert.doesNotThrow(() => assertProviderExecutionIdentityMatch(identity, identity));
+  assert.throws(
+    () => assertProviderExecutionIdentityMatch({ ...identity, organId: id('organ', 'other-organ') }, identity),
+    ContractError,
+  );
+  assert.throws(
+    () => assertProviderExecutionIdentityMatch({ ...identity, cycleId: id('cycle', 'other-cycle') }, identity),
+    ContractError,
+  );
+});
+
 test('rejects invalid provider binding identity and missing required binding data', () => {
   assert.throws(() => validateProviderBinding({ ...providerBinding(), bindingId: '   ' }), ContractError);
   assert.throws(() => validateProviderBinding({ ...providerBinding(), protocol: 'openai' } as unknown as ProviderBinding), ContractError);

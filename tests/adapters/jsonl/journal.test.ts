@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { JsonlOrganJournal, JournalIntegrityError } from '../../../packages/adapters/jsonl/src/index.js';
-import { id, type Checkpoint } from '@humanagent/contracts';
+import { id, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
 
 const organ = id('organ', 'organ-a'); const task = id('task', 'task-a'); const cycle = id('cycle', 'cycle-a');
 const checkpoint = (seq: number, previousCheckpointId: Checkpoint['previousCheckpointId']): Checkpoint => ({ id: id('checkpoint', `cp-${seq}`), scope: { organId: organ, taskId: task }, cycleId: cycle, seq, previousCheckpointId, directiveRevision: 1, executionEpoch: 1, outcome: 'waiting', summary: `cp-${seq}`, recoveryStateRef: { evidenceId: id('evidence', `ev-${seq}`), kind: 'operation', source: 'test', locator: `state-${seq}`, scope: { organId: organ, taskId: task } }, evidenceRefs: [], next: { kind: 'wait', ref: 'condition' } });
@@ -80,4 +80,61 @@ test('appends and verifies an operation-scoped stopped checkpoint after a busine
   assert.equal(stopped.checkpoint!.scope.operationId?.value, operationId.value);
   assert.equal(replayed[1]!.scope.operationId?.value, operationId.value);
   assert.equal(replayed[1]!.checkpoint!.scope.operationId?.value, operationId.value);
+});
+
+test('recovery appends a root checkpoint for a new operation chain after another chain', async () => {
+  const { journal } = await fixture();
+  const firstOperation = id('operation', 'operation-epoch-1');
+  const secondOperation = id('operation', 'operation-epoch-2');
+  const firstScope = { organId: organ, taskId: task, cycleId: cycle, operationId: firstOperation };
+  const secondScope = { organId: organ, taskId: task, cycleId: cycle, operationId: secondOperation };
+  const evidence = (label: string, scope: ScopeRef) => ({
+    evidenceId: id('evidence', `chain-${label}`),
+    kind: 'operation' as const,
+    source: 'test',
+    locator: label,
+    scope,
+  });
+  await journal.append({
+    kind: 'checkpoint',
+    scope: firstScope,
+    checkpoint: {
+      id: id('checkpoint', 'chain-1'),
+      scope: firstScope,
+      cycleId: cycle,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'failed',
+      summary: 'first chain root',
+      recoveryStateRef: evidence('recovery-1', firstScope),
+      evidenceRefs: [],
+      next: { kind: 'recover', ref: 'recover-1' },
+    },
+  });
+  const recovered = await journal.append({
+    kind: 'checkpoint',
+    scope: secondScope,
+    checkpoint: {
+      id: id('checkpoint', 'chain-2'),
+      scope: secondScope,
+      cycleId: cycle,
+      // A recovered operation is a new HumanAgent chain, so it restarts at
+      // seq 1 with no predecessor even though another chain already exists.
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: 1,
+      executionEpoch: 2,
+      outcome: 'succeeded',
+      summary: 'second chain root',
+      recoveryStateRef: evidence('recovery-2', secondScope),
+      evidenceRefs: [],
+      next: { kind: 'continue', ref: 'continue-2' },
+    },
+  });
+  const verified = await journal.verify();
+  assert.equal(verified.valid, true);
+  assert.equal(recovered.checkpoint!.seq, 1);
+  assert.equal(recovered.checkpoint!.previousCheckpointId, null);
 });

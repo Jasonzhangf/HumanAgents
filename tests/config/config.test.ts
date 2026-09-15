@@ -360,6 +360,73 @@ test('rejects agent capabilities outside the role and permission ceiling', () =>
       resourceClass: 'foreground',
     }],
   }), /template ref is not locked/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [{
+      agentId: 'unknown-driver',
+      roleId: 'execution',
+      templateRef: 'builtin/execution@1.0.0',
+      driverRef: 'remote',
+      skills: ['single-capability-worker'],
+      tools: ['search'],
+      permissions: ['task.read', 'workspace.read'],
+      memoryScopes: ['task'],
+      resourceClass: 'foreground',
+    }],
+  }), /unknown agent driver: remote/);
+});
+
+test('validates DSH execution config and keeps it user-owned', async () => {
+  const agents = [{
+    agentId: 'execution-dsh',
+    roleId: 'execution',
+    templateRef: 'builtin/execution@1.0.0',
+    driverRef: 'dsh',
+    skills: ['single-capability-worker'],
+    tools: ['search'],
+    permissions: ['task.read', 'workspace.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  }];
+  const valid = validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    execution: {
+      dsh: {
+        sourceRoot: '/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915',
+        home: '~/.humanagent/dsh/home',
+        profile: 'humanagent',
+        provider: 'rcc',
+        model: 'gpt-5.5',
+        patchFiles: ['apps/cli/src/sdk-source.cordis.patch.yml'],
+        permissionMode: 'read-only',
+        turnTimeoutMs: 900000,
+        shutdownTimeoutMs: 60000,
+      },
+    },
+  });
+  assert.equal(valid.execution?.dsh?.provider, 'rcc');
+  assert.equal(valid.execution?.dsh?.turnTimeoutMs, 900000);
+
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    execution: { dsh: { sourceRoot: '/tmp/dsh', home: '~/.humanagent/dsh', profile: 'humanagent', provider: 'rcc', model: 'gpt-5.5', turnTimeoutMs: 0 } },
+  }), /turnTimeoutMs must be positive/);
+
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-dsh-project-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[execution.dsh]\nsourceRoot = "/tmp/project-dsh"\n', 'utf8');
+  let projectError: unknown;
+  try {
+    await loadConfiguration(paths);
+  } catch (error) {
+    projectError = error;
+  }
+  assert.equal(String(projectError).includes('project execution config contains unsupported key: dsh'), true);
 });
 
 test('rejects misspelled user and project configuration keys', async () => {

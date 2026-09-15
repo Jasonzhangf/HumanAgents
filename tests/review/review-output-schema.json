@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "scope", "module_boundary_evidence", "findings"],
+  "properties": {
+    "contract_version": { "type": "string", "const": "1" },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "commit", "base"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["uncommitted", "commit", "base"] },
+        "commit": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] }
+      }
+    },
+    "module_boundary_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["module", "owner", "paths", "edges", "resources", "gates"],
+        "properties": {
+          "module": { "type": "string", "minLength": 1 },
+          "owner": { "type": "string", "minLength": 1 },
+          "paths": { "type": "string", "minLength": 1 },
+          "edges": { "type": "string", "minLength": 1 },
+          "resources": { "type": "string", "minLength": 1 },
+          "gates": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "line", "rule", "evidence", "remediation"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
+          "file": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "rule": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string", "minLength": 1 },
+          "remediation": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
