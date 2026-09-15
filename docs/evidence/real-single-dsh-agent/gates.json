@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.dsh.closeout-gates",
+  "candidate": {
+    "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
+    "implementationCommit": "9b67217774a05a5e4776d774e33993261460ea73",
+    "documentationCommit": "3e8ee8f02768cdf7220bd93b1fb2fad3f6a744d6",
+    "evidenceCommit": null,
+    "finalCommit": null,
+    "finalTree": null
+  },
+  "dshLock": {
+    "source": "https://github.com/deepseek-ai/deepseek-harness.git",
+    "reference": "refs/remotes/origin/master",
+    "commit": "c291e7961a515f6d7af9304e7fd1d257929aef26",
+    "tree": "e482b49bef64726be8f79380bb35bae569dc3c48",
+    "describe": "dsh-v0.1.5-rc.2-139-gc291e7961a",
+    "checkedAt": "2026-09-14T18:00:00-07:00"
+  },
+  "commands": [
+    {
+      "command": "corepack pnpm@10.31.0 run typecheck",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "candidate-bound after P2 identity fix"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "candidate-bound after P2 identity fix"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:release",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "18/18 release gates"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run test:app",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "37/37 app integration tests"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run proof:dsh-entry",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "same locked DSH source; receipt is dsh-entry-proof.json"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run proof:dsh-lifecycle",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "stop, mid-turn shutdown, continuation, resume boundary, crash recovery"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 run proof:dsh-cli",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "real CLI same-entry run with RCC 4444 and HumanAgent checkpoint"
+    }
+  ],
+  "artifacts": {
+    "dsh-entry-proof.json": {
+      "sha256": "1e35f5b7298e68dd4b51e4e2faeada0b1d2dea65e22a14d2522319a335509385",
+      "source": "dist/receipts/dsh-entry-proof.json"
+    },
+    "dsh-lifecycle-proof.json": {
+      "sha256": "d36a08d0976790461a11a2e8c7b2caf6b08d8af0f3b41eaeefa1df0e5ec0f310",
+      "source": "dist/receipts/dsh-lifecycle-proof.json"
+    },
+    "dsh-humanagent-cli-smoke.json": {
+      "sha256": "a570be378f038cfadc0f20939271bd0a2e8f1f1473c2c6daad971da931f7ee70",
+      "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
+    },
+    "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
+      "sha256": "1afb0d20e0c1ed3e70fdd8abbd6feb62385fe6d012b48fbf27eca71a9453cfcd",
+      "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
+    },
+    "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
+      "sha256": "3621f5dac9dba1158c139ba8a1e2a79f78681197ea959a22c6904acaf284a4f8",
+      "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
+    },
+    "ui/dsh-dashboard-desktop.png": {
+      "sha256": "406432868c60a5c711ad3c35c5e2bf0c39d62f3921a5357f33d53998536709c5",
+      "source": "dist/receipts/ui/dsh-dashboard-desktop.png"
+    },
+    "ui/dsh-dashboard-narrow.png": {
+      "sha256": "a200bc494b619859c055ecc126d97987a35440fe52610091280ff2f2f7dbcc97",
+      "source": "dist/receipts/ui/dsh-dashboard-narrow.png"
+    }
+  },
+  "review": {
+    "implementationCandidate": "9b67217774a05a5e4776d774e33993261460ea73",
+    "implementationVerdict": "FAIL",
+    "implementationFindings": {
+      "P0": 0,
+      "P1": 2
+    },
+    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-9b67217/",
+    "fixes": [
+      "packages/adapters/dsh/src/driver.ts now rejects missing HumanAgent organId/operationId instead of minting fallback identity",
+      "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
+    ],
+    "finalCandidate": null,
+    "finalVerdict": "PENDING"
+  }
+}

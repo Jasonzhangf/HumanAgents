@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.dsh.lifecycle-proof",
+  "dshSource": "/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914",
+  "dshHome": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-E1wdhh/.dsh",
+  "workspace": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-E1wdhh/workspace",
+  "profile": "sdk",
+  "provider": "rcc",
+  "model": "gpt-5.5",
+  "protocol": "openai-completions",
+  "capabilityFinding": {
+    "perSessionCancel": false,
+    "perSessionClose": false,
+    "crossProcessSessionResume": false,
+    "stopSemantics": "runtime-shutdown-settle",
+    "recoverySemantics": "humanagent-checkpoint-then-fresh-dsh-session",
+    "source": [
+      "packages/sdk/protocol/README.md#known-limitations-and-deferred-work",
+      "packages/sdk/server/src/server.ts (getOrCreateSession -> agents.create)"
+    ]
+  },
+  "stop": {
+    "initialize": {
+      "serverInfo": {
+        "name": "deepseek-harness-sdk-runtime",
+        "version": "0.0.1"
+      }
+    },
+    "prompt": {
+      "messageId": "381da653-ab57-42da-8b97-4d9022badd37"
+    },
+    "turnEnd": {
+      "kind": "completed"
+    },
+    "assistantText": "I'll read the file and return its second line.\nfeature_flag=137d11f7-352c-41d6-a284-bb85b73ffe0c",
+    "shutdown": {},
+    "exit": {
+      "code": 0,
+      "signal": null
+    },
+    "sessionLogCount": 1,
+    "sessionLogMagic": "28b52ffd",
+    "sessionHeader": {
+      "type": "session",
+      "version": 3,
+      "id": "main",
+      "createdAt": 1789434559213,
+      "cwd": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-dsh-lifecycle-E1wdhh/workspace",
+      "isSeeded": false,
+      "delegationDepth": 0
+    }
+  },
+  "stopMidTurn": {
+    "initialize": {
+      "serverInfo": {
+        "name": "deepseek-harness-sdk-runtime",
+        "version": "0.0.1"
+      }
+    },
+    "prompt": {
+      "messageId": "8071939b-6599-4558-a1fc-90c128938c78"
+    },
+    "shutdown": {},
+    "exit": {
+      "code": 0,
+      "signal": null
+    },
+    "shutdownToExitMs": 68,
+    "sessionLogCount": 2
+  },
+  "continue": {
+    "initialize": {
+      "serverInfo": {
+        "name": "deepseek-harness-sdk-runtime",
+        "version": "0.0.1"
+      }
+    },
+    "firstPrompt": {
+      "messageId": "4efbd757-49c7-4091-b077-598b7f08488b"
+    },
+    "secondPrompt": {
+      "messageId": "0e8a50bb-21ef-4135-80e5-a7e1f0aa2a3e"
+    },
+    "turnEnd": {
+      "kind": "completed"
+    },
+    "recalledWithinSession": true,
+    "shutdown": {},
+    "exit": {
+      "code": 0,
+      "signal": null
+    }
+  },
+  "resume": {
+    "initialize": {
+      "serverInfo": {
+        "name": "deepseek-harness-sdk-runtime",
+        "version": "0.0.1"
+      }
+    },
+    "reusedSessionId": "[third] JSON-RPC 2: {\"code\":-32603,\"message\":\"session \\\"main\\\" already exists\"}",
+    "resumeRejected": true,
+    "freshSessionAccepted": true,
+    "shutdown": {},
+    "exit": {
+      "code": 0,
+      "signal": null
+    }
+  },
+  "crash": {
+    "initialize": {
+      "serverInfo": {
+        "name": "deepseek-harness-sdk-runtime",
+        "version": "0.0.1"
+      }
+    },
+    "prompt": {
+      "messageId": "826cda0e-2d7a-4fda-b819-e87db5a5428e"
+    },
+    "exit": {
+      "code": null,
+      "signal": "SIGKILL"
+    },
+    "originalErrorPreserved": true,
+    "reinitialize": {
+      "serverInfo": {
+        "name": "deepseek-harness-sdk-runtime",
+        "version": "0.0.1"
+      }
+    },
+    "recoveryPrompt": {
+      "messageId": "73378514-1794-47f1-991e-76bacc0f8df7"
+    },
+    "recoveryTurnEnd": {
+      "kind": "completed"
+    },
+    "recovered": true,
+    "shutdown": {},
+    "exitAfterRecovery": {
+      "code": 0,
+      "signal": null
+    }
+  },
+  "ok": true
+}

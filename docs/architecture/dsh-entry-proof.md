@@ -4,12 +4,13 @@
 日期：2026-09-14
 Owner：`packages/adapters/dsh` + `docs/architecture`
 
-本文只记录从干净 DSH 源码 worktree 上真实运行得到的事实。它不是 adapter
-实现，也不代表 DSH 适配已完成。所有原始 JSON receipt 由
+本文只记录从干净 DSH 源码 worktree 上真实运行得到的事实。所有原始 JSON receipt 由
 `tests/adapters/dsh/real-dsh-entry-proof.mjs` 和
 `tests/adapters/dsh/real-dsh-lifecycle-proof.mjs` 生成；HumanAgent CLI
 同入口 receipt 由 `tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs`
-生成，均写入 `dist/receipts/`。
+生成。候选绑定的可提交副本、SHA-256、命令退出码和 HumanAgent checkpoint /
+DSH session log artifact 位于 `docs/evidence/real-single-dsh-agent/`；
+运行时脚本默认仍写入 ignored `dist/receipts/`，不把该路径当作唯一证据。
 
 ## 1. 锁定的 DSH 输入
 
@@ -102,7 +103,8 @@ RCC 4444 的 `/v1/responses` 在工具调用时返回非标准终止状态
 - 探针第二行是每次运行生成的 UUID nonce；proof 只有在模型真实调用 `read`、
   tool result 回到同一 session，且模型在后续 step 回报该 nonce 时才通过。
 
-运行命令：
+运行命令（下面示例写 `dist/`；正式候选证据已按 manifest 同步到
+`docs/evidence/real-single-dsh-agent/`）：
 
 ```text
 HUMANAGENT_DSH_SOURCE=/Volumes/extension/code/dsh/playground/humanagent-0.1.5-20260914 \
@@ -167,6 +169,9 @@ mid-turn prompt cancel：
 
 P0-P6 已完成：真实 transport、runtime/app/config 接线、stop/settle、crash
 recovery 和 UI projection 均已通过 focused tests 与真实入口证据。四层验证已
-执行；代码候选 `9b67217774a05a5e4776d774e33993261460ea73` 已完成
-candidate-bound 独立 review，P0/P1 = 0。该 candidate 尚未 merge、push 或
-production release；最终文档提交仍需作为新的精确 SHA 再执行一次只读 review。
+执行；代码候选 `9b67217774a05a5e4776d774e33993261460ea73` 的早期独立 review
+曾发现“adapter缺省铸造 HumanAgent身份”和“证据只在 ignored `dist/`”两项问题。
+当前候选已把 driver 改为缺失 `organId`/`operationId` 时显式失败，并把
+candidate-bound receipts、gate manifest、HumanAgent checkpoint、DSH session log
+和 UI 截图提交到 `docs/evidence/real-single-dsh-agent/`。最终候选仍须以新的
+精确 SHA 完成只读 review；该 candidate 尚未 merge、push 或 production release。

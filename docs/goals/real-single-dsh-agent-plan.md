@@ -183,10 +183,10 @@ Owner：`packages/runtime`、`packages/app`、`packages/config`
   内完成 model -> tool -> result -> continue -> HumanAgent checkpoint。
 - 当前收口 smoke 由
   `tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs` 可重复生成：
-  `session=dsh-smoke-1789432192051`，`outcome=succeeded`，
-  `checkpoint=dsh-smoke-1789432192051-1-1`，RCC health 200，receipt 为
-  `dist/receipts/dsh-humanagent-cli-smoke.json`，并保留 DSH session log 与
-  HumanAgent checkpoint journal artifact。
+  `session=dsh-smoke-1789434594287`，`outcome=succeeded`，
+  `checkpoint=dsh-smoke-1789434594287-1-1`，RCC health 200。候选绑定的 receipt、
+  DSH session log 与 HumanAgent checkpoint journal artifact 已提交到
+  `docs/evidence/real-single-dsh-agent/`。
 
 ### P4：Stop、crash 与 recovery —— `COMPLETE`
 
@@ -218,8 +218,9 @@ DSH 能力边界（P1 已实测）：公开 SDK wire 无 per-session cancel / cl
 退出证据：
 
 - focused tests、crash/recovery receipt、stopped checkpoint 和资源释放证据。
-- `dist/receipts/dsh-lifecycle-proof.json` 已验证 stop exit 0、mid-turn
-  shutdown exit 0、跨进程 resume 被拒绝、crash 原始错误保留和新 session 恢复。
+- `docs/evidence/real-single-dsh-agent/dsh-lifecycle-proof.json` 已验证 stop
+  exit 0、mid-turn shutdown exit 0、跨进程 resume 被拒绝、crash 原始错误保留和
+  新 session 恢复。
 
 ### P5：UI projection —— `COMPLETE`
 
@@ -239,8 +240,10 @@ Owner：`packages/ui/projection`、`packages/ui/surfaces`
 退出证据：
 
 - projection fixture/replay 和实际入口截图/交互证据。
-- UI focused tests 9/9；`dist/receipts/ui/dsh-dashboard-desktop.png` 与
-  `dist/receipts/ui/dsh-dashboard-narrow.png` 记录桌面和窄宽度投影。
+- UI focused tests 9/9；
+  `docs/evidence/real-single-dsh-agent/ui/dsh-dashboard-desktop.png` 与
+  `docs/evidence/real-single-dsh-agent/ui/dsh-dashboard-narrow.png` 记录桌面和
+  窄宽度投影。
 
 ### P6：四层验证与收口 —— `COMPLETE`
 
@@ -267,9 +270,14 @@ Owner：validation
 - `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 112/112；
   `test:release` 18/18。
 - `proof:dsh-entry`、`proof:dsh-lifecycle`、`proof:dsh-cli` 均 exit `0`；
-  receipts 为 `dist/receipts/dsh-entry-proof.json`、
-  `dist/receipts/dsh-lifecycle-proof.json`、
-  `dist/receipts/dsh-humanagent-cli-smoke.json`。
+  candidate-bound receipts 为
+  `docs/evidence/real-single-dsh-agent/dsh-entry-proof.json`、
+  `docs/evidence/real-single-dsh-agent/dsh-lifecycle-proof.json`、
+  `docs/evidence/real-single-dsh-agent/dsh-humanagent-cli-smoke.json`；
+  同目录 `gates.json` 记录命令、退出码、结果和 SHA-256。
+- 最终 review 前的 P2 identity 修复：`packages/adapters/dsh/src/driver.ts`
+  不再为缺失的 HumanAgent `organId` / `operationId` 铸造 fallback；缺失时
+  显式抛 `identity-mismatch`，负向测试确认 runtime `start` 未被调用。
 - `packages/app/src/agent-driver-composition.ts` 的真实 review finding
   “配置值可改变生成的 YAML route”已修复为 JSON 双引号 scalar 编码，并有
   `tests/app/app.test.ts` 负向测试；代码候选

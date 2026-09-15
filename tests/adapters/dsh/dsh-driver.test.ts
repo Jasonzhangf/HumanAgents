@@ -26,8 +26,6 @@ import {
 import {
   createDshAgentDriver,
   dshBaselineLock,
-  dshExecutionOrganId,
-  dshOperationIdFor,
   type DshProfileDescriptor,
   type DshTransport,
   type DshTransportContext,
@@ -50,6 +48,7 @@ const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const operation = id('operation', 'operation-a');
 const scope: ScopeRef = { organId: organ, taskId: task, operationId: operation };
+const driverOrgan = id('organ', 'driver-organ-a');
 
 const binding: ProviderBinding = {
   bindingId: 'binding-dsh',
@@ -60,10 +59,6 @@ const binding: ProviderBinding = {
   configDigest: digest(),
   capabilityDigest: digest(),
 };
-
-// The driver mints its own operation evidence under this organ; transport
-// evidence must share it or the bridge rejects the scope as mismatched.
-const driverOrgan = dshExecutionOrganId(binding);
 
 const profile: DshProfileDescriptor = {
   profileName: 'humanagent',
@@ -107,6 +102,7 @@ const validity = (): { checkedAt: string; expiresAt: string } => {
 class LoopTransport implements DshTransport {
   private readonly events = new Map<string, ProviderEvent[]>();
   readonly settledOperations: string[] = [];
+  startCalls = 0;
   private key(input: { readonly runtimeId: string; readonly taskId: { readonly value: string }; readonly executionEpoch: number }): string {
     return `${input.runtimeId}:${input.taskId.value}:${input.executionEpoch}`;
   }
@@ -160,6 +156,7 @@ class LoopTransport implements DshTransport {
   }
 
   async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.startCalls += 1;
     this.events.set(this.key(input), []);
     return {
       runtimeId: input.runtimeId,
@@ -317,7 +314,14 @@ function makeDriver(transport: DshTransport) {
 test('driver bridges model -> tool -> result -> continuation into AgentDriver events', async () => {
   const transport = new LoopTransport();
   const driver = makeDriver(transport);
-  await driver.start({ runtimeId: 'runtime-a', taskId: task, executionEpoch: 1, assignmentId: 'assignment-a' });
+  await driver.start({
+    runtimeId: 'runtime-a',
+    taskId: task,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    organId: driverOrgan,
+    operationId: operation,
+  });
   await driver.submit({
     taskId: task,
     executionEpoch: 1,
@@ -340,14 +344,36 @@ test('driver bridges model -> tool -> result -> continuation into AgentDriver ev
   }
 });
 
+test('driver rejects missing HumanAgent identity before touching the runtime', async () => {
+  const transport = new LoopTransport();
+  const driver = makeDriver(transport);
+  await assert.rejects(
+    driver.start({
+      runtimeId: 'runtime-a',
+      taskId: task,
+      executionEpoch: 1,
+      assignmentId: 'assignment-a',
+    } as Parameters<typeof driver.start>[0]),
+    /requires HumanAgent-owned organId and operationId/,
+  );
+  assert.equal(transport.startCalls, 0);
+});
+
 test('driver stop requests the operation and settles only through the port', async () => {
   const transport = new LoopTransport();
   const driver = makeDriver(transport);
-  await driver.start({ runtimeId: 'runtime-a', taskId: task, executionEpoch: 1, assignmentId: 'assignment-a' });
+  await driver.start({
+    runtimeId: 'runtime-a',
+    taskId: task,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    organId: driverOrgan,
+    operationId: operation,
+  });
   const receipt = await driver.requestStop({
     runtimeId: 'runtime-a',
     executionEpoch: 1,
-    operationId: dshOperationIdFor({ runtimeId: 'runtime-a', executionEpoch: 1 }),
+    operationId: operation,
   });
   assert.equal(receipt.requested, true);
   // The stop receipt alone must not be a closure.
@@ -359,7 +385,14 @@ test('driver stop requests the operation and settles only through the port', asy
 test('driver keeps a failed settle instance alive for retry', async () => {
   const transport = new FailingLoopTransport();
   const driver = makeDriver(transport);
-  await driver.start({ runtimeId: 'runtime-a', taskId: task, executionEpoch: 1, assignmentId: 'assignment-a' });
+  await driver.start({
+    runtimeId: 'runtime-a',
+    taskId: task,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    organId: driverOrgan,
+    operationId: operation,
+  });
 
   const failed = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: 1 });
   assert.equal(failed.state, 'failed');
@@ -375,7 +408,14 @@ test('driver keeps a failed settle instance alive for retry', async () => {
 test('driver rejects a stop operation that does not own the active execution', async () => {
   const transport = new LoopTransport();
   const driver = makeDriver(transport);
-  await driver.start({ runtimeId: 'runtime-a', taskId: task, executionEpoch: 1, assignmentId: 'assignment-a' });
+  await driver.start({
+    runtimeId: 'runtime-a',
+    taskId: task,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    organId: driverOrgan,
+    operationId: operation,
+  });
   await assert.rejects(
     driver.requestStop({
       runtimeId: 'runtime-a',
@@ -396,6 +436,8 @@ test('driver surfaces the DSH resume capability gap instead of faking recovery',
       taskId: task,
       executionEpoch: 1,
       assignmentId: 'assignment-a',
+      organId: driverOrgan,
+      operationId: operation,
       checkpointId: id('checkpoint', 'cp-1'),
     }),
     /cannot reopen/,

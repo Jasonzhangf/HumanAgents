@@ -22,16 +22,14 @@ import {
   type TaskId,
 } from '../../../contracts/src/index.js';
 import { DshAdapterError } from './errors.js';
-import { dshExecutionOrganId, dshOperationIdFor } from './identity.js';
 
 /**
  * `ExecutionRuntimePort`-backed `AgentDriver`.
  *
  * `AgentRuntime` owns Task / execution epoch / assignment; DSH owns only
  * profile, session, agent, tool, and model. This adapter is the single place
- * where those two vocabularies meet. It mints the operation identity from the
- * runtime binding (one operation per runtime epoch) because `AgentStartRequest`
- * carries no operation id, and it keeps every DSH / provider identity inside
+ * where those two vocabularies meet. It requires HumanAgent to supply the
+ * organ and operation identity and keeps every DSH / provider identity inside
  * `EvidenceRef`s that leave the adapter.
  */
 
@@ -90,7 +88,6 @@ function isFinalSettlement(settlement: ProviderSettlement): boolean {
 
 export function createDshAgentDriver(options: DshAgentDriverOptions): AgentDriver {
   const promptFor = options.promptFor ?? defaultPrompt;
-  const defaultOrganId = dshExecutionOrganId(options.binding);
   const instances = new Map<string, DriverInstance>();
 
   const key = (runtimeId: string, executionEpoch: number): string => `${runtimeId}:${executionEpoch}`;
@@ -112,16 +109,26 @@ export function createDshAgentDriver(options: DshAgentDriverOptions): AgentDrive
     readonly cycleId?: CycleId;
     readonly operationId?: OperationId;
   }): DriverInstance {
-    const operationId = input.operationId ?? dshOperationIdFor({
-      runtimeId: input.runtimeId,
-      executionEpoch: input.executionEpoch,
-    });
+    if (!input.organId || !input.operationId) {
+      const missing = [
+        ...(input.organId ? [] : ['organId']),
+        ...(input.operationId ? [] : ['operationId']),
+      ];
+      throw new DshAdapterError(
+        'identity-mismatch',
+        `DSH agent driver requires HumanAgent-owned ${missing.join(' and ')}`,
+        OWNER,
+        { kind: 'recover', ref: OWNER },
+      );
+    }
+    const organId = input.organId;
+    const operationId = input.operationId;
     const instance: DriverInstance = {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
       executionEpoch: input.executionEpoch,
       assignmentId: input.assignmentId ?? input.runtimeId,
-      organId: input.organId ?? defaultOrganId,
+      organId,
       ...(input.cycleId ? { cycleId: input.cycleId } : {}),
       operationId,
     };

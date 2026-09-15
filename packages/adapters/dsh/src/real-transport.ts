@@ -201,9 +201,19 @@ interface RuntimeInstance {
   protocolFailure?: string;
 }
 
+/**
+ * Provider-root scope for transport-level probe/capability/close evidence.
+ *
+ * It is not a HumanAgent operation identity. Execution evidence always uses the
+ * explicit `organId`/`operationId` supplied by the HumanAgent execution input.
+ */
+function dshProviderRootScope(binding: ProviderBinding): ScopeRef {
+  return { organId: dshExecutionOrganId(binding) };
+}
+
 function scopeFor(binding: ProviderBinding, execution: Partial<ExecutionIdentity>, organId?: OrganId): ScopeRef {
   return {
-    organId: organId ?? dshExecutionOrganId(binding),
+    organId: organId ?? dshProviderRootScope(binding).organId,
     ...(execution.taskId ? { taskId: id('task', execution.taskId.value) } : {}),
     ...(execution.cycleId ? { cycleId: id('cycle', execution.cycleId.value) } : {}),
     ...(execution.operationId ? { operationId: id('operation', execution.operationId.value) } : {}),
@@ -657,12 +667,10 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
     };
   }
 
-  const rootScope = (): ScopeRef => scopeFor(options.binding, {});
-
   return {
     async probe(context: DshTransportContext): Promise<ProviderReadiness> {
       const times = validity();
-      const probeScope = scopeFor(context.binding, {});
+      const probeScope = dshProviderRootScope(context.binding);
       return {
         bindingId: context.binding.bindingId,
         providerId: context.binding.providerId,
@@ -693,7 +701,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
         digest: context.binding.capabilityDigest,
         checkedAt: times.checkedAt,
         expiresAt: times.expiresAt,
-        evidenceRefs: [evidence(scopeFor(context.binding, {}), 'external', 'capabilities', `dsh://profile/${context.profile.profileName}`)],
+        evidenceRefs: [evidence(dshProviderRootScope(context.binding), 'external', 'capabilities', `dsh://profile/${context.profile.profileName}`)],
       };
     },
 
@@ -903,7 +911,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
           providerId: context.binding.providerId,
           protocol: context.binding.protocol,
           state: 'closed',
-          evidenceRefs: [evidence(scopeFor(context.binding, {}), 'external', 'close-idempotent', 'dsh://runtime/closed')],
+          evidenceRefs: [evidence(dshProviderRootScope(context.binding), 'external', 'close-idempotent', 'dsh://runtime/closed')],
         };
       }
       for (const instance of runtimes.values()) {
@@ -930,7 +938,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
         providerId: context.binding.providerId,
         protocol: context.binding.protocol,
         state: 'closed',
-        evidenceRefs: [evidence(rootScope(), 'external', 'close', 'dsh://runtime/closed')],
+        evidenceRefs: [evidence(dshProviderRootScope(context.binding), 'external', 'close', 'dsh://runtime/closed')],
       };
     },
   };
