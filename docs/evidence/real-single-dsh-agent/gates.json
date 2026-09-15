@@ -3,11 +3,11 @@
   "kind": "humanagent.dsh.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "implementationCommit": "a74f55b9187ad5ec3b6a9b693041c18710392076",
-    "implementationTree": "ac8da22193e51ec3e8325eb8be740cd1d1c9e631",
-    "evidenceCommit": null,
-    "finalCommit": null,
-    "finalTree": null
+    "implementationCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "implementationTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed",
+    "evidenceCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "finalCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "finalTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed"
   },
   "dshLock": {
     "source": "https://github.com/deepseek-ai/deepseek-harness.git",
@@ -104,10 +104,13 @@
     }
   },
   "review": {
-    "implementationCandidate": "a74f55b9187ad5ec3b6a9b693041c18710392076",
-    "implementationVerdict": "PENDING",
-    "implementationFindings": null,
-    "implementationReview": null,
+    "implementationCandidate": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "implementationVerdict": "PASS",
+    "implementationFindings": {
+      "P0": 0,
+      "P1": 0
+    },
+    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-287a2f6/review.final.md",
     "priorReviews": [
       {
         "candidate": "8b5d6bb42b0554ab7ecb1a15b90c16f76185cb07",
@@ -233,7 +236,7 @@
       "bridge aborts a started DSH runtime when post-start validation/identity/evidence/proof fails, reusing the real shutdown path and preserving the original validation error",
       "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
     ],
-    "finalCandidate": null,
-    "finalVerdict": "PENDING"
+    "finalCandidate": "287a2f61cdfac79d321166b201a36b438d9d374b",
+    "finalVerdict": "PASS"
   }
 }
