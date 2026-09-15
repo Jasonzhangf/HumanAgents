@@ -3,7 +3,7 @@
   "kind": "humanagent.ui-provider-loop.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "sourceDigest": "sha256:a25601b823db6b181fa7d0e60d0441b9f3d7ba7399a70b80829d994e1eef3ae0",
+    "sourceDigest": "sha256:ef409e22314f217fe117139f249459ba673ae7e3f7bf117851378aa2b3dcdf46",
     "reviewedUiCommit": "7faee1e711ce4ea05041c7b8530c5ce84d2cbbcf",
     "binding": "sourceDigest covers every tracked source file except docs/evidence/ui-provider-loop/, so the proof stays verifiable from both the implementation commit and the evidence commit"
   },
@@ -47,7 +47,7 @@
   ],
   "artifacts": {
     "ui-provider-loop-proof.json": {
-      "sha256": "ac29c3f4f41209738b516544d2d8a42203c114579568b0edd6d404aa7cde6b8c",
+      "sha256": "6fe4b4e5ee52d4ee9f5bf6264398220c9612d7a96fe06ec42850018c82bda7e7",
       "source": "dist/receipts/ui-provider-loop-proof.json"
     }
   },
