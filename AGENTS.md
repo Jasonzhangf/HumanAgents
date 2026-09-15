@@ -50,8 +50,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 ## 已批准 MVP 交付门禁
 
 1. Wave 2 candidate 只有在 focused tests、runtime integration 和独立 Codex/Astra review 通过后才可进入 main；不得伪造已入 main。
-2. 候选分支通过适用 focused tests、集成验证和独立 review 后，merge 到本地 main 是本项目的标准交付操作；无需为每次标准 merge 单独请求授权。merge 必须使用可追溯 commit，保持 main clean，并记录 candidate SHA、main merge SHA 和验证证据。push、release、安装和生产变更仍是独立动作，不因 merge 自动授权。
-3. 先保持 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
-4. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
-5. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
-6. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。
+2. 先保持 `contracts` 的最小类型与负向测试，再实现 `core` 不变量；不得先写 DSH wrapper。
+3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
+4. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
+5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。
