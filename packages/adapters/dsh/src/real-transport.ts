@@ -776,7 +776,10 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
           sessionId: instance.sessionId,
           contentBlocks: [{ type: 'text', text: prompt }],
         }) as { readonly messageId?: string };
-        const messageId = result.messageId ?? `seq-${instance.nextRequestId}`;
+        const messageId = result.messageId;
+        if (typeof messageId !== 'string' || messageId.trim().length === 0) {
+          throw new Error('DSH session/prompt response did not include a non-empty messageId');
+        }
         return {
           runtimeId: input.runtimeId,
           taskId: input.taskId,

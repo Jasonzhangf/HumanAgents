@@ -498,3 +498,28 @@ test('submit surfaces a rejected prompt as a failed result with an error', async
   assert.equal(result.status, 'failed');
   assert.equal(result.error?.phase, 'submit');
 });
+
+test('submit rejects a prompt response without a DSH message id', async () => {
+  const child = makeChild({
+    'session/prompt': (_params: unknown, requestId: number) => ({
+      jsonrpc: '2.0',
+      id: requestId,
+      result: {},
+    }),
+  });
+  const transport = makeTransport(child);
+  await transport.start(startInput());
+  const result = await transport.submit({
+    runtimeId: 'runtime-a',
+    taskId: task,
+    operationId: operation,
+    executionEpoch: 1,
+    inputRefs: ['input-b'],
+    evidenceRefs: [evidenceRef('submit-input')],
+    payload: { prompt: 'boom' },
+  } satisfies ProviderSubmitInput);
+  validateProviderSubmitResult(result);
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.outputRefs, []);
+  assert.match(result.error?.message ?? '', /messageId/);
+});
