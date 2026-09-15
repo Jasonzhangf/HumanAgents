@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { access, mkdtemp, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -355,6 +355,34 @@ async function releaseFixture() {
   const stageDigest = digest(stageManifest);
   const artifactDigest = await treeDigest(artifactPath);
   const packageArtifactDigest = digest(await readFile(packageArtifactPath));
+  const reviewRoot = join(fixtureValue.root, 'review');
+  const reviewId = 'review-test-1';
+  const receiptDir = join(reviewRoot, reviewId);
+  const receiptStatus = {
+    state: 'completed',
+    verdict: 'pass',
+    failureClass: null,
+    exitCode: 0,
+    mode: 'commit',
+    commit: sourceCommit,
+    base: 'a'.repeat(40),
+  };
+  const receiptFinal = JSON.stringify({
+    contract_version: '1',
+    scope: { mode: 'commit', commit: sourceCommit, base: 'a'.repeat(40) },
+    module_boundary_evidence: [{
+      module: 'release',
+      owner: 'test',
+      paths: 'scripts',
+      edges: 'build -> record -> check',
+      resources: 'release manifest',
+      gates: 'release test',
+    }],
+    findings: [],
+  });
+  await mkdir(receiptDir, { recursive: true });
+  await writeFile(join(receiptDir, 'status.json'), JSON.stringify(receiptStatus), 'utf8');
+  await writeFile(join(receiptDir, 'review.final.md'), receiptFinal, 'utf8');
   const unsigned = {
     schemaVersion: 1,
     releaseVersion: '0.1.0',
@@ -373,10 +401,11 @@ async function releaseFixture() {
     dshBaseline: { status: 'not-applicable', reason: 'test' },
     review: {
       status: 'passed',
-      reviewId: 'review-test-1',
+      reviewId,
       sourceCommit,
       baseCommit: 'a'.repeat(40),
-      receiptDigest: digest('review-receipt-test-1'),
+      reviewRoot,
+      receiptDigest: digest({ status: receiptStatus, final: receiptFinal }),
       reviewedAt: new Date().toISOString(),
     },
     workingTreeClean: true,
@@ -612,4 +641,55 @@ test('record-review refuses empty module boundary evidence', async () => {
     '--review-root', join(fixtureValue.root, 'review'),
     '--review-id', 'review-no-evidence',
   ], { encoding: 'utf8', stdio: 'pipe' }), /module boundary evidence is invalid/);
+});
+
+test('record-review refuses a symlinked review receipt outside the review root', async () => {
+  const fixtureValue = await pendingReleaseFixture();
+  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
+  const outsideReceipt = join(fixtureValue.root, 'outside-review', 'receipt');
+  await mkdir(outsideReceipt, { recursive: true });
+  await writeFile(join(outsideReceipt, 'status.json'), JSON.stringify({
+    state: 'completed',
+    verdict: 'pass',
+    failureClass: null,
+    exitCode: 0,
+    mode: 'commit',
+    commit: manifest.sourceCommit,
+    base: 'a'.repeat(40),
+  }), 'utf8');
+  await writeFile(join(outsideReceipt, 'review.final.md'), JSON.stringify({
+    contract_version: '1',
+    scope: { mode: 'commit', commit: manifest.sourceCommit, base: 'a'.repeat(40) },
+    module_boundary_evidence: [{
+      module: 'outside',
+      owner: 'outside',
+      paths: 'outside',
+      edges: 'outside',
+      resources: 'outside',
+      gates: 'outside',
+    }],
+    findings: [],
+  }), 'utf8');
+  await mkdir(join(fixtureValue.root, 'review'), { recursive: true });
+  await symlink(outsideReceipt, join(fixtureValue.root, 'review', 'review-symlink-link'), 'dir');
+  assert.throws(() => execFileSync(node, [
+    'scripts/record-review.mjs',
+    '--manifest', fixtureValue.releasePath,
+    '--review-root', join(fixtureValue.root, 'review'),
+    '--review-id', 'review-symlink-link',
+  ], { encoding: 'utf8', stdio: 'pipe' }), /must stay below review root/);
+});
+
+test('release checker rejects a review receipt changed after recording', async () => {
+  const fixtureValue = await releaseFixture();
+  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
+  await writeFile(join(manifest.review.reviewRoot, manifest.review.reviewId, 'review.final.md'), '{}', 'utf8');
+  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /review receipt digest mismatch/);
+});
+
+test('release checker rejects a missing review receipt', async () => {
+  const fixtureValue = await releaseFixture();
+  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
+  await rm(join(manifest.review.reviewRoot, manifest.review.reviewId), { recursive: true, force: true });
+  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /review receipt is missing/);
 });

@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { digest } from './digests.mjs';
 
@@ -21,11 +21,20 @@ function absolute(value, name) {
   return value;
 }
 
-function childPath(root, child, name) {
+function isWithin(root, candidate) {
+  const offset = relative(root, candidate);
+  return offset && !offset.startsWith('..') && !isAbsolute(offset);
+}
+
+async function childPath(root, child, name) {
   const resolved = resolve(root, child);
-  const offset = relative(root, resolved);
-  if (!offset || offset.startsWith('..') || isAbsolute(offset)) throw new Error(name + ' must stay below review root');
-  return resolved;
+  if (!isWithin(root, resolved)) throw new Error(name + ' must stay below review root');
+  const canonicalRoot = await realpath(root);
+  const canonical = await realpath(resolved).catch(() => {
+    throw new Error(name + ' does not resolve to a review receipt');
+  });
+  if (!isWithin(canonicalRoot, canonical)) throw new Error(name + ' must stay below review root');
+  return canonical;
 }
 
 function object(value) {
@@ -70,7 +79,7 @@ const projectRoot = resolve(option(args, '--project-root', process.cwd()));
 const manifestPath = resolve(option(args, '--manifest', join(projectRoot, 'dist', 'release', 'release-manifest.json')));
 const reviewId = required(option(args, '--review-id'), '--review-id');
 const reviewRoot = absolute(resolve(option(args, '--review-root', join(projectRoot, '.agent-collab', 'review'))), '--review-root');
-const receiptDir = childPath(reviewRoot, reviewId, '--review-id');
+const receiptDir = await childPath(reviewRoot, reviewId, '--review-id');
 
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 if (manifest.review?.status === 'passed') {
@@ -107,6 +116,7 @@ const review = {
   reviewId,
   sourceCommit,
   baseCommit,
+  reviewRoot,
   receiptDigest: digest({ status, final: finalText }),
   reviewedAt: new Date().toISOString(),
 };
