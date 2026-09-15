@@ -42,10 +42,6 @@ function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' }).trim();
 }
 
-function sleep(ms) {
-  return new Promise((done) => setTimeout(done, ms));
-}
-
 function startServe(protocol, root) {
   const workspace = join(root, 'workspace');
   const controlRoot = join(root, 'control');
@@ -215,14 +211,12 @@ async function runProtocol(protocol) {
     const second = await jsonRequest(`${launched.url}/api/tasks/${taskId}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mode: 'rcc', prompt: 'Count from 1 to 50 slowly, one number per line.' }),
+      body: JSON.stringify({ mode: 'rcc', prompt: 'Write a detailed 2000 word essay about distributed systems. Do not stop early.' }),
     });
     record.steps.secondStart = second;
     const stopStream = openEventStream(`${launched.url}/api/executions/${second.operationId}/events`);
-    await Promise.race([
-      stopStream.waitFor((events) => events.some((event) => event.kind === 'provider.model' || event.kind === 'provider.output'), `${protocol} first provider event`),
-      sleep(4000),
-    ]);
+    // startExecution marks the task running synchronously, so stop is
+    // deterministic here and does not depend on how fast the model streams.
     const stopRequest = await jsonRequest(`${launched.url}/api/tasks/${taskId}/stop`, { method: 'POST' });
     record.steps.stopRequest = stopRequest;
     await stopStream.waitFor(terminalFinal, `${protocol} stopped terminal`);
