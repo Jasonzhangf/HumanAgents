@@ -453,6 +453,14 @@ async function writeReviewReceipt({
   base = 'a'.repeat(40),
   status = {},
   final = {},
+  moduleBoundaryEvidence = [{
+    module: 'release review receipt recording',
+    owner: 'scripts/record-review.mjs',
+    paths: 'scripts/record-review.mjs',
+    edges: 'build-release.mjs -> record-review.mjs -> check-release.mjs',
+    resources: 'release manifest and review receipt',
+    gates: 'pnpm run test:release',
+  }],
 }) {
   const receiptDir = join(fixtureValue.root, 'review', reviewId);
   await mkdir(receiptDir, { recursive: true });
@@ -469,7 +477,7 @@ async function writeReviewReceipt({
   await writeFile(join(receiptDir, 'review.final.md'), JSON.stringify({
     contract_version: '1',
     scope: { mode, commit, base },
-    module_boundary_evidence: [],
+    module_boundary_evidence: moduleBoundaryEvidence,
     findings,
     ...final,
   }), 'utf8');
@@ -575,4 +583,33 @@ test('record-review refuses a completed receipt without a pass verdict', async (
     '--review-root', join(fixtureValue.root, 'review'),
     '--review-id', 'review-no-verdict',
   ], { encoding: 'utf8', stdio: 'pipe' }), /is not a passing review/);
+});
+
+test('record-review refuses a review id outside the review root', async () => {
+  const fixtureValue = await pendingReleaseFixture();
+  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
+  await writeReviewReceipt({ fixtureValue, reviewId: '../outside-review', commit: manifest.sourceCommit });
+  assert.throws(() => execFileSync(node, [
+    'scripts/record-review.mjs',
+    '--manifest', fixtureValue.releasePath,
+    '--review-root', join(fixtureValue.root, 'review'),
+    '--review-id', '../outside-review',
+  ], { encoding: 'utf8', stdio: 'pipe' }), /must stay below review root/);
+});
+
+test('record-review refuses empty module boundary evidence', async () => {
+  const fixtureValue = await pendingReleaseFixture();
+  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
+  await writeReviewReceipt({
+    fixtureValue,
+    reviewId: 'review-no-evidence',
+    commit: manifest.sourceCommit,
+    moduleBoundaryEvidence: [],
+  });
+  assert.throws(() => execFileSync(node, [
+    'scripts/record-review.mjs',
+    '--manifest', fixtureValue.releasePath,
+    '--review-root', join(fixtureValue.root, 'review'),
+    '--review-id', 'review-no-evidence',
+  ], { encoding: 'utf8', stdio: 'pipe' }), /module boundary evidence is invalid/);
 });

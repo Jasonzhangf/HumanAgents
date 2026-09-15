@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { digest } from './digests.mjs';
 
 const BLOCKING_SEVERITIES = new Set(['P0', 'P1']);
@@ -19,6 +19,13 @@ function absolute(value, name) {
   required(value, name);
   if (!isAbsolute(value)) throw new Error(name + ' must be absolute');
   return value;
+}
+
+function childPath(root, child, name) {
+  const resolved = resolve(root, child);
+  const offset = relative(root, resolved);
+  if (!offset || offset.startsWith('..') || isAbsolute(offset)) throw new Error(name + ' must stay below review root');
+  return resolved;
 }
 
 function object(value) {
@@ -41,7 +48,7 @@ function validateReviewFinal(final, status, sourceCommit, reviewId) {
   if (!exactKeys(final.scope, ['mode', 'commit', 'base']) || final.scope.mode !== 'commit' || final.scope.commit !== sourceCommit || final.scope.base !== status.base) {
     throw new Error('review receipt final scope is not bound to the candidate source commit: ' + reviewId);
   }
-  const validEvidence = Array.isArray(final.module_boundary_evidence) && final.module_boundary_evidence.every((entry) =>
+  const validEvidence = Array.isArray(final.module_boundary_evidence) && final.module_boundary_evidence.length > 0 && final.module_boundary_evidence.every((entry) =>
     exactKeys(entry, ['module', 'owner', 'paths', 'edges', 'resources', 'gates']) &&
     ['module', 'owner', 'paths', 'edges', 'resources', 'gates'].every((key) => typeof entry[key] === 'string' && entry[key].trim()));
   if (!validEvidence) {
@@ -63,7 +70,7 @@ const projectRoot = resolve(option(args, '--project-root', process.cwd()));
 const manifestPath = resolve(option(args, '--manifest', join(projectRoot, 'dist', 'release', 'release-manifest.json')));
 const reviewId = required(option(args, '--review-id'), '--review-id');
 const reviewRoot = absolute(resolve(option(args, '--review-root', join(projectRoot, '.agent-collab', 'review'))), '--review-root');
-const receiptDir = join(reviewRoot, reviewId);
+const receiptDir = childPath(reviewRoot, reviewId, '--review-id');
 
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 if (manifest.review?.status === 'passed') {
