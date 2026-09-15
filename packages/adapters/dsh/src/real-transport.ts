@@ -1,5 +1,9 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcessLike } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { zstdDecompressSync } from 'node:zlib';
 import {
   id,
   type EvidenceRef,
@@ -49,6 +53,8 @@ const OWNER = 'humanagent.dsh-adapter.real';
 const DEFAULT_TURN_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 60 * 1000;
 const DEFAULT_PROBE_TTL_MS = 60 * 1000;
+const DSH_SESSION_FORMAT_VERSION = 3;
+const DSH_SESSION_LOG_FILENAME = `session.v${DSH_SESSION_FORMAT_VERSION}.jsonl.zstd`;
 const DSH_KNOWN_EVENT_TYPES = new Set([
   'agent-preset/selected',
   'agent/inbox/spliced',
@@ -118,6 +124,23 @@ export const DSH_REAL_CAPABILITIES: readonly string[] = [
   'dsh.persistence.session-log',
 ];
 
+export interface DshPersistenceVerificationInput {
+  readonly sessionId: string;
+  readonly home: string;
+  readonly workspace: string;
+  readonly scope: ScopeRef;
+}
+
+export interface DshPersistenceVerification {
+  readonly state: 'committed' | 'pending' | 'failed';
+  readonly evidenceRef: EvidenceRef;
+  readonly failure?: ProviderError;
+}
+
+export type DshPersistenceVerifier = (
+  input: DshPersistenceVerificationInput,
+) => Promise<DshPersistenceVerification>;
+
 export interface DshRealTransportOptions {
   /** Fixed binding this transport serves; DSH identities never leave the adapter. */
   readonly binding: ProviderBinding;
@@ -144,6 +167,11 @@ export interface DshRealTransportOptions {
   readonly shutdownTimeoutMs?: number;
   readonly probeTtlMs?: number;
   readonly now?: () => Date;
+  /**
+   * Verifies the DSH session-log artifact after a clean runtime exit. The
+   * default implementation validates the locked DSH v3 artifact and header.
+   */
+  readonly verifyPersistence?: DshPersistenceVerifier;
   /** Spawn override for tests; production uses node:child_process.spawn. */
   readonly spawnRuntime?: (
     command: string,
@@ -200,6 +228,137 @@ interface RuntimeInstance {
   terminalState?: ProviderEvent['terminalState'];
   protocolFailure?: string;
 }
+
+function encodeSessionSegment(raw: string): string {
+  let out = '';
+  for (let index = 0; index < raw.length; index += 1) {
+    const code = raw.charCodeAt(index);
+    const char = String.fromCharCode(code);
+    out += char !== '~' && /^[A-Za-z0-9._-]$/.test(char)
+      ? char
+      : `~${code.toString(16).toUpperCase().padStart(4, '0')}`;
+  }
+  return out;
+}
+
+async function findSessionArtifacts(root: string, sessionId: string): Promise<string[]> {
+  const encodedSessionId = encodeSessionSegment(sessionId);
+  const matches: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as { readonly code?: string }).code === 'ENOENT') return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const child = join(directory, entry.name);
+      if (entry.name === encodedSessionId) matches.push(join(child, DSH_SESSION_LOG_FILENAME));
+      await visit(child);
+    }
+  };
+  await visit(root);
+  return matches;
+}
+
+function persistenceEvidence(scope: ScopeRef, sessionId: string, digest?: string): EvidenceRef {
+  return {
+    ...evidence(scope, 'execution', 'persistence-commit', `dsh://session/${sessionId}/persistence`),
+    ...(digest ? { digest } : {}),
+  };
+}
+
+function persistenceFailure(scope: ScopeRef, code: string, message: string): ProviderError {
+  return providerError(scope, 'settle', code, message, 'runtime');
+}
+
+/**
+ * Verify the locked DSH JSONL persistence artifact after a clean shutdown.
+ *
+ * DSH writes one Zstandard frame for the immutable session header followed by
+ * event frames. The header frame is enough to bind persistence to this
+ * HumanAgent execution identity without treating DSH event/log types as
+ * HumanAgent state.
+ */
+export const verifyDshSessionPersistence: DshPersistenceVerifier = async (input) => {
+  let matches: string[];
+  try {
+    matches = await findSessionArtifacts(join(input.home, 'sessions'), input.sessionId);
+  } catch (error) {
+    const failure = persistenceFailure(
+      input.scope,
+      'persistence-root-unreadable',
+      `DSH session log root could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { state: 'failed', evidenceRef: persistenceEvidence(input.scope, input.sessionId), failure };
+  }
+  if (matches.length === 0) {
+    const failure = persistenceFailure(
+      input.scope,
+      'persistence-artifact-missing',
+      `DSH session log artifact is missing for session ${input.sessionId}`,
+    );
+    return { state: 'failed', evidenceRef: persistenceEvidence(input.scope, input.sessionId), failure };
+  }
+  if (matches.length > 1) {
+    const failure = persistenceFailure(
+      input.scope,
+      'persistence-artifact-ambiguous',
+      `DSH session log artifact is ambiguous for session ${input.sessionId}`,
+    );
+    return { state: 'failed', evidenceRef: persistenceEvidence(input.scope, input.sessionId), failure };
+  }
+
+  const artifactPath = matches[0] as string;
+  let compressed: Uint8Array;
+  try {
+    compressed = await readFile(artifactPath);
+  } catch (error) {
+    const failure = persistenceFailure(
+      input.scope,
+      'persistence-artifact-unreadable',
+      `DSH session log artifact could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { state: 'failed', evidenceRef: persistenceEvidence(input.scope, input.sessionId), failure };
+  }
+
+  let header: unknown;
+  try {
+    const decoded = new TextDecoder().decode(zstdDecompressSync(compressed));
+    const firstLine = decoded.split('\n')[0]?.trim();
+    if (!firstLine) throw new Error('session header frame is empty');
+    header = JSON.parse(firstLine) as unknown;
+  } catch (error) {
+    const failure = persistenceFailure(
+      input.scope,
+      'persistence-artifact-corrupt',
+      `DSH session log artifact is corrupt: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { state: 'failed', evidenceRef: persistenceEvidence(input.scope, input.sessionId), failure };
+  }
+
+  if (!isRecord(header)
+    || header.type !== 'session'
+    || header.version !== DSH_SESSION_FORMAT_VERSION
+    || header.id !== input.sessionId
+    || header.cwd !== input.workspace) {
+    const failure = persistenceFailure(
+      input.scope,
+      'persistence-identity-mismatch',
+      `DSH session log header does not match session ${input.sessionId} and workspace ${input.workspace}`,
+    );
+    return { state: 'failed', evidenceRef: persistenceEvidence(input.scope, input.sessionId), failure };
+  }
+
+  const digestValue = createHash('sha256').update(compressed).digest('hex');
+  const digest = typeof digestValue === 'string' ? `sha256:${digestValue}` : undefined;
+  return {
+    state: 'committed',
+    evidenceRef: persistenceEvidence(input.scope, input.sessionId, digest),
+  };
+};
 
 /**
  * Provider-root scope for transport-level probe/capability/close evidence.
@@ -336,6 +495,7 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
   const turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   const probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
+  const verifyPersistence = options.verifyPersistence ?? verifyDshSessionPersistence;
   const runtimes = new Map<string, RuntimeInstance>();
   let closed = false;
 
@@ -866,9 +1026,28 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
         };
       }
       const exitEvidence = evidence(instance.scope, 'external', 'runtime-exit', `dsh://runtime/${instance.sessionId}/exit/${String(exit.code)}`);
-      const persistenceEvidence = evidence(instance.scope, 'execution', 'persistence-commit', `dsh://session/${instance.sessionId}/persistence`);
+      let persistence: DshPersistenceVerification;
+      try {
+        persistence = await verifyPersistence({
+          sessionId: instance.sessionId,
+          home: options.home,
+          workspace: options.workspace,
+          scope: instance.scope,
+        });
+      } catch (error) {
+        const failure = persistenceFailure(
+          instance.scope,
+          'persistence-verification-failed',
+          `DSH persistence verification failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        persistence = {
+          state: 'failed',
+          evidenceRef: persistenceEvidence(instance.scope, instance.sessionId),
+          failure,
+        };
+      }
       const terminalState = instance.terminalState;
-      const state = terminalState === undefined
+      const terminalOutcome = terminalState === undefined
         ? instance.stopRequested
           ? 'stopped'
           : 'failed'
@@ -879,14 +1058,14 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
             : terminalState === 'succeeded'
               ? 'succeeded'
               : 'unknown';
-      const failure = state === 'failed' || state === 'unknown'
+      const terminalFailure = terminalOutcome === 'failed' || terminalOutcome === 'unknown'
         ? providerError(
           instance.scope,
           'settle',
           'turn-failed',
           instance.protocolFailure
             ? `DSH protocol integrity failed: ${instance.protocolFailure}`
-            : state === 'unknown'
+            : terminalOutcome === 'unknown'
             ? 'DSH turn ended without a completed state'
             : terminalState === undefined
               ? `DSH runtime exited before terminal evidence was observed; stderr=${instance.stderr}`
@@ -894,15 +1073,35 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
           'provider',
         )
         : undefined;
+      const persistenceFailureValue = persistence.state === 'failed'
+        ? persistence.failure ?? persistenceFailure(
+          instance.scope,
+          'persistence-verification-failed',
+          `DSH session log persistence failed for session ${instance.sessionId}`,
+        )
+        : undefined;
+      const pendingFailure = persistence.state === 'pending'
+        ? persistenceFailure(
+          instance.scope,
+          'persistence-pending',
+          `DSH session log persistence is pending for session ${instance.sessionId}`,
+        )
+        : undefined;
+      const failure = persistenceFailureValue ?? pendingFailure ?? terminalFailure;
+      const state = persistence.state === 'committed' ? terminalOutcome : 'failed';
       return {
         runtimeId: input.runtimeId,
         taskId: input.taskId,
         operationId: input.operationId,
         executionEpoch: input.executionEpoch,
         state,
-        evidenceRefs: [exitEvidence, persistenceEvidence],
+        evidenceRefs: [exitEvidence, persistence.evidenceRef],
         resourceRelease: { state: 'released', evidenceRefs: [exitEvidence] },
-        persistence: { state: 'committed', evidenceRefs: [persistenceEvidence] },
+        persistence: {
+          state: persistence.state,
+          evidenceRefs: [persistence.evidenceRef],
+          ...(persistenceFailureValue ? { failure: persistenceFailureValue } : {}),
+        },
         ...(failure ? { error: failure, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } } : {}),
       };
     },

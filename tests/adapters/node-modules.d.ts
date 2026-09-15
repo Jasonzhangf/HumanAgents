@@ -80,6 +80,11 @@ declare module "node:fs/promises" {
     writeFile(data: string | Uint8Array): Promise<void>;
     close(): Promise<void>;
   }
+  interface Dirent {
+    readonly name: string;
+    isDirectory(): boolean;
+    isFile(): boolean;
+  }
 
   function readFile(
     path: string | URL | FileHandle,
@@ -102,6 +107,13 @@ declare module "node:fs/promises" {
   ): Promise<string | undefined>;
   function mkdtemp(prefix: string): Promise<string>;
   function open(path: string | URL, flags?: string): Promise<FileHandle>;
+  function readdir(path: string | URL, options: { withFileTypes: true }): Promise<Dirent[]>;
+  function rm(path: string | URL, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+}
+
+declare module "node:zlib" {
+  function zstdCompressSync(input: string | Uint8Array): Uint8Array;
+  function zstdDecompressSync(input: Uint8Array): Uint8Array;
 }
 
 declare module "node:os" {

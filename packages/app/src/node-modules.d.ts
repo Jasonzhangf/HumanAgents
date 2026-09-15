@@ -71,17 +71,23 @@ declare module 'node:fs/promises' {
   }
   export interface Dirent {
     readonly name: string;
+    isDirectory(): boolean;
     isFile(): boolean;
   }
   export function appendFile(path: string, data: string, encoding?: string): Promise<void>;
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
   export function open(path: string, flags: string): Promise<FileHandle>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
+  export function readFile(path: string): Promise<Uint8Array>;
   export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function truncate(path: string, length: number): Promise<void>;
   export function writeFile(path: string, data: string, encoding?: string): Promise<void>;
+}
+
+declare module 'node:zlib' {
+  export function zstdDecompressSync(input: Uint8Array): Uint8Array;
 }
 
 declare module 'node:fs' {

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { zstdCompressSync } from 'node:zlib';
 import {
   id,
   validateProviderEvent,
@@ -18,7 +22,9 @@ import {
 import {
   createRealDshTransport,
   dshBaselineLock,
+  type DshRealTransportOptions,
   type DshProfileDescriptor,
+  verifyDshSessionPersistence,
 } from '../../../packages/adapters/dsh/src/index.js';
 
 /**
@@ -149,7 +155,7 @@ function makeChild(handlers: Partial<FakeChild['handlers']> = {}): FakeChild {
   return child;
 }
 
-function makeTransport(child: FakeChild, overrides: Record<string, unknown> = {}) {
+function makeTransport(child: FakeChild, overrides: Partial<DshRealTransportOptions> = {}) {
   return createRealDshTransport({
     binding,
     lock: dshBaselineLock,
@@ -161,8 +167,33 @@ function makeTransport(child: FakeChild, overrides: Record<string, unknown> = {}
     model: 'gpt-5.5',
     patchFiles: ['/dsh/source/apps/cli/src/sdk-source.cordis.patch.yml'],
     spawnRuntime: () => child as never,
+    verifyPersistence: async ({ scope: verificationScope }) => ({
+      state: 'committed',
+      evidenceRef: persistenceEvidence(verificationScope, 'persistence-commit'),
+    }),
     ...overrides,
   });
+}
+
+function persistenceEvidence(scopeValue: ScopeRef, label: string): EvidenceRef {
+  return {
+    evidenceId: id('evidence', `ev-${label}`),
+    kind: 'execution',
+    source: 'dsh-real-transport-test',
+    locator: `dsh://evidence/${label}`,
+    scope: scopeValue,
+  };
+}
+
+async function writeSessionArtifact(input: {
+  readonly home: string;
+  readonly sessionId: string;
+  readonly header: Record<string, unknown>;
+}): Promise<void> {
+  const directory = join(input.home, 'sessions', '--workspace--', 'runtime-a~003Atask-a~003A1');
+  await mkdir(directory, { recursive: true });
+  const bytes = zstdCompressSync(`${JSON.stringify(input.header)}\n`);
+  await writeFile(join(directory, 'session.v3.jsonl.zstd'), bytes);
 }
 
 function defaultHandlers(child: FakeChild) {
@@ -385,6 +416,190 @@ test('turn failure with clean exit settles failed instead of succeeded', async (
   const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
   validateProviderSettlement(settlement);
   assert.equal(settlement.state, 'failed');
+});
+
+test('pending persistence verification cannot settle as succeeded', async () => {
+  const child = makeChild();
+  const transport = makeTransport(child, {
+    verifyPersistence: async ({ scope: verificationScope }) => ({
+      state: 'pending',
+      evidenceRef: persistenceEvidence(verificationScope, 'persistence-pending'),
+    }),
+  });
+  await transport.start(startInput());
+  child.push({
+    jsonrpc: '2.0',
+    method: 'session.event',
+    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
+  });
+
+  const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
+  validateProviderSettlement(settlement);
+  assert.equal(settlement.state, 'failed');
+  assert.equal(settlement.resourceRelease.state, 'released');
+  assert.equal(settlement.persistence.state, 'pending');
+  assert.match(settlement.error?.message ?? '', /persistence is pending/);
+});
+
+test('failed persistence verification preserves its error and blocks settlement', async () => {
+  const child = makeChild();
+  const verificationFailure = {
+    errorId: 'dsh.settle.persistence-artifact-missing',
+    code: 'persistence-artifact-missing',
+    category: 'runtime' as const,
+    phase: 'settle' as const,
+    message: 'DSH session log artifact is missing',
+    ownerId: 'test',
+    retryable: 'manual' as const,
+    attention: 'foreground' as const,
+    evidenceRefs: [evidenceRef('persistence-failure')],
+    nextAction: { kind: 'recover' as const, ref: 'test' },
+  };
+  const transport = makeTransport(child, {
+    verifyPersistence: async ({ scope: verificationScope }) => ({
+      state: 'failed',
+      evidenceRef: persistenceEvidence(verificationScope, 'persistence-failed'),
+      failure: verificationFailure,
+    }),
+  });
+  await transport.start(startInput());
+  child.push({
+    jsonrpc: '2.0',
+    method: 'session.event',
+    params: { sessionId: 'runtime-a:task-a:1', event: { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } } },
+  });
+
+  const settlement = await transport.settle({ runtimeId: 'runtime-a', taskId: task, operationId: operation, executionEpoch: 1 });
+  validateProviderSettlement(settlement);
+  assert.equal(settlement.state, 'failed');
+  assert.equal(settlement.persistence.state, 'failed');
+  assert.equal(settlement.persistence.failure, verificationFailure);
+  assert.equal(settlement.error, verificationFailure);
+});
+
+test('persistence verifier validates the committed session artifact header', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'humanagent-persistence-verifier-'));
+  const sessionId = 'runtime-a:task-a:1';
+  try {
+    await writeSessionArtifact({
+      home,
+      sessionId,
+      header: {
+        type: 'session',
+        version: 3,
+        id: sessionId,
+        createdAt: Date.now(),
+        cwd: '/dsh/workspace',
+        isSeeded: false,
+        delegationDepth: 0,
+      },
+    });
+    const verification = await verifyDshSessionPersistence({
+      sessionId,
+      home,
+      workspace: '/dsh/workspace',
+      scope,
+    });
+    assert.equal(verification.state, 'committed');
+    assert.match(verification.evidenceRef.digest ?? '', /^sha256:/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('persistence verifier rejects missing, corrupt, and mismatched artifacts', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'humanagent-persistence-verifier-'));
+  const sessionId = 'runtime-a:task-a:1';
+  try {
+    const missing = await verifyDshSessionPersistence({
+      sessionId,
+      home,
+      workspace: '/dsh/workspace',
+      scope,
+    });
+    assert.equal(missing.state, 'failed');
+    assert.match(missing.failure?.message ?? '', /missing/);
+
+    const directory = join(home, 'sessions', '--workspace--', 'runtime-a~003Atask-a~003A1');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'session.v3.jsonl.zstd'), 'not-zstd');
+    const corrupt = await verifyDshSessionPersistence({
+      sessionId,
+      home,
+      workspace: '/dsh/workspace',
+      scope,
+    });
+    assert.equal(corrupt.state, 'failed');
+    assert.match(corrupt.failure?.message ?? '', /corrupt/);
+
+    await writeSessionArtifact({
+      home,
+      sessionId,
+      header: {
+        type: 'session',
+        version: 3,
+        id: 'other-session',
+        createdAt: Date.now(),
+        cwd: '/dsh/workspace',
+        isSeeded: false,
+        delegationDepth: 0,
+      },
+    });
+    const mismatch = await verifyDshSessionPersistence({
+      sessionId,
+      home,
+      workspace: '/dsh/workspace',
+      scope,
+    });
+    assert.equal(mismatch.state, 'failed');
+    assert.match(mismatch.failure?.message ?? '', /does not match/);
+
+    await writeSessionArtifact({
+      home,
+      sessionId,
+      header: {
+        type: 'session',
+        version: 3,
+        id: sessionId,
+        createdAt: Date.now(),
+        cwd: '/other/workspace',
+        isSeeded: false,
+        delegationDepth: 0,
+      },
+    });
+    const wrongWorkspace = await verifyDshSessionPersistence({
+      sessionId,
+      home,
+      workspace: '/dsh/workspace',
+      scope,
+    });
+    assert.equal(wrongWorkspace.state, 'failed');
+    assert.match(wrongWorkspace.failure?.message ?? '', /does not match/);
+
+    await writeSessionArtifact({
+      home,
+      sessionId,
+      header: {
+        type: 'session',
+        version: 2,
+        id: sessionId,
+        createdAt: Date.now(),
+        cwd: '/dsh/workspace',
+        isSeeded: false,
+        delegationDepth: 0,
+      },
+    });
+    const wrongVersion = await verifyDshSessionPersistence({
+      sessionId,
+      home,
+      workspace: '/dsh/workspace',
+      scope,
+    });
+    assert.equal(wrongVersion.state, 'failed');
+    assert.match(wrongVersion.failure?.message ?? '', /does not match/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('failed turn/end maps to valid error and terminal provider events', async () => {
