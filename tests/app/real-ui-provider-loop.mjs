@@ -225,16 +225,31 @@ async function runProtocol(protocol) {
     await stream.close();
 
     // stop -> settle -> stopped checkpoint -> close
-    const second = await jsonRequest(`${launched.url}/api/tasks/${taskId}/executions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mode: 'rcc', prompt: 'Write a detailed 2000 word essay about distributed systems. Do not stop early.' }),
-    });
+    //
+    // The upstream model may finish before the stop control reaches the
+    // runtime. That is a genuine race, not a stop failure, so retry with a new
+    // execution; any other error still propagates.
+    let second;
+    let stopStream;
+    let stopRequest;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      second = await jsonRequest(`${launched.url}/api/tasks/${taskId}/executions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: 'rcc', prompt: 'Write a detailed 2000 word essay about distributed systems. Do not stop early.' }),
+      });
+      stopStream = openEventStream(`${launched.url}/api/executions/${second.operationId}/events`);
+      try {
+        stopRequest = await jsonRequest(`${launched.url}/api/tasks/${taskId}/stop`, { method: 'POST' });
+        break;
+      } catch (error) {
+        await stopStream.close();
+        if (!String(error).includes('task.not.running')) throw error;
+        stopStream = undefined;
+      }
+    }
+    if (!stopRequest || !stopStream) throw new Error(`${protocol} execution finished before stop control could reach the runtime`);
     record.steps.secondStart = second;
-    const stopStream = openEventStream(`${launched.url}/api/executions/${second.operationId}/events`);
-    // startExecution marks the task running synchronously, so stop is
-    // deterministic here and does not depend on how fast the model streams.
-    const stopRequest = await jsonRequest(`${launched.url}/api/tasks/${taskId}/stop`, { method: 'POST' });
     record.steps.stopRequest = stopRequest;
     await stopStream.waitFor(terminalFinal, `${protocol} stopped terminal`);
     record.events.stop = stopStream.events.map((event) => ({ kind: event.kind, state: event.state, summary: event.summary, terminalPhase: event.terminalPhase ?? null }));
