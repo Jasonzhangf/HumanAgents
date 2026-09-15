@@ -308,8 +308,6 @@ async function main() {
     kind: 'humanagent.ui-provider-loop-proof',
     generatedAt: new Date().toISOString(),
     candidate: {
-      commit: git(['rev-parse', 'HEAD']),
-      tree: git(['rev-parse', 'HEAD^{tree}']),
       branch: git(['rev-parse', '--abbrev-ref', 'HEAD']),
       workingTreeClean: git(['status', '--porcelain', '--untracked-files=all']) === '',
       sourceDigest: sourceDigest(),
