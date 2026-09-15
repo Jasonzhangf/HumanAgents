@@ -254,8 +254,10 @@ async function main() {
     const sessionEvidence = [];
     for (const sessionFile of sessionFiles) {
       const records = await readJsonlFromZstd(sessionFile);
-      const toolCallIndex = records.findIndex((object) => object.type === 'tool/call'
-        && object.data?.name === 'read');
+      const toolCallIndexes = records
+        .map((object, index) => object.type === 'tool/call' && object.data?.name === 'read' ? index : -1)
+        .filter((index) => index >= 0);
+      const toolCallIndex = toolCallIndexes.length === 1 ? toolCallIndexes[0] : -1;
       const toolCallId = toolCallIndex < 0 ? undefined : records[toolCallIndex]?.data?.callId;
       const toolResultIndex = records.findIndex((object, index) => index > toolCallIndex
         && object.type === 'tool/result'
@@ -267,9 +269,12 @@ async function main() {
       sessionEvidence.push({
         file: sessionFile,
         toolCallRead: toolCallIndex >= 0,
+        readCallCount: toolCallIndexes.length,
+        exactlyOneReadCall: toolCallIndexes.length === 1,
         matchingToolResult: toolResultIndex > toolCallIndex,
         assistantReportedNonceAfterResult: assistantIndex > toolResultIndex,
         sameSessionContinuation: toolCallIndex >= 0
+          && toolCallIndexes.length === 1
           && toolResultIndex > toolCallIndex
           && assistantIndex > toolResultIndex,
       });
