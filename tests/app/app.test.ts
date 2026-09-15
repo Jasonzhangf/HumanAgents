@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -687,6 +687,23 @@ test('CLI resume closes the session with the checkpoint from the recovered execu
   assert.equal(session.state, 'stopped');
   assert.equal(session.records.at(-1)?.type, 'session.closed');
   assert.equal(session.records.at(-1)?.checkpointRef, resumed.checkpointId);
+});
+
+test('session outcome settlement commits failed checkpoints without marking them recoverable', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-run-failed-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const sessionId = 'session-cli-run-failed';
+  const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId });
+  await new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+  const state = await settleSessionOutcome(runtime, 'failed', 'checkpoint:failed');
+  assert.equal(state, 'failed');
+  await runtime.lock.release();
+
+  const session = await new SessionStore(paths).open(sessionId);
+  assert.equal(session.state, 'failed');
+  assert.equal(session.records.at(-1)?.type, 'session.failed');
+  assert.equal(session.records.at(-1)?.checkpointRef, 'checkpoint:failed');
 });
 
 test('runtime crash preserves original error in a failed checkpoint and resumes in a new epoch', async () => {

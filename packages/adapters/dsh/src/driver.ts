@@ -81,8 +81,7 @@ function closureState(settlement: ProviderSettlement): AgentClosure['state'] {
 }
 
 function isFinalSettlement(settlement: ProviderSettlement): boolean {
-  return (settlement.state === 'succeeded' || settlement.state === 'stopped' || settlement.state === 'cancelled')
-    && settlement.resourceRelease.state === 'released'
+  return settlement.resourceRelease.state === 'released'
     && settlement.persistence.state === 'committed';
 }
 

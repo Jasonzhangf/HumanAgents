@@ -310,6 +310,36 @@ class FailingLoopTransport extends LoopTransport {
   }
 }
 
+class FailedFinalSettlementTransport extends LoopTransport {
+  override async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
+    const failure: ProviderError = {
+      errorId: 'dsh.turn.failed',
+      code: 'turn-failed',
+      category: 'provider',
+      phase: 'settle',
+      message: 'turn failed after resource release',
+      ownerId: 'dsh-driver-test',
+      retryable: 'manual',
+      attention: 'foreground',
+      evidenceRefs: [execEvidence('settle-final-failed', input)],
+      nextAction: { kind: 'recover', ref: 'dsh-driver-test' },
+    };
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      state: 'failed',
+      evidenceRefs: failure.evidenceRefs,
+      resourceRelease: { state: 'released', evidenceRefs: [execEvidence('release', input)] },
+      persistence: { state: 'committed', evidenceRefs: [execEvidence('persist', input)] },
+      error: failure,
+      ownerId: 'dsh-driver-test',
+      nextAction: { kind: 'recover', ref: 'dsh-driver-test' },
+    };
+  }
+}
+
 function makeDriver(transport: DshTransport) {
   const runtime = createDshExecutionRuntimePort({
     lock: dshBaselineLock,
@@ -416,6 +446,26 @@ test('driver keeps a failed settle instance alive for retry', async () => {
   const retried = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: 1 });
   assert.equal(retried.state, 'stopped');
   assert.equal(transport.settleCalls, 2);
+});
+
+test('driver releases a failed settlement instance once resources are released and persistence is committed', async () => {
+  const transport = new FailedFinalSettlementTransport();
+  const driver = makeDriver(transport);
+  await driver.start({
+    runtimeId: 'runtime-a',
+    taskId: task,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    organId: driverOrgan,
+    operationId: operation,
+  });
+
+  const failed = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: 1 });
+  assert.equal(failed.state, 'failed');
+  await assert.rejects(
+    driver.settle({ runtimeId: 'runtime-a', executionEpoch: 1 }),
+    /has no active runtime for this epoch/,
+  );
 });
 
 test('driver rejects a stop operation that does not own the active execution', async () => {

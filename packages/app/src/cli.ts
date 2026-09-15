@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { ConfigurationError, ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../config/src/index.js';
 import { AppLifecycleError } from './errors.js';
-import { closeRuntime, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation } from './index.js';
+import { closeRuntime, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
 import { SessionStore } from './session-store.js';
 
 function option(args: readonly string[], name: string): string | undefined {
@@ -44,14 +44,7 @@ export async function main(args: readonly string[]): Promise<void> {
         plan,
         prompt,
       });
-      const terminalOutcome = result.checkpoint.outcome === 'succeeded'
-        || result.checkpoint.outcome === 'stopped'
-        || result.checkpoint.outcome === 'cancelled';
-      if (!terminalOutcome) {
-        await runtime.lock.release();
-      } else {
-        await closeRuntime(runtime, result.checkpoint.id.value);
-      }
+      const settled = await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
       console.log(JSON.stringify({
         command,
         plan,
@@ -59,7 +52,7 @@ export async function main(args: readonly string[]): Promise<void> {
         controlCwd: runtime.paths.controlRoot,
         workspaceCwd: runtime.paths.workspaceCwd,
         projectKey: runtime.paths.projectKey,
-        state: terminalOutcome ? 'stopped' : 'recoverable',
+        state: settled,
         taskId: result.taskId.value,
         operationId: result.operationId.value,
         executionEpoch: result.executionEpoch,

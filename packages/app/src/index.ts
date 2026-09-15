@@ -60,6 +60,29 @@ export async function closeRuntime(handle: RuntimeHandle, checkpointRef?: string
   }
 }
 
+export async function settleSessionOutcome(
+  handle: RuntimeHandle,
+  outcome: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown',
+  checkpointRef: string,
+): Promise<SessionSnapshot['state'] | 'recoverable'> {
+  if (outcome === 'failed' || outcome === 'unknown') {
+    const failed = await new SessionStore(handle.paths).append(handle.session.sessionId, {
+      type: 'session.failed',
+      state: 'failed',
+      checkpointRef,
+      errorCode: outcome === 'failed' ? 'agent-operation-failed' : 'agent-operation-unknown',
+      nextAction: 'resume from the failed checkpoint or start a new operation',
+    }, handle.lock);
+    await handle.lock.release();
+    return failed.state;
+  }
+  if (outcome === 'succeeded' || outcome === 'cancelled' || outcome === 'stopped') {
+    return (await closeRuntime(handle, checkpointRef)).state;
+  }
+  await handle.lock.release();
+  return 'recoverable';
+}
+
 export { AppLifecycleError } from './errors.js';
 export { bindExecutionRuntime, probeExecutionRuntime } from './execution.js';
 export type { RuntimeExecutionBinding } from './execution.js';
