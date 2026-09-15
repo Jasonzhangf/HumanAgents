@@ -170,8 +170,8 @@ mid-turn prompt cancel：
 P0-P6 的实现与验证已完成：真实 transport、runtime/app/config 接线、stop/settle、
 crash recovery 和 UI projection 均已通过 focused tests 与真实入口证据。四层
 验证已执行；当前实现候选
-`298b749f9002efa7720ea9186a8d27bb64892dac`，tree
-`42c77571edcd1742067c9132bef4673a0f1a5f9c`，把 HumanAgent Organ 收回 app
+`29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
+`957110c188acffc20f00c146131f6f296a92524f`，把 HumanAgent Organ 收回 app
 所有，DSH 只校验并转发 `organId` / `cycleId` / `operationId`。
 
 candidate-bound receipts、gate manifest、HumanAgent checkpoint、DSH session log

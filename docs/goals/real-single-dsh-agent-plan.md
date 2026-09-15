@@ -183,8 +183,8 @@ Owner：`packages/runtime`、`packages/app`、`packages/config`
   内完成 model -> tool -> result -> continue -> HumanAgent checkpoint。
 - 当前收口 smoke 由
   `tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs` 可重复生成：
-  `session=dsh-smoke-1789437547765`，`outcome=succeeded`，
-  `checkpoint=dsh-smoke-1789437547765-1-1`，RCC health 200。候选绑定的 receipt、
+  `session=dsh-smoke-1789438565281`，`outcome=succeeded`，
+  `checkpoint=dsh-smoke-1789438565281-1-1`，RCC health 200。候选绑定的 receipt、
   DSH session log 与 HumanAgent checkpoint journal artifact 已提交到
   `docs/evidence/real-single-dsh-agent/`。
 
@@ -268,7 +268,7 @@ Owner：validation
 - 每层命令、退出码、artifact/receipt、限制和剩余风险。
 - 独立 review PASS；P0/P1 = 0；candidate、merge、push、release 分别报告。
 - `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 的 contracts
-  21/21、config 22/22、app 38/38、runtime 112/112；DSH focused 54/54；
+  21/21、config 22/22、app 38/38、runtime 112/112；DSH focused 55/55；
   `test:release` 18/18。
 - `proof:dsh-entry`、`proof:dsh-lifecycle`、`proof:dsh-cli` 均 exit `0`；
   candidate-bound receipts 为
@@ -282,8 +282,8 @@ Owner：validation
   `organId` / `cycleId` 传给 provider execution identity。当前候选由 app
   生成稳定 `agent-${agentId}` Organ，DSH adapter 只校验并转发，并新增
   scope negative tests。
-- 实现候选为 `298b749f9002efa7720ea9186a8d27bb64892dac`，tree
-  `42c77571edcd1742067c9132bef4673a0f1a5f9c`。独立只读 review 结果记录在
+- 实现候选为 `29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
+  `957110c188acffc20f00c146131f6f296a92524f`。独立只读 review 结果记录在
   后续 evidence commit；review PASS 前不得把 P6 宣称为最终收口。
 - 该 candidate 尚未 merge、push 或 release。
 
