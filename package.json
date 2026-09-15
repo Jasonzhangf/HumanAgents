@@ -20,6 +20,7 @@
     "test:app": "pnpm build:app && tsc -p tests/app/tsconfig.json && node --test dist/tests/tests/app/app.test.js dist/tests/tests/app/ui-runtime.test.js",
     "test:provider": "pnpm build:app && tsc -p tests/adapters/provider/tsconfig.json && node --test dist/tests-provider/tests/adapters/provider/provider-adapter.test.js dist/tests-provider/tests/adapters/provider/provider-agent-driver.test.js dist/tests-provider/tests/adapters/provider/provider-replay.test.js dist/tests-provider/tests/adapters/provider/rcc-v3-transport.test.js",
     "test:ui": "pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js",
+    "proof:ui-provider-loop": "node tests/app/real-ui-provider-loop.mjs",
     "test:release": "node --test tests/release/release-gates.test.mjs",
     "test:runtime": "pnpm build:runtime && node --test dist/tests/runtime/admission/admission.test.js dist/tests/tests/runtime/checkpoints/checkpoint-coordinator.test.js dist/tests/tests/runtime/control/control.test.js dist/tests-runtime-intake/tests/runtime/intake/intake.test.js dist/tests/tests/runtime/memory/memory-coordinator.test.js dist/tests/runtime/nodes/tests/runtime/nodes/agent-runtime.test.js dist/tests/runtime/nodes/tests/runtime/nodes/node-runtime.test.js dist/tests/tests/runtime/review/review-coordinator.test.js dist/tests/tests/runtime/integration/wave2-assembly.test.js",
     "test": "pnpm test:contracts && pnpm test:config && pnpm test:provider && pnpm test:app && pnpm test:ui && pnpm test:runtime",
