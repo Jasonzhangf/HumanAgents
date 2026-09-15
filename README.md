@@ -35,10 +35,11 @@ UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和�
 DSH 源码基线锁定到上游
 `master@c291e7961a515f6d7af9304e7fd1d257929aef26`，并使用 clean detached
 worktree 验证 commit/tree、源码 patch、真实 RCC 和真实 DSH 同入口。当前分支已
-完成 P0-P5，计划与证据见
+完成 P0-P6；代码候选 `9b67217774a05a5e4776d774e33993261460ea73` 的独立 review
+已 PASS 且 P0/P1 = 0，计划与证据见
 [`docs/goals/real-single-dsh-agent-plan.md`](docs/goals/real-single-dsh-agent-plan.md)；
-只剩 candidate-bound 独立 review 和最终 SHA/tree 收口。该 candidate 尚未 merge、
-push 或 production release。
+最终文档提交仍会按新的精确 SHA 再执行一次只读 review。该 candidate 尚未
+merge、push 或 production release。
 
 ## 本地启动与增量编译
 

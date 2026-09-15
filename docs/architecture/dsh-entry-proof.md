@@ -1,6 +1,6 @@
 # 真实 DSH 入口证明（P0 / P1）
 
-状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-IN-PROGRESS`
+状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-COMPLETE`
 日期：2026-09-14
 Owner：`packages/adapters/dsh` + `docs/architecture`
 
@@ -165,7 +165,8 @@ mid-turn prompt cancel：
 
 ## 5. 当前收口
 
-P0-P5 已完成：真实 transport、runtime/app/config 接线、stop/settle、crash
-recovery 和 UI projection 均已通过 focused tests 与真实入口证据。P6 的四层验证
-已执行，candidate-bound 独立 review 尚未收口；在 review PASS 前不得声称该
-candidate 已完成交付、merge 或 release。
+P0-P6 已完成：真实 transport、runtime/app/config 接线、stop/settle、crash
+recovery 和 UI projection 均已通过 focused tests 与真实入口证据。四层验证已
+执行；代码候选 `9b67217774a05a5e4776d774e33993261460ea73` 已完成
+candidate-bound 独立 review，P0/P1 = 0。该 candidate 尚未 merge、push 或
+production release；最终文档提交仍需作为新的精确 SHA 再执行一次只读 review。

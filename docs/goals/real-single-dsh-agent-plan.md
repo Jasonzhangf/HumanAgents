@@ -1,6 +1,6 @@
 # 真实单 DSH Agent 执行计划
 
-状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-IN-PROGRESS`
+状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-COMPLETE`
 基线：`origin/main @ 36528f4e7d05932d63ddd7a4308c8863be424138`
 Worktree：`playground/real-single-dsh-agent`
 分支：`codex/real-single-dsh-agent`
@@ -26,7 +26,7 @@ Worktree：`playground/real-single-dsh-agent`
   `c291e7961a515f6d7af9304e7fd1d257929aef26`，
   tree `e482b49bef64726be8f79380bb35bae569dc3c48`，describe
   `dsh-v0.1.5-rc.2-139-gc291e7961a`。
-- P6 pre-review 已再次从 `~/code/dsh` 执行 `git fetch origin master`；当前最新
+- P6 已再次从 `~/code/dsh` 执行 `git fetch origin master`；当前最新
   `origin/master` 仍与上述 commit/tree/describe 完全一致。若之后发生前移，
   必须先把 `packages/adapters/dsh/src/lock.ts`、入口证明和真实 receipts
   一起重锁，再继续验证；禁止继续用旧 commit 生成 PASS。
@@ -183,8 +183,8 @@ Owner：`packages/runtime`、`packages/app`、`packages/config`
   内完成 model -> tool -> result -> continue -> HumanAgent checkpoint。
 - 当前收口 smoke 由
   `tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs` 可重复生成：
-  `session=dsh-smoke-1789430811584`，`outcome=succeeded`，
-  `checkpoint=dsh-smoke-1789430811584-1-1`，RCC health 200，receipt 为
+  `session=dsh-smoke-1789432192051`，`outcome=succeeded`，
+  `checkpoint=dsh-smoke-1789432192051-1-1`，RCC health 200，receipt 为
   `dist/receipts/dsh-humanagent-cli-smoke.json`，并保留 DSH session log 与
   HumanAgent checkpoint journal artifact。
 
@@ -242,7 +242,7 @@ Owner：`packages/ui/projection`、`packages/ui/surfaces`
 - UI focused tests 9/9；`dist/receipts/ui/dsh-dashboard-desktop.png` 与
   `dist/receipts/ui/dsh-dashboard-narrow.png` 记录桌面和窄宽度投影。
 
-### P6：四层验证与收口 —— `IN-PROGRESS`
+### P6：四层验证与收口 —— `COMPLETE`
 
 Owner：validation
 
@@ -264,6 +264,20 @@ Owner：validation
 
 - 每层命令、退出码、artifact/receipt、限制和剩余风险。
 - 独立 review PASS；P0/P1 = 0；candidate、merge、push、release 分别报告。
+- `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 112/112；
+  `test:release` 18/18。
+- `proof:dsh-entry`、`proof:dsh-lifecycle`、`proof:dsh-cli` 均 exit `0`；
+  receipts 为 `dist/receipts/dsh-entry-proof.json`、
+  `dist/receipts/dsh-lifecycle-proof.json`、
+  `dist/receipts/dsh-humanagent-cli-smoke.json`。
+- `packages/app/src/agent-driver-composition.ts` 的真实 review finding
+  “配置值可改变生成的 YAML route”已修复为 JSON 双引号 scalar 编码，并有
+  `tests/app/app.test.ts` 负向测试；代码候选
+  `9b67217774a05a5e4776d774e33993261460ea73` 的独立 review 为 PASS，
+  P0/P1 = 0，receipt 为
+  `.agent-collab/review/humanagent-real-single-dsh-agent-9b67217/`。
+- 该 candidate 尚未 merge、push 或 release；最终文档提交会作为新的精确 SHA
+  再运行一次只读 review，旧 review 不自动代表最终 SHA。
 
 ## 4. 验收场景
 
