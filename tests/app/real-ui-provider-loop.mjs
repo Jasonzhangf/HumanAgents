@@ -24,6 +24,7 @@
  */
 
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -40,6 +41,22 @@ const EVENT_TIMEOUT_MS = 180_000;
 
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' }).trim();
+}
+
+/**
+ * Digest of the tracked source tree that the proof actually exercised.
+ *
+ * The receipt cannot bind its own commit: committing the receipt necessarily
+ * creates a new commit whose tree differs from the one the proof ran against.
+ * Binding a source digest that excludes the evidence directory keeps the proof
+ * verifiable from both the implementation commit and the evidence commit.
+ */
+function sourceDigest() {
+  const entries = execFileSync('git', ['ls-files', '-s'], { encoding: 'utf8' })
+    .split('\n')
+    .filter((line) => line && !line.includes('docs/evidence/ui-provider-loop/'))
+    .sort();
+  return `sha256:${createHash('sha256').update(entries.join('\n')).digest('hex')}`;
 }
 
 function startServe(protocol, root) {
@@ -280,6 +297,7 @@ async function main() {
       tree: git(['rev-parse', 'HEAD^{tree}']),
       branch: git(['rev-parse', '--abbrev-ref', 'HEAD']),
       workingTreeClean: git(['status', '--porcelain', '--untracked-files=all']) === '',
+      sourceDigest: sourceDigest(),
     },
     rcc: {
       baseUrl: RCC_BASE_URL,
