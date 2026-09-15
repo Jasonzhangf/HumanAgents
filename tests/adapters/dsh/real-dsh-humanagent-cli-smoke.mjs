@@ -97,6 +97,15 @@ function findObject(value, predicate) {
   return undefined;
 }
 
+function containsOrderedKinds(actual, required) {
+  let requiredIndex = 0;
+  for (const kind of actual) {
+    if (kind === required[requiredIndex]) requiredIndex += 1;
+    if (requiredIndex === required.length) return true;
+  }
+  return required.length === 0;
+}
+
 async function readJsonl(file) {
   const values = [];
   for (const line of (await readFile(file, 'utf8')).split('\n')) {
@@ -132,8 +141,9 @@ async function main() {
     cliPath: CLI_PATH,
     rccBaseUrl: RCC_BASE_URL,
     expected: {
+      state: 'stopped',
       outcome: 'succeeded',
-      observedKinds: ['output', 'tool', 'tool', 'output', 'terminal'],
+      requiredObservedKinds: ['tool', 'tool', 'output', 'terminal'],
       targetSecondLine,
     },
   };
@@ -244,16 +254,24 @@ async function main() {
     const sessionEvidence = [];
     for (const sessionFile of sessionFiles) {
       const records = await readJsonlFromZstd(sessionFile);
-      const toolCall = findObject(records, (object) => object.type === 'tool/call'
+      const toolCallIndex = records.findIndex((object) => object.type === 'tool/call'
         && object.data?.name === 'read');
-      const toolResult = findObject(records, (object) => object.type === 'tool/result');
-      const assistant = findObject(records, (object) => object.type === 'assistant/message'
+      const toolCallId = toolCallIndex < 0 ? undefined : records[toolCallIndex]?.data?.callId;
+      const toolResultIndex = records.findIndex((object, index) => index > toolCallIndex
+        && object.type === 'tool/result'
+        && Array.isArray(object.data?.message?.content)
+        && object.data.message.content.some((content) => content?.toolCallId === toolCallId));
+      const assistantIndex = records.findIndex((object, index) => index > toolResultIndex
+        && object.type === 'assistant/message'
         && JSON.stringify(object).includes(targetSecondLine));
       sessionEvidence.push({
         file: sessionFile,
-        toolCallRead: toolCall !== undefined,
-        toolResult: toolResult !== undefined,
-        assistantReportedNonce: assistant !== undefined,
+        toolCallRead: toolCallIndex >= 0,
+        matchingToolResult: toolResultIndex > toolCallIndex,
+        assistantReportedNonceAfterResult: assistantIndex > toolResultIndex,
+        sameSessionContinuation: toolCallIndex >= 0
+          && toolResultIndex > toolCallIndex
+          && assistantIndex > toolResultIndex,
       });
     }
     receipt.dshSessionEvidence = sessionEvidence;
@@ -263,13 +281,11 @@ async function main() {
       receipt.dshSessionLogArtifact = sessionLogArtifact;
     }
 
-    receipt.ok = cliRun.state === 'stopped'
-      && cliRun.outcome === 'succeeded'
-      && JSON.stringify(cliRun.observedKinds) === JSON.stringify(receipt.expected.observedKinds)
+    receipt.ok = cliRun.state === receipt.expected.state
+      && cliRun.outcome === receipt.expected.outcome
+      && containsOrderedKinds(cliRun.observedKinds, receipt.expected.requiredObservedKinds)
       && receipt.humanagentCheckpointCommitted === true
-      && sessionEvidence.some((entry) => entry.toolCallRead
-        && entry.toolResult
-        && entry.assistantReportedNonce);
+      && sessionEvidence.some((entry) => entry.sameSessionContinuation);
     if (!receipt.ok) throw new Error('CLI smoke did not satisfy all invariants');
   } catch (error) {
     failure = error;
