@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "kind": "humanagent.ui-provider-loop-proof",
-  "generatedAt": "2026-09-15T15:38:58.241Z",
+  "generatedAt": "2026-09-15T15:54:21.813Z",
   "candidate": {
-    "commit": "7b80ea9308df5cd3842cca599dcaefe63e070212",
-    "tree": "7d1f373db0c5d2a73a57b55820b6ebf916d810ef",
+    "commit": "5dd4f90527e17c03e8a9578a712ce993d03be232",
+    "tree": "b344e47d2c487c5f0bb34ee13e386a7989313451",
     "branch": "codex/ui-provider-loop",
     "workingTreeClean": true
   },
@@ -24,228 +24,7 @@
     {
       "protocol": "responses",
       "model": "gpt-5.5",
-      "root": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd",
-      "steps": {
-        "probe": {
-          "state": "ready",
-          "providerState": "ready",
-          "providerError": null
-        },
-        "start": {
-          "operationId": "ui-operation-1",
-          "executionEpoch": 1
-        },
-        "execute": {
-          "state": "succeeded",
-          "output": "humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:0c038OK",
-          "checkpoint": {
-            "checkpointId": "checkpoint-ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1-1",
-            "seq": 1,
-            "outcome": "succeeded",
-            "summary": "execution succeeded",
-            "committedAt": "2026-09-15T15:39:21.879Z",
-            "evidenceRefs": [
-              {
-                "evidenceId": {
-                  "scope": "evidence",
-                  "value": "checkpoint-ui-operation-1-1"
-                },
-                "kind": "operation",
-                "source": "humanagent.runtime",
-                "locator": "operation/ui-operation-1/checkpoint",
-                "scope": {
-                  "organId": {
-                    "scope": "organ",
-                    "value": "humanagent-ui"
-                  },
-                  "taskId": {
-                    "scope": "task",
-                    "value": "ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1"
-                  },
-                  "cycleId": {
-                    "scope": "cycle",
-                    "value": "ui-cycle-1"
-                  }
-                }
-              }
-            ]
-          },
-          "error": null
-        },
-        "secondStart": {
-          "operationId": "ui-operation-2",
-          "executionEpoch": 2
-        },
-        "stopRequest": {
-          "state": "stopped",
-          "operationId": "ui-operation-2"
-        },
-        "stop": {
-          "state": "stopped",
-          "checkpoint": {
-            "checkpointId": "stopped-ui-operation-2-1",
-            "seq": 1,
-            "outcome": "stopped",
-            "summary": "operator-stop",
-            "committedAt": "2026-09-15T15:39:24.887Z",
-            "evidenceRefs": [
-              {
-                "evidenceId": {
-                  "scope": "evidence",
-                  "value": "provider-settle-rcc-v3---settle-ea463ff238a8"
-                },
-                "kind": "external",
-                "source": "humanagent.provider-adapter",
-                "locator": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8",
-                "digest": "sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675",
-                "scope": {
-                  "organId": {
-                    "scope": "organ",
-                    "value": "humanagent-ui"
-                  },
-                  "taskId": {
-                    "scope": "task",
-                    "value": "ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1"
-                  },
-                  "cycleId": {
-                    "scope": "cycle",
-                    "value": "ui-cycle-2"
-                  },
-                  "operationId": {
-                    "scope": "operation",
-                    "value": "ui-operation-2"
-                  }
-                }
-              }
-            ]
-          },
-          "error": null
-        }
-      },
-      "events": {
-        "execute": [
-          {
-            "kind": "execution.started",
-            "state": "running",
-            "summary": "execution started",
-            "terminalPhase": null
-          },
-          {
-            "kind": "provider.model",
-            "state": "model",
-            "summary": "model",
-            "terminalPhase": null
-          },
-          {
-            "kind": "provider.output",
-            "state": "output",
-            "summary": "output: humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:0c038",
-            "terminalPhase": null
-          },
-          {
-            "kind": "provider.output",
-            "state": "output",
-            "summary": "OK",
-            "terminalPhase": null
-          },
-          {
-            "kind": "execution.terminal",
-            "state": "succeeded",
-            "summary": "execution succeeded",
-            "terminalPhase": "provider"
-          },
-          {
-            "kind": "execution.settling",
-            "state": "settling",
-            "summary": "execution settling",
-            "terminalPhase": null
-          },
-          {
-            "kind": "checkpoint.committed",
-            "state": "succeeded",
-            "summary": "execution succeeded",
-            "terminalPhase": null
-          },
-          {
-            "kind": "execution.terminal",
-            "state": "succeeded",
-            "summary": "execution succeeded; provider closed",
-            "terminalPhase": "final"
-          }
-        ],
-        "stop": [
-          {
-            "kind": "execution.started",
-            "state": "running",
-            "summary": "execution started",
-            "terminalPhase": null
-          },
-          {
-            "kind": "provider.model",
-            "state": "model",
-            "summary": "model",
-            "terminalPhase": null
-          },
-          {
-            "kind": "provider.output",
-            "state": "output",
-            "summary": "output: humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:c40d5",
-            "terminalPhase": null
-          },
-          {
-            "kind": "provider.output",
-            "state": "output",
-            "summary": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50",
-            "terminalPhase": null
-          },
-          {
-            "kind": "execution.settling",
-            "state": "settling",
-            "summary": "stop requested; settling",
-            "terminalPhase": null
-          },
-          {
-            "kind": "checkpoint.committed",
-            "state": "stopped",
-            "summary": "stopped checkpoint committed",
-            "terminalPhase": null
-          },
-          {
-            "kind": "execution.terminal",
-            "state": "stopped",
-            "summary": "execution stopped; provider closed",
-            "terminalPhase": "final"
-          }
-        ]
-      },
-      "endpoint": "http://127.0.0.1:59342",
-      "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/checkpoints/ui-runtime",
-      "taskId": "ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1",
-      "checkpointModeRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/checkpoints/ui-runtime/rcc",
-      "checkpointFiles": [
-        "task-ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1-cycle-ui-cycle-1.jsonl",
-        "task-ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1-cycle-ui-cycle-2.jsonl",
-        "ui-runtime-journal.jsonl"
-      ],
-      "checkpointJournal": [
-        {
-          "name": "task-ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1-cycle-ui-cycle-1.jsonl",
-          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"checkpoint-ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":1,\"outcome\":\"succeeded\",\"summary\":\"execution succeeded\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint-recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}],\"next\":{\"kind\":\"continue\",\"ref\":\"task://ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1/next\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:506f5211b7b270f8ebe23e46da5523213c47410e1dfb591b9e8ae90c034fa801\"}\n"
-        },
-        {
-          "name": "task-ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1-cycle-ui-cycle-2.jsonl",
-          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"stopped-ui-operation-2-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":2,\"outcome\":\"stopped\",\"summary\":\"operator-stop\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-2\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-2/recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-ea463ff238a8\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8\",\"digest\":\"sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}],\"next\":{\"kind\":\"stop\",\"ref\":\"operator-stop\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:86dc942d69d97eccc744cba7efc102f42873c7c6897e0a25724fabab65f4c356\"}\n"
-        },
-        {
-          "name": "ui-runtime-journal.jsonl",
-          "content": "{\"kind\":\"task.created\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"title\":\"rcc responses provider loop\",\"directive\":\"prove responses entry\",\"directiveRevision\":1,\"createdAt\":\"2026-09-15T15:38:58.581Z\",\"taskCounter\":1}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}},\"executionEpoch\":1,\"operationCounter\":1,\"cycleCounter\":1,\"startedAt\":\"2026-09-15T15:38:58.584Z\",\"input\":\"Reply with the single word OK.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:38:58.584Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:39:21.874Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.model\",\"state\":\"model\",\"summary\":\"model\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.created-response-rcc-response-1-83a58b9145bc\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.created-response-rcc-response-1-83a58b9145bc\",\"digest\":\"sha256:83a58b9145bcda5649bc296e34a95e8b3452a5ccd89db686e367bc7964d823d0\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:39:21.875Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"output: humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:0c038\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.output_item.done-output-rcc-output-0-0c0388615dd7\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.output_item.done-output-rcc-output-0-0c0388615dd7\",\"digest\":\"sha256:0c0388615dd77737a1bbd57152d2c4c237a9a1b0cca4be5e5d49c23cc3cddfed\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:0c038\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:39:21.875Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"OK\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.output_item.done-output-rcc-output-1-7f7b9191070d\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.output_item.done-output-rcc-output-1-7f7b9191070d\",\"digest\":\"sha256:7f7b9191070dea427dbcba306ba5a9c80a6252c4f6e5eccb3b2ab51dfc664bc1\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:0c038OK\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-5\",\"seq\":5,\"occurredAt\":\"2026-09-15T15:39:21.876Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.completed-response-rcc-response-1-1b1001c55add\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.completed-response-rcc-response-1-1b1001c55add\",\"digest\":\"sha256:1b1001c55add56c4dc7f64d410810ad6bb273bb9816e49474fa2375435b90af8\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}],\"ownerId\":\"humanagent.provider-adapter\",\"nextAction\":\"continue\",\"terminalPhase\":\"provider\"}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-6\",\"seq\":6,\"occurredAt\":\"2026-09-15T15:39:21.877Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"execution settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-7\",\"seq\":7,\"occurredAt\":\"2026-09-15T15:39:21.879Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"checkpoint.committed\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-8\",\"seq\":8,\"occurredAt\":\"2026-09-15T15:39:21.879Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-4be6569b4fa1\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-4be6569b4fa1\",\"digest\":\"sha256:4be6569b4fa12a15543c428dc34d0cf04faee8b710dac5e02ac35e81bd74d3f4\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-2619cfc0793d\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-2619cfc0793d\",\"digest\":\"sha256:2619cfc0793d90f1f4ae5648839650dcee7229c6c8cbd5578d39d3cc7e44f542\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"executionEpoch\":2,\"operationCounter\":2,\"cycleCounter\":2,\"startedAt\":\"2026-09-15T15:39:21.883Z\",\"input\":\"Count from 1 to 50 slowly, one number per line.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:39:21.883Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:39:24.882Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"provider.model\",\"state\":\"model\",\"summary\":\"model\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.created-response-rcc-response-2-2462b13dc72b\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.created-response-rcc-response-2-2462b13dc72b\",\"digest\":\"sha256:2462b13dc72b62e364ed1f8ad991c083384eb333a3cc1260bc4d1565a40562cc\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:39:24.882Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"output: humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:c40d5\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.output_item.done-output-rcc-output-0-c40d5d429e93\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.output_item.done-output-rcc-output-0-c40d5d429e93\",\"digest\":\"sha256:c40d5d429e93786cf894789e79a036deaedcabe830be60f85190d9b315637c6e\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]},\"taskOutput\":\"humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:c40d5\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:39:24.883Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10\\n11\\n12\\n13\\n14\\n15\\n16\\n17\\n18\\n19\\n20\\n21\\n22\\n23\\n24\\n25\\n26\\n27\\n28\\n29\\n30\\n31\\n32\\n33\\n34\\n35\\n36\\n37\\n38\\n39\\n40\\n41\\n42\\n43\\n44\\n45\\n46\\n47\\n48\\n49\\n50\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.output_item.done-output-rcc-output-1-93cb7da9e107\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-response.output_item.done-output-rcc-output-1-93cb7da9e107\",\"digest\":\"sha256:93cb7da9e1076e1a2c2ed84ff2b303c60fee63e4be81c07da896f85b99101d07\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]},\"taskOutput\":\"humanagent.provider-adapter:response.output_item.done:output-rcc-output-0:sha256:c40d51\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10\\n11\\n12\\n13\\n14\\n15\\n16\\n17\\n18\\n19\\n20\\n21\\n22\\n23\\n24\\n25\\n26\\n27\\n28\\n29\\n30\\n31\\n32\\n33\\n34\\n35\\n36\\n37\\n38\\n39\\n40\\n41\\n42\\n43\\n44\\n45\\n46\\n47\\n48\\n49\\n50\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-5\",\"seq\":5,\"occurredAt\":\"2026-09-15T15:39:24.884Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"stop requested; settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-6\",\"seq\":6,\"occurredAt\":\"2026-09-15T15:39:24.887Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"checkpoint.committed\",\"state\":\"stopped\",\"summary\":\"stopped checkpoint committed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-ea463ff238a8\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8\",\"digest\":\"sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-7\",\"seq\":7,\"occurredAt\":\"2026-09-15T15:39:24.888Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.terminal\",\"state\":\"stopped\",\"summary\":\"execution stopped; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-ea463ff238a8\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8\",\"digest\":\"sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-6174b56d-932f-49c5-a36e-610c58db567d-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-2619cfc0793d\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-fcxTkd/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-fcxTkd-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-2619cfc0793d\",\"digest\":\"sha256:2619cfc0793d90f1f4ae5648839650dcee7229c6c8cbd5578d39d3cc7e44f542\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n"
-        }
-      ]
-    },
-    {
-      "protocol": "openai",
-      "model": "gpt-5.5",
-      "root": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D",
+      "root": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O",
       "steps": {
         "probe": {
           "state": "ready",
@@ -260,11 +39,11 @@
           "state": "succeeded",
           "output": "OK",
           "checkpoint": {
-            "checkpointId": "checkpoint-ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1-1",
+            "checkpointId": "checkpoint-ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1-1",
             "seq": 1,
             "outcome": "succeeded",
             "summary": "execution succeeded",
-            "committedAt": "2026-09-15T15:39:35.113Z",
+            "committedAt": "2026-09-15T15:54:33.433Z",
             "evidenceRefs": [
               {
                 "evidenceId": {
@@ -281,7 +60,7 @@
                   },
                   "taskId": {
                     "scope": "task",
-                    "value": "ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1"
+                    "value": "ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1"
                   },
                   "cycleId": {
                     "scope": "cycle",
@@ -308,7 +87,204 @@
             "seq": 1,
             "outcome": "stopped",
             "summary": "operator-stop",
-            "committedAt": "2026-09-15T15:39:47.014Z",
+            "committedAt": "2026-09-15T15:55:07.550Z",
+            "evidenceRefs": [
+              {
+                "evidenceId": {
+                  "scope": "evidence",
+                  "value": "provider-settle-rcc-v3---settle-ea463ff238a8"
+                },
+                "kind": "external",
+                "source": "humanagent.provider-adapter",
+                "locator": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8",
+                "digest": "sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675",
+                "scope": {
+                  "organId": {
+                    "scope": "organ",
+                    "value": "humanagent-ui"
+                  },
+                  "taskId": {
+                    "scope": "task",
+                    "value": "ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1"
+                  },
+                  "cycleId": {
+                    "scope": "cycle",
+                    "value": "ui-cycle-2"
+                  },
+                  "operationId": {
+                    "scope": "operation",
+                    "value": "ui-operation-2"
+                  }
+                }
+              }
+            ]
+          },
+          "error": null
+        }
+      },
+      "events": {
+        "execute": [
+          {
+            "kind": "execution.started",
+            "state": "running",
+            "summary": "execution started",
+            "terminalPhase": null
+          },
+          {
+            "kind": "provider.model",
+            "state": "model",
+            "summary": "model",
+            "terminalPhase": null
+          },
+          {
+            "kind": "provider.output",
+            "state": "output",
+            "summary": "OK",
+            "terminalPhase": null
+          },
+          {
+            "kind": "execution.terminal",
+            "state": "succeeded",
+            "summary": "execution succeeded",
+            "terminalPhase": "provider"
+          },
+          {
+            "kind": "execution.settling",
+            "state": "settling",
+            "summary": "execution settling",
+            "terminalPhase": null
+          },
+          {
+            "kind": "checkpoint.committed",
+            "state": "succeeded",
+            "summary": "execution succeeded",
+            "terminalPhase": null
+          },
+          {
+            "kind": "execution.terminal",
+            "state": "succeeded",
+            "summary": "execution succeeded; provider closed",
+            "terminalPhase": "final"
+          }
+        ],
+        "stop": [
+          {
+            "kind": "execution.started",
+            "state": "running",
+            "summary": "execution started",
+            "terminalPhase": null
+          },
+          {
+            "kind": "execution.settling",
+            "state": "settling",
+            "summary": "stop requested; settling",
+            "terminalPhase": null
+          },
+          {
+            "kind": "checkpoint.committed",
+            "state": "stopped",
+            "summary": "stopped checkpoint committed",
+            "terminalPhase": null
+          },
+          {
+            "kind": "execution.terminal",
+            "state": "stopped",
+            "summary": "execution stopped; provider closed",
+            "terminalPhase": "final"
+          }
+        ]
+      },
+      "endpoint": "http://127.0.0.1:53387",
+      "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/checkpoints/ui-runtime",
+      "taskId": "ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1",
+      "checkpointModeRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/checkpoints/ui-runtime/rcc",
+      "checkpointFiles": [
+        "task-ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1-cycle-ui-cycle-1.jsonl",
+        "task-ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1-cycle-ui-cycle-2.jsonl",
+        "ui-runtime-journal.jsonl"
+      ],
+      "checkpointJournal": [
+        {
+          "name": "task-ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1-cycle-ui-cycle-1.jsonl",
+          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"checkpoint-ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":1,\"outcome\":\"succeeded\",\"summary\":\"execution succeeded\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint-recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}],\"next\":{\"kind\":\"continue\",\"ref\":\"task://ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1/next\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:08ff787ab69dbadf8046743ddecf456e07f7e1186d498ebc2c205baa5bb3ee35\"}\n"
+        },
+        {
+          "name": "task-ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1-cycle-ui-cycle-2.jsonl",
+          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"stopped-ui-operation-2-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":2,\"outcome\":\"stopped\",\"summary\":\"operator-stop\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-2\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-2/recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-ea463ff238a8\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8\",\"digest\":\"sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}],\"next\":{\"kind\":\"stop\",\"ref\":\"operator-stop\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:f1c38691056e684d6b8e842ca56206e0a85061d35a7b4fb5a2700080af00b858\"}\n"
+        },
+        {
+          "name": "ui-runtime-journal.jsonl",
+          "content": "{\"kind\":\"task.created\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"title\":\"rcc responses provider loop\",\"directive\":\"prove responses entry\",\"directiveRevision\":1,\"createdAt\":\"2026-09-15T15:54:22.423Z\",\"taskCounter\":1}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}},\"executionEpoch\":1,\"operationCounter\":1,\"cycleCounter\":1,\"startedAt\":\"2026-09-15T15:54:22.425Z\",\"input\":\"Reply with the single word OK.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:54:22.426Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:54:33.429Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.model\",\"state\":\"model\",\"summary\":\"model\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.created-response-rcc-response-1-83a58b9145bc\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-response.created-response-rcc-response-1-83a58b9145bc\",\"digest\":\"sha256:83a58b9145bcda5649bc296e34a95e8b3452a5ccd89db686e367bc7964d823d0\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:54:33.430Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"OK\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.output_item.done-output-rcc-output-0-7f7b9191070d\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-response.output_item.done-output-rcc-output-0-7f7b9191070d\",\"digest\":\"sha256:7f7b9191070dea427dbcba306ba5a9c80a6252c4f6e5eccb3b2ab51dfc664bc1\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"OK\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:54:33.431Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-response.completed-response-rcc-response-1-1b1001c55add\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-response.completed-response-rcc-response-1-1b1001c55add\",\"digest\":\"sha256:1b1001c55add56c4dc7f64d410810ad6bb273bb9816e49474fa2375435b90af8\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}],\"ownerId\":\"humanagent.provider-adapter\",\"nextAction\":\"continue\",\"terminalPhase\":\"provider\"}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-5\",\"seq\":5,\"occurredAt\":\"2026-09-15T15:54:33.431Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"execution settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-6\",\"seq\":6,\"occurredAt\":\"2026-09-15T15:54:33.433Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"checkpoint.committed\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-7\",\"seq\":7,\"occurredAt\":\"2026-09-15T15:54:33.434Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-4be6569b4fa1\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-4be6569b4fa1\",\"digest\":\"sha256:4be6569b4fa12a15543c428dc34d0cf04faee8b710dac5e02ac35e81bd74d3f4\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-2619cfc0793d\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-2619cfc0793d\",\"digest\":\"sha256:2619cfc0793d90f1f4ae5648839650dcee7229c6c8cbd5578d39d3cc7e44f542\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"executionEpoch\":2,\"operationCounter\":2,\"cycleCounter\":2,\"startedAt\":\"2026-09-15T15:54:33.438Z\",\"input\":\"Write a detailed 2000 word essay about distributed systems. Do not stop early.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:54:33.439Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:55:07.545Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"stop requested; settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:55:07.550Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"checkpoint.committed\",\"state\":\"stopped\",\"summary\":\"stopped checkpoint committed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-ea463ff238a8\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8\",\"digest\":\"sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:55:07.551Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.terminal\",\"state\":\"stopped\",\"summary\":\"execution stopped; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-ea463ff238a8\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8\",\"digest\":\"sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-1a58a94a-4393-48d2-a98d-726fe9bceb4f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-2619cfc0793d\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-responses-vl3W7O/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-responses-vl3W7O-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-2619cfc0793d\",\"digest\":\"sha256:2619cfc0793d90f1f4ae5648839650dcee7229c6c8cbd5578d39d3cc7e44f542\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n"
+        }
+      ]
+    },
+    {
+      "protocol": "openai",
+      "model": "gpt-5.5",
+      "root": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa",
+      "steps": {
+        "probe": {
+          "state": "ready",
+          "providerState": "ready",
+          "providerError": null
+        },
+        "start": {
+          "operationId": "ui-operation-1",
+          "executionEpoch": 1
+        },
+        "execute": {
+          "state": "succeeded",
+          "output": "OK",
+          "checkpoint": {
+            "checkpointId": "checkpoint-ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1-1",
+            "seq": 1,
+            "outcome": "succeeded",
+            "summary": "execution succeeded",
+            "committedAt": "2026-09-15T15:55:15.317Z",
+            "evidenceRefs": [
+              {
+                "evidenceId": {
+                  "scope": "evidence",
+                  "value": "checkpoint-ui-operation-1-1"
+                },
+                "kind": "operation",
+                "source": "humanagent.runtime",
+                "locator": "operation/ui-operation-1/checkpoint",
+                "scope": {
+                  "organId": {
+                    "scope": "organ",
+                    "value": "humanagent-ui"
+                  },
+                  "taskId": {
+                    "scope": "task",
+                    "value": "ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1"
+                  },
+                  "cycleId": {
+                    "scope": "cycle",
+                    "value": "ui-cycle-1"
+                  }
+                }
+              }
+            ]
+          },
+          "error": null
+        },
+        "secondStart": {
+          "operationId": "ui-operation-2",
+          "executionEpoch": 2
+        },
+        "stopRequest": {
+          "state": "stopped",
+          "operationId": "ui-operation-2"
+        },
+        "stop": {
+          "state": "stopped",
+          "checkpoint": {
+            "checkpointId": "stopped-ui-operation-2-1",
+            "seq": 1,
+            "outcome": "stopped",
+            "summary": "operator-stop",
+            "committedAt": "2026-09-15T15:55:47.080Z",
             "evidenceRefs": [
               {
                 "evidenceId": {
@@ -317,7 +293,7 @@
                 },
                 "kind": "external",
                 "source": "humanagent.provider-adapter",
-                "locator": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e",
+                "locator": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e",
                 "digest": "sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829",
                 "scope": {
                   "organId": {
@@ -326,7 +302,7 @@
                   },
                   "taskId": {
                     "scope": "task",
-                    "value": "ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1"
+                    "value": "ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1"
                   },
                   "cycleId": {
                     "scope": "cycle",
@@ -409,27 +385,27 @@
           }
         ]
       },
-      "endpoint": "http://127.0.0.1:59505",
-      "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/checkpoints/ui-runtime",
-      "taskId": "ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1",
-      "checkpointModeRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/checkpoints/ui-runtime/rcc",
+      "endpoint": "http://127.0.0.1:53713",
+      "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/checkpoints/ui-runtime",
+      "taskId": "ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1",
+      "checkpointModeRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/checkpoints/ui-runtime/rcc",
       "checkpointFiles": [
-        "task-ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1-cycle-ui-cycle-1.jsonl",
-        "task-ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1-cycle-ui-cycle-2.jsonl",
+        "task-ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1-cycle-ui-cycle-1.jsonl",
+        "task-ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1-cycle-ui-cycle-2.jsonl",
         "ui-runtime-journal.jsonl"
       ],
       "checkpointJournal": [
         {
-          "name": "task-ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1-cycle-ui-cycle-1.jsonl",
-          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"checkpoint-ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":1,\"outcome\":\"succeeded\",\"summary\":\"execution succeeded\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint-recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}],\"next\":{\"kind\":\"continue\",\"ref\":\"task://ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1/next\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:2f1b2e0857ff5a0b8053f5d139d2a3ace1dcbf81048ff07c9ede8aa6643f6b26\"}\n"
+          "name": "task-ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1-cycle-ui-cycle-1.jsonl",
+          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"checkpoint-ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":1,\"outcome\":\"succeeded\",\"summary\":\"execution succeeded\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint-recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}],\"next\":{\"kind\":\"continue\",\"ref\":\"task://ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1/next\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:dc0c2dbb2635ff0e5ff9ec65f2e5adbaa354ebccfeeb3d1342e74131f7a64b8e\"}\n"
         },
         {
-          "name": "task-ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1-cycle-ui-cycle-2.jsonl",
-          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"stopped-ui-operation-2-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":2,\"outcome\":\"stopped\",\"summary\":\"operator-stop\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-2\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-2/recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-595f660b6e1e\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e\",\"digest\":\"sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}],\"next\":{\"kind\":\"stop\",\"ref\":\"operator-stop\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:32f75e1188f25984fc44c8ef1651eec56329c3972dfa6930612c9db1ba17bdcd\"}\n"
+          "name": "task-ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1-cycle-ui-cycle-2.jsonl",
+          "content": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"stopped-ui-operation-2-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":2,\"outcome\":\"stopped\",\"summary\":\"operator-stop\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-2\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-2/recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-595f660b6e1e\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e\",\"digest\":\"sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}],\"next\":{\"kind\":\"stop\",\"ref\":\"operator-stop\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:c8a9614607519dae140de12513b70878c0895df9a96cfc75332fbbf386d2cd48\"}\n"
         },
         {
           "name": "ui-runtime-journal.jsonl",
-          "content": "{\"kind\":\"task.created\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"title\":\"rcc openai provider loop\",\"directive\":\"prove openai entry\",\"directiveRevision\":1,\"createdAt\":\"2026-09-15T15:39:25.063Z\",\"taskCounter\":1}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}},\"executionEpoch\":1,\"operationCounter\":1,\"cycleCounter\":1,\"startedAt\":\"2026-09-15T15:39:25.066Z\",\"input\":\"Reply with the single word OK.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:39:25.066Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:39:35.109Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"OK\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-openai.chat.completion-text-ff10f505-6304-4a0b-aa57-1ffa99275cf8-0-565339bc4d33\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-openai.chat.completion-text-ff10f505-6304-4a0b-aa57-1ffa99275cf8-0-565339bc4d33\",\"digest\":\"sha256:565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"OK\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:39:35.110Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-openai.chat.completion-finish-ff10f505-6304-4a0b-aa57-1ffa99275cf8-0-6c45cb72a36e\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-openai.chat.completion-finish-ff10f505-6304-4a0b-aa57-1ffa99275cf8-0-6c45cb72a36e\",\"digest\":\"sha256:6c45cb72a36e63d522aa54ed8adbd7a29a989474f2f77e0458af8800564ef3cb\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}],\"ownerId\":\"humanagent.provider-adapter\",\"nextAction\":\"continue\",\"terminalPhase\":\"provider\"}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:39:35.111Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"execution settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-5\",\"seq\":5,\"occurredAt\":\"2026-09-15T15:39:35.113Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"checkpoint.committed\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-6\",\"seq\":6,\"occurredAt\":\"2026-09-15T15:39:35.114Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-f30eb899cfcf\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-f30eb899cfcf\",\"digest\":\"sha256:f30eb899cfcf7c2b62a9f5813307290303f1824c960711d6813d1b3c3542ec40\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-6fddcc694302\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-6fddcc694302\",\"digest\":\"sha256:6fddcc6943025581c758febb4acddccdd148e0133179a3784421db0e19c341fd\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"executionEpoch\":2,\"operationCounter\":2,\"cycleCounter\":2,\"startedAt\":\"2026-09-15T15:39:35.116Z\",\"input\":\"Count from 1 to 50 slowly, one number per line.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:39:35.116Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:39:47.010Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"stop requested; settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:39:47.014Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"checkpoint.committed\",\"state\":\"stopped\",\"summary\":\"stopped checkpoint committed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-595f660b6e1e\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e\",\"digest\":\"sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:39:47.014Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.terminal\",\"state\":\"stopped\",\"summary\":\"execution stopped; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-595f660b6e1e\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e\",\"digest\":\"sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-a81cb7e2-cafe-4305-8ba0-28b782888e07-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-6fddcc694302\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-oR016D/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-oR016D-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-6fddcc694302\",\"digest\":\"sha256:6fddcc6943025581c758febb4acddccdd148e0133179a3784421db0e19c341fd\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n"
+          "content": "{\"kind\":\"task.created\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"title\":\"rcc openai provider loop\",\"directive\":\"prove openai entry\",\"directiveRevision\":1,\"createdAt\":\"2026-09-15T15:55:07.715Z\",\"taskCounter\":1}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}},\"executionEpoch\":1,\"operationCounter\":1,\"cycleCounter\":1,\"startedAt\":\"2026-09-15T15:55:07.718Z\",\"input\":\"Reply with the single word OK.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:55:07.718Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:55:15.313Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"OK\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-openai.chat.completion-text-chatcmpl_codebuddy_1789487699301-0-565339bc4d33\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-openai.chat.completion-text-chatcmpl_codebuddy_1789487699301-0-565339bc4d33\",\"digest\":\"sha256:565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"OK\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:55:15.314Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-openai.chat.completion-finish-chatcmpl_codebuddy_1789487699301-0-6c45cb72a36e\"},\"kind\":\"execution\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-openai.chat.completion-finish-chatcmpl_codebuddy_1789487699301-0-6c45cb72a36e\",\"digest\":\"sha256:6c45cb72a36e63d522aa54ed8adbd7a29a989474f2f77e0458af8800564ef3cb\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}],\"ownerId\":\"humanagent.provider-adapter\",\"nextAction\":\"continue\",\"terminalPhase\":\"provider\"}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:55:15.314Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"execution settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-5\",\"seq\":5,\"occurredAt\":\"2026-09-15T15:55:15.317Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"checkpoint.committed\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-6\",\"seq\":6,\"occurredAt\":\"2026-09-15T15:55:15.317Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-f30eb899cfcf\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-f30eb899cfcf\",\"digest\":\"sha256:f30eb899cfcf7c2b62a9f5813307290303f1824c960711d6813d1b3c3542ec40\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-6fddcc694302\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-6fddcc694302\",\"digest\":\"sha256:6fddcc6943025581c758febb4acddccdd148e0133179a3784421db0e19c341fd\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}},\"executionEpoch\":2,\"operationCounter\":2,\"cycleCounter\":2,\"startedAt\":\"2026-09-15T15:55:15.320Z\",\"input\":\"Write a detailed 2000 word essay about distributed systems. Do not stop early.\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-1\",\"seq\":1,\"occurredAt\":\"2026-09-15T15:55:15.320Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-2\",\"seq\":2,\"occurredAt\":\"2026-09-15T15:55:47.075Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"stop requested; settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-3\",\"seq\":3,\"occurredAt\":\"2026-09-15T15:55:47.080Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"checkpoint.committed\",\"state\":\"stopped\",\"summary\":\"stopped checkpoint committed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-595f660b6e1e\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e\",\"digest\":\"sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"},\"event\":{\"eventId\":\"ui-operation-2-4\",\"seq\":4,\"occurredAt\":\"2026-09-15T15:55:47.080Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"operationId\":\"ui-operation-2\",\"executionEpoch\":2,\"kind\":\"execution.terminal\",\"state\":\"stopped\",\"summary\":\"execution stopped; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-settle-rcc-v3---settle-595f660b6e1e\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-595f660b6e1e\",\"digest\":\"sha256:595f660b6e1e2402d4fbb8baafd88903d83926b55abc21b690a9992ea83fc829\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-2ab4a0ed-9bd9-4b0f-b95b-e99f71221c0f-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-2\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-2\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"provider-close-rcc-v3---close-6fddcc694302\"},\"kind\":\"external\",\"source\":\"humanagent.provider-adapter\",\"locator\":\"/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-ui-loop-openai-P4IuFa/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-ui-loop-openai-P4IuFa-workspace/artifacts/ui-provider-evidence/provider-close-rcc-v3---close-6fddcc694302\",\"digest\":\"sha256:6fddcc6943025581c758febb4acddccdd148e0133179a3784421db0e19c341fd\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"provider-adapter\"}}}],\"terminalPhase\":\"final\"}}\n"
         }
       ]
     }

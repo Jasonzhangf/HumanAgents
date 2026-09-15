@@ -3,11 +3,11 @@
   "kind": "humanagent.ui-provider-loop.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "implementationCommit": "7b80ea9308df5cd3842cca599dcaefe63e070212",
-    "implementationTree": "7d1f373db0c5d2a73a57b55820b6ebf916d810ef",
+    "implementationCommit": "5dd4f90527e17c03e8a9578a712ce993d03be232",
+    "implementationTree": "b344e47d2c487c5f0bb34ee13e386a7989313451",
     "reviewedUiCommit": "7faee1e711ce4ea05041c7b8530c5ce84d2cbbcf",
-    "evidenceCommit": "7b80ea9308df5cd3842cca599dcaefe63e070212",
-    "evidenceTree": "7d1f373db0c5d2a73a57b55820b6ebf916d810ef"
+    "evidenceCommit": "5dd4f90527e17c03e8a9578a712ce993d03be232",
+    "evidenceTree": "b344e47d2c487c5f0bb34ee13e386a7989313451"
   },
   "provider": {
     "endpoint": "http://127.0.0.1:4444",
@@ -49,7 +49,7 @@
   ],
   "artifacts": {
     "ui-provider-loop-proof.json": {
-      "sha256": "8262ec8d5e984ef7d5097f34373f0246226e2bba7984bc9e2d8af20045136cb4",
+      "sha256": "44c2f6d9bff47affd1d281dab5ad4f95a9265db1c5f849966a8a614543159322",
       "source": "dist/receipts/ui-provider-loop-proof.json"
     }
   },
