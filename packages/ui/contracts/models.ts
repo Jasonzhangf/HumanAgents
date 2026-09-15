@@ -151,6 +151,29 @@ export interface TaskFeedbackProjection {
   readonly entry?: 'task-detail';
 }
 
+export type ExecutionStepKind = 'input' | 'tool-call' | 'tool-result' | 'output' | 'terminal';
+
+export interface TaskExecutionStepProjection {
+  readonly stepId: string;
+  readonly kind: ExecutionStepKind;
+  readonly summary: string;
+  readonly refs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface AgentCheckpointProjection {
+  readonly checkpointId: string;
+  readonly executionEpoch: number;
+  readonly outcome: LifecycleState;
+  readonly ref: string;
+}
+
+export interface StopRecoveryProjection {
+  readonly mode: 'running' | 'recovering' | 'stopped';
+  readonly summary: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
 export interface TaskDashboardProjection {
   readonly surface: 'task-dashboard';
   readonly taskId: TaskId;
@@ -162,6 +185,9 @@ export interface TaskDashboardProjection {
   readonly currentStatus: string;
   readonly agentCards: readonly AgentWorkCardProjection[];
   readonly feedback: TaskFeedbackProjection;
+  readonly executionSteps: readonly TaskExecutionStepProjection[];
+  readonly checkpoint?: AgentCheckpointProjection;
+  readonly stopRecovery?: StopRecoveryProjection;
   readonly observationRef?: string;
 }
 

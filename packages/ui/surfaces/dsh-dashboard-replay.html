@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSH Agent 投影 replay</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    body {
+      margin: 0;
+      background: #f6f7f9;
+      color: #1a2433;
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0 0 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    section {
+      background: #fff;
+      border: 1px solid #d8dde5;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .status {
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+    ol {
+      margin: 0;
+      padding-left: 20px;
+      display: grid;
+      gap: 8px;
+    }
+    li {
+      list-style: none;
+      border-left: 3px solid #7b8aa0;
+      padding-left: 10px;
+    }
+    li.tool {
+      border-color: #2d7d52;
+    }
+    li.checkpoint,
+    li.recovery {
+      border-color: #b0562c;
+    }
+    @media (max-width: 720px) {
+      main {
+        padding: 12px;
+      }
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>检查配置问题</h1>
+    <div class="grid">
+      <section>
+        <div class="status">执行步骤</div>
+        <ol>
+          <li>输入：检查当前项目中是否存在配置问题</li>
+          <li class="tool">Tool call：读取配置文件</li>
+          <li class="tool">Tool result：配置项读取成功</li>
+          <li>输出：阶段性结论</li>
+          <li>Terminal：turn completed</li>
+        </ol>
+      </section>
+      <section>
+        <div class="status">状态</div>
+        <div>Agent：执行</div>
+        <div>Checkpoint：check-1-2 / succeeded</div>
+        <div>Recovery：从 HumanAgent checkpoint 启动新 execution epoch</div>
+        <div>Evidence：dsh://session/main/tool-result/1</div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

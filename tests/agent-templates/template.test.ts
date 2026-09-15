@@ -7,6 +7,7 @@ import {
   digestAgentTemplate,
   loadAgentTemplate,
   validateAgentTemplate,
+  validateConfiguredAgentBinding,
   type AgentRole,
   type AgentTemplateManifest,
   type AgentTemplateRegistry,
@@ -172,4 +173,31 @@ test('load rejects a driver outside the template contract or missing required ca
   assert.throws(() => loadAgentTemplate(compiled, { driverKind: 'remote', driverCapabilities: ['execute', 'settle'] }), AgentTemplateError);
   assert.throws(() => loadAgentTemplate(compiled, { driverKind: 'fake', driverCapabilities: ['execute'] }), AgentTemplateError);
   assert.throws(() => loadAgentTemplate(compiled, { driverKind: 'fake', driverCapabilities: ['execute', 'settle', 'settle'] }), AgentTemplateError);
+});
+
+test('configured agent bindings enable fake and explicit dsh drivers without implicit fallback', () => {
+  assert.doesNotThrow(() => validateConfiguredAgentBinding({
+    roleId: 'execution',
+    templateRef: 'builtin/execution@1.0.0',
+    driverRef: 'fake',
+    skills: ['single-capability-worker'],
+    tools: ['search'],
+    permissions: ['task.read', 'workspace.read'],
+  }));
+  assert.doesNotThrow(() => validateConfiguredAgentBinding({
+    roleId: 'execution',
+    templateRef: 'builtin/execution@1.0.0',
+    driverRef: 'dsh',
+    skills: ['single-capability-worker'],
+    tools: ['search'],
+    permissions: ['task.read', 'workspace.read'],
+  }));
+  assert.throws(() => validateConfiguredAgentBinding({
+    roleId: 'execution',
+    templateRef: 'builtin/execution@1.0.0',
+    driverRef: 'remote',
+    skills: ['single-capability-worker'],
+    tools: ['search'],
+    permissions: ['task.read', 'workspace.read'],
+  }), AgentTemplateError);
 });

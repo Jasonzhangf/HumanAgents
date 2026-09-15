@@ -7,6 +7,8 @@ import { validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole } f
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
+export const AGENT_DRIVER_REFS = ['fake', 'dsh'] as const;
+export type AgentDriverRef = (typeof AGENT_DRIVER_REFS)[number];
 export const AGENT_ROLES = ['interaction', 'orchestration', 'execution', 'review', 'memory'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
@@ -14,13 +16,26 @@ export interface AgentConfig {
   readonly agentId: string;
   readonly roleId: AgentRole;
   readonly templateRef: string;
-  readonly driverRef: string;
+  readonly driverRef: AgentDriverRef;
   readonly skills: readonly string[];
   readonly tools: readonly string[];
   readonly permissions: readonly string[];
   readonly memoryScopes: readonly ('task' | 'organ' | 'approved-global')[];
   readonly resourceClass: string;
   readonly model?: string;
+}
+
+export interface DshExecutionConfig {
+  readonly sourceRoot: string;
+  readonly home: string;
+  readonly profile: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly workspace?: string;
+  readonly patchFiles?: readonly string[];
+  readonly permissionMode?: string;
+  readonly turnTimeoutMs?: number;
+  readonly shutdownTimeoutMs?: number;
 }
 
 export interface UserConfig {
@@ -33,6 +48,7 @@ export interface UserConfig {
   readonly execution?: {
     readonly maxConcurrentTasks?: number;
     readonly stopTimeoutMs?: number;
+    readonly dsh?: DshExecutionConfig;
   };
 }
 
@@ -237,6 +253,10 @@ function validateAgent(value: unknown, index: number): AgentConfig {
   rejectUnknownKeys(agent, ['agentId', 'roleId', 'templateRef', 'driverRef', 'skills', 'tools', 'permissions', 'memoryScopes', 'resourceClass', 'model'], `agents[${index}]`);
   const role = asString(agent.roleId, `agents[${index}].roleId`);
   if (!(AGENT_ROLES as readonly string[]).includes(role)) fail('config-invalid', `unknown agent role: ${role}`);
+  const driverRef = asString(agent.driverRef, `agents[${index}].driverRef`);
+  if (!(AGENT_DRIVER_REFS as readonly string[]).includes(driverRef)) {
+    fail('config-capability', `unknown agent driver: ${driverRef}`, 'choose an explicitly supported driverRef');
+  }
   const memoryScopes = asStringArray(agent.memoryScopes, `agents[${index}].memoryScopes`);
   if (memoryScopes.some((scope) => !['task', 'organ', 'approved-global'].includes(scope))) {
     fail('config-invalid', `invalid memory scope for agents[${index}]`);
@@ -245,7 +265,7 @@ function validateAgent(value: unknown, index: number): AgentConfig {
     validateConfiguredAgentBinding({
       roleId: role as TemplateAgentRole,
       templateRef: asString(agent.templateRef, `agents[${index}].templateRef`),
-      driverRef: asString(agent.driverRef, `agents[${index}].driverRef`),
+      driverRef,
       skills: asStringArray(agent.skills, `agents[${index}].skills`),
       tools: asStringArray(agent.tools, `agents[${index}].tools`),
       permissions: asStringArray(agent.permissions, `agents[${index}].permissions`),
@@ -257,13 +277,38 @@ function validateAgent(value: unknown, index: number): AgentConfig {
     agentId: asString(agent.agentId, `agents[${index}].agentId`),
     roleId: role as AgentRole,
     templateRef: asString(agent.templateRef, `agents[${index}].templateRef`),
-    driverRef: asString(agent.driverRef, `agents[${index}].driverRef`),
+    driverRef: driverRef as AgentDriverRef,
     skills: asStringArray(agent.skills, `agents[${index}].skills`),
     tools: asStringArray(agent.tools, `agents[${index}].tools`),
     permissions: asStringArray(agent.permissions, `agents[${index}].permissions`),
     memoryScopes: memoryScopes as AgentConfig['memoryScopes'],
     resourceClass: asString(agent.resourceClass, `agents[${index}].resourceClass`),
     ...(agent.model === undefined ? {} : { model: asString(agent.model, `agents[${index}].model`) }),
+  };
+}
+
+function validateDshExecution(value: unknown, label: string): DshExecutionConfig {
+  const dsh = asRecord(value, label);
+  rejectUnknownKeys(dsh, ['sourceRoot', 'home', 'profile', 'provider', 'model', 'workspace', 'patchFiles', 'permissionMode', 'turnTimeoutMs', 'shutdownTimeoutMs'], label);
+  const timeout = (candidate: unknown, field: string): number | undefined => {
+    if (candidate === undefined) return undefined;
+    if (typeof candidate !== 'number' || !Number.isSafeInteger(candidate) || candidate < 1) fail('config-invalid', `${label}.${field} must be positive`);
+    return candidate;
+  };
+  const patchFiles = dsh.patchFiles === undefined ? undefined : asStringArray(dsh.patchFiles, `${label}.patchFiles`);
+  const turnTimeoutMs = timeout(dsh.turnTimeoutMs, 'turnTimeoutMs');
+  const shutdownTimeoutMs = timeout(dsh.shutdownTimeoutMs, 'shutdownTimeoutMs');
+  return {
+    sourceRoot: asString(dsh.sourceRoot, `${label}.sourceRoot`),
+    home: asString(dsh.home, `${label}.home`),
+    profile: asString(dsh.profile, `${label}.profile`),
+    provider: asString(dsh.provider, `${label}.provider`),
+    model: asString(dsh.model, `${label}.model`),
+    ...(dsh.workspace === undefined ? {} : { workspace: asString(dsh.workspace, `${label}.workspace`) }),
+    ...(patchFiles === undefined ? {} : { patchFiles }),
+    ...(dsh.permissionMode === undefined ? {} : { permissionMode: asString(dsh.permissionMode, `${label}.permissionMode`) }),
+    ...(turnTimeoutMs === undefined ? {} : { turnTimeoutMs }),
+    ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs }),
   };
 }
 
@@ -281,7 +326,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   const project = value.project === undefined ? undefined : asRecord(value.project, 'project');
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'user project config');
-  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs'], 'user execution config');
+  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh'], 'user execution config');
   const maxConcurrentTasks = execution?.maxConcurrentTasks as unknown;
   const stopTimeoutMs = execution?.stopTimeoutMs as unknown;
   if (maxConcurrentTasks !== undefined && (typeof maxConcurrentTasks !== 'number' || !Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)) fail('config-invalid', 'execution.maxConcurrentTasks must be positive');
@@ -296,6 +341,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
     ...(execution === undefined ? {} : { execution: {
       ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks: maxConcurrentTasks as number }),
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
+      ...(execution.dsh === undefined ? {} : { dsh: validateDshExecution(execution.dsh, 'execution.dsh') }),
     }}),
   };
 }

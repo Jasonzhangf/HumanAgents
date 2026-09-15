@@ -9,8 +9,10 @@ import {
   type AgentOutput,
   type AgentResumeRequest,
   type AgentStartRequest,
+  type CycleId,
   type EvidenceRef,
   type OperationId,
+  type OrganId,
   type StopRequestReceipt,
 } from '../../../contracts/src/index.js';
 
@@ -30,7 +32,7 @@ export type FakeExecutionEvidence = {
   readonly evidenceRefs: readonly EvidenceRef[];
 };
 
-type Session = { readonly runtimeId: string; readonly taskId: AgentStartRequest['taskId']; readonly epoch: number; readonly sessionRef: string; readonly operationId: OperationId };
+type Session = { readonly runtimeId: string; readonly taskId: AgentStartRequest['taskId']; readonly epoch: number; readonly sessionRef: string; readonly operationId: OperationId; readonly organId?: OrganId; readonly cycleId?: CycleId };
 
 function digest(value: string): string {
   let hash = 2166136261;
@@ -52,7 +54,7 @@ export class FakeAgentDriver implements AgentDriver {
 
   async start(input: AgentStartRequest): Promise<AgentHandle> {
     if (this.sessions.has(input.runtimeId)) throw new ContractError(`runtime already started: ${input.runtimeId}`);
-    const session = this.makeSession(input.runtimeId, input.taskId, input.executionEpoch);
+    const session = this.makeSession(input.runtimeId, input.taskId, input.executionEpoch, input.operationId, input.organId, input.cycleId);
     this.sessions.set(input.runtimeId, session);
     if (input.assignmentId) this.sessions.set(input.assignmentId, session);
     return { runtimeId: input.runtimeId, executionEpoch: input.executionEpoch };
@@ -98,7 +100,7 @@ export class FakeAgentDriver implements AgentDriver {
     const session = this.sessions.get(input.assignmentId);
     if (!session || session.epoch !== input.executionEpoch) throw new ContractError('fake execution is not bound to session epoch');
     const outcome = this.outcomes[input.assignmentId] ?? 'succeeded';
-    const evidenceRef: EvidenceRef = { evidenceId: { scope: 'evidence', value: `fake-${session.sessionRef}-${this.evidence.length + 1}` }, kind: 'execution', source: 'humanagent.fake', locator: `session/${session.sessionRef}/operation/${session.operationId.value}`, digest: digest(`${input.assignmentId}:${JSON.stringify(input.payload)}:${outcome}`), scope: { organId: { scope: 'organ', value: 'fake-organ' }, taskId: input.taskId, operationId: session.operationId } };
+    const evidenceRef: EvidenceRef = { evidenceId: { scope: 'evidence', value: `fake-${session.sessionRef}-${this.evidence.length + 1}` }, kind: 'execution', source: 'humanagent.fake', locator: `session/${session.sessionRef}/operation/${session.operationId.value}`, digest: digest(`${input.assignmentId}:${JSON.stringify(input.payload)}:${outcome}`), scope: { organId: session.organId ?? { scope: 'organ', value: 'fake-organ' }, taskId: input.taskId, ...(session.cycleId ? { cycleId: session.cycleId } : {}), operationId: session.operationId } };
     const evidence: FakeExecutionEvidence = { operationId: session.operationId, sessionRef: session.sessionRef, sequence: this.evidence.length + 1, outcome, inputDigest: evidenceRef.digest!, evidenceRefs: [evidenceRef] };
     this.evidence.push(evidence);
     return { outcome, summary: `fake ${outcome}`, evidence };
@@ -106,8 +108,8 @@ export class FakeAgentDriver implements AgentDriver {
 
   replay(): readonly FakeExecutionEvidence[] { return this.evidence.map((item) => ({ ...item, evidenceRefs: [...item.evidenceRefs] })); }
 
-  private makeSession(runtimeId: string, taskId: AgentStartRequest['taskId'], epoch: number): Session {
+  private makeSession(runtimeId: string, taskId: AgentStartRequest['taskId'], epoch: number, operationId?: OperationId, organId?: OrganId, cycleId?: CycleId): Session {
     const suffix = digest(`${runtimeId}:${taskId.value}:${epoch}`);
-    return { runtimeId, taskId, epoch, sessionRef: `fake-session-${suffix}`, operationId: { scope: 'operation', value: `fake-operation-${suffix}` } };
+    return { runtimeId, taskId, epoch, sessionRef: `fake-session-${suffix}`, operationId: operationId ?? { scope: 'operation', value: `fake-operation-${suffix}` }, organId, cycleId };
   }
 }

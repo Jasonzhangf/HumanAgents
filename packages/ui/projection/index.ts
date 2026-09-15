@@ -19,6 +19,7 @@ import {
   type ObservationNodeDetailProjection,
   type PipelineObservationProjection,
   type RecentInputProjection,
+  type ExecutionStepKind,
   type TaskDashboardProjection,
   type TaskDetailProjection,
   type TaskListProjection,
@@ -26,6 +27,9 @@ import {
   type TaskRowProjection,
   type UiDataSource,
   type UiSurfaceState,
+  type AgentCheckpointProjection,
+  type StopRecoveryProjection,
+  type TaskExecutionStepProjection,
 } from '../contracts/models.js';
 
 const STATE_LABELS: Record<LifecycleState, string> = {
@@ -157,6 +161,27 @@ export interface AgentCardSource {
   readonly processRef?: string;
 }
 
+export interface ExecutionStepSource {
+  readonly stepId: string;
+  readonly kind: ExecutionStepKind;
+  readonly summary: string;
+  readonly refs?: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface CheckpointSource {
+  readonly checkpointId: string;
+  readonly executionEpoch: number;
+  readonly outcome: LifecycleState;
+  readonly ref: string;
+}
+
+export interface StopRecoverySource {
+  readonly mode: StopRecoveryProjection['mode'];
+  readonly summary: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
 export interface TaskDashboardProjectionInput {
   readonly source: UiDataSource;
   readonly task: Task;
@@ -164,6 +189,9 @@ export interface TaskDashboardProjectionInput {
   readonly objective: string;
   readonly currentStatus: string;
   readonly agentCards: readonly AgentCardSource[];
+  readonly executionSteps?: readonly ExecutionStepSource[];
+  readonly checkpoint?: CheckpointSource;
+  readonly stopRecovery?: StopRecoverySource;
   readonly requiresUserHandling: boolean;
   readonly userHandlingSummary?: string;
   readonly observationRef?: string;
@@ -369,6 +397,36 @@ function toAgentWorkCard(source: AgentCardSource): AgentWorkCardProjection {
   };
 }
 
+function toExecutionSteps(sources: readonly ExecutionStepSource[] | undefined): TaskExecutionStepProjection[] {
+  if (!sources) return [];
+  return sources.map((source) => ({
+    stepId: source.stepId,
+    kind: source.kind,
+    summary: source.summary,
+    refs: source.refs ?? [],
+    evidenceRefs: source.evidenceRefs,
+  }));
+}
+
+function toCheckpoint(source: CheckpointSource | undefined): AgentCheckpointProjection | undefined {
+  if (!source) return undefined;
+  return {
+    checkpointId: source.checkpointId,
+    executionEpoch: source.executionEpoch,
+    outcome: source.outcome,
+    ref: source.ref,
+  };
+}
+
+function toStopRecovery(source: StopRecoverySource | undefined): StopRecoveryProjection | undefined {
+  if (!source) return undefined;
+  return {
+    mode: source.mode,
+    summary: source.summary,
+    evidenceRefs: source.evidenceRefs,
+  };
+}
+
 export function projectTaskDashboard(input: TaskDashboardProjectionInput): TaskDashboardProjection {
   return {
     surface: 'task-dashboard',
@@ -380,6 +438,9 @@ export function projectTaskDashboard(input: TaskDashboardProjectionInput): TaskD
     objective: input.objective,
     currentStatus: input.currentStatus,
     agentCards: input.agentCards.map(toAgentWorkCard),
+    executionSteps: toExecutionSteps(input.executionSteps),
+    checkpoint: toCheckpoint(input.checkpoint),
+    stopRecovery: toStopRecovery(input.stopRecovery),
     feedback: {
       required: input.requiresUserHandling,
       summary: input.userHandlingSummary,

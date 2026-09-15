@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { ConfigurationError, ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../config/src/index.js';
 import { AppLifecycleError } from './errors.js';
-import { openRuntime, resumeRuntime } from './index.js';
+import { closeRuntime, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation } from './index.js';
 import { SessionStore } from './session-store.js';
 
 function option(args: readonly string[], name: string): string | undefined {
@@ -31,17 +31,84 @@ export async function main(args: readonly string[]): Promise<void> {
   }
   if (command === 'run') {
     const plan = required(option(args, '--plan'), '--plan');
+    const prompt = required(option(args, '--prompt'), '--prompt');
     const sessionId = option(args, '--session') ?? 'session-' + Date.now();
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
-    console.log(JSON.stringify({ command, plan, sessionId, controlCwd: runtime.paths.controlRoot, agentCwd: runtime.paths.agentCwd, workspaceCwd: runtime.paths.workspaceCwd, projectKey: runtime.paths.projectKey, state: runtime.session.state }, null, 2));
-    await runtime.lock.release();
+    try {
+      const running = await new SessionStore(runtime.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+      const result = await runAgentOperation({
+        paths: runtime.paths,
+        configuration: runtime.configuration,
+        workspace: runtime.paths.workspaceCwd,
+        sessionId,
+        plan,
+        prompt,
+      });
+      const terminalOutcome = result.checkpoint.outcome === 'succeeded'
+        || result.checkpoint.outcome === 'stopped'
+        || result.checkpoint.outcome === 'cancelled';
+      if (!terminalOutcome) {
+        await runtime.lock.release();
+      } else {
+        await closeRuntime(runtime, result.checkpoint.id.value);
+      }
+      console.log(JSON.stringify({
+        command,
+        plan,
+        sessionId,
+        controlCwd: runtime.paths.controlRoot,
+        workspaceCwd: runtime.paths.workspaceCwd,
+        projectKey: runtime.paths.projectKey,
+        state: terminalOutcome ? 'stopped' : 'recoverable',
+        taskId: result.taskId.value,
+        operationId: result.operationId.value,
+        executionEpoch: result.executionEpoch,
+        outcome: result.checkpoint.outcome,
+        checkpointId: result.checkpoint.id.value,
+        observedKinds: result.receipt.observedKinds,
+      }, null, 2));
+      void running;
+    } catch (error) {
+      try { await runtime.lock.release(); } catch { /* preserve the execution failure */ }
+      throw error;
+    }
     return;
   }
   if (command === 'resume') {
     const sessionId = required(option(args, '--session'), '--session');
+    const prompt = required(option(args, '--prompt'), '--prompt');
     const runtime = await resumeRuntime({ workspace, controlRoot, sessionId });
-    console.log(JSON.stringify({ command, sessionId, controlCwd: runtime.paths.controlRoot, agentCwd: runtime.paths.agentCwd, workspaceCwd: runtime.paths.workspaceCwd, projectKey: runtime.paths.projectKey, state: runtime.session.state }, null, 2));
-    await runtime.lock.release();
+    try {
+      const manifest = await readRunManifest(runtime.paths, sessionId);
+      const recovered = await resumeAgentOperation({
+        paths: runtime.paths,
+        configuration: runtime.configuration,
+        workspace: runtime.paths.workspaceCwd,
+        sessionId,
+        plan: runtime.session.records[0].plan,
+        prompt,
+        taskId: manifest.taskId,
+        cycleId: manifest.cycleId,
+        scope: manifest.scope,
+        executionEpoch: manifest.executionEpoch,
+        directiveRevision: manifest.directiveRevision,
+        agentId: manifest.agentId,
+        driverRef: manifest.driverRef,
+      });
+      console.log(JSON.stringify({
+        command,
+        sessionId,
+        state: runtime.session.state,
+        checkpointId: recovered.recovered?.checkpoint.id.value,
+        waitingReason: recovered.waitingReason,
+        resumedExecutionEpoch: recovered.execution?.executionEpoch,
+        resumedOutcome: recovered.execution?.checkpoint.outcome,
+      }, null, 2));
+      await runtime.lock.release();
+    } catch (error) {
+      try { await runtime.lock.release(); } catch { /* preserve the recovery failure */ }
+      throw error;
+    }
     return;
   }
   if (command === 'session') {

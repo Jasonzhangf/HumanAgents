@@ -41,7 +41,18 @@ function digestRecord(record: Omit<JournalRecord, 'recordDigest'>): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(record)).digest('hex')}`;
 }
 
-function validateRecord(record: JournalRecord, previous: JournalRecord | null, previousCheckpoint: Checkpoint | null): void {
+function checkpointKey(checkpoint: Checkpoint): string {
+  return `${checkpoint.id.scope}:${checkpoint.id.value}`;
+}
+
+function resolveCheckpointPredecessor(checkpoint: Checkpoint, checkpoints: ReadonlyMap<string, Checkpoint>): Checkpoint | null {
+  if (checkpoint.previousCheckpointId === null) return null;
+  const previous = checkpoints.get(`${checkpoint.previousCheckpointId.scope}:${checkpoint.previousCheckpointId.value}`);
+  if (!previous) throw new JournalIntegrityError('broken checkpoint predecessor');
+  return previous;
+}
+
+function validateRecord(record: JournalRecord, previous: JournalRecord | null, checkpoints: ReadonlyMap<string, Checkpoint>): void {
   if (record.version !== 1 || !Number.isSafeInteger(record.seq) || record.seq < 1) throw new JournalIntegrityError('invalid journal record');
   if (record.seq !== (previous ? previous.seq + 1 : 1)) throw new JournalIntegrityError('duplicate or non-contiguous journal sequence');
   if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) throw new JournalIntegrityError('broken journal predecessor link');
@@ -61,7 +72,7 @@ function validateRecord(record: JournalRecord, previous: JournalRecord | null, p
         assertEvidenceRef(evidenceRef);
         assertSameScope(record.checkpoint!.scope, evidenceRef.scope);
       }
-      assertCheckpointLink(record.checkpoint!, previousCheckpoint);
+      assertCheckpointLink(record.checkpoint!, resolveCheckpointPredecessor(record.checkpoint!, checkpoints));
     });
   } else if (record.checkpoint) throw new JournalIntegrityError('event record cannot contain checkpoint');
   else if (record.payload === undefined) throw new JournalIntegrityError('event record missing payload');
@@ -84,7 +95,7 @@ function parse(content: string): JournalVerification {
   const lines = content.split('\n');
   const trailingLine = lines[lines.length - 1] === '' ? undefined : lines.pop();
   const records: JournalRecord[] = [];
-  let previousCheckpoint: Checkpoint | null = null;
+  const checkpoints = new Map<string, Checkpoint>();
   try {
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
@@ -93,9 +104,9 @@ function parse(content: string): JournalVerification {
         continue;
       }
       const record = JSON.parse(line) as JournalRecord;
-      validateRecord(record, records.at(-1) ?? null, previousCheckpoint);
+      validateRecord(record, records.at(-1) ?? null, checkpoints);
       records.push(record);
-      if (record.kind === 'checkpoint') previousCheckpoint = record.checkpoint ?? null;
+      if (record.kind === 'checkpoint' && record.checkpoint) checkpoints.set(checkpointKey(record.checkpoint), record.checkpoint);
     }
   } catch (error) {
     return { valid: false, records, error: error instanceof Error ? error.message : String(error), trailingLine };
@@ -115,7 +126,10 @@ export class JsonlOrganJournal {
     const { kind, scope, checkpoint, payload } = input;
     assertScopeRef(scope);
     const recordWithoutDigest = { version: 1 as const, seq: (previous?.seq ?? 0) + 1, kind, scope, checkpoint, payload, previousRecordDigest: previous?.recordDigest ?? null };
-    const lastCheckpoint = [...verification.records].reverse().find((record) => record.kind === 'checkpoint')?.checkpoint ?? null;
+    const checkpoints = new Map<string, Checkpoint>();
+    for (const record of verification.records) {
+      if (record.kind === 'checkpoint' && record.checkpoint) checkpoints.set(checkpointKey(record.checkpoint), record.checkpoint);
+    }
     if (input.kind === 'checkpoint') {
       if (!input.checkpoint) throw new JournalIntegrityError('checkpoint record missing checkpoint');
       if (input.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
@@ -126,11 +140,11 @@ export class JsonlOrganJournal {
           assertEvidenceRef(evidenceRef);
           assertSameScope(input.checkpoint!.scope, evidenceRef.scope);
         }
-        assertCheckpointLink(input.checkpoint!, lastCheckpoint);
+        assertCheckpointLink(input.checkpoint!, resolveCheckpointPredecessor(input.checkpoint!, checkpoints));
       });
     }
     const record = { ...recordWithoutDigest, recordDigest: digestRecord(recordWithoutDigest) };
-    validateRecord(record, previous, lastCheckpoint);
+    validateRecord(record, previous, checkpoints);
     await mkdir(dirname(this.filePath), { recursive: true });
     await appendFile(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
     return record;

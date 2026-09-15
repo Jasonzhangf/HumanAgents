@@ -8,7 +8,11 @@
   },
   "include": [
     "src/**/*.ts",
+    "src/**/*.d.ts",
     "../config/src/**/*.ts",
-    "../contracts/src/**/*.ts"
+    "../contracts/src/**/*.ts",
+    "../agent-templates/src/**/*.ts",
+    "../adapters/dsh/src/**/*.ts",
+    "../adapters/testing/src/**/*.ts"
   ]
 }

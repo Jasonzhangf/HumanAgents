@@ -63,5 +63,27 @@ export async function closeRuntime(handle: RuntimeHandle, checkpointRef?: string
 export { AppLifecycleError } from './errors.js';
 export { bindExecutionRuntime, probeExecutionRuntime } from './execution.js';
 export type { RuntimeExecutionBinding } from './execution.js';
+export { executeAgentOperation, openAgentExecution } from './agent-execution.js';
+export type { AgentExecutionReceipt, AgentExecutionRequest, AgentExecutionSession } from './agent-execution.js';
+export {
+  assertDshSourceMatchesLock,
+  composeAgentDriver,
+  ensureDshSettings,
+  resolveDshHome,
+  verifyDshPatches,
+} from './agent-driver-composition.js';
+export type { ComposedAgentDriver, DshCompositionInput } from './agent-driver-composition.js';
+export { openAgentOperation, prepareAgentOperation, AgentOperationController } from './agent-operation.js';
+export type { AgentOperationSnapshot, OpenAgentOperationInput } from './agent-operation.js';
+export { createJsonlCheckpointJournal } from './checkpoint-journal.js';
+export { checkpointIdFor, resumeAgentOperation, runAgentOperation } from './run-operation.js';
+export type {
+  ResumeAgentOperationInput,
+  ResumeAgentOperationResult,
+  RunAgentOperationInput,
+  RunAgentOperationResult,
+} from './run-operation.js';
+export { readRunManifest, writeRunManifest } from './run-manifest.js';
+export type { RunManifest } from './run-manifest.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';

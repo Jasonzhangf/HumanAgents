@@ -6,6 +6,7 @@ export type DshAdapterErrorCode =
   | 'capability-unavailable'
   | 'configuration-invalid'
   | 'identity-mismatch'
+  | 'stop-rejected'
   | 'transport-failure';
 
 export type DshAdapterNextAction = { readonly kind: 'continue' | 'wait' | 'stop' | 'recover'; readonly ref?: string };

@@ -135,6 +135,12 @@ export interface AgentStartRequest {
   readonly taskId: TaskId;
   readonly executionEpoch: number;
   readonly assignmentId?: string;
+  /** HumanAgent-owned organ identity; adapters must not mint their own. */
+  readonly organId?: OrganId;
+  /** HumanAgent-owned cycle identity; adapters must not mint their own. */
+  readonly cycleId?: CycleId;
+  /** HumanAgent-owned operation identity; adapters must not mint their own. */
+  readonly operationId?: OperationId;
 }
 export interface AgentResumeRequest extends AgentStartRequest {
   readonly checkpointId: CheckpointId;
@@ -435,6 +441,7 @@ export interface ProviderExecutionIdentityRef {
   readonly runtimeId: AgentRuntimeId;
   readonly taskId: TaskId;
   readonly operationId: OperationId;
+  readonly organId?: OrganId;
   readonly executionEpoch: number;
 }
 

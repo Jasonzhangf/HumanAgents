@@ -16,13 +16,15 @@ const OWNER_ID = 'humanagent.provider-adapter';
 
 function toScope(scopeOrExecution: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef | undefined): ScopeRef {
   if (!scopeOrExecution) return { organId: id('organ', 'provider-adapter') };
-  if ('organId' in scopeOrExecution) return scopeOrExecution;
   if ('providerId' in scopeOrExecution) return { organId: id('organ', 'provider-adapter') };
-  return {
-    organId: id('organ', 'provider-adapter'),
-    taskId: scopeOrExecution.taskId,
-    operationId: scopeOrExecution.operationId,
-  };
+  if ('runtimeId' in scopeOrExecution) {
+    return {
+      organId: scopeOrExecution.organId ?? id('organ', 'provider-adapter'),
+      taskId: scopeOrExecution.taskId,
+      operationId: scopeOrExecution.operationId,
+    };
+  }
+  return scopeOrExecution;
 }
 
 function errorEvidence(scopeOrExecution: ProviderBinding | ProviderExecutionIdentityRef | ScopeRef | undefined, label: string): EvidenceRef {

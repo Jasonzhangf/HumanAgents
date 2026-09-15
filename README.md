@@ -4,7 +4,10 @@
 
 ## 当前状态
 
-`MVP-IMPLEMENTATION`（2026-09-13）。已具备独立的启动/config/session 链和带 checkpoint 的本地编译链；DSH 仍是后续可替换执行后端。
+`MVP-IMPLEMENTATION`（2026-09-14）。已具备独立的启动/config/session 链、带
+checkpoint 的本地编译链，以及真实单 DSH Agent candidate：DSH stdio session、
+真实只读工具、RCC 4444 provider、同一 session continuation、stop/settle、
+crash recovery 和 UI projection 已接通；candidate 尚未 merge 或 release。
 
 ## 核心决定
 
@@ -27,9 +30,15 @@ UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和�
 9. [DSH 基线与 Milestone 1 适配准备](docs/architecture/dsh-baseline.md)
 10. [项目规则](AGENTS.md)
 
-## 当前未完成
+## 当前收口
 
-DSH 源码基线已锁定到上游 `master@c291e7961a515f6d7af9304e7fd1d257929aef26`，并记录了 tree、最近发布标记和 clean checkout 证据。真实 DSH 适配、Cordis bridge、持久化故障恢复、steer 同入口停止和长程 replay 仍待 Milestone 1；当前只完成基线和计划，不声称 adapter 已接入。
+DSH 源码基线锁定到上游
+`master@c291e7961a515f6d7af9304e7fd1d257929aef26`，并使用 clean detached
+worktree 验证 commit/tree、源码 patch、真实 RCC 和真实 DSH 同入口。当前分支已
+完成 P0-P5，计划与证据见
+[`docs/goals/real-single-dsh-agent-plan.md`](docs/goals/real-single-dsh-agent-plan.md)；
+只剩 candidate-bound 独立 review 和最终 SHA/tree 收口。该 candidate 尚未 merge、
+push 或 production release。
 
 ## 本地启动与增量编译
 
