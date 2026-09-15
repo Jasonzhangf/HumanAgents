@@ -123,6 +123,7 @@ function codecContext(sink = memoryEvidenceSink()) {
     scope: operationScope,
     evidence: sink,
     sink,
+    responsesOutputText: new Map<string, string>(),
     nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
   };
 }
@@ -226,6 +227,7 @@ test('recorded Responses success sequence replays through codec and immutable ev
   }
 
   assert.deepEqual(decoded.map((event) => event.kind), ['model', 'output', 'terminal']);
+  assert.equal(decoded.find((event) => event.kind === 'output')?.summary, 'hello');
   assert.equal(decoded.at(-1)?.terminalState, 'succeeded');
   assert.equal(decoded.at(-1)?.ownerId, ownerId);
   assert.deepEqual(decoded.at(-1)?.nextAction, { kind: 'continue' });

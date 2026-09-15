@@ -299,7 +299,7 @@ test('provider-neutral execution runtime fixtures validate and expose a typed fa
 
 test('rejects invalid provider binding identity and missing required binding data', () => {
   assert.throws(() => validateProviderBinding({ ...providerBinding(), bindingId: '   ' }), ContractError);
-  assert.throws(() => validateProviderBinding({ ...providerBinding(), protocol: 'openai' } as unknown as ProviderBinding), ContractError);
+  assert.doesNotThrow(() => validateProviderBinding({ ...providerBinding(), protocol: 'openai' }));
   for (const field of ['endpointRef', 'modelRef', 'configDigest', 'capabilityDigest'] as const) {
     const invalid = { ...providerBinding() } as Partial<ProviderBinding>;
     delete invalid[field];

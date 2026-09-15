@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="HumanAgent 任务执行看板交互定义" />
     <title>HumanAgent · 任务执行看板</title>
-    <link rel="stylesheet" href="./task-dashboard.css" />
+    <link rel="stylesheet" href="./runtime.css" />
   </head>
   <body>
-    <div class="task-dashboard" data-task-state="running">
+    <div class="task-dashboard" data-task-state="running" hidden>
       <header class="task-dashboard-header" data-region="global-navigation">
         <div class="brand-line">
           <a href="./dashboard.html">HumanAgent</a>
@@ -96,6 +96,6 @@
         </form>
       </dialog>
     </div>
-    <script src="./task-dashboard.js"></script>
+    <script type="module" src="./task-dashboard.js"></script>
   </body>
 </html>

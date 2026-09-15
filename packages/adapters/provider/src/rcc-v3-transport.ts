@@ -22,8 +22,10 @@ import {
 } from '../../../contracts/src/index.js';
 import { ProviderAdapterError } from './errors.js';
 import type { ProviderEvidenceSink } from './evidence.js';
+import { mapOpenAIFinishReason } from './openai-finish-reason.js';
 import type {
   AnthropicWireRequest,
+  OpenAIChatWireRequest,
   ProviderWireEvent,
   ProviderWireRequest,
   ProviderWireStopRequest,
@@ -67,7 +69,7 @@ interface ActiveExecution {
   readonly identity: ProviderExecutionIdentityRef;
   readonly controller: AbortController;
   readonly body: AsyncIterable<Uint8Array>;
-  readonly protocol: 'responses' | 'anthropic';
+  readonly protocol: 'responses' | 'anthropic' | 'openai';
   readonly route: string;
   readonly model: string;
   readonly evidenceScope: ScopeRef;
@@ -78,6 +80,9 @@ interface ActiveExecution {
   resourceReleased: boolean;
   terminalState?: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'stopped' | 'unknown';
   terminalError?: ProviderError;
+  // Resolved by observe() once the SSE loop has stopped consuming the body,
+  // so requestStop can report a settled terminal state instead of waiting.
+  streamCompletion?: Promise<void>;
 }
 
 interface SseFrame {
@@ -127,8 +132,8 @@ function scopeFor(execution: ProviderExecutionIdentityRef, scope?: ScopeRef): Sc
   };
 }
 
-function protocolOf(request: ProviderWireRequest): 'responses' | 'anthropic' {
-  if (request.protocol === 'responses' || request.protocol === 'anthropic') return request.protocol;
+function protocolOf(request: ProviderWireRequest): 'responses' | 'anthropic' | 'openai' {
+  if (request.protocol === 'responses' || request.protocol === 'anthropic' || request.protocol === 'openai') return request.protocol;
   throw new ProviderAdapterError({
     code: 'capability.unavailable',
     category: 'capability',
@@ -137,8 +142,10 @@ function protocolOf(request: ProviderWireRequest): 'responses' | 'anthropic' {
   });
 }
 
-function endpointPath(protocol: 'responses' | 'anthropic'): string {
-  return protocol === 'responses' ? '/v1/responses' : '/v1/messages';
+function endpointPath(protocol: 'responses' | 'anthropic' | 'openai'): string {
+  if (protocol === 'responses') return '/v1/responses';
+  if (protocol === 'openai') return '/v1/chat/completions';
+  return '/v1/messages';
 }
 
 function requestRoute(request: ProviderWireRequest): string {
@@ -186,23 +193,26 @@ function providerError(
   };
 }
 
-function isTerminalEvent(protocol: 'responses' | 'anthropic', type: string): boolean {
-  return protocol === 'responses'
-    ? ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(type)
-    : ['message_stop', 'error'].includes(type);
+function isTerminalEvent(protocol: 'responses' | 'anthropic' | 'openai', type: string): boolean {
+  if (protocol === 'responses') return ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(type);
+  if (protocol === 'openai') return type === 'error';
+  return ['message_stop', 'error'].includes(type);
 }
 
 // The provider protocol owns the terminal state. RCC transport only records the
 // already-decoded terminal fact and never rewrites a provider waiting/blocked
 // outcome into succeeded.
 function terminalStateFor(
-  protocol: 'responses' | 'anthropic',
+  protocol: 'responses' | 'anthropic' | 'openai',
   type: string,
   stopReason: string | undefined,
   stopRequested: boolean,
 ): ActiveExecution['terminalState'] {
   if (protocol === 'responses') {
     if (type === 'response.incomplete') return 'waiting';
+    return stopRequested ? 'stopped' : 'succeeded';
+  }
+  if (protocol === 'openai') {
     return stopRequested ? 'stopped' : 'succeeded';
   }
   const providerState = stopReason === 'tool_use' || stopReason === 'max_tokens' || stopReason === 'pause_turn'
@@ -312,8 +322,19 @@ function anthropicPayload(request: AnthropicWireRequest): Record<string, unknown
   };
 }
 
+function openAIChatPayload(request: OpenAIChatWireRequest): Record<string, unknown> {
+  return {
+    model: request.model,
+    messages: request.messages,
+    ...(request.tools ? { tools: request.tools } : {}),
+    stream: true,
+  };
+}
+
 function requestPayload(request: ProviderWireRequest): Record<string, unknown> {
-  return request.protocol === 'responses' ? responsesPayload(request) : anthropicPayload(request);
+  if (request.protocol === 'responses') return responsesPayload(request);
+  if (request.protocol === 'openai') return openAIChatPayload(request);
+  return anthropicPayload(request);
 }
 
 function urlFor(baseUrl: string, path: string): string {
@@ -332,7 +353,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
   private readonly stopReasons = new Map<ProviderExecutionIdentityRef, string>();
 
   constructor(private readonly options: RccV3ProviderTransportOptions) {
-    if (options.binding.protocol !== 'responses' && options.binding.protocol !== 'anthropic') {
+    if (options.binding.protocol !== 'responses' && options.binding.protocol !== 'anthropic' && options.binding.protocol !== 'openai') {
       throw new ProviderAdapterError({
         code: 'capability.unavailable',
         category: 'capability',
@@ -379,8 +400,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
     }
 
     const models = await this.probeModels(binding);
+    if (!models.ok) {
+      return { readiness: readiness(binding, models.state, checkedAt, expiresAt, [health.evidence, models.evidence], models.error, health.version) };
+    }
     let evidenceRefs = [health.evidence, models.evidence];
-    if (models.ok && !models.models.includes(binding.modelRef)) {
+    if (!models.models.includes(binding.modelRef)) {
       const ref = await this.writeEvidence(scopeForBinding(binding), 'probe-model-unavailable', { model: binding.modelRef, models: models.models });
       evidenceRefs = [...evidenceRefs, ref];
     }
@@ -462,11 +486,19 @@ export class RccV3ProviderTransport implements ProviderTransport {
     const active = this.active(input);
     if (active.observed) throw new ProviderAdapterError({ code: 'runtime.observe.repeated', category: 'runtime', phase: 'observe', message: 'RCC v3 stream can only be observed once', scope: input });
     active.observed = true;
+    let resolveStreamCompletion!: () => void;
+    active.streamCompletion = new Promise<void>((resolve) => {
+      resolveStreamCompletion = resolve;
+    });
     let completed = false;
     let failed = false;
     try {
       for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
-        if (!frame.data || frame.data === '[DONE]') continue;
+        if (!frame.data) continue;
+        if (frame.data === '[DONE]') {
+          if (active.protocol === 'openai' && !active.terminalState) active.terminalState = terminalStateFor(active.protocol, 'done', undefined, active.stopRequested);
+          continue;
+        }
         let record: Record<string, unknown>;
         try {
           record = readRecord(JSON.parse(frame.data));
@@ -476,9 +508,16 @@ export class RccV3ProviderTransport implements ProviderTransport {
           active.terminalState = 'failed';
           throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input, cause });
         }
-        const type = typeof record.type === 'string' ? record.type : frame.event;
+        const type = typeof record.type === 'string'
+          ? record.type
+          : active.protocol === 'openai' && record.object === 'chat.completion.chunk'
+            ? 'openai.chat.completion'
+            : active.protocol === 'openai' && record.error
+              ? 'error'
+              : frame.event;
         if (!type) throw new ProviderAdapterError({ code: 'protocol.missing-event-type', category: 'protocol', phase: 'observe', message: 'RCC v3 SSE event has no type', scope: input });
         if (active.protocol === 'responses' && type === 'response.done') continue;
+        if (active.protocol === 'openai' && type !== 'openai.chat.completion' && type !== 'error') continue;
         const raw = { protocol: active.protocol, ...record, type } as unknown as ProviderWireEvent;
         if (isTerminalEvent(active.protocol, type)) {
           if (type === 'error' || type.endsWith('.failed')) {
@@ -500,6 +539,26 @@ export class RccV3ProviderTransport implements ProviderTransport {
               ? this.anthropicStopReason(active)
               : undefined;
             active.terminalState = terminalStateFor(active.protocol, type, stopReason, active.stopRequested);
+          }
+        }
+        if (active.protocol === 'openai' && type === 'openai.chat.completion') {
+          const choices = Array.isArray(record.choices) ? record.choices : [];
+          const finishReason = choices
+            .filter((choice): choice is Record<string, unknown> => Boolean(choice) && typeof choice === 'object' && !Array.isArray(choice))
+            .map((choice) => choice.finish_reason)
+            .find((reason) => typeof reason === 'string');
+          if (typeof finishReason === 'string') {
+            const mapping = mapOpenAIFinishReason(finishReason);
+            active.terminalState = mapping.terminalState;
+            if (mapping.errorCode) {
+              active.terminalError = providerError(
+                active.evidenceScope,
+                'observe',
+                mapping.errorCode,
+                mapping.errorMessage ?? `OpenAI chat finish_reason ${finishReason} stopped the stream`,
+                'provider',
+              );
+            }
           }
         }
         if (active.protocol === 'anthropic' && type === 'message_delta') {
@@ -531,6 +590,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       failed = true;
       throw cause;
     } finally {
+      resolveStreamCompletion();
       if (!completed) {
         if (!failed) {
           if (!active.controller.signal.aborted) {
@@ -564,6 +624,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
     active.stopRequested = true;
     active.stopCause = new DOMException(input.reason, 'AbortError');
     active.controller.abort(active.stopCause);
+    if (!active.observed) {
+      active.streamDone = true;
+      active.resourceReleased = true;
+      active.terminalState ??= 'stopped';
+    }
     const ref = await this.writeEvidence(scope, 'stop-requested', {
       remoteStopSupported: false,
       transportAbort: true,
@@ -577,6 +642,9 @@ export class RccV3ProviderTransport implements ProviderTransport {
   async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
     const active = this.active(input);
     const scope = active.evidenceScope;
+    // A stop receipt only aborts the RCC stream; settle must wait for that
+    // abort to be consumed so it can report the real terminal state.
+    if (active.stopRequested && active.observed) await active.streamCompletion;
     const state = active.streamDone ? (active.terminalState ?? 'unknown') : 'waiting';
     const evidenceRef = await this.writeEvidence(scope, 'settle', {
       state,
@@ -662,7 +730,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return active;
   }
 
-  private assertProtocol(protocol: 'responses' | 'anthropic'): void {
+  private assertProtocol(protocol: 'responses' | 'anthropic' | 'openai'): void {
     if (protocol !== this.options.binding.protocol) throw new ProviderAdapterError({ code: 'protocol.mismatch', category: 'protocol', phase: 'start', message: 'RCC request protocol does not match binding', scope: this.options.binding });
   }
 
@@ -672,7 +740,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return reason;
   }
 
-  private async send(protocol: 'responses' | 'anthropic', request: ProviderWireRequest, controller: AbortController): Promise<RccV3FetchResponse> {
+  private async send(protocol: 'responses' | 'anthropic' | 'openai', request: ProviderWireRequest, controller: AbortController): Promise<RccV3FetchResponse> {
     const response = await this.fetcher(urlFor(this.options.baseUrl, endpointPath(protocol)), {
       method: 'POST',
       headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
@@ -738,7 +806,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       const ref = await this.writeEvidence(scope, 'probe-health', { status: response.status, body: value });
       if (value.status !== 'ok') {
         const error = providerError(scope, 'probe', 'health.not-ready', 'RCC v3 health endpoint did not report status ok', 'provider');
-        return { ok: false, state: 'degraded', evidence: ref, error: { ...error, evidenceRefs: [ref] }, version };
+        return { ok: false, state: 'not-ready', evidence: ref, error: { ...error, evidenceRefs: [ref] }, version };
       }
       return { ok: true, state: 'ready', evidence: ref, version };
     } catch (cause) {
@@ -758,14 +826,16 @@ export class RccV3ProviderTransport implements ProviderTransport {
       const raw = (await response.text()).slice(0, this.maxEventBytes);
       if (response.status < 200 || response.status >= 300) {
         const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status });
-        return { ok: false, evidence: ref, models: [] };
+        const error = providerError(scope, 'probe', `models.http.${response.status}`, `RCC v3 model discovery returned HTTP ${response.status}`, 'provider');
+        return { ok: false, state: 'degraded', evidence: ref, models: [], error: { ...error, evidenceRefs: [ref] } };
       }
       let value: Record<string, unknown>;
       try {
         value = readRecord(JSON.parse(raw));
-      } catch {
+      } catch (cause) {
         const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, invalid: 'json' });
-        return { ok: false, evidence: ref, models: [] };
+        const error = providerError(scope, 'probe', 'models.invalid-json', cause instanceof Error ? cause.message : 'RCC v3 model discovery response is not valid JSON', 'protocol');
+        return { ok: false, state: 'degraded', evidence: ref, models: [], error: { ...error, evidenceRefs: [ref] } };
       }
       const candidates = Array.isArray(value.data) ? value.data : Array.isArray(value.models) ? value.models : [];
       const models = candidates.flatMap((candidate) => {
@@ -774,10 +844,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
         return [];
       });
       const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, models });
-      return { ok: true, evidence: ref, models };
-    } catch {
-      const ref = await this.writeEvidence(scope, 'probe-models', { error: 'transport-failure' });
-      return { ok: false, evidence: ref, models: [] };
+      return { ok: true, state: 'ready', evidence: ref, models };
+    } catch (cause) {
+      const ref = await this.writeEvidence(scope, 'probe-models', { error: cause instanceof Error ? cause.message : 'transport-failure' });
+      const error = providerError(scope, 'probe', 'models.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 model discovery transport failed', 'transport');
+      return { ok: false, state: 'degraded', evidence: ref, models: [], error: { ...error, evidenceRefs: [ref] } };
     }
   }
 }
@@ -792,8 +863,10 @@ interface ProbeHealthResult {
 
 interface ProbeModelsResult {
   readonly ok: boolean;
+  readonly state: ProviderReadiness['state'];
   readonly evidence: EvidenceRef;
   readonly models: readonly string[];
+  readonly error?: ProviderError;
 }
 
 function scopeForBinding(binding: ProviderBinding): ScopeRef {

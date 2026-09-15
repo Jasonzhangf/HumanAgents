@@ -1,6 +1,8 @@
 export { ProviderAdapter } from './adapter.js';
 export type { ProviderAdapterOptions, ProviderProbeResult, ProviderTransport } from './adapter.js';
-export { AnthropicProviderCodec, ResponsesProviderCodec } from './codecs.js';
+export { ProviderAgentDriver } from './agent-driver.js';
+export type { ProviderAgentDriverOptions, ProviderAgentEvent } from './agent-driver.js';
+export { AnthropicProviderCodec, OpenAIChatProviderCodec, ResponsesProviderCodec } from './codecs.js';
 export type { DecodeContext, ProviderCodec, ProviderDecodedEvent } from './codecs.js';
 export { filesystemProviderEvidenceSink } from './evidence.js';
 export type { ProviderEvidenceSink, ProviderEvidenceWrite } from './evidence.js';
@@ -23,6 +25,13 @@ export type {
   AnthropicWireMessage,
   AnthropicWireRequest,
   AnthropicWireTool,
+  OpenAIChatCancelRequest,
+  OpenAIChatWireError,
+  OpenAIChatWireEvent,
+  OpenAIChatWireMessage,
+  OpenAIChatWireRequest,
+  OpenAIChatWireTool,
+  OpenAIChatWireToolCallDelta,
   ProviderWireEvent,
   ProviderWireRequest,
   ProviderWireStopRequest,

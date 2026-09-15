@@ -1,6 +1,6 @@
 import type { BusinessPayload, CheckpointId, ProviderExecutionIdentityRef } from '../../../contracts/src/index.js';
 
-export type ProviderProtocol = 'responses' | 'anthropic' | 'other-explicit';
+export type ProviderProtocol = 'responses' | 'anthropic' | 'openai' | 'other-explicit';
 
 export interface ResponsesWireRequest {
   readonly protocol: 'responses';
@@ -59,6 +59,75 @@ export interface ResponsesWireError {
 export interface ResponsesWireCancelRequest {
   readonly protocol: 'responses';
   readonly type: 'responses.cancel';
+  readonly route: string;
+  readonly model: string;
+  readonly reason: string;
+  readonly execution: ProviderExecutionIdentityRef;
+}
+
+export interface OpenAIChatWireRequest {
+  readonly protocol: 'openai';
+  readonly type: 'openai.chat.request';
+  readonly route: string;
+  readonly model: string;
+  readonly messages: readonly OpenAIChatWireMessage[];
+  readonly tools?: readonly OpenAIChatWireTool[];
+  readonly execution: ProviderExecutionIdentityRef;
+  readonly checkpointId?: CheckpointId;
+}
+
+export interface OpenAIChatWireMessage {
+  readonly role: 'user' | 'system' | 'assistant';
+  readonly content: string;
+}
+
+export interface OpenAIChatWireTool {
+  readonly type: 'function';
+  readonly function: {
+    readonly name: string;
+    readonly description: string;
+    readonly parameters: BusinessPayload;
+  };
+}
+
+export interface OpenAIChatWireToolCallDelta {
+  readonly index: number;
+  readonly id?: string;
+  readonly type?: 'function';
+  readonly function?: {
+    readonly name?: string;
+    readonly arguments?: string;
+  };
+}
+
+export type OpenAIChatWireEvent =
+  | {
+      readonly protocol: 'openai';
+      readonly type: 'openai.chat.completion';
+      readonly id: string;
+      readonly object?: 'chat.completion.chunk';
+      readonly model?: string;
+      readonly choices: readonly {
+        readonly index: number;
+        readonly delta?: {
+          readonly role?: 'assistant';
+          readonly content?: string | null;
+          readonly tool_calls?: readonly OpenAIChatWireToolCallDelta[];
+        };
+        readonly finish_reason?: string | null;
+      }[];
+    }
+  | { readonly protocol: 'openai'; readonly type: 'error'; readonly error: OpenAIChatWireError };
+
+export interface OpenAIChatWireError {
+  readonly code?: string;
+  readonly type?: string;
+  readonly message: string;
+}
+
+export interface OpenAIChatCancelRequest {
+  readonly protocol: 'openai';
+  readonly type: 'openai.cancel';
   readonly route: string;
   readonly model: string;
   readonly reason: string;
@@ -129,6 +198,6 @@ export interface AnthropicWireCancelRequest {
   readonly execution: ProviderExecutionIdentityRef;
 }
 
-export type ProviderWireRequest = ResponsesWireRequest | AnthropicWireRequest;
-export type ProviderWireStopRequest = ResponsesWireCancelRequest | AnthropicWireCancelRequest;
-export type ProviderWireEvent = ResponsesWireEvent | AnthropicWireEvent;
+export type ProviderWireRequest = ResponsesWireRequest | OpenAIChatWireRequest | AnthropicWireRequest;
+export type ProviderWireStopRequest = ResponsesWireCancelRequest | OpenAIChatCancelRequest | AnthropicWireCancelRequest;
+export type ProviderWireEvent = ResponsesWireEvent | OpenAIChatWireEvent | AnthropicWireEvent;

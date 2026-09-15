@@ -1,77 +1,116 @@
-const rows = [...document.querySelectorAll('[data-task-row]')]
-const groups = [...document.querySelectorAll('[data-group]')]
-const scopeButtons = [...document.querySelectorAll('[data-scope-filter]')]
-const searchInput = document.querySelector('[data-task-search]')
-const statusFilter = document.querySelector('[data-status-filter]')
-const clearButton = document.querySelector('[data-clear-filters]')
-const filterFeedback = document.querySelector('[data-filter-feedback]')
-const noResults = document.querySelector('[data-no-results]')
+import {
+  api,
+  element,
+  formatTime,
+  loadRuntimeStatus,
+  makePageShell,
+  renderRuntimeStatus,
+  stateTone,
+  taskDashboardHref,
+  taskDetailHref,
+} from './runtime-shell.js'
 
-const initialScope = new URLSearchParams(window.location.search).get('scope')
-let selectedScope = ['current', 'decision', 'history'].includes(initialScope) ? initialScope : 'all'
+const { main, status } = makePageShell(
+  'Task List',
+  'Runtime',
+  '任务列表',
+  '运行中、等待决策、已完成和失败任务都来自 Runtime projection。',
+)
 
-function matches(row) {
-  const search = searchInput.value.trim().toLocaleLowerCase()
-  const scopeMatches = selectedScope === 'all' || row.dataset.scope === selectedScope
-  const statusMatches = statusFilter.value === 'all' || row.dataset.status === statusFilter.value
-  const textMatches = !search || row.dataset.search.toLocaleLowerCase().includes(search)
-  return scopeMatches && statusMatches && textMatches
+let currentFilter = 'all'
+let rows = []
+
+function visibleGroups() {
+  const filtered = rows.filter((row) => currentFilter === 'all' || row.group === currentFilter)
+  return [
+    ['running', '运行中任务', filtered.filter((row) => row.group === 'running'), '当前没有运行中的任务。'],
+    ['waiting', '等待决策任务', filtered.filter((row) => row.group === 'waiting'), '当前没有等待决策的任务。'],
+    ['completed', '已完成任务', filtered.filter((row) => row.group === 'completed'), '当前没有已完成的任务。'],
+    ['stopped', '已停止任务', filtered.filter((row) => row.group === 'stopped'), '当前没有已停止的任务。'],
+    ['draft', '未启动任务', filtered.filter((row) => row.group === 'draft'), '当前没有未启动的任务。'],
+    ['failed', '失败任务', filtered.filter((row) => row.group === 'failed'), '当前没有失败的任务。'],
+  ]
 }
 
-function update() {
-  let visibleRows = 0
-  const counts = { current: 0, decision: 0, history: 0 }
-
-  for (const row of rows) {
-    const visible = matches(row)
-    row.hidden = !visible
-    if (visible) {
-      visibleRows += 1
-      counts[row.dataset.scope] += 1
+function renderTasks() {
+  const groups = element('section', undefined, 'stack')
+  for (const [, title, groupRows, emptyText] of visibleGroups()) {
+    const section = element('section', undefined, 'section')
+    const head = element('header', undefined, 'section-head')
+    head.append(element('h2', title), element('span', `${groupRows.length} 项`, 'section-meta'))
+    const panel = element('div', undefined, 'panel')
+    if (groupRows.length === 0) {
+      panel.append(element('p', emptyText, 'empty'))
+    } else {
+      for (const row of groupRows) {
+        const link = element('a', undefined, 'task-row')
+        link.href = row.state === 'waiting' || row.state === 'blocked'
+          ? taskDetailHref(row.taskId.value)
+          : taskDashboardHref(row.taskId.value)
+        const copy = element('div')
+        copy.append(element('h3', row.title), element('p', row.currentState))
+        const next = element('div')
+        const chip = element('span', row.stateLabel, 'state-chip')
+        chip.dataset.tone = stateTone(row.state)
+        next.append(chip, element('p', `下一步：${row.nextStep}`))
+        link.append(copy, next, element('time', formatTime(row.updatedAt)))
+        panel.append(link)
+      }
     }
+    section.append(head, panel)
+    groups.append(section)
   }
+  main.querySelector('[data-task-groups]')?.remove()
+  groups.dataset.taskGroups = ''
+  main.append(groups)
+}
 
-  for (const group of groups) {
-    const scope = group.dataset.group
-    const visible = counts[scope] > 0
-    group.hidden = selectedScope !== 'all' && selectedScope !== scope
-    group.querySelector('[data-group-count]').textContent = `${counts[scope]} 项`
-    group.querySelector(`[data-group-empty="${scope}"]`).hidden = visible || group.hidden
+function addFilters() {
+  const bar = element('section', undefined, 'filterbar')
+  const segments = element('div', undefined, 'segments')
+  for (const [value, label] of [
+    ['all', '全部'],
+    ['running', '运行中'],
+    ['waiting', '等待决策'],
+    ['completed', '已完成'],
+    ['stopped', '已停止'],
+    ['draft', '未启动'],
+    ['failed', '失败'],
+  ]) {
+    const button = element('button', label, 'segment')
+    button.type = 'button'
+    button.setAttribute('aria-pressed', String(value === currentFilter))
+    button.addEventListener('click', () => {
+      currentFilter = value
+      for (const candidate of segments.querySelectorAll('button')) {
+        candidate.setAttribute('aria-pressed', String(candidate === button))
+      }
+      renderTasks()
+    })
+    segments.append(button)
   }
-
-  noResults.hidden = visibleRows > 0
-  const scopeLabel = selectedScope === 'all' ? '全部任务' : document.querySelector(`[data-scope-filter="${selectedScope}"]`).textContent
-  const filterActive = selectedScope !== 'all' || statusFilter.value !== 'all' || searchInput.value.trim()
-  filterFeedback.textContent = filterActive ? `当前显示 ${visibleRows} 项 · ${scopeLabel}` : '显示全部任务'
-  clearButton.hidden = !filterActive
+  bar.append(segments)
+  main.append(bar)
 }
 
-for (const button of scopeButtons) {
-  button.addEventListener('click', () => {
-    selectedScope = button.dataset.scopeFilter
-    for (const candidate of scopeButtons) {
-      const active = candidate === button
-      candidate.classList.toggle('is-active', active)
-      candidate.setAttribute('aria-pressed', String(active))
-    }
-    update()
-  })
+async function load() {
+  try {
+    const [{ status: runtimeStatus, error }, taskList] = await Promise.all([loadRuntimeStatus(), api.listTasks()])
+    renderRuntimeStatus(status, runtimeStatus, error)
+    rows = [
+      ...taskList.running.map((row) => ({ ...row, group: 'running' })),
+      ...taskList.waiting.map((row) => ({ ...row, group: 'waiting' })),
+      ...taskList.completed.map((row) => ({ ...row, group: 'completed' })),
+      ...taskList.stopped.map((row) => ({ ...row, group: 'stopped' })),
+      ...taskList.draft.map((row) => ({ ...row, group: 'draft' })),
+      ...taskList.failed.map((row) => ({ ...row, group: 'failed' })),
+    ]
+    renderTasks()
+  } catch (error) {
+    status.dataset.tone = 'danger'
+    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  }
 }
 
-searchInput.addEventListener('input', update)
-statusFilter.addEventListener('change', update)
-clearButton.addEventListener('click', () => {
-  selectedScope = 'all'
-  searchInput.value = ''
-  statusFilter.value = 'all'
-  scopeButtons[0].click()
-  searchInput.focus()
-})
-
-for (const button of scopeButtons) {
-  const active = button.dataset.scopeFilter === selectedScope
-  button.classList.toggle('is-active', active)
-  button.setAttribute('aria-pressed', String(active))
-}
-
-update()
+addFilters()
+void load()

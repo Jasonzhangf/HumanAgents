@@ -17,7 +17,7 @@ declare module 'node:fs' {
   export function lstatSync(path: string): { isSymbolicLink(): boolean };
 }
 declare module 'node:crypto' {
-  export function createHash(algorithm: string): { update(value: string): { digest(encoding: 'hex'): string } };
+  export function createHash(algorithm: string): { update(value: string | Uint8Array): { digest(encoding: 'hex'): string } };
 }
 declare module 'node:os' {
   export function homedir(): string;

@@ -65,3 +65,12 @@ export { bindExecutionRuntime, probeExecutionRuntime } from './execution.js';
 export type { RuntimeExecutionBinding } from './execution.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
+
+export {
+  buildFakeExecutionPort,
+  buildRccExecutionPort,
+  startUiRuntime,
+  UiRuntimeApiError,
+  UiRuntimeService,
+} from './ui-runtime/index.js';
+export type { RccModeConfig, UiRuntime, UiRuntimeLaunchOptions } from './ui-runtime/index.js';

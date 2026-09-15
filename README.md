@@ -41,10 +41,31 @@ node dist/app/app/src/cli.js run --workspace /absolute/project --plan default
 node dist/app/app/src/cli.js resume --workspace /absolute/project --session <session-id>
 node dist/app/app/src/cli.js session list --workspace /absolute/project
 node dist/app/app/src/cli.js session inspect --workspace /absolute/project --session <session-id>
+node dist/app/app/src/cli.js serve --mode fake --workspace /absolute/project
+node dist/app/app/src/cli.js serve --mode rcc --workspace /absolute/project \
+  --binding rcc-entry --provider rcc --protocol responses \
+  --model MiniMax-M3 --route default \
+  --rcc-base-url http://127.0.0.1:4444
+node dist/app/app/src/cli.js serve --mode rcc --workspace /absolute/project \
+  --binding rcc-openai-entry --provider rcc --protocol openai \
+  --model MiniMax-M3 --route default \
+  --rcc-base-url http://127.0.0.1:4444
 pnpm build:release
 pnpm release:check
 pnpm smoke
 ```
+
+`serve` 启动本地 HumanAgent Runtime API 和 `docs/ui`。`fake` 只使用固定 replay；
+`rcc` 通过同一个 Runtime API 连接 RCC v3 `127.0.0.1:4444`，失败会显式投影
+owner 和 next action，不会回退到 fake。`dsh` 在当前阶段保持关闭。
+RCC 是透明代理，本阶段 MVP验收覆盖两个入口协议：
+`responses -> /v1/responses` 和 `openai -> /v1/chat/completions`；
+`anthropic -> /v1/messages` 保留既有入口能力，但不属于本阶段 UI Provider
+Loop 验收范围。`providerId` 只是本地 binding 标签，不代表上游 Provider
+身份；RCC 最终选择的 model 与请求 model 不同不构成 binding mismatch。
+`serve --host` 只接受 loopback（`127.0.0.1` 或 `::1`）：控制 API 目前没有鉴权，
+绑定非 loopback 地址会让任意可达客户端创建任务、发起执行和执行 stop，因此
+server 会拒绝启动而不是静默暴露控制面。
 
 `pnpm build:release` 使用 `~/.humanagent/build/checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke` 的 stage checkpoint。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
 `pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。

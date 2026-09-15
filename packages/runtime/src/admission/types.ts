@@ -4,7 +4,7 @@ import type {
   NextAction,
   RequirementEnvelope,
   TaskId,
-} from '../../../../packages/contracts/src/index.js';
+} from '../../../contracts/src/index.js';
 
 export const ADMISSION_QUEUE_KINDS = ['interactive', 'execution', 'research', 'maintenance'] as const;
 export type AdmissionQueueKind = (typeof ADMISSION_QUEUE_KINDS)[number];

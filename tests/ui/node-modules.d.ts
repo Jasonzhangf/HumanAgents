@@ -10,6 +10,9 @@ declare module 'node:assert/strict' {
   export = assert;
 }
 declare module 'node:test' {
-  const test: (name: string, fn: () => void) => void;
+  const test: (name: string, fn: () => void | Promise<void>) => void;
   export default test;
+}
+declare module 'node:fs/promises' {
+  export function readFile(path: string, encoding: 'utf8'): Promise<string>;
 }

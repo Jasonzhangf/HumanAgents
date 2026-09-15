@@ -27,6 +27,7 @@ import {
 } from '../../../packages/contracts/src/index.js';
 import {
   AnthropicProviderCodec,
+  OpenAIChatProviderCodec,
   ProviderAdapter,
   ProviderAdapterError,
   ResponsesProviderCodec,
@@ -114,6 +115,15 @@ const goaichatBinding = binding({
   modelRef: 'model-goaichat',
   configDigest: 'sha256:goaichat-config',
   capabilityDigest: 'sha256:goaichat-capability',
+});
+const openAIBinding = binding({
+  bindingId: 'binding-openai-entry',
+  providerId: 'rcc-openai-entry',
+  protocol: 'openai',
+  endpointRef: 'local-endpoint-rcc-openai',
+  modelRef: 'model-openai-entry',
+  configDigest: 'sha256:openai-entry-config',
+  capabilityDigest: 'sha256:openai-entry-capability',
 });
 
 function readiness(provider: ProviderBinding): ProviderReadiness {
@@ -234,6 +244,7 @@ function codecContext() {
     scope: operationScope,
     evidence: sink,
     sink,
+    responsesOutputText: new Map<string, string>(),
     nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
   };
 }
@@ -261,21 +272,151 @@ function anthropicAdapter(transport: ProviderTransport, provider = goaichatBindi
   return new ProviderAdapter({ binding: provider, routeRef: `${provider.providerId}-route`, codec: new AnthropicProviderCodec(4096), transport, evidence: memoryEvidenceSink() });
 }
 
-test('responses and anthropic codecs keep independent explicit wire contracts', () => {
+function openAIAdapter(transport: ProviderTransport, provider = openAIBinding) {
+  return new ProviderAdapter({ binding: provider, routeRef: `${provider.providerId}-route`, codec: new OpenAIChatProviderCodec(), transport, evidence: memoryEvidenceSink() });
+}
+
+test('responses, openai, and anthropic codecs keep independent explicit wire contracts', () => {
   const responses = new ResponsesProviderCodec();
+  const openai = new OpenAIChatProviderCodec();
   const anthropic = new AnthropicProviderCodec(4096);
   const responsesRequest = responses.encodeStart(startInput(), ccBinding, 'cc-route');
+  const openAIRequest = openai.encodeStart(startInput(), openAIBinding, 'openai-route');
   const anthropicRequest = anthropic.encodeStart(startInput(), goaichatBinding, 'goaichat-route');
 
   assert.equal(responsesRequest.type, 'responses.request');
+  assert.equal(openAIRequest.type, 'openai.chat.request');
   assert.equal(anthropicRequest.type, 'anthropic.request');
   assert.equal(responsesRequest.protocol, 'responses');
+  assert.equal(openAIRequest.protocol, 'openai');
   assert.equal(anthropicRequest.protocol, 'anthropic');
   assert.equal(responsesRequest.route, 'cc:cc-route');
+  assert.equal(openAIRequest.route, 'rcc-openai-entry:openai-route');
   assert.equal(anthropicRequest.route, 'goaichat:goaichat-route');
   assert.equal(responses.encodeStop(stopRequest(), ccBinding, 'cc-route').type, 'responses.cancel');
+  assert.equal(openai.encodeStop(stopRequest(), openAIBinding, 'openai-route').type, 'openai.cancel');
   assert.equal(anthropic.encodeStop(stopRequest(), goaichatBinding, 'goaichat-route').type, 'anthropic.cancel');
-  assert.equal(Object.is(responsesRequest, anthropicRequest), false);
+  assert.equal(Object.is(responsesRequest, openAIRequest), false);
+  assert.equal(Object.is(openAIRequest, anthropicRequest), false);
+});
+
+test('openai chat codec maps text, tool calls, finish reason, and error events', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+
+  const text = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-1',
+    choices: [{ index: 0, delta: { role: 'assistant', content: 'hello' }, finish_reason: null }],
+  }, context);
+  assert.equal(text.events[0].kind, 'output');
+  assert.equal(text.events[0].summary, 'hello');
+
+  const tool = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-1',
+    choices: [{
+      index: 0,
+      delta: {
+        tool_calls: [{
+          index: 0,
+          id: 'call-1',
+          type: 'function',
+          function: { name: 'lookup', arguments: '{"q":"x"}' },
+        }],
+      },
+      finish_reason: null,
+    }],
+  }, context);
+  assert.equal(tool.events[0].kind, 'tool');
+  assert.equal(tool.events[0].summary, 'lookup');
+
+  const terminal = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-1',
+    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+  }, context);
+  assert.equal(terminal.events[0].kind, 'terminal');
+  assert.equal(terminal.events[0].terminalState, 'succeeded');
+
+  const error = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'error',
+    error: { code: 'server_error', message: 'provider exploded' },
+  }, context);
+  assert.equal(error.events[0].kind, 'error');
+  assert.equal(error.events[0].error?.code, 'server_error');
+  assert.equal(error.events[1].terminalState, 'failed');
+});
+
+test('openai chat codec blocks content_filter and unsupported finish reasons', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const context = codecContext();
+
+  const filtered = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-filtered',
+    choices: [{ index: 0, delta: {}, finish_reason: 'content_filter' }],
+  }, context);
+  assert.deepEqual(filtered.events.map((event) => event.kind), ['error', 'terminal']);
+  assert.equal(filtered.events[1].terminalState, 'blocked');
+  assert.equal(filtered.events[0].error?.code, 'openai.finish_reason.content_filter');
+  assert.equal(filtered.events[0].error?.retryable, 'manual');
+  assert.equal(filtered.events[0].nextAction?.kind, 'recover');
+
+  const unsupported = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-unsupported',
+    choices: [{ index: 0, delta: {}, finish_reason: 'surprise_stop' }],
+  }, context);
+  assert.deepEqual(unsupported.events.map((event) => event.kind), ['error', 'terminal']);
+  assert.equal(unsupported.events[1].terminalState, 'blocked');
+  assert.equal(unsupported.events[0].error?.code, 'openai.finish_reason.unsupported');
+
+  const toolCall = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-tool-call',
+    choices: [{ index: 0, delta: {}, finish_reason: 'function_call' }],
+  }, context);
+  assert.equal(toolCall.events[0].kind, 'terminal');
+  assert.equal(toolCall.events[0].terminalState, 'waiting');
+});
+
+test('openai chat codec keeps checkpoint control truth off business payload', () => {
+  const openai = new OpenAIChatProviderCodec();
+  const request = openai.encodeResume(resumeInput(), openAIBinding, 'openai-route');
+  const serializedMessages = JSON.stringify(request.messages);
+
+  assert.equal(serializedMessages.includes('cp-provider'), false);
+  assert.equal(serializedMessages.includes('checkpoint'), false);
+  assert.equal(request.checkpointId?.value, 'cp-provider');
+  assert.equal(request.execution.executionEpoch, 1);
+});
+
+test('openai chat codec accepts a legal usage-only chunk with empty choices', async () => {
+  const codec = new OpenAIChatProviderCodec();
+  const decodeContext = codecContext();
+  const decoded = await codec.decodeEvent({
+    protocol: 'openai',
+    type: 'openai.chat.completion',
+    id: 'chat-usage',
+    object: 'chat.completion.chunk',
+    choices: [],
+  }, decodeContext);
+  assert.deepEqual(decoded.events, []);
+});
+
+test('provider adapter binds openai chat as an explicit route', async () => {
+  const openai = openAIAdapter(makeTransport(openAIBinding), openAIBinding);
+
+  assert.equal((await openai.probe(openAIBinding)).state, 'ready');
+  await assert.rejects(() => openai.probe(ccBinding), /binding identity/);
 });
 
 test('responses codec maps terminal, tool, and error wire events', async () => {
@@ -322,7 +463,35 @@ test('responses codec accepts RCC transparent-proxy events with empty response a
 
   assert.equal(created.events[0].kind, 'model');
   assert.equal(output.events[0].kind, 'output');
+  assert.equal(output.events[0].summary, 'OK');
   assert.equal(completed.events[0].terminalState, 'succeeded');
+});
+
+test('responses codec emits each output item text exactly once across delta and completion events', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const events = [
+    {
+      protocol: 'responses' as const,
+      type: 'response.output_item.added' as const,
+      output_index: 0,
+      item: { type: 'message' as const, id: 'item-1', role: 'assistant' as const, content: [] },
+    },
+    { protocol: 'responses' as const, type: 'response.content_part.added' as const, item_id: 'item-1', output_index: 0, content_index: 0, part: { type: 'output_text' as const, text: '' } },
+    { protocol: 'responses' as const, type: 'response.output_text.delta' as const, item_id: 'item-1', delta: 'hello ' },
+    { protocol: 'responses' as const, type: 'response.output_text.delta' as const, item_id: 'item-1', delta: 'world' },
+    { protocol: 'responses' as const, type: 'response.output_text.done' as const, item_id: 'item-1', text: 'hello world' },
+    { protocol: 'responses' as const, type: 'response.content_part.done' as const, item_id: 'item-1', output_index: 0, content_index: 0, part: { type: 'output_text' as const, text: 'hello world' } },
+    { protocol: 'responses' as const, type: 'response.output_item.done' as const, output_index: 0, item: { type: 'message' as const, id: 'item-1', role: 'assistant' as const, content: [{ type: 'output_text' as const, text: 'hello world' }] } },
+  ];
+  const summaries: string[] = [];
+  for (const event of events) {
+    const decoded = await codec.decodeEvent(event, context);
+    const summary = decoded.events[0]?.summary;
+    if (summary) summaries.push(summary);
+  }
+  assert.deepEqual(summaries, ['hello ', 'world']);
+  assert.equal(summaries.join(''), 'hello world');
 });
 
 test('responses and anthropic resume codecs keep checkpoint control truth off business payload', () => {
@@ -795,7 +964,7 @@ test('provider adapter source avoids dsh/rcc/sdk imports, network calls, and sec
     /[\s('"]dsh/i,
     /[\s('"]rcc/i,
     /routecodex/i,
-    /@openai|openai/i,
+    /@openai|openai-sdk|from\s+['"]openai['"]|import\s*\(\s*['"]openai['"]/i,
     /anthropic-ai|anthropic-sdk/i,
     /provider-sdk/i,
     /(?:api[_-]?key|authorization|bearer|secret|password|access[_-]?token|auth[_-]?token)/i,

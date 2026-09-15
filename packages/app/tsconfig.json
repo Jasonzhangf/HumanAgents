@@ -9,6 +9,12 @@
   "include": [
     "src/**/*.ts",
     "../config/src/**/*.ts",
-    "../contracts/src/**/*.ts"
+    "../contracts/src/**/*.ts",
+    "../core/src/**/*.ts",
+    "../runtime/src/**/*.ts",
+    "../ui/**/*.ts",
+    "../adapters/provider/src/**/*.ts",
+    "../adapters/filesystem/src/**/*.ts",
+    "../adapters/jsonl/src/**/*.ts"
   ]
 }

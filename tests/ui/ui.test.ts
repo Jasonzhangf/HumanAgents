@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { UiCommandError, validateUiCommand, assertObservationReadOnly, type PipelineObservationCommand, type UiCommand } from '../../packages/ui/contracts/commands.js';
 import { UiProjectionError } from '../../packages/ui/contracts/models.js';
@@ -316,4 +317,25 @@ test('command validation keeps observation read-only and decisions on explicit i
   assert.doesNotThrow(
     () => validateUiCommand({ commandId: 'ok-1', surface: 'task-detail', kind: 'confirm-draft', draftId: 'draft-1', intent: 'append', taskId, normalizedInput: '补齐证据', confirmedBy: 'human', payloadRef: 'asset://req' }),
   );
+});
+
+test('runtime UI consumes typed API without hardcoded success or direct source access', async () => {
+  const files = [
+    'docs/ui/dashboard.js',
+    'docs/ui/tasks.js',
+    'docs/ui/task.js',
+    'docs/ui/task-dashboard.js',
+    'docs/ui/observation.js',
+    'docs/ui/runtime-api.js',
+    'docs/ui/runtime-shell.js',
+  ];
+  const source = (await Promise.all(files.map((file) => readFile(file, 'utf8')))).join('\n');
+  assert.equal(source.includes('Journal'), false);
+  assert.equal(source.includes('RCC raw'), false);
+  assert.equal(source.includes('DSH Session'), false);
+  assert.equal(source.includes('fake://output'), false);
+  assert.equal(source.includes('重试 operation'), false);
+  assert.equal(source.includes('steer'), false);
+  assert.equal(source.includes('/api/runtime/status'), true);
+  assert.equal(source.includes('createRuntimeApi'), true);
 });

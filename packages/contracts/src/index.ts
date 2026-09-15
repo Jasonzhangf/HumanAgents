@@ -371,7 +371,7 @@ export function validateWorkResult(input: WorkResult, assignment: WorkAssignment
   }
 }
 
-export type ProviderProtocol = 'responses' | 'anthropic' | 'other-explicit';
+export type ProviderProtocol = 'responses' | 'anthropic' | 'openai' | 'other-explicit';
 export type ProviderReadinessState = 'ready' | 'degraded' | 'not-ready' | 'unknown' | 'capability-unavailable' | 'dependency-missing';
 export type ProviderEventKind = 'model' | 'output' | 'tool' | 'error' | 'terminal' | 'attention' | 'transport';
 export type ProviderTerminalState = 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown';
@@ -492,6 +492,7 @@ export interface ProviderEvent extends ProviderExecutionIdentityRef {
   readonly kind: ProviderEventKind;
   readonly terminalState?: ProviderTerminalState;
   readonly outputRefs?: readonly string[];
+  readonly summary?: string;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly error?: ProviderError;
   readonly ownerId?: string;
@@ -594,7 +595,7 @@ export type ProviderEventEpochDecision =
   | { readonly accepted: true }
   | { readonly accepted: false; readonly rejected: true; readonly reason: 'stale' | 'future' | 'mismatch'; readonly expectedExecutionEpoch: number; readonly receivedExecutionEpoch: number };
 
-const PROVIDER_PROTOCOLS = new Set<string>(['responses', 'anthropic', 'other-explicit']);
+const PROVIDER_PROTOCOLS = new Set<string>(['responses', 'anthropic', 'openai', 'other-explicit']);
 const PROVIDER_READINESS_STATES = new Set<string>(['ready', 'degraded', 'not-ready', 'unknown', 'capability-unavailable', 'dependency-missing']);
 const PROVIDER_EVENT_KINDS = new Set<string>(['model', 'output', 'tool', 'error', 'terminal', 'attention', 'transport']);
 const PROVIDER_TERMINAL_STATES = new Set<string>(['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown']);
@@ -794,6 +795,7 @@ export function validateProviderEvent(input: ProviderEvent): void {
   if (input.kind === 'terminal') assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider terminal event');
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider event evidenceRefs');
   if (input.outputRefs !== undefined) assertRefList(input.outputRefs, 'provider event outputRefs');
+  if (input.summary !== undefined && input.summary.trim() === '') throw new ContractError('provider event summary must be non-empty');
   if (input.error) validateProviderError(input.error);
   if (input.kind === 'error' && !input.error) throw new ContractError('provider error event requires error');
   if (input.error && input.kind !== 'error') throw new ContractError('provider error payload requires error event kind');

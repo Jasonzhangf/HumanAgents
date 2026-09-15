@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <meta name="description" content="HumanAgent 静态 Operator Console 原型" />
-    <title>HumanAgent · Operator Console</title>
+    <meta name="description" content="HumanAgent Runtime Operator Console" />
+    <title>HumanAgent · Runtime Console</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -232,6 +232,8 @@
       <div class="dialog-footer"><span>只读诊断 · 不改变任务状态</span><button class="button button--secondary" type="button" data-close-diagnostic>关闭</button></div>
     </dialog>
 
-    <script src="./app.js"></script>
+    <script type="module">
+      location.replace('./dashboard.html')
+    </script>
   </body>
 </html>
