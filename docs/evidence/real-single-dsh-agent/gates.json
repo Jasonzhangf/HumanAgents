@@ -7,7 +7,9 @@
     "implementationTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed",
     "evidenceCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
     "finalCommit": "287a2f61cdfac79d321166b201a36b438d9d374b",
-    "finalTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed"
+    "finalTree": "846779d9d25008585faf4c9e42b624ec0d0b92ed",
+    "mainMerge": "37965991017345e690865dfae1fc46d030fa607c",
+    "mainMergeTree": "8480a63f6b37ea4362073b52d47ea2dbf850f061"
   },
   "dshLock": {
     "source": "https://github.com/deepseek-ai/deepseek-harness.git",
@@ -83,15 +85,15 @@
       "source": "dist/receipts/dsh-lifecycle-proof.json"
     },
     "dsh-humanagent-cli-smoke.json": {
-      "sha256": "ae9de4cbc2ecd091e3884e7426bdeba8642171982b3c420c291b5175a50d73d7",
+      "sha256": "6011f1f98ee0675c6fa8c459bbc53c10f0796780fbb446d016c737163c64fe82",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
     },
     "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
-      "sha256": "c3a7785ff93daa043786a8ac7c69421728bc838476d6b75fa1755b22d6b7129c",
+      "sha256": "dffc4e9567f25ef3d54a12261416cd87e20d15db7552bf176226a010bb3a7dac",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
     },
     "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
-      "sha256": "4222535199d4fcb4dedb9338b74216c04f324b4afcbbe05fdddb32078ba94fdb",
+      "sha256": "3470a31208f8ec8cd0edc899ded5969a8f856b8acba0f8dc7c8f8972e2d07c53",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
     },
     "ui/dsh-dashboard-desktop.png": {

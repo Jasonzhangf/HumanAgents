@@ -28,6 +28,7 @@ export interface DshTransport {
   probe(context: DshTransportContext): Promise<ProviderReadiness>;
   capabilities(context: DshTransportContext): Promise<ProviderCapabilities>;
   start(input: ProviderStartInput): Promise<ProviderStartReceipt>;
+  /** Release a runtime already opened by start when bridge-side receipt validation fails. */
   abortStart?(input: ProviderStartInput): Promise<void>;
   resume(input: ProviderResumeInput): Promise<ProviderRecoveryResult>;
   submit(input: ProviderSubmitInput): Promise<ProviderSubmitResult>;
