@@ -642,6 +642,53 @@ test('resume from a failed checkpoint starts a new HumanAgent epoch', async () =
   assert.equal(recovered.execution?.checkpoint.outcome, 'succeeded');
 });
 
+test('CLI resume closes the session with the checkpoint from the recovered execution', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-resume-state-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const sessionId = 'session-cli-resume-state';
+  const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId });
+  await new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+  await runtime.lock.release();
+  const first = await runAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId,
+    plan: 'default',
+    prompt: 'fail once',
+    composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) },
+  });
+  assert.equal(first.checkpoint.outcome, 'failed');
+
+  const resumed = JSON.parse(execFileSync(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'resume',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--session',
+    sessionId,
+    '--prompt',
+    'continue after failure',
+  ], { encoding: 'utf8', stdio: 'pipe' })) as {
+    readonly state: string;
+    readonly checkpointId: string;
+    readonly recoveredCheckpointId: string;
+    readonly resumedOutcome: string;
+  };
+  assert.equal(resumed.state, 'stopped');
+  assert.equal(resumed.resumedOutcome, 'succeeded');
+  assert.equal(resumed.recoveredCheckpointId, first.checkpoint.id.value);
+
+  const session = await new SessionStore(paths).open(sessionId);
+  assert.equal(session.state, 'stopped');
+  assert.equal(session.records.at(-1)?.type, 'session.closed');
+  assert.equal(session.records.at(-1)?.checkpointRef, resumed.checkpointId);
+});
+
 test('runtime crash preserves original error in a failed checkpoint and resumes in a new epoch', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-crash-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

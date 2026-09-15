@@ -80,6 +80,13 @@ export async function main(args: readonly string[]): Promise<void> {
     const runtime = await resumeRuntime({ workspace, controlRoot, sessionId });
     try {
       const manifest = await readRunManifest(runtime.paths, sessionId);
+      const store = new SessionStore(runtime.paths);
+      if (runtime.session.state !== 'ready' && runtime.session.state !== 'running') {
+        throw new Error(`session cannot resume from state: ${runtime.session.state}`);
+      }
+      const running = runtime.session.state === 'running'
+        ? runtime.session
+        : await store.append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
       const recovered = await resumeAgentOperation({
         paths: runtime.paths,
         configuration: runtime.configuration,
@@ -95,16 +102,35 @@ export async function main(args: readonly string[]): Promise<void> {
         agentId: manifest.agentId,
         driverRef: manifest.driverRef,
       });
+      let state: string;
+      if (!recovered.execution) {
+        state = (await store.append(sessionId, { type: 'session.state', state: 'ready' }, runtime.lock)).state;
+        await runtime.lock.release();
+      } else if (recovered.execution.checkpoint.outcome === 'failed') {
+        await store.append(sessionId, {
+          type: 'session.failed',
+          state: 'failed',
+          checkpointRef: recovered.execution.checkpoint.id.value,
+          errorCode: 'agent-operation-failed',
+          nextAction: 'resume from the failed checkpoint or start a new operation',
+        }, runtime.lock);
+        state = 'failed';
+        await runtime.lock.release();
+      } else {
+        const closed = await closeRuntime(runtime, recovered.execution.checkpoint.id.value);
+        state = closed.state;
+      }
       console.log(JSON.stringify({
         command,
         sessionId,
-        state: runtime.session.state,
-        checkpointId: recovered.recovered?.checkpoint.id.value,
+        state,
+        recoveredCheckpointId: recovered.recovered?.checkpoint.id.value,
+        checkpointId: recovered.execution?.checkpoint.id.value,
         waitingReason: recovered.waitingReason,
         resumedExecutionEpoch: recovered.execution?.executionEpoch,
         resumedOutcome: recovered.execution?.checkpoint.outcome,
       }, null, 2));
-      await runtime.lock.release();
+      void running;
     } catch (error) {
       try { await runtime.lock.release(); } catch { /* preserve the recovery failure */ }
       throw error;
