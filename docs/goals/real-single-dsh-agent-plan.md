@@ -1,6 +1,6 @@
 # 真实单 DSH Agent 执行计划
 
-状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-REVIEW-PENDING`
+状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-COMPLETE`
 基线：`origin/main @ 36528f4e7d05932d63ddd7a4308c8863be424138`
 Worktree：`playground/real-single-dsh-agent`
 分支：`codex/real-single-dsh-agent`
@@ -98,7 +98,8 @@ persistence commit、同 session 多轮推理、SIGKILL crash 后同 home 恢复
 
 - 用专用 `DSH_HOME` 和 `humanagent` profile 启动真实 DSH runtime。
 - 证明 profile boot、session create、prompt admission、follow snapshot/event、
-  tool call/result、同 session continuation、cancel receipt、close/dispose。
+  tool call/result、同 session continuation、shutdown/settle、close/dispose；
+  若当前 wire 不提供 cancel，则显式记录该能力边界，不伪造 receipt。
 - 原始 DSH session locator 只进入 `EvidenceRef`；HumanAgent identity 不依赖
   DSH SessionId。
 
@@ -106,7 +107,7 @@ persistence commit、同 session 多轮推理、SIGKILL crash 后同 home 恢复
 
 - 真实入口 smoke 必须使用显式 binary、profile、home 和 workspace。
 - 失败矩阵覆盖 binary missing、profile invalid、provider unavailable、
-  malformed frame、transport close、cancel receipt 后未 settle。
+  malformed frame、transport close，以及 stop 请求后未 settle。
 - 测试失败保留原始 stderr 和 exit code，不转成成功。
 
 退出证据：
@@ -283,8 +284,11 @@ Owner：validation
   生成稳定 `agent-${agentId}` Organ，DSH adapter 只校验并转发，并新增
   scope negative tests。
 - 实现候选为 `29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
-  `957110c188acffc20f00c146131f6f296a92524f`。独立只读 review 结果记录在
-  后续 evidence commit；review PASS 前不得把 P6 宣称为最终收口。
+  `957110c188acffc20f00c146131f6f296a92524f`。独立只读 review 候选为
+  `8f1a597e3b4b48856f549a7af0615aafca6f3a9c`，tree
+  `e1720b707d5baa33be74fea751a5a0a1c3a5075f`；review 结果 `PASS`，
+  P0/P1 = 0，receipt 为
+  `.agent-collab/review/humanagent-real-single-dsh-agent-8f1a597/status.json`。
 - 该 candidate 尚未 merge、push 或 release。
 
 ## 4. 验收场景

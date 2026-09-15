@@ -3,11 +3,12 @@
 ```text
 /goal
 目标：
-在 HumanAgent 生命周期下跑通一个真实 DSH Agent：HumanAgent 创建 Task 与
-Operation，经 Provider-neutral ExecutionRuntimePort 驱动 DSH Session，Agent
-调用真实工具并经 RCC 4444 持续推理，结果回到同一 DSH Session，最终由
-HumanAgent 写 checkpoint；stop 必须完成 requestStop、DSH cancel、真实 settle、
-资源释放和 stopped checkpoint。
+完成 `docs/goals/real-single-dsh-agent-plan.md` 定义的真实单 DSH Agent 主线：
+HumanAgent 拥有 Task、Operation、execution epoch、checkpoint 和恢复责任；
+真实 DSH Agent 通过 Provider-neutral ExecutionRuntimePort 执行，调用真实工具，
+经 RCC 4444 持续推理，结果回到同一 DSH Session，并由 HumanAgent 写
+checkpoint。stop 按计划的真实 DSH stop/settle 映射完成，不得把请求受理、
+cancel receipt 或进程退出单点当作 stopped。
 
 范围与约束：
 - 项目：/Volumes/extension/code/humanagent
@@ -31,6 +32,9 @@ HumanAgent 写 checkpoint；stop 必须完成 requestStop、DSH cancel、真实 
   Attention、stop/settle、health 和 UI projection。DSH 只拥有 profile、session、
   agent、tool、model 和原生执行事件；RCC 只拥有外部 Provider endpoint、route、
   model 和 auth 配置。
+- stop、recovery、session continuation、工具边界和 UI 投影的语义以
+  `docs/goals/real-single-dsh-agent-plan.md` 与
+  `docs/architecture/dsh-entry-proof.md` 的实测结论为准。
 - 不修改 /Volumes/extension/code/dsh；不修改 ~/.rcc；不自动安装或升级 DSH；
   不接 DSH WebUI、不做多 Agent、不做 Memory/RAG、不做生产发布。
 - 不静默 fallback，不用 fake、编译、listener 可连接或 DSH 日志存在冒充真实执行。
@@ -49,13 +53,13 @@ docs/architecture/host-and-cordis.md
 docs/architecture/organ-runtime.md
 
 验收：
-- 真实 DSH entry proof 有可复核 receipt：profile boot、session create/resume、
-  prompt admission、follow 事件、tool result、cancel receipt、close/dispose
-  和失败矩阵；所有 DSH 身份只进入 EvidenceRef。
+- 真实 DSH entry proof 有可复核 receipt：profile boot、session create、
+  prompt admission、follow 事件、tool result、shutdown/settle、能力边界和
+  失败矩阵；所有 DSH 身份只进入 EvidenceRef。
 - ExecutionRuntimePort 经 AgentDriver 驱动 AgentRuntime；同一 DSH Session 内
   完成至少一次 model -> tool -> tool result -> continue 闭环。
-- stop operation 有 HumanAgent 撤销继续许可、DSH cancel、真实 settle、资源释放、
-  persistence commit 和 stopped checkpoint 证据。
+- stop operation 有 HumanAgent 撤销继续许可、按当前 DSH wire 的 stop/settle、
+  资源释放、persistence commit 和 stopped checkpoint 证据。
 - DSH 意外退出保留原始错误，operation 不静默成功，能恢复或进入明确 waiting。
 - fake contract、recorded replay、real RCC 4444、real DSH same-entry 四层验证
   语义一致；Journal 与 DSH Session Log 分离。

@@ -5,9 +5,9 @@
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
     "implementationCommit": "29d4cfa1f690ab9b281115f570868cd4d38c92c2",
     "implementationTree": "957110c188acffc20f00c146131f6f296a92524f",
-    "evidenceCommit": null,
-    "finalCommit": null,
-    "finalTree": null
+    "evidenceCommit": "8f1a597e3b4b48856f549a7af0615aafca6f3a9c",
+    "finalCommit": "8f1a597e3b4b48856f549a7af0615aafca6f3a9c",
+    "finalTree": "e1720b707d5baa33be74fea751a5a0a1c3a5075f"
   },
   "dshLock": {
     "source": "https://github.com/deepseek-ai/deepseek-harness.git",
@@ -99,9 +99,12 @@
   },
   "review": {
     "implementationCandidate": "29d4cfa1f690ab9b281115f570868cd4d38c92c2",
-    "implementationVerdict": "PENDING",
-    "implementationFindings": null,
-    "implementationReview": null,
+    "implementationVerdict": "PASS",
+    "implementationFindings": {
+      "P0": 0,
+      "P1": 0
+    },
+    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-8f1a597/",
     "priorReviews": [
       {
         "candidate": "9b67217774a05a5e4776d774e33993261460ea73",
@@ -130,6 +133,15 @@
           "P1": 1
         },
         "review": ".agent-collab/review/humanagent-real-single-dsh-agent-287afc8/"
+      },
+      {
+        "candidate": "da4aaf0351a3c5e1dd69767084ec05a3c63fec32",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-da4aaf0/"
       }
     ],
     "fixes": [
@@ -139,7 +151,7 @@
       "DSH prompt submit requires the real server messageId instead of fabricating an output reference",
       "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
     ],
-    "finalCandidate": null,
-    "finalVerdict": "PENDING"
+    "finalCandidate": "8f1a597e3b4b48856f549a7af0615aafca6f3a9c",
+    "finalVerdict": "PASS"
   }
 }

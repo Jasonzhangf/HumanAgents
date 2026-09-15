@@ -1,6 +1,6 @@
 # 真实 DSH 入口证明（P0 / P1）
 
-状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-REVIEW-PENDING`
+状态：`P0-COMPLETE / P1-COMPLETE / P2-COMPLETE / P3-COMPLETE / P4-COMPLETE / P5-COMPLETE / P6-COMPLETE`
 日期：2026-09-14
 Owner：`packages/adapters/dsh` + `docs/architecture`
 
@@ -167,7 +167,7 @@ mid-turn prompt cancel：
 
 ## 5. 当前收口
 
-P0-P5 已完成，P6 实现与验证已完成但独立 review 仍为 `PENDING`：真实
+P0-P6 已完成：真实
 transport、runtime/app/config 接线、stop/settle、crash recovery 和 UI
 projection 均已通过 focused tests 与真实入口证据。四层验证已执行；当前实现候选
 `29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
@@ -175,6 +175,9 @@ projection 均已通过 focused tests 与真实入口证据。四层验证已执
 所有，DSH 只校验并转发 `organId` / `cycleId` / `operationId`。
 
 candidate-bound receipts、gate manifest、HumanAgent checkpoint、DSH session log
-和 UI 截图已提交到 `docs/evidence/real-single-dsh-agent/`。独立 review 结果由
-后续 evidence commit 绑定到上述精确 SHA；review PASS 前不宣称最终收口。该
-candidate 尚未 merge、push 或 production release。
+和 UI 截图已提交到 `docs/evidence/real-single-dsh-agent/`。独立只读 review
+绑定到精确候选 `8f1a597e3b4b48856f549a7af0615aafca6f3a9c`，tree
+`e1720b707d5baa33be74fea751a5a0a1c3a5075f`，结果为 `PASS`，P0/P1 = 0；
+receipt 为
+`.agent-collab/review/humanagent-real-single-dsh-agent-8f1a597/status.json`。
+该 candidate 尚未 merge、push 或 production release。
