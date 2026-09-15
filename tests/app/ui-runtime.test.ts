@@ -362,6 +362,74 @@ test('journal replay fails explicitly instead of silently dropping corrupted pro
   );
 });
 
+test('journal replay rejects a projection event that cross-links another operation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-journal-cross-link-'));
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const createdAt = '2026-01-01T00:00:00.000Z';
+  const taskId = id('task', 'task-cross-link');
+  const operationId = id('operation', 'operation-cross-link');
+  const scope = {
+    organId: id('organ', 'organ-cross-link'),
+    taskId,
+    cycleId: id('cycle', 'cycle-cross-link'),
+    operationId,
+  };
+  await writeFile(journalPath, `${[
+    JSON.stringify({
+      kind: 'task.created',
+      taskId,
+      title: 'cross link',
+      directive: 'cross link',
+      directiveRevision: 1,
+      createdAt,
+      taskCounter: 1,
+    }),
+    JSON.stringify({
+      kind: 'operation.started',
+      operationId,
+      taskId,
+      cycleId: scope.cycleId,
+      scope,
+      executionEpoch: 1,
+      operationCounter: 1,
+      cycleCounter: 1,
+      startedAt: createdAt,
+      input: 'cross link',
+    }),
+    JSON.stringify({
+      kind: 'operation.event',
+      operationId,
+      event: {
+        eventId: 'event-cross-link',
+        seq: 1,
+        occurredAt: createdAt,
+        taskId,
+        operationId: 'operation-somewhere-else',
+        executionEpoch: 1,
+        kind: 'execution.started',
+        state: 'running',
+        summary: 'foreign event',
+        evidenceRefs: [],
+      },
+    }),
+  ].join('\n')}\n`, 'utf8');
+
+  assert.throws(
+    () => new RuntimeTaskCoordinator({
+      organId,
+      createDriver: () => {
+        throw new Error('createDriver must not run while replaying a corrupt journal');
+      },
+      checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+      attentionPort: attentionPort(),
+      journal: new UiRuntimeJournal(journalPath),
+    }),
+    (error: unknown) => error instanceof RuntimeTaskControlError
+      && error.code === 'journal.corrupt'
+      && error.message.includes('operation-cross-link'),
+  );
+});
+
 test('restart restores a failed task error owner and next action from the app journal', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-failure-restart-'));
   const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });

@@ -1018,8 +1018,31 @@ export class RuntimeTaskCoordinator {
         }
         case 'operation.event': {
           const operation = this.operations.get(record.operationId.value);
-          const task = this.tasks.get(record.event.taskId.value);
-          if (!operation || !task) break;
+          if (!operation) {
+            throw new RuntimeTaskControlError(
+              'journal.corrupt',
+              RUNTIME_OWNER,
+              `journal event ${record.event.eventId} references unknown operation ${record.operationId.value}`,
+              'repair or discard the UI runtime journal before restarting',
+            );
+          }
+          if (record.event.operationId !== record.operationId.value || record.event.taskId.value !== operation.taskId.value) {
+            throw new RuntimeTaskControlError(
+              'journal.corrupt',
+              RUNTIME_OWNER,
+              `journal event ${record.event.eventId} identity does not match operation ${record.operationId.value}`,
+              'repair or discard the UI runtime journal before restarting',
+            );
+          }
+          const task = this.tasks.get(operation.taskId.value);
+          if (!task) {
+            throw new RuntimeTaskControlError(
+              'journal.corrupt',
+              RUNTIME_OWNER,
+              `journal event ${record.event.eventId} references unknown task ${operation.taskId.value}`,
+              'repair or discard the UI runtime journal before restarting',
+            );
+          }
           operation.events.push(record.event);
           operation.seq = Math.max(operation.seq, record.event.seq);
           task.events.push(record.event);
