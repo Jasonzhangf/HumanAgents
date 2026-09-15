@@ -5,9 +5,9 @@
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
     "implementationCommit": "1ef020de2e69afd6395f9e8fd03b289ec7541f6b",
     "implementationTree": "fd7b6596e5047c828b3fb287cd254400da6202c4",
-    "evidenceCommit": null,
-    "finalCommit": null,
-    "finalTree": null
+    "evidenceCommit": "ca858373e3ff6ae1cbe2705d8180f9aba88091fd",
+    "finalCommit": "ca858373e3ff6ae1cbe2705d8180f9aba88091fd",
+    "finalTree": "bb8d5888d2112474875dabfbe1de0e88fa68a86c"
   },
   "dshLock": {
     "source": "https://github.com/deepseek-ai/deepseek-harness.git",
@@ -99,9 +99,12 @@
   },
   "review": {
     "implementationCandidate": "1ef020de2e69afd6395f9e8fd03b289ec7541f6b",
-    "implementationVerdict": "PENDING",
-    "implementationFindings": null,
-    "implementationReview": null,
+    "implementationVerdict": "PASS",
+    "implementationFindings": {
+      "P0": 0,
+      "P1": 0
+    },
+    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-ca85837/",
     "priorReviews": [
       {
         "candidate": "9b67217774a05a5e4776d774e33993261460ea73",
@@ -167,7 +170,7 @@
       "CLI smoke requires exactly one read call, a matching tool result, and a post-result assistant nonce in the same session",
       "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
     ],
-    "finalCandidate": null,
-    "finalVerdict": "PENDING"
+    "finalCandidate": "ca858373e3ff6ae1cbe2705d8180f9aba88091fd",
+    "finalVerdict": "PASS"
   }
 }

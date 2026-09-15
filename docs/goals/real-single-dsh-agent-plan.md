@@ -269,7 +269,7 @@ Owner：validation
 - 每层命令、退出码、artifact/receipt、限制和剩余风险。
 - 独立 review PASS；P0/P1 = 0；candidate、merge、push、release 分别报告。
 - `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 的 contracts
-  21/21、config 22/22、app 38/38、runtime 112/112；DSH focused 55/55；
+  21/21、config 22/22、app 39/39、runtime 112/112；DSH focused 55/55；
   `test:release` 18/18。
 - `proof:dsh-entry`、`proof:dsh-lifecycle`、`proof:dsh-cli` 均 exit `0`；
   candidate-bound receipts 为
@@ -283,12 +283,12 @@ Owner：validation
   `organId` / `cycleId` 传给 provider execution identity。当前候选由 app
   生成稳定 `agent-${agentId}` Organ，DSH adapter 只校验并转发，并新增
   scope negative tests。
-- 当前实现候选为 `36d359ebaa06ad39bf00240b174b0fea55ff457a`，tree
-  `1dcc76a5c98fe02d36ca3e6bd7589cac3d305360`；当前候选的精确 review 记录在
-  `.agent-collab/review/humanagent-real-single-dsh-agent-7365184/`，状态为
-  `PENDING`。早期候选 `29d4cfa1f690ab9b281115f570868cd4d38c92c2` 和
-  `8f1a597e3b4b48856f549a7af0615aafca6f3a9c` 的历史 review 结果为 `PASS`，
-  P0/P1 = 0，不作为当前候选的 PASS 证据。
+- 实现候选为 `1ef020de2e69afd6395f9e8fd03b289ec7541f6b`，tree
+  `fd7b6596e5047c828b3fb287cd254400da6202c4`。证据候选为
+  `ca858373e3ff6ae1cbe2705d8180f9aba88091fd`，tree
+  `bb8d5888d2112474875dabfbe1de0e88fa68a86c`；独立只读 review 结果为
+  `PASS`，P0/P1 = 0，receipt 为
+  `.agent-collab/review/humanagent-real-single-dsh-agent-ca85837/status.json`。
 - 该 candidate 尚未 merge、push 或 release。
 
 ## 4. 验收场景
