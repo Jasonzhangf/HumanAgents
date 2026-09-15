@@ -3,8 +3,8 @@
   "kind": "humanagent.dsh.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "implementationCommit": "9b67217774a05a5e4776d774e33993261460ea73",
-    "documentationCommit": "3e8ee8f02768cdf7220bd93b1fb2fad3f6a744d6",
+    "implementationCommit": "298b749f9002efa7720ea9186a8d27bb64892dac",
+    "implementationTree": "42c77571edcd1742067c9132bef4673a0f1a5f9c",
     "evidenceCommit": null,
     "finalCommit": null,
     "finalTree": null
@@ -15,20 +15,20 @@
     "commit": "c291e7961a515f6d7af9304e7fd1d257929aef26",
     "tree": "e482b49bef64726be8f79380bb35bae569dc3c48",
     "describe": "dsh-v0.1.5-rc.2-139-gc291e7961a",
-    "checkedAt": "2026-09-14T18:00:00-07:00"
+    "checkedAt": "2026-09-14T19:00:00-07:00"
   },
   "commands": [
     {
       "command": "corepack pnpm@10.31.0 run typecheck",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "candidate-bound after P2 identity fix"
+      "notes": "candidate-bound after HumanAgent execution scope fix"
     },
     {
       "command": "corepack pnpm@10.31.0 run test",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "candidate-bound after P2 identity fix"
+      "notes": "contracts 21/21, config 22/22, app 38/38, runtime 112/112"
     },
     {
       "command": "corepack pnpm@10.31.0 run test:release",
@@ -40,7 +40,13 @@
       "command": "corepack pnpm@10.31.0 run test:app",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "37/37 app integration tests"
+      "notes": "38/38 app integration tests"
+    },
+    {
+      "command": "corepack pnpm@10.31.0 exec tsc -p tests/adapters/dsh/tsconfig.json && node --test dist/tests/adapters/dsh/dsh-adapter.test.js dist/tests/adapters/dsh/dsh-driver.test.js dist/tests/adapters/dsh/dsh-real-transport.test.js dist/tests/adapters/dsh/dsh-replay.test.js",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "54/54 focused DSH adapter, driver, transport, and replay tests"
     },
     {
       "command": "corepack pnpm@10.31.0 run proof:dsh-entry",
@@ -63,23 +69,23 @@
   ],
   "artifacts": {
     "dsh-entry-proof.json": {
-      "sha256": "1e35f5b7298e68dd4b51e4e2faeada0b1d2dea65e22a14d2522319a335509385",
+      "sha256": "4064129569085567cb33931610063ad133e0078f223a1acc19c52a278a6f6583",
       "source": "dist/receipts/dsh-entry-proof.json"
     },
     "dsh-lifecycle-proof.json": {
-      "sha256": "d36a08d0976790461a11a2e8c7b2caf6b08d8af0f3b41eaeefa1df0e5ec0f310",
+      "sha256": "abf065047a81a993f219893036c946a87ae4ebdf377a82ec660dce9e59dc58b9",
       "source": "dist/receipts/dsh-lifecycle-proof.json"
     },
     "dsh-humanagent-cli-smoke.json": {
-      "sha256": "a570be378f038cfadc0f20939271bd0a2e8f1f1473c2c6daad971da931f7ee70",
+      "sha256": "b4fdab18e4e3044be4fbc8a36905866d5097f382e7948b0ef417a50b86bcf512",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
     },
     "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
-      "sha256": "1afb0d20e0c1ed3e70fdd8abbd6feb62385fe6d012b48fbf27eca71a9453cfcd",
+      "sha256": "4de33cd330a4aad2ded855367f1ef5fa7d3690f4d7a12cc7ff6b63cbd81bfcce",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
     },
     "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
-      "sha256": "3621f5dac9dba1158c139ba8a1e2a79f78681197ea959a22c6904acaf284a4f8",
+      "sha256": "e0ae5bd5e1e24391490b11e357b54ed75bc81039abf6229d8442bd969434806f",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
     },
     "ui/dsh-dashboard-desktop.png": {
@@ -92,15 +98,35 @@
     }
   },
   "review": {
-    "implementationCandidate": "9b67217774a05a5e4776d774e33993261460ea73",
-    "implementationVerdict": "FAIL",
-    "implementationFindings": {
-      "P0": 0,
-      "P1": 2
-    },
-    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-9b67217/",
+    "implementationCandidate": "298b749f9002efa7720ea9186a8d27bb64892dac",
+    "implementationVerdict": "PENDING",
+    "implementationFindings": null,
+    "implementationReview": null,
+    "priorReviews": [
+      {
+        "candidate": "9b67217774a05a5e4776d774e33993261460ea73",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 2
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-9b67217/"
+      },
+      {
+        "candidate": "6ebc2e51cb74e4732ed9f63921ca8e50142fcf05",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1,
+          "P2": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-6ebc2e5/"
+      }
+    ],
     "fixes": [
-      "packages/adapters/dsh/src/driver.ts now rejects missing HumanAgent organId/operationId instead of minting fallback identity",
+      "HumanAgent Organ identity is app-owned and stable across driver/provider bindings",
+      "DSH execution start forwards HumanAgent organId/cycleId/operationId unchanged",
+      "provider execution identity matching includes organ and cycle scope",
       "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
     ],
     "finalCandidate": null,

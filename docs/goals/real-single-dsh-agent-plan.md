@@ -183,8 +183,8 @@ Owner：`packages/runtime`、`packages/app`、`packages/config`
   内完成 model -> tool -> result -> continue -> HumanAgent checkpoint。
 - 当前收口 smoke 由
   `tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs` 可重复生成：
-  `session=dsh-smoke-1789434594287`，`outcome=succeeded`，
-  `checkpoint=dsh-smoke-1789434594287-1-1`，RCC health 200。候选绑定的 receipt、
+  `session=dsh-smoke-1789437547765`，`outcome=succeeded`，
+  `checkpoint=dsh-smoke-1789437547765-1-1`，RCC health 200。候选绑定的 receipt、
   DSH session log 与 HumanAgent checkpoint journal artifact 已提交到
   `docs/evidence/real-single-dsh-agent/`。
 
@@ -267,7 +267,8 @@ Owner：validation
 
 - 每层命令、退出码、artifact/receipt、限制和剩余风险。
 - 独立 review PASS；P0/P1 = 0；candidate、merge、push、release 分别报告。
-- `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 112/112；
+- `corepack pnpm@10.31.0 run typecheck` exit `0`；`test` 的 contracts
+  21/21、config 22/22、app 38/38、runtime 112/112；DSH focused 54/54；
   `test:release` 18/18。
 - `proof:dsh-entry`、`proof:dsh-lifecycle`、`proof:dsh-cli` 均 exit `0`；
   candidate-bound receipts 为
@@ -275,17 +276,16 @@ Owner：validation
   `docs/evidence/real-single-dsh-agent/dsh-lifecycle-proof.json`、
   `docs/evidence/real-single-dsh-agent/dsh-humanagent-cli-smoke.json`；
   同目录 `gates.json` 记录命令、退出码、结果和 SHA-256。
-- 最终 review 前的 P2 identity 修复：`packages/adapters/dsh/src/driver.ts`
-  不再为缺失的 HumanAgent `organId` / `operationId` 铸造 fallback；缺失时
-  显式抛 `identity-mismatch`，负向测试确认 runtime `start` 未被调用。
-- `packages/app/src/agent-driver-composition.ts` 的真实 review finding
-  “配置值可改变生成的 YAML route”已修复为 JSON 双引号 scalar 编码，并有
-  `tests/app/app.test.ts` 负向测试；代码候选
-  `9b67217774a05a5e4776d774e33993261460ea73` 的独立 review 为 PASS，
-  P0/P1 = 0，receipt 为
-  `.agent-collab/review/humanagent-real-single-dsh-agent-9b67217/`。
-- 该 candidate 尚未 merge、push 或 release；最终文档提交会作为新的精确 SHA
-  再运行一次只读 review，旧 review 不自动代表最终 SHA。
+- 早期候选 review 已发现并修复三类问题：app 曾依赖 DSH adapter 铸造
+  HumanAgent Organ identity；driver 曾为缺失的 HumanAgent
+  `organId` / `operationId` 铸造 fallback；真实 CLI 未把 HumanAgent
+  `organId` / `cycleId` 传给 provider execution identity。当前候选由 app
+  生成稳定 `agent-${agentId}` Organ，DSH adapter 只校验并转发，并新增
+  scope negative tests。
+- 实现候选为 `298b749f9002efa7720ea9186a8d27bb64892dac`，tree
+  `42c77571edcd1742067c9132bef4673a0f1a5f9c`。独立只读 review 结果记录在
+  后续 evidence commit；review PASS 前不得把 P6 宣称为最终收口。
+- 该 candidate 尚未 merge、push 或 release。
 
 ## 4. 验收场景
 
