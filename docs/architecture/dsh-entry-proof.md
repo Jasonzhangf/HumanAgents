@@ -170,14 +170,13 @@ mid-turn prompt cancel：
 P0-P6 已完成：真实
 transport、runtime/app/config 接线、stop/settle、crash recovery 和 UI
 projection 均已通过 focused tests 与真实入口证据。四层验证已执行；当前实现候选
-`29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
-`957110c188acffc20f00c146131f6f296a92524f`，把 HumanAgent Organ 收回 app
-所有，DSH 只校验并转发 `organId` / `cycleId` / `operationId`。
+`36d359ebaa06ad39bf00240b174b0fea55ff457a`，tree
+`1dcc76a5c98fe02d36ca3e6bd7589cac3d305360`。当前候选的独立只读 review 仍为
+`PENDING`，不能宣称最终 PASS。
 
 candidate-bound receipts、gate manifest、HumanAgent checkpoint、DSH session log
-和 UI 截图已提交到 `docs/evidence/real-single-dsh-agent/`。独立只读 review
-绑定到精确候选 `8f1a597e3b4b48856f549a7af0615aafca6f3a9c`，tree
-`e1720b707d5baa33be74fea751a5a0a1c3a5075f`，结果为 `PASS`，P0/P1 = 0；
-receipt 为
-`.agent-collab/review/humanagent-real-single-dsh-agent-8f1a597/status.json`。
-该 candidate 尚未 merge、push 或 production release。
+和 UI 截图已提交到 `docs/evidence/real-single-dsh-agent/`。早期候选
+`29d4cfa1f690ab9b281115f570868cd4d38c92c2` 和
+`8f1a597e3b4b48856f549a7af0615aafca6f3a9c` 的历史 review 结果为 `PASS`，
+P0/P1 = 0，但不作为当前候选的 PASS 证据。该 candidate 尚未 merge、push 或
+production release。

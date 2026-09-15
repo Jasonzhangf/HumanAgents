@@ -283,12 +283,12 @@ Owner：validation
   `organId` / `cycleId` 传给 provider execution identity。当前候选由 app
   生成稳定 `agent-${agentId}` Organ，DSH adapter 只校验并转发，并新增
   scope negative tests。
-- 实现候选为 `29d4cfa1f690ab9b281115f570868cd4d38c92c2`，tree
-  `957110c188acffc20f00c146131f6f296a92524f`。独立只读 review 候选为
-  `8f1a597e3b4b48856f549a7af0615aafca6f3a9c`，tree
-  `e1720b707d5baa33be74fea751a5a0a1c3a5075f`；review 结果 `PASS`，
-  P0/P1 = 0，receipt 为
-  `.agent-collab/review/humanagent-real-single-dsh-agent-8f1a597/status.json`。
+- 当前实现候选为 `36d359ebaa06ad39bf00240b174b0fea55ff457a`，tree
+  `1dcc76a5c98fe02d36ca3e6bd7589cac3d305360`；当前候选的精确 review 记录在
+  `.agent-collab/review/humanagent-real-single-dsh-agent-7365184/`，状态为
+  `PENDING`。早期候选 `29d4cfa1f690ab9b281115f570868cd4d38c92c2` 和
+  `8f1a597e3b4b48856f549a7af0615aafca6f3a9c` 的历史 review 结果为 `PASS`，
+  P0/P1 = 0，不作为当前候选的 PASS 证据。
 - 该 candidate 尚未 merge、push 或 release。
 
 ## 4. 验收场景
