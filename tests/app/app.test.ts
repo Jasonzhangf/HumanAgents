@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -225,6 +225,23 @@ test('DSH home rejects a symlink escaping the control root', async () => {
   await mkdir(join(controlRoot, 'dsh'));
   await symlink(outside, join(controlRoot, 'dsh', 'link'));
   assert.throws(() => resolveDshHome({ paths, configuredHome: 'dsh/link/home' }), /must remain below the HumanAgent control root/);
+});
+
+test('DSH settings quote configured provider and model scalars', async () => {
+  const { root } = await createConfiguredWorkspace('humanagent-app-dsh-settings-');
+  const home = join(root, 'dsh-home');
+  await ensureDshSettings(home, {
+    sourceRoot: '/locked/dsh',
+    home: '~/.humanagent/dsh/home',
+    profile: 'sdk',
+    provider: 'rcc\n    injected: true',
+    model: 'gpt-5.5\n          injected: true',
+  });
+  const document = await readFile(join(home, 'settings.yaml'), 'utf8');
+  assert.match(document, /^    "rcc\\n    injected: true":$/m);
+  assert.match(document, /^        - id: "gpt-5\.5\\n          injected: true"$/m);
+  assert.equal(document.includes('\n    injected: true'), false);
+  assert.equal(document.includes('\n          injected: true'), false);
 });
 
 test('DSH driver rejects a sourceRoot that does not match the locked DSH commit', async () => {

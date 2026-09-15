@@ -228,16 +228,17 @@ function providerBinding(
  * a different existing document: the DSH home is persistent runtime state.
  */
 function settingsDocument(config: DshExecutionConfig): string {
+  const yamlScalar = (value: string): string => JSON.stringify(value);
   return [
     'llm-pi-ai:',
     '  providers:',
-    `    ${config.provider}:`,
-    `      displayName: ${config.provider} route`,
+    `    ${yamlScalar(config.provider)}:`,
+    `      displayName: ${yamlScalar(`${config.provider} route`)}`,
     '      api: openai-completions',
     `      baseURL: ${DSH_RCC_BASE_URL}`,
     '      apiKeyEnv: RCC_LOCAL_API_KEY',
     '      models:',
-    `        - id: ${config.model}`,
+    `        - id: ${yamlScalar(config.model)}`,
     '          contextWindow: 272000',
     '          maxTokens: 32768',
     '',
