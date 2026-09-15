@@ -28,7 +28,7 @@
       "command": "corepack pnpm@10.31.0 run test",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "contracts 21/21, config 22/22, app 38/38, runtime 112/112"
+      "notes": "contracts 21/21, config 22/22, app 39/39, runtime 112/112"
     },
     {
       "command": "corepack pnpm@10.31.0 run test:release",
@@ -40,7 +40,7 @@
       "command": "corepack pnpm@10.31.0 run test:app",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "38/38 app integration tests"
+      "notes": "39/39 app integration tests"
     },
     {
       "command": "corepack pnpm@10.31.0 exec tsc -p tests/adapters/dsh/tsconfig.json && node --test dist/tests/adapters/dsh/dsh-adapter.test.js dist/tests/adapters/dsh/dsh-driver.test.js dist/tests/adapters/dsh/dsh-real-transport.test.js dist/tests/adapters/dsh/dsh-replay.test.js",

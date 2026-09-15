@@ -156,7 +156,7 @@ Owner：`packages/runtime`、`packages/app`、`packages/config`
 - 真实 DSH transport 的普通 `shutdown()` 不再隐式把运行标记为 stopped；只有经过
   `requestStop` 的 stop control 才会由 settle 返回 `stopped`。否则普通完成会被
   `AgentRuntime` 拒绝为 “ordinary settle cannot complete stopped”。
-- `test:app` 26/26：覆盖 stopped settle 证据、settle 失败不得 commit stopped、以及
+- `test:app` 本阶段覆盖 stopped settle 证据、settle 失败不得 commit stopped、以及
   失败 checkpoint 后新 epoch 恢复。
 - 新增 jsonl 与 DSH transport 回归测试，覆盖独立根链和普通 settle 不返回 stopped。
 
