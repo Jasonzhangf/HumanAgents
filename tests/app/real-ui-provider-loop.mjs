@@ -56,7 +56,7 @@ function sourceDigest() {
     .split('\n')
     .filter((line) => line && !line.includes('docs/evidence/ui-provider-loop/'))
     .sort();
-  return `sha256:${createHash('sha256').update(entries.join('\n')).digest('hex')}`;
+  return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
 }
 
 function startServe(protocol, root) {
