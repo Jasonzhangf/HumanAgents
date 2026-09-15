@@ -3,11 +3,11 @@
   "kind": "humanagent.dsh.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "implementationCommit": "29d4cfa1f690ab9b281115f570868cd4d38c92c2",
-    "implementationTree": "957110c188acffc20f00c146131f6f296a92524f",
-    "evidenceCommit": "8f1a597e3b4b48856f549a7af0615aafca6f3a9c",
-    "finalCommit": "8f1a597e3b4b48856f549a7af0615aafca6f3a9c",
-    "finalTree": "e1720b707d5baa33be74fea751a5a0a1c3a5075f"
+    "implementationCommit": "36d359ebaa06ad39bf00240b174b0fea55ff457a",
+    "implementationTree": "1dcc76a5c98fe02d36ca3e6bd7589cac3d305360",
+    "evidenceCommit": null,
+    "finalCommit": null,
+    "finalTree": null
   },
   "dshLock": {
     "source": "https://github.com/deepseek-ai/deepseek-harness.git",
@@ -22,7 +22,7 @@
       "command": "corepack pnpm@10.31.0 run typecheck",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "candidate-bound after HumanAgent execution scope fix"
+      "notes": "candidate-bound after CLI smoke semantic verification fix"
     },
     {
       "command": "corepack pnpm@10.31.0 run test",
@@ -64,7 +64,7 @@
       "command": "corepack pnpm@10.31.0 run proof:dsh-cli",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "real CLI same-entry run with RCC 4444 and HumanAgent checkpoint"
+      "notes": "real CLI same-entry run with exactly one read, matching result, same-session continuation, RCC 4444, and HumanAgent checkpoint"
     }
   ],
   "artifacts": {
@@ -77,15 +77,15 @@
       "source": "dist/receipts/dsh-lifecycle-proof.json"
     },
     "dsh-humanagent-cli-smoke.json": {
-      "sha256": "46dd8a8a0c4a2c7efb7c2c1952bcc7914910f6943c22fdec9573f8bde807a5b9",
+      "sha256": "c1e6312d6a2c851b53b7ba2acb5149a916fe2a7b9c7b8553ddf506f6510bb9b1",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
     },
     "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
-      "sha256": "aadc2e8d1cf321b9034e49c06a925c26da9d12292e086e5b173ed0c48fa5aa1b",
+      "sha256": "0ce24de0b6c8dc66b25e4b10f045beda8f24e2bf668d764ee111a4289a31f66c",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
     },
     "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
-      "sha256": "a6e68617a083d56190e4829ae2a56894aa9817555dae569f922cced36085d2fd",
+      "sha256": "1803433159313023ba47e99099820b079af00c1e57f7f1bb29d8cee17a9a8fa7",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
     },
     "ui/dsh-dashboard-desktop.png": {
@@ -98,13 +98,10 @@
     }
   },
   "review": {
-    "implementationCandidate": "29d4cfa1f690ab9b281115f570868cd4d38c92c2",
-    "implementationVerdict": "PASS",
-    "implementationFindings": {
-      "P0": 0,
-      "P1": 0
-    },
-    "implementationReview": ".agent-collab/review/humanagent-real-single-dsh-agent-8f1a597/",
+    "implementationCandidate": "36d359ebaa06ad39bf00240b174b0fea55ff457a",
+    "implementationVerdict": "PENDING",
+    "implementationFindings": null,
+    "implementationReview": null,
     "priorReviews": [
       {
         "candidate": "9b67217774a05a5e4776d774e33993261460ea73",
@@ -142,6 +139,15 @@
           "P1": 1
         },
         "review": ".agent-collab/review/humanagent-real-single-dsh-agent-da4aaf0/"
+      },
+      {
+        "candidate": "0b85d4ab4b4762c3b35ca1380dfc122e74a7f9bf",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 3
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-0b85d4a/"
       }
     ],
     "fixes": [
@@ -149,9 +155,10 @@
       "DSH execution start forwards HumanAgent organId/cycleId/operationId unchanged",
       "provider execution identity matching includes organ and cycle scope",
       "DSH prompt submit requires the real server messageId instead of fabricating an output reference",
+      "CLI smoke requires exactly one read call, a matching tool result, and a post-result assistant nonce in the same session",
       "candidate-bound receipts and artifacts are committed under docs/evidence/real-single-dsh-agent/"
     ],
-    "finalCandidate": "8f1a597e3b4b48856f549a7af0615aafca6f3a9c",
-    "finalVerdict": "PASS"
+    "finalCandidate": null,
+    "finalVerdict": "PENDING"
   }
 }
