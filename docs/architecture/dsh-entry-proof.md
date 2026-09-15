@@ -170,12 +170,10 @@ mid-turn prompt cancel：
 P0-P6 已完成：真实
 transport、runtime/app/config 接线、stop/settle、crash recovery 和 UI
 projection 均已通过 focused tests 与真实入口证据。四层验证已执行；当前实现候选
-`1ef020de2e69afd6395f9e8fd03b289ec7541f6b`，tree
-`fd7b6596e5047c828b3fb287cd254400da6202c4`。当前候选的独立只读 review
-为 `PASS`，P0/P1 = 0。
+`8f22266b3b967a169f71f5bfbb520a5d0642c365`，tree
+`5c5240ffd5798ab1135fbcc15beee1b09202af5a`。当前证据提交和最终 commit
+的独立只读 review 为 `PENDING`。
 
 candidate-bound receipts、gate manifest、HumanAgent checkpoint、DSH session log
-和 UI 截图已提交到 `docs/evidence/real-single-dsh-agent/`。review receipt
-绑定精确证据候选 `ca858373e3ff6ae1cbe2705d8180f9aba88091fd`，tree
-`bb8d5888d2112474875dabfbe1de0e88fa68a86c`。该 candidate 尚未 merge、push
-或 production release。
+和 UI 截图位于 `docs/evidence/real-single-dsh-agent/`。该 candidate 尚未
+merge、push 或 production release。
