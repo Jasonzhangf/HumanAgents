@@ -3,8 +3,8 @@
   "kind": "humanagent.ui-provider-loop.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "sourceDigest": "sha256:ef409e22314f217fe117139f249459ba673ae7e3f7bf117851378aa2b3dcdf46",
-    "reviewedUiCommit": "7faee1e711ce4ea05041c7b8530c5ce84d2cbbcf",
+    "sourceDigest": "sha256:d7f0728d6d9cf135b51fc4861ebad5a0502a960ead00852e3adb7592d82b93db",
+    "reviewedUiCommit": "56840b3d62d1d9db943e4d5376ff3febe99d979c",
     "binding": "sourceDigest covers every tracked source file except docs/evidence/ui-provider-loop/, so the proof stays verifiable from both the implementation commit and the evidence commit"
   },
   "provider": {
@@ -47,7 +47,7 @@
   ],
   "artifacts": {
     "ui-provider-loop-proof.json": {
-      "sha256": "6fe4b4e5ee52d4ee9f5bf6264398220c9612d7a96fe06ec42850018c82bda7e7",
+      "sha256": "a0dd5359c70c3faf6c95f623172b3397fb7fec17834e7e81e8be71c67b8edaee",
       "source": "dist/receipts/ui-provider-loop-proof.json"
     }
   },
@@ -72,8 +72,8 @@
     }
   },
   "review": {
-    "reviewedCommit": "7faee1e711ce4ea05041c7b8530c5ce84d2cbbcf",
-    "reviewTaskId": "humanagent-ui-provider-loop-r2-7faee1e",
+    "reviewedCommit": "56840b3d62d1d9db943e4d5376ff3febe99d979c",
+    "reviewTaskId": "humanagent-ui-provider-loop-r7-56840b3",
     "reviewVerdict": "pass",
     "reviewFindings": { "P0": 0, "P1": 0 }
   }
