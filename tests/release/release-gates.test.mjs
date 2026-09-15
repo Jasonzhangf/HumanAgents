@@ -375,9 +375,7 @@ async function releaseFixture() {
       status: 'passed',
       reviewId: 'review-test-1',
       sourceCommit,
-      stageManifestDigest: stageDigest,
-      artifactDigest,
-      packageArtifactDigest,
+      baseCommit: 'a'.repeat(40),
       receiptDigest: digest('review-receipt-test-1'),
       reviewedAt: new Date().toISOString(),
     },
@@ -405,7 +403,7 @@ test('release checker rejects a non-passing stage with forged underlying pass st
   await writeFile(fixtureValue.stagePath, JSON.stringify(stageManifest), 'utf8');
   const releaseManifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
   const stageManifestDigest = digest(stageManifest);
-  const unsigned = { ...releaseManifest, stageManifestDigest, review: { ...releaseManifest.review, stageManifestDigest } };
+  const unsigned = { ...releaseManifest, stageManifestDigest };
   delete unsigned.releaseManifestDigest;
   await writeFile(fixtureValue.releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
   assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /release stage is not passing/);
@@ -418,7 +416,7 @@ test('release checker rejects a forged pass stage without runner evidence', asyn
   await writeFile(fixtureValue.stagePath, JSON.stringify(stageManifest), 'utf8');
   const releaseManifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
   const stageManifestDigest = digest(stageManifest);
-  const unsigned = { ...releaseManifest, stageManifestDigest, review: { ...releaseManifest.review, stageManifestDigest } };
+  const unsigned = { ...releaseManifest, stageManifestDigest };
   delete unsigned.releaseManifestDigest;
   await writeFile(fixtureValue.releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
   assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /typecheck\.evidenceIdentity/);
@@ -446,11 +444,35 @@ async function pendingReleaseFixture() {
   return fixtureValue;
 }
 
-async function writeReviewReceipt({ fixtureValue, reviewId, commit, findings = [], mode = 'commit' }) {
+async function writeReviewReceipt({
+  fixtureValue,
+  reviewId,
+  commit,
+  findings = [],
+  mode = 'commit',
+  base = 'a'.repeat(40),
+  status = {},
+  final = {},
+}) {
   const receiptDir = join(fixtureValue.root, 'review', reviewId);
   await mkdir(receiptDir, { recursive: true });
-  await writeFile(join(receiptDir, 'status.json'), JSON.stringify({ state: 'completed', mode, commit }), 'utf8');
-  await writeFile(join(receiptDir, 'review.final.md'), JSON.stringify({ scope: { mode, commit }, findings }), 'utf8');
+  await writeFile(join(receiptDir, 'status.json'), JSON.stringify({
+    state: 'completed',
+    verdict: 'pass',
+    failureClass: null,
+    exitCode: 0,
+    mode,
+    commit,
+    base,
+    ...status,
+  }), 'utf8');
+  await writeFile(join(receiptDir, 'review.final.md'), JSON.stringify({
+    contract_version: '1',
+    scope: { mode, commit, base },
+    module_boundary_evidence: [],
+    findings,
+    ...final,
+  }), 'utf8');
   return receiptDir;
 }
 
@@ -468,9 +490,7 @@ test('record-review binds a passing receipt to the candidate and unblocks releas
   const recorded = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
   assert.equal(recorded.review.status, 'passed');
   assert.equal(recorded.review.sourceCommit, manifest.sourceCommit);
-  assert.equal(recorded.review.stageManifestDigest, manifest.stageManifestDigest);
-  assert.equal(recorded.review.artifactDigest, manifest.artifactDigest);
-  assert.equal(recorded.review.packageArtifactDigest, manifest.packageArtifactDigest);
+  assert.equal(recorded.review.baseCommit, 'a'.repeat(40));
   const valid = execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8' });
   assert.match(valid, /"valid": true/);
 });
@@ -493,7 +513,14 @@ test('record-review refuses a receipt carrying blocking findings', async () => {
     fixtureValue,
     reviewId: 'review-blocking',
     commit: manifest.sourceCommit,
-    findings: [{ severity: 'P1', file: 'packages/app/src/cli.ts', rule: 'blocking' }],
+    findings: [{
+      severity: 'P1',
+      file: 'packages/app/src/cli.ts',
+      line: 1,
+      rule: 'blocking',
+      evidence: 'blocking evidence',
+      remediation: 'fix blocking finding',
+    }],
   });
   assert.throws(() => execFileSync(node, [
     'scripts/record-review.mjs',
@@ -521,19 +548,31 @@ test('record-review refuses to overwrite an already passed review', async () => 
   ], { encoding: 'utf8', stdio: 'pipe' }), /already has a passed review/);
 });
 
-test('release checker rejects a review not bound to the release artifacts', async () => {
+test('record-review refuses a malformed review output contract', async () => {
   const fixtureValue = await pendingReleaseFixture();
   const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  await writeReviewReceipt({ fixtureValue, reviewId: 'review-pass-3', commit: manifest.sourceCommit });
-  execFileSync(node, [
+  await writeReviewReceipt({ fixtureValue, reviewId: 'review-malformed', commit: manifest.sourceCommit, final: { contract_version: undefined } });
+  assert.throws(() => execFileSync(node, [
     'scripts/record-review.mjs',
     '--manifest', fixtureValue.releasePath,
     '--review-root', join(fixtureValue.root, 'review'),
-    '--review-id', 'review-pass-3',
-  ], { encoding: 'utf8' });
-  const recorded = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
-  const unsigned = { ...recorded, review: { ...recorded.review, artifactDigest: 'sha256:tampered' } };
-  delete unsigned.releaseManifestDigest;
-  await writeFile(fixtureValue.releasePath, JSON.stringify({ ...unsigned, releaseManifestDigest: digest(unsigned) }), 'utf8');
-  assert.throws(() => execFileSync(node, ['scripts/check-release.mjs', fixtureValue.releasePath], { encoding: 'utf8', stdio: 'pipe' }), /review is not bound to the release artifact/);
+    '--review-id', 'review-malformed',
+  ], { encoding: 'utf8', stdio: 'pipe' }), /does not match the review output contract/);
+});
+
+test('record-review refuses a completed receipt without a pass verdict', async () => {
+  const fixtureValue = await pendingReleaseFixture();
+  const manifest = JSON.parse(await readFile(fixtureValue.releasePath, 'utf8'));
+  await writeReviewReceipt({
+    fixtureValue,
+    reviewId: 'review-no-verdict',
+    commit: manifest.sourceCommit,
+    status: { verdict: 'fail' },
+  });
+  assert.throws(() => execFileSync(node, [
+    'scripts/record-review.mjs',
+    '--manifest', fixtureValue.releasePath,
+    '--review-root', join(fixtureValue.root, 'review'),
+    '--review-id', 'review-no-verdict',
+  ], { encoding: 'utf8', stdio: 'pipe' }), /is not a passing review/);
 });
