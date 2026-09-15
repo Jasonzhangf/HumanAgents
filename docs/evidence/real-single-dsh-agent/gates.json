@@ -3,8 +3,8 @@
   "kind": "humanagent.dsh.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "implementationCommit": "36d359ebaa06ad39bf00240b174b0fea55ff457a",
-    "implementationTree": "1dcc76a5c98fe02d36ca3e6bd7589cac3d305360",
+    "implementationCommit": "1ef020de2e69afd6395f9e8fd03b289ec7541f6b",
+    "implementationTree": "fd7b6596e5047c828b3fb287cd254400da6202c4",
     "evidenceCommit": null,
     "finalCommit": null,
     "finalTree": null
@@ -69,23 +69,23 @@
   ],
   "artifacts": {
     "dsh-entry-proof.json": {
-      "sha256": "4064129569085567cb33931610063ad133e0078f223a1acc19c52a278a6f6583",
+      "sha256": "fdf1e7d73182e8af71f4528f9c518444f576039924e9e034600c55158ae9d9e7",
       "source": "dist/receipts/dsh-entry-proof.json"
     },
     "dsh-lifecycle-proof.json": {
-      "sha256": "abf065047a81a993f219893036c946a87ae4ebdf377a82ec660dce9e59dc58b9",
+      "sha256": "6be5cef3837d819cf4b1d66ba38b313ae8752494ede6a7c6d50f1418ab17ac94",
       "source": "dist/receipts/dsh-lifecycle-proof.json"
     },
     "dsh-humanagent-cli-smoke.json": {
-      "sha256": "c1e6312d6a2c851b53b7ba2acb5149a916fe2a7b9c7b8553ddf506f6510bb9b1",
+      "sha256": "413daf0f4b3e9d55696aa87f83eea3a6528637d90561576c241630185c17b38a",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json"
     },
     "dsh-humanagent-cli-smoke.json.checkpoints.jsonl": {
-      "sha256": "0ce24de0b6c8dc66b25e4b10f045beda8f24e2bf668d764ee111a4289a31f66c",
+      "sha256": "1b3aaa1ec57088b777fd7b84a4ffe95ca04d9c620c11034cb153236aaebd7a51",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.checkpoints.jsonl"
     },
     "dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd": {
-      "sha256": "1803433159313023ba47e99099820b079af00c1e57f7f1bb29d8cee17a9a8fa7",
+      "sha256": "19925c50a1976c47915851a7ba987029f976fb652ea93bb80969677b44a53ade",
       "source": "dist/receipts/dsh-humanagent-cli-smoke.json.session.v3.jsonl.zstd"
     },
     "ui/dsh-dashboard-desktop.png": {
@@ -98,7 +98,7 @@
     }
   },
   "review": {
-    "implementationCandidate": "36d359ebaa06ad39bf00240b174b0fea55ff457a",
+    "implementationCandidate": "1ef020de2e69afd6395f9e8fd03b289ec7541f6b",
     "implementationVerdict": "PENDING",
     "implementationFindings": null,
     "implementationReview": null,
@@ -148,6 +148,15 @@
           "P1": 3
         },
         "review": ".agent-collab/review/humanagent-real-single-dsh-agent-0b85d4a/"
+      },
+      {
+        "candidate": "d0af1dea996bc96c1500e3a7c3a320bfba786073",
+        "verdict": "FAIL",
+        "findings": {
+          "P0": 0,
+          "P1": 1
+        },
+        "review": ".agent-collab/review/humanagent-real-single-dsh-agent-d0af1de/"
       }
     ],
     "fixes": [
