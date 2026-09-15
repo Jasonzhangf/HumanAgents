@@ -149,13 +149,16 @@ function endpointPath(protocol: 'responses' | 'anthropic' | 'openai'): string {
 }
 
 function requestRoute(request: ProviderWireRequest): string {
+  // routeRef is a HumanAgent-local entry label. RCC v3 classifies the
+  // upstream route from typed request facts; this label is evidence, not an
+  // HTTP route selector.
   const route = request.route;
   if (typeof route !== 'string' || route.trim() === '') {
     throw new ProviderAdapterError({
       code: 'missing.route',
       category: 'configuration',
       phase: 'start',
-      message: 'RCC v3 transport requires an explicit provider route binding on the wire request',
+      message: 'RCC v3 transport requires an explicit local route label on the wire request',
     });
   }
   return route;

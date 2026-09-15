@@ -63,7 +63,10 @@ DSH 和 RCC 是两个不同的边界：
 
 HumanAgent 不能因为所有请求都经过 `127.0.0.1:4444` 就认为协议相同。4444
 是透明路由 listener，不是最终 Provider 身份；协议选择仍必须来自锁定的
-Provider binding，但 route label 只表示请求入口，不得用来校验最终上游 Provider。
+Provider binding。`routeRef` / `--route` 只表示 HumanAgent 本地入口标签，用于
+binding、evidence 和审计关联；它不是 RCC 请求体或 header 中可由客户端选择的
+上游 route。RCC 4444 的上游路由由它自己的 typed request facts 分类决定，
+所以该标签也不得用来校验最终上游 Provider。
 `/health` 失败才阻断入口 readiness；模型发现失败、空列表或模型未列出时保留
 evidence，仍允许实际请求验证 RCC 的路由能力。不能猜测协议，也不能静默改用
 另一条协议。

@@ -315,6 +315,7 @@ async function main() {
     rcc: {
       baseUrl: RCC_BASE_URL,
       health: await jsonRequest(`${RCC_BASE_URL}/health`, {}),
+      routeSemantics: 'routeRef is a local HumanAgent entry label for binding and evidence; it is not sent as an RCC upstream route selector',
     },
     protocols: [],
   };

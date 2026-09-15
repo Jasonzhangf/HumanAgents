@@ -251,7 +251,8 @@ Owner：provider + app。
   `openai`（`/v1/chat/completions`）两个入口协议；`anthropic`
   （`/v1/messages`）保留既有入口能力，但不纳入本阶段 UI Provider Loop
   验收，也不得被 UI/Runtime 禁用；`providerId` 只是本地入口标签，不代表
-  上游 Provider 身份。
+  上游 Provider 身份。`routeRef` / `--route` 同样只是本地入口标签，用于
+  binding、evidence 和审计关联，不作为 RCC 请求体中的上游 route selector。
 - `probe`、`start`、`observe`、`submit`、`requestStop`、`settle`、`close` 映射到
   HumanAgent operation 和 evidence。
 

@@ -61,8 +61,10 @@ owner 和 next action，不会回退到 fake。`dsh` 在当前阶段保持关闭
 RCC 是透明代理，本阶段 MVP验收覆盖两个入口协议：
 `responses -> /v1/responses` 和 `openai -> /v1/chat/completions`；
 `anthropic -> /v1/messages` 保留既有入口能力，但不属于本阶段 UI Provider
-Loop 验收范围。`providerId` 只是本地 binding 标签，不代表上游 Provider
-身份；RCC 最终选择的 model 与请求 model 不同不构成 binding mismatch。
+Loop 验收范围。`providerId` 和 `--route` 都只是 HumanAgent 本地 binding /
+入口标签，不代表 RCC 最终上游 Provider 身份，也不会写入 RCC 请求体作为
+route selector；RCC 最终选择的 model 与请求 model 不同不构成 binding
+mismatch。
 `serve --host` 只接受 loopback（`127.0.0.1` 或 `::1`）：控制 API 目前没有鉴权，
 绑定非 loopback 地址会让任意可达客户端创建任务、发起执行和执行 stop，因此
 server 会拒绝启动而不是静默暴露控制面。
