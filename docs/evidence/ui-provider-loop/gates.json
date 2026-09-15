@@ -3,7 +3,7 @@
   "kind": "humanagent.ui-provider-loop.closeout-gates",
   "candidate": {
     "base": "36528f4e7d05932d63ddd7a4308c8863be424138",
-    "sourceDigest": "sha256:d7f0728d6d9cf135b51fc4861ebad5a0502a960ead00852e3adb7592d82b93db",
+    "sourceDigest": "sha256:de3228d9b7dc29d09164bb8edb85cb0aa5d4c2877cead189cbe2e7814fcd6641",
     "reviewedUiCommit": "56840b3d62d1d9db943e4d5376ff3febe99d979c",
     "binding": "sourceDigest covers every tracked source file except docs/evidence/ui-provider-loop/, so the proof stays verifiable from both the implementation commit and the evidence commit"
   },
@@ -21,22 +21,16 @@
       "result": "PASS"
     },
     {
-      "command": "corepack pnpm@10.31.0 run test:app",
+      "command": "corepack pnpm@10.31.0 run test",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "57/57 app integration tests, including UI runtime lifecycle and stop recovery"
+      "notes": "contracts 21/21, config 22/22, provider 67/67, app 80/80, UI 10/10, runtime 112/112"
     },
     {
-      "command": "corepack pnpm@10.31.0 run test:ui",
+      "command": "corepack pnpm@10.31.0 run test:release",
       "exitCode": 0,
       "result": "PASS",
-      "notes": "10/10 runtime projection tests"
-    },
-    {
-      "command": "corepack pnpm@10.31.0 run test:provider",
-      "exitCode": 0,
-      "result": "PASS",
-      "notes": "67/67 provider adapter, codec, replay and RCC v3 transport tests"
+      "notes": "31/31 release gate tests"
     },
     {
       "command": "corepack pnpm@10.31.0 run proof:ui-provider-loop",
@@ -47,7 +41,7 @@
   ],
   "artifacts": {
     "ui-provider-loop-proof.json": {
-      "sha256": "a0dd5359c70c3faf6c95f623172b3397fb7fec17834e7e81e8be71c67b8edaee",
+      "sha256": "388c57706ff6bf7d4a33a1e7f8eea6de9f10338dc9b2159b48689f25acc92f76",
       "source": "dist/receipts/ui-provider-loop-proof.json"
     }
   },
