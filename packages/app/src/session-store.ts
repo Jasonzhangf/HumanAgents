@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { RuntimePaths } from '../../config/src/index.js';
 import { AppLifecycleError } from './errors.js';
+import { readDaemonLease } from './supervisor/supervisor.js';
 
 export type SessionState = 'created' | 'opening' | 'ready' | 'running' | 'stopping' | 'stopped' | 'failed';
 
@@ -33,10 +34,16 @@ export interface SessionSnapshot {
   readonly recoverableTail: boolean;
 }
 
+export interface SessionLockFence {
+  readonly leaseId: string;
+  readonly generation: number;
+}
+
 export interface SessionLock {
   readonly path: string;
   readonly sessionId: string;
   readonly lockToken: string;
+  readonly fence?: SessionLockFence;
   readonly release: () => Promise<void>;
 }
 
@@ -191,14 +198,26 @@ export class SessionStore {
 
   constructor(private readonly paths: RuntimePaths) {}
 
+  private async assertFenceActive(fence: SessionLockFence): Promise<void> {
+    const lease = await readDaemonLease(this.paths);
+    if (
+      !lease
+      || lease.disposedAt !== undefined
+      || lease.leaseId !== fence.leaseId
+      || lease.generation !== fence.generation
+    ) {
+      throw new AppLifecycleError('session-lock-fence-mismatch', 'session lock fence no longer matches the active daemon lease', 'reacquire the session lock with the current daemon lease', 'session-store');
+    }
+  }
+
   private async verifyLock(sessionId: string, lock: SessionLock): Promise<void> {
     validateSessionId(sessionId);
     if (lock.sessionId !== sessionId || lock.path !== join(this.paths.locksRoot, sessionId + '.lock')) {
       throw new AppLifecycleError('session-lock-owner-mismatch', 'session write is not bound to its lock', 'use the lock acquired for this session', 'session-store');
     }
-    let owner: { lockToken?: string; sessionId?: string; released?: boolean };
+    let owner: { lockToken?: string; sessionId?: string; released?: boolean; fence?: SessionLockFence };
     try {
-      owner = JSON.parse(await readFile(join(lock.path, 'owner.json'), 'utf8')) as { lockToken?: string; sessionId?: string; released?: boolean };
+      owner = JSON.parse(await readFile(join(lock.path, 'owner.json'), 'utf8')) as { lockToken?: string; sessionId?: string; released?: boolean; fence?: SessionLockFence };
     } catch (error) {
       if ((error as { code?: string }).code === 'ENOENT') {
         throw new AppLifecycleError('session-lock-owner-mismatch', 'session lock is no longer active', 'acquire the session lock again before writing', 'session-store');
@@ -207,6 +226,15 @@ export class SessionStore {
     }
     if (owner.sessionId !== sessionId || owner.lockToken !== lock.lockToken || owner.released === true) {
       throw new AppLifecycleError('session-lock-owner-mismatch', 'session lock is owned by another runtime', 'acquire the session lock again before writing', 'session-store');
+    }
+    if (lock.fence !== undefined && (owner.fence === undefined || owner.fence.leaseId !== lock.fence.leaseId || owner.fence.generation !== lock.fence.generation)) {
+      throw new AppLifecycleError('session-lock-fence-mismatch', 'session lock fence no longer matches the owning host', 'reacquire the session lock with the current daemon lease', 'session-store');
+    }
+    if (lock.fence === undefined && owner.fence !== undefined) {
+      throw new AppLifecycleError('session-lock-fence-mismatch', 'session lock is bound to a newer host generation', 'reacquire the session lock with the current daemon lease', 'session-store');
+    }
+    if (lock.fence !== undefined) {
+      await this.assertFenceActive(lock.fence);
     }
   }
 
@@ -230,8 +258,11 @@ export class SessionStore {
     }
   }
 
-  async acquire(sessionId: string): Promise<SessionLock> {
+  async acquire(sessionId: string, fence?: SessionLockFence): Promise<SessionLock> {
     validateSessionId(sessionId);
+    if (fence !== undefined) {
+      await this.assertFenceActive(fence);
+    }
     const lockPath = join(this.paths.locksRoot, sessionId + '.lock');
     const acquisitionPath = join(this.paths.locksRoot, sessionId + '.lock.acquire');
     const lockToken = randomUUID();
@@ -245,19 +276,41 @@ export class SessionStore {
     }
     let created = false;
     try {
-      let existing: { lockToken?: string; released?: boolean } | undefined;
+      let existing: { lockToken?: string; sessionId?: string; released?: boolean; fence?: SessionLockFence } | undefined;
       try {
-        existing = JSON.parse(await readFile(join(lockPath, 'owner.json'), 'utf8')) as { lockToken?: string; released?: boolean };
+        existing = JSON.parse(await readFile(join(lockPath, 'owner.json'), 'utf8')) as { lockToken?: string; sessionId?: string; released?: boolean; fence?: SessionLockFence };
       } catch (error) {
         if ((error as { code?: string }).code !== 'ENOENT') throw error;
       }
       if (existing && existing.released !== true) {
-        throw new AppLifecycleError('session-locked', 'session is already owned by another runtime', 'wait for the owner to release the session lock', 'session-store');
+        if (existing.fence === undefined) {
+          throw new AppLifecycleError('session-locked', 'session is already owned by another runtime', 'wait for the owner to release the session lock', 'session-store');
+        }
+        const active = await readDaemonLease(this.paths);
+        const activeFenceMatches = active !== undefined
+          && active.disposedAt === undefined
+          && active.leaseId === existing.fence.leaseId
+          && active.generation === existing.fence.generation;
+        if (activeFenceMatches) {
+          throw new AppLifecycleError('session-locked', 'session is already owned by another runtime', 'wait for the owner to release the session lock', 'session-store');
+        }
+        if (fence === undefined) {
+          throw new AppLifecycleError('session-lock-fence-mismatch', 'session lock is bound to an inactive daemon generation', 'reacquire the session lock with the current daemon lease', 'session-store');
+        }
+        await rm(lockPath, { recursive: true, force: true });
       }
-      if (existing) await rm(lockPath, { recursive: true, force: true });
+      if (existing && existing.released === true) await rm(lockPath, { recursive: true, force: true });
       await mkdir(lockPath);
       created = true;
-      await writeFile(join(lockPath, 'owner.json'), JSON.stringify({ lockToken, sessionId, controlCwd: this.paths.controlRoot, workspaceCwd: this.paths.workspaceCwd, acquiredAt: new Date().toISOString(), released: false }) + '\n', 'utf8');
+      await writeFile(join(lockPath, 'owner.json'), JSON.stringify({
+        lockToken,
+        sessionId,
+        controlCwd: this.paths.controlRoot,
+        workspaceCwd: this.paths.workspaceCwd,
+        acquiredAt: new Date().toISOString(),
+        released: false,
+        ...(fence === undefined ? {} : { fence }),
+      }) + '\n', 'utf8');
     } catch (error) {
       if (created) await rm(lockPath, { recursive: true, force: true });
       throw error;
@@ -269,6 +322,7 @@ export class SessionStore {
       path: lockPath,
       sessionId,
       lockToken,
+      ...(fence === undefined ? {} : { fence }),
       release: async () => {
         if (released) return;
         await withLockGuard(lockPath, async () => {

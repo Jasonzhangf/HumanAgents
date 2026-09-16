@@ -24,6 +24,7 @@ import {
 } from '../../../contracts/src/index.js';
 import { fenceExecutionEvent, type LateEventRejection } from '../../../core/src/epoch.js';
 import { assertTransitionLifecycle } from '../../../core/src/lifecycle.js';
+import type { AgentIoProviderBinding } from '../agent-io/types.js';
 import { requireReference, RuntimeError } from './errors.js';
 
 export interface AgentRuntimeBinding {
@@ -35,6 +36,7 @@ export interface AgentRuntimeBinding {
   readonly operationId?: OperationId;
   readonly executionEpoch: number;
   readonly ownerRef: string;
+  readonly providerBinding?: AgentIoProviderBinding;
   readonly waitConditionRef?: string;
   readonly recoveryRef?: string;
 }
@@ -283,6 +285,13 @@ export class AgentRuntime {
 
   staleEvents(): readonly LateEventRejection[] {
     return structuredClone(this.stale);
+  }
+
+  agentIoProviderBinding(): AgentIoProviderBinding {
+    if (!this.binding.providerBinding) {
+      throw new RuntimeError('agent runtime has no locked provider binding', this.errorContext());
+    }
+    return structuredClone(this.binding.providerBinding);
   }
 
   assertStopTarget(runtimeId: string, taskId: TaskId, executionEpoch: number): void {

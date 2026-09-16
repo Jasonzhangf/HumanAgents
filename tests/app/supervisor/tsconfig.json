@@ -1,0 +1,16 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests-supervisor",
+    "noEmitOnError": true
+  },
+  "include": [
+    "./supervisor.test.ts",
+    "../node-modules.d.ts",
+    "../../../packages/app/src/**/*.ts",
+    "../../../packages/config/src/**/*.ts",
+    "../../../packages/contracts/src/**/*.ts"
+  ]
+}

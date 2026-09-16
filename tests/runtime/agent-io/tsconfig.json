@@ -1,0 +1,16 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/agent-io",
+    "noEmitOnError": true
+  },
+  "include": [
+    "**/*.ts",
+    "../../../packages/runtime/src/agent-io/**/*.ts",
+    "../../../packages/runtime/src/hooks/**/*.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/core/src/**/*.ts"
+  ]
+}

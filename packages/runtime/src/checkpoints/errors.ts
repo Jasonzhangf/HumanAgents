@@ -18,3 +18,17 @@ export class CheckpointCompletionError extends CheckpointCoordinatorError {
     this.name = 'CheckpointCompletionError';
   }
 }
+
+export class CheckpointSubmissionError extends CheckpointCoordinatorError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CheckpointSubmissionError';
+  }
+}
+
+export class CheckpointClosureError extends CheckpointCoordinatorError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CheckpointClosureError';
+  }
+}
