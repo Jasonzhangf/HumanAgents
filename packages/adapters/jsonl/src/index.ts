@@ -1,4 +1,4 @@
-import { link, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { assertCheckpointLink, assertEvidenceRef, assertSameScope, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
@@ -8,6 +8,7 @@ declare module 'node:fs/promises' {
     sync(): Promise<void>;
   }
   function link(oldPath: string, newPath: string): Promise<void>;
+  function rename(oldPath: string, newPath: string): Promise<void>;
 }
 
 export type JournalRecordKind = 'checkpoint' | 'event';
@@ -57,10 +58,13 @@ export class JournalCommitConflictError extends JournalIntegrityError {
 
 const LOCK_RETRY_MS = 20;
 const LOCK_WAIT_MS = 5_000;
-const LOCK_STALE_MS = 10_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomToken(): string {
+  return String(createHash('sha256').update(`${process.pid}:${Date.now()}:${Math.random()}`).digest('hex'));
 }
 
 function assertJournalContract<T>(assertion: () => T): T {
@@ -178,13 +182,19 @@ function recoverCommittedContent(content: string): { readonly content: string; r
 interface LockInfo {
   readonly pid: number;
   readonly startedAt: string;
+  readonly token?: string;
 }
 
 function readLockInfo(content: string): LockInfo | null {
   try {
     const parsed = JSON.parse(content) as Partial<LockInfo>;
-    if (typeof parsed.pid === 'number' && typeof parsed.startedAt === 'string' && Number.isFinite(Date.parse(parsed.startedAt))) {
-      return { pid: parsed.pid, startedAt: parsed.startedAt };
+    if (
+      typeof parsed.pid === 'number'
+      && typeof parsed.startedAt === 'string'
+      && Number.isFinite(Date.parse(parsed.startedAt))
+      && (parsed.token === undefined || (typeof parsed.token === 'string' && parsed.token.length > 0))
+    ) {
+      return { pid: parsed.pid, startedAt: parsed.startedAt, ...(parsed.token === undefined ? {} : { token: parsed.token }) };
     }
     return null;
   } catch {
@@ -209,18 +219,37 @@ async function readLock(path: string): Promise<LockInfo | null> {
   }
 }
 
-async function isStaleLock(path: string): Promise<boolean> {
-  const lock = await readLock(path);
-  if (!lock) return true;
-  const age = Date.now() - Date.parse(lock.startedAt);
-  if (age > LOCK_STALE_MS) return true;
-  if (!processAlive(lock.pid)) return true;
-  return false;
+async function evictDeadLock(lockPath: string, expected: LockInfo): Promise<boolean> {
+  const guardPath = `${lockPath}.evict`;
+  try {
+    await mkdir(guardPath);
+  } catch (error) {
+    if ((error as { code?: string }).code === 'EEXIST') return false;
+    throw error;
+  }
+  try {
+    const current = await readLock(lockPath);
+    if (!current) return false;
+    if (current.pid !== expected.pid || current.token !== expected.token) return false;
+    if (processAlive(current.pid)) return false;
+    const stalePath = `${lockPath}.stale-${process.pid}-${Date.now().toString(36)}-${randomToken()}`;
+    try {
+      await rename(lockPath, stalePath);
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ENOENT') return true;
+      throw error;
+    }
+    await rm(stalePath, { force: true });
+    return true;
+  } finally {
+    await rm(guardPath, { recursive: true, force: true });
+  }
 }
 
-async function acquireLock(journalPath: string): Promise<{ path: string; startedAt: string }> {
+async function acquireLock(journalPath: string): Promise<{ path: string; token: string }> {
   const lockPath = `${journalPath}.lock`;
   const startedAt = new Date().toISOString();
+  const token = randomToken();
   const deadline = Date.now() + LOCK_WAIT_MS;
   await mkdir(dirname(journalPath), { recursive: true });
   for (;;) {
@@ -228,7 +257,7 @@ async function acquireLock(journalPath: string): Promise<{ path: string; started
     try {
       const handle = await open(tempLockPath, 'wx');
       try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt }));
+        await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt, token }));
         await handle.sync();
       } finally {
         await handle.close();
@@ -238,16 +267,16 @@ async function acquireLock(journalPath: string): Promise<{ path: string; started
       } catch (error) {
         if ((error as { code?: string }).code !== 'EEXIST') throw error;
         await rm(tempLockPath, { force: true }).catch(() => undefined);
-        if (await isStaleLock(lockPath)) {
-          await rm(lockPath, { force: true });
-          continue;
+        const current = await readLock(lockPath);
+        if (current && !processAlive(current.pid)) {
+          if (await evictDeadLock(lockPath, current)) continue;
         }
         if (Date.now() >= deadline) throw new JournalIntegrityError('journal lock timeout');
         await sleep(LOCK_RETRY_MS);
         continue;
       }
       await rm(tempLockPath, { force: true }).catch(() => undefined);
-      return { path: lockPath, startedAt };
+      return { path: lockPath, token };
     } catch (error) {
       if ((error as { code?: string }).code === 'EEXIST') {
         await rm(tempLockPath, { force: true }).catch(() => undefined);
@@ -259,38 +288,54 @@ async function acquireLock(journalPath: string): Promise<{ path: string; started
   }
 }
 
-async function releaseLock(lock: { readonly path: string; readonly startedAt: string }): Promise<void> {
+async function releaseLock(lock: { readonly path: string; readonly token: string }): Promise<void> {
   const current = await readLock(lock.path);
-  if (current?.pid === process.pid && current.startedAt === lock.startedAt) {
+  if (current?.pid === process.pid && current.token === lock.token) {
     await rm(lock.path, { force: true });
   }
 }
 
-async function readVerifiedJournal(filePath: string, options: { recoverTail: boolean }): Promise<JournalVerification> {
+async function readVerifiedJournal(filePath: string): Promise<JournalVerification> {
   const raw = await readFile(filePath, 'utf8').catch((error: unknown) => (error as { code?: string }).code === 'ENOENT' ? '' : Promise.reject(error));
-  const recovered = recoverCommittedContent(raw);
-  const verification = parse(recovered.content);
-  if (recovered.truncated) {
-    if (!verification.valid) return verification;
-    if (options.recoverTail) {
-      await writeFile(filePath, recovered.content, 'utf8');
-    } else {
-      return { valid: false, records: verification.records, error: 'incomplete trailing journal line', trailingLine: raw.slice(recovered.content.length) };
+  return parse(raw);
+}
+
+async function replaceFileDurably(filePath: string, content: string): Promise<void> {
+  const tempPath = `${filePath}.recover-${process.pid}-${Date.now().toString(36)}-${randomToken()}`;
+  try {
+    const handle = await open(tempPath, 'wx');
+    try {
+      await handle.writeFile(content);
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
+    await rename(tempPath, filePath);
+    const directory = await open(dirname(filePath), 'r');
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
   }
-  return verification;
 }
 
 export class JsonlOrganJournal {
   constructor(private readonly filePath: string) {}
 
-  async verify(): Promise<JournalVerification> { return readVerifiedJournal(this.filePath, { recoverTail: false }); }
+  async verify(): Promise<JournalVerification> { return readVerifiedJournal(this.filePath); }
 
   async recover(): Promise<JournalVerification> {
     const lock = await acquireLock(this.filePath);
     try {
-      const verification = await readVerifiedJournal(this.filePath, { recoverTail: true });
+      const raw = await readFile(this.filePath, 'utf8').catch((error: unknown) => (error as { code?: string }).code === 'ENOENT' ? '' : Promise.reject(error));
+      const recovered = recoverCommittedContent(raw);
+      const verification = parse(recovered.content);
       if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
+      if (recovered.truncated) await replaceFileDurably(this.filePath, recovered.content);
       return verification;
     } finally {
       await releaseLock(lock);
@@ -311,7 +356,7 @@ export class JsonlOrganJournal {
     if (input.kind === 'event' && input.checkpoint !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint');
     const lock = await acquireLock(this.filePath);
     try {
-      const verification = await readVerifiedJournal(this.filePath, { recoverTail: true });
+      const verification = await readVerifiedJournal(this.filePath);
       if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
       if (commitId !== undefined) {
         const existing = verification.records.find((record) => record.commitId === commitId);

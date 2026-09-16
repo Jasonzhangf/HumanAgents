@@ -24,6 +24,20 @@ function assertLocator(locator: string, expected: string): void {
 function tempLocator(root: string, assetId: string): string {
   return join(root, '.tmp', `${assetId}.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}.tmp`);
 }
+function tempOwnerPid(name: string): number | null {
+  const match = /^.*\.([0-9]+)\.[a-z0-9]+\.[a-z0-9]+\.tmp$/.exec(name);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+function processAlive(pid: number): boolean {
+  try {
+    (process as unknown as { kill(pid: number, signal: 0): void }).kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as { code?: string }).code === 'EPERM';
+  }
+}
 
 export function evidenceReference(reference: AssetReference, scope: ScopeRef, kind: EvidenceRef['kind'], source = 'filesystem'): EvidenceRef {
   validateId(reference.assetId);
@@ -88,7 +102,11 @@ export class ImmutableAssetStore {
     }
     await Promise.all(entries
       .filter((entry) => entry.isFile())
-      .map((entry) => rm(join(this.root, '.tmp', entry.name), { force: true })));
+      .map(async (entry) => {
+        const ownerPid = tempOwnerPid(entry.name);
+        if (ownerPid === null || processAlive(ownerPid)) return;
+        await rm(join(this.root, '.tmp', entry.name), { force: true });
+      }));
   }
 
   async read(reference: AssetReference): Promise<Uint8Array> {
