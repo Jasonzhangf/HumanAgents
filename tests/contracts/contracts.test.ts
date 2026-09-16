@@ -6,6 +6,8 @@ import {
   assertNotExpired, assertPermissionRevisionMatches, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
   assertScopeAcl,
   assertSameScope, assertScope, checkProviderEventEpoch, checkScopeAcl, consumerKey, id, occurrenceIdempotencyKey, runtimeId,
+  validateAgentCloseReceipt, validateAgentDispatchReceipt, validateAgentDriverReceipt, validateAgentObservationEvent, validateAgentReconcileResult,
+  validateAgentRequestEnvelope, validateAgentResult, validateAgentSettleReceipt, validateAgentStopReceipt,
   validateAcpDriverBinding, validateAcpServerBinding, validateAgentMessageEnvelope, validateAgentProviderBinding, validateAgentRequestControl,
   validateCheckpointClosureRecord, validateCheckpointReentryRecord, validateControlProbeRecord, validateControlWatchdogPolicy,
   validateEventConsumerCursor, validateEventConsumerReceipt, validateEventHandlerCommit, validateEventRetryObligation, validateExecutionBinding,
@@ -15,7 +17,7 @@ import {
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
   validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
   validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
-  type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
+  type AgentDriverV1, type AgentRequestEnvelope, type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
   type CheckpointClosureRecord, type CheckpointReentryRecord, type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation,
   type ExecutionBinding, type ExecutionRuntimePort, type GoalRecord, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
   type Occurrence, type Reminder, type RuntimeBinding, type SchedulerLease, type ScopeAcl, type Subscription,
@@ -564,6 +566,68 @@ test('agent request control and runtime binding fingerprints reject task/interac
   assert.throws(() => validateAgentRequestControl({ ...request, binding: { kind: 'interaction' as const, interactionScopeId: 'interaction-a', bindingFingerprint: 'sha256:binding-a' }, permissionRevision: '' }), ContractError);
 });
 
+test('versioned driver contract keeps dispatch, observation, result, reconcile, settle, and close separate', async () => {
+  const request: AgentRequestEnvelope = {
+    version: 1,
+    control: {
+      protocolVersion: 1, requestId: 'request-a', attemptId: 'attempt-a',
+      binding: { kind: 'task', taskId: task, assignmentId: 'assignment-a', executionEpoch: 1, bindingFingerprint: 'sha256:binding-a' },
+      providerBinding: providerBindingFramework(), contextViewRef: 'context://view-a', permissionRevision: 'permission-r1',
+      idempotencyKey: 'idem-a', replyMode: 'terminal',
+    },
+    data: { inputRefs: ['asset://input-a'], outputContractRef: 'contract://output-a', capabilitySetRef: 'capability://set-a' },
+  };
+  assert.doesNotThrow(() => validateAgentRequestEnvelope(request));
+  assert.throws(() => validateAgentRequestEnvelope({ ...request, data: { ...request.data, inputRefs: [''] } }), ContractError);
+  assert.throws(() => validateAgentRequestEnvelope({ ...request, data: { ...request.data, capabilitySetRef: ' ' } }), ContractError);
+  assert.doesNotThrow(() => validateAgentDriverReceipt({
+    runtimeId: 'runtime-a', executionEpoch: 1,
+  }));
+  assert.throws(() => validateAgentDriverReceipt({ runtimeId: '', executionEpoch: 0 }), ContractError);
+  assert.doesNotThrow(() => validateAgentDispatchReceipt({
+    requestId: 'request-a', attemptId: 'attempt-a', operationRef: 'operation-a', accepted: true,
+  }));
+  assert.throws(() => validateAgentDispatchReceipt({ requestId: 'request-a', attemptId: 'attempt-a', operationRef: '', accepted: true }), ContractError);
+  assert.doesNotThrow(() => validateAgentObservationEvent({
+    requestId: 'request-a', attemptId: 'attempt-a', sequence: 1, cursor: 'cursor-a', kind: 'progress', evidenceRefs: ['fact://observation'],
+  }));
+  assert.throws(() => validateAgentObservationEvent({
+    requestId: 'request-a', attemptId: 'attempt-a', sequence: 0, cursor: 'cursor-a', kind: 'progress', evidenceRefs: [],
+  }), ContractError);
+  assert.doesNotThrow(() => validateAgentResult({ status: 'succeeded', evidenceRefs: [providerEvidence('result')] }));
+  assert.throws(() => validateAgentResult({ status: 'running' as never, evidenceRefs: [] }), ContractError);
+  assert.doesNotThrow(() => validateAgentStopReceipt({ runtimeId: 'runtime-a', executionEpoch: 1, accepted: true }));
+  assert.throws(() => validateAgentStopReceipt({ runtimeId: '', executionEpoch: 1, accepted: true }), ContractError);
+  assert.doesNotThrow(() => validateAgentReconcileResult({
+    runtimeId: 'runtime-a', executionEpoch: 1, operationRef: 'operation-a', reconciled: true, evidenceRefs: [providerEvidence('reconcile')],
+  }));
+  assert.throws(() => validateAgentReconcileResult({
+    runtimeId: 'runtime-a', executionEpoch: 1, operationRef: '', reconciled: false, evidenceRefs: [],
+  }), ContractError);
+  assert.doesNotThrow(() => validateAgentSettleReceipt({ state: 'stopped', evidenceRefs: [providerEvidence('settle')] }));
+  assert.throws(() => validateAgentSettleReceipt({ state: 'running' as never, evidenceRefs: [] }), ContractError);
+  assert.doesNotThrow(() => validateAgentCloseReceipt({
+    runtimeId: 'runtime-a', executionEpoch: 1, closed: true, evidenceRefs: [providerEvidence('close')],
+  }));
+  assert.throws(() => validateAgentCloseReceipt({
+    runtimeId: 'runtime-a', executionEpoch: 1, closed: true, evidenceRefs: [{ ...providerEvidence('close'), source: '' }],
+  }), ContractError);
+  const driver: AgentDriverV1 = {
+    protocolVersion: 1,
+    kind: 'fake',
+    capabilities: async () => ({ driverKind: 'fake', capabilities: [], version: '1' }),
+    start: async (input) => ({ runtimeId: input.runtimeId, executionEpoch: input.executionEpoch }),
+    send: async (input) => ({ requestId: input.control.requestId, attemptId: input.control.attemptId, operationRef: 'operation-a', accepted: true }),
+    observe: async function* () { yield { requestId: 'request-a', attemptId: 'attempt-a', sequence: 1, cursor: 'cursor-a', kind: 'progress', evidenceRefs: [] }; },
+    readResult: async () => ({ status: 'succeeded', evidenceRefs: [] }),
+    requestStop: async (input) => ({ runtimeId: input.runtimeId, executionEpoch: input.executionEpoch, accepted: true }),
+    reconcile: async (input) => ({ runtimeId: input.runtimeId, executionEpoch: input.executionEpoch, operationRef: input.operationRef, reconciled: true, evidenceRefs: [] }),
+    settle: async () => ({ state: 'stopped', evidenceRefs: [] }),
+    close: async (input) => ({ runtimeId: input.runtimeId, executionEpoch: input.executionEpoch, closed: true, evidenceRefs: [] }),
+  };
+  assert.equal(driver.protocolVersion, 1);
+});
+
 test('scope ACL and permission revision prevent cross-scope reads and revoked permissions', () => {
   assert.doesNotThrow(() => validateScopeAcl(scopeAcl()));
   assertScopeAcl(scopeAcl(), {
@@ -594,11 +658,16 @@ test('consumer cursors, receipts, retry obligations, and commit intents keep fin
     consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'applied',
     completionMode: 'journal-atomic', internalEffectFacts: [], externalOperationRefs: ['asset://external'],
   }), ContractError);
+  assert.throws(() => validateEventHandlerCommit({
+    consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'applied',
+    completionMode: 'operation-barrier', internalEffectFacts: [], externalOperationRefs: [],
+  }), ContractError);
 });
 
 test('checkpoint closure and reentry keep committed facts separate from reentry permission', () => {
   validateCheckpointClosureRecord(closureRecord());
   validateCheckpointReentryRecord(reentryRecord());
+  assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ committed: false, reentryAllowed: true }) }), ContractError);
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ unknownOperations: ['op://unknown'], reentryAllowed: true }) }), ContractError);
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'wait' } }) }), ContractError);
   assert.throws(() => validateCheckpointReentryRecord({ ...reentryRecord({ executionEpoch: 1, fencedEpochs: [1] }) }), ContractError);

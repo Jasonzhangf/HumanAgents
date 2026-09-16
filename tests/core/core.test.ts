@@ -411,6 +411,8 @@ test('consumer cursor advances monotonically and retry obligations stay bounded'
 test('checkpoint closure committed fact does not imply reentry permission', () => {
   assert.doesNotThrow(() => assertCheckpointClosureCommitted(coreClosure()));
   assert.throws(() => assertCheckpointClosureCommitted(coreClosure({ committed: false })), CheckpointError);
+  assert.throws(() => assertCheckpointClosureCommitted(coreClosure({ committed: false, reentryAllowed: true })), CheckpointError);
+  assert.doesNotThrow(() => assertCheckpointClosureCommitted(coreClosure({ pendingOperations: ['op://pending'], unknownOperations: ['op://unknown'] })));
   assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: false }), coreReentry()), CheckpointError);
   assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ committed: false, reentryAllowed: true }), coreReentry()), CheckpointError);
   assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ unknownOperations: ['op://unknown'], reentryAllowed: false }), coreReentry()), CheckpointError);

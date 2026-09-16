@@ -2,14 +2,27 @@ import type { CheckpointClosureRecord, CheckpointReentryRecord } from '../../con
 import { validateCheckpointClosureRecord, validateCheckpointReentryRecord } from '../../contracts/src/index.js';
 import { CheckpointError } from './errors.js';
 
+function checkpointError(error: unknown): never {
+  if (error instanceof CheckpointError) throw error;
+  throw new CheckpointError(error instanceof Error ? error.message : 'invalid checkpoint control record');
+}
+
 export function assertCheckpointClosureCommitted(input: CheckpointClosureRecord): void {
-  validateCheckpointClosureRecord(input);
+  try {
+    validateCheckpointClosureRecord(input);
+  } catch (error) {
+    checkpointError(error);
+  }
   if (!input.committed) throw new CheckpointError('checkpoint closure is not committed');
 }
 
 export function assertCheckpointClosureCanReenter(closure: CheckpointClosureRecord, reentry: CheckpointReentryRecord): void {
-  validateCheckpointClosureRecord(closure);
-  validateCheckpointReentryRecord(reentry);
+  try {
+    validateCheckpointClosureRecord(closure);
+    validateCheckpointReentryRecord(reentry);
+  } catch (error) {
+    checkpointError(error);
+  }
   if (!closure.committed) throw new CheckpointError('cannot reenter uncommitted closure');
   if (!closure.reentryAllowed) throw new CheckpointError('checkpoint closure does not allow reentry');
   if (closure.unknownOperations.length > 0) throw new CheckpointError('unknown operations block checkpoint reentry');

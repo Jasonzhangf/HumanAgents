@@ -1,4 +1,14 @@
-import type { CheckpointId, EvidenceRef, NextAction, OperationId, ScopeRef, TaskId } from './index.js';
+import type {
+  AgentCapabilities,
+  AgentClosure,
+  AgentStartRequest,
+  CheckpointId,
+  EvidenceRef,
+  NextAction,
+  OperationId,
+  ScopeRef,
+  TaskId,
+} from './index.js';
 import { ContractError } from './errors.js';
 
 export type AgentMessageClass = 'control' | 'data' | 'observation';
@@ -58,6 +68,100 @@ export interface AgentRequestControl {
   readonly permissionRevision: string;
   readonly idempotencyKey: string;
   readonly replyMode: 'terminal' | 'stream';
+}
+
+export interface AgentRequestEnvelope {
+  readonly version: 1;
+  readonly control: AgentRequestControl;
+  readonly data: {
+    readonly inputRefs: readonly string[];
+    readonly outputContractRef: string;
+    readonly capabilitySetRef: string;
+    readonly memoryRecallRefs?: readonly string[];
+  };
+}
+
+export interface AgentDriverReceipt {
+  readonly runtimeId: string;
+  readonly executionEpoch: number;
+}
+
+export interface AgentDispatchReceipt {
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly operationRef: string;
+  readonly accepted: boolean;
+}
+
+export interface AgentObserveRequest {
+  readonly runtimeId: string;
+  readonly cursor?: string;
+}
+
+export interface AgentObservationEvent {
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly sequence: number;
+  readonly cursor: string;
+  readonly kind: string;
+  readonly evidenceRefs: readonly string[];
+}
+
+export interface AgentResultRequest {
+  readonly runtimeId: string;
+  readonly requestId: string;
+  readonly attemptId: string;
+}
+
+export interface AgentResult {
+  readonly status: AgentClosure['state'];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface AgentStopRequest extends AgentStartRequest {
+  readonly reason: string;
+  readonly ownerId: string;
+}
+
+export interface AgentStopReceipt extends AgentDriverReceipt {
+  readonly accepted: boolean;
+}
+
+export interface AgentReconcileRequest extends AgentDriverReceipt {
+  readonly operationRef: string;
+}
+
+export interface AgentReconcileResult extends AgentDriverReceipt {
+  readonly operationRef: string;
+  readonly reconciled: boolean;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface AgentSettleRequest extends AgentDriverReceipt {}
+
+export interface AgentSettleReceipt extends AgentClosure {}
+
+export interface AgentCloseRequest extends AgentDriverReceipt {
+  readonly reason: string;
+}
+
+export interface AgentCloseReceipt extends AgentDriverReceipt {
+  readonly closed: boolean;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface AgentDriverV1 {
+  readonly protocolVersion: 1;
+  readonly kind: string;
+  capabilities(): Promise<AgentCapabilities>;
+  start(input: AgentStartRequest): Promise<AgentDriverReceipt>;
+  send(input: AgentRequestEnvelope): Promise<AgentDispatchReceipt>;
+  observe(input: AgentObserveRequest): AsyncIterable<AgentObservationEvent>;
+  readResult(input: AgentResultRequest): Promise<AgentResult>;
+  requestStop(input: AgentStopRequest): Promise<AgentStopReceipt>;
+  reconcile(input: AgentReconcileRequest): Promise<AgentReconcileResult>;
+  settle(input: AgentSettleRequest): Promise<AgentSettleReceipt>;
+  close(input: AgentCloseRequest): Promise<AgentCloseReceipt>;
 }
 
 export interface AgentMessageCorrelation {
@@ -313,6 +417,15 @@ const OCCURRENCE_STATES: readonly OccurrenceState[] = ['due', 'skipped-busy', 'r
 const REMINDER_STATES: readonly ReminderState[] = ['pending', 'consumed', 'invalidated'];
 const LEASE_STATES: readonly LeaseState[] = ['active', 'expired', 'released'];
 const ACP_SESSION_KINDS: readonly AcpAllowedSessionKind[] = ['interaction', 'task'];
+const AGENT_SETTLE_STATES: readonly AgentClosure['state'][] = [
+  'succeeded',
+  'waiting',
+  'blocked',
+  'failed',
+  'cancelled',
+  'stopped',
+  'unknown',
+];
 const CONTROL_PROBE_POINTS: readonly ControlProbePoint[] = [
   'request-start',
   'after-tool-result',
@@ -410,6 +523,72 @@ export function validateAgentRequestControl(input: AgentRequestControl): void {
   nonEmpty(input.permissionRevision, 'permissionRevision');
   nonEmpty(input.idempotencyKey, 'idempotencyKey');
   if (input.replyMode !== 'terminal' && input.replyMode !== 'stream') throw new ContractError('replyMode must be terminal or stream');
+}
+
+export function validateAgentRequestEnvelope(input: AgentRequestEnvelope): void {
+  if (input.version !== 1) throw new ContractError('AgentRequestEnvelope version must be 1');
+  validateAgentRequestControl(input.control);
+  assertRefList(input.data.inputRefs, 'data.inputRefs');
+  nonEmpty(input.data.outputContractRef, 'data.outputContractRef');
+  nonEmpty(input.data.capabilitySetRef, 'data.capabilitySetRef');
+  if (input.data.memoryRecallRefs !== undefined) assertRefList(input.data.memoryRecallRefs, 'data.memoryRecallRefs');
+}
+
+export function validateAgentDriverReceipt(input: AgentDriverReceipt): void {
+  nonEmpty(input.runtimeId, 'runtimeId');
+  assertPositiveSafeInteger(input.executionEpoch, 'executionEpoch');
+}
+
+export function validateAgentDispatchReceipt(input: AgentDispatchReceipt): void {
+  nonEmpty(input.requestId, 'requestId');
+  nonEmpty(input.attemptId, 'attemptId');
+  nonEmpty(input.operationRef, 'operationRef');
+}
+
+export function validateAgentObservationEvent(input: AgentObservationEvent): void {
+  nonEmpty(input.requestId, 'requestId');
+  nonEmpty(input.attemptId, 'attemptId');
+  assertPositiveSafeInteger(input.sequence, 'sequence');
+  nonEmpty(input.cursor, 'cursor');
+  nonEmpty(input.kind, 'kind');
+  assertRefList(input.evidenceRefs, 'evidenceRefs');
+}
+
+export function validateAgentResult(input: AgentResult): void {
+  if (!AGENT_SETTLE_STATES.includes(input.status)) throw new ContractError(`unknown agent result status: ${input.status}`);
+  for (const evidenceRef of input.evidenceRefs) {
+    nonEmpty(evidenceRef.source, 'evidenceRef.source');
+    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
+  }
+}
+
+export function validateAgentStopReceipt(input: AgentStopReceipt): void {
+  validateAgentDriverReceipt(input);
+}
+
+export function validateAgentReconcileResult(input: AgentReconcileResult): void {
+  validateAgentDriverReceipt(input);
+  nonEmpty(input.operationRef, 'operationRef');
+  for (const evidenceRef of input.evidenceRefs) {
+    nonEmpty(evidenceRef.source, 'evidenceRef.source');
+    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
+  }
+}
+
+export function validateAgentSettleReceipt(input: AgentSettleReceipt): void {
+  if (!AGENT_SETTLE_STATES.includes(input.state)) throw new ContractError(`unknown agent settle state: ${input.state}`);
+  for (const evidenceRef of input.evidenceRefs) {
+    nonEmpty(evidenceRef.source, 'evidenceRef.source');
+    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
+  }
+}
+
+export function validateAgentCloseReceipt(input: AgentCloseReceipt): void {
+  validateAgentDriverReceipt(input);
+  for (const evidenceRef of input.evidenceRefs) {
+    nonEmpty(evidenceRef.source, 'evidenceRef.source');
+    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
+  }
 }
 
 export function validateAgentMessageEnvelope(input: AgentMessageEnvelope): void {
@@ -542,6 +721,9 @@ export function validateEventHandlerCommit(input: EventHandlerCommit): void {
   if (input.completionMode === 'journal-atomic' && input.externalOperationRefs.length !== 0) {
     throw new ContractError('journal-atomic commit cannot carry external operation refs');
   }
+  if (input.completionMode === 'operation-barrier' && input.externalOperationRefs.length === 0) {
+    throw new ContractError('operation-barrier commit requires external operation refs');
+  }
   if (input.disposition === 'terminal-failure') nonEmpty(input.failureRef, 'failureRef');
 }
 
@@ -553,6 +735,9 @@ export function validateCheckpointClosureRecord(input: CheckpointClosureRecord):
   assertValidTime(input.closedAt, 'closedAt');
   assertRefList(input.pendingOperations, 'pendingOperations');
   assertRefList(input.unknownOperations, 'unknownOperations');
+  if (input.reentryAllowed && !input.committed) {
+    throw new ContractError('uncommitted closure cannot allow reentry');
+  }
   if (input.unknownOperations.length > 0 && input.reentryAllowed) {
     throw new ContractError('unknown operations block reentry');
   }
