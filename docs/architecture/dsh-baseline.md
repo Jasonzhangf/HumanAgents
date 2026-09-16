@@ -81,13 +81,13 @@ Provider endpoint、protocol 和 model。
 ### M1-1：高层 port contract
 
 Owner：`packages/contracts` / `packages/adapters/dsh`。
-先让 fake driver、Provider adapter 与 DSH driver 共用同一组高层 contract：
+先让 fake driver、Provider adapter 与 DSH driver 共用 [`agent-request-response.md`](agent-request-response.md) §10 的高层 Driver contract：
 
 ```text
-start → resume → submit/observe → requestStop → settle
+start → send(dispatch receipt) → observe/readResult → requestStop → reconcile → settle → close
 ```
 
-DSH 类型只能存在 adapter 边界。DSH `SessionId` 只能进入 `EvidenceRef`，不能成为 `TaskId`、`CheckpointId` 或 `AgentRuntimeId`。
+旧 `resume`、`submit` 只能作为 adapter 内部兼容入口，分别映射到 `start({ mode: 'resume' })` 和 `send` + `readResult`，不能进入公共高层 contract。DSH 类型只能存在 adapter 边界。DSH `SessionId` 只能进入 `EvidenceRef`，不能成为 `TaskId`、`CheckpointId` 或 `AgentRuntimeId`。
 Provider `providerId`、route、model 和外部 session/request id 同样不能成为高层身份。
 
 ### M1-2：`cc` / `goaichat` 协议 adapter 与独立 DSH profile

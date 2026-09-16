@@ -1,7 +1,7 @@
 # Agent 流程与入口设计
 
-状态：`NEXT-DESIGN / UI-BASELINE-FROZEN`  
-日期：2026-09-11  
+状态：`NEXT-DESIGN / UI-BASELINE-FROZEN`
+日期：2026-09-11
 适用阶段：`DESIGN-BOOTSTRAP` → MVP 设计收口
 
 本文是 HumanAgent 各 agent 的流程、输入输出、入口和反馈边界的详细设计。它依赖 [`organ-runtime.md`](organ-runtime.md) 的领域状态、生命周期和端口边界；不替代 `core` 的状态机，也不把 UI 变成运行时真源。
@@ -322,6 +322,8 @@ steer、停止、权限撤销和安全升级走独立 control channel，不进�
 - 停止/权限/安全事件：通过控制通道立即撤销继续许可，不等待业务队列。
 
 ### 5.7 任务编排 agent 的反馈
+
+Agent 间的请求、结果、进度、Bug、资源通知、Review、Memory feedback 和异步提醒统一遵循 [`agent-communication-and-feedback.md`](agent-communication-and-feedback.md)。本节只定义编排业务字段和验收条件，不重复定义 EventBus publisher、scope、cursor、ACK 或消费恢复协议。
 
 执行 agent 返回的是一次已经可判定的工作结果，不能只返回自然语言反馈：
 

@@ -1,7 +1,7 @@
 # Organ Runtime 架构设计
 
 状态：`MVP-IMPLEMENTATION / M1-PREPARATION`
-日期：2026-09-11  
+日期：2026-09-11
 高层原则：HumanAgent 拥有领域状态；DSH 是可替换执行后端。
 
 当前冻结的 UI 责任和各 agent 的详细流程、入口、反馈边界见 [`agent-flows.md`](agent-flows.md)。Agent 的 prompt/skills/tools 装载见 [`agent-templates.md`](agent-templates.md)；宿主启动、Cordis 第一层插件宿主和 Agent Driver 边界见 [`host-and-cordis.md`](host-and-cordis.md)；Memory 的交互面、Operations Backend、Index 和 Agent Context Injection 见 [`memory-system.md`](memory-system.md)；阶段闭环和故障 owner 见 [`lifecycle-and-failure-ownership.md`](lifecycle-and-failure-ownership.md)。本文件继续作为领域状态、生命周期、模块 owner 和 DSH 解耦边界的上层真源。
@@ -333,15 +333,18 @@ type AgentDefinition = {
 interface AgentDriver {
   kind: string
   capabilities(): Promise<AgentCapabilities>
-  start(input: AgentStartRequest): Promise<AgentHandle>
-  resume(input: AgentResumeRequest): Promise<AgentHandle>
-  submit(input: AgentInput): Promise<AgentOutput>
-  observe(input: AgentObserveRequest): AsyncIterable<AgentEvent>
-  requestStop(input: AgentStopRequest): Promise<StopRequestReceipt>
-  reconcile(input: AgentReconcileRequest): Promise<AgentReconciliation>
-  settle(input: AgentSettleRequest): Promise<AgentClosure>
+  start(input: AgentDriverStart): Promise<AgentDriverReceipt>
+  send(input: AgentRequestEnvelope): Promise<AgentDispatchReceipt>
+  observe(input: AgentObserveRequest): AsyncIterable<AgentObservationEvent>
+  readResult(input: AgentResultRequest): Promise<AgentResult>
+  requestStop(input: AgentStopRequest): Promise<AgentStopReceipt>
+  reconcile(input: AgentReconcileRequest): Promise<AgentReconcileResult>
+  settle(input: AgentSettleRequest): Promise<AgentSettleReceipt>
+  close(input: AgentCloseRequest): Promise<AgentCloseReceipt>
 }
 ```
+
+该接口的完整语义、旧 `submit/resume` 兼容映射和结果/流的分离以 [`agent-request-response.md`](agent-request-response.md) §10 为唯一真源。`send` 只返回 dispatch receipt；最终结果必须由 `readResult` 读取，`observe` 只提供有 cursor 的证据流。
 
 Driver 不拥有 Task、Journal、checkpoint 或 Harness gate；它不能自己创建平级 agent，也不能把 provider session 当作高层身份。DSH driver 是一个可选插件，未来 native/remote driver 使用完全相同的高层 contracts、节点协议和错误闭环。Driver 的输入输出必须经过模板 schema、assignment contract、epoch fence 和 evidence policy 校验。
 
@@ -716,7 +719,7 @@ Supervisor 只负责恢复 Host 进程和重新绑定 runtime；Journal owner �
 - `Reporting Window`：显意识需要看到的最新状态、重要变化、待决策事项；重复普通进度合并。
 - `History`：完整/分级保存的 Journal 和资产引用；可以压缩或清理，但不能破坏仍被恢复状态引用的资产。
 
-队列超限首先淘汰窗口内容，不等于立即删除权威历史。清理前必须检查引用，清理后必须保留可查询的覆盖范围和清理记录。
+队列超限首先淘汰窗口内容，不等于立即删除权威历史。清理前必须检查引用，清理后必须保留可查询的覆盖范围和清理记录。Absolute Journal 的保留根、原始资产和可清理派生物以 [`context-contract.md`](context-contract.md) §10 为唯一真源；本节不另定义 retention 规则。
 
 ### Index
 

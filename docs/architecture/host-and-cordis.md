@@ -1,7 +1,7 @@
 # HumanAgent 宿主、启动和 Cordis 插件化架构
 
 状态：`MVP-IMPLEMENTATION / DSH-BASELINE-LOCKED`
-日期：2026-09-11  
+日期：2026-09-11
 适用阶段：MVP → Milestone 3
 
 本文定义 HumanAgent 如何以 Cordis 为第一层插件宿主独立启动，如何装载固定 Harness 内核和可替换模块，如何在外部安装 DSH，以及如何把 DSH 作为一种 Agent/Execution provider 接入。Provider 协议和 RCC v3 临时绑定由 [`provider-adapters.md`](provider-adapters.md) 唯一维护。当前 DSH 源码基线已锁定；真实 adapter 仍需公开入口、profile、能力和同入口验证后才能实现，详见 [`dsh-baseline.md`](dsh-baseline.md)。
@@ -16,14 +16,18 @@ HumanAgent CLI / Host Supervisor
         ├── fixed Harness Kernel plugins [不可替换控制面]
         │     ├── lifecycle / gate / node protocol
         │     ├── Journal / checkpoint / control
+        │     ├── built-in checkpoint tools / Hook chain
         │     ├── queue / resource / review / supervision
         │     └── health and evidence policy
         ├── node orchestration plugins [策略可替换，协议固定]
         ├── agent registry / template plugins
+        ├── Skill source adapters [HumanAgent / Codex / ~/.agent]
+        ├── MCP source adapters [project / Codex / ~/.agent / MCPX]
         ├── memory interaction plugin
         ├── memory operations backend plugin
         ├── Journal / Index / asset adapters
         ├── UI projection plugins
+        ├── ACP server/driver adapters
         └── Agent Driver / Execution provider plugins
               ├── deterministic/fake（MVP）
               ├── DSH + Cordis bridge（Milestone 1）
@@ -57,6 +61,12 @@ DSH execution provider
 - 接收显式交互 agent 的 `RequirementEnvelope`；
 - 管理编排 agent runtime pool 和 worker/review/memory binding；
 - 通过 `ExecutionRuntimePort` 请求一次具体执行；
+- 为每个 Agent Runtime 注入固定的 built-in checkpoint tools，并管理工具调用的
+  operation、权限、Journal、Hook 和 Event Bus 闭环；
+- 在 Request/Response 的阶段入口和出口运行声明过的 lifecycle hooks，并向 UI
+  发布可消费的阶段事件；
+- 提供 ACP Server surface，也可通过 ACP Driver 连接外部 ACP Agent；ACP session
+  不替代 HumanAgent Task、Request、Checkpoint 或 Journal；
 - 将执行事件映射成高层 operation、node、evidence 和 checkpoint；
 - 运行 Harness health probe 和 supervision；
 - 为 UI 提供自己的 projection，不把 DSH WebUI 当作产品壳。
@@ -159,11 +169,15 @@ Cordis Host
   ├── NodeProtocolPlugin               fixed contract
   ├── NodeStrategyPlugin(s)            replaceable policy
   ├── AgentTemplateRegistryPlugin      replaceable data/loader
+  ├── SkillSourcePlugin(s)             read-only catalog adapters
+  ├── McpSourcePlugin(s)               server/tool catalog adapters
   ├── AgentDriverPlugin(s)             fake / DSH / native / remote
   ├── MemoryInteractionPlugin          user-facing memory surface
   ├── MemoryOperationsPlugin(s)        deterministic / RAG / Memmy adapter
   ├── JournalIndexAssetPlugin(s)       storage ports
   ├── HealthSupervisionPlugin          fixed owner facade
+  ├── AgentLifecycleHookPlugin(s)      typed stage hooks
+  ├── AcpAdapterPlugin(s)              ACP server / driver boundary
   └── UiProjectionPlugin(s)            read models and command facades
 ```
 
@@ -196,7 +210,7 @@ interface HarnessPlugin {
 }
 ```
 
-上面的 manifest 和接口是 HumanAgent 自己的框架无关契约；`app/cordis-host` 负责将它映射为 Cordis 的 Definition/Provider/Consumer 和生命周期 hook。`HarnessPluginContext` 只暴露注册过的 typed seam，例如 `registerNodeStrategy`、`registerAgentDriver`、`registerMemoryInteraction`、`registerMemoryOperations`、`registerInputSource`、`registerAssetStore`、`registerHealthProbe` 和 `registerUiProjection`。没有通用的“拿到 root context 后任意修改状态”入口。
+上面的 manifest 和接口是 HumanAgent 自己的框架无关契约；`app/cordis-host` 负责将它映射为 Cordis 的 Definition/Provider/Consumer 和生命周期 hook。`HarnessPluginContext` 只暴露注册过的 typed seam，例如 `registerNodeStrategy`、`registerAgentDriver`、`registerAgentLifecycleHook`、`registerAcpAdapter`、`registerSkillSource`、`registerMcpSource`、`registerMemoryInteraction`、`registerMemoryOperations`、`registerInputSource`、`registerAssetStore`、`registerHealthProbe` 和 `registerUiProjection`。内置 Checkpoint tools 由 Harness Kernel 唯一注册，插件不能替换或另建一套。没有通用的“拿到 root context 后任意修改状态”入口。
 
 同进程 plugin 是受信任代码，不等同于 sandbox：它拥有宿主进程的语言运行时权限。默认选择独立 DSH provider 进程；若未来允许同进程 plugin，必须额外通过 signed/allowlisted package、API compatibility、permission review 和独立 test fixture，且仍只能拿到 capability facade。manifest 中的 `permissions` 是 Harness 的准入输入，不是对恶意代码的安全隔离承诺。
 

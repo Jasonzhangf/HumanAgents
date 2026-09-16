@@ -1,7 +1,7 @@
 # HumanAgent Memory System
 
-状态：`DESIGN-BOOTSTRAP / MEMORY-DESIGN-DRAFT`  
-日期：2026-09-11  
+状态：`DESIGN-BOOTSTRAP / MEMORY-DESIGN-DRAFT`
+日期：2026-09-11
 适用阶段：MVP → Milestone 3
 
 本文定义记忆系统的边界、索引方式、用户交互面、后台操作面和 Agent 上下文插入接口。记忆系统不是一个必须通过 AI 对话才能工作的 agent；`memory agent` 只是任务流程中负责协调记忆分析的一个角色。真正的记忆能力由确定性的后台操作端口提供，AI provider 只能作为可选分析器或摘要器。
@@ -162,7 +162,7 @@ Journal/checkpoint/session evidence
   → approved memory/skill record
 ```
 
-其中 `proposeSkill` 只能生成候选及其证据，不能写入 Agent Template 或 Skill registry。`compact` 只能清理可重建的索引、窗口和已解除引用的历史细节；不得删除仍被 checkpoint 或 approved memory 引用的来源。
+其中 `proposeSkill` 只能生成候选及其证据，不能写入 Agent Template 或 Skill registry。`compact` 只能清理可重建的索引、窗口和已解除引用的历史细节；不得删除仍被 checkpoint 或 approved memory 引用的来源。Absolute Journal、原始资产、Context Slot 和派生 Index 的保留根与清理边界以 [`context-contract.md`](context-contract.md) §10 为唯一真源，本节不重复定义。
 
 可选的 AI provider 位于 Operations Backend 后面：
 
