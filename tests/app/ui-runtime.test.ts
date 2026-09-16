@@ -1620,6 +1620,66 @@ test('post-commit context hook failure preserves checkpoint identity and recover
   assert.equal(rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded' && event.terminalPhase === 'final'), false);
 });
 
+test('post-commit context hook failure keeps non-succeeded checkpoints blocked after coordinator rebuild', async () => {
+  for (const checkpointOutcome of ['failed', 'blocked', 'waiting', 'cancelled', 'unknown'] as const) {
+    const root = await mkdtemp(join(tmpdir(), `humanagent-ui-context-commit-${checkpointOutcome}-`));
+    const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+      hookId: 'ui-context-commit-gate',
+      version: '1',
+      mode: 'core',
+      stages: ['context.committed'],
+      onEnter: async () => ({
+        status: 'failed' as const,
+        diagnostics: ['post-commit publication failed'],
+        ownerId: 'ui-context-commit-gate',
+        nextAction: 'reconcile committed checkpoint',
+      }),
+    }]);
+    const failingService = serviceFor(
+      root,
+      new FakeReplayExecutionRuntimePort({
+        binding,
+        stepDelayMs: 1,
+        replay: [
+          { kind: 'terminal', state: checkpointOutcome, summary: `execution ${checkpointOutcome}`, terminalState: checkpointOutcome },
+        ],
+      }),
+      'fake',
+      'ready',
+      undefined,
+      undefined,
+      hooks,
+    );
+    const task = failingService.createTask({ title: `context commit recovery ${checkpointOutcome}` });
+    const started = failingService.startExecution(task.taskId, { prompt: `commit ${checkpointOutcome}` });
+    await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
+    const failedDashboard = failingService.taskDashboard(task.taskId);
+    if (!failedDashboard.checkpoint) throw new Error(`expected durable ${checkpointOutcome} checkpoint identity`);
+    assert.equal(failedDashboard.checkpoint.outcome, checkpointOutcome);
+    assert.equal(failedDashboard.error?.ownerId, 'ui-context-commit-gate');
+    assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
+
+    const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+    await rebuilt.hydrate();
+    const recovered = rebuilt.taskDashboard(task.taskId);
+    assert.equal(recovered.state, 'blocked');
+    assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+    assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+    assert.equal(recovered.checkpoint?.outcome, checkpointOutcome);
+    assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
+    assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+    assert.deepEqual(recovered.allowedActions, []);
+    assert.throws(
+      () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked' }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+    );
+    assert.equal(
+      rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'),
+      true,
+    );
+  }
+});
+
 test('actual UI entry follows the provider-neutral composition and keeps hook, context, settlement, and failure evidence visible', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-'));
   const hookEvents: string[] = [];

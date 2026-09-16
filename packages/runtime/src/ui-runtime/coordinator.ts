@@ -1436,7 +1436,7 @@ export class RuntimeTaskCoordinator {
         const checkpoint = recalled.checkpoint;
         task.checkpoint = checkpoint;
         task.checkpointSeq = checkpoint.seq;
-        if (checkpoint.outcome === 'succeeded' && task.error?.code === 'execution.context-commit-hook.blocked') {
+        if (task.error?.code === 'execution.context-commit-hook.blocked') {
           this.markCommittedCheckpointRecovery(task, task.error.nextAction);
           continue;
         }
