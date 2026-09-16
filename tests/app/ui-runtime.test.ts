@@ -19,6 +19,7 @@ import {
   type ProviderStartReceipt,
   type ProviderStopReceipt,
   type ProviderSubmitResult,
+  type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import { AgentRuntime, bindAgentDriver, executeStopControl, type AttentionPort } from '../../packages/runtime/src/index.js';
@@ -47,7 +48,7 @@ const binding: ProviderBinding = {
   capabilityDigest: 'sha256:ui-test-capability',
 };
 
-function evidence(label: string, scope: { readonly organId: typeof organId; readonly taskId?: { readonly scope: 'task'; readonly value: string }; readonly operationId?: { readonly scope: 'operation'; readonly value: string } }): EvidenceRef {
+function evidence(label: string, scope: ScopeRef): EvidenceRef {
   return {
     evidenceId: id('evidence', `ui-test-${label}`),
     kind: 'operation',
@@ -332,24 +333,17 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   const reconstructedDashboard = second.taskDashboard(firstTask.taskId);
   assert.equal(reconstructedDashboard.state, 'succeeded');
   assert.equal(reconstructedDashboard.checkpoint?.outcome, 'succeeded');
-  const store = new FileCheckpointStore(
+  const reconstructed = await new FileCheckpointStore(
     join(root, `task-${firstTask.taskId.value}-cycle-ui-cycle-1.jsonl`),
-  );
-  const operationScoped = await store.readLatest({
+  ).readLatest({
     organId,
     taskId: firstTask.taskId,
     cycleId: id('cycle', 'ui-cycle-1'),
     operationId: firstStarted.operationId,
   });
-  assert.equal(operationScoped, null);
-  const businessScoped = await store.readLatest({
-    organId,
-    taskId: firstTask.taskId,
-    cycleId: id('cycle', 'ui-cycle-1'),
-  });
-  if (!businessScoped) throw new Error('expected business checkpoint');
-  assert.equal(businessScoped.checkpoint.outcome, 'succeeded');
-  assert.equal(businessScoped.checkpoint.scope.operationId, undefined);
+  if (!reconstructed) throw new Error('expected reconstructed checkpoint');
+  assert.equal(reconstructed.checkpoint.outcome, 'succeeded');
+  assert.equal(reconstructed.checkpoint.scope.operationId, undefined);
   assert.deepEqual(second.eventsSince(firstStarted.operationId).map((event) => event.eventId), firstEvents.map((event) => event.eventId));
 
   const secondTask = second.createTask({ title: 'second process' });
@@ -365,49 +359,6 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   const resumed = third.startExecution(firstTask.taskId, { prompt: 'new epoch after restart' });
   assert.equal(resumed.executionEpoch, 2);
   await waitFor(() => assert.equal(third.taskDashboard(firstTask.taskId).state, 'succeeded'));
-});
-
-test('FileCheckpointStore filters latest and previous checkpoints by complete scope', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-store-scope-'));
-  const store = new FileCheckpointStore(join(root, 'shared-cycle.jsonl'));
-  const taskId = id('task', 'task-shared-cycle');
-  const cycleId = id('cycle', 'cycle-shared-cycle');
-  const scopeA = { organId, taskId, cycleId, operationId: id('operation', 'operation-a') };
-  const scopeB = { organId, taskId, cycleId, operationId: id('operation', 'operation-b') };
-  const checkpoint = (input: {
-    readonly id: string;
-    readonly scope: typeof scopeA | typeof scopeB;
-    readonly seq: number;
-    readonly previousCheckpointId: Checkpoint['previousCheckpointId'];
-  }): Checkpoint => ({
-    id: id('checkpoint', input.id),
-    scope: input.scope,
-    cycleId,
-    seq: input.seq,
-    previousCheckpointId: input.previousCheckpointId,
-    directiveRevision: 1,
-    executionEpoch: 1,
-    outcome: 'succeeded',
-    summary: `checkpoint ${input.id}`,
-    recoveryStateRef: evidence(`recovery-${input.id}`, input.scope),
-    evidenceRefs: [evidence(`completion-${input.id}`, input.scope)],
-    next: { kind: 'continue', ref: 'next' },
-  });
-  const sharedId = id('checkpoint', 'checkpoint-shared');
-  const firstA = checkpoint({ id: sharedId.value, scope: scopeA, seq: 1, previousCheckpointId: null });
-  const secondA = checkpoint({ id: 'checkpoint-a-2', scope: scopeA, seq: 2, previousCheckpointId: sharedId });
-  const firstB = checkpoint({ id: sharedId.value, scope: scopeB, seq: 1, previousCheckpointId: null });
-
-  await store.append({ ownerId: 'test-owner', commitId: 'commit-a-1', checkpoint: firstA });
-  await store.append({ ownerId: 'test-owner', commitId: 'commit-a-2', checkpoint: secondA });
-  await store.append({ ownerId: 'test-owner', commitId: 'commit-b-1', checkpoint: firstB });
-
-  const latestA = await store.readLatest(scopeA);
-  assert.equal(latestA?.checkpoint.id.value, secondA.id.value);
-  assert.equal(latestA?.previous?.id.value, firstA.id.value);
-  const latestB = await store.readLatest(scopeB);
-  assert.equal(latestB?.checkpoint.id.value, firstB.id.value);
-  assert.equal(latestB?.previous, null);
 });
 
 test('journal replay fails explicitly instead of silently dropping corrupted projection records', async () => {
@@ -792,6 +743,181 @@ test('restart hydration rejects a checkpoint copied under another task scope', a
   const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   await restarted.hydrate();
   assert.equal(restarted.taskDashboard(targetTask.taskId).state, 'blocked');
+});
+
+test('checkpoint latest reads prefer exact operation chains and fall back to business checkpoints', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-operation-scope-'));
+  const store = new FileCheckpointStore(join(root, 'checkpoints.jsonl'));
+  const taskId = id('task', 'shared-task');
+  const cycleId = id('cycle', 'shared-cycle');
+  const businessScope: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+  };
+  const scopeA: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+    operationId: id('operation', 'operation-a'),
+  };
+  const scopeB: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+    operationId: id('operation', 'operation-b'),
+  };
+
+  const checkpoint = (
+    scope: ScopeRef,
+    seq: number,
+    previousCheckpointId: Checkpoint['previousCheckpointId'],
+  ): Checkpoint => {
+    const label = scope.operationId?.value ?? 'business';
+    return {
+      id: id('checkpoint', `${label}-${seq}`),
+      scope,
+      cycleId,
+      seq,
+      previousCheckpointId,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+      summary: `${label} checkpoint ${seq}`,
+      recoveryStateRef: evidence(`${label}-${seq}-recovery`, scope),
+      evidenceRefs: [evidence(`${label}-${seq}-completion`, scope)],
+      next: { kind: 'continue', ref: 'retry-closure' },
+    };
+  };
+
+  const checkpointA1 = checkpoint(scopeA, 1, null);
+  const checkpointB1 = checkpoint(scopeB, 1, null);
+  const checkpointA2 = checkpoint(scopeA, 2, checkpointA1.id);
+  const business1 = checkpoint(businessScope, 1, null);
+  const business2 = checkpoint(businessScope, 2, business1.id);
+  const checkpointB2 = checkpoint(scopeB, 2, checkpointB1.id);
+  await store.append({ ownerId: 'app-test', checkpoint: checkpointA1 });
+  await store.append({ ownerId: 'app-test', checkpoint: checkpointB1 });
+  await store.append({ ownerId: 'app-test', checkpoint: checkpointA2 });
+  await store.append({ ownerId: 'app-test', checkpoint: business1 });
+  await store.append({ ownerId: 'app-test', checkpoint: business2 });
+  await store.append({ ownerId: 'app-test', checkpoint: checkpointB2 });
+
+  const retryReadA = await store.readLatest(scopeA);
+  assert.equal(retryReadA?.checkpoint.id.value, checkpointA2.id.value);
+  assert.equal(retryReadA?.previous?.id.value, checkpointA1.id.value);
+
+  const retryReadB = await store.readLatest(scopeB);
+  assert.equal(retryReadB?.checkpoint.id.value, checkpointB2.id.value);
+  assert.equal(retryReadB?.previous?.id.value, checkpointB1.id.value);
+
+  const businessRead = await store.readLatest(businessScope);
+  assert.equal(businessRead?.checkpoint.id.value, business2.id.value);
+  assert.equal(businessRead?.previous?.id.value, business1.id.value);
+
+  const missingOperationRead = await store.readLatest({
+    organId,
+    taskId,
+    cycleId,
+    operationId: id('operation', 'operation-missing'),
+  });
+  assert.equal(missingOperationRead?.checkpoint.id.value, business2.id.value);
+  assert.equal(missingOperationRead?.previous?.id.value, business1.id.value);
+});
+
+test('hydration restores a business predecessor for an operation-scoped stopped checkpoint', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-stopped-predecessor-'));
+  const taskId = id('task', 'ui-task-checkpoint-hydrate-1');
+  const cycleId = id('cycle', 'ui-cycle-1');
+  const operationId = id('operation', 'ui-operation-1');
+  const businessScope: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+  };
+  const operationScope: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+    operationId,
+  };
+  const businessCheckpoint: Checkpoint = {
+    id: id('checkpoint', 'hydrate-business-1'),
+    scope: businessScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'business checkpoint before stop',
+    recoveryStateRef: evidence('hydrate-business-recovery', businessScope),
+    evidenceRefs: [evidence('hydrate-business-evidence', businessScope)],
+    next: { kind: 'continue', ref: 'task://hydrate/next' },
+  };
+  const stoppedCheckpoint: Checkpoint = {
+    id: id('checkpoint', 'hydrate-stopped-1'),
+    scope: operationScope,
+    cycleId,
+    seq: 2,
+    previousCheckpointId: businessCheckpoint.id,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'stopped',
+    summary: 'stopped checkpoint with business predecessor',
+    recoveryStateRef: evidence('hydrate-stopped-recovery', operationScope),
+    evidenceRefs: [evidence('hydrate-stopped-evidence', operationScope)],
+    next: { kind: 'stop', ref: 'operator-stop' },
+  };
+  const checkpointFile = join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
+  const store = new FileCheckpointStore(checkpointFile);
+  await store.append({ ownerId: 'app-test', checkpoint: businessCheckpoint });
+  await store.append({ ownerId: 'app-test', checkpoint: stoppedCheckpoint });
+
+  const latest = await store.readLatest(operationScope);
+  if (!latest) throw new Error('expected latest operation-scoped stopped checkpoint');
+  assert.equal(latest.checkpoint.id.value, stoppedCheckpoint.id.value);
+  assert.equal(latest.previous?.id.value, businessCheckpoint.id.value);
+  assert.equal(latest.previous?.scope.operationId, undefined);
+
+  const createdAt = '2026-01-01T00:00:00.000Z';
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  await writeFile(journalPath, `${[
+    JSON.stringify({
+      kind: 'task.created',
+      taskId,
+      title: 'hydrate stopped predecessor',
+      directive: 'hydrate stopped predecessor',
+      directiveRevision: 1,
+      createdAt,
+      taskCounter: 1,
+    }),
+    JSON.stringify({
+      kind: 'operation.started',
+      operationId,
+      taskId,
+      cycleId,
+      scope: operationScope,
+      executionEpoch: 1,
+      operationCounter: 1,
+      cycleCounter: 1,
+      startedAt: createdAt,
+      input: 'hydrate stopped predecessor',
+    }),
+  ].join('\n')}\n`, 'utf8');
+
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    new UiRuntimeJournal(journalPath),
+  );
+  await service.hydrate();
+  const dashboard = service.taskDashboard(taskId);
+  assert.equal(dashboard.state, 'stopped');
+  assert.equal(dashboard.checkpoint?.outcome, 'stopped');
+  assert.equal(dashboard.checkpoint?.checkpointId, stoppedCheckpoint.id.value);
 });
 
 test('stop during provider observation keeps the stopped projection free of late errors', async () => {

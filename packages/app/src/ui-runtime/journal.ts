@@ -14,7 +14,6 @@ import type {
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
-import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
 
 // App-owned UI runtime journal. This is not the Organ Journal or the runtime
 // lifecycle state; it only stores enough typed projection state for the UI
@@ -48,6 +47,10 @@ function requirePositiveInteger(record: Record<string, unknown>, key: string, fi
   if (!Number.isSafeInteger(record[key]) || Number(record[key]) <= 0) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} is invalid`);
   }
+}
+
+function checkpointIdKey(id: Checkpoint['id']): string {
+  return `${id.scope}:${id.value}`;
 }
 
 function validateEvidenceRefs(value: unknown, filePath: string, line: number): void {
@@ -176,27 +179,40 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
 
   async readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
     const records = await this.journal().replay();
-    const checkpoints = records
+    const checkpointById = new Map<string, Checkpoint>();
+    for (const record of records) {
+      if (record.kind === 'checkpoint' && record.checkpoint) {
+        checkpointById.set(checkpointIdKey(record.checkpoint.id), record.checkpoint);
+      }
+    }
+    const businessCheckpoints = records
       .filter((record) =>
         record.kind === 'checkpoint'
         && record.checkpoint
-        && record.checkpoint.scope.organId.scope === scope.organId.scope
-        && record.checkpoint.scope.organId.value === scope.organId.value
-        && record.checkpoint.scope.taskId?.scope === scope.taskId?.scope
-        && record.checkpoint.scope.taskId?.value === scope.taskId?.value
-        && record.checkpoint.scope.cycleId?.scope === scope.cycleId?.scope
-        && record.checkpoint.scope.cycleId?.value === scope.cycleId?.value
-        && record.checkpoint.scope.operationId?.scope === scope.operationId?.scope
-        && record.checkpoint.scope.operationId?.value === scope.operationId?.value)
+        && record.scope.organId.value === scope.organId.value
+        && record.scope.taskId?.value === scope.taskId?.value
+        && record.scope.cycleId?.value === scope.cycleId?.value)
       .map((record) => record.checkpoint as Checkpoint);
+    const exactOperationCheckpoints = scope.operationId
+      ? businessCheckpoints.filter((checkpoint) => checkpoint.scope.operationId?.value === scope.operationId!.value)
+      : [];
+    const checkpoints = exactOperationCheckpoints.length > 0
+      ? exactOperationCheckpoints
+      : businessCheckpoints.filter((checkpoint) => !checkpoint.scope.operationId);
     const latest = checkpoints.at(-1);
     if (!latest) return null;
-    return { checkpoint: latest, previous: checkpoints.at(-2) ?? null };
+    if (latest.previousCheckpointId === null) {
+      return { checkpoint: latest, previous: null };
+    }
+    const previous = checkpointById.get(checkpointIdKey(latest.previousCheckpointId));
+    if (!previous) {
+      throw new Error(`corrupt UI runtime checkpoint journal ${this.filePath}: previous checkpoint ${latest.previousCheckpointId.value} is missing`);
+    }
+    return { checkpoint: latest, previous };
   }
 
   async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {
     const record = await this.journal().append({
-      commitId: input.commitId,
       kind: 'checkpoint',
       scope: input.checkpoint.scope,
       checkpoint: input.checkpoint,
@@ -205,11 +221,7 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
   }
 
   async commit(checkpoint: Checkpoint): Promise<{ readonly checkpointId: Checkpoint['id']; readonly committed: true }> {
-    await this.append({
-      ownerId: 'humanagent.app',
-      commitId: checkpointCommitId(checkpoint),
-      checkpoint,
-    });
+    await this.append({ ownerId: 'humanagent.app', checkpoint });
     return { checkpointId: checkpoint.id, committed: true };
   }
 
