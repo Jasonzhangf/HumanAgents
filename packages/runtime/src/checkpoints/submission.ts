@@ -180,6 +180,14 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
       if (!('closureKind' in existing) || existing.closureKind !== 'checkpoint' || !sameCheckpointClosureRecord(existing, closure)) {
         throw new CheckpointSubmissionError('checkpoint closure id is already committed with different content');
       }
+      const verification = await input.journal.verify(input.checkpoint.scope);
+      if (!verification.valid) {
+        throw new CheckpointSubmissionError(`checkpoint journal is invalid: ${verification.reason}`);
+      }
+      const latest = await input.journal.readLatest(input.checkpoint.scope);
+      if (!latest || !sameCheckpoint(latest.checkpoint, input.checkpoint)) {
+        throw new CheckpointSubmissionError('checkpoint closure exists without a matching committed journal checkpoint');
+      }
       return {
         state: 'committed',
         checkpoint: input.checkpoint,

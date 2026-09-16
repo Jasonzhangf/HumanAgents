@@ -502,6 +502,40 @@ test('checkpoint append retries are idempotent and closure commit failures remai
   assert.equal(closurePort.committed.length, 1);
 });
 
+test('checkpoint closure retries require the matching authoritative journal record', async () => {
+  const input = submissionInput();
+  const first = await submitCheckpoint(input);
+  const retry = await submitCheckpoint(input);
+
+  assert.deepEqual(retry, first);
+  assert.equal(input.journal.appended.length, 1);
+  assert.equal(input.closurePort.committed.length, 1);
+
+  input.journal.latest = null;
+  await assert.rejects(() => submitCheckpoint(input), CheckpointSubmissionError);
+  assert.equal(input.journal.appended.length, 1);
+  assert.equal(input.closurePort.committed.length, 1);
+});
+
+test('checkpoint closure retries reject corrupt or mismatched authoritative journal records', async () => {
+  const mismatched = submissionInput();
+  await submitCheckpoint(mismatched);
+  mismatched.journal.latest = {
+    checkpoint: checkpoint(1, null, { summary: 'different journal checkpoint' }),
+    previous: null,
+  };
+  await assert.rejects(() => submitCheckpoint(mismatched), CheckpointSubmissionError);
+  assert.equal(mismatched.journal.appended.length, 1);
+  assert.equal(mismatched.closurePort.committed.length, 1);
+
+  const corrupt = submissionInput();
+  await submitCheckpoint(corrupt);
+  corrupt.journal.verification = { valid: false, reason: 'digest mismatch' };
+  await assert.rejects(() => submitCheckpoint(corrupt), CheckpointSubmissionError);
+  assert.equal(corrupt.journal.appended.length, 1);
+  assert.equal(corrupt.closurePort.committed.length, 1);
+});
+
 test('checkpoint append identity conflicts fail explicitly instead of overwriting history', async () => {
   const journal = new FakeJournal();
   const closurePort = new FakeClosurePort();
