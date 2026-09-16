@@ -322,14 +322,30 @@ export interface PublishedContext<T> extends Omit<PreparedContext<T>, 'state'> {
 }
 
 export interface ContextCommitterOptions<T> {
-  readonly commit?: (context: PreparedContext<T>) => void;
+  readonly commit?: (context: PreparedContext<T>) => void | Promise<void>;
   readonly publish?: (context: CommittedContext<T>) => void;
 }
 
+interface PreparedRecord<T> {
+  readonly context: PreparedContext<T>;
+  readonly state: 'prepared';
+  attempt?: Promise<CommittedContext<T>>;
+}
+
+interface CommittedRecord<T> {
+  readonly context: CommittedContext<T>;
+  readonly state: 'committed';
+}
+
+interface PublishedRecord<T> {
+  readonly context: PublishedContext<T>;
+  readonly state: 'published';
+}
+
 type CommitterState<T> =
-  | { readonly context: PreparedContext<T>; readonly state: 'prepared' }
-  | { readonly context: CommittedContext<T>; readonly state: 'committed' }
-  | { readonly context: PublishedContext<T>; readonly state: 'published' };
+  | PreparedRecord<T>
+  | CommittedRecord<T>
+  | PublishedRecord<T>;
 
 export class ContextCommitter<T = unknown> {
   private readonly records = new Map<string, CommitterState<T>>();
@@ -351,7 +367,7 @@ export class ContextCommitter<T = unknown> {
     return context;
   }
 
-  commit(contextOrId: PreparedContext<T> | string): CommittedContext<T> {
+  async commit(contextOrId: PreparedContext<T> | string): Promise<CommittedContext<T>> {
     const current = this.record(contextOrId, ContextCommitError);
     if (current.state === 'committed') {
       if (typeof contextOrId !== 'string') {
@@ -365,10 +381,39 @@ export class ContextCommitter<T = unknown> {
     if (typeof contextOrId !== 'string') {
       this.assertCommitIdentity(current.context, contextOrId);
     }
-    const context: CommittedContext<T> = { ...current.context, state: 'committed' };
-    this.options.commit?.(current.context);
-    this.records.set(context.id, { context, state: 'committed' });
-    return context;
+    if (current.attempt) return current.attempt;
+
+    let resolveAttempt!: (context: CommittedContext<T>) => void;
+    let rejectAttempt!: (error: unknown) => void;
+    const attempt = new Promise<CommittedContext<T>>((resolve, reject) => {
+      resolveAttempt = resolve;
+      rejectAttempt = reject;
+    });
+    current.attempt = attempt;
+    void (async () => {
+      try {
+        await this.options.commit?.(current.context);
+        const context: CommittedContext<T> = { ...current.context, state: 'committed' };
+        const latest = this.records.get(context.id);
+        if (latest?.state === 'prepared' && latest.attempt === attempt) {
+          this.records.set(context.id, { context, state: 'committed' });
+          resolveAttempt(context);
+          return;
+        }
+        rejectAttempt(
+          latest?.state === 'prepared'
+            ? new ContextCommitError(`context commit attempt superseded: ${context.id}`)
+            : new ContextCommitError(`context commit no longer pending: ${context.id}`),
+        );
+      } catch (error) {
+        const latest = this.records.get(current.context.id);
+        if (latest?.state === 'prepared' && latest.attempt === attempt) {
+          latest.attempt = undefined;
+        }
+        rejectAttempt(error);
+      }
+    })();
+    return attempt;
   }
 
   publish(contextOrId: CommittedContext<T> | string): PublishedContext<T> {
