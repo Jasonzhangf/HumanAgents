@@ -261,7 +261,7 @@ export interface EventConsumerReceipt {
 export interface EventHandlerCommitIntent {
   readonly consumerKey: string;
   readonly messageId: string;
-  readonly disposition: EventConsumerReceiptDisposition;
+  readonly disposition: Exclude<EventConsumerReceiptDisposition, 'terminal-failure'>;
   readonly completionMode: 'journal-atomic' | 'operation-barrier';
   readonly internalEffectFacts: readonly string[];
   readonly externalOperationRefs: readonly string[];
@@ -493,8 +493,8 @@ function assertRefList(refs: readonly string[], label: string): void {
   for (const ref of refs) nonEmpty(ref, label);
 }
 
-function assertEvidenceRefs(refs: readonly EvidenceRef[]): void {
-  for (const ref of refs) assertEvidenceRef(ref);
+function validateEvidenceRefs(refs: readonly EvidenceRef[]): void {
+  for (const evidenceRef of refs) assertEvidenceRef(evidenceRef);
 }
 
 function hasTaskId(taskId: TaskId | undefined): boolean {
@@ -586,7 +586,7 @@ export function validateAgentDriverReceipt(input: AgentDriverReceipt): void {
   if (input.providerSessionRef !== undefined) nonEmpty(input.providerSessionRef, 'providerSessionRef');
   if (input.operationRef !== undefined) nonEmpty(input.operationRef, 'operationRef');
   if (!DRIVER_RECEIPT_STATUSES.includes(input.status)) throw new ContractError(`unknown driver receipt status: ${input.status}`);
-  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  validateEvidenceRefs(input.evidenceRefs);
   if (input.status === 'unknown' && input.operationRef === undefined) {
     throw new ContractError('unknown driver receipt requires an operation reference for reconcile');
   }
@@ -600,7 +600,7 @@ export function validateAgentDispatchReceipt(input: AgentDispatchReceipt): void 
   nonEmpty(input.driverRef, 'driverRef');
   if (input.operationRef !== undefined) nonEmpty(input.operationRef, 'operationRef');
   if (!DRIVER_RECEIPT_STATUSES.includes(input.status)) throw new ContractError(`unknown driver receipt status: ${input.status}`);
-  assertEvidenceRefs(input.evidenceRefs);
+  validateEvidenceRefs(input.evidenceRefs);
   if (input.status === 'unknown' && input.operationRef === undefined) {
     throw new ContractError('unknown dispatch receipt requires an operation reference for reconcile');
   }
@@ -617,30 +617,29 @@ export function validateAgentObservationEvent(input: AgentObservationEvent): voi
 
 export function validateAgentResult(input: AgentResult): void {
   if (!AGENT_SETTLE_STATES.includes(input.status)) throw new ContractError(`unknown agent result status: ${input.status}`);
-  assertEvidenceRefs(input.evidenceRefs);
+  validateEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentStopReceipt(input: AgentStopReceipt): void {
   validateAgentDriverReceipt(input);
-  if (typeof input.accepted !== 'boolean') throw new ContractError('accepted must be a boolean');
 }
 
 export function validateAgentReconcileResult(input: AgentReconcileResult): void {
   validateAgentDriverReceipt(input);
   nonEmpty(input.operationRef, 'operationRef');
-  assertEvidenceRefs(input.evidenceRefs);
+  validateEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentSettleReceipt(input: AgentSettleReceipt): void {
   validateAgentDriverReceipt(input);
   if (!AGENT_SETTLE_STATES.includes(input.state)) throw new ContractError(`unknown agent settle state: ${input.state}`);
-  assertEvidenceRefs(input.evidenceRefs);
+  validateEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentCloseReceipt(input: AgentCloseReceipt): void {
   validateAgentDriverReceipt(input);
   if (typeof input.closed !== 'boolean') throw new ContractError('closed must be a boolean');
-  assertEvidenceRefs(input.evidenceRefs);
+  validateEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentMessageEnvelope(input: AgentMessageEnvelope): void {
@@ -768,6 +767,9 @@ export function validateEventHandlerCommit(input: EventHandlerCommit): void {
     return;
   }
   if (!RECEIPT_DISPOSITIONS.includes(input.disposition)) throw new ContractError(`unknown handler commit disposition: ${input.disposition}`);
+  if ((input.disposition as EventConsumerReceiptDisposition) === 'terminal-failure') {
+    throw new ContractError('terminal-failure is reserved for retry exhaustion');
+  }
   if (input.completionMode !== 'journal-atomic' && input.completionMode !== 'operation-barrier') {
     throw new ContractError('completionMode must be journal-atomic or operation-barrier');
   }
@@ -779,7 +781,6 @@ export function validateEventHandlerCommit(input: EventHandlerCommit): void {
   if (input.completionMode === 'operation-barrier' && input.externalOperationRefs.length === 0) {
     throw new ContractError('operation-barrier commit requires external operation refs');
   }
-  if (input.disposition === 'terminal-failure') nonEmpty(input.failureRef, 'failureRef');
 }
 
 export function validateCheckpointClosureRecord(input: CheckpointClosureRecord): void {
@@ -830,7 +831,7 @@ export function validateInteractionClosure(input: InteractionClosure): void {
   }
   assertRefList(input.inputRefs, 'inputRefs');
   assertRefList(input.feedbackRefs, 'feedbackRefs');
-  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  validateEvidenceRefs(input.evidenceRefs);
   nonEmpty(input.closureRef, 'closureRef');
   assertValidTime(input.closedAt, 'closedAt');
 }

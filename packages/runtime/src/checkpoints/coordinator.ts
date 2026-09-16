@@ -95,6 +95,10 @@ export function sameCheckpoint(left: Checkpoint, right: Checkpoint): boolean {
     && JSON.stringify(left.evidenceRefs) === JSON.stringify(right.evidenceRefs);
 }
 
+export function checkpointCommitId(checkpoint: Pick<Checkpoint, 'id'>): string {
+  return `checkpoint:${checkpoint.id.value}`;
+}
+
 function asRecallError(error: unknown): CheckpointRecallError {
   if (error instanceof CheckpointRecallError) return error;
   return new CheckpointRecallError(error instanceof Error ? error.message : String(error));
@@ -187,6 +191,7 @@ export async function completeCheckpoint(
 
     const receipt = await journal.append({
       ownerId: input.ownerId,
+      commitId: checkpointCommitId(input.checkpoint),
       checkpoint: input.checkpoint,
     });
     if (!sameId(receipt.checkpointId, input.checkpoint.id) || receipt.seq !== input.checkpoint.seq) {

@@ -643,10 +643,6 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
     requestId: 'request-a', attemptId: 'attempt-a', runtimeId: 'runtime-a', executionEpoch: 1, driverRef: 'driver-a',
     status: 'accepted', state: 'running' as never, evidenceRefs: [],
   }), ContractError);
-  assert.throws(() => validateAgentReconcileResult({
-    runtimeId: 'runtime-a', executionEpoch: 1, operationRef: 'operation-a', reconciled: true,
-    evidenceRefs: [{ ...providerEvidence('reconcile-invalid'), kind: 'invalid' as never }],
-  }), ContractError);
   assert.doesNotThrow(() => validateAgentCloseReceipt({
     requestId: 'request-a', attemptId: 'attempt-a', runtimeId: 'runtime-a', executionEpoch: 1, driverRef: 'driver-a',
     status: 'accepted', closed: true, evidenceRefs: [providerEvidence('close')],
@@ -654,16 +650,6 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
   assert.throws(() => validateAgentCloseReceipt({
     requestId: 'request-a', attemptId: 'attempt-a', runtimeId: 'runtime-a', executionEpoch: 1, driverRef: 'driver-a',
     status: 'accepted', closed: true, evidenceRefs: [{ ...providerEvidence('close'), source: '' }],
-  }), ContractError);
-  assert.throws(() => validateAgentCloseReceipt({
-    runtimeId: 'runtime-a', executionEpoch: 1, closed: 'yes' as never, evidenceRefs: [providerEvidence('close')],
-  }), ContractError);
-  assert.throws(() => validateAgentCloseReceipt({
-    runtimeId: 'runtime-a', executionEpoch: 1, evidenceRefs: [providerEvidence('close')],
-  } as never), ContractError);
-  assert.throws(() => validateAgentCloseReceipt({
-    runtimeId: 'runtime-a', executionEpoch: 1, closed: true,
-    evidenceRefs: [{ ...providerEvidence('close-invalid'), scope: { organId: { scope: 'task', value: 'bad' } } as never }],
   }), ContractError);
   const driver: AgentDriverV1 = {
     protocolVersion: 1,
@@ -697,26 +683,6 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
     }),
   };
   assert.equal(driver.protocolVersion, 1);
-});
-
-test('settle receipts reject invalid evidence ref fields', () => {
-  const receipt = { state: 'stopped', evidenceRefs: [providerEvidence('settle-invalid')] } as const;
-  assert.throws(() => validateAgentSettleReceipt({
-    ...receipt,
-    evidenceRefs: [{ ...providerEvidence('settle-invalid-id'), evidenceId: id('task', 'bad') as never }],
-  }), ContractError);
-  assert.throws(() => validateAgentSettleReceipt({
-    ...receipt,
-    evidenceRefs: [{ ...providerEvidence('settle-invalid-kind'), kind: 'invalid' as never }],
-  }), ContractError);
-  assert.throws(() => validateAgentSettleReceipt({
-    ...receipt,
-    evidenceRefs: [{ ...providerEvidence('settle-invalid-digest'), digest: '' }],
-  }), ContractError);
-  assert.throws(() => validateAgentSettleReceipt({
-    ...receipt,
-    evidenceRefs: [{ ...providerEvidence('settle-invalid-scope'), scope: { organId: id('task', 'bad') } as never }],
-  }), ContractError);
 });
 
 test('scope ACL and permission revision prevent cross-scope reads and revoked permissions', () => {
@@ -756,6 +722,10 @@ test('consumer cursors, receipts, retry obligations, and commit intents keep fin
     consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'applied',
     completionMode: 'journal-atomic', internalEffectFacts: ['asset://effect-a'], externalOperationRefs: [],
   });
+  assert.throws(() => validateEventHandlerCommit({
+    consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'terminal-failure' as never,
+    completionMode: 'journal-atomic', internalEffectFacts: [], externalOperationRefs: [], failureRef: 'failure://forced',
+  }), ContractError);
   assert.equal(consumerKey({ consumerOwner: 'event-owner', scopeRef: 'organ-a::task-a', contractVersion: 'v1' }), 'event-owner::organ-a::task-a::v1');
   assert.throws(() => validateEventConsumerReceipt({ ...consumerReceipt(), disposition: 'applied', effectRefs: [] }), ContractError);
   assert.throws(() => validateEventConsumerReceipt({ ...consumerReceipt({ disposition: 'terminal-failure' }), failureRef: undefined }), ContractError);

@@ -422,6 +422,52 @@ test('partial control decode exposes missing fields and keeps partial raw eviden
   assert.ok(minimal.absentFields.includes('next'));
 });
 
+test('plain summaries, invalid control field types, and conflicting blocks are rejected', () => {
+  const plain = decodeControlBlock({ sourceRef: 'response:plain', raw: 'summary: work complete' });
+  assert.equal(plain.status, 'missing');
+
+  const wrongSummary = decodeControlBlock({ sourceRef: 'response:wrong-summary', raw: '{"summary":123}' });
+  assert.equal(wrongSummary.status, 'malformed');
+
+  const wrongDisposition = decodeControlBlock({ sourceRef: 'response:wrong-disposition', raw: '{"summary":"ok","disposition":"bogus"}' });
+  assert.equal(wrongDisposition.status, 'malformed');
+
+  const conflicting = decodeControlBlock({
+    sourceRef: 'response:conflicting',
+    raw: `\`\`\`json
+{"summary":"first","disposition":"continue"}
+\`\`\`
+\`\`\`json
+{"summary":"second","disposition":"failed"}
+\`\`\``,
+  });
+  assert.equal(conflicting.status, 'multiple-conflicting');
+});
+
+test('accepted turns reset raw output so later turns decode independently', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
+    maxTotalTurns: 10,
+    maxTurnsBetweenProbes: 10,
+    maxNoProgressTurns: 10,
+  }));
+  await coordinator.start();
+
+  const first = await coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' });
+  assert.equal(first.accepted, true);
+
+  const second = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
+    maxTotalTurns: 10,
+    maxTurnsBetweenProbes: 10,
+    maxNoProgressTurns: 10,
+  }));
+  await second.start();
+  const result = await second.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:2' });
+  assert.equal(result.accepted, true);
+  assert.equal(result.decode?.status, 'valid');
+});
+
 test('closed control marker decodes only the bounded JSON block', () => {
   const decoded = decodeControlBlock({
     sourceRef: 'response:closed-marker',

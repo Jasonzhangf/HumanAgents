@@ -465,7 +465,6 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
       await stage.start();
     }
     await lease.markReady();
-    let disposed = false;
     let disposeReceipt: SupervisorDisposeReceipt | undefined;
     const startup: SupervisorStartup = {
       paths,
@@ -473,11 +472,7 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
       readyAt: lease.record.readyAt ?? new Date().toISOString(),
       stages: stages.map((stage) => stage.name),
       async dispose() {
-        if (disposed) {
-          if (disposeReceipt === undefined) throw new Error('startup dispose was already completed without a receipt');
-          return disposeReceipt;
-        }
-        disposed = true;
+        if (disposeReceipt !== undefined) return disposeReceipt;
         const cleanup = await disposeStagesReverse(started);
         const released = await lease.release();
         disposeReceipt = {

@@ -77,12 +77,16 @@ function assertEventPayload(event: EventEnvelope): void {
   if (event.payload) assertBusinessPayload(event.payload);
 }
 
+function identityKey(streamId: string, consumerKey: string, messageId: string): string {
+  return `${streamId.length}:${streamId}${consumerKey.length}:${consumerKey}${messageId.length}:${messageId}`;
+}
+
 function receiptKey(streamId: string, consumerKey: string, messageId: string): string {
-  return `${streamId}\u0000${consumerKey}\u0000${messageId}`;
+  return identityKey(streamId, consumerKey, messageId);
 }
 
 function retryKey(streamId: string, consumerKey: string, messageId: string): string {
-  return `${streamId}\u0000${consumerKey}\u0000${messageId}`;
+  return identityKey(streamId, consumerKey, messageId);
 }
 
 function uniqueRefs(refs: readonly string[]): readonly string[] {
@@ -536,6 +540,18 @@ async function processEvent(
   });
   if (obligation?.state === 'exhausted') {
     return commitExhaustedReceipt(ports, consumer, event, obligation, updatedAt);
+  }
+  if (obligation?.state === 'cancelled') {
+    return {
+      receipt: await commitTerminalReceipt(
+        ports,
+        consumer.consumerKey,
+        event,
+        'rejected',
+        updatedAt,
+        obligation.failureRef,
+      ),
+    };
   }
   if (obligation && Date.parse(obligation.nextAttemptAt) > Date.parse(updatedAt)) {
     return { retry: obligation };

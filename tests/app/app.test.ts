@@ -6,10 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
-import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, createJsonlCheckpointJournal, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
+import { JsonlOrganJournal, JournalCommitConflictError } from '../../packages/adapters/jsonl/src/index.js';
+import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -387,6 +389,66 @@ test('run creates a HumanAgent task, operation, checkpoint, and run manifest', a
   assert.equal(manifest.driverRef, 'fake');
   const checkpointFile = join(paths.journalRoot, 'checkpoints.jsonl');
   assert.match(await readFile(checkpointFile, 'utf8'), /"outcome":"succeeded"/);
+});
+
+test('real JSONL checkpoint journal deduplicates retries by stable commit identity and rejects conflicts', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-checkpoint-commit-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const filePath = join(paths.journalRoot, 'checkpoint-commit-identity.jsonl');
+  const journal = createJsonlCheckpointJournal({ filePath });
+  const scope = {
+    organId: id('organ', 'checkpoint-commit-organ'),
+    taskId: id('task', 'checkpoint-commit-task'),
+    cycleId: id('cycle', 'checkpoint-commit-cycle'),
+  };
+  const recoveryStateRef: EvidenceRef = {
+    evidenceId: id('evidence', 'checkpoint-commit-recovery'),
+    kind: 'operation',
+    source: 'test',
+    locator: 'records/recovery',
+    scope,
+  };
+  const checkpoint = {
+    id: id('checkpoint', 'checkpoint-commit-1'),
+    scope,
+    cycleId: scope.cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded' as const,
+    summary: 'stable checkpoint commit',
+    recoveryStateRef,
+    evidenceRefs: [{
+      evidenceId: id('evidence', 'checkpoint-commit-evidence'),
+      kind: 'operation' as const,
+      source: 'test',
+      locator: 'records/evidence',
+      scope,
+    }],
+    next: { kind: 'continue' as const, ref: 'next' },
+  };
+  const request = {
+    ownerId: 'checkpoint-owner',
+    commitId: checkpointCommitId(checkpoint),
+    checkpoint,
+  };
+
+  const first = await journal.append(request);
+  const retry = await journal.append(request);
+  assert.equal(first.seq, 1);
+  assert.deepEqual(retry, first);
+  assert.equal((await readFile(filePath, 'utf8')).trim().split('\n').length, 1);
+  assert.equal((await new JsonlOrganJournal(filePath).findByCommitId(request.commitId))?.seq, 1);
+
+  await assert.rejects(
+    () => journal.append({
+      ...request,
+      checkpoint: { ...checkpoint, summary: 'different checkpoint fact' },
+    }),
+    (error: unknown) => error instanceof JournalCommitConflictError,
+  );
 });
 
 test('run manifest rejects tampered or cross-session identity fields', async () => {

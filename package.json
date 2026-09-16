@@ -35,7 +35,7 @@
     "proof:dsh-entry": "node tests/adapters/dsh/real-dsh-entry-proof.mjs",
     "proof:dsh-lifecycle": "node tests/adapters/dsh/real-dsh-lifecycle-proof.mjs",
     "proof:dsh-cli": "node tests/adapters/dsh/real-dsh-humanagent-cli-smoke.mjs",
-    "test": "pnpm test:contracts && pnpm test:config && pnpm test:provider && pnpm test:app && pnpm test:ui && pnpm test:runtime",
+    "test": "pnpm test:contracts && pnpm test:journal && pnpm test:config && pnpm test:provider && pnpm test:app && pnpm test:ui && pnpm test:runtime",
     "ci:check": "pnpm run typecheck && pnpm run test && pnpm run test:release",
     "doctor": "pnpm build:app && node dist/app/app/src/cli.js doctor",
     "run": "pnpm build:app && node dist/app/app/src/cli.js run",

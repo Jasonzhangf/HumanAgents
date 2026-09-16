@@ -360,7 +360,7 @@ export class AgentIoRequestCoordinator {
     await this.persistBudget();
 
     const probeRequired = this.budget.turnsSinceProbe >= Math.max(1, this.policy.maxTurnsBetweenProbes);
-    if (!decode.block?.summary) {
+    if (decode.status !== 'valid' || !decode.block?.summary) {
       this.budget = { ...this.budget, controlRepairAttempts: this.budget.controlRepairAttempts + 1 };
       this.repairOrdinal += 1;
       this.status = 'repairing';
@@ -399,6 +399,7 @@ export class AgentIoRequestCoordinator {
       await this.persistBudget();
     }
 
+    this.currentRaw = '';
     await this.closeWith({
       status: 'completed',
       reason: input.repairing ? 'end-turn repair accepted' : 'end-turn summary accepted',

@@ -34,6 +34,17 @@ const CONTROL_FIELDS = new Set([
   'repair',
 ]);
 
+const DISPOSITIONS = new Set([
+  'continue',
+  'checkpoint-proposed',
+  'waiting-user',
+  'waiting-operation',
+  'blocked',
+  'failed',
+  'completion-proposed',
+  'stop-ack',
+]);
+
 function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
@@ -56,6 +67,25 @@ function cleanBlock(value: unknown): Partial<AgentControlBlock> | undefined {
     if (key in raw) block[key] = raw[key];
   }
   return block as Partial<AgentControlBlock>;
+}
+
+function validateBlockShape(block: Partial<AgentControlBlock>): string | undefined {
+  if (block.summary !== undefined && !nonEmpty(block.summary)) return 'summary must be a non-empty string';
+  if (block.turnRef !== undefined && !nonEmpty(block.turnRef)) return 'turnRef must be a non-empty string';
+  if (block.phase !== undefined && !nonEmpty(block.phase)) return 'phase must be a non-empty string';
+  if (block.disposition !== undefined && !DISPOSITIONS.has(block.disposition)) return `unknown disposition: ${String(block.disposition)}`;
+  if (block.goal !== undefined) {
+    if (!block.goal || typeof block.goal !== 'object' || Array.isArray(block.goal)) return 'goal must be an object';
+    if (!['in-progress', 'complete', 'blocked', 'unknown'].includes(block.goal.status)) return `unknown goal status: ${String(block.goal.status)}`;
+  }
+  if (block.next !== undefined) {
+    if (!block.next || typeof block.next !== 'object' || Array.isArray(block.next)) return 'next must be an object';
+    if (!nonEmpty(block.next.objective)) return 'next.objective must be a non-empty string';
+    if (!['reason', 'tool', 'wait', 'ask-user', 'review', 'stop', 'close'].includes(block.next.kind)) {
+      return `unknown next kind: ${String(block.next.kind)}`;
+    }
+  }
+  return undefined;
 }
 
 function absentFields(block: Partial<AgentControlBlock>): string[] {
@@ -100,6 +130,18 @@ function decodeJsonObject(json: string, sourceRef: string): ControlDecodeResult 
   }
   rejected.push(...bindingKeys);
   const block = cleanBlock(nested) ?? {};
+  const shapeError = validateBlockShape(block);
+  if (shapeError) {
+    return {
+      status: 'malformed',
+      sourceRef,
+      completeness: 'partial',
+      absentFields: absentFields(block),
+      diagnostics: [`control block shape is invalid: ${shapeError}`],
+      block,
+      partialRaw: json,
+    };
+  }
   if (rejected.length > 0) {
     return {
       status: 'malformed',
@@ -122,23 +164,33 @@ function decodeJsonObject(json: string, sourceRef: string): ControlDecodeResult 
   };
 }
 
-function extractMarkerJson(raw: string, marker: string): string | undefined {
-  const start = raw.indexOf(marker);
-  if (start === -1) return undefined;
-  const contentStart = start + marker.length;
-  const endMarker = `[[/${marker.slice(2, -2)}]]`;
-  const end = raw.indexOf(endMarker, contentStart);
-  if (end === -1) return raw.slice(contentStart).trim();
-  return raw.slice(contentStart, end).trim();
+function extractMarkerJson(raw: string, marker: string): string[] {
+  const candidates: string[] = [];
+  let cursor = 0;
+  while (cursor < raw.length) {
+    const start = raw.indexOf(marker, cursor);
+    if (start === -1) break;
+    const contentStart = start + marker.length;
+    const endMarker = `[[/${marker.slice(2, -2)}]]`;
+    const end = raw.indexOf(endMarker, contentStart);
+    candidates.push((end === -1 ? raw.slice(contentStart) : raw.slice(contentStart, end)).trim());
+    cursor = end === -1 ? raw.length : end + endMarker.length;
+  }
+  return candidates;
 }
 
-function extractFencedJson(raw: string): string | undefined {
-  const start = raw.indexOf('```json');
-  if (start === -1) return undefined;
-  const contentStart = start + '```json'.length;
-  const end = raw.indexOf('```', contentStart);
-  if (end === -1) return raw.slice(contentStart).trim();
-  return raw.slice(contentStart, end).trim();
+function extractFencedJson(raw: string): string[] {
+  const candidates: string[] = [];
+  let cursor = 0;
+  while (cursor < raw.length) {
+    const start = raw.indexOf('```json', cursor);
+    if (start === -1) break;
+    const contentStart = start + '```json'.length;
+    const end = raw.indexOf('```', contentStart);
+    candidates.push((end === -1 ? raw.slice(contentStart) : raw.slice(contentStart, end)).trim());
+    cursor = end === -1 ? raw.length : end + 3;
+  }
+  return candidates;
 }
 
 export function decodeControlBlock(input: {
@@ -158,17 +210,35 @@ export function decodeControlBlock(input: {
 
   const candidates: string[] = [
     raw,
-    extractMarkerJson(raw, '[[control]]'),
-    extractFencedJson(raw),
+    ...extractMarkerJson(raw, '[[control]]'),
+    ...extractFencedJson(raw),
   ].filter((candidate): candidate is string => Boolean(candidate));
 
+  const decodedCandidates: ControlDecodeResult[] = [];
   for (const candidate of candidates) {
     if (!candidate.trim().startsWith('{')) continue;
     const decoded = decodeJsonObject(candidate, input.sourceRef);
-    if (decoded) {
+    if (decoded?.status === 'valid') {
+      decodedCandidates.push(decoded);
+    } else if (decoded?.status === 'malformed') {
       return decoded;
     }
   }
+  if (decodedCandidates.length > 1) {
+    const first = JSON.stringify(decodedCandidates[0]?.block);
+    const conflict = decodedCandidates.some((candidate) => JSON.stringify(candidate.block) !== first);
+    if (conflict) {
+      return {
+        status: 'multiple-conflicting',
+        sourceRef: input.sourceRef,
+        completeness: 'complete',
+        absentFields: [],
+        diagnostics: ['response contains multiple conflicting control blocks'],
+      };
+    }
+    return decodedCandidates[0]!;
+  }
+  if (decodedCandidates.length === 1) return decodedCandidates[0]!;
 
   const summary = extractSummary(raw);
   if (summary) {

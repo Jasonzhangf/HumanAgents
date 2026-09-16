@@ -12,6 +12,7 @@ export interface LatestCheckpointRecord {
 
 export interface CheckpointAppendRequest {
   readonly ownerId: string;
+  readonly commitId: string;
   readonly checkpoint: Checkpoint;
 }
 

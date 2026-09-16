@@ -4,6 +4,7 @@ import type {
   ScopeRef,
 } from '../../contracts/src/index.js';
 import type {
+  CheckpointAppendRequest,
   CheckpointAppendReceipt,
   CheckpointChainVerification,
   CheckpointJournalPort,
@@ -80,7 +81,7 @@ export function createJsonlCheckpointJournal(input: {
       return latestCheckpoint(verification.records, scope);
     },
 
-    async append(input: { readonly ownerId: string; readonly checkpoint: Checkpoint }): Promise<CheckpointAppendReceipt> {
+    async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {
       if (!input.ownerId.trim()) {
         throw new AppLifecycleError(
           'checkpoint-owner-missing',
@@ -90,6 +91,7 @@ export function createJsonlCheckpointJournal(input: {
         );
       }
       const record = await journal.append({
+        commitId: input.commitId,
         kind: 'checkpoint',
         scope: input.checkpoint.scope,
         checkpoint: input.checkpoint,

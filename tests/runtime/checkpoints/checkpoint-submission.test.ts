@@ -30,6 +30,7 @@ import {
   submitInteractionClosure,
   type SubmitCheckpointInput,
 } from '../../../packages/runtime/src/checkpoints/submission.js';
+import { checkpointCommitId } from '../../../packages/runtime/src/checkpoints/coordinator.js';
 import { reconcileUnknownOperations } from '../../../packages/runtime/src/checkpoints/closure.js';
 import {
   CheckpointSubmissionError,
@@ -494,6 +495,7 @@ test('checkpoint append retries are idempotent and closure commit failures remai
 
   await assert.rejects(() => submitCheckpoint(input), CheckpointSubmissionError);
   assert.equal(journal.appended.length, 1);
+  assert.equal(journal.appended[0]?.commitId, checkpointCommitId(input.checkpoint));
   assert.equal(closurePort.committed.length, 0);
 
   const retried = await submitCheckpoint(input);
@@ -723,7 +725,11 @@ test('reentry rejects missing committed closure, wrong checkpoint identity, stal
 
   const noClosureJournal = new FakeJournal();
   const noClosurePort = new FakeClosurePort();
-  await noClosureJournal.append({ ownerId: 'task-owner', checkpoint: committedCheckpoint });
+  await noClosureJournal.append({
+    ownerId: 'task-owner',
+    commitId: checkpointCommitId(committedCheckpoint),
+    checkpoint: committedCheckpoint,
+  });
   await assert.rejects(
     () => commitReentry({
       ...base,

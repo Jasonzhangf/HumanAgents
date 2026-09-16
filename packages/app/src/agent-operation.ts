@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import {
+  checkpointCommitId,
   completeCheckpoint,
   executeStopControl,
   recallCheckpoint,
@@ -309,7 +310,11 @@ export class AgentOperationController {
     const previousCheckpoint = this.prepared.previous?.checkpoint ?? null;
     const checkpointPort: CheckpointCommitPort = {
       commit: async (checkpoint) => {
-        const receipt = await this.prepared.journal.append({ ownerId: OWNER, checkpoint });
+        const receipt = await this.prepared.journal.append({
+          ownerId: OWNER,
+          commitId: checkpointCommitId(checkpoint),
+          checkpoint,
+        });
         return { checkpointId: receipt.checkpointId, committed: true as const };
       },
     };

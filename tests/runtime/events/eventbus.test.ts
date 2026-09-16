@@ -65,6 +65,10 @@ const organHarnessPublisher: TrustedEventPublisher = {
 
 const consumerKey = 'owner-a|scope:organ-a/task-a|contract-v1';
 
+function eventIdentityKey(streamIdValue: string, consumerKeyValue: string, messageIdValue: string): string {
+  return `${streamIdValue.length}:${streamIdValue}${consumerKeyValue.length}:${consumerKeyValue}${messageIdValue.length}:${messageIdValue}`;
+}
+
 function consumer(overrides: Partial<EventConsumerBinding> = {}): EventConsumerBinding {
   return {
     consumerKey,
@@ -291,7 +295,7 @@ function retryFailure(
     consumerKey,
     messageId,
     retryObligation: {
-      retryKey: `${eventRecord.streamId}\u0000${consumerKey}\u0000${messageId}`,
+      retryKey: eventIdentityKey(eventRecord.streamId, consumerKey, messageId),
       consumerKey,
       messageId,
       streamId: eventRecord.streamId,
@@ -715,6 +719,40 @@ test('retry obligation survives restart and bounded failure advances to terminal
   assert.equal(afterTerminal.dlq.length, 0);
 });
 
+test('cancelled retry obligations are terminal and never redelivered', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ retryLimit: 2 }));
+  const bus = ports(journal, registry);
+  const published = await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'retry-cancelled' }),
+  });
+  const retryKey = eventIdentityKey(published.event.streamId, consumerKey, published.event.messageId);
+  await journal.commitRetryObligation({
+    retryKey,
+    consumerKey,
+    messageId: published.event.messageId,
+    streamId: published.event.streamId,
+    failedSequence: published.event.sequence,
+    attempt: 1,
+    nextAttemptAt: '2026-09-16T00:00:00.000Z',
+    ownerRef: 'owner-a',
+    failureRef: 'cancelled-retry',
+    state: 'cancelled',
+  });
+  let handlerCalls = 0;
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+    handlerCalls += 1;
+    return applied('retry-cancelled', ['asset://unexpected']);
+  });
+
+  assert.equal(handlerCalls, 0);
+  assert.equal(result.committed[0]?.disposition, 'rejected');
+  assert.equal(result.retries.length, 0);
+});
+
 test('retry obligations remain stream-scoped when message ids collide', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
@@ -731,7 +769,7 @@ test('retry obligations remain stream-scoped when message ids collide', async ()
     event: event({ messageId: 'retry-collision', streamId: streamB }),
   });
   const pending: EventRetryObligation = {
-    retryKey: `${first.event.streamId}\u0000${consumerKey}\u0000${first.event.messageId}`,
+    retryKey: eventIdentityKey(first.event.streamId, consumerKey, first.event.messageId),
     consumerKey,
     messageId: first.event.messageId,
     streamId: first.event.streamId,
@@ -743,7 +781,7 @@ test('retry obligations remain stream-scoped when message ids collide', async ()
     state: 'pending',
   };
   const exhausted: EventRetryObligation = {
-    retryKey: `${second.event.streamId}\u0000${consumerKey}\u0000${second.event.messageId}`,
+    retryKey: eventIdentityKey(second.event.streamId, consumerKey, second.event.messageId),
     consumerKey,
     messageId: second.event.messageId,
     streamId: second.event.streamId,
@@ -774,6 +812,33 @@ test('retry obligations remain stream-scoped when message ids collide', async ()
   assert.deepEqual(result.cursors.map((cursor) => cursor.streamId), [streamB]);
   assert.equal(await journal.readCursor({ streamId, consumerKey }), null);
   assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
+});
+
+test('retry key encoding is unambiguous when identifiers contain delimiters', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  const collidingConsumerKey = 'owner-b:consumer';
+  registry.consumers.set(collidingConsumerKey, consumer({
+    consumerKey: collidingConsumerKey,
+    streamIds: ['a', 'a:b'],
+    retryLimit: 2,
+  }));
+  const bus = ports(journal, registry);
+
+  const first = await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'd', streamId: 'a:b' }),
+  });
+  const second = await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'd', streamId: 'a' }),
+  });
+  assert.equal(
+    eventIdentityKey(first.event.streamId, collidingConsumerKey, first.event.messageId)
+      === eventIdentityKey(second.event.streamId, collidingConsumerKey, second.event.messageId),
+    false,
+  );
 });
 
 test('operation-barrier refuses final receipt without settled external operation refs', async () => {

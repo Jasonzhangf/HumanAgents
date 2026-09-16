@@ -133,6 +133,25 @@ test('startup dispose releases staged resources in reverse order', async () => {
   await next.release();
 });
 
+test('startup dispose remains retryable when lease release fails', async () => {
+  const paths = await fixture();
+  const startup = await runSupervisorStartup(paths, []);
+  const originalRelease = startup.lease.release.bind(startup.lease);
+  let releaseCalls = 0;
+  Object.defineProperty(startup.lease, 'release', {
+    value: async (...args: Parameters<typeof originalRelease>) => {
+      releaseCalls += 1;
+      if (releaseCalls === 1) throw new Error('lease store unavailable');
+      return originalRelease(...args);
+    },
+  });
+
+  await assert.rejects(() => startup.dispose(), /lease store unavailable/);
+  const receipt = await startup.dispose();
+  assert.equal(releaseCalls, 2);
+  assert.ok(receipt.lease.disposedAt);
+});
+
 test('partial startup failure cleans up reverse and keeps owner/next-action failure receipt', async () => {
   const paths = await fixture();
   const events: string[] = [];
