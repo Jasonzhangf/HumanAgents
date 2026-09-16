@@ -25,6 +25,7 @@ import {
 import { fenceExecutionEvent, type LateEventRejection } from '../../../core/src/epoch.js';
 import { assertTransitionLifecycle } from '../../../core/src/lifecycle.js';
 import type { AgentIoProviderBinding } from '../agent-io/types.js';
+import type { StopSettlementRecovery } from '../control/steering.js';
 import { requireReference, RuntimeError } from './errors.js';
 
 export interface AgentRuntimeBinding {
@@ -109,6 +110,7 @@ export interface PendingStopSettlement {
   readonly closure: AgentClosure;
   readonly checkpoint: Checkpoint;
   readonly checkpointCommitted: boolean;
+  readonly recovery?: StopSettlementRecovery;
 }
 
 type StopSettlementInput = Omit<PendingStopSettlement, 'checkpointCommitted'>;

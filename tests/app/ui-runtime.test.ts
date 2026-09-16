@@ -1680,6 +1680,157 @@ test('post-commit context hook failure keeps non-succeeded checkpoints blocked a
   }
 });
 
+test('post-commit context hook failure with provider close failure preserves hook recovery after coordinator rebuild', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-context-commit-close-failure-'));
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['post-commit publication failed'],
+      ownerId: 'ui-context-commit-gate',
+      nextAction: 'reconcile committed checkpoint',
+    }),
+  }]);
+  const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const closeFailure: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => base.probe(value),
+    capabilities: (value) => base.capabilities(value),
+    start: (value) => base.start(value),
+    resume: (value) => base.resume(value),
+    submit: (value) => base.submit(value),
+    observe: (value) => base.observe(value),
+    requestStop: (value) => base.requestStop(value),
+    settle: (value) => base.settle(value),
+    close: async () => ({
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: binding.protocol,
+      state: 'failed',
+      evidenceRefs: [evidence('provider-close-failure', { organId })],
+      ownerId: 'ui-provider-close-owner',
+      nextAction: { kind: 'recover', ref: 'provider-close-recovery' },
+    }),
+  };
+  const failingService = serviceFor(root, closeFailure, 'fake', 'ready', undefined, undefined, hooks);
+  const task = failingService.createTask({ title: 'context commit close recovery' });
+  const started = failingService.startExecution(task.taskId, { prompt: 'commit once with close failure' });
+  await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
+  const failedDashboard = failingService.taskDashboard(task.taskId);
+  if (!failedDashboard.checkpoint) throw new Error('expected durable checkpoint identity');
+  assert.equal(failedDashboard.checkpoint.outcome, 'succeeded');
+  assert.equal(failedDashboard.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(failedDashboard.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
+  assert.equal(failedDashboard.error?.cleanupError?.code, 'provider.close.failed');
+  assert.equal(failedDashboard.error?.cleanupError?.ownerId, 'ui-provider-close-owner');
+  assert.equal(failedDashboard.error?.cleanupError?.evidenceRefs?.[0]?.locator, 'test://provider-close-failure');
+  const failureJournal = await readFile(join(root, 'ui-runtime-journal.jsonl'), 'utf8');
+  assert.match(failureJournal, /"cleanupError":\{"code":"provider\.close\.failed","ownerId":"ui-provider-close-owner"/);
+  assert.match(failureJournal, /ui-test-provider-close-failure/);
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+  assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+  assert.equal(recovered.checkpoint?.outcome, 'succeeded');
+  assert.equal(recovered.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+  assert.deepEqual(recovered.allowedActions, []);
+  assert.throws(
+    () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked' }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+  );
+  assert.equal(
+    rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'),
+    true,
+  );
+});
+
+test('formal stop with committed stopped checkpoint and context hook failure stays blocked after coordinator rebuild', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-context-commit-'));
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-stop-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['stopped checkpoint publication failed'],
+      ownerId: 'ui-stop-context-commit-gate',
+      nextAction: 'reconcile stopped checkpoint',
+    }),
+  }]);
+  const stopBase = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 40 });
+  let closeCalls = 0;
+  const stopDriver: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => stopBase.probe(value),
+    capabilities: (value) => stopBase.capabilities(value),
+    start: (value) => stopBase.start(value),
+    resume: (value) => stopBase.resume(value),
+    submit: (value) => stopBase.submit(value),
+    observe: (value) => stopBase.observe(value),
+    requestStop: (value) => stopBase.requestStop(value),
+    settle: (value) => stopBase.settle(value),
+    close: async (value) => {
+      closeCalls += 1;
+      return stopBase.close(value);
+    },
+  };
+  const service = serviceFor(
+    root,
+    stopDriver,
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    hooks,
+  );
+  const task = service.createTask({ title: 'formal stop context recovery' });
+  const started = service.startExecution(task.taskId, { prompt: 'stop with post-commit hook failure' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
+  await assert.rejects(
+    () => service.stop(task.taskId),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'execution.context-commit-hook.blocked',
+  );
+  const failedDashboard = service.taskDashboard(task.taskId);
+  if (!failedDashboard.checkpoint) throw new Error('expected durable stopped checkpoint identity');
+  assert.equal(failedDashboard.state, 'blocked');
+  assert.equal(failedDashboard.checkpoint.outcome, 'stopped');
+  assert.equal(failedDashboard.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(failedDashboard.error?.ownerId, 'ui-stop-context-commit-gate');
+  assert.equal(failedDashboard.error?.nextAction, 'reconcile stopped checkpoint');
+  assert.deepEqual(failedDashboard.allowedActions, []);
+  assert.equal(closeCalls, 1);
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+  assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+  assert.equal(recovered.checkpoint?.outcome, 'stopped');
+  assert.equal(recovered.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(recovered.error?.ownerId, 'ui-stop-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile stopped checkpoint');
+  assert.deepEqual(recovered.allowedActions, []);
+  assert.throws(
+    () => rebuilt.startExecution(task.taskId, { prompt: 'must not start' }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+  );
+  assert.equal(
+    rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'),
+    true,
+  );
+});
+
 test('actual UI entry follows the provider-neutral composition and keeps hook, context, settlement, and failure evidence visible', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-'));
   const hookEvents: string[] = [];

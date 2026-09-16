@@ -339,6 +339,14 @@ export async function executeStopControl(input: StopControlInput): Promise<StopC
   }
   let receipt: StoppedCheckpointReceipt;
   if (pendingSettlement?.checkpointCommitted) {
+    if (pendingSettlement.recovery) {
+      throw new StopSettlementCommitError(
+        'stopped checkpoint committed but post-commit recovery failed',
+        pendingSettlement,
+        undefined,
+        { checkpointCommitted: true, recovery: pendingSettlement.recovery },
+      );
+    }
     receipt = {
       state: 'stopped',
       checkpoint: structuredClone(pendingSettlement.checkpoint),
@@ -357,7 +365,18 @@ export async function executeStopControl(input: StopControlInput): Promise<StopC
         preparedSettlement: pendingSettlement,
       });
     } catch (failure) {
-      if (failure instanceof StopSettlementCommitError) boundInput.runtime.recordStopSettlement(boundInput.operationId, failure.prepared);
+      if (failure instanceof StopSettlementCommitError) {
+        if (failure.checkpointCommitted) {
+          boundInput.runtime.recordStopSettlement(
+            boundInput.operationId,
+            { ...failure.prepared, ...(failure.recovery ? { recovery: failure.recovery } : {}) },
+            true,
+          );
+          if (!failure.recovery) throw new ControlError('committed stop settlement is missing post-commit recovery');
+          throw failure;
+        }
+        boundInput.runtime.recordStopSettlement(boundInput.operationId, failure.prepared);
+      }
       const attentionId = `stop-pending-${boundInput.operationId.value}`;
       const attention = {
         attentionId,
