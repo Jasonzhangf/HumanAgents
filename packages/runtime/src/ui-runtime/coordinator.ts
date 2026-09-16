@@ -258,6 +258,7 @@ interface TaskRecord {
   error?: RuntimeTaskError;
   running: boolean;
   stopping: boolean;
+  postCommitRecoveryPending?: boolean;
   executionReady?: Promise<void>;
   resolveExecutionReady?: () => void;
 }
@@ -990,8 +991,9 @@ export class RuntimeTaskCoordinator {
       await composition.submit(prompt);
       record.resolveExecutionReady?.();
       record.resolveExecutionReady = undefined;
-      if (record.stopping) return;
+      if (record.stopping || record.postCommitRecoveryPending) return;
       for await (const observation of composition.observe()) {
+        if (record.postCommitRecoveryPending) return;
         if (!observation.accepted) {
           this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
           continue;
@@ -1000,6 +1002,7 @@ export class RuntimeTaskCoordinator {
         if (!event.providerEvent) continue;
         this.recordProviderEvent(record, operation, event.providerEvent);
       }
+      if (record.postCommitRecoveryPending) return;
       if (runtime.snapshot().state === 'stopped') {
         this.finalize(record, 'stopped');
         return;
@@ -1020,6 +1023,7 @@ export class RuntimeTaskCoordinator {
       this.pushEvent(record, operation, 'execution.terminal', closure.state, close.retained ? `execution ${closure.state}; provider retained for active executions` : `execution ${closure.state}; provider closed`, [...closure.evidenceRefs, ...close.evidenceRefs], undefined, undefined, undefined, undefined, 'final');
       this.finalize(record, closure.state);
     } catch (error) {
+      if (record.postCommitRecoveryPending) return;
       const startupFailureBeforeReady = record.resolveExecutionReady !== undefined;
       if (record.stopping && !startupFailureBeforeReady) return;
       if (record.state === 'stopped' || runtime?.snapshot().state === 'stopped') {
@@ -1027,8 +1031,6 @@ export class RuntimeTaskCoordinator {
         return;
       }
       const projection = errorFromUnknown(error);
-      record.error = projection;
-      this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };
       const errorEvidenceRef: EvidenceRef = {
         evidenceId: id('evidence', `error-${record.operationId?.value ?? 'none'}-${record.checkpointSeq + 1}`),
@@ -1038,6 +1040,30 @@ export class RuntimeTaskCoordinator {
         scope: businessScope,
       };
       const errorEvidenceRefs = [...operation.events.filter((event) => event.kind === 'provider.error').flatMap((event) => event.evidenceRefs), errorEvidenceRef];
+      const committedCheckpoint = record.checkpoint;
+      const committedContext = error instanceof RuntimeContextCommitError && committedCheckpoint !== undefined;
+      let committedProjection: MutableRuntimeTaskError | undefined;
+      if (committedContext && committedCheckpoint) {
+        committedProjection = projection;
+        record.error = committedProjection;
+        this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
+        this.pushEvent(
+          record,
+          operation,
+          'execution.terminal',
+          'blocked',
+          'checkpoint committed; post-commit lifecycle requires recovery',
+          [...errorEvidenceRefs, ...committedCheckpoint.evidenceRefs],
+          committedProjection.ownerId,
+          true,
+          committedProjection.nextAction,
+          { error: committedProjection },
+          'final',
+        );
+      } else {
+        record.error = projection;
+        this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
+      }
       const outcome: 'failed' | 'blocked' = 'failed';
       const runtimeState = runtime?.snapshot().state ?? 'failed';
       const providerMayBeActive = runtimeState === 'running'
@@ -1067,30 +1093,27 @@ export class RuntimeTaskCoordinator {
           cleanupFailure = cleanupError;
         }
       }
-      if (error instanceof RuntimeContextCommitError && record.checkpoint) {
-        const committedProjection: MutableRuntimeTaskError = projection;
+      if (committedProjection && committedCheckpoint) {
         if (cleanupFailure) {
           const cleanupProjection: MutableRuntimeTaskError = errorFromUnknown(cleanupFailure);
           if (!cleanupProjection.evidenceRefs?.length && cleanupEvidenceRefs.length > 0) {
             cleanupProjection.evidenceRefs = cleanupEvidenceRefs;
           }
           committedProjection.cleanupError = cleanupProjection;
+          record.error = committedProjection;
+          this.pushEvent(
+            record,
+            operation,
+            'provider.error',
+            'blocked',
+            cleanupProjection.message,
+            cleanupEvidenceRefs,
+            cleanupProjection.ownerId,
+            true,
+            cleanupProjection.nextAction,
+            { error: committedProjection },
+          );
         }
-        record.error = committedProjection;
-        this.pushEvent(
-          record,
-          operation,
-          'execution.terminal',
-          'blocked',
-          'checkpoint committed; post-commit lifecycle requires recovery',
-          [...errorEvidenceRefs, ...cleanupEvidenceRefs, ...record.checkpoint.evidenceRefs],
-          committedProjection.ownerId,
-          true,
-          committedProjection.nextAction,
-          { error: committedProjection },
-          'final',
-        );
-        this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
         return;
       }
       if (cleanupFailure) {
@@ -1287,6 +1310,7 @@ export class RuntimeTaskCoordinator {
   }
 
   private markCommittedCheckpointRecovery(record: TaskRecord, nextAction: string): void {
+    record.postCommitRecoveryPending = true;
     record.state = 'blocked';
     record.running = false;
     record.stopping = false;
@@ -1304,6 +1328,24 @@ export class RuntimeTaskCoordinator {
     recovery: StopSettlementRecovery,
   ): Promise<never> {
     const projection = recoveryProjection(recovery);
+    const committedProjection: MutableRuntimeTaskError = projection;
+    record.checkpoint = error.prepared.checkpoint;
+    record.checkpointSeq = error.prepared.checkpoint.seq;
+    record.error = committedProjection;
+    this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
+    this.pushEvent(
+      record,
+      operation,
+      'execution.terminal',
+      'blocked',
+      'stopped checkpoint committed; post-commit lifecycle requires recovery',
+      [...error.prepared.checkpoint.evidenceRefs, ...error.prepared.closure.evidenceRefs],
+      committedProjection.ownerId,
+      true,
+      committedProjection.nextAction,
+      { error: committedProjection },
+      'final',
+    );
     let cleanupError: RuntimeTaskError | undefined;
     if (record.driver) {
       try {
@@ -1326,25 +1368,22 @@ export class RuntimeTaskCoordinator {
         cleanupError = errorFromUnknown(failure);
       }
     }
-    const committedProjection: MutableRuntimeTaskError = projection;
     if (cleanupError) committedProjection.cleanupError = cleanupError;
-    record.checkpoint = error.prepared.checkpoint;
-    record.checkpointSeq = error.prepared.checkpoint.seq;
-    record.error = committedProjection;
-    this.pushEvent(
-      record,
-      operation,
-      'execution.terminal',
-      'blocked',
-      'stopped checkpoint committed; post-commit lifecycle requires recovery',
-      [...error.prepared.checkpoint.evidenceRefs, ...error.prepared.closure.evidenceRefs],
-      committedProjection.ownerId,
-      true,
-      committedProjection.nextAction,
-      { error: committedProjection },
-      'final',
-    );
-    this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
+    if (cleanupError) {
+      record.error = committedProjection;
+      this.pushEvent(
+        record,
+        operation,
+        'provider.error',
+        'blocked',
+        cleanupError.message,
+        cleanupError.evidenceRefs ?? [],
+        cleanupError.ownerId,
+        true,
+        cleanupError.nextAction,
+        { error: committedProjection },
+      );
+    }
     throw new RuntimeTaskControlError(
       'execution.context-commit-hook.blocked',
       projection.ownerId,
