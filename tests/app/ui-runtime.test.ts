@@ -23,6 +23,7 @@ import {
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import { AgentRuntime, bindAgentDriver, executeStopControl, type AttentionPort } from '../../packages/runtime/src/index.js';
+import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
@@ -47,6 +48,10 @@ const binding: ProviderBinding = {
   configDigest: 'sha256:ui-test-config',
   capabilityDigest: 'sha256:ui-test-capability',
 };
+
+function appendCheckpoint(store: FileCheckpointStore, checkpoint: Checkpoint): Promise<unknown> {
+  return store.append({ ownerId: 'app-test', commitId: checkpointCommitId(checkpoint), checkpoint });
+}
 
 function evidence(label: string, scope: ScopeRef): EvidenceRef {
   return {
@@ -796,12 +801,12 @@ test('checkpoint latest reads prefer exact operation chains and fall back to bus
   const business1 = checkpoint(businessScope, 1, null);
   const business2 = checkpoint(businessScope, 2, business1.id);
   const checkpointB2 = checkpoint(scopeB, 2, checkpointB1.id);
-  await store.append({ ownerId: 'app-test', checkpoint: checkpointA1 });
-  await store.append({ ownerId: 'app-test', checkpoint: checkpointB1 });
-  await store.append({ ownerId: 'app-test', checkpoint: checkpointA2 });
-  await store.append({ ownerId: 'app-test', checkpoint: business1 });
-  await store.append({ ownerId: 'app-test', checkpoint: business2 });
-  await store.append({ ownerId: 'app-test', checkpoint: checkpointB2 });
+  await appendCheckpoint(store, checkpointA1);
+  await appendCheckpoint(store, checkpointB1);
+  await appendCheckpoint(store, checkpointA2);
+  await appendCheckpoint(store, business1);
+  await appendCheckpoint(store, business2);
+  await appendCheckpoint(store, checkpointB2);
 
   const retryReadA = await store.readLatest(scopeA);
   assert.equal(retryReadA?.checkpoint.id.value, checkpointA2.id.value);
@@ -871,8 +876,8 @@ test('hydration restores a business predecessor for an operation-scoped stopped 
   };
   const checkpointFile = join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
   const store = new FileCheckpointStore(checkpointFile);
-  await store.append({ ownerId: 'app-test', checkpoint: businessCheckpoint });
-  await store.append({ ownerId: 'app-test', checkpoint: stoppedCheckpoint });
+  await appendCheckpoint(store, businessCheckpoint);
+  await appendCheckpoint(store, stoppedCheckpoint);
 
   const latest = await store.readLatest(operationScope);
   if (!latest) throw new Error('expected latest operation-scoped stopped checkpoint');

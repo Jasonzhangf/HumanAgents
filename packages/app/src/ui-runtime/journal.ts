@@ -14,6 +14,7 @@ import type {
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
+import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
 
 // App-owned UI runtime journal. This is not the Organ Journal or the runtime
 // lifecycle state; it only stores enough typed projection state for the UI
@@ -213,6 +214,7 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
 
   async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {
     const record = await this.journal().append({
+      commitId: input.commitId,
       kind: 'checkpoint',
       scope: input.checkpoint.scope,
       checkpoint: input.checkpoint,
@@ -221,7 +223,11 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
   }
 
   async commit(checkpoint: Checkpoint): Promise<{ readonly checkpointId: Checkpoint['id']; readonly committed: true }> {
-    await this.append({ ownerId: 'humanagent.app', checkpoint });
+    await this.append({
+      ownerId: 'humanagent.app',
+      commitId: checkpointCommitId(checkpoint),
+      checkpoint,
+    });
     return { checkpointId: checkpoint.id, committed: true };
   }
 
