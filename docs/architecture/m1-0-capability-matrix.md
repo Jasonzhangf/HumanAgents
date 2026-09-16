@@ -1,6 +1,6 @@
 # M1-0 Capability and Failure Matrix
 
-Status: `M1-0-REBASELINE / ASTRA-PASS / P2-ADVISORY`
+Status: `M1-0-REBASELINE-CANDIDATE / REVIEW-PENDING / NOT-PASS`
 Review time: `2026-09-16T16:12:51-0700` (local), `2026-09-16T23:12:51Z` (UTC)
 Candidate base: `37ca6fa1ad3db70e017945f449f7b7fb99170972`
 Candidate worktree: `/Volumes/extension/code/humanagent/playground/m1-0-rebaseline-20260916`
@@ -9,9 +9,8 @@ Source expansion rechecked: `2026-09-16T22:37:33Z` (UTC)
 
 This is a read-only M1-0 rebaseline record. It does not implement an adapter,
 install a plugin, make a provider request, or prove provider/DSH runtime
-completion. The current candidate passed independent commit-bound Codex review
-and native Astra M1-0 review with P0=0 and P1=0; the remaining P2 items are
-non-blocking documentation advisories.
+completion. Commit-bound Codex review, native Astra M1-0 review and parent
+acceptance remain pending for this candidate.
 
 The prior `c291e7961a515f6d7af9304e7fd1d257929aef26` source review remains
 historical evidence only. This candidate refreshes the source and non-secret
