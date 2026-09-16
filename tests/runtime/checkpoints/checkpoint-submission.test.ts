@@ -89,20 +89,37 @@ function checkpoint(
 
 class FakeJournal implements CheckpointJournalPort {
   verification: CheckpointChainVerification = { valid: true };
-  latest: LatestCheckpointRecord | null = null;
+  readonly latestByScope = new Map<string, LatestCheckpointRecord>();
   appended: CheckpointAppendRequest[] = [];
+
+  private scopeKey(scope: ScopeRef): string {
+    return JSON.stringify(scope);
+  }
+
+  get latest(): LatestCheckpointRecord | null {
+    return [...this.latestByScope.values()].at(-1) ?? null;
+  }
+
+  set latest(value: LatestCheckpointRecord | null) {
+    this.latestByScope.clear();
+    if (value) this.latestByScope.set(this.scopeKey(value.checkpoint.scope), value);
+  }
 
   async verify(): Promise<CheckpointChainVerification> {
     return this.verification;
   }
 
-  async readLatest(): Promise<LatestCheckpointRecord | null> {
-    return this.latest;
+  async readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
+    return this.latestByScope.get(this.scopeKey(scope)) ?? null;
   }
 
   async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {
     this.appended.push(input);
-    this.latest = { checkpoint: input.checkpoint, previous: this.latest?.checkpoint ?? null };
+    const current = this.latestByScope.get(this.scopeKey(input.checkpoint.scope));
+    this.latestByScope.set(this.scopeKey(input.checkpoint.scope), {
+      checkpoint: input.checkpoint,
+      previous: current?.checkpoint ?? null,
+    });
     return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
 }
@@ -557,11 +574,38 @@ test('checkpoint append identity conflicts fail explicitly instead of overwritin
   assert.equal(journal.appended.length, 1);
 });
 
+test('same checkpoint value in different scopes keeps commit and closure identities isolated', async () => {
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const otherScope: ScopeRef = {
+    organId: organ,
+    taskId: id('task', 'task-b'),
+    cycleId: id('cycle', 'cycle-b'),
+    operationId: id('operation', 'operation-b'),
+  };
+  const first = checkpoint(1, null);
+  const second = checkpoint(1, null, {
+    scope: otherScope,
+    cycleId: otherScope.cycleId!,
+    recoveryStateRef: evidence('recovery-1', otherScope),
+    evidenceRefs: [evidence('completion-1', otherScope)],
+  });
+
+  assert.equal(checkpointCommitId(first) === checkpointCommitId(second), false);
+  await submitCheckpoint({ ...submissionInput(), checkpoint: first, journal, closurePort });
+  await submitCheckpoint({ ...submissionInput(), checkpoint: second, journal, closurePort });
+
+  assert.equal(journal.appended.length, 2);
+  assert.equal(closurePort.committed.length, 2);
+  const closureIds = closurePort.committed.map((record) => 'closureId' in record ? record.closureId : record.deadEndRef);
+  assert.equal(closureIds[0] === closureIds[1], false);
+});
+
 test('checkpoint submission rejects a committed closure that does not match the checkpoint', async () => {
   const input = submissionInput();
-  input.closurePort.records.set(`checkpoint-closure:${input.checkpoint.id.value}`, {
+  input.closurePort.records.set(`checkpoint-closure:${checkpointCommitId(input.checkpoint)}`, {
     closureKind: 'checkpoint',
-    closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
+    closureId: `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',
     outcome: 'succeeded',

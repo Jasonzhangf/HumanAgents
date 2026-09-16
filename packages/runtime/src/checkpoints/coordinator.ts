@@ -95,8 +95,9 @@ export function sameCheckpoint(left: Checkpoint, right: Checkpoint): boolean {
     && JSON.stringify(left.evidenceRefs) === JSON.stringify(right.evidenceRefs);
 }
 
-export function checkpointCommitId(checkpoint: Pick<Checkpoint, 'id'>): string {
-  return `checkpoint:${checkpoint.id.value}`;
+export function checkpointCommitId(checkpoint: Pick<Checkpoint, 'id' | 'scope'>): string {
+  const { scope } = checkpoint;
+  return `checkpoint:${scope.organId.value}:${scope.taskId?.value ?? '-'}:${scope.cycleId?.value ?? '-'}:${scope.operationId?.value ?? '-'}:${checkpoint.id.value}`;
 }
 
 function asRecallError(error: unknown): CheckpointRecallError {

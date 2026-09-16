@@ -7,7 +7,7 @@ import {
   type OperationId,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
-import { completeCheckpoint, sameCheckpoint } from './coordinator.js';
+import { checkpointCommitId, completeCheckpoint, sameCheckpoint } from './coordinator.js';
 import {
   assertDeadEndRecord,
   assertInteractionClosure,
@@ -166,7 +166,7 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
     const evidenceRefs = reconciledOperations.flatMap((result) => result.evidenceRef ? [result.evidenceRef] : []);
     const closure: CheckpointClosureRecord = {
       closureKind: 'checkpoint',
-      closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
+      closureId: `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`,
       checkpointId: input.checkpoint.id,
       source: input.source,
       outcome: input.checkpoint.outcome,
@@ -345,7 +345,7 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
     if (!latest || !sameCheckpoint(latest.checkpoint, input.checkpoint)) {
       throw new CheckpointSubmissionError('reentry checkpoint is not the committed latest checkpoint');
     }
-    const closure = await input.closurePort.read(`checkpoint-closure:${latest.checkpoint.id.value}`);
+    const closure = await input.closurePort.read(`checkpoint-closure:${checkpointCommitId(latest.checkpoint)}`);
     if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') {
       throw new CheckpointSubmissionError('reentry requires a committed checkpoint closure');
     }
