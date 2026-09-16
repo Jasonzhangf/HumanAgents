@@ -319,7 +319,7 @@ test('provider identity mismatch fails the execution without surfacing a foreign
   assert.equal(child.nodes.some((node) => node.summary.includes('another execution')), true);
 });
 
-test('new service instance reconstructs tasks, events, epochs, and counters from the app-owned journal', async () => {
+test('operation-scoped hydration restores an operation-less business checkpoint after restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-'));
   const first = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   const firstTask = first.createTask({ title: 'first process' });
@@ -329,9 +329,27 @@ test('new service instance reconstructs tasks, events, epochs, and counters from
 
   const second = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   await second.hydrate();
-  const reconstructed = second.taskDashboard(firstTask.taskId);
-  assert.equal(reconstructed.state, 'succeeded');
-  assert.equal(reconstructed.checkpoint?.outcome, 'succeeded');
+  const reconstructedDashboard = second.taskDashboard(firstTask.taskId);
+  assert.equal(reconstructedDashboard.state, 'succeeded');
+  assert.equal(reconstructedDashboard.checkpoint?.outcome, 'succeeded');
+  const store = new FileCheckpointStore(
+    join(root, `task-${firstTask.taskId.value}-cycle-ui-cycle-1.jsonl`),
+  );
+  const operationScoped = await store.readLatest({
+    organId,
+    taskId: firstTask.taskId,
+    cycleId: id('cycle', 'ui-cycle-1'),
+    operationId: firstStarted.operationId,
+  });
+  assert.equal(operationScoped, null);
+  const businessScoped = await store.readLatest({
+    organId,
+    taskId: firstTask.taskId,
+    cycleId: id('cycle', 'ui-cycle-1'),
+  });
+  if (!businessScoped) throw new Error('expected business checkpoint');
+  assert.equal(businessScoped.checkpoint.outcome, 'succeeded');
+  assert.equal(businessScoped.checkpoint.scope.operationId, undefined);
   assert.deepEqual(second.eventsSince(firstStarted.operationId).map((event) => event.eventId), firstEvents.map((event) => event.eventId));
 
   const secondTask = second.createTask({ title: 'second process' });
