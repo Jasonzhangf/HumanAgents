@@ -279,6 +279,68 @@ test('settlement publication failure leaves delivery pending and does not falsel
   assert.equal(settlementHookCalls, 1);
 });
 
+test('settlement publication intent survives coordinator recreation and retries once without hooks', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const attempted: AgentIoEvent[] = [];
+  let successfulPublications = 0;
+  let sinkAvailable = false;
+  let settlementHookCalls = 0;
+  const firstRegistry = createHookRegistry(() => undefined, clock.clock.now, [{
+    hookId: 'settlement-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['request.settled'],
+    onExit: async () => {
+      settlementHookCalls += 1;
+      return { status: 'observed' };
+    },
+  }]);
+  const first = await AgentIoRequestCoordinator.create({
+    ...coordinatorOptions(store, clock, { restartBudget: 1 }, firstRegistry),
+    onEvent: (event) => {
+      if (event.kind !== 'request.settled') return;
+      attempted.push(event);
+      if (!sinkAvailable) throw new Error('settlement event sink unavailable');
+      successfulPublications += 1;
+    },
+  });
+  await first.start();
+
+  await assert.rejects(
+    first.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' }),
+    /settlement event sink unavailable/,
+  );
+
+  const second = await AgentIoRequestCoordinator.create({
+    ...coordinatorOptions(store, clock, { restartBudget: 1 }, firstRegistry),
+    onEvent: (event) => {
+      if (event.kind === 'request.settled') {
+        attempted.push(event);
+        if (!sinkAvailable) throw new Error('settlement event sink unavailable');
+        successfulPublications += 1;
+      }
+    },
+  });
+  assert.equal(second.snapshot().status, 'incomplete');
+  assert.equal(second.snapshot().closed, true);
+  assert.equal(second.pendingSettlementClosure()?.status, 'completed');
+  assert.equal((await store.read('request-agent-io'))?.pendingSettlement?.event.eventId, attempted[0]?.eventId);
+
+  sinkAvailable = true;
+  const retried = await second.retrySettlementPublication();
+  assert.equal(retried?.status, 'completed');
+  assert.equal(second.snapshot().status, 'settled');
+  assert.equal(settlementHookCalls, 1);
+  assert.equal(attempted.length, 2);
+  assert.equal(successfulPublications, 1);
+  assert.equal((await store.read('request-agent-io'))?.pendingSettlement, undefined);
+  assert.equal(attempted[0]?.eventId, attempted[1]?.eventId);
+  assert.equal(attempted[0]?.requestId, attempted[1]?.requestId);
+  assert.equal(attempted[0]?.attemptId, attempted[1]?.attemptId);
+  assert.equal(attempted[0]?.sequence, attempted[1]?.sequence);
+});
+
 test('request rejects stale and mismatched caller bindings before dispatch', async () => {
   const store = createMemoryRestartBudgetStore();
   const clock = fakeClock();

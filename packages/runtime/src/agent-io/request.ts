@@ -15,6 +15,7 @@ import type {
   AgentIoRequestData,
   AgentIoRequestStatus,
   AgentIoRestartBudgetStore,
+  AgentIoSettlementPublicationIntent,
 } from './types.js';
 import { DEFAULT_AGENT_IO_POLICY } from './types.js';
 import { emptyAgentIoBudgetRecord } from './budget.js';
@@ -193,6 +194,7 @@ export class AgentIoRequestCoordinator {
       );
     }
     const coordinator = new AgentIoRequestCoordinator(options, budget, options.clock.now());
+    if (budget.pendingSettlement) coordinator.restorePendingSettlement(budget.pendingSettlement);
     await coordinator.persistBudget();
     return coordinator;
   }
@@ -460,6 +462,7 @@ export class AgentIoRequestCoordinator {
         `settlement publication retry failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    await this.clearSettlementIntent();
     this.pendingSettlement = undefined;
     this.pendingSettlementEvent = undefined;
     this.closure = structuredClone(closure);
@@ -551,16 +554,17 @@ export class AgentIoRequestCoordinator {
     try {
       await this.emit(
         { kind: 'request.settled', sourceRef: this.latestSourceRef, ownerId: closure.ownerId, closure },
-        () => {
-          this.closure = closure;
-          this.status = this.statusForClosure(closure);
-          this.closed = true;
+        async () => {
+          const event = this.settlementEvent;
+          if (!event) throw this.error('settlement.intent.missing', 'request.settled event was not prepared');
+          await this.persistSettlementIntent({ closure, event });
         },
       );
+      await this.clearSettlementIntent();
+      this.pendingSettlement = undefined;
+      this.pendingSettlementEvent = undefined;
     } catch (error) {
       if (this.closure === closure) {
-        this.pendingSettlement = structuredClone(closure);
-        this.pendingSettlementEvent = this.settlementEvent ? { ...this.settlementEvent } : undefined;
         this.closure = this.settlementDeliveryPendingClosure(closure);
         this.status = 'incomplete';
       }
@@ -568,6 +572,31 @@ export class AgentIoRequestCoordinator {
     } finally {
       this.closing = false;
     }
+  }
+
+  private restorePendingSettlement(intent: AgentIoSettlementPublicationIntent): void {
+    this.pendingSettlement = structuredClone(intent.closure);
+    this.pendingSettlementEvent = structuredClone(intent.event);
+    this.closure = this.settlementDeliveryPendingClosure(intent.closure);
+    this.status = 'incomplete';
+    this.closed = true;
+    this.latestSourceRef = intent.event.sourceRef;
+  }
+
+  private async persistSettlementIntent(intent: AgentIoSettlementPublicationIntent): Promise<void> {
+    this.pendingSettlement = structuredClone(intent.closure);
+    this.pendingSettlementEvent = structuredClone(intent.event);
+    this.budget = { ...this.budget, pendingSettlement: structuredClone(intent) };
+    this.closure = intent.closure;
+    this.status = this.statusForClosure(intent.closure);
+    this.closed = true;
+    await this.persistBudget();
+  }
+
+  private async clearSettlementIntent(): Promise<void> {
+    const { pendingSettlement: _pendingSettlement, ...budget } = this.budget;
+    await this.budgetStore.write(this.requestId, budget);
+    this.budget = budget;
   }
 
   private settlementDeliveryPendingClosure(closure: AgentIoClosure): AgentIoClosure {
@@ -628,7 +657,7 @@ export class AgentIoRequestCoordinator {
 
   private async emit(
     input: Omit<AgentIoEvent, 'eventId' | 'requestId' | 'attemptId' | 'sequence' | 'occurredAtMs' | 'stage'> & { readonly stage?: AgentHookStage; readonly kind: AgentIoEvent['kind'] },
-    beforePublish?: () => void,
+    beforePublish?: () => void | Promise<void>,
   ): Promise<void> {
     const event: AgentIoEvent = {
       ...input,
@@ -681,7 +710,7 @@ export class AgentIoRequestCoordinator {
           : undefined,
       );
     }
-    beforePublish?.();
+    await beforePublish?.();
     await this.onEvent(event);
     if (input.kind === 'request.settled') this.settlementEvent = undefined;
   }
