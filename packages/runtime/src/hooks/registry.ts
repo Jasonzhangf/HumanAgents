@@ -91,9 +91,9 @@ export function createHookRegistry(
       phase: 'enter' | 'exit',
     ): Promise<HookRunResult[]> {
       const results: HookRunResult[] = [];
-      const skip = new Set<string>();
+      let coreBlocked = false;
       for (const hook of entries.filter((entry) => entry.stages.includes(stage))) {
-        if (skip.has(hook.hookId)) {
+        if (hook.mode === 'core' && coreBlocked) {
           results.push({
             hookId: hook.hookId,
             hookStage: stage,
@@ -113,7 +113,7 @@ export function createHookRegistry(
           const handler = phase === 'enter' ? hook.onEnter : hook.onExit;
           const result = handler ? await handler(fullInput) : { status: 'observed' as const };
           const blocked = hook.mode === 'core' && (result.status === 'failed' || result.status === 'waiting');
-          if (blocked) skip.add(hook.hookId);
+          if (blocked) coreBlocked = true;
           await emit({
             ...nextEvent('hook.completed', hook.hookId, stage, phase, fullInput),
             diagnostics: result.diagnostics,
@@ -131,11 +131,12 @@ export function createHookRegistry(
             nextAction: `inspect hook ${hook.hookId}`,
           };
           const blocked = hook.mode === 'core';
-          if (blocked) skip.add(hook.hookId);
+          if (blocked) coreBlocked = true;
           await emit({
             ...nextEvent('hook.failed', hook.hookId, stage, phase, fullInput),
             diagnostics: result.diagnostics,
             ownerId: result.ownerId,
+            nextAction: result.nextAction,
             error: {
               code: 'hook.failed',
               message: result.diagnostics[0] ?? 'hook failed',

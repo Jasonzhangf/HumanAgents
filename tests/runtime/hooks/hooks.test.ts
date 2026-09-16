@@ -41,6 +41,121 @@ test('core hook failure blocks the stage result and observation hooks stay obser
   assert.equal(completed?.nextAction, 'inspect hook core');
 });
 
+test('core hook failed result blocks later core hooks and leaves observation hooks visible', async () => {
+  const events: AgentIoEvent[] = [];
+  const calls: string[] = [];
+  const registry = createHookRegistry((event) => {
+    events.push(event);
+  }, () => 1, [
+    {
+      hookId: 'first-core',
+      version: '1',
+      mode: 'core',
+      stages: ['request.admitted'],
+      onEnter: async () => {
+        calls.push('first-core');
+        return {
+          status: 'failed',
+          diagnostics: ['policy failed'],
+          ownerId: 'policy-owner',
+          nextAction: 'review policy',
+        };
+      },
+    },
+    {
+      hookId: 'later-core',
+      version: '1',
+      mode: 'core',
+      stages: ['request.admitted'],
+      onEnter: async () => {
+        calls.push('later-core');
+        return { status: 'observed' };
+      },
+    },
+    {
+      hookId: 'observer',
+      version: '1',
+      mode: 'observation',
+      stages: ['request.admitted'],
+      onEnter: async () => {
+        calls.push('observer');
+        return { status: 'observed' };
+      },
+    },
+  ]);
+
+  const results = await registry.runStage('request.admitted', {
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+  }, 'enter');
+
+  assert.deepEqual(calls, ['first-core', 'observer']);
+  assert.equal(results.find((result) => result.hookId === 'first-core')?.blocked, true);
+  assert.equal(results.find((result) => result.hookId === 'later-core')?.blocked, true);
+  assert.equal(events.some((event) => event.kind === 'hook.started' && event.hookId === 'later-core'), false);
+  assert.equal(results.find((result) => result.hookId === 'observer')?.blocked, false);
+  assert.equal(events.some((event) => event.kind === 'hook.completed' && event.hookId === 'observer'), true);
+  const completed = events.find((event) => event.kind === 'hook.completed' && event.hookId === 'first-core');
+  assert.equal(completed?.ownerId, 'policy-owner');
+  assert.equal(completed?.nextAction, 'review policy');
+});
+
+test('thrown core hook blocks later core hooks and leaves observation hooks visible', async () => {
+  const events: AgentIoEvent[] = [];
+  const calls: string[] = [];
+  const registry = createHookRegistry((event) => {
+    events.push(event);
+  }, () => 1, [
+    {
+      hookId: 'first-core',
+      version: '1',
+      mode: 'core',
+      stages: ['request.admitted'],
+      onEnter: async () => {
+        calls.push('first-core');
+        throw new Error('core boom');
+      },
+    },
+    {
+      hookId: 'later-core',
+      version: '1',
+      mode: 'core',
+      stages: ['request.admitted'],
+      onEnter: async () => {
+        calls.push('later-core');
+        return { status: 'observed' };
+      },
+    },
+    {
+      hookId: 'observer',
+      version: '1',
+      mode: 'observation',
+      stages: ['request.admitted'],
+      onEnter: async () => {
+        calls.push('observer');
+        return { status: 'observed' };
+      },
+    },
+  ]);
+
+  const results = await registry.runStage('request.admitted', {
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+  }, 'enter');
+
+  assert.deepEqual(calls, ['first-core', 'observer']);
+  assert.equal(results.find((result) => result.hookId === 'first-core')?.blocked, true);
+  assert.equal(results.find((result) => result.hookId === 'later-core')?.blocked, true);
+  assert.equal(events.some((event) => event.kind === 'hook.started' && event.hookId === 'later-core'), false);
+  assert.equal(results.find((result) => result.hookId === 'observer')?.blocked, false);
+  assert.equal(events.some((event) => event.kind === 'hook.completed' && event.hookId === 'observer'), true);
+  const failed = events.find((event) => event.kind === 'hook.failed' && event.hookId === 'first-core');
+  assert.equal(failed?.ownerId, 'first-core');
+  assert.equal(failed?.nextAction, 'inspect hook first-core');
+  assert.equal(failed?.error?.ownerId, 'first-core');
+  assert.equal(failed?.error?.nextAction, 'inspect hook first-core');
+});
+
 test('hook events carry request, attempt, stage, hook and correlation context', async () => {
   const events: AgentIoEvent[] = [];
   const hook: AgentLifecycleHook = {
