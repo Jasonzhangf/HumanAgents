@@ -245,6 +245,10 @@ async function withLeaseGuard<T>(leasePath: string, operation: () => Promise<T>,
   }
 }
 
+export async function withDaemonLeaseGuard<T>(paths: RuntimePaths, operation: () => Promise<T>): Promise<T> {
+  return withLeaseGuard(daemonLeasePath(paths), operation);
+}
+
 async function writeLeaseRecord(paths: RuntimePaths, record: SupervisorLeaseRecord): Promise<void> {
   const leasePath = daemonLeasePath(paths);
   const tempPath = `${leasePath}.tmp-${record.leaseId}`;
@@ -336,12 +340,8 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       return record;
     },
     async refresh() {
-      const latest = await readLeaseRecord(paths);
-      if (!latest) {
-        throw supervisorError('daemon-lease-stale', 'daemon lease is missing', 'acquire a fresh daemon lease before continuing');
-      }
-      record = latest;
-      return latest;
+      record = await assertLeaseActive(paths, record);
+      return record;
     },
     async assertActive() {
       record = await assertLeaseActive(paths, record);

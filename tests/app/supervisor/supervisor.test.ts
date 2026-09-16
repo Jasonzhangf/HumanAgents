@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,6 +62,7 @@ test('missing readiness is not availability and marked ready is still leased', a
 test('crash takeover fences the old lease and permits a new generation', async () => {
   const paths = await fixture();
   const first = await acquireDaemonLease(paths);
+  const firstLeaseId = first.record.leaseId;
   const raw = JSON.parse(await readFile(daemonLeasePath(paths), 'utf8')) as Record<string, unknown>;
   await writeFile(daemonLeasePath(paths), JSON.stringify({ ...raw, pid: 999999999 }) + '\n', 'utf8');
 
@@ -69,6 +71,11 @@ test('crash takeover fences the old lease and permits a new generation', async (
   assert.equal(second.record.takeover?.previousGeneration, 1);
   assert.equal(second.record.takeover?.previousLeaseId, first.record.leaseId);
 
+  await assert.rejects(() => first.refresh(), (error: any) => {
+    assert.equal(error.code, 'daemon-lease-stale');
+    return true;
+  });
+  assert.equal(first.record.leaseId, firstLeaseId);
   await assert.rejects(() => first.markReady(), (error: any) => {
     assert.equal(error.code, 'daemon-lease-stale');
     return true;
@@ -78,6 +85,10 @@ test('crash takeover fences the old lease and permits a new generation', async (
     return true;
   });
   await second.release();
+  await assert.rejects(() => second.refresh(), (error: any) => {
+    assert.equal(error.code, 'daemon-lease-disposed');
+    return true;
+  });
 });
 
 test('stale acquire guard is replaced by an explicit crash takeover', async () => {
@@ -214,4 +225,100 @@ test('session lock fences writes against the active daemon lease and stale lock 
 
   await secondLock.release();
   await secondLease.release();
+});
+
+test('fenced session append holds the daemon transition guard through its durable write', async () => {
+  const paths = await fixture();
+  const store = new SessionStore(paths);
+  const lease = await acquireDaemonLease(paths);
+  const fence = { leaseId: lease.record.leaseId, generation: lease.record.generation };
+  const lock = await store.acquire('session-race', fence);
+  await store.create({ sessionId: 'session-race', plan: 'default' }, lock);
+
+  const originalOpen = store.open.bind(store);
+  let enteredWrite!: () => void;
+  let releaseWrite!: () => void;
+  const writeEntered = new Promise<void>((resolve) => { enteredWrite = resolve; });
+  const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let firstOpen = true;
+  (store as unknown as { open: typeof store.open }).open = async (sessionId: string) => {
+    if (firstOpen) {
+      firstOpen = false;
+      enteredWrite();
+      await writeBlocked;
+    }
+    return originalOpen(sessionId);
+  };
+
+  const append = store.append('session-race', { type: 'session.state', state: 'ready' }, lock);
+  await writeEntered;
+  await assert.rejects(() => acquireDaemonLease(paths, {
+    takeover: { reason: 'append must finish before takeover', allowed: () => true },
+  }), (error: any) => {
+    assert.equal(error.code, 'daemon-lease-transition-in-progress');
+    return true;
+  });
+  releaseWrite();
+  const ready = await append;
+  assert.equal(ready.state, 'ready');
+  const session = await store.open('session-race');
+  assert.equal(session.records.length, 2);
+  await lock.release();
+  await lease.release();
+});
+
+test('real child-process crash leaves a stale owner that cannot commit after takeover', async () => {
+  const paths = await fixture();
+  const configModule = new URL('../../../packages/config/src/index.js', import.meta.url).href;
+  const sessionStoreModule = new URL('../../../packages/app/src/session-store.js', import.meta.url).href;
+  const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
+  const sessionId = 'session-child-crash';
+  const script = `
+    import { resolveRuntimePaths } from ${JSON.stringify(configModule)};
+    import { SessionStore } from ${JSON.stringify(sessionStoreModule)};
+    import { acquireDaemonLease } from ${JSON.stringify(supervisorModule)};
+    const paths = await resolveRuntimePaths({ controlRoot: ${JSON.stringify(paths.controlRoot)}, workspace: ${JSON.stringify(paths.workspaceCwd)} });
+    const lease = await acquireDaemonLease(paths);
+    const store = new SessionStore(paths);
+    const lock = await store.acquire(${JSON.stringify(sessionId)}, { leaseId: lease.record.leaseId, generation: lease.record.generation });
+    await store.create({ sessionId: ${JSON.stringify(sessionId)}, plan: 'default' }, lock);
+    console.log(JSON.stringify({ pid: process.pid, leaseId: lease.record.leaseId, generation: lease.record.generation, lockPath: lock.path, lockToken: lock.lockToken }));
+  `;
+  const child = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+  })) as { readonly pid: number; readonly leaseId: string; readonly generation: number; readonly lockPath: string; readonly lockToken: string };
+
+  const crashed = await readDaemonLease(paths);
+  assert.equal(crashed?.pid, child.pid);
+  assert.equal(crashed?.leaseId, child.leaseId);
+  await assert.rejects(() => acquireDaemonLease(paths), (error: any) => {
+    assert.equal(error.code, 'daemon-lease-owned');
+    return true;
+  });
+
+  const takeover = await acquireDaemonLease(paths, { takeover: { reason: 'child process exited without releasing lease' } });
+  assert.equal(takeover.record.takeover?.previousLeaseId, child.leaseId);
+
+  const staleLock = {
+    path: child.lockPath,
+    sessionId,
+    lockToken: child.lockToken,
+    fence: { leaseId: child.leaseId, generation: child.generation },
+    release: async () => {},
+  };
+  await assert.rejects(() => new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'ready' }, staleLock), (error: any) => {
+    assert.equal(error.code, 'session-lock-fence-mismatch');
+    return true;
+  });
+  assert.equal((await new SessionStore(paths).open(sessionId)).records.length, 1);
+
+  const freshLock = await new SessionStore(paths).acquire(sessionId, {
+    leaseId: takeover.record.leaseId,
+    generation: takeover.record.generation,
+  });
+  const ready = await new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'ready' }, freshLock);
+  assert.equal(ready.state, 'ready');
+  await freshLock.release();
+  await takeover.release();
 });

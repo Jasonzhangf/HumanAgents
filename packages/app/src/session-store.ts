@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { RuntimePaths } from '../../config/src/index.js';
 import { AppLifecycleError } from './errors.js';
-import { readDaemonLease } from './supervisor/supervisor.js';
+import { readDaemonLease, withDaemonLeaseGuard } from './supervisor/supervisor.js';
 
 export type SessionState = 'created' | 'opening' | 'ready' | 'running' | 'stopping' | 'stopped' | 'failed';
 
@@ -248,8 +248,13 @@ export class SessionStore {
     try {
       await previous;
       return await withLockGuard(ownedLock.path, async () => {
-        await this.verifyLock(sessionId, ownedLock);
-        return write();
+        const commit = async (): Promise<SessionSnapshot> => {
+          await this.verifyLock(sessionId, ownedLock);
+          return write();
+        };
+        return ownedLock.fence === undefined
+          ? commit()
+          : withDaemonLeaseGuard(this.paths, commit);
       });
     } finally {
       releaseQueue();
