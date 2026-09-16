@@ -54,6 +54,13 @@ function checkpointIdKey(id: Checkpoint['id']): string {
   return `${id.scope}:${id.value}`;
 }
 
+function sameScopedId(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left?.scope === right?.scope && left?.value === right?.value;
+}
+
 function checkpointScopeKey(scope: ScopeRef): string {
   return [
     `${scope.organId.scope}:${scope.organId.value}`,
@@ -203,12 +210,12 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
       .filter((record) =>
         record.kind === 'checkpoint'
         && record.checkpoint
-        && record.scope.organId.value === scope.organId.value
-        && record.scope.taskId?.value === scope.taskId?.value
-        && record.scope.cycleId?.value === scope.cycleId?.value)
+        && sameScopedId(record.scope.organId, scope.organId)
+        && sameScopedId(record.scope.taskId, scope.taskId)
+        && sameScopedId(record.scope.cycleId, scope.cycleId))
       .map((record) => record.checkpoint as Checkpoint);
     const exactOperationCheckpoints = scope.operationId
-      ? businessCheckpoints.filter((checkpoint) => checkpoint.scope.operationId?.value === scope.operationId!.value)
+      ? businessCheckpoints.filter((checkpoint) => sameScopedId(checkpoint.scope.operationId, scope.operationId))
       : [];
     const checkpoints = exactOperationCheckpoints.length > 0
       ? exactOperationCheckpoints

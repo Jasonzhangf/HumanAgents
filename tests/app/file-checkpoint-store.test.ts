@@ -72,3 +72,29 @@ test('readLatest keeps predecessors in their operation chain when checkpoint ids
   assert.equal(latestB?.previous?.id.value, checkpointB1.id.value);
   assert.equal(latestB?.previous?.scope.operationId?.value, scopeB.operationId!.value);
 });
+
+test('readLatest does not recall checkpoints across scoped-ID namespaces', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-file-checkpoint-store-scope-'));
+  const store = new FileCheckpointStore(join(root, 'checkpoints.jsonl'));
+  const taskId = id('task', 'checkpoint-store-scope-task');
+  const cycleId = id('cycle', 'checkpoint-store-scope-cycle');
+  const operationId = id('operation', 'checkpoint-store-scope-operation');
+  const businessScope: ScopeRef = { organId, taskId, cycleId };
+  const operationScope: ScopeRef = { ...businessScope, operationId };
+  const businessCheckpoint = checkpoint(businessScope, 'scope-business', 1, null);
+  const operationCheckpoint = checkpoint(operationScope, 'scope-operation', 1, null);
+  await appendCheckpoint(store, businessCheckpoint);
+  await appendCheckpoint(store, operationCheckpoint);
+
+  const foreignOrgan = id('task', organId.value) as unknown as ScopeRef['organId'];
+  const foreignTask = id('cycle', taskId.value) as unknown as ScopeRef['taskId'];
+  const foreignCycle = id('operation', cycleId.value) as unknown as ScopeRef['cycleId'];
+  const foreignOperation = id('task', operationId.value) as unknown as ScopeRef['operationId'];
+
+  assert.equal((await store.readLatest({ organId: foreignOrgan, taskId, cycleId }))?.checkpoint.id.value, undefined);
+  assert.equal((await store.readLatest({ organId, taskId: foreignTask, cycleId }))?.checkpoint.id.value, undefined);
+  assert.equal((await store.readLatest({ organId, taskId, cycleId: foreignCycle }))?.checkpoint.id.value, undefined);
+
+  const operationFallback = await store.readLatest({ ...businessScope, operationId: foreignOperation });
+  assert.equal(operationFallback?.checkpoint.id.value, businessCheckpoint.id.value);
+});
