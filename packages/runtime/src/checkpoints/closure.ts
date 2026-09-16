@@ -108,6 +108,41 @@ export function sameEvidenceRef(left: EvidenceRef, right: EvidenceRef): boolean 
     && sameScopedId(left.scope.operationId, right.scope.operationId);
 }
 
+export function sameReentryDecision(left: CheckpointReentryDecision, right: CheckpointReentryDecision): boolean {
+  return left.allowed === right.allowed
+    && left.reason === right.reason
+    && JSON.stringify(left.blockedBy) === JSON.stringify(right.blockedBy);
+}
+
+export function sameCheckpointClosureRecord(left: CheckpointClosureRecord, right: CheckpointClosureRecord): boolean {
+  return left.closureKind === right.closureKind
+    && left.closureId === right.closureId
+    && left.checkpointId.scope === right.checkpointId.scope
+    && left.checkpointId.value === right.checkpointId.value
+    && left.source === right.source
+    && left.outcome === right.outcome
+    && left.summary === right.summary
+    && left.next.kind === right.next.kind
+    && left.next.ref === right.next.ref
+    && left.evidenceRefs.length === right.evidenceRefs.length
+    && left.evidenceRefs.every((evidenceRef, index) => sameEvidenceRef(evidenceRef, right.evidenceRefs[index]!))
+    && sameReentryDecision(left.reentry, right.reentry);
+}
+
+export function sameReentryRecord(left: ReentryRecord, right: ReentryRecord): boolean {
+  return left.closureKind === right.closureKind
+    && left.closureId === right.closureId
+    && left.checkpointId.scope === right.checkpointId.scope
+    && left.checkpointId.value === right.checkpointId.value
+    && left.checkpointExecutionEpoch === right.checkpointExecutionEpoch
+    && left.previousExecutionEpoch === right.previousExecutionEpoch
+    && left.newExecutionEpoch === right.newExecutionEpoch
+    && left.deadEndRef === right.deadEndRef
+    && left.nextAction.kind === right.nextAction.kind
+    && left.nextAction.ref === right.nextAction.ref
+    && sameReentryDecision(left.reentry, right.reentry);
+}
+
 export function sameOperationId(left: OperationId, right: OperationId): boolean {
   return left.scope === right.scope && left.value === right.value;
 }
@@ -163,7 +198,6 @@ export function computeReentryDecision(input: {
   readonly permissionRevoked?: boolean;
   readonly hardBlockers?: readonly string[];
   readonly unresolvedOperations?: readonly OperationId[];
-  readonly explicit?: CheckpointReentryDecision;
 }): CheckpointReentryDecision {
   const blockedBy: string[] = [];
   if (input.permissionRevoked) blockedBy.push('permission-revoked');
@@ -172,7 +206,6 @@ export function computeReentryDecision(input: {
   if (blockedBy.length > 0) {
     return { allowed: false, reason: 'checkpoint committed without reentry admission', blockedBy };
   }
-  if (input.explicit) return { ...input.explicit, blockedBy: input.explicit.blockedBy };
   switch (input.outcome) {
     case 'waiting':
       return { allowed: true, reason: 'waiting checkpoint can be reentered from its recovery condition' };

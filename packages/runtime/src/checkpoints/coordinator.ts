@@ -79,6 +79,22 @@ function assertCheckpointCycle(checkpoint: Checkpoint): void {
   }
 }
 
+export function sameCheckpoint(left: Checkpoint, right: Checkpoint): boolean {
+  return sameId(left.id, right.id)
+    && left.seq === right.seq
+    && left.directiveRevision === right.directiveRevision
+    && left.executionEpoch === right.executionEpoch
+    && left.outcome === right.outcome
+    && left.summary === right.summary
+    && left.next.kind === right.next.kind
+    && left.next.ref === right.next.ref
+    && JSON.stringify(left.previousCheckpointId) === JSON.stringify(right.previousCheckpointId)
+    && JSON.stringify(left.scope) === JSON.stringify(right.scope)
+    && JSON.stringify(left.cycleId) === JSON.stringify(right.cycleId)
+    && JSON.stringify(left.recoveryStateRef) === JSON.stringify(right.recoveryStateRef)
+    && JSON.stringify(left.evidenceRefs) === JSON.stringify(right.evidenceRefs);
+}
+
 function asRecallError(error: unknown): CheckpointRecallError {
   if (error instanceof CheckpointRecallError) return error;
   return new CheckpointRecallError(error instanceof Error ? error.message : String(error));
@@ -156,6 +172,18 @@ export async function completeCheckpoint(
       previous: input.previous,
       ownerId: input.ownerId,
     });
+
+    const latest = await journal.readLatest(input.checkpoint.scope);
+    if (latest && sameId(latest.checkpoint.id, input.checkpoint.id)) {
+      if (!sameCheckpoint(latest.checkpoint, input.checkpoint)) {
+        throw new CheckpointCompletionError('checkpoint id is already committed with different content');
+      }
+      return {
+        checkpoint: latest.checkpoint,
+        receipt: { checkpointId: latest.checkpoint.id, seq: latest.checkpoint.seq },
+        windows: assembleCheckpointWindows(latest.checkpoint, input.windowLimits),
+      };
+    }
 
     const receipt = await journal.append({
       ownerId: input.ownerId,

@@ -13,6 +13,8 @@ import type {
   CheckpointChainVerification,
   CheckpointClosurePort,
   CheckpointJournalPort,
+  CheckpointReentryAdmissionDecision,
+  CheckpointReentryAdmissionPort,
   LatestCheckpointRecord,
 } from '../../../packages/runtime/src/checkpoints/ports.js';
 import type {
@@ -99,21 +101,45 @@ class FakeJournal implements CheckpointJournalPort {
 
   async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {
     this.appended.push(input);
+    this.latest = { checkpoint: input.checkpoint, previous: this.latest?.checkpoint ?? null };
     return { checkpointId: input.checkpoint.id, seq: input.checkpoint.seq };
   }
 }
 
 class FakeClosurePort implements CheckpointClosurePort {
   readonly committed: ClosureRecord[] = [];
+  readonly records = new Map<string, ClosureRecord>();
+  failNextCommit: Error | null = null;
 
   async commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {
+    if (this.failNextCommit) {
+      const failure = this.failNextCommit;
+      this.failNextCommit = null;
+      throw failure;
+    }
     const closureId = 'closureId' in input
       ? (input as { readonly closureId: string }).closureId
-      : 'deadEndRef' in input
-        ? (input as DeadEndRecord).deadEndRef
-        : 'unknown-closure';
+      : (input as DeadEndRecord).deadEndRef;
     this.committed.push(input);
+    this.records.set(closureId, input);
     return { closureId, committed: true };
+  }
+
+  async read(closureId: string): Promise<ClosureRecord | null> {
+    return this.records.get(closureId) ?? null;
+  }
+}
+
+class FakeAdmissionPort implements CheckpointReentryAdmissionPort {
+  decision: CheckpointReentryAdmissionDecision = {
+    allowed: true,
+    reason: 'permission, resources, and admission are valid',
+  };
+  readonly calls: Array<Parameters<CheckpointReentryAdmissionPort['admit']>[0]> = [];
+
+  async admit(input: Parameters<CheckpointReentryAdmissionPort['admit']>[0]): Promise<CheckpointReentryAdmissionDecision> {
+    this.calls.push(input);
+    return this.decision;
   }
 }
 
@@ -270,11 +296,15 @@ test('reconcile operation port separates resolved unknowns from unresolved unkno
 });
 
 test('dead-end and reentry tools commit separate closure facts before reentry is allowed', async () => {
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const admissionPort = new FakeAdmissionPort();
   const context = {
     ownerId: 'task-owner',
     source: 'agent-tool' as const,
-    journal: new FakeJournal(),
-    closurePort: new FakeClosurePort(),
+    journal,
+    closurePort,
+    admissionPort,
   };
   const deadEndInput: DeadEndRecord = {
     deadEndRef: 'dead-end-a',
@@ -288,9 +318,18 @@ test('dead-end and reentry tools commit separate closure facts before reentry is
   const deadEnd = await recordDeadEndTool(context, { record: deadEndInput });
   assert.equal(deadEnd.state, 'committed');
 
+  const committedCheckpoint = checkpoint(1, null);
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: context.ownerId,
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
   const reentry = await reenterCheckpointTool(context, {
     closureId: 'reentry-a',
-    checkpoint: checkpoint(1, null),
+    checkpoint: committedCheckpoint,
     previousExecutionEpoch: 4,
     newExecutionEpoch: 5,
     deadEndRef: 'dead-end-a',
@@ -298,6 +337,51 @@ test('dead-end and reentry tools commit separate closure facts before reentry is
   });
   assert.equal(reentry.state, 'committed');
   assert.equal(reentry.record.reentry.allowed, true);
+  assert.equal(admissionPort.calls.length, 1);
+  assert.equal(admissionPort.calls[0]?.checkpoint.id.value, committedCheckpoint.id.value);
+});
+
+test('reentry retries are idempotent and reject a reused closure id with different content', async () => {
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const admissionPort = new FakeAdmissionPort();
+  const committedCheckpoint = checkpoint(1, null);
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
+  const input = {
+    ownerId: 'task-owner',
+    closureId: 'reentry-idempotent',
+    checkpoint: committedCheckpoint,
+    previousExecutionEpoch: 4,
+    newExecutionEpoch: 5,
+    nextAction: { kind: 'continue' as const, ref: 'after-reentry' },
+    journal,
+    closurePort,
+    admissionPort,
+  };
+
+  const first = await commitReentry(input);
+  journal.latest = {
+    checkpoint: checkpoint(2, committedCheckpoint.id, { id: id('checkpoint', 'checkpoint-later') }),
+    previous: committedCheckpoint,
+  };
+  const retry = await commitReentry(input);
+  assert.deepEqual(retry, first);
+  assert.equal(admissionPort.calls.length, 1);
+  assert.equal(closurePort.committed.length, 2);
+
+  await assert.rejects(
+    () => commitReentry({ ...input, newExecutionEpoch: 6 }),
+    CheckpointSubmissionError,
+  );
+  assert.equal(admissionPort.calls.length, 1);
+  assert.equal(closurePort.committed.length, 2);
 });
 
 test('checkpoint.save tool exposes committed versus blocked outcomes without bypassing unified submission', async () => {
@@ -306,6 +390,7 @@ test('checkpoint.save tool exposes committed versus blocked outcomes without byp
     source: 'harness-control' as const,
     journal: new FakeJournal(),
     closurePort: new FakeClosurePort(),
+    admissionPort: new FakeAdmissionPort(),
   };
   const saved = await saveCheckpointTool(context, {
     checkpoint: checkpoint(1, null, {
@@ -316,7 +401,7 @@ test('checkpoint.save tool exposes committed versus blocked outcomes without byp
     }),
     previous: null,
   });
-  assert.equal(saved.outcome, 'rejected');
+  assert.equal(saved.outcome, 'stopped');
   assert.equal(saved.reentry.allowed, false);
 
   await assert.rejects(
@@ -327,6 +412,131 @@ test('checkpoint.save tool exposes committed versus blocked outcomes without byp
     }),
     CheckpointSubmissionError,
   );
+});
+
+test('checkpoint.save preserves every persisted closure outcome instead of reporting rejected', async () => {
+  const cases: readonly {
+    readonly outcome: Checkpoint['outcome'];
+    readonly next: Checkpoint['next'];
+  }[] = [
+    { outcome: 'failed', next: { kind: 'recover', ref: 'remediation-a' } },
+    { outcome: 'cancelled', next: { kind: 'stop', ref: 'cancelled-by-user' } },
+    { outcome: 'stopped', next: { kind: 'stop', ref: 'settled' } },
+    { outcome: 'unknown', next: { kind: 'recover', ref: 'reconcile-a' } },
+  ];
+
+  for (const item of cases) {
+    const context = {
+      ownerId: 'task-owner',
+      source: 'harness-control' as const,
+      journal: new FakeJournal(),
+      closurePort: new FakeClosurePort(),
+      admissionPort: new FakeAdmissionPort(),
+    };
+    const saved = await saveCheckpointTool(context, {
+      checkpoint: checkpoint(1, null, {
+        outcome: item.outcome,
+        next: item.next,
+        evidenceRefs: [evidence(`outcome-${item.outcome}`)],
+      }),
+      previous: null,
+    });
+    assert.equal(saved.outcome, item.outcome);
+    assert.equal(context.journal.appended.length, 1);
+    assert.equal(context.closurePort.committed.length, 1);
+  }
+});
+
+test('submission derives reentry from owner facts and ignores no caller-supplied admission', async () => {
+  const input = submissionInput({
+    checkpoint: checkpoint(1, null, {
+      outcome: 'stopped',
+      next: { kind: 'stop', ref: 'stopped-by-owner' },
+      evidenceRefs: [evidence('owner-stop')],
+    }),
+  });
+  const submitted = await submitCheckpoint(input);
+  assert.equal(submitted.reentry.allowed, false);
+  assert.deepEqual(submitted.reentry.blockedBy, undefined);
+});
+
+test('checkpoint.save cannot commit a model-declared reentry admission', async () => {
+  const context = {
+    ownerId: 'task-owner',
+    source: 'agent-tool' as const,
+    journal: new FakeJournal(),
+    closurePort: new FakeClosurePort(),
+    admissionPort: new FakeAdmissionPort(),
+  };
+  const saved = await saveCheckpointTool(context, {
+    checkpoint: checkpoint(1, null, {
+      outcome: 'blocked',
+      next: { kind: 'recover', ref: 're-admission' },
+      evidenceRefs: [evidence('model-declared-reentry')],
+    }),
+    previous: null,
+  });
+  assert.equal(saved.outcome, 'blocked');
+  assert.equal(saved.reentry.allowed, false);
+  assert.equal(context.closurePort.committed.length, 1);
+  assert.equal(context.journal.appended.length, 1);
+});
+
+test('checkpoint append retries are idempotent and closure commit failures remain retryable', async () => {
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const input = submissionInput({
+    journal,
+    closurePort,
+    checkpoint: checkpoint(1, null),
+  });
+  closurePort.failNextCommit = new Error('closure store unavailable');
+
+  await assert.rejects(() => submitCheckpoint(input), CheckpointSubmissionError);
+  assert.equal(journal.appended.length, 1);
+  assert.equal(closurePort.committed.length, 0);
+
+  const retried = await submitCheckpoint(input);
+  assert.equal(retried.state, 'committed');
+  assert.equal(journal.appended.length, 1);
+  assert.equal(closurePort.committed.length, 1);
+});
+
+test('checkpoint append identity conflicts fail explicitly instead of overwriting history', async () => {
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const first = submissionInput({
+    journal,
+    closurePort,
+    checkpoint: checkpoint(1, null, { summary: 'first summary' }),
+  });
+  await submitCheckpoint(first);
+
+  const conflicting = submissionInput({
+    journal,
+    closurePort,
+    checkpoint: checkpoint(1, null, { summary: 'different summary' }),
+  });
+  await assert.rejects(() => submitCheckpoint(conflicting), CheckpointSubmissionError);
+  assert.equal(journal.appended.length, 1);
+});
+
+test('checkpoint submission rejects a committed closure that does not match the checkpoint', async () => {
+  const input = submissionInput();
+  input.closurePort.records.set(`checkpoint-closure:${input.checkpoint.id.value}`, {
+    closureKind: 'checkpoint',
+    closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: 'succeeded',
+    summary: 'different summary',
+    next: { kind: 'continue', ref: 'other' },
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'different closure' },
+  });
+
+  await assert.rejects(() => submitCheckpoint(input), CheckpointSubmissionError);
+  assert.equal(input.journal.appended.length, 0);
 });
 
 test('unknown-operation reconcile rejects unresolved evidence gaps and out-of-scope operations before journal append', async () => {
@@ -404,11 +614,24 @@ test('dead-end closure requires failed paths, invalidated assumptions, and scope
 });
 
 test('reentry rejects wrong checkpoint epoch, non-increasing epoch, and non-reentry next action', async () => {
+  const committedCheckpoint = checkpoint(1, null);
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const admissionPort = new FakeAdmissionPort();
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
   const base = {
     ownerId: 'task-owner',
-    checkpointId: checkpoint(1, null).id,
-    checkpointExecutionEpoch: 4,
-    closurePort: new FakeClosurePort(),
+    checkpoint: committedCheckpoint,
+    journal,
+    closurePort,
+    admissionPort,
     nextAction: { kind: 'continue' as const, ref: 'after-dead-end' },
   };
 
@@ -440,4 +663,80 @@ test('reentry rejects wrong checkpoint epoch, non-increasing epoch, and non-reen
     }),
     CheckpointSubmissionError,
   );
+});
+
+test('reentry rejects missing committed closure, wrong checkpoint identity, stale epochs, and denied admission', async () => {
+  const committedCheckpoint = checkpoint(1, null);
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  const admissionPort = new FakeAdmissionPort();
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
+  const base = {
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    journal,
+    closurePort,
+    admissionPort,
+    nextAction: { kind: 'continue' as const, ref: 'after-reentry' },
+  };
+
+  const noClosureJournal = new FakeJournal();
+  const noClosurePort = new FakeClosurePort();
+  await noClosureJournal.append({ ownerId: 'task-owner', checkpoint: committedCheckpoint });
+  await assert.rejects(
+    () => commitReentry({
+      ...base,
+      journal: noClosureJournal,
+      closurePort: noClosurePort,
+      closureId: 'reentry-no-closure',
+      previousExecutionEpoch: 4,
+      newExecutionEpoch: 5,
+    }),
+    CheckpointSubmissionError,
+  );
+
+  const wrongCheckpoint = checkpoint(2, committedCheckpoint.id, { id: id('checkpoint', 'checkpoint-other') });
+  await assert.rejects(
+    () => commitReentry({
+      ...base,
+      checkpoint: wrongCheckpoint,
+      closureId: 'reentry-wrong-identity',
+      previousExecutionEpoch: 4,
+      newExecutionEpoch: 5,
+    }),
+    CheckpointSubmissionError,
+  );
+
+  await assert.rejects(
+    () => commitReentry({
+      ...base,
+      closureId: 'reentry-stale-old-epoch',
+      previousExecutionEpoch: 3,
+      newExecutionEpoch: 5,
+    }),
+    CheckpointSubmissionError,
+  );
+
+  admissionPort.decision = {
+    allowed: false,
+    reason: 'permission revoked and resources are not admitted',
+    blockedBy: ['permission-revoked', 'resource-admission'],
+  };
+  await assert.rejects(
+    () => commitReentry({
+      ...base,
+      closureId: 'reentry-admission-denied',
+      previousExecutionEpoch: 4,
+      newExecutionEpoch: 5,
+    }),
+    CheckpointSubmissionError,
+  );
+  assert.equal(closurePort.committed.length, 1);
 });

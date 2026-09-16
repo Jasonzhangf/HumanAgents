@@ -1,5 +1,5 @@
 import type { Checkpoint, EvidenceRef, ScopeRef } from '../../../contracts/src/index.js';
-import type { ClosureRecord } from './closure.js';
+import type { CheckpointClosureRecord, ClosureRecord } from './closure.js';
 
 export type CheckpointChainVerification =
   | { readonly valid: true }
@@ -28,4 +28,23 @@ export interface CheckpointJournalPort {
 
 export interface CheckpointClosurePort {
   commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }>;
+  read(closureId: string): Promise<ClosureRecord | null>;
+}
+
+export interface CheckpointReentryAdmissionInput {
+  readonly ownerId: string;
+  readonly checkpoint: Checkpoint;
+  readonly closure: CheckpointClosureRecord;
+  readonly previousExecutionEpoch: number;
+  readonly newExecutionEpoch: number;
+}
+
+export interface CheckpointReentryAdmissionDecision {
+  readonly allowed: boolean;
+  readonly reason: string;
+  readonly blockedBy?: readonly string[];
+}
+
+export interface CheckpointReentryAdmissionPort {
+  admit(input: CheckpointReentryAdmissionInput): Promise<CheckpointReentryAdmissionDecision>;
 }

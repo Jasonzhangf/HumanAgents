@@ -17,6 +17,7 @@ import {
 import type {
   CheckpointClosurePort,
   CheckpointJournalPort,
+  CheckpointReentryAdmissionPort,
 } from '../checkpoints/ports.js';
 import type { CheckpointWindowLimits } from '../checkpoints/windows.js';
 import type {
@@ -31,6 +32,7 @@ export interface BuiltInCheckpointToolContext {
   readonly source: CheckpointSubmissionSource;
   readonly journal: CheckpointJournalPort;
   readonly closurePort: CheckpointClosurePort;
+  readonly admissionPort: CheckpointReentryAdmissionPort;
 }
 
 export interface InspectCheckpointToolInput {
@@ -82,12 +84,11 @@ export interface SaveCheckpointToolInput {
   readonly hardBlockers?: readonly string[];
   readonly unknownOperations?: readonly OperationId[];
   readonly reconciledOperations?: readonly OperationReconcileResult[];
-  readonly reentry?: CheckpointReentryDecision;
 }
 
 export interface SaveCheckpointToolResult {
   readonly checkpointRef: string;
-  readonly outcome: 'committed' | 'waiting' | 'blocked' | 'rejected';
+  readonly outcome: 'committed' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown';
   readonly reentry: CheckpointReentryDecision;
   readonly unresolvedOperations: readonly OperationId[];
 }
@@ -107,17 +108,10 @@ export async function saveCheckpointTool(
     hardBlockers: input.hardBlockers,
     unknownOperations: input.unknownOperations,
     reconciledOperations: input.reconciledOperations,
-    reentry: input.reentry,
   });
   return {
     checkpointRef: submitted.checkpoint.id.value,
-    outcome: submitted.checkpoint.outcome === 'waiting'
-      ? 'waiting'
-      : submitted.checkpoint.outcome === 'blocked'
-        ? 'blocked'
-        : submitted.checkpoint.outcome === 'succeeded'
-          ? 'committed'
-          : 'rejected',
+    outcome: submitted.checkpoint.outcome === 'succeeded' ? 'committed' : submitted.checkpoint.outcome,
     reentry: submitted.reentry,
     unresolvedOperations: submitted.unresolvedOperations,
   };
@@ -154,13 +148,14 @@ export async function reenterCheckpointTool(
   return commitReentry({
     ownerId: context.ownerId,
     closureId: input.closureId,
-    checkpointId: input.checkpoint.id,
-    checkpointExecutionEpoch: input.checkpoint.executionEpoch,
+    checkpoint: input.checkpoint,
     previousExecutionEpoch: input.previousExecutionEpoch,
     newExecutionEpoch: input.newExecutionEpoch,
     deadEndRef: input.deadEndRef,
     nextAction: input.nextAction,
+    journal: context.journal,
     closurePort: context.closurePort,
+    admissionPort: context.admissionPort,
   });
 }
 
