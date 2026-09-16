@@ -1227,13 +1227,27 @@ test('operation-barrier recovers the persisted intent across ACL/epoch changes a
         messageId,
         state: finalState,
       });
+      const unauthorizedRecovery = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+        throw new Error('settled barrier recovery must not invoke a new handler');
+      });
+      assert.equal(unauthorizedRecovery.committed.length, 0);
+      assert.equal(unauthorizedRecovery.cursors.length, 0);
+      assert.equal(handlerCalls, 1);
+      assert.equal(journal.commitCalls, 0);
+      assert.equal(journal.receipts.size, 0);
+      assert.equal(journal.cursors.size, 0);
+
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
       const recovered = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
         throw new Error('settled barrier recovery must not invoke a new handler');
       });
       assert.equal(recovered.committed.length, 1);
       assert.equal(recovered.committed[0]?.disposition, 'applied');
       assert.equal(recovered.cursors.length, 1);
-      assert.equal(handlerCalls, 1);
+      assert.equal(journal.commitCalls, 1);
+      assert.equal(journal.receipts.size, 1);
+      assert.equal(journal.cursors.size, 1);
+      assert.deepEqual(journal.externalOperationReads, [operationRef, operationRef, operationRef, operationRef]);
 
       const replayJournal = new FakeJournal();
       replayJournal.events = [...journal.events];
@@ -1248,6 +1262,7 @@ test('operation-barrier recovers the persisted intent across ACL/epoch changes a
       assert.equal(replay.cursors.length, 1);
       assert.equal(replayJournal.receipts.size, 1);
       assert.equal(replayJournal.cursors.size, 1);
+      assert.deepEqual(replayJournal.externalOperationReads, [operationRef]);
     }
   }
 });

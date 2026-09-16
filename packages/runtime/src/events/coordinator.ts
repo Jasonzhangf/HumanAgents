@@ -631,10 +631,17 @@ async function processEvent(
     messageId: event.messageId,
   });
   if (persistedBarrier) {
-    const recoveryConsumer = await readConsumer(ports, consumerKey);
-    const blocked = await assertCommitIntent(ports, recoveryConsumer, event, persistedBarrier.intent);
+    const recoveryAuthorization = await authorizeEvent(ports, consumerKey, event);
+    const blocked = await assertCommitIntent(
+      ports,
+      recoveryAuthorization.consumer,
+      event,
+      persistedBarrier.intent,
+    );
     if (blocked) return { blocked };
     const existingReceipt = await ports.journal.readReceipt({ consumerKey, messageId: event.messageId });
+    const beforeCommit = await authorizeEvent(ports, consumerKey, event);
+    if (!beforeCommit.decision.deliver) return {};
     if (existingReceipt) {
       return {
         receipt: await commitDuplicateReceipt(ports, consumerKey, event, existingReceipt, updatedAt),
@@ -792,7 +799,7 @@ export async function consumeEvents(
         blocked.push(result.blocked);
         break streamLoop;
       }
-      if (!result.retry || result.receipt || result.dlq) {
+      if (result.receipt || result.dlq) {
         cursors.push(cursorFor(event, consumer.consumerKey, updatedAt));
         remaining -= 1;
       } else {
