@@ -140,6 +140,7 @@ export class AgentIoRequestCoordinator {
   private closure?: AgentIoClosure;
   private pendingSettlement?: AgentIoClosure;
   private pendingSettlementEvent?: AgentIoEvent;
+  private settlementIntentPersisted = false;
   private settlementEvent?: AgentIoEvent;
   private budget: AgentIoBudgetRecord;
   private readonly policy: AgentIoPolicy;
@@ -455,11 +456,21 @@ export class AgentIoRequestCoordinator {
     if (!this.pendingSettlement || !this.pendingSettlementEvent) return undefined;
     const closure = this.pendingSettlement;
     try {
+      if (!this.settlementIntentPersisted) {
+        await this.persistSettlementIntent({ closure, event: this.pendingSettlementEvent });
+      }
       await this.onEvent(this.pendingSettlementEvent);
     } catch (error) {
+      this.closure = this.settlementIntentPersisted
+        ? this.settlementDeliveryPendingClosure(closure)
+        : this.settlementIntentPersistencePendingClosure(closure);
+      this.status = 'incomplete';
+      this.closed = true;
       throw this.error(
-        'settlement.publication.retry.failed',
-        `settlement publication retry failed: ${error instanceof Error ? error.message : String(error)}`,
+        this.settlementIntentPersisted
+          ? 'settlement.publication.retry.failed'
+          : 'settlement.intent.persistence.retry.failed',
+        `${this.settlementIntentPersisted ? 'settlement publication' : 'settlement intent persistence'} retry failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     await this.clearSettlementIntent();
@@ -564,8 +575,10 @@ export class AgentIoRequestCoordinator {
       this.pendingSettlement = undefined;
       this.pendingSettlementEvent = undefined;
     } catch (error) {
-      if (this.closure === closure) {
-        this.closure = this.settlementDeliveryPendingClosure(closure);
+      if (this.pendingSettlement && this.pendingSettlementEvent) {
+        this.closure = this.settlementIntentPersisted
+          ? this.settlementDeliveryPendingClosure(closure)
+          : this.settlementIntentPersistencePendingClosure(closure);
         this.status = 'incomplete';
       }
       throw error;
@@ -577,6 +590,7 @@ export class AgentIoRequestCoordinator {
   private restorePendingSettlement(intent: AgentIoSettlementPublicationIntent): void {
     this.pendingSettlement = structuredClone(intent.closure);
     this.pendingSettlementEvent = structuredClone(intent.event);
+    this.settlementIntentPersisted = true;
     this.closure = this.settlementDeliveryPendingClosure(intent.closure);
     this.status = 'incomplete';
     this.closed = true;
@@ -587,10 +601,14 @@ export class AgentIoRequestCoordinator {
     this.pendingSettlement = structuredClone(intent.closure);
     this.pendingSettlementEvent = structuredClone(intent.event);
     this.budget = { ...this.budget, pendingSettlement: structuredClone(intent) };
-    this.closure = intent.closure;
-    this.status = this.statusForClosure(intent.closure);
+    this.settlementIntentPersisted = false;
+    this.closure = this.settlementIntentPersistencePendingClosure(intent.closure);
+    this.status = 'incomplete';
     this.closed = true;
     await this.persistBudget();
+    this.settlementIntentPersisted = true;
+    this.closure = intent.closure;
+    this.status = this.statusForClosure(intent.closure);
   }
 
   private async clearSettlementIntent(): Promise<void> {
@@ -606,6 +624,16 @@ export class AgentIoRequestCoordinator {
       ownerId: closure.ownerId,
       evidenceRefs: closure.evidenceRefs,
       nextAction: 'retry request.settled publication; EOF is not completion',
+    };
+  }
+
+  private settlementIntentPersistencePendingClosure(closure: AgentIoClosure): AgentIoClosure {
+    return {
+      status: 'incomplete',
+      reason: 'request.settled intent persistence failed before durable closure',
+      ownerId: closure.ownerId,
+      evidenceRefs: closure.evidenceRefs,
+      nextAction: 'restore the budget store and retry settlement intent persistence; EOF is not completion',
     };
   }
 

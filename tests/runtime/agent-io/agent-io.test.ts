@@ -279,6 +279,74 @@ test('settlement publication failure leaves delivery pending and does not falsel
   assert.equal(settlementHookCalls, 1);
 });
 
+test('settlement intent persistence failure stays incomplete until retry persists the same identity', async () => {
+  const backingStore = createMemoryRestartBudgetStore();
+  let failPendingWrite = true;
+  const pendingEventIds: string[] = [];
+  const store: AgentIoRestartBudgetStore = {
+    read: (requestId) => backingStore.read(requestId),
+    write: async (requestId, record) => {
+      if (record.pendingSettlement) {
+        pendingEventIds.push(record.pendingSettlement.event.eventId);
+        if (failPendingWrite) {
+          failPendingWrite = false;
+          throw new Error('budget store unavailable');
+        }
+      }
+      await backingStore.write(requestId, record);
+    },
+  };
+  const clock = fakeClock();
+  let settlementPublications = 0;
+  let publishedEventId: string | undefined;
+  let settlementHookCalls = 0;
+  const registry = createHookRegistry(() => undefined, clock.clock.now, [{
+    hookId: 'settlement-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['request.settled'],
+    onExit: async () => {
+      settlementHookCalls += 1;
+      return { status: 'observed' };
+    },
+  }]);
+  const coordinator = await AgentIoRequestCoordinator.create({
+    ...coordinatorOptions(store, clock, undefined, registry),
+    onEvent: (event) => {
+      if (event.kind === 'request.settled') {
+        settlementPublications += 1;
+        publishedEventId = event.eventId;
+      }
+    },
+  });
+  await coordinator.start();
+
+  await assert.rejects(
+    coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' }),
+    /budget store unavailable/,
+  );
+  assert.equal(coordinator.snapshot().status, 'incomplete');
+  assert.equal(coordinator.snapshot().closed, true);
+  assert.equal(settlementPublications, 0);
+  assert.equal(settlementHookCalls, 1);
+  assert.equal((await backingStore.read('request-agent-io'))?.pendingSettlement, undefined);
+
+  const eof = await coordinator.endOfStream({ sourceRef: 'response:eof' });
+  assert.equal(eof.status, 'incomplete');
+  assert.equal(eof.ownerId, 'agent-io-owner');
+  assert.match(eof.nextAction ?? '', /retry settlement intent persistence/);
+
+  const retried = await coordinator.retrySettlementPublication();
+  assert.equal(retried?.status, 'completed');
+  assert.equal(coordinator.snapshot().status, 'settled');
+  assert.equal(settlementPublications, 1);
+  assert.equal(settlementHookCalls, 1);
+  assert.equal(pendingEventIds.length, 2);
+  assert.equal(pendingEventIds[0], pendingEventIds[1]);
+  assert.equal(publishedEventId, pendingEventIds[0]);
+  assert.equal((await backingStore.read('request-agent-io'))?.pendingSettlement, undefined);
+});
+
 test('settlement publication intent survives coordinator recreation and retries once without hooks', async () => {
   const store = createMemoryRestartBudgetStore();
   const clock = fakeClock();
