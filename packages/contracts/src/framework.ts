@@ -9,6 +9,7 @@ import type {
   ScopeRef,
   TaskId,
 } from './index.js';
+import { assertEvidenceRef, assertNextAction } from './index.js';
 import { ContractError } from './errors.js';
 
 export type AgentMessageClass = 'control' | 'data' | 'observation';
@@ -492,11 +493,8 @@ function assertRefList(refs: readonly string[], label: string): void {
   for (const ref of refs) nonEmpty(ref, label);
 }
 
-function validateEvidenceRefs(refs: readonly EvidenceRef[], label: string): void {
-  for (const evidenceRef of refs) {
-    nonEmpty(evidenceRef.source, `${label}.source`);
-    nonEmpty(evidenceRef.locator, `${label}.locator`);
-  }
+function assertEvidenceRefs(refs: readonly EvidenceRef[]): void {
+  for (const ref of refs) assertEvidenceRef(ref);
 }
 
 function hasTaskId(taskId: TaskId | undefined): boolean {
@@ -602,7 +600,7 @@ export function validateAgentDispatchReceipt(input: AgentDispatchReceipt): void 
   nonEmpty(input.driverRef, 'driverRef');
   if (input.operationRef !== undefined) nonEmpty(input.operationRef, 'operationRef');
   if (!DRIVER_RECEIPT_STATUSES.includes(input.status)) throw new ContractError(`unknown driver receipt status: ${input.status}`);
-  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  assertEvidenceRefs(input.evidenceRefs);
   if (input.status === 'unknown' && input.operationRef === undefined) {
     throw new ContractError('unknown dispatch receipt requires an operation reference for reconcile');
   }
@@ -619,25 +617,30 @@ export function validateAgentObservationEvent(input: AgentObservationEvent): voi
 
 export function validateAgentResult(input: AgentResult): void {
   if (!AGENT_SETTLE_STATES.includes(input.status)) throw new ContractError(`unknown agent result status: ${input.status}`);
-  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  assertEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentStopReceipt(input: AgentStopReceipt): void {
   validateAgentDriverReceipt(input);
+  if (typeof input.accepted !== 'boolean') throw new ContractError('accepted must be a boolean');
 }
 
 export function validateAgentReconcileResult(input: AgentReconcileResult): void {
   validateAgentDriverReceipt(input);
   nonEmpty(input.operationRef, 'operationRef');
+  assertEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentSettleReceipt(input: AgentSettleReceipt): void {
   validateAgentDriverReceipt(input);
   if (!AGENT_SETTLE_STATES.includes(input.state)) throw new ContractError(`unknown agent settle state: ${input.state}`);
+  assertEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentCloseReceipt(input: AgentCloseReceipt): void {
   validateAgentDriverReceipt(input);
+  if (typeof input.closed !== 'boolean') throw new ContractError('closed must be a boolean');
+  assertEvidenceRefs(input.evidenceRefs);
 }
 
 export function validateAgentMessageEnvelope(input: AgentMessageEnvelope): void {
@@ -796,6 +799,7 @@ export function validateCheckpointClosureRecord(input: CheckpointClosureRecord):
   if (!input.recoveryStateRef.source.trim() || !input.recoveryStateRef.locator.trim()) {
     throw new ContractError('recoveryStateRef must identify source and locator');
   }
+  assertNextAction(input.nextAction);
   if (!input.nextAction.ref?.trim() && input.nextAction.kind !== 'continue') {
     throw new ContractError('closure next action requires a reference for non-continue actions');
   }

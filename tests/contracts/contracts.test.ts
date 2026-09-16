@@ -643,6 +643,10 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
     requestId: 'request-a', attemptId: 'attempt-a', runtimeId: 'runtime-a', executionEpoch: 1, driverRef: 'driver-a',
     status: 'accepted', state: 'running' as never, evidenceRefs: [],
   }), ContractError);
+  assert.throws(() => validateAgentReconcileResult({
+    runtimeId: 'runtime-a', executionEpoch: 1, operationRef: 'operation-a', reconciled: true,
+    evidenceRefs: [{ ...providerEvidence('reconcile-invalid'), kind: 'invalid' as never }],
+  }), ContractError);
   assert.doesNotThrow(() => validateAgentCloseReceipt({
     requestId: 'request-a', attemptId: 'attempt-a', runtimeId: 'runtime-a', executionEpoch: 1, driverRef: 'driver-a',
     status: 'accepted', closed: true, evidenceRefs: [providerEvidence('close')],
@@ -650,6 +654,16 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
   assert.throws(() => validateAgentCloseReceipt({
     requestId: 'request-a', attemptId: 'attempt-a', runtimeId: 'runtime-a', executionEpoch: 1, driverRef: 'driver-a',
     status: 'accepted', closed: true, evidenceRefs: [{ ...providerEvidence('close'), source: '' }],
+  }), ContractError);
+  assert.throws(() => validateAgentCloseReceipt({
+    runtimeId: 'runtime-a', executionEpoch: 1, closed: 'yes' as never, evidenceRefs: [providerEvidence('close')],
+  }), ContractError);
+  assert.throws(() => validateAgentCloseReceipt({
+    runtimeId: 'runtime-a', executionEpoch: 1, evidenceRefs: [providerEvidence('close')],
+  } as never), ContractError);
+  assert.throws(() => validateAgentCloseReceipt({
+    runtimeId: 'runtime-a', executionEpoch: 1, closed: true,
+    evidenceRefs: [{ ...providerEvidence('close-invalid'), scope: { organId: { scope: 'task', value: 'bad' } } as never }],
   }), ContractError);
   const driver: AgentDriverV1 = {
     protocolVersion: 1,
@@ -741,6 +755,8 @@ test('checkpoint closure and reentry keep committed facts separate from reentry 
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ committed: false, reentryAllowed: true }) }), ContractError);
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ unknownOperations: ['op://unknown'], reentryAllowed: true }) }), ContractError);
   assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'wait' } }) }), ContractError);
+  assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'wait', ref: ' ' } }) }), ContractError);
+  assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'unknown' as never, ref: 'unknown' } }) }), ContractError);
   assert.throws(() => validateCheckpointReentryRecord({ ...reentryRecord({ executionEpoch: 1, fencedEpochs: [1] }) }), ContractError);
 });
 

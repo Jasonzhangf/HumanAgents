@@ -627,7 +627,7 @@ export function runtimeId(value: string): AgentRuntimeId {
 export function assertAgentRuntimeId(value: string): asserts value is AgentRuntimeId {
   assertNonEmptyReference(value, 'agent runtime id');
 }
-function assertNextAction(action: NextAction): void {
+export function assertNextAction(action: NextAction): void {
   if (!action || !NEXT_ACTION_KINDS.has(action.kind)) throw new ContractError('invalid next action');
   if (action.ref !== undefined) assertNonEmptyReference(action.ref, 'next action ref');
 }
