@@ -1,7 +1,7 @@
 # Agent Template System
 
-状态：`DESIGN-BOOTSTRAP / TEMPLATE-CONTRACT-DRAFT`  
-日期：2026-09-11  
+状态：`DESIGN-BOOTSTRAP / TEMPLATE-CONTRACT-DRAFT`
+日期：2026-09-11
 适用范围：Agent 角色定义、技能/工具装配、任务定制和 Agent Runtime 启动
 
 本文定义 HumanAgent 如何为不同 agent 装载不同的 system prompt、skills 和 tools，并把统一模板绑定到可替换的 Agent Driver。它与 [`agent-flows.md`](agent-flows.md) 的角色责任相对应，与 [`host-and-cordis.md`](host-and-cordis.md) 的 Cordis 宿主/插件生命周期相对应。
@@ -73,9 +73,11 @@ type AgentRuntimeManifest = {
       }
     | {
         kind: 'task'
+        bindingRef: string
         taskId: string
         phaseId?: string
-        assignmentId?: string
+        assignmentId: string
+        executionEpoch: number
       }
   executionEpoch: number
   resourceLeaseRef: string
@@ -147,6 +149,91 @@ agent-templates/
 ```
 
 实现阶段建议将这些目录放在 HumanAgent 自己的 template registry 中；外部 template pack 必须通过显式 manifest 注册。不能通过扫描目录、文件名猜测角色，也不能把一个角色目录下的 system prompt 或 tools 自动带入另一个角色。
+
+### 3.1 Codex / `~/.agent` Skill 兼容层
+
+HumanAgent 可以兼容宿主已有的 Skill，但不接管其目录，也不复制第二份 Skill 真源。Skill Loader 只做只读发现、digest、版本和 Schema 适配；真正装载仍由 Agent Template 的显式 `skillRefs` 决定。
+
+默认候选来源：
+
+```text
+HumanAgent template registry
+  → ~/.agent/skills
+  → ~/.agents/skills              # 兼容复数目录
+  → $CODEX_HOME/skills            # 未设置时使用 ~/.codex/skills
+  → project/.agent/skills         # 只有 project config 显式启用
+```
+
+来源不是优先覆盖关系。相同 Skill 如果通过多个路径可见，按内容 digest 去重；来源、版本和 digest 都保留，出现同一稳定 ID 的不同内容时进入 `skill-conflict`，不能按目录顺序静默覆盖。
+
+```ts
+type SkillSource = {
+  kind: 'humanagent' | 'agent-home' | 'codex-home' | 'project-agent'
+  rootRef: string
+  readOnly: true
+  catalogRevision: string
+}
+
+type SkillBinding = {
+  skillId: string
+  version: string
+  source: SkillSource
+  entryRef: string
+  digest: string
+  compatibility: 'native' | 'adapted'
+}
+```
+
+兼容规则：
+
+- 支持标准 `SKILL.md` 入口和其声明的相对 references/assets；加载时保留原始 source ref 和 digest；
+- Codex/`~/.agent` Skill 的运行规则不能自动成为 HumanAgent 的核心生命周期规则；需要执行能力的 Skill 必须映射为已注册的 Tool capability 或 Plugin；
+- Skill 只提供 prompt/知识时，可按 `SKILL.md` 内容装配到角色上下文，但不能通过 Markdown 扩大权限；
+- 外部 Skill 的安装、更新和删除由原宿主管理，HumanAgent 只刷新 catalog 并重新校验 lock；
+- 未在模板 allowlist 中的 Skill 不可见；未知引用、digest 变化或入口缺失显式失败；
+- Codex 原生 Skill 和 `~/.agent` Skill 可以共存，但不把同一文件再次写入 HumanAgent registry。
+
+### 3.2 Codex / MCP 兼容层
+
+MCP 与 Skill 一样，HumanAgent 只统一描述和授权，不复制 MCP Server 的配置真源。`McpRegistry` 通过 source adapter 读取：
+
+```text
+HumanAgent plugin manifest
+  → project .mcp.json
+  → ~/.agent 的显式 MCP 配置
+  → $CODEX_HOME/config.toml 的 MCP server 配置
+  → MCPX Workspace inventory（如果已启用）
+```
+
+MCPX 是可选的发现、Session 和审计代理，不是 Agent 智能层。启用 MCPX 时按 `list → describe → call` 获取能力；没有 MCPX 时，仍可通过 Codex/宿主原生配置 adapter 读取 MCP。已由 MCPX 代理的 Server 不再在 HumanAgent 中直接重复注册。
+
+```ts
+type McpSource = {
+  kind: 'humanagent-plugin' | 'project-config' | 'agent-config' | 'codex-config' | 'mcpx'
+  configRef: string
+  serverId: string
+  revision: string
+  credentialsRef?: string
+}
+
+type McpCapabilityBinding = {
+  server: McpSource
+  toolName: string
+  descriptorRef: string
+  inputSchemaDigest: string
+  permissionRef: string
+  executionMode: 'direct' | 'mcpx'
+}
+```
+
+MCP 兼容规则：
+
+- MCP Server、tool schema、endpoint、credential 和 session 保留在原配置/宿主中；HumanAgent 只保存非敏感 source ref、schema digest 和授权 binding；
+- 不把 MCP Server 的 session id 当作 HumanAgent Agent/Task/Operation 身份；
+- MCP tool 经过统一 `Tool Intent → capability admission → Operation → Result Codec`，与内置工具、DSH tool 和 ACP tool 使用同一边界；
+- MCP tool 的 `reason.title` 统一生成 `ToolReasonProjection`，可供 UI、下一轮 Context 和 Memory event 使用；
+- MCPX 的 `tools/list_changed`、Skill catalog revision 或配置 digest 变化时，重新验证当前 binding；活动 Task 不自动换能力，按 Harness 的 epoch/checkpoint 规则收拢或拒绝；
+- MCP/Skill 不得绕过 HumanAgent 的 permission、checkpoint、Hook、Journal 和错误 owner。
 
 ## 4. Manifest 契约
 
@@ -281,9 +368,11 @@ interface AgentRuntimeSpawner {
       | { kind: 'interaction'; interactionScopeId: string }
       | {
           kind: 'task'
+          bindingRef: string
           taskId: string
           phaseId?: string
-          assignmentId?: string
+          assignmentId: string
+          executionEpoch: number
         }
     resourceLeaseRef: string
     contextRefs: string[]
@@ -293,6 +382,12 @@ interface AgentRuntimeSpawner {
 ```
 
 `AgentRuntimeSpawner` 必须由 Harness 调用。agent 不能自己 spawn 平级 agent、加载新模板或追加 tool capability。
+
+Task-bound runtime 的 `Assignment` 是启动准入条件，不是可选的后补字段：`AgentRuntimeSpawner` 只能接收已由 Assignment owner 提交并校验的 `taskId + assignmentId + executionEpoch` binding。若 Harness 需要先创建空 runtime，必须使用 `kind: 'interaction'` 或独立的未绑定 host allocation 类型；该 runtime 在获得 Assignment 前不得发送 task-bound Request、调用 task capability 或产生 WorkResult。
+
+`bindingRef`、`assignmentId` 和 `executionEpoch` 必须来自同一个不可变、已准入的 `TaskRuntimeBinding`。Spawner 不解析“当前 epoch”，不自行分配 epoch；重入需要由 Checkpoint/Assignment owner 先提交新的 binding，再调用 Spawner。
+
+Manifest 顶层 `executionEpoch` 必须等于 task binding 内的 `executionEpoch`；不一致时拒绝 load/spawn。
 
 Runtime 通过统一的 `AgentDriver` port 启动、恢复、提交输入、观测、停止、reconcile 和 settle；Driver 类型不进入模板的业务 payload。Agent Context Injection 由 Harness 额外调用 [`memory-system.md`](memory-system.md) 定义的接口，按层级注入可追溯引用，不把完整 Index 或 RAG 数据库暴露给 agent。
 
