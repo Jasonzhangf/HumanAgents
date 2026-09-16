@@ -327,11 +327,12 @@ function assertCheckpointNextActionForTest(): void {
 const taskRuntimeBinding = (overrides: Partial<RuntimeBinding> = {}): RuntimeBinding => ({
   runtimeId: 'runtime-a', agentInstanceId: 'agent-a', roleId: 'executor', taskId: task, assignmentId: 'assignment-a',
   executionEpoch: 4, scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r1', capabilityDigest: 'sha256:capability-a',
-  bindingDigest: 'sha256:binding-a', ...overrides,
+  providerBindingId: 'binding-a', providerBindingDigest: 'sha256:provider-binding-a', bindingDigest: 'sha256:binding-a', ...overrides,
 });
 const providerBinding = (overrides: Partial<AgentProviderBinding> = {}): AgentProviderBinding => ({
   bindingId: 'binding-a', providerId: 'cc-local', protocol: 'responses', endpointRef: 'local-config', modelRef: 'model-a',
-  configDigest: 'sha256:config-a', capabilityDigest: 'sha256:capability-a', owner: 'harness', ...overrides,
+  configDigest: 'sha256:config-a', capabilityDigest: 'sha256:capability-a', bindingDigest: 'sha256:provider-binding-a',
+  owner: 'harness', ...overrides,
 });
 const coreConsumerCursor = (overrides: Partial<EventConsumerCursor> = {}): EventConsumerCursor => ({
   consumerKey: consumerKey({ consumerOwner: 'event-owner', scopeRef: 'organ-a::task-a', contractVersion: 'v1' }),
@@ -385,6 +386,9 @@ test('runtime bindings enforce task/interaction shape, permission revision, and 
   assert.throws(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
     kind: 'interaction', interactionScopeId: 'interaction-a', bindingFingerprint: 'sha256:binding-a',
   }), PermissionError);
+  assert.doesNotThrow(() => assertRuntimeProviderBindingLocked(taskRuntimeBinding(), providerBinding()));
+  assert.throws(() => assertRuntimeProviderBindingLocked(taskRuntimeBinding(), providerBinding({ bindingId: 'binding-b' })), PermissionError);
+  assert.throws(() => assertRuntimeProviderBindingLocked(taskRuntimeBinding(), providerBinding({ bindingDigest: 'sha256:provider-binding-b' })), PermissionError);
   assert.throws(() => assertRuntimeProviderBindingLocked(taskRuntimeBinding(), providerBinding({ capabilityDigest: 'sha256:capability-b' })), PermissionError);
 });
 

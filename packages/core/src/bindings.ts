@@ -64,6 +64,12 @@ export function assertAgentBindingMatchesRuntime(runtime: RuntimeBinding, agentB
 export function assertRuntimeProviderBindingLocked(runtime: RuntimeBinding, providerBinding: AgentProviderBinding): void {
   validateRuntimeBinding(runtime);
   validateAgentProviderBinding(providerBinding);
+  if (runtime.providerBindingId !== providerBinding.bindingId) {
+    throw new PermissionError('runtime provider binding id mismatch');
+  }
+  if (runtime.providerBindingDigest !== providerBinding.bindingDigest) {
+    throw new PermissionError('runtime provider binding digest mismatch');
+  }
   if (runtime.capabilityDigest !== providerBinding.capabilityDigest) {
     throw new PermissionError('runtime capability digest does not match provider binding');
   }

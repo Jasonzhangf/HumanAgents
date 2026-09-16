@@ -29,6 +29,8 @@ export interface RuntimeBinding {
   readonly scopeRef: string;
   readonly permissionRevision: string;
   readonly capabilityDigest: string;
+  readonly providerBindingId: string;
+  readonly providerBindingDigest: string;
   readonly bindingDigest: string;
 }
 
@@ -40,6 +42,7 @@ export interface AgentProviderBinding {
   readonly modelRef: string;
   readonly configDigest: string;
   readonly capabilityDigest: string;
+  readonly bindingDigest: string;
   readonly owner: string;
   readonly selectionReason?: string;
 }
@@ -81,16 +84,33 @@ export interface AgentRequestEnvelope {
   };
 }
 
-export interface AgentDriverReceipt {
+export type AgentDriverReceiptStatus = 'accepted' | 'rejected' | 'unknown';
+
+export interface AgentDriverRequestIdentity {
+  readonly requestId: string;
+  readonly attemptId: string;
   readonly runtimeId: string;
   readonly executionEpoch: number;
 }
 
-export interface AgentDispatchReceipt {
-  readonly requestId: string;
-  readonly attemptId: string;
-  readonly operationRef: string;
-  readonly accepted: boolean;
+export interface AgentDriverReceipt extends AgentDriverRequestIdentity {
+  readonly driverRef: string;
+  readonly providerSessionRef?: string;
+  readonly operationRef?: string;
+  readonly status: AgentDriverReceiptStatus;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface AgentDriverStartRequest extends AgentStartRequest, AgentDriverRequestIdentity {
+  readonly mode?: 'fresh' | 'resume';
+  readonly checkpointId?: CheckpointId;
+}
+
+export interface AgentDispatchReceipt extends AgentDriverRequestIdentity {
+  readonly driverRef: string;
+  readonly operationRef?: string;
+  readonly status: AgentDriverReceiptStatus;
+  readonly evidenceRefs: readonly EvidenceRef[];
 }
 
 export interface AgentObserveRequest {
@@ -118,16 +138,14 @@ export interface AgentResult {
   readonly evidenceRefs: readonly EvidenceRef[];
 }
 
-export interface AgentStopRequest extends AgentStartRequest {
+export interface AgentStopRequest extends AgentDriverStartRequest {
   readonly reason: string;
   readonly ownerId: string;
 }
 
-export interface AgentStopReceipt extends AgentDriverReceipt {
-  readonly accepted: boolean;
-}
+export interface AgentStopReceipt extends AgentDriverReceipt {}
 
-export interface AgentReconcileRequest extends AgentDriverReceipt {
+export interface AgentReconcileRequest extends AgentDriverRequestIdentity {
   readonly operationRef: string;
 }
 
@@ -137,24 +155,25 @@ export interface AgentReconcileResult extends AgentDriverReceipt {
   readonly evidenceRefs: readonly EvidenceRef[];
 }
 
-export interface AgentSettleRequest extends AgentDriverReceipt {}
+export interface AgentSettleRequest extends AgentDriverRequestIdentity {}
 
-export interface AgentSettleReceipt extends AgentClosure {}
+export interface AgentSettleReceipt extends AgentDriverReceipt {
+  readonly state: AgentClosure['state'];
+}
 
-export interface AgentCloseRequest extends AgentDriverReceipt {
+export interface AgentCloseRequest extends AgentDriverRequestIdentity {
   readonly reason: string;
 }
 
 export interface AgentCloseReceipt extends AgentDriverReceipt {
   readonly closed: boolean;
-  readonly evidenceRefs: readonly EvidenceRef[];
 }
 
 export interface AgentDriverV1 {
   readonly protocolVersion: 1;
   readonly kind: string;
   capabilities(): Promise<AgentCapabilities>;
-  start(input: AgentStartRequest): Promise<AgentDriverReceipt>;
+  start(input: AgentDriverStartRequest): Promise<AgentDriverReceipt>;
   send(input: AgentRequestEnvelope): Promise<AgentDispatchReceipt>;
   observe(input: AgentObserveRequest): AsyncIterable<AgentObservationEvent>;
   readResult(input: AgentResultRequest): Promise<AgentResult>;
@@ -299,6 +318,20 @@ export interface CheckpointReentryRecord {
   readonly reentryRef: string;
 }
 
+export type InteractionClosureDisposition = 'confirmed' | 'rejected' | 'cancelled' | 'failed';
+
+export interface InteractionClosure {
+  readonly interactionScopeId: string;
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly disposition: InteractionClosureDisposition;
+  readonly inputRefs: readonly string[];
+  readonly feedbackRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly closureRef: string;
+  readonly closedAt: string;
+}
+
 export type ControlProbePoint =
   | 'request-start'
   | 'after-tool-result'
@@ -417,6 +450,8 @@ const OCCURRENCE_STATES: readonly OccurrenceState[] = ['due', 'skipped-busy', 'r
 const REMINDER_STATES: readonly ReminderState[] = ['pending', 'consumed', 'invalidated'];
 const LEASE_STATES: readonly LeaseState[] = ['active', 'expired', 'released'];
 const ACP_SESSION_KINDS: readonly AcpAllowedSessionKind[] = ['interaction', 'task'];
+const INTERACTION_CLOSURE_DISPOSITIONS: readonly InteractionClosureDisposition[] = ['confirmed', 'rejected', 'cancelled', 'failed'];
+const DRIVER_RECEIPT_STATUSES: readonly AgentDriverReceiptStatus[] = ['accepted', 'rejected', 'unknown'];
 const AGENT_SETTLE_STATES: readonly AgentClosure['state'][] = [
   'succeeded',
   'waiting',
@@ -457,6 +492,13 @@ function assertRefList(refs: readonly string[], label: string): void {
   for (const ref of refs) nonEmpty(ref, label);
 }
 
+function validateEvidenceRefs(refs: readonly EvidenceRef[], label: string): void {
+  for (const evidenceRef of refs) {
+    nonEmpty(evidenceRef.source, `${label}.source`);
+    nonEmpty(evidenceRef.locator, `${label}.locator`);
+  }
+}
+
 function hasTaskId(taskId: TaskId | undefined): boolean {
   return taskId !== undefined && Boolean(taskId.value.trim());
 }
@@ -474,6 +516,8 @@ export function validateRuntimeBinding(input: RuntimeBinding): void {
   nonEmpty(input.scopeRef, 'scopeRef');
   nonEmpty(input.permissionRevision, 'permissionRevision');
   nonEmpty(input.capabilityDigest, 'capabilityDigest');
+  nonEmpty(input.providerBindingId, 'providerBindingId');
+  nonEmpty(input.providerBindingDigest, 'providerBindingDigest');
   nonEmpty(input.bindingDigest, 'bindingDigest');
 
   const taskBound = hasTaskId(input.taskId) || Boolean(input.assignmentId?.trim());
@@ -498,6 +542,7 @@ export function validateAgentProviderBinding(input: AgentProviderBinding): void 
   nonEmpty(input.modelRef, 'modelRef');
   nonEmpty(input.configDigest, 'configDigest');
   nonEmpty(input.capabilityDigest, 'capabilityDigest');
+  nonEmpty(input.bindingDigest, 'bindingDigest');
   nonEmpty(input.owner, 'owner');
 }
 
@@ -535,14 +580,32 @@ export function validateAgentRequestEnvelope(input: AgentRequestEnvelope): void 
 }
 
 export function validateAgentDriverReceipt(input: AgentDriverReceipt): void {
+  nonEmpty(input.requestId, 'requestId');
+  nonEmpty(input.attemptId, 'attemptId');
   nonEmpty(input.runtimeId, 'runtimeId');
   assertPositiveSafeInteger(input.executionEpoch, 'executionEpoch');
+  nonEmpty(input.driverRef, 'driverRef');
+  if (input.providerSessionRef !== undefined) nonEmpty(input.providerSessionRef, 'providerSessionRef');
+  if (input.operationRef !== undefined) nonEmpty(input.operationRef, 'operationRef');
+  if (!DRIVER_RECEIPT_STATUSES.includes(input.status)) throw new ContractError(`unknown driver receipt status: ${input.status}`);
+  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  if (input.status === 'unknown' && input.operationRef === undefined) {
+    throw new ContractError('unknown driver receipt requires an operation reference for reconcile');
+  }
 }
 
 export function validateAgentDispatchReceipt(input: AgentDispatchReceipt): void {
   nonEmpty(input.requestId, 'requestId');
   nonEmpty(input.attemptId, 'attemptId');
-  nonEmpty(input.operationRef, 'operationRef');
+  nonEmpty(input.runtimeId, 'runtimeId');
+  assertPositiveSafeInteger(input.executionEpoch, 'executionEpoch');
+  nonEmpty(input.driverRef, 'driverRef');
+  if (input.operationRef !== undefined) nonEmpty(input.operationRef, 'operationRef');
+  if (!DRIVER_RECEIPT_STATUSES.includes(input.status)) throw new ContractError(`unknown driver receipt status: ${input.status}`);
+  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  if (input.status === 'unknown' && input.operationRef === undefined) {
+    throw new ContractError('unknown dispatch receipt requires an operation reference for reconcile');
+  }
 }
 
 export function validateAgentObservationEvent(input: AgentObservationEvent): void {
@@ -556,10 +619,7 @@ export function validateAgentObservationEvent(input: AgentObservationEvent): voi
 
 export function validateAgentResult(input: AgentResult): void {
   if (!AGENT_SETTLE_STATES.includes(input.status)) throw new ContractError(`unknown agent result status: ${input.status}`);
-  for (const evidenceRef of input.evidenceRefs) {
-    nonEmpty(evidenceRef.source, 'evidenceRef.source');
-    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
-  }
+  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
 }
 
 export function validateAgentStopReceipt(input: AgentStopReceipt): void {
@@ -569,26 +629,15 @@ export function validateAgentStopReceipt(input: AgentStopReceipt): void {
 export function validateAgentReconcileResult(input: AgentReconcileResult): void {
   validateAgentDriverReceipt(input);
   nonEmpty(input.operationRef, 'operationRef');
-  for (const evidenceRef of input.evidenceRefs) {
-    nonEmpty(evidenceRef.source, 'evidenceRef.source');
-    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
-  }
 }
 
 export function validateAgentSettleReceipt(input: AgentSettleReceipt): void {
+  validateAgentDriverReceipt(input);
   if (!AGENT_SETTLE_STATES.includes(input.state)) throw new ContractError(`unknown agent settle state: ${input.state}`);
-  for (const evidenceRef of input.evidenceRefs) {
-    nonEmpty(evidenceRef.source, 'evidenceRef.source');
-    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
-  }
 }
 
 export function validateAgentCloseReceipt(input: AgentCloseReceipt): void {
   validateAgentDriverReceipt(input);
-  for (const evidenceRef of input.evidenceRefs) {
-    nonEmpty(evidenceRef.source, 'evidenceRef.source');
-    nonEmpty(evidenceRef.locator, 'evidenceRef.locator');
-  }
 }
 
 export function validateAgentMessageEnvelope(input: AgentMessageEnvelope): void {
@@ -763,6 +812,20 @@ export function validateCheckpointReentryRecord(input: CheckpointReentryRecord):
       throw new ContractError('fencedEpochs must precede the reentry execution epoch');
     }
   }
+}
+
+export function validateInteractionClosure(input: InteractionClosure): void {
+  nonEmpty(input.interactionScopeId, 'interactionScopeId');
+  nonEmpty(input.requestId, 'requestId');
+  nonEmpty(input.attemptId, 'attemptId');
+  if (!INTERACTION_CLOSURE_DISPOSITIONS.includes(input.disposition)) {
+    throw new ContractError(`unknown interaction closure disposition: ${input.disposition}`);
+  }
+  assertRefList(input.inputRefs, 'inputRefs');
+  assertRefList(input.feedbackRefs, 'feedbackRefs');
+  validateEvidenceRefs(input.evidenceRefs, 'evidenceRefs');
+  nonEmpty(input.closureRef, 'closureRef');
+  assertValidTime(input.closedAt, 'closedAt');
 }
 
 export function validateControlWatchdogPolicy(input: ControlWatchdogPolicy): void {
