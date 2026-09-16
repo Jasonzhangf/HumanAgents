@@ -199,6 +199,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   }
 
   async readRetryObligation(input: {
+    readonly streamId: string;
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventRetryObligation | null> {
@@ -231,6 +232,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   }
 
   async readDlq(input: {
+    readonly streamId: string;
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventDlqRecord | null> {

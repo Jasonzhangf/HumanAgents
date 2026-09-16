@@ -46,17 +46,6 @@ export interface ReadRetryObligationInput {
   readonly consumerKey: string;
   readonly messageId: string;
 }
-
-export interface ReadExternalOperationInput {
-  readonly operationRef: string;
-  readonly consumerKey: string;
-  readonly messageId: string;
-}
-
-export interface EventExternalOperationPort {
-  readExternalOperation(input: ReadExternalOperationInput): Promise<EventExternalOperation | null>;
-}
-
 export interface ReadExternalOperationInput {
   readonly operationRef: string;
   readonly consumerKey: string;

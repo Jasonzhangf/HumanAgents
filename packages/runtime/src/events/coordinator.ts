@@ -77,8 +77,8 @@ function assertEventPayload(event: EventEnvelope): void {
   if (event.payload) assertBusinessPayload(event.payload);
 }
 
-function receiptKey(consumerKey: string, messageId: string): string {
-  return `${consumerKey}\u0000${messageId}`;
+function receiptKey(streamId: string, consumerKey: string, messageId: string): string {
+  return `${streamId}\u0000${consumerKey}\u0000${messageId}`;
 }
 
 function retryKey(streamId: string, consumerKey: string, messageId: string): string {
@@ -180,7 +180,7 @@ function assertRetryIntent(
   }
   if (!obligation.ownerRef.trim()) throw new EventConsumerError('retry obligation owner ref is required');
   if (!obligation.failureRef.trim()) throw new EventConsumerError('retry obligation failure ref is required');
-  if (obligation.retryKey !== retryKey(consumer.consumerKey, event.messageId)) {
+  if (obligation.retryKey !== retryKey(event.streamId, consumer.consumerKey, event.messageId)) {
     throw new EventConsumerError('retry obligation key mismatch');
   }
 }
@@ -364,6 +364,7 @@ async function commitExhaustedReceipt(
   readonly dlq: EventDlqRecord;
 }> {
   const existingDlq = await ports.journal.readDlq({
+    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -435,6 +436,7 @@ async function commitRetry(
     state: 'exhausted',
   });
   const existingDlq = await ports.journal.readDlq({
+    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -528,6 +530,7 @@ async function processEvent(
   }
 
   const obligation = await ports.journal.readRetryObligation({
+    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
