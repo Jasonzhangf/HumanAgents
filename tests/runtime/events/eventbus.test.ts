@@ -548,6 +548,60 @@ test('cross-stream duplicate advances the second cursor without replacing the ca
   assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
 });
 
+test('already-receipted message ids cannot bypass ACL on colliding streams', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.publishers.set(organHarnessPublisher.publisherId, organHarnessPublisher);
+  registry.consumers.set(consumerKey, consumer({
+    currentEpoch: 2,
+    streamIds: [streamId, streamB, 'stream-c'],
+  }));
+  const bus = ports(journal, registry);
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'acl-collision', streamId, executionEpoch: 2 }),
+  });
+  await publishEvent(bus, {
+    publisherId: organHarnessPublisher.publisherId,
+    event: event({ messageId: 'acl-collision', streamId: streamB, scope: otherScope, executionEpoch: 2 }),
+  });
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'acl-collision', streamId: 'stream-c', executionEpoch: 1 }),
+  });
+
+  const delivered: string[] = [];
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    delivered.push(event.streamId);
+    return applied(event.messageId);
+  });
+
+  assert.deepEqual(delivered, [streamId]);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.streamId, receipt.disposition]), [
+    [streamId, 'applied'],
+    [streamB, 'rejected'],
+    ['stream-c', 'stale'],
+  ]);
+  assert.equal(journal.receipts.size, 1);
+  assert.deepEqual(
+    await journal.readReceipt({ consumerKey, messageId: 'acl-collision' }),
+    {
+      consumerKey,
+      messageId: 'acl-collision',
+      streamId,
+      handledSequence: 1,
+      disposition: 'applied',
+      effectRefs: [],
+      failureRef: undefined,
+    },
+  );
+  assert.equal((await journal.readCursor({ streamId, consumerKey }))?.lastHandledSequence, 1);
+  assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
+  assert.equal((await journal.readCursor({ streamId: 'stream-c', consumerKey }))?.lastHandledSequence, 1);
+});
+
 test('duplicate message identity in the same batch executes the handler once', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();

@@ -313,16 +313,22 @@ async function commitTerminalReceipt(
   disposition: 'stale' | 'rejected' | 'terminal-failure',
   updatedAt: string,
   failureRef: string,
+  canonical?: EventConsumerReceipt,
 ): Promise<ConsumerProcessResult['committed'][number]> {
   const receipt = makeReceipt(consumerKey, event, disposition, [], failureRef);
   const commit: ConsumerCommitRequest = {
-    receipt,
+    receipt: canonical ?? receipt,
     cursor: cursorFor(event, consumerKey, updatedAt),
     completionMode: 'journal-atomic',
     internalEffectFacts: [],
     externalOperationRefs: [],
   };
   const result = await ports.journal.commitConsumerCommit(commit);
+  if (canonical) {
+    assertCanonicalReceipt(result.receipt, canonical);
+    assertCommittedCursor(result, consumerKey, event);
+    return receipt;
+  }
   return assertCommittedReceipt(result, consumerKey, event);
 }
 
@@ -494,6 +500,25 @@ async function processEvent(
   readonly dlq?: EventDlqRecord;
   readonly blocked?: EventOperationBlocked;
 }> {
+  const decision = decideConsumerDelivery(consumer, event);
+  if (!decision.deliver) {
+    const existingReceipt = await ports.journal.readReceipt({
+      consumerKey: consumer.consumerKey,
+      messageId: event.messageId,
+    });
+    return {
+      receipt: await commitTerminalReceipt(
+        ports,
+        consumer.consumerKey,
+        event,
+        decision.disposition,
+        updatedAt,
+        decision.failureRef,
+        existingReceipt ?? undefined,
+      ),
+    };
+  }
+
   const existingReceipt = await ports.journal.readReceipt({
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
@@ -509,10 +534,6 @@ async function processEvent(
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
-  const decision = decideConsumerDelivery(consumer, event);
-  if (!decision.deliver) {
-    return { receipt: await commitTerminalReceipt(ports, consumer.consumerKey, event, decision.disposition, updatedAt, decision.failureRef) };
-  }
   if (obligation?.state === 'exhausted') {
     return commitExhaustedReceipt(ports, consumer, event, obligation, updatedAt);
   }
