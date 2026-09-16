@@ -24,6 +24,7 @@ import {
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import { AgentRuntime, bindAgentDriver, executeStopControl, type AttentionPort } from '../../packages/runtime/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
@@ -103,6 +104,7 @@ function serviceFor(
   providerState = 'ready',
   journal?: UiRuntimeJournal,
   now?: () => Date,
+  hookRegistry?: AgentHookRegistry,
 ): UiRuntimeService {
   return new UiRuntimeService({
     mode,
@@ -114,6 +116,7 @@ function serviceFor(
     providerState,
     journal: journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     ...(now ? { now } : {}),
+    ...(hookRegistry ? { hookRegistry } : {}),
   });
 }
 
@@ -1502,14 +1505,93 @@ test('ordinary settlement removes stop eligibility before awaiting provider sett
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 });
 
-test('service composes AgentRuntime and stop control without bypassing the provider port', async () => {
+test('actual UI entry follows the provider-neutral composition and keeps hook, context, settlement, and failure evidence visible', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-'));
+  const hookEvents: string[] = [];
+  const hooks = createHookRegistry(
+    (event) => {
+      hookEvents.push(`${event.kind}:${event.stage}:${event.hookPhase ?? 'none'}`);
+    },
+    () => Date.now(),
+    [{
+      hookId: 'ui-runtime-observation-hook',
+      version: '1',
+      mode: 'observation',
+      stages: [
+        'request.created',
+        'request.before-dispatch',
+        'request.dispatched',
+        'attempt.started',
+        'response.received',
+        'response.decoded',
+        'result.mapped',
+        'context.committed',
+        'request.settled',
+      ],
+    }],
+  );
   const port = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
-  const service = serviceFor(root, port);
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, hooks);
   const task = service.createTask({ title: 'composition' });
   const started = service.startExecution(task.taskId, { prompt: 'composition' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
-  assert.equal(service.eventsSince(started.operationId).some((event) => event.evidenceRefs.some((ref) => ref.source === 'humanagent.fake-provider')), true);
+
+  const events = service.eventsSince(started.operationId);
+  assert.equal(events.some((event) => event.evidenceRefs.some((ref) => ref.source === 'humanagent.fake-provider')), true);
+  assert.equal(events.some((event) => event.kind === 'execution.settling'), true);
+  assert.equal(events.some((event) => event.kind === 'checkpoint.committed'), true);
+  assert.equal(events.at(-1)?.kind, 'execution.terminal');
+  assert.equal(events.at(-1)?.terminalPhase, 'final');
+  assert.equal(hookEvents.some((event) => event.endsWith(':request.created:enter')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':response.received:enter')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':response.decoded:exit')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':context.committed:exit')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':request.settled:exit')), true);
+
+  const capabilities = service.executionCapabilities();
+  assert.equal(capabilities.providerNeutralHarness.state, 'available');
+  assert.equal(capabilities.requestResponseHooks.state, 'available');
+  assert.equal(capabilities.contextCommitReentry.state, 'available');
+  assert.equal(capabilities.checkpointSettlementCancellation.state, 'available');
+  assert.equal(capabilities.eventBus.state, 'unavailable');
+  assert.equal(capabilities.eventBus.ownerId, 'humanagent.runtime.events');
+
+  const failureRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-failure-'));
+  const failingHooks = createHookRegistry(
+    () => undefined,
+    () => Date.now(),
+    [{
+      hookId: 'ui-runtime-blocking-hook',
+      version: '1',
+      mode: 'core',
+      stages: ['request.before-dispatch'],
+      onEnter: async () => ({
+        status: 'failed' as const,
+        diagnostics: ['request hook rejected execution'],
+        ownerId: 'ui-runtime-blocking-hook',
+        nextAction: 'inspect ui-runtime-blocking-hook',
+      }),
+    }],
+  );
+  const failingService = serviceFor(
+    failureRoot,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    failingHooks,
+  );
+  const failedTask = failingService.createTask({ title: 'composition failure' });
+  const failedStart = failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
+  await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
+  const failedEvents = failingService.eventsSince(failedStart.operationId);
+  assert.equal(failedEvents.some((event) => event.kind === 'provider.error' && event.ownerId === 'ui-runtime-blocking-hook'), true);
+  assert.equal(failedEvents.some((event) => event.kind === 'checkpoint.committed' && event.state === 'failed'), true);
+  assert.equal(failedEvents.at(-1)?.kind, 'execution.terminal');
+  assert.equal(failedEvents.at(-1)?.state, 'failed');
+  assert.equal(failedEvents.at(-1)?.terminalPhase, 'final');
+
   assert.equal(typeof AgentRuntime, 'function');
   assert.equal(typeof bindAgentDriver, 'function');
   assert.equal(typeof executeStopControl, 'function');
