@@ -6,6 +6,7 @@ import type {
   EventConsumerReceipt,
   EventDlqRecord,
   EventEnvelope,
+  EventExternalOperation,
   EventRecord,
   EventRetryObligation,
   TrustedEventPublisher,
@@ -36,12 +37,21 @@ export interface ReadCursorInput {
 }
 
 export interface ReadReceiptInput {
-  readonly streamId: string;
   readonly consumerKey: string;
   readonly messageId: string;
 }
 
 export interface ReadRetryObligationInput extends ReadReceiptInput {}
+
+export interface ReadExternalOperationInput {
+  readonly operationRef: string;
+  readonly consumerKey: string;
+  readonly messageId: string;
+}
+
+export interface EventExternalOperationPort {
+  readExternalOperation(input: ReadExternalOperationInput): Promise<EventExternalOperation | null>;
+}
 
 export interface ListPendingRetryObligationsInput {
   readonly streamId: string;

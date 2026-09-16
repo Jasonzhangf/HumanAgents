@@ -15,6 +15,7 @@ import type {
   AppendEventRequest,
   EventJournalPort,
   EventPublisherRegistryPort,
+  EventExternalOperationPort,
 } from './ports.js';
 import type {
   ConsumerCommitRequest,
@@ -26,9 +27,11 @@ import type {
   EventConsumerReceipt,
   EventDlqRecord,
   EventEnvelope,
+  EventExternalOperation,
   EventHandlerCommit,
   EventHandlerCommitIntent,
   EventHandlerRetryIntent,
+  EventOperationBlocked,
   EventRecord,
   EventRetryObligation,
 } from './types.js';
@@ -37,6 +40,7 @@ export interface EventBusPorts {
   readonly journal: EventJournalPort;
   readonly publishers: EventPublisherRegistryPort;
   readonly consumers: EventConsumerRegistryPort;
+  readonly externalOperations: EventExternalOperationPort;
 }
 
 export interface PublishEventInput {
@@ -73,12 +77,12 @@ function assertEventPayload(event: EventEnvelope): void {
   if (event.payload) assertBusinessPayload(event.payload);
 }
 
-function receiptKey(streamId: string, consumerKey: string, messageId: string): string {
-  return `${streamId}\u0000${consumerKey}\u0000${messageId}`;
+function receiptKey(consumerKey: string, messageId: string): string {
+  return `${consumerKey}\u0000${messageId}`;
 }
 
-function retryKey(streamId: string, consumerKey: string, messageId: string): string {
-  return `${streamId}:${consumerKey}:${messageId}`;
+function retryKey(consumerKey: string, messageId: string): string {
+  return `${consumerKey}:${messageId}`;
 }
 
 function uniqueRefs(refs: readonly string[]): readonly string[] {
@@ -93,7 +97,36 @@ function isRetryIntent(commit: EventHandlerCommit): commit is EventHandlerRetryI
   return 'retryObligation' in commit;
 }
 
-function assertCommitIntent(consumer: EventConsumerBinding, event: EventRecord, commit: EventHandlerCommitIntent): void {
+function assertExternalOperationSettled(
+  operation: EventExternalOperation | null,
+  ref: string,
+): asserts operation is EventExternalOperation {
+  if (!operation) throw new EventConsumerError(`external operation is not settled or reconciled: ${ref}`);
+  if (operation.operationRef !== ref) throw new EventConsumerError('external operation ref mismatch');
+}
+
+function externalOperationBlocked(
+  operation: EventExternalOperation,
+  consumerKey: string,
+  messageId: string,
+  streamId: string,
+): EventOperationBlocked {
+  return {
+    consumerKey,
+    messageId,
+    streamId,
+    operationRef: operation.operationRef,
+    reason: 'unknown-side-effect',
+    action: 'reconcile',
+  };
+}
+
+async function assertCommitIntent(
+  ports: EventBusPorts,
+  consumer: EventConsumerBinding,
+  event: EventRecord,
+  commit: EventHandlerCommitIntent,
+): Promise<EventOperationBlocked | null> {
   if (commit.consumerKey !== consumer.consumerKey) throw new EventConsumerError('handler commit consumer key mismatch');
   if (commit.messageId !== event.messageId) throw new EventConsumerError('handler commit message id mismatch');
   if (commit.completionMode === 'journal-atomic' && commit.externalOperationRefs.length > 0) {
@@ -102,9 +135,38 @@ function assertCommitIntent(consumer: EventConsumerBinding, event: EventRecord, 
   if (commit.completionMode === 'operation-barrier' && commit.externalOperationRefs.length === 0) {
     throw new EventConsumerError('operation-barrier handler commit requires settled external operations');
   }
+  if (commit.completionMode === 'operation-barrier') {
+    const refs = uniqueRefs(commit.externalOperationRefs);
+    const operations = await Promise.all(refs.map((ref) => ports.externalOperations.readExternalOperation({
+      operationRef: ref,
+      consumerKey: consumer.consumerKey,
+      messageId: event.messageId,
+    })));
+    for (const [index, operation] of operations.entries()) {
+      const ref = refs[index];
+      if (!ref?.trim()) throw new EventConsumerError('external operation ref is required');
+      assertExternalOperationSettled(operation, ref);
+      if (operation.consumerKey !== consumer.consumerKey) throw new EventConsumerError('external operation consumer key mismatch');
+      if (operation.messageId !== event.messageId) throw new EventConsumerError('external operation message id mismatch');
+    }
+    const unknown = operations.find((operation) => operation?.state === 'unknown');
+    if (unknown) return externalOperationBlocked(unknown, consumer.consumerKey, event.messageId, event.streamId);
+    for (const [index, operation] of operations.entries()) {
+      const ref = refs[index];
+      if (operation?.state !== 'settled' && operation?.state !== 'reconciled') {
+        throw new EventConsumerError(`external operation is not settled or reconciled: ${ref}`);
+      }
+    }
+  }
+  return null;
 }
 
-function assertRetryIntent(consumer: EventConsumerBinding, event: EventRecord, retry: EventHandlerRetryIntent): void {
+function assertRetryIntent(
+  consumer: EventConsumerBinding,
+  event: EventRecord,
+  retry: EventHandlerRetryIntent,
+  expectedAttempt: number,
+): void {
   if (retry.consumerKey !== consumer.consumerKey) throw new EventConsumerError('retry intent consumer key mismatch');
   if (retry.messageId !== event.messageId) throw new EventConsumerError('retry intent message id mismatch');
   const obligation = retry.retryObligation;
@@ -112,15 +174,13 @@ function assertRetryIntent(consumer: EventConsumerBinding, event: EventRecord, r
   if (obligation.messageId !== event.messageId) throw new EventConsumerError('retry obligation message id mismatch');
   if (obligation.streamId !== event.streamId) throw new EventConsumerError('retry obligation stream id mismatch');
   if (obligation.failedSequence !== event.sequence) throw new EventConsumerError('retry obligation sequence mismatch');
-  if (!Number.isSafeInteger(obligation.attempt) || obligation.attempt < 1) {
-    throw new EventConsumerError('retry obligation attempt must be a positive safe integer');
-  }
+  if (obligation.attempt !== expectedAttempt) throw new EventConsumerError('retry obligation attempt is not coordinator-owned');
   if (!Number.isFinite(Date.parse(obligation.nextAttemptAt))) {
     throw new EventConsumerError('retry obligation nextAttemptAt is invalid');
   }
   if (!obligation.ownerRef.trim()) throw new EventConsumerError('retry obligation owner ref is required');
   if (!obligation.failureRef.trim()) throw new EventConsumerError('retry obligation failure ref is required');
-  if (obligation.retryKey !== retryKey(event.streamId, consumer.consumerKey, event.messageId)) {
+  if (obligation.retryKey !== retryKey(consumer.consumerKey, event.messageId)) {
     throw new EventConsumerError('retry obligation key mismatch');
   }
 }
@@ -198,6 +258,23 @@ function cursorFor(
   };
 }
 
+function assertCommittedReceipt(
+  result: { readonly receipt: EventConsumerReceipt; readonly cursor: ConsumerCursor },
+  consumerKey: string,
+  event: EventRecord,
+): EventConsumerReceipt {
+  if (result.receipt.consumerKey !== consumerKey || result.receipt.messageId !== event.messageId) {
+    throw new EventConsumerError('journal consumer receipt identity mismatch');
+  }
+  if (result.receipt.streamId !== event.streamId || result.receipt.handledSequence !== event.sequence) {
+    throw new EventConsumerError('journal consumer receipt delivery mismatch');
+  }
+  if (result.cursor.consumerKey !== consumerKey || result.cursor.streamId !== event.streamId) {
+    throw new EventConsumerError('journal consumer cursor identity mismatch');
+  }
+  return result.receipt;
+}
+
 async function commitTerminalReceipt(
   ports: EventBusPorts,
   consumerKey: string,
@@ -215,7 +292,26 @@ async function commitTerminalReceipt(
     externalOperationRefs: [],
   };
   const result = await ports.journal.commitConsumerCommit(commit);
-  return result.receipt;
+  return assertCommittedReceipt(result, consumerKey, event);
+}
+
+async function commitDuplicateReceipt(
+  ports: EventBusPorts,
+  consumerKey: string,
+  event: EventRecord,
+  existing: EventConsumerReceipt,
+  updatedAt: string,
+): Promise<ConsumerProcessResult['committed'][number]> {
+  const receipt = makeReceipt(consumerKey, event, 'duplicate', existing.effectRefs, existing.failureRef);
+  const commit: ConsumerCommitRequest = {
+    receipt,
+    cursor: cursorFor(event, consumerKey, updatedAt),
+    completionMode: 'journal-atomic',
+    internalEffectFacts: [],
+    externalOperationRefs: [],
+  };
+  const result = await ports.journal.commitConsumerCommit(commit);
+  return assertCommittedReceipt(result, consumerKey, event);
 }
 
 async function commitExhaustedReceipt(
@@ -229,7 +325,6 @@ async function commitExhaustedReceipt(
   readonly dlq: EventDlqRecord;
 }> {
   const existingDlq = await ports.journal.readDlq({
-    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -273,7 +368,7 @@ async function commitHandlerIntent(
     externalOperationRefs: intent.externalOperationRefs,
   };
   const result = await ports.journal.commitConsumerCommit(commit);
-  return result.receipt;
+  return assertCommittedReceipt(result, consumerKey, event);
 }
 
 async function commitRetry(
@@ -301,7 +396,6 @@ async function commitRetry(
     state: 'exhausted',
   });
   const existingDlq = await ports.journal.readDlq({
-    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -341,13 +435,15 @@ async function deliverToHandler(
   readonly receipt?: ConsumerProcessResult['committed'][number];
   readonly retry?: EventRetryObligation;
   readonly dlq?: EventDlqRecord;
+  readonly blocked?: EventOperationBlocked;
 }> {
   const commit = await handler({ event, attempt, retryKey: retryKeyValue });
   if (isRetryIntent(commit)) {
-    assertRetryIntent(consumer, event, commit);
+    assertRetryIntent(consumer, event, commit, attempt);
     return commitRetry(ports, consumer, event, commit, updatedAt);
   }
-  assertCommitIntent(consumer, event, commit);
+  const blocked = await assertCommitIntent(ports, consumer, event, commit);
+  if (blocked) return { blocked };
   return { receipt: await commitHandlerIntent(ports, consumer.consumerKey, event, commit, updatedAt) };
 }
 
@@ -361,16 +457,19 @@ async function processEvent(
   readonly receipt?: ConsumerProcessResult['committed'][number];
   readonly retry?: EventRetryObligation;
   readonly dlq?: EventDlqRecord;
+  readonly blocked?: EventOperationBlocked;
 }> {
   const existingReceipt = await ports.journal.readReceipt({
-    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
-  if (existingReceipt) return { receipt: existingReceipt };
+  if (existingReceipt) {
+    return {
+      receipt: await commitDuplicateReceipt(ports, consumer.consumerKey, event, existingReceipt, updatedAt),
+    };
+  }
 
   const obligation = await ports.journal.readRetryObligation({
-    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -411,11 +510,12 @@ export async function consumeEvents(
   const committed: ConsumerProcessResult['committed'][number][] = [];
   const retries: EventRetryObligation[] = [];
   const dlq: EventDlqRecord[] = [];
+  const blocked: EventOperationBlocked[] = [];
   const cursors: ConsumerCursor[] = [];
   const seen = new Set<string>();
   let remaining = input.limit;
 
-  for (const streamId of consumer.streamIds) {
+  streamLoop: for (const streamId of consumer.streamIds) {
     if (remaining < 1) break;
     const cursor = await readCursor(ports, streamId, consumer.consumerKey);
     const events = await ports.journal.readEvents({
@@ -425,13 +525,28 @@ export async function consumeEvents(
     });
     for (const event of events) {
       if (remaining < 1) break;
-      const key = receiptKey(event.streamId, consumer.consumerKey, event.messageId);
-      if (seen.has(key)) continue;
+      const key = receiptKey(consumer.consumerKey, event.messageId);
+      if (seen.has(key)) {
+        const receipt = await ports.journal.readReceipt({
+          consumerKey: consumer.consumerKey,
+          messageId: event.messageId,
+        });
+        if (!receipt) continue;
+        const duplicate = await commitDuplicateReceipt(ports, consumer.consumerKey, event, receipt, updatedAt);
+        committed.push(duplicate);
+        cursors.push(cursorFor(event, consumer.consumerKey, updatedAt));
+        remaining -= 1;
+        continue;
+      }
       seen.add(key);
       const result = await processEvent(ports, consumer, event, handler, updatedAt);
       if (result.receipt) committed.push(result.receipt);
       if (result.retry) retries.push(result.retry);
       if (result.dlq) dlq.push(result.dlq);
+      if (result.blocked) {
+        blocked.push(result.blocked);
+        break streamLoop;
+      }
       if (!result.retry || result.receipt || result.dlq) {
         cursors.push(cursorFor(event, consumer.consumerKey, updatedAt));
         remaining -= 1;
@@ -446,6 +561,7 @@ export async function consumeEvents(
     committed,
     retries,
     dlq,
+    blocked,
     cursors,
   };
 }

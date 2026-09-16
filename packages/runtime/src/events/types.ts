@@ -104,6 +104,25 @@ export interface EventRetryObligation {
   readonly state: 'pending' | 'exhausted' | 'cancelled';
 }
 
+export const EXTERNAL_OPERATION_STATES = ['pending', 'settled', 'reconciled', 'failed', 'unknown'] as const;
+export type ExternalOperationState = (typeof EXTERNAL_OPERATION_STATES)[number];
+
+export interface EventExternalOperation {
+  readonly operationRef: string;
+  readonly consumerKey: string;
+  readonly messageId: string;
+  readonly state: ExternalOperationState;
+}
+
+export interface EventOperationBlocked {
+  readonly consumerKey: string;
+  readonly messageId: string;
+  readonly streamId: string;
+  readonly operationRef: string;
+  readonly reason: 'unknown-side-effect';
+  readonly action: 'reconcile';
+}
+
 export interface EventHandlerRetryIntent {
   readonly consumerKey: string;
   readonly messageId: string;
@@ -147,6 +166,7 @@ export interface ConsumerProcessResult {
   readonly committed: readonly EventConsumerReceipt[];
   readonly retries: readonly EventRetryObligation[];
   readonly dlq: readonly EventDlqRecord[];
+  readonly blocked: readonly EventOperationBlocked[];
   readonly cursors: readonly ConsumerCursor[];
 }
 
