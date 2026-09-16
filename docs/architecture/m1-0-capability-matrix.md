@@ -1,15 +1,17 @@
 # M1-0 Capability and Failure Matrix
 
-Status: `M1-0-REBASELINE-CANDIDATE / REVIEW-PENDING / NOT-PASS`
-Review time: `2026-09-16T15:37:33-0700` (local), `2026-09-16T22:37:33Z` (UTC)
+Status: `M1-0-REBASELINE / ASTRA-PASS / P2-ADVISORY`
+Review time: `2026-09-16T16:12:51-0700` (local), `2026-09-16T23:12:51Z` (UTC)
 Candidate base: `37ca6fa1ad3db70e017945f449f7b7fb99170972`
 Candidate worktree: `/Volumes/extension/code/humanagent/playground/m1-0-rebaseline-20260916`
 DSH input: commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`, tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`
 Source expansion rechecked: `2026-09-16T22:37:33Z` (UTC)
 
 This is a read-only M1-0 rebaseline record. It does not implement an adapter,
-install a plugin, make a provider request, or prove M1-0 PASS. Native Astra
-review and parent acceptance remain pending.
+install a plugin, make a provider request, or prove provider/DSH runtime
+completion. The current candidate passed independent commit-bound Codex review
+and native Astra M1-0 review with P0=0 and P1=0; the remaining P2 items are
+non-blocking documentation advisories.
 
 The prior `c291e7961a515f6d7af9304e7fd1d257929aef26` source review remains
 historical evidence only. This candidate refreshes the source and non-secret
@@ -38,9 +40,9 @@ performed in this review.
 | 15:37:33-0700 | `rg -n 'allowed_transports|routecodex_v3_4444' /Users/fanzhang/.rcc/config.toml; rg -n 'providerId|type\s*=' /Users/fanzhang/.rcc/provider/cc/config.v2.toml /Users/fanzhang/.rcc/provider/cc-sol/config.v2.toml /Users/fanzhang/.rcc/provider/goaichat/config.v2.toml` | `/Users/fanzhang/.rcc/config.toml` declares `routecodex_v3_4444` and `allowed_transports = ["json", "sse"]`; the provider files declare `cc`/`cc-sol` as `responses` and `goaichat` as `anthropic`. Only these non-secret matched fields were retained. |
 | 15:37:33-0700 | `curl --max-time 5 -fsS http://127.0.0.1:4444/health` | RCC v3 health returned `status: ok`, `port: 4444`, `server_id: routecodex_v3_4444`, build `0.90.4789`. Health/readiness evidence only. |
 | 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 status --short --branch; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 rev-parse HEAD^{commit} HEAD^{tree}` | Clean DSH worktree at commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`, tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`. Clean source baseline evidence. |
-| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f500...:package.json` | Root declares version `0.1.6-alpha.1`, MIT and `pnpm@11.7.0`; source declaration only. |
-| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f500...:apps/cli/package.json`, `src/bin.ts`, `src/args.ts` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`; profile boot, `web`, `plugin`, config dump, `--patch` and forwarded app arguments are present. Runtime boot/install remains unverified. |
-| 15:37:33-0700 | `if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/node_modules; then printf 'present node_modules\\n'; else printf 'absent node_modules\\n'; fi; if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib; then printf 'present apps/cli/lib\\n'; else printf 'absent apps/cli/lib\\n'; fi; if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib/bin.js; then printf 'present apps/cli/lib/bin.js\\n'; else printf 'absent apps/cli/lib/bin.js\\n'; fi` | Exact output was `present node_modules`, `absent apps/cli/lib`, `absent apps/cli/lib/bin.js`; no built CLI executable was treated as available. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:package.json` | Root declares version `0.1.6-alpha.1`, MIT and `pnpm@11.7.0`; source declaration only. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:apps/cli/package.json; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:apps/cli/src/bin.ts; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:apps/cli/src/args.ts` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`; profile boot, `web`, `plugin`, config dump, `--patch` and forwarded app arguments are present. Runtime boot/install remains unverified. |
+| 15:37:33-0700 | `if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/node_modules; then echo 'present node_modules'; else echo 'absent node_modules'; fi; if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib; then echo 'present apps/cli/lib'; else echo 'absent apps/cli/lib'; fi; if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib/bin.js; then echo 'present apps/cli/lib/bin.js'; else echo 'absent apps/cli/lib/bin.js'; fi` | Exact output was three lines: `present node_modules`, `absent apps/cli/lib`, `absent apps/cli/lib/bin.js`; no built CLI executable was treated as available. |
 | 15:37:33-0700 | current DSH source seam scan | Confirmed current source contains `AgentRegistry.create`/`resume`, `AgentHandle.dispose`, session-controller `follow`/`cancel`, JSONL persistence `create`/`open`, and Cordis `ctx.effect`/`ctx.on` seams. Source evidence only. |
 
 The original `/Volumes/extension/code/dsh` checkout was not used as clean
