@@ -699,6 +699,26 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
   assert.equal(driver.protocolVersion, 1);
 });
 
+test('settle receipts reject invalid evidence ref fields', () => {
+  const receipt = { state: 'stopped', evidenceRefs: [providerEvidence('settle-invalid')] } as const;
+  assert.throws(() => validateAgentSettleReceipt({
+    ...receipt,
+    evidenceRefs: [{ ...providerEvidence('settle-invalid-id'), evidenceId: id('task', 'bad') as never }],
+  }), ContractError);
+  assert.throws(() => validateAgentSettleReceipt({
+    ...receipt,
+    evidenceRefs: [{ ...providerEvidence('settle-invalid-kind'), kind: 'invalid' as never }],
+  }), ContractError);
+  assert.throws(() => validateAgentSettleReceipt({
+    ...receipt,
+    evidenceRefs: [{ ...providerEvidence('settle-invalid-digest'), digest: '' }],
+  }), ContractError);
+  assert.throws(() => validateAgentSettleReceipt({
+    ...receipt,
+    evidenceRefs: [{ ...providerEvidence('settle-invalid-scope'), scope: { organId: id('task', 'bad') } as never }],
+  }), ContractError);
+});
+
 test('scope ACL and permission revision prevent cross-scope reads and revoked permissions', () => {
   assert.doesNotThrow(() => validateScopeAcl(scopeAcl()));
   const allowedSubject = {
