@@ -113,10 +113,12 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   retries = new Map<string, EventRetryObligation>();
   dlq = new Map<string, EventDlqRecord>();
   externalOperations = new Map<string, EventExternalOperation>();
+  externalOperationReads: string[] = [];
   appendCalls = 0;
   commitCalls = 0;
   failBeforeCommit = false;
   failAfterCommit = false;
+  beforeCommit?: (input: ConsumerCommitRequest) => void;
 
   private cursorKey(streamId: string, consumerKeyValue: string): string {
     return `${streamId}:${consumerKeyValue}`;
@@ -164,6 +166,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
 
   async commitConsumerCommit(input: ConsumerCommitRequest) {
     if (this.failBeforeCommit) throw new Error('commit failed');
+    this.beforeCommit?.(input);
     const receiptKey = `${input.receipt.consumerKey}:${input.receipt.messageId}`;
     const existing = this.receipts.get(receiptKey);
     if (existing) {
@@ -253,6 +256,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventExternalOperation | null> {
+    this.externalOperationReads.push(input.operationRef);
     return this.externalOperations.get(input.operationRef) ?? null;
   }
 }
@@ -630,6 +634,57 @@ test('duplicate message identity in the same batch executes the handler once', a
   assert.equal(calls, 1);
   assert.deepEqual(result.committed.map((receipt) => receipt.disposition), ['applied', 'duplicate']);
   assert.deepEqual(result.cursors.map((cursor) => cursor.streamId), [streamId, streamB]);
+});
+
+test('same-batch duplicate reauthorizes revoked and stale delivery before exposing canonical effects', async () => {
+  for (const change of ['revoke', 'epoch'] as const) {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+    registry.consumers.set(consumerKey, consumer({ streamIds: [streamId, streamB], currentEpoch: 2 }));
+    const bus = ports(journal, registry);
+    const messageId = `same-batch-${change}`;
+
+    await publishEvent(bus, {
+      publisherId: harnessPublisher.publisherId,
+      event: event({ messageId, streamId, executionEpoch: 2 }),
+    });
+    await publishEvent(bus, {
+      publisherId: harnessPublisher.publisherId,
+      event: event({ messageId, streamId: streamB, executionEpoch: 2 }),
+    });
+
+    journal.beforeCommit = (input) => {
+      if (input.receipt.messageId !== messageId || input.receipt.streamId !== streamId) return;
+      journal.beforeCommit = undefined;
+      registry.consumers.set(
+        consumerKey,
+        consumer({
+          streamIds: [streamId, streamB],
+          currentEpoch: change === 'epoch' ? 3 : 2,
+          revoked: change === 'revoke',
+        }),
+      );
+    };
+
+    const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event: delivery }) =>
+      applied(delivery.messageId, [`effect:${change}`]));
+
+    assert.deepEqual(result.committed.map((receipt) => [receipt.streamId, receipt.disposition, receipt.effectRefs]), [
+      [streamId, 'applied', [`effect:${change}`]],
+      [streamB, change === 'epoch' ? 'stale' : 'rejected', []],
+    ]);
+    assert.deepEqual(await journal.readReceipt({ consumerKey, messageId }), {
+      consumerKey,
+      messageId,
+      streamId,
+      handledSequence: 1,
+      disposition: 'applied',
+      effectRefs: [`effect:${change}`],
+      failureRef: undefined,
+    });
+    assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
+  }
 });
 
 test('retry attempt is coordinator-owned and cannot be forged by the handler', async () => {
@@ -1025,6 +1080,53 @@ test('operation-barrier accepts a reconciled external operation', async () => {
   assert.equal(result.blocked.length, 0);
   assert.equal(journal.receipts.size, 1);
   assert.equal(journal.cursors.size, 1);
+});
+
+test('operation-barrier checks unknown external operation before terminalizing after authorization changes', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+  const messageId = 'op-barrier-auth-change';
+  const operationRef = 'operation:unknown-after-auth-change';
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId, executionEpoch: 2 }),
+  });
+  journal.externalOperations.set(operationRef, {
+    operationRef,
+    consumerKey,
+    messageId,
+    state: 'unknown',
+  });
+
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event: delivery }) => {
+    registry.consumers.set(consumerKey, consumer({ currentEpoch: 3 }));
+    return {
+      consumerKey,
+      messageId: delivery.messageId,
+      disposition: 'applied',
+      completionMode: 'operation-barrier',
+      internalEffectFacts: ['effect:unknown'],
+      externalOperationRefs: [operationRef],
+    };
+  });
+
+  assert.deepEqual(journal.externalOperationReads, [operationRef]);
+  assert.deepEqual(result.blocked, [{
+    consumerKey,
+    messageId,
+    streamId,
+    operationRef,
+    reason: 'unknown-side-effect',
+    action: 'reconcile',
+  }]);
+  assert.equal(result.committed.length, 0);
+  assert.equal(result.cursors.length, 0);
+  assert.equal(journal.receipts.size, 0);
+  assert.equal(journal.cursors.size, 0);
 });
 
 test('scope ACL, epoch staleness, and permission revocation are rejected without handler delivery', async () => {

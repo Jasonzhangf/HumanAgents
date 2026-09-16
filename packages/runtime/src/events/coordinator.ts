@@ -498,6 +498,12 @@ async function deliverToHandler(
   readonly blocked?: EventOperationBlocked;
 }> {
   const commit = await handler({ event, attempt, retryKey: retryKeyValue });
+  let barrierChecked = false;
+  if (!isRetryIntent(commit) && commit.completionMode === 'operation-barrier') {
+    const blocked = await assertCommitIntent(ports, consumer, event, commit);
+    barrierChecked = true;
+    if (blocked) return { blocked };
+  }
   const afterHandler = await authorizeEvent(ports, consumer.consumerKey, event);
   if (!afterHandler.decision.deliver) {
     return {
@@ -515,7 +521,9 @@ async function deliverToHandler(
     assertRetryIntent(afterHandler.consumer, event, commit, attempt);
     return commitRetry(ports, afterHandler.consumer, event, commit, updatedAt);
   }
-  const blocked = await assertCommitIntent(ports, afterHandler.consumer, event, commit);
+  const blocked = barrierChecked
+    ? null
+    : await assertCommitIntent(ports, afterHandler.consumer, event, commit);
   if (blocked) return { blocked };
   const beforeCommit = await authorizeEvent(ports, consumer.consumerKey, event);
   if (!beforeCommit.decision.deliver) {
@@ -661,6 +669,22 @@ export async function consumeEvents(
           messageId: event.messageId,
         });
         if (!receipt) continue;
+        const authorization = await authorizeEvent(ports, consumer.consumerKey, event);
+        if (!authorization.decision.deliver) {
+          const terminal = await commitTerminalReceipt(
+            ports,
+            consumer.consumerKey,
+            event,
+            authorization.decision.disposition,
+            updatedAt,
+            authorization.decision.failureRef,
+            receipt,
+          );
+          committed.push(terminal);
+          cursors.push(cursorFor(event, consumer.consumerKey, updatedAt));
+          remaining -= 1;
+          continue;
+        }
         const duplicate = await commitDuplicateReceipt(ports, consumer.consumerKey, event, receipt, updatedAt);
         committed.push(duplicate);
         cursors.push(cursorFor(event, consumer.consumerKey, updatedAt));
