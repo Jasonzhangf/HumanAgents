@@ -77,12 +77,12 @@ function assertEventPayload(event: EventEnvelope): void {
   if (event.payload) assertBusinessPayload(event.payload);
 }
 
-function receiptKey(consumerKey: string, messageId: string): string {
-  return `${consumerKey}\u0000${messageId}`;
+function receiptKey(streamId: string, consumerKey: string, messageId: string): string {
+  return `${streamId}\u0000${consumerKey}\u0000${messageId}`;
 }
 
-function retryKey(consumerKey: string, messageId: string): string {
-  return `${consumerKey}:${messageId}`;
+function retryKey(streamId: string, consumerKey: string, messageId: string): string {
+  return `${streamId}\u0000${consumerKey}\u0000${messageId}`;
 }
 
 function uniqueRefs(refs: readonly string[]): readonly string[] {
@@ -180,7 +180,7 @@ function assertRetryIntent(
   }
   if (!obligation.ownerRef.trim()) throw new EventConsumerError('retry obligation owner ref is required');
   if (!obligation.failureRef.trim()) throw new EventConsumerError('retry obligation failure ref is required');
-  if (obligation.retryKey !== retryKey(consumer.consumerKey, event.messageId)) {
+  if (obligation.retryKey !== retryKey(event.streamId, consumer.consumerKey, event.messageId)) {
     throw new EventConsumerError('retry obligation key mismatch');
   }
 }
@@ -275,6 +275,37 @@ function assertCommittedReceipt(
   return result.receipt;
 }
 
+function assertCanonicalReceipt(
+  receipt: EventConsumerReceipt,
+  canonical: EventConsumerReceipt,
+): void {
+  if (
+    receipt.consumerKey !== canonical.consumerKey
+    || receipt.messageId !== canonical.messageId
+    || receipt.streamId !== canonical.streamId
+    || receipt.handledSequence !== canonical.handledSequence
+    || receipt.disposition !== canonical.disposition
+    || receipt.failureRef !== canonical.failureRef
+    || receipt.effectRefs.length !== canonical.effectRefs.length
+    || receipt.effectRefs.some((ref, index) => ref !== canonical.effectRefs[index])
+  ) {
+    throw new EventConsumerError('journal consumer receipt canonical mismatch');
+  }
+}
+
+function assertCommittedCursor(
+  result: { readonly cursor: ConsumerCursor },
+  consumerKey: string,
+  event: EventRecord,
+): void {
+  if (result.cursor.consumerKey !== consumerKey || result.cursor.streamId !== event.streamId) {
+    throw new EventConsumerError('journal consumer cursor identity mismatch');
+  }
+  if (result.cursor.lastHandledSequence < event.sequence) {
+    throw new EventConsumerError('journal consumer cursor did not advance');
+  }
+}
+
 async function commitTerminalReceipt(
   ports: EventBusPorts,
   consumerKey: string,
@@ -304,14 +335,16 @@ async function commitDuplicateReceipt(
 ): Promise<ConsumerProcessResult['committed'][number]> {
   const receipt = makeReceipt(consumerKey, event, 'duplicate', existing.effectRefs, existing.failureRef);
   const commit: ConsumerCommitRequest = {
-    receipt,
+    receipt: existing,
     cursor: cursorFor(event, consumerKey, updatedAt),
     completionMode: 'journal-atomic',
     internalEffectFacts: [],
     externalOperationRefs: [],
   };
   const result = await ports.journal.commitConsumerCommit(commit);
-  return assertCommittedReceipt(result, consumerKey, event);
+  assertCanonicalReceipt(result.receipt, existing);
+  assertCommittedCursor(result, consumerKey, event);
+  return receipt;
 }
 
 async function commitExhaustedReceipt(
@@ -325,6 +358,7 @@ async function commitExhaustedReceipt(
   readonly dlq: EventDlqRecord;
 }> {
   const existingDlq = await ports.journal.readDlq({
+    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -396,6 +430,7 @@ async function commitRetry(
     state: 'exhausted',
   });
   const existingDlq = await ports.journal.readDlq({
+    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -470,6 +505,7 @@ async function processEvent(
   }
 
   const obligation = await ports.journal.readRetryObligation({
+    streamId: event.streamId,
     consumerKey: consumer.consumerKey,
     messageId: event.messageId,
   });
@@ -523,9 +559,9 @@ export async function consumeEvents(
       afterSequence: cursor?.lastHandledSequence ?? 0,
       limit: remaining,
     });
-    for (const event of events) {
+    eventLoop: for (const event of events) {
       if (remaining < 1) break;
-      const key = receiptKey(consumer.consumerKey, event.messageId);
+      const key = receiptKey(event.streamId, consumer.consumerKey, event.messageId);
       if (seen.has(key)) {
         const receipt = await ports.journal.readReceipt({
           consumerKey: consumer.consumerKey,
@@ -551,7 +587,7 @@ export async function consumeEvents(
         cursors.push(cursorFor(event, consumer.consumerKey, updatedAt));
         remaining -= 1;
       } else {
-        break;
+        break eventLoop;
       }
     }
   }

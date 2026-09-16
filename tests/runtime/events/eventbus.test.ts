@@ -164,9 +164,14 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
     const existing = this.receipts.get(receiptKey);
     if (existing) {
       this.commitCalls += 1;
-      const cursorKey = this.cursorKey(input.receipt.streamId, input.receipt.consumerKey);
+      const cursorKey = this.cursorKey(input.cursor.streamId, input.cursor.consumerKey);
+      const existingCursor = this.cursors.get(cursorKey);
+      if (existingCursor && existingCursor.lastHandledSequence >= input.cursor.lastHandledSequence) {
+        return { receipt: existing, cursor: existingCursor };
+      }
       this.cursors.set(cursorKey, input.cursor);
-      return { receipt: input.receipt, cursor: input.cursor };
+      if (this.failAfterCommit) throw new Error('ack lost after durable commit');
+      return { receipt: existing, cursor: existingCursor ?? input.cursor };
     }
     const cursorKey = this.cursorKey(input.receipt.streamId, input.receipt.consumerKey);
     const existingCursor = this.cursors.get(cursorKey);
@@ -194,10 +199,16 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   }
 
   async readRetryObligation(input: {
+    readonly streamId: string;
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventRetryObligation | null> {
-    return this.retries.get(`${input.consumerKey}:${input.messageId}`) ?? null;
+    return [...this.retries.values()].find(
+      (obligation) =>
+        obligation.streamId === input.streamId
+        && obligation.consumerKey === input.consumerKey
+        && obligation.messageId === input.messageId,
+    ) ?? null;
   }
 
   async listPendingRetryObligations(input: {
@@ -221,10 +232,16 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   }
 
   async readDlq(input: {
+    readonly streamId: string;
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventDlqRecord | null> {
-    return this.dlq.get(`${input.consumerKey}:${input.messageId}`) ?? null;
+    return [...this.dlq.values()].find(
+      (record) =>
+        record.streamId === input.streamId
+        && record.consumerKey === input.consumerKey
+        && record.messageId === input.messageId,
+    ) ?? null;
   }
 
   async readExternalOperation(input: {
@@ -274,7 +291,7 @@ function retryFailure(
     consumerKey,
     messageId,
     retryObligation: {
-      retryKey: `${consumerKey}:${messageId}`,
+      retryKey: `${eventRecord.streamId}\u0000${consumerKey}\u0000${messageId}`,
       consumerKey,
       messageId,
       streamId: eventRecord.streamId,
@@ -498,6 +515,39 @@ test('message id and consumer key form one receipt identity across streams', asy
   assert.equal(replay.retries.length, 0);
 });
 
+test('cross-stream duplicate advances the second cursor without replacing the canonical receipt', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ streamIds: [streamId, streamB] }));
+  const bus = ports(journal, registry);
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'canonical-collision', streamId }),
+  });
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'canonical-collision', streamId: streamB }),
+  });
+
+  let calls = 0;
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    calls += 1;
+    return applied(event.messageId);
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.streamId, receipt.disposition]), [
+    [streamId, 'applied'],
+    [streamB, 'duplicate'],
+  ]);
+  assert.equal(journal.receipts.size, 1);
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'canonical-collision' }))?.streamId, streamId);
+  assert.equal((await journal.readCursor({ streamId, consumerKey }))?.lastHandledSequence, 1);
+  assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
+});
+
 test('duplicate message identity in the same batch executes the handler once', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
@@ -609,6 +659,67 @@ test('retry obligation survives restart and bounded failure advances to terminal
   });
   assert.equal(afterTerminal.committed.length, 0);
   assert.equal(afterTerminal.dlq.length, 0);
+});
+
+test('retry obligations remain stream-scoped when message ids collide', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ streamIds: [streamId, streamB], retryLimit: 2 }));
+  const bus = ports(journal, registry);
+
+  const first = await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'retry-collision', streamId }),
+  });
+  const second = await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'retry-collision', streamId: streamB }),
+  });
+  const pending: EventRetryObligation = {
+    retryKey: `${first.event.streamId}\u0000${consumerKey}\u0000${first.event.messageId}`,
+    consumerKey,
+    messageId: first.event.messageId,
+    streamId: first.event.streamId,
+    failedSequence: first.event.sequence,
+    attempt: 1,
+    nextAttemptAt: '2026-09-16T00:00:30.000Z',
+    ownerRef: 'owner-a',
+    failureRef: 'retryable-failure',
+    state: 'pending',
+  };
+  const exhausted: EventRetryObligation = {
+    retryKey: `${second.event.streamId}\u0000${consumerKey}\u0000${second.event.messageId}`,
+    consumerKey,
+    messageId: second.event.messageId,
+    streamId: second.event.streamId,
+    failedSequence: second.event.sequence,
+    attempt: 2,
+    nextAttemptAt: '2026-09-16T00:00:10.000Z',
+    ownerRef: 'owner-a',
+    failureRef: 'retryable-failure',
+    state: 'exhausted',
+  };
+  journal.retries.set(pending.retryKey, pending);
+  journal.retries.set(exhausted.retryKey, exhausted);
+
+  let calls = 0;
+  const result = await consumeEvents(
+    bus,
+    { consumerKey, limit: 10, now: '2026-09-16T00:00:20.000Z' },
+    async () => {
+      calls += 1;
+      throw new Error('exhausted retry obligation should not invoke the handler');
+    },
+  );
+  assert.equal(calls, 0);
+  assert.deepEqual(result.retries.map((retry) => [retry.streamId, retry.state]), [[streamId, 'pending']]);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.streamId, receipt.disposition]), [
+    [streamB, 'terminal-failure'],
+  ]);
+  assert.deepEqual(result.cursors.map((cursor) => cursor.streamId), [streamB]);
+  assert.equal(await journal.readCursor({ streamId, consumerKey }), null);
+  assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
 });
 
 test('operation-barrier refuses final receipt without settled external operation refs', async () => {

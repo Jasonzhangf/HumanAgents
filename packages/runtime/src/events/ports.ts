@@ -41,7 +41,11 @@ export interface ReadReceiptInput {
   readonly messageId: string;
 }
 
-export interface ReadRetryObligationInput extends ReadReceiptInput {}
+export interface ReadRetryObligationInput {
+  readonly streamId: string;
+  readonly consumerKey: string;
+  readonly messageId: string;
+}
 
 export interface ReadExternalOperationInput {
   readonly operationRef: string;
