@@ -1069,6 +1069,91 @@ test('scope ACL, epoch staleness, and permission revocation are rejected without
   assert.equal(revoked.committed[0]?.failureRef, 'consumer-permission-revoked');
 });
 
+test('batch rechecks ACL after awaited handler revokes consumer before later delivery', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'revoke-first', executionEpoch: 2 }),
+  });
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'revoke-second', executionEpoch: 2 }),
+  });
+
+  const handlerCalls: string[] = [];
+  let secondExternalOperations = 0;
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    handlerCalls.push(event.messageId);
+    if (event.messageId === 'revoke-first') {
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 2, revoked: true }));
+      return applied(event.messageId);
+    }
+    secondExternalOperations += 1;
+    return applied(event.messageId, [`operation:${event.messageId}`]);
+  });
+
+  assert.deepEqual(handlerCalls, ['revoke-first']);
+  assert.equal(secondExternalOperations, 0);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.messageId, receipt.disposition]), [
+    ['revoke-first', 'rejected'],
+    ['revoke-second', 'rejected'],
+  ]);
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'revoke-first' }))?.disposition, 'rejected');
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'revoke-second' }))?.disposition, 'rejected');
+
+  const replayCalls: string[] = [];
+  const replay = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    replayCalls.push(event.messageId);
+    return applied(event.messageId);
+  });
+  assert.deepEqual(replayCalls, []);
+  assert.equal(replay.committed.length, 0);
+});
+
+test('batch rechecks epoch after awaited handler advances it', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'epoch-first', executionEpoch: 2 }),
+  });
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'epoch-second', executionEpoch: 2 }),
+  });
+
+  const handlerCalls: string[] = [];
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    handlerCalls.push(event.messageId);
+    if (event.messageId === 'epoch-first') {
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 3 }));
+    }
+    return applied(event.messageId);
+  });
+
+  assert.deepEqual(handlerCalls, ['epoch-first']);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.messageId, receipt.disposition]), [
+    ['epoch-first', 'stale'],
+    ['epoch-second', 'stale'],
+  ]);
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'epoch-first' }))?.disposition, 'stale');
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'epoch-second' }))?.disposition, 'stale');
+
+  const replay = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+    throw new Error('should not deliver after epoch advance');
+  });
+  assert.equal(replay.committed.length, 0);
+});
+
 test('consumer payload must not leak control fields through business payload', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();

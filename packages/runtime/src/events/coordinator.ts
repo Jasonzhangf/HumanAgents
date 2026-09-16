@@ -5,6 +5,7 @@ import {
 import {
   assertConsumerKey,
   assertPublisherCanPublish,
+  type ConsumerDeliveryDecision,
   decideConsumerDelivery,
   scopeContains,
   validateEventEnvelope,
@@ -221,6 +222,20 @@ async function readConsumer(
   if (!consumer) throw new EventConsumerError('consumer is not registered');
   assertConsumerKey(consumer, consumerKey);
   return consumer;
+}
+
+interface EventAuthorization {
+  readonly consumer: EventConsumerBinding;
+  readonly decision: ConsumerDeliveryDecision;
+}
+
+async function authorizeEvent(
+  ports: EventBusPorts,
+  consumerKey: string,
+  event: EventRecord,
+): Promise<EventAuthorization> {
+  const consumer = await readConsumer(ports, consumerKey);
+  return { consumer, decision: decideConsumerDelivery(consumer, event) };
 }
 
 async function readCursor(
@@ -483,18 +498,44 @@ async function deliverToHandler(
   readonly blocked?: EventOperationBlocked;
 }> {
   const commit = await handler({ event, attempt, retryKey: retryKeyValue });
-  if (isRetryIntent(commit)) {
-    assertRetryIntent(consumer, event, commit, attempt);
-    return commitRetry(ports, consumer, event, commit, updatedAt);
+  const afterHandler = await authorizeEvent(ports, consumer.consumerKey, event);
+  if (!afterHandler.decision.deliver) {
+    return {
+      receipt: await commitTerminalReceipt(
+        ports,
+        consumer.consumerKey,
+        event,
+        afterHandler.decision.disposition,
+        updatedAt,
+        afterHandler.decision.failureRef,
+      ),
+    };
   }
-  const blocked = await assertCommitIntent(ports, consumer, event, commit);
+  if (isRetryIntent(commit)) {
+    assertRetryIntent(afterHandler.consumer, event, commit, attempt);
+    return commitRetry(ports, afterHandler.consumer, event, commit, updatedAt);
+  }
+  const blocked = await assertCommitIntent(ports, afterHandler.consumer, event, commit);
   if (blocked) return { blocked };
+  const beforeCommit = await authorizeEvent(ports, consumer.consumerKey, event);
+  if (!beforeCommit.decision.deliver) {
+    return {
+      receipt: await commitTerminalReceipt(
+        ports,
+        consumer.consumerKey,
+        event,
+        beforeCommit.decision.disposition,
+        updatedAt,
+        beforeCommit.decision.failureRef,
+      ),
+    };
+  }
   return { receipt: await commitHandlerIntent(ports, consumer.consumerKey, event, commit, updatedAt) };
 }
 
 async function processEvent(
   ports: EventBusPorts,
-  consumer: EventConsumerBinding,
+  consumerKey: string,
   event: EventRecord,
   handler: EventConsumerHandler,
   updatedAt: string,
@@ -504,67 +545,82 @@ async function processEvent(
   readonly dlq?: EventDlqRecord;
   readonly blocked?: EventOperationBlocked;
 }> {
-  const decision = decideConsumerDelivery(consumer, event);
-  if (!decision.deliver) {
+  while (true) {
+    const current = await authorizeEvent(ports, consumerKey, event);
+    if (!current.decision.deliver) {
+      const beforeCommit = await authorizeEvent(ports, consumerKey, event);
+      if (beforeCommit.decision.deliver) continue;
+      const existingReceipt = await ports.journal.readReceipt({
+        consumerKey,
+        messageId: event.messageId,
+      });
+      return {
+        receipt: await commitTerminalReceipt(
+          ports,
+          consumerKey,
+          event,
+          beforeCommit.decision.disposition,
+          updatedAt,
+          beforeCommit.decision.failureRef,
+          existingReceipt ?? undefined,
+        ),
+      };
+    }
+
     const existingReceipt = await ports.journal.readReceipt({
-      consumerKey: consumer.consumerKey,
+      consumerKey,
       messageId: event.messageId,
     });
-    return {
-      receipt: await commitTerminalReceipt(
-        ports,
-        consumer.consumerKey,
-        event,
-        decision.disposition,
-        updatedAt,
-        decision.failureRef,
-        existingReceipt ?? undefined,
-      ),
-    };
-  }
+    if (existingReceipt) {
+      const beforeCommit = await authorizeEvent(ports, consumerKey, event);
+      if (!beforeCommit.decision.deliver) continue;
+      return {
+        receipt: await commitDuplicateReceipt(ports, consumerKey, event, existingReceipt, updatedAt),
+      };
+    }
 
-  const existingReceipt = await ports.journal.readReceipt({
-    consumerKey: consumer.consumerKey,
-    messageId: event.messageId,
-  });
-  if (existingReceipt) {
-    return {
-      receipt: await commitDuplicateReceipt(ports, consumer.consumerKey, event, existingReceipt, updatedAt),
-    };
-  }
+    const obligation = await ports.journal.readRetryObligation({
+      streamId: event.streamId,
+      consumerKey,
+      messageId: event.messageId,
+    });
+    if (obligation?.state === 'exhausted') {
+      const beforeCommit = await authorizeEvent(ports, consumerKey, event);
+      if (!beforeCommit.decision.deliver) continue;
+      return commitExhaustedReceipt(ports, beforeCommit.consumer, event, obligation, updatedAt);
+    }
+    if (obligation?.state === 'cancelled') {
+      const beforeCommit = await authorizeEvent(ports, consumerKey, event);
+      if (!beforeCommit.decision.deliver) continue;
+      return {
+        receipt: await commitTerminalReceipt(
+          ports,
+          consumerKey,
+          event,
+          'rejected',
+          updatedAt,
+          obligation.failureRef,
+        ),
+      };
+    }
+    if (obligation && Date.parse(obligation.nextAttemptAt) > Date.parse(updatedAt)) {
+      const beforeReturn = await authorizeEvent(ports, consumerKey, event);
+      if (!beforeReturn.decision.deliver) continue;
+      return { retry: obligation };
+    }
 
-  const obligation = await ports.journal.readRetryObligation({
-    streamId: event.streamId,
-    consumerKey: consumer.consumerKey,
-    messageId: event.messageId,
-  });
-  if (obligation?.state === 'exhausted') {
-    return commitExhaustedReceipt(ports, consumer, event, obligation, updatedAt);
+    const beforeDelivery = await authorizeEvent(ports, consumerKey, event);
+    if (!beforeDelivery.decision.deliver) continue;
+    return deliverToHandler(
+      ports,
+      beforeDelivery.consumer,
+      event,
+      obligation ? obligation.attempt + 1 : 1,
+      obligation?.retryKey,
+      handler,
+      updatedAt,
+    );
   }
-  if (obligation?.state === 'cancelled') {
-    return {
-      receipt: await commitTerminalReceipt(
-        ports,
-        consumer.consumerKey,
-        event,
-        'rejected',
-        updatedAt,
-        obligation.failureRef,
-      ),
-    };
-  }
-  if (obligation && Date.parse(obligation.nextAttemptAt) > Date.parse(updatedAt)) {
-    return { retry: obligation };
-  }
-  return deliverToHandler(
-    ports,
-    consumer,
-    event,
-    obligation ? obligation.attempt + 1 : 1,
-    obligation?.retryKey,
-    handler,
-    updatedAt,
-  );
 }
 
 export async function consumeEvents(
@@ -612,7 +668,7 @@ export async function consumeEvents(
         continue;
       }
       seen.add(key);
-      const result = await processEvent(ports, consumer, event, handler, updatedAt);
+      const result = await processEvent(ports, consumer.consumerKey, event, handler, updatedAt);
       if (result.receipt) committed.push(result.receipt);
       if (result.retry) retries.push(result.retry);
       if (result.dlq) dlq.push(result.dlq);
