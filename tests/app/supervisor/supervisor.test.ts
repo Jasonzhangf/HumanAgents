@@ -190,7 +190,6 @@ test('session lock accepts a supervisor fence and rejects a mismatched fence han
   await lock.release();
   await lease.release();
 });
-
 test('session lock fences writes against the active daemon lease and stale lock takeover', async () => {
   const paths = await fixture();
   const store = new SessionStore(paths);
