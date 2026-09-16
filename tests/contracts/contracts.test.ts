@@ -3,13 +3,22 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
   ContractError, assertAgentRuntimeId, assertBusinessPayload, assertCapabilities, assertCheckpointLink, assertContextBudget, assertExecutionEpoch,
-  assertNotExpired, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
-  assertSameScope, assertScope, checkProviderEventEpoch, id, runtimeId, validateExecutionBinding, validateProviderBinding, validateProviderCapabilities,
+  assertNotExpired, assertPermissionRevisionMatches, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
+  assertScopeAcl,
+  assertSameScope, assertScope, checkProviderEventEpoch, checkScopeAcl, consumerKey, id, occurrenceIdempotencyKey, runtimeId,
+  validateAcpDriverBinding, validateAcpServerBinding, validateAgentMessageEnvelope, validateAgentProviderBinding, validateAgentRequestControl,
+  validateCheckpointClosureRecord, validateCheckpointReentryRecord, validateControlProbeRecord, validateControlWatchdogPolicy,
+  validateEventConsumerCursor, validateEventConsumerReceipt, validateEventHandlerCommit, validateEventRetryObligation, validateExecutionBinding,
+  validateGoalRecord, validateOccurrence, validateProviderBinding, validateProviderCapabilities,
   validateProviderCloseResult, validateProviderError, validateProviderEvent, validateProviderReadiness, validateProviderRecoveryResult, validateProviderResumeInput,
   validateProviderSettleInput, validateProviderSettlement, validateProviderStartInput, validateProviderStartReceipt, validateProviderStopReceipt,
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
+  validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
   validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
-  type BusinessPayload, type Checkpoint, type ExecutionBinding, type ExecutionRuntimePort, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
+  type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
+  type CheckpointClosureRecord, type CheckpointReentryRecord, type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation,
+  type ExecutionBinding, type ExecutionRuntimePort, type GoalRecord, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
+  type Occurrence, type Reminder, type RuntimeBinding, type SchedulerLease, type ScopeAcl, type Subscription,
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
@@ -454,4 +463,166 @@ test('contract source stays provider-neutral without DSH/RCC/provider SDK import
   for (const pattern of forbiddenPatterns) {
     assert.equal(pattern.test(source), false, `contract source must not contain ${pattern}`);
   }
+});
+
+const runtimeBinding = (overrides: Partial<RuntimeBinding> = {}): RuntimeBinding => ({
+  runtimeId: 'runtime-a', agentInstanceId: 'agent-a', roleId: 'executor', taskId: task, assignmentId: 'assignment-a',
+  executionEpoch: 1, scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r1', capabilityDigest: 'sha256:capability-a',
+  bindingDigest: 'sha256:binding-a', ...overrides,
+});
+const providerBindingFramework = (overrides: Partial<AgentProviderBinding> = {}): AgentProviderBinding => ({
+  bindingId: 'binding-a', providerId: 'cc-local', protocol: 'responses', endpointRef: 'local-config', modelRef: 'model-a',
+  configDigest: 'sha256:config-a', capabilityDigest: 'sha256:capability-a', owner: 'harness', ...overrides,
+});
+const messageEnvelope = (overrides: Partial<AgentMessageEnvelope> = {}): AgentMessageEnvelope => ({
+  schemaVersion: 1, messageId: 'message-a', streamId: 'stream-a', sequence: 1, class: 'control', kind: 'stop.requested',
+  publisherBindingRef: 'runtime-a', scopeRef: 'organ-a::task-a', correlation: { taskId: task }, payloadRef: 'asset://payload-a',
+  sourceFactRef: 'fact://source-a', emittedAt: '2099-01-01T00:00:00Z', ...overrides,
+});
+const scopeAcl = (overrides: Partial<ScopeAcl> = {}): ScopeAcl => ({
+  scopeRef: 'organ-a::task-a', principalRef: 'agent-a', permissionRevision: 'permission-r1', allowedCapabilities: ['stop'],
+  allowedMessages: ['control'], ...overrides,
+});
+const consumerCursor = (overrides: Partial<EventConsumerCursor> = {}): EventConsumerCursor => ({
+  consumerKey: consumerKey({ consumerOwner: 'event-owner', scopeRef: 'organ-a::task-a', contractVersion: 'v1' }),
+  streamId: 'stream-a', lastHandledSequence: 0, ...overrides,
+});
+const consumerReceipt = (overrides: Partial<EventConsumerReceipt> = {}): EventConsumerReceipt => ({
+  consumerKey: consumerCursor().consumerKey, messageId: 'message-a', streamId: 'stream-a', handledSequence: 1,
+  disposition: 'applied', effectRefs: ['asset://effect-a'], ...overrides,
+});
+const retryObligation = (overrides: Partial<EventRetryObligation> = {}): EventRetryObligation => ({
+  retryKey: 'retry-a', consumerKey: consumerCursor().consumerKey, messageId: 'message-a', streamId: 'stream-a',
+  failedSequence: 1, attempt: 1, nextAttemptAt: '2099-01-01T00:00:00Z', ownerRef: 'event-owner', failureRef: 'fact://failure-a',
+  state: 'pending', ...overrides,
+});
+const closureRecord = (overrides: Partial<CheckpointClosureRecord> = {}): CheckpointClosureRecord => ({
+  checkpointId: id('checkpoint', 'checkpoint-a'), source: 'harness-control', closureReason: 'stop settled', executionEpoch: 1,
+  committed: true, reentryAllowed: false, pendingOperations: [], unknownOperations: [], recoveryStateRef: providerEvidence('recovery'),
+  nextAction: { kind: 'stop', ref: 'stopped' }, closedAt: '2099-01-01T00:00:00Z', ...overrides,
+});
+const reentryRecord = (overrides: Partial<CheckpointReentryRecord> = {}): CheckpointReentryRecord => ({
+  checkpointId: id('checkpoint', 'checkpoint-a'), reentryId: 'reentry-a', executionEpoch: 2, fencedEpochs: [1],
+  permissionRevision: 'permission-r2', contextViewRef: 'context://view-a', entryPhase: 'recovery', nextAction: 'continue task',
+  reentryRef: 'fact://reentry-a', ...overrides,
+});
+const goalRecord = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
+  goalId: 'goal-a', scopeRef: 'organ-a::task-a', acceptedRevision: 'sha256:goal-a', status: 'active', ...overrides,
+});
+const subscription = (overrides: Partial<Subscription> = {}): Subscription => ({
+  subscriptionId: 'subscription-a', goalId: 'goal-a', scheduleRevision: 1, state: 'active', busyPolicy: 'idle-reminder',
+  currentOccurrenceOrdinal: 0, ...overrides,
+});
+const occurrence = (overrides: Partial<Occurrence> = {}): Occurrence => ({
+  subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 1, state: 'due', dueAt: '2099-01-01T00:00:00Z', ...overrides,
+});
+const reminder = (overrides: Partial<Reminder> = {}): Reminder => ({
+  reminderId: 'reminder-a', subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 1,
+  state: 'pending', dueAt: '2099-01-01T00:00:00Z', ...overrides,
+});
+const lease = (overrides: Partial<SchedulerLease> = {}): SchedulerLease => ({
+  leaseId: 'lease-a', schedulerInstanceId: 'scheduler-a', generation: 1, scopeRef: 'organ-a::task-a',
+  acquiredAt: '2026-09-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z', state: 'active', ...overrides,
+});
+const serverBinding = (overrides: Partial<AcpServerBinding> = {}): AcpServerBinding => ({
+  bindingRef: 'acp-server-a', principalRef: 'agent-a', scopeRef: 'organ-a::task-a', allowedSessionKinds: ['task'],
+  allowedCapabilities: ['stop'], permissionRevision: 'permission-r1', bindingDigest: 'sha256:acp-server-a', ...overrides,
+});
+const driverBinding = (overrides: Partial<AcpDriverBinding> = {}): AcpDriverBinding => ({
+  bindingRef: 'acp-driver-a', externalPeerRef: 'peer-a', taskId: task, assignmentId: 'assignment-a', executionEpoch: 1,
+  delegatedCapabilities: ['stop'], delegationProofRef: 'fact://proof-a', permissionRevision: 'permission-r1', ...overrides,
+});
+
+test('framework runtime, provider, message, and ACP bindings validate positively and reject forged shapes', () => {
+  assert.doesNotThrow(() => validateRuntimeBinding(runtimeBinding()));
+  assert.doesNotThrow(() => validateAgentProviderBinding(providerBindingFramework()));
+  assert.doesNotThrow(() => validateAgentMessageEnvelope(messageEnvelope()));
+  assert.doesNotThrow(() => validateAcpServerBinding(serverBinding()));
+  assert.doesNotThrow(() => validateAcpDriverBinding(driverBinding()));
+
+  assert.throws(() => validateRuntimeBinding({ ...runtimeBinding(), executionEpoch: 0 }), ContractError);
+  assert.throws(() => validateRuntimeBinding({ ...runtimeBinding(), assignmentId: '   ' }), ContractError);
+  assert.throws(() => validateRuntimeBinding({ ...runtimeBinding(), interactionScopeId: 'interaction-a' }), ContractError);
+  assert.throws(() => validateRuntimeBinding({ ...runtimeBinding(), taskId: undefined, assignmentId: undefined }), ContractError);
+  assert.throws(() => validateAgentProviderBinding({ ...providerBindingFramework(), capabilityDigest: '' }), ContractError);
+  assert.throws(() => validateAgentMessageEnvelope({ ...messageEnvelope(), class: 'nonsense' as never }), ContractError);
+  assert.throws(() => validateAgentMessageEnvelope({ ...messageEnvelope(), payloadRef: '' }), ContractError);
+  assert.throws(() => validateAcpServerBinding({ ...serverBinding(), allowedSessionKinds: [] }), ContractError);
+  assert.throws(() => validateAcpDriverBinding({ ...driverBinding(), taskId: undefined, assignmentId: 'dangling' }), ContractError);
+  assert.throws(() => validateAcpDriverBinding({ ...driverBinding(), delegationProofRef: '' }), ContractError);
+});
+
+test('agent request control and runtime binding fingerprints reject task/interaction forgery', () => {
+  const request = {
+    protocolVersion: 1 as const, requestId: 'request-a', attemptId: 'attempt-a',
+    binding: { kind: 'task' as const, taskId: task, assignmentId: 'assignment-a', executionEpoch: 1, bindingFingerprint: 'sha256:binding-a' },
+    providerBinding: providerBindingFramework(), contextViewRef: 'context://view-a', permissionRevision: 'permission-r1',
+    idempotencyKey: 'idem-a', replyMode: 'terminal' as const,
+  };
+  assert.doesNotThrow(() => validateAgentRequestControl(request));
+  assert.throws(() => validateAgentRequestControl({ ...request, binding: { kind: 'task' as const, taskId: task, executionEpoch: 1, bindingFingerprint: 'sha256:binding-a', assignmentId: '' } }), ContractError);
+  assert.throws(() => validateAgentRequestControl({ ...request, binding: { kind: 'interaction' as const, interactionScopeId: 'interaction-a', bindingFingerprint: 'sha256:binding-a' }, permissionRevision: '' }), ContractError);
+});
+
+test('scope ACL and permission revision prevent cross-scope reads and revoked permissions', () => {
+  assert.doesNotThrow(() => validateScopeAcl(scopeAcl()));
+  assertScopeAcl(scopeAcl(), {
+    principalRef: 'agent-a', scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r1', requestedCapability: 'stop', messageClass: 'control',
+  });
+  assert.equal(checkScopeAcl(scopeAcl(), {
+    principalRef: 'agent-a', scopeRef: 'organ-a::other-task', permissionRevision: 'permission-r1',
+  }).allowed, false);
+  assert.equal(checkScopeAcl(scopeAcl({ permissionRevision: 'permission-r1' }), {
+    principalRef: 'agent-a', scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r2',
+  }).allowed, false);
+  assert.throws(() => assertPermissionRevisionMatches('permission-r2', 'permission-r1'), ContractError);
+});
+
+test('consumer cursors, receipts, retry obligations, and commit intents keep final ACK separate from retry', () => {
+  validateEventConsumerCursor(consumerCursor());
+  validateEventConsumerReceipt(consumerReceipt());
+  validateEventRetryObligation(retryObligation());
+  validateEventHandlerCommit({ consumerKey: retryObligation().consumerKey, messageId: retryObligation().messageId, retryObligation: retryObligation() });
+  validateEventHandlerCommit({
+    consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'applied',
+    completionMode: 'journal-atomic', internalEffectFacts: ['asset://effect-a'], externalOperationRefs: [],
+  });
+  assert.equal(consumerKey({ consumerOwner: 'event-owner', scopeRef: 'organ-a::task-a', contractVersion: 'v1' }), 'event-owner::organ-a::task-a::v1');
+  assert.throws(() => validateEventConsumerReceipt({ ...consumerReceipt(), disposition: 'applied', effectRefs: [] }), ContractError);
+  assert.throws(() => validateEventConsumerReceipt({ ...consumerReceipt({ disposition: 'terminal-failure' }), failureRef: undefined }), ContractError);
+  assert.throws(() => validateEventHandlerCommit({
+    consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'applied',
+    completionMode: 'journal-atomic', internalEffectFacts: [], externalOperationRefs: ['asset://external'],
+  }), ContractError);
+});
+
+test('checkpoint closure and reentry keep committed facts separate from reentry permission', () => {
+  validateCheckpointClosureRecord(closureRecord());
+  validateCheckpointReentryRecord(reentryRecord());
+  assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ unknownOperations: ['op://unknown'], reentryAllowed: true }) }), ContractError);
+  assert.throws(() => validateCheckpointClosureRecord({ ...closureRecord({ nextAction: { kind: 'wait' } }) }), ContractError);
+  assert.throws(() => validateCheckpointReentryRecord({ ...reentryRecord({ executionEpoch: 1, fencedEpochs: [1] }) }), ContractError);
+});
+
+test('watchdog, goal, schedule, occurrence, reminder, and lease invariants reject invalid state shapes', () => {
+  validateControlWatchdogPolicy({
+    maxSilentDurationMs: 1, maxTurnDurationMs: 2, maxTotalTurns: 3, maxTurnsBetweenProbes: 4, maxNoProgressTurns: 5, maxControlRepairAttempts: 6,
+  });
+  validateControlProbeRecord({
+    runtimeRef: 'runtime-a', requestRef: 'request-a', turnRef: 'turn-a', probePoint: 'after-tool-result', triggeredAt: '2099-01-01T00:00:00Z', requiredSummary: true,
+  });
+  assert.throws(() => validateControlWatchdogPolicy({
+    maxSilentDurationMs: 0, maxTurnDurationMs: 2, maxTotalTurns: 3, maxTurnsBetweenProbes: 4, maxNoProgressTurns: 5, maxControlRepairAttempts: 6,
+  }), ContractError);
+  validateGoalRecord(goalRecord());
+  assert.throws(() => validateGoalRecord({ ...goalRecord({ status: 'completed' }) }), ContractError);
+  validateSubscription(subscription());
+  assert.throws(() => validateSubscription({ ...subscription({ state: 'bogus' as never }) }), ContractError);
+  validateOccurrence(occurrence());
+  assert.throws(() => validateOccurrence({ ...occurrence({ occurrenceOrdinal: 0 }) }), ContractError);
+  validateReminder(reminder());
+  assert.throws(() => validateReminder({ ...reminder({ dueAt: 'nope' }) }), ContractError);
+  validateSchedulerLease(lease());
+  assert.throws(() => validateSchedulerLease({ ...lease({ expiresAt: '2026-01-01T00:00:00Z' }) }), ContractError);
+  assert.equal(occurrenceIdempotencyKey(occurrence()), 'subscription-a::1::1');
 });

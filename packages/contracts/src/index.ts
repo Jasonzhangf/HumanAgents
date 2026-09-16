@@ -251,7 +251,8 @@ export interface WorkResult {
   readonly outputRefs: readonly string[]; readonly evidenceRefs: readonly EvidenceRef[]; readonly nextAction: 'continue' | 'wait' | 'attention' | 'review' | 'settle' | 'remediate'; readonly conditionRef?: string; readonly failureRef?: string;
 }
 
-export class ContractError extends Error { constructor(message: string) { super(message); this.name = 'ContractError'; } }
+import { ContractError } from './errors.js';
+export { ContractError } from './errors.js';
 const ID_SCOPES: readonly ScopeKind[] = ['organ', 'task', 'cycle', 'operation', 'checkpoint', 'evidence'];
 const CONTROL_KEYS = new Set(['retry', 'degrade', 'steer', 'continuation', 'health', 'debug', 'checkpoint', 'executionEpoch', 'operationId']);
 
@@ -932,3 +933,5 @@ export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionId
     throw new ContractError('provider execution identity mismatch');
   }
 }
+
+export * from './framework.js';

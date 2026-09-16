@@ -6,13 +6,22 @@ import {
   EpochError,
   HealthError,
   PermissionError,
+  advanceConsumerCursor,
   assertExecutionEventFence,
+  assertAgentBindingMatchesRuntime,
+  assertCheckpointClosureCanReenter,
+  assertCheckpointClosureCommitted,
   assertHarnessHealthPublisher,
   assertHealthSnapshotOwnership,
   assertCheckpointOutcome,
   assertCheckpointRecoveryStateRef,
   assertCheckpointRecoveryResponsibility,
+  assertRetryNotExhausted,
+  assertRuntimeBindingEpoch,
+  assertRuntimeBindingPermission,
+  assertRuntimeProviderBindingLocked,
   assertSteerPermission,
+  canRetryNow,
   canTransitionLifecycle,
   canTransitionOrgan,
   classifyErrorPolicy,
@@ -20,6 +29,7 @@ import {
   classifyHealthSnapshot,
   fenceExecutionEvent,
   isLateEventRejection,
+  isRetryPending,
   isTerminalLifecycleState,
   planStopRequest,
   planStopSettle,
@@ -27,7 +37,11 @@ import {
   transitionLifecycle,
   type ExecutionEventFence,
 } from '../../packages/core/src/index.js';
-import { ContractError, id, type Checkpoint, type EvidenceRef, type OrganHealthSnapshot, type ScopeRef } from '../../packages/contracts/src/index.js';
+import {
+  ContractError, consumerKey, id,
+  type AgentProviderBinding, type Checkpoint, type CheckpointClosureRecord, type CheckpointReentryRecord,
+  type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation, type EvidenceRef, type OrganHealthSnapshot, type RuntimeBinding, type ScopeRef,
+} from '../../packages/contracts/src/index.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -309,3 +323,98 @@ function assertCheckpointNextActionForTest(): void {
     ownerId: 'task-owner',
   });
 }
+
+const taskRuntimeBinding = (overrides: Partial<RuntimeBinding> = {}): RuntimeBinding => ({
+  runtimeId: 'runtime-a', agentInstanceId: 'agent-a', roleId: 'executor', taskId: task, assignmentId: 'assignment-a',
+  executionEpoch: 4, scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r1', capabilityDigest: 'sha256:capability-a',
+  bindingDigest: 'sha256:binding-a', ...overrides,
+});
+const providerBinding = (overrides: Partial<AgentProviderBinding> = {}): AgentProviderBinding => ({
+  bindingId: 'binding-a', providerId: 'cc-local', protocol: 'responses', endpointRef: 'local-config', modelRef: 'model-a',
+  configDigest: 'sha256:config-a', capabilityDigest: 'sha256:capability-a', owner: 'harness', ...overrides,
+});
+const coreConsumerCursor = (overrides: Partial<EventConsumerCursor> = {}): EventConsumerCursor => ({
+  consumerKey: consumerKey({ consumerOwner: 'event-owner', scopeRef: 'organ-a::task-a', contractVersion: 'v1' }),
+  streamId: 'stream-a', lastHandledSequence: 2, ...overrides,
+});
+const coreConsumerReceipt = (overrides: Partial<EventConsumerReceipt> = {}): EventConsumerReceipt => ({
+  consumerKey: coreConsumerCursor().consumerKey, messageId: 'message-a', streamId: 'stream-a', handledSequence: 3,
+  disposition: 'applied', effectRefs: ['asset://effect-a'], ...overrides,
+});
+const coreRetryObligation = (overrides: Partial<EventRetryObligation> = {}): EventRetryObligation => ({
+  retryKey: 'retry-a', consumerKey: coreConsumerCursor().consumerKey, messageId: 'message-a', streamId: 'stream-a',
+  failedSequence: 3, attempt: 1, nextAttemptAt: '2020-01-01T00:00:00Z', ownerRef: 'event-owner', failureRef: 'fact://failure-a',
+  state: 'pending', ...overrides,
+});
+const coreClosure = (overrides: Partial<CheckpointClosureRecord> = {}): CheckpointClosureRecord => ({
+  checkpointId: id('checkpoint', 'checkpoint-a'), source: 'harness-control', closureReason: 'stop settled', executionEpoch: 4,
+  committed: true, reentryAllowed: false, pendingOperations: [], unknownOperations: [], recoveryStateRef: evidence('recovery'),
+  nextAction: { kind: 'stop', ref: 'stopped' }, closedAt: '2099-01-01T00:00:00Z', ...overrides,
+});
+const coreReentry = (overrides: Partial<CheckpointReentryRecord> = {}): CheckpointReentryRecord => ({
+  checkpointId: id('checkpoint', 'checkpoint-a'), reentryId: 'reentry-a', executionEpoch: 5, fencedEpochs: [4],
+  permissionRevision: 'permission-r2', contextViewRef: 'context://view-a', entryPhase: 'recovery', nextAction: 'continue',
+  reentryRef: 'fact://reentry-a', ...overrides,
+});
+
+test('runtime bindings enforce task/interaction shape, permission revision, and epoch fence', () => {
+  assert.doesNotThrow(() => assertRuntimeBindingPermission(taskRuntimeBinding(), 'permission-r1'));
+  assert.doesNotThrow(() => assertRuntimeBindingEpoch(taskRuntimeBinding(), 4));
+  assert.throws(() => assertRuntimeBindingPermission(taskRuntimeBinding(), 'permission-r2'), PermissionError);
+  assert.throws(() => assertRuntimeBindingEpoch(taskRuntimeBinding(), 5), EpochError);
+
+  assert.doesNotThrow(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
+    kind: 'task', taskId: task, assignmentId: 'assignment-a', executionEpoch: 4, bindingFingerprint: 'sha256:binding-a',
+  }));
+  assert.throws(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
+    kind: 'task', taskId: id('task', 'task-b'), assignmentId: 'assignment-a', executionEpoch: 4, bindingFingerprint: 'sha256:binding-a',
+  }), PermissionError);
+  assert.throws(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
+    kind: 'task', taskId: task, assignmentId: 'assignment-b', executionEpoch: 4, bindingFingerprint: 'sha256:binding-a',
+  }), PermissionError);
+  assert.throws(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
+    kind: 'task', taskId: task, assignmentId: 'assignment-a', executionEpoch: 5, bindingFingerprint: 'sha256:binding-a',
+  }), PermissionError);
+  assert.throws(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
+    kind: 'task', taskId: task, assignmentId: 'assignment-a', executionEpoch: 4, bindingFingerprint: 'sha256:binding-b',
+  }), PermissionError);
+  assert.doesNotThrow(() => assertAgentBindingMatchesRuntime(
+    taskRuntimeBinding({ taskId: undefined, assignmentId: undefined, interactionScopeId: 'interaction-a', bindingDigest: 'sha256:binding-i' }),
+    { kind: 'interaction', interactionScopeId: 'interaction-a', bindingFingerprint: 'sha256:binding-i' },
+  ));
+  assert.throws(() => assertAgentBindingMatchesRuntime(taskRuntimeBinding(), {
+    kind: 'interaction', interactionScopeId: 'interaction-a', bindingFingerprint: 'sha256:binding-a',
+  }), PermissionError);
+  assert.throws(() => assertRuntimeProviderBindingLocked(taskRuntimeBinding(), providerBinding({ capabilityDigest: 'sha256:capability-b' })), PermissionError);
+});
+
+test('consumer cursor advances monotonically and retry obligations stay bounded', () => {
+  const advanced = advanceConsumerCursor(coreConsumerCursor(), coreConsumerReceipt({ handledSequence: 3 }));
+  assert.equal(advanced.lastHandledSequence, 3);
+  const idempotent = advanceConsumerCursor(advanced, coreConsumerReceipt({ handledSequence: 3, disposition: 'duplicate', effectRefs: [] }));
+  assert.equal(idempotent.lastHandledSequence, 3);
+  const replayed = advanceConsumerCursor(advanced, coreConsumerReceipt({ handledSequence: 1 }));
+  assert.equal(replayed.lastHandledSequence, 3);
+  assert.throws(() => advanceConsumerCursor(coreConsumerCursor(), coreConsumerReceipt({ streamId: 'stream-b' })), CoreError);
+  assert.throws(() => advanceConsumerCursor(coreConsumerCursor(), coreConsumerReceipt({ consumerKey: 'other-key' })), CoreError);
+
+  const pending = coreRetryObligation();
+  assert.equal(isRetryPending(pending), true);
+  assert.equal(canRetryNow(pending, { maxAttempts: 3 }), true);
+  assert.doesNotThrow(() => assertRetryNotExhausted(pending, { maxAttempts: 3 }));
+  assert.equal(canRetryNow(pending, { maxAttempts: 1 }), false);
+  assert.equal(canRetryNow(coreRetryObligation({ state: 'exhausted' }), { maxAttempts: 3 }), false);
+  assert.throws(() => assertRetryNotExhausted(coreRetryObligation({ state: 'exhausted' }), { maxAttempts: 3 }), CoreError);
+  assert.throws(() => canRetryNow(pending, { maxAttempts: 0 }), CoreError);
+});
+
+test('checkpoint closure committed fact does not imply reentry permission', () => {
+  assert.doesNotThrow(() => assertCheckpointClosureCommitted(coreClosure()));
+  assert.throws(() => assertCheckpointClosureCommitted(coreClosure({ committed: false })), CheckpointError);
+  assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: false }), coreReentry()), CheckpointError);
+  assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ committed: false, reentryAllowed: true }), coreReentry()), CheckpointError);
+  assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ unknownOperations: ['op://unknown'], reentryAllowed: false }), coreReentry()), CheckpointError);
+  assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: true }), coreReentry({ fencedEpochs: [] })), CheckpointError);
+  assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: true }), coreReentry({ checkpointId: id('checkpoint', 'checkpoint-b') })), CheckpointError);
+  assert.doesNotThrow(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: true }), coreReentry()));
+});
