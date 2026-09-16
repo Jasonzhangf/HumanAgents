@@ -1,14 +1,20 @@
 # M1-0 Capability and Failure Matrix
 
-Status: `M1-0-REVIEW-RECORDED / NOT-PASS`
-Review time: `2026-09-13T07:14:30-0700` (local), `2026-09-13T14:14:30Z` (UTC)
-Candidate base: `41adc33e62629ae56c7b4eba667d13bd6cb358b8`
-DSH input: commit `c291e7961a515f6d7af9304e7fd1d257929aef26`, tree `e482b49bef64726be8f79380bb35bae569dc3c48`
-Source expansion rechecked: `2026-09-13T07:42:55-0700` (local), `2026-09-13T14:42:55Z` (UTC)
+Status: `M1-0-REBASELINE-CANDIDATE / REVIEW-PENDING / NOT-PASS`
+Review time: `2026-09-16T15:37:33-0700` (local), `2026-09-16T22:37:33Z` (UTC)
+Candidate base: `37ca6fa1ad3db70e017945f449f7b7fb99170972`
+Candidate worktree: `/Volumes/extension/code/humanagent/playground/m1-0-rebaseline-20260916`
+DSH input: commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`, tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`
+Source expansion rechecked: `2026-09-16T22:37:33Z` (UTC)
 
-This is a read-only M1-0 record. It does not implement an adapter, install a
-plugin, make a provider request, or prove M1-0 PASS. Native Astra review and
-parent acceptance remain pending.
+This is a read-only M1-0 rebaseline record. It does not implement an adapter,
+install a plugin, make a provider request, or prove M1-0 PASS. Native Astra
+review and parent acceptance remain pending.
+
+The prior `c291e7961a515f6d7af9304e7fd1d257929aef26` source review remains
+historical evidence only. This candidate refreshes the source and non-secret
+RCC observations against the currently locked clean DSH worktree at
+`/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915`.
 
 ## Evidence Rules
 
@@ -27,18 +33,15 @@ performed in this review.
 
 | Time | Command / source | Result and boundary |
 |---|---|---|
-| 07:14:30-0700 | `pwd; git status --short --branch; git rev-parse HEAD` | Worktree is `/Volumes/extension/code/humanagent/playground/m1-0-capability-review`; HEAD is the requested base; status clean. |
-| 07:14:30-0700 | `ls -ld ~/.rcc /Volumes/extension/.rcc` | `~/.rcc -> /Volumes/extension/.rcc`; target is a directory. Path evidence only. |
-| 07:14:30-0700 | `lsof -nP -iTCP:4444 -sTCP:LISTEN` | `rccv3` PID `22700`, TCP `*:4444 (LISTEN)`. Listener evidence only. |
-| 07:14:30-0700 | `rg -n 'allowed_transports|cc-sol|goaichat|providerId|type\s*=' ~/.rcc/config.toml ~/.rcc/provider/{cc,cc-sol,goaichat}/config.v2.toml` | `allowed_transports = ["json", "sse"]`; `cc` and `cc-sol` declare `type = "responses"`; `goaichat` declares `type = "anthropic"`; routes include `cc-sol` and `goaichat`. Non-sensitive field evidence only. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh rev-parse c291...^{tree}; git -C /Volumes/extension/code/dsh ls-tree c291...` | Locked DSH commit is a commit and resolves to tree `e482b49...`. Object inspection, not dirty checkout evidence. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:package.json` | Root declares version `0.1.5-rc.2`, MIT, `pnpm@11.7.0`, Node `^22.19.0 || >=24.0.0`, workspaces, and host build/test scripts. Source declaration only. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:apps/cli/package.json` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`, MIT, and workspace dependencies including Cordis, app boot, agent, headless, session, tool, and LLM packages. Dependency installation is unverified. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:apps/cli/src/bin.ts` and `src/args.ts` | Public launcher has profile boot, `web` alias, `plugin`, and config dump modes; inner app args are passed to the booted profile. `--resume` is an app argument, not a HumanAgent contract. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/llm/llm-pi-ai/package.json`, `src/config.ts`, `src/provider.ts`, `src/index.ts`, `src/catalog.ts` | Confirmed package exports, `PiAiProviderProfile` / `Config.providers`, protocol table, `buildProvider`, and route model/base URL resolution. Source object evidence only. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/core/agent/src/index.ts`, `packages/core/agent-loop/src/index.ts` | Confirmed `AgentRegistry.create`/`resume`, `AgentHandle.dispose`, agent-loop create/resume preconditions, rollback, and publish path. Source object evidence only. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/api/session-controller/src/index.ts`, `src/commands.ts`, `src/types.ts`, `src/history.ts` | Confirmed `cancel` is an admission receipt, `follow` emits snapshot plus event frames, and cancel/create failure exits. Source object evidence only. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/session/session-persistence-jsonl/src/index.ts`, `src/lease.ts` | Confirmed required `root`, lazy create, read/write open, not-found/already-exists/already-owned/corruption failure classes. Source object evidence only. |
+| 15:37:33-0700 | `pwd; git status --short --branch; git rev-parse HEAD` | Worktree is `/Volumes/extension/code/humanagent/playground/m1-0-rebaseline-20260916`; HEAD is `37ca6fa`; status clean. |
+| 15:37:33-0700 | `readlink ~/.rcc; lsof -nP -iTCP:4444 -sTCP:LISTEN` | `~/.rcc -> /Volumes/extension/.rcc`; `rccv3` is listening on `*:4444` (PID observed as `58485`). Path/listener evidence only. |
+| 15:37:33-0700 | `rg -n 'allowed_transports|routecodex_v3_4444' /Users/fanzhang/.rcc/config.toml; rg -n 'providerId|type\s*=' /Users/fanzhang/.rcc/provider/cc/config.v2.toml /Users/fanzhang/.rcc/provider/cc-sol/config.v2.toml /Users/fanzhang/.rcc/provider/goaichat/config.v2.toml` | `/Users/fanzhang/.rcc/config.toml` declares `routecodex_v3_4444` and `allowed_transports = ["json", "sse"]`; the provider files declare `cc`/`cc-sol` as `responses` and `goaichat` as `anthropic`. Only these non-secret matched fields were retained. |
+| 15:37:33-0700 | `curl --max-time 5 -fsS http://127.0.0.1:4444/health` | RCC v3 health returned `status: ok`, `port: 4444`, `server_id: routecodex_v3_4444`, build `0.90.4789`. Health/readiness evidence only. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 status --short --branch; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 rev-parse HEAD^{commit} HEAD^{tree}` | Clean DSH worktree at commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`, tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`. Clean source baseline evidence. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f500...:package.json` | Root declares version `0.1.6-alpha.1`, MIT and `pnpm@11.7.0`; source declaration only. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f500...:apps/cli/package.json`, `src/bin.ts`, `src/args.ts` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`; profile boot, `web`, `plugin`, config dump, `--patch` and forwarded app arguments are present. Runtime boot/install remains unverified. |
+| 15:37:33-0700 | `test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/node_modules; test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib; test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib/bin.js` | `/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/node_modules` is present, while the two `apps/cli/lib` paths are absent; no built CLI executable was treated as available. |
+| 15:37:33-0700 | current DSH source seam scan | Confirmed current source contains `AgentRegistry.create`/`resume`, `AgentHandle.dispose`, session-controller `follow`/`cancel`, JSONL persistence `create`/`open`, and Cordis `ctx.effect`/`ctx.on` seams. Source evidence only. |
 
 The original `/Volumes/extension/code/dsh` checkout was not used as clean
 evidence. The previously recorded clean-baseline verification is the project
@@ -249,7 +252,7 @@ health capability is `unverified` and cannot be reported as `healthy` or `ready`
 
 | Failure / missing evidence | Status | Required retained evidence | Owner / next action |
 |---|---|---|---|
-| DSH clean source worktree unavailable in this workspace | `evidence-limited` | Locked commit/tree and object-read commands; do not call dirty checkout clean | Parent/DSH owner: use the separately verified clean baseline for any execution gate. |
+| DSH clean source worktree executable unavailable | `dependency-missing / runtime-unverified` | Clean commit/tree is available for source review, but the worktree has no built `apps/cli/lib/bin.js` entrypoint | DSH profile owner: use an approved dedicated profile/build only after the M1-0 gate; do not treat source presence or `node_modules` as boot proof. |
 | DSH dependency installation not performed | `dependency-missing` | Package manager, Node constraint and declared dependency list | DSH profile owner: install/lock only in an approved dedicated profile, then verify. |
 | No approved HumanAgent DSH plugin/bundle identified | `capability-unavailable` | No package name, entrypoint, version or digest was invented | DSH/plugin owner: identify approved bundle and prove load/dispose. |
 | RCC listener absent | `dependency-missing / health-blocked` | Probe error and next probe condition | Provider supervisor: start/restore RCC only under separate authorization. |
