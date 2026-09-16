@@ -265,14 +265,14 @@ test('watchdog applies max turn duration even while chunks keep the stream activ
   const clock = fakeClock();
   const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
     maxSilentDurationMs: 5_000,
-    maxTurnDurationMs: 500,
+    maxTurnDurationMs: 1_000,
     maxTotalTurns: 10,
     maxNoProgressTurns: 10,
     noProgressAtMs: undefined,
   }));
   await coordinator.start();
 
-  for (let sequence = 1; sequence <= 6; sequence += 1) {
+  for (let sequence = 1; sequence <= 4; sequence += 1) {
     clock.now = sequence * 100;
     await coordinator.acceptChunk({
       sequence,
@@ -282,6 +282,7 @@ test('watchdog applies max turn duration even while chunks keep the stream activ
     });
   }
 
+  clock.now = 1_000;
   const closure = await coordinator.checkWatchdog();
   assert.equal(closure?.status, 'incomplete');
   assert.equal(closure?.reason, 'max turn duration reached');
