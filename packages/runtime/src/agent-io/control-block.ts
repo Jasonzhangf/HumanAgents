@@ -126,7 +126,7 @@ function extractMarkerJson(raw: string, marker: string): string | undefined {
   const start = raw.indexOf(marker);
   if (start === -1) return undefined;
   const contentStart = start + marker.length;
-  const endMarker = `[[/${marker.slice(2)}]]`;
+  const endMarker = `[[/${marker.slice(2, -2)}]]`;
   const end = raw.indexOf(endMarker, contentStart);
   if (end === -1) return raw.slice(contentStart).trim();
   return raw.slice(contentStart, end).trim();

@@ -422,6 +422,21 @@ test('partial control decode exposes missing fields and keeps partial raw eviden
   assert.ok(minimal.absentFields.includes('next'));
 });
 
+test('closed control marker decodes only the bounded JSON block', () => {
+  const decoded = decodeControlBlock({
+    sourceRef: 'response:closed-marker',
+    raw: `prefix
+[[control]]
+${VALID_CONTROL}
+[[/control]]
+suffix`,
+  });
+
+  assert.equal(decoded.status, 'valid');
+  assert.equal(decoded.block?.summary, 'completed the requested work');
+  assert.deepEqual(decoded.absentFields, ['turnRef', 'phase', 'next']);
+});
+
 test('missing end-turn summary enters bounded repair and then protocol-noncompliant closure', async () => {
   const store = createMemoryRestartBudgetStore();
   const clock = fakeClock();
