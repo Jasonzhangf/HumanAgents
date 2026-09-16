@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   id,
   type Attention,
+  type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type ProviderBinding,
@@ -346,6 +347,49 @@ test('new service instance reconstructs tasks, events, epochs, and counters from
   const resumed = third.startExecution(firstTask.taskId, { prompt: 'new epoch after restart' });
   assert.equal(resumed.executionEpoch, 2);
   await waitFor(() => assert.equal(third.taskDashboard(firstTask.taskId).state, 'succeeded'));
+});
+
+test('FileCheckpointStore filters latest and previous checkpoints by complete scope', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-store-scope-'));
+  const store = new FileCheckpointStore(join(root, 'shared-cycle.jsonl'));
+  const taskId = id('task', 'task-shared-cycle');
+  const cycleId = id('cycle', 'cycle-shared-cycle');
+  const scopeA = { organId, taskId, cycleId, operationId: id('operation', 'operation-a') };
+  const scopeB = { organId, taskId, cycleId, operationId: id('operation', 'operation-b') };
+  const checkpoint = (input: {
+    readonly id: string;
+    readonly scope: typeof scopeA | typeof scopeB;
+    readonly seq: number;
+    readonly previousCheckpointId: Checkpoint['previousCheckpointId'];
+  }): Checkpoint => ({
+    id: id('checkpoint', input.id),
+    scope: input.scope,
+    cycleId,
+    seq: input.seq,
+    previousCheckpointId: input.previousCheckpointId,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: `checkpoint ${input.id}`,
+    recoveryStateRef: evidence(`recovery-${input.id}`, input.scope),
+    evidenceRefs: [evidence(`completion-${input.id}`, input.scope)],
+    next: { kind: 'continue', ref: 'next' },
+  });
+  const sharedId = id('checkpoint', 'checkpoint-shared');
+  const firstA = checkpoint({ id: sharedId.value, scope: scopeA, seq: 1, previousCheckpointId: null });
+  const secondA = checkpoint({ id: 'checkpoint-a-2', scope: scopeA, seq: 2, previousCheckpointId: sharedId });
+  const firstB = checkpoint({ id: sharedId.value, scope: scopeB, seq: 1, previousCheckpointId: null });
+
+  await store.append({ ownerId: 'test-owner', commitId: 'commit-a-1', checkpoint: firstA });
+  await store.append({ ownerId: 'test-owner', commitId: 'commit-a-2', checkpoint: secondA });
+  await store.append({ ownerId: 'test-owner', commitId: 'commit-b-1', checkpoint: firstB });
+
+  const latestA = await store.readLatest(scopeA);
+  assert.equal(latestA?.checkpoint.id.value, secondA.id.value);
+  assert.equal(latestA?.previous?.id.value, firstA.id.value);
+  const latestB = await store.readLatest(scopeB);
+  assert.equal(latestB?.checkpoint.id.value, firstB.id.value);
+  assert.equal(latestB?.previous, null);
 });
 
 test('journal replay fails explicitly instead of silently dropping corrupted projection records', async () => {

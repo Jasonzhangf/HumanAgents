@@ -601,6 +601,44 @@ test('same checkpoint value in different scopes keeps commit and closure identit
   assert.equal(closureIds[0] === closureIds[1], false);
 });
 
+test('legacy checkpoint closure ids remain readable for submission retries and reentry', async () => {
+  const input = submissionInput();
+  await input.journal.append({
+    ownerId: 'task-owner',
+    commitId: checkpointCommitId(input.checkpoint),
+    checkpoint: input.checkpoint,
+  });
+  input.closurePort.records.set(`checkpoint-closure:${input.checkpoint.id.value}`, {
+    closureKind: 'checkpoint',
+    closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'waiting checkpoint can be reentered from its recovery condition' },
+  });
+
+  const retried = await submitCheckpoint(input);
+  assert.equal(retried.state, 'committed');
+  assert.equal(input.closurePort.committed.length, 0);
+
+  const reentry = await commitReentry({
+    ownerId: 'task-owner',
+    closureId: 'reentry-from-legacy-closure',
+    checkpoint: input.checkpoint,
+    previousExecutionEpoch: input.checkpoint.executionEpoch,
+    newExecutionEpoch: input.checkpoint.executionEpoch + 1,
+    nextAction: { kind: 'continue', ref: 'after-legacy-reentry' },
+    journal: input.journal,
+    closurePort: input.closurePort,
+    admissionPort: new FakeAdmissionPort(),
+  });
+  assert.equal(reentry.state, 'committed');
+  assert.equal(input.closurePort.committed.length, 1);
+});
+
 test('checkpoint submission rejects a committed closure that does not match the checkpoint', async () => {
   const input = submissionInput();
   input.closurePort.records.set(`checkpoint-closure:${checkpointCommitId(input.checkpoint)}`, {

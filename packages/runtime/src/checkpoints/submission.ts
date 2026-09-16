@@ -14,10 +14,12 @@ import {
   assertReconcileEvidenceScope,
   assertReentryRecord,
   computeReentryDecision,
+  sameEvidenceRef,
   sameCheckpointClosureRecord,
   sameOperationId,
   sameReentryRecord,
   type CheckpointClosureRecord,
+  type ClosureRecord,
   type DeadEndRecord,
   type InteractionClosureRecord,
   type OperationReconcilePort,
@@ -34,6 +36,56 @@ import type {
 } from './ports.js';
 
 const CHECKPOINT_SOURCES: readonly CheckpointSubmissionSource[] = ['agent-tool', 'harness-control', 'recovery'];
+
+function checkpointClosureId(checkpoint: Pick<Checkpoint, 'id' | 'scope'>): string {
+  return `checkpoint-closure:${checkpointCommitId(checkpoint)}`;
+}
+
+function legacyCheckpointClosureId(checkpoint: Pick<Checkpoint, 'id'>): string {
+  return `checkpoint-closure:${checkpoint.id.value}`;
+}
+
+function sameCheckpointClosureContent(left: CheckpointClosureRecord, right: CheckpointClosureRecord): boolean {
+  return sameCheckpointClosureRecord({ ...left, closureId: right.closureId }, right);
+}
+
+function closureMatchesCheckpoint(closure: CheckpointClosureRecord, checkpoint: Checkpoint): boolean {
+  if (
+    closure.checkpointId.scope !== checkpoint.id.scope
+    || closure.checkpointId.value !== checkpoint.id.value
+    || closure.outcome !== checkpoint.outcome
+    || closure.summary !== checkpoint.summary
+    || closure.next.kind !== checkpoint.next.kind
+    || closure.next.ref !== checkpoint.next.ref
+  ) {
+    return false;
+  }
+  try {
+    for (const evidenceRef of closure.evidenceRefs) assertSameScope(checkpoint.scope, evidenceRef.scope);
+  } catch {
+    return false;
+  }
+  return checkpoint.evidenceRefs.every((expected) =>
+    closure.evidenceRefs.some((candidate) => sameEvidenceRef(candidate, expected)));
+}
+
+async function readCheckpointClosure(
+  port: CheckpointClosurePort,
+  checkpoint: Checkpoint,
+): Promise<ClosureRecord | null> {
+  const scoped = await port.read(checkpointClosureId(checkpoint));
+  if (scoped) return scoped;
+  const legacy = await port.read(legacyCheckpointClosureId(checkpoint));
+  if (
+    !legacy
+    || !('closureKind' in legacy)
+    || legacy.closureKind !== 'checkpoint'
+    || !closureMatchesCheckpoint(legacy, checkpoint)
+  ) {
+    return null;
+  }
+  return legacy;
+}
 
 function asSubmissionError(error: unknown): CheckpointSubmissionError {
   if (error instanceof CheckpointSubmissionError) return error;
@@ -166,7 +218,7 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
     const evidenceRefs = reconciledOperations.flatMap((result) => result.evidenceRef ? [result.evidenceRef] : []);
     const closure: CheckpointClosureRecord = {
       closureKind: 'checkpoint',
-      closureId: `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`,
+      closureId: checkpointClosureId(input.checkpoint),
       checkpointId: input.checkpoint.id,
       source: input.source,
       outcome: input.checkpoint.outcome,
@@ -175,9 +227,9 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
       evidenceRefs: [...input.checkpoint.evidenceRefs, ...evidenceRefs],
       reentry,
     };
-    const existing = await input.closurePort.read(closure.closureId);
+    const existing = await readCheckpointClosure(input.closurePort, input.checkpoint);
     if (existing) {
-      if (!('closureKind' in existing) || existing.closureKind !== 'checkpoint' || !sameCheckpointClosureRecord(existing, closure)) {
+      if (!('closureKind' in existing) || existing.closureKind !== 'checkpoint' || !sameCheckpointClosureContent(existing, closure)) {
         throw new CheckpointSubmissionError('checkpoint closure id is already committed with different content');
       }
       const verification = await input.journal.verify(input.checkpoint.scope);
@@ -345,7 +397,7 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
     if (!latest || !sameCheckpoint(latest.checkpoint, input.checkpoint)) {
       throw new CheckpointSubmissionError('reentry checkpoint is not the committed latest checkpoint');
     }
-    const closure = await input.closurePort.read(`checkpoint-closure:${checkpointCommitId(latest.checkpoint)}`);
+    const closure = await readCheckpointClosure(input.closurePort, latest.checkpoint);
     if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') {
       throw new CheckpointSubmissionError('reentry requires a committed checkpoint closure');
     }

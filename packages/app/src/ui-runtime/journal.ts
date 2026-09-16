@@ -174,10 +174,20 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     return verification.valid ? { valid: true } : { valid: false, reason: verification.error ?? 'checkpoint journal is invalid' };
   }
 
-  async readLatest(_scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
+  async readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
     const records = await this.journal().replay();
     const checkpoints = records
-      .filter((record) => record.kind === 'checkpoint' && record.checkpoint)
+      .filter((record) =>
+        record.kind === 'checkpoint'
+        && record.checkpoint
+        && record.checkpoint.scope.organId.scope === scope.organId.scope
+        && record.checkpoint.scope.organId.value === scope.organId.value
+        && record.checkpoint.scope.taskId?.scope === scope.taskId?.scope
+        && record.checkpoint.scope.taskId?.value === scope.taskId?.value
+        && record.checkpoint.scope.cycleId?.scope === scope.cycleId?.scope
+        && record.checkpoint.scope.cycleId?.value === scope.cycleId?.value
+        && record.checkpoint.scope.operationId?.scope === scope.operationId?.scope
+        && record.checkpoint.scope.operationId?.value === scope.operationId?.value)
       .map((record) => record.checkpoint as Checkpoint);
     const latest = checkpoints.at(-1);
     if (!latest) return null;

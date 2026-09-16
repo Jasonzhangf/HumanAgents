@@ -1081,7 +1081,12 @@ export class RuntimeTaskCoordinator {
       }
       try {
         const store = this.options.checkpointStoreFor(task.taskId, scope.cycleId);
-        const latest = await store.readLatest(scope);
+        const businessScope: ScopeRef = {
+          organId: this.options.organId,
+          taskId: task.taskId,
+          cycleId: scope.cycleId,
+        };
+        const latest = await store.readLatest(scope) ?? await store.readLatest(businessScope);
         if (!latest || !sameCheckpointBusinessScope(scope, latest.checkpoint.scope)) {
           this.markRecoveryRequired(task);
           continue;
