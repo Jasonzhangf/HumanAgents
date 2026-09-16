@@ -1505,6 +1505,121 @@ test('ordinary settlement removes stop eligibility before awaiting provider sett
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 });
 
+test('UI admission and decoded-control core hooks gate the real execution entry', async () => {
+  const admissionRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-admission-hook-'));
+  let admissionStarts = 0;
+  const admissionBase = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const admissionPort: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => admissionBase.probe(value),
+    capabilities: (value) => admissionBase.capabilities(value),
+    start: async (value) => {
+      admissionStarts += 1;
+      return admissionBase.start(value);
+    },
+    resume: (value) => admissionBase.resume(value),
+    submit: (value) => admissionBase.submit(value),
+    observe: (value) => admissionBase.observe(value),
+    requestStop: (value) => admissionBase.requestStop(value),
+    settle: (value) => admissionBase.settle(value),
+    close: (value) => admissionBase.close(value),
+  };
+  const admissionHooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-admission-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['request.admitted'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['admission rejected'],
+      ownerId: 'ui-admission-gate',
+      nextAction: 'repair admission',
+    }),
+  }]);
+  const admissionService = serviceFor(admissionRoot, admissionPort, 'fake', 'ready', undefined, undefined, admissionHooks);
+  const admissionTask = admissionService.createTask({ title: 'admission gate' });
+  const admissionStarted = admissionService.startExecution(admissionTask.taskId, { prompt: 'must not dispatch' });
+  await waitFor(() => assert.equal(admissionService.taskDashboard(admissionTask.taskId).state, 'failed'));
+  assert.equal(admissionStarts, 0);
+  assert.equal(admissionService.taskDashboard(admissionTask.taskId).error?.ownerId, 'ui-admission-gate');
+  assert.equal(admissionService.eventsSince(admissionStarted.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded'), false);
+
+  const controlRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-control-hook-'));
+  const controlHooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-control-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['control.decoded'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['decoded control rejected'],
+      ownerId: 'ui-control-gate',
+      nextAction: 'repair decoded control',
+    }),
+  }]);
+  const controlService = serviceFor(
+    controlRoot,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    controlHooks,
+  );
+  const controlTask = controlService.createTask({ title: 'control gate' });
+  const controlStarted = controlService.startExecution(controlTask.taskId, { prompt: 'must not succeed' });
+  await waitFor(() => assert.equal(controlService.taskDashboard(controlTask.taskId).state, 'failed'));
+  assert.equal(controlService.taskDashboard(controlTask.taskId).error?.ownerId, 'ui-control-gate');
+  assert.equal(controlService.eventsSince(controlStarted.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded'), false);
+});
+
+test('post-commit context hook failure preserves checkpoint identity and recovery after coordinator rebuild', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-context-commit-hook-'));
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['post-commit publication failed'],
+      ownerId: 'ui-context-commit-gate',
+      nextAction: 'reconcile committed checkpoint',
+    }),
+  }]);
+  const failingService = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    hooks,
+  );
+  const task = failingService.createTask({ title: 'context commit recovery' });
+  const started = failingService.startExecution(task.taskId, { prompt: 'commit once' });
+  await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
+  const failedDashboard = failingService.taskDashboard(task.taskId);
+  if (!failedDashboard.checkpoint) throw new Error('expected durable checkpoint identity');
+  assert.equal(failedDashboard.checkpoint.outcome, 'succeeded');
+  assert.equal(failedDashboard.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
+  const checkpointPath = join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`);
+  const checkpointJournal = await readFile(checkpointPath, 'utf8');
+  assert.equal(checkpointJournal.trim().split('\n').length, 1);
+  assert.match(checkpointJournal, new RegExp(`checkpoint-${task.taskId.value}-1`));
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+  assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+  assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+  assert.equal(rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded' && event.terminalPhase === 'final'), false);
+});
+
 test('actual UI entry follows the provider-neutral composition and keeps hook, context, settlement, and failure evidence visible', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-'));
   const hookEvents: string[] = [];
@@ -1551,6 +1666,8 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   const capabilities = service.executionCapabilities();
   assert.equal(capabilities.providerNeutralHarness.state, 'available');
   assert.equal(capabilities.requestResponseHooks.state, 'available');
+  assert.equal(capabilities.agentIoRequestLifecycle.state, 'unavailable');
+  assert.match(capabilities.agentIoRequestLifecycle.reason, /raw response chunks/);
   assert.equal(capabilities.contextCommitReentry.state, 'available');
   assert.equal(capabilities.checkpointSettlementCancellation.state, 'available');
   assert.equal(capabilities.eventBus.state, 'unavailable');
