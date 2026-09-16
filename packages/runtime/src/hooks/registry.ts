@@ -59,6 +59,7 @@ export function createHookRegistry(
     kind: AgentIoEvent['kind'],
     hookId: string,
     hookStage: AgentHookStage,
+    hookPhase: 'enter' | 'exit',
     input: AgentHookInput,
   ): AgentIoEvent {
     return {
@@ -71,10 +72,11 @@ export function createHookRegistry(
       kind,
       hookId,
       hookStage,
+      hookPhase,
       sourceRef: input.sourceRef,
       correlation: input.correlation,
       payloadRef: input.payloadRef,
-      ownerId: input.correlation,
+      ownerId: hookId,
     };
   }
 
@@ -89,28 +91,36 @@ export function createHookRegistry(
       phase: 'enter' | 'exit',
     ): Promise<HookRunResult[]> {
       const results: HookRunResult[] = [];
-      const skip: string[] = [];
+      const skip = new Set<string>();
       for (const hook of entries.filter((entry) => entry.stages.includes(stage))) {
-        if (skip.includes(hook.hookId)) {
+        if (skip.has(hook.hookId)) {
           results.push({
             hookId: hook.hookId,
             hookStage: stage,
-            result: { status: 'failed', diagnostics: ['core hook failed; dependent hooks were skipped'], ownerId: hook.hookId },
+            result: {
+              status: 'failed',
+              diagnostics: ['core hook failed; dependent hooks were skipped'],
+              ownerId: hook.hookId,
+              nextAction: `inspect hook ${hook.hookId}`,
+            },
             blocked: true,
           });
           continue;
         }
         const fullInput: AgentHookInput = { ...input, stage };
-        await emit(nextEvent('hook.started', hook.hookId, stage, fullInput));
+        await emit(nextEvent('hook.started', hook.hookId, stage, phase, fullInput));
         try {
           const handler = phase === 'enter' ? hook.onEnter : hook.onExit;
           const result = handler ? await handler(fullInput) : { status: 'observed' as const };
           const blocked = hook.mode === 'core' && (result.status === 'failed' || result.status === 'waiting');
-          if (blocked) skip.push(hook.hookId);
+          if (blocked) skip.add(hook.hookId);
           await emit({
-            ...nextEvent('hook.completed', hook.hookId, stage, fullInput),
+            ...nextEvent('hook.completed', hook.hookId, stage, phase, fullInput),
             diagnostics: result.diagnostics,
-            ownerId: result.ownerId,
+            ownerId: result.ownerId ?? hook.hookId,
+            nextAction: result.status === 'failed' || result.status === 'waiting'
+              ? result.nextAction ?? `inspect hook ${hook.hookId}`
+              : undefined,
           });
           results.push({ hookId: hook.hookId, hookStage: stage, result, blocked });
         } catch (error) {
@@ -118,11 +128,12 @@ export function createHookRegistry(
             status: 'failed',
             diagnostics: [error instanceof Error ? error.message : String(error)],
             ownerId: hook.hookId,
+            nextAction: `inspect hook ${hook.hookId}`,
           };
           const blocked = hook.mode === 'core';
-          if (blocked) skip.push(hook.hookId);
+          if (blocked) skip.add(hook.hookId);
           await emit({
-            ...nextEvent('hook.failed', hook.hookId, stage, fullInput),
+            ...nextEvent('hook.failed', hook.hookId, stage, phase, fullInput),
             diagnostics: result.diagnostics,
             ownerId: result.ownerId,
             error: {
@@ -130,6 +141,7 @@ export function createHookRegistry(
               message: result.diagnostics[0] ?? 'hook failed',
               ownerId: hook.hookId,
               retryable: false,
+              nextAction: result.nextAction,
             },
           });
           results.push({ hookId: hook.hookId, hookStage: stage, result, blocked });

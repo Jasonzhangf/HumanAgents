@@ -36,7 +36,9 @@ test('core hook failure blocks the stage result and observation hooks stay obser
   assert.equal(core?.blocked, true);
   assert.equal(observer?.blocked, false);
   assert.equal(events.some((event) => event.kind === 'hook.failed' && event.hookId === 'observer'), true);
-  assert.equal(events.some((event) => event.kind === 'hook.completed' && event.hookId === 'core'), true);
+  const completed = events.find((event) => event.kind === 'hook.completed' && event.hookId === 'core');
+  assert.equal(completed?.ownerId, 'core');
+  assert.equal(completed?.nextAction, 'inspect hook core');
 });
 
 test('hook events carry request, attempt, stage, hook and correlation context', async () => {
@@ -66,7 +68,65 @@ test('hook events carry request, attempt, stage, hook and correlation context', 
   assert.equal(started?.attemptId, 'attempt-42');
   assert.equal(started?.stage, 'response.decoded');
   assert.equal(started?.hookStage, 'response.decoded');
+  assert.equal(started?.hookPhase, 'enter');
   assert.equal(started?.correlation, 'idempotency-42');
   assert.equal(started?.payloadRef, 'payload:42');
   assert.equal(completed?.ownerId, 'request-42');
+});
+
+test('core hook exit failures preserve owner and next action', async () => {
+  const events: AgentIoEvent[] = [];
+  const registry = createHookRegistry((event) => {
+    events.push(event);
+  }, () => 1, [
+    {
+      hookId: 'settlement-gate',
+      version: '1',
+      mode: 'core',
+      stages: ['request.settled'],
+      onExit: async () => {
+        throw new Error('settlement gate failed');
+      },
+    },
+  ]);
+
+  const results = await registry.runStage('request.settled', {
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+  }, 'exit');
+  const failure = results.find((result) => result.hookId === 'settlement-gate');
+
+  assert.equal(failure?.blocked, true);
+  assert.equal(failure?.result.status, 'failed');
+  assert.equal(failure?.result.ownerId, 'settlement-gate');
+  assert.equal(
+    failure?.result.status === 'failed' ? failure.result.nextAction : undefined,
+    'inspect hook settlement-gate',
+  );
+  assert.equal(events.find((event) => event.kind === 'hook.failed')?.hookPhase, 'exit');
+});
+
+test('enter and exit phases do not share blocked hook state', async () => {
+  const registry = createHookRegistry(() => undefined, () => 1, [
+    {
+      hookId: 'enter-only-gate',
+      version: '1',
+      mode: 'core',
+      stages: ['request.created'],
+      onEnter: async () => ({ status: 'waiting', diagnostics: ['blocked'], ownerId: 'policy-owner' }),
+    },
+  ]);
+
+  const enter = await registry.runStage('request.created', {
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+  }, 'enter');
+  const exit = await registry.runStage('request.created', {
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+  }, 'exit');
+
+  assert.equal(enter[0]?.blocked, true);
+  assert.equal(exit[0]?.blocked, false);
+  assert.equal(exit[0]?.result.status, 'observed');
 });

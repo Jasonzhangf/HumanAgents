@@ -180,6 +180,7 @@ export interface AgentIoRequest {
   readonly totalTurns: number;
   readonly noProgressTurns: number;
   readonly controlRepairAttempts: number;
+  readonly turnsSinceProbe: number;
   readonly closed: boolean;
 }
 
@@ -187,6 +188,7 @@ export interface AgentIoBudgetRecord {
   readonly totalTurns: number;
   readonly noProgressTurns: number;
   readonly controlRepairAttempts: number;
+  readonly turnsSinceProbe: number;
   readonly restartCount: number;
 }
 

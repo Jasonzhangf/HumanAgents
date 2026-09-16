@@ -63,6 +63,8 @@ export type AgentIoEvent = {
   readonly closure?: Readonly<AgentIoClosure>;
   readonly hookId?: string;
   readonly hookStage?: AgentHookStage;
+  readonly hookPhase?: 'enter' | 'exit';
+  readonly nextAction?: string;
   readonly error?: {
     readonly code: string;
     readonly message: string;

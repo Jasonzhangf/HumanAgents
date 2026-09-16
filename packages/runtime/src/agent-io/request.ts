@@ -3,6 +3,7 @@ import { decodeControlBlock } from './control-block.js';
 import type { AgentIoEvent, AgentHookStage } from './events.js';
 import type {
   AgentControlBlock,
+  AgentIoBinding,
   AgentIoBudgetRecord,
   AgentIoClock,
   AgentIoClosure,
@@ -49,6 +50,7 @@ export interface EndTurnResult {
 
 export interface AgentIoRequestCoordinatorOptions {
   readonly control: AgentIoRequestControl;
+  readonly lockedBinding: AgentIoBinding;
   readonly data: AgentIoRequestData;
   readonly clock: AgentIoClock;
   readonly budgetStore: AgentIoRestartBudgetStore;
@@ -63,6 +65,7 @@ export class AgentIoRequestError extends Error {
     message: string,
     readonly ownerId: string,
     readonly retryable = false,
+    readonly nextAction?: string,
   ) {
     super(message);
     this.name = 'AgentIoRequestError';
@@ -70,6 +73,55 @@ export class AgentIoRequestError extends Error {
 }
 
 const DEFAULT_PROGRESS_POLICY = DEFAULT_AGENT_IO_POLICY;
+
+function sameProviderBinding(left: AgentIoBinding['provider'], right: AgentIoBinding['provider']): boolean {
+  return left.bindingId === right.bindingId
+    && left.providerId === right.providerId
+    && left.protocol === right.protocol
+    && left.endpointRef === right.endpointRef
+    && left.modelRef === right.modelRef
+    && left.configDigest === right.configDigest
+    && left.capabilityDigest === right.capabilityDigest
+    && left.owner === right.owner;
+}
+
+function assertLockedBinding(control: AgentIoRequestControl, locked: AgentIoBinding): void {
+  if (control.binding.kind !== locked.kind) {
+    throw new AgentIoRequestError(
+      'request.binding.mismatch',
+      'request binding kind does not match the locked runtime binding',
+      locked.provider.owner,
+      false,
+      'recreate the request from the current runtime binding',
+    );
+  }
+  if (control.binding.kind === 'task' && locked.kind === 'task' && control.binding.executionEpoch !== locked.executionEpoch) {
+    throw new AgentIoRequestError(
+      'request.binding.stale',
+      'request execution epoch does not match the locked runtime binding',
+      locked.provider.owner,
+      false,
+      'recreate the request from the current execution epoch',
+    );
+  }
+  const matches = control.binding.kind === 'interaction' && locked.kind === 'interaction'
+    ? control.binding.interactionScopeId === locked.interactionScopeId
+      && control.binding.bindingFingerprint === locked.bindingFingerprint
+    : control.binding.kind === 'task' && locked.kind === 'task'
+      && control.binding.taskId === locked.taskId
+      && control.binding.assignmentId === locked.assignmentId
+      && control.binding.executionEpoch === locked.executionEpoch
+      && control.binding.bindingFingerprint === locked.bindingFingerprint;
+  if (!matches || !sameProviderBinding(control.binding.provider, locked.provider)) {
+    throw new AgentIoRequestError(
+      'request.binding.mismatch',
+      'request binding does not match the locked runtime binding',
+      locked.provider.owner,
+      false,
+      'recreate the request from the current runtime binding',
+    );
+  }
+}
 
 export class AgentIoRequestCoordinator {
   readonly requestId: string;
@@ -79,6 +131,7 @@ export class AgentIoRequestCoordinator {
 
   private status: AgentIoRequestStatus = 'created';
   private closed = false;
+  private closing = false;
   private closure?: AgentIoClosure;
   private budget: AgentIoBudgetRecord;
   private readonly policy: AgentIoPolicy;
@@ -108,7 +161,7 @@ export class AgentIoRequestCoordinator {
     this.hooks = options.hooks;
     this.requestId = options.control.requestId;
     this.attemptId = options.control.attemptId;
-    this.control = options.control;
+    this.control = { ...options.control, binding: structuredClone(options.lockedBinding) };
     this.data = options.data;
     this.budget = budget;
     this.policy = { ...DEFAULT_PROGRESS_POLICY, ...options.policy };
@@ -119,10 +172,11 @@ export class AgentIoRequestCoordinator {
   }
 
   static async create(options: AgentIoRequestCoordinatorOptions): Promise<AgentIoRequestCoordinator> {
+    assertLockedBinding(options.control, options.lockedBinding);
     const existing = await options.budgetStore.read(options.control.requestId);
     const policy = { ...DEFAULT_PROGRESS_POLICY, ...options.policy };
     const budget = existing
-      ? { ...existing, restartCount: existing.restartCount + 1 }
+      ? { ...existing, turnsSinceProbe: existing.turnsSinceProbe ?? 0, restartCount: existing.restartCount + 1 }
       : { ...emptyAgentIoBudgetRecord(), restartCount: 0 };
     if (budget.restartCount > policy.restartBudget) {
       throw new AgentIoRequestError(
@@ -241,8 +295,12 @@ export class AgentIoRequestCoordinator {
     readonly sourceRef: string;
     readonly cursor?: string;
     readonly progressRef?: string;
+    readonly repairing?: boolean;
   }): Promise<EndTurnResult> {
     this.assertOpenRunning();
+    if (this.status === 'repairing' && input.repairing !== true) {
+      throw this.error('request.not.repairable', 'request must be repaired through the repair path');
+    }
     const now = this.nowMs();
     this.lastActivityAtMs = now;
     this.turnStartedAtMs = now;
@@ -293,6 +351,7 @@ export class AgentIoRequestCoordinator {
     this.budget = {
       ...this.budget,
       totalTurns: this.budget.totalTurns + 1,
+      turnsSinceProbe: this.budget.turnsSinceProbe + 1,
     };
     if (!this.progressObservedInTurn) {
       this.budget = { ...this.budget, noProgressTurns: this.budget.noProgressTurns + 1 };
@@ -300,20 +359,28 @@ export class AgentIoRequestCoordinator {
     this.progressObservedInTurn = false;
     await this.persistBudget();
 
+    const probeRequired = this.budget.turnsSinceProbe >= Math.max(1, this.policy.maxTurnsBetweenProbes);
     if (!decode.block?.summary) {
       this.budget = { ...this.budget, controlRepairAttempts: this.budget.controlRepairAttempts + 1 };
       this.repairOrdinal += 1;
+      this.status = 'repairing';
       await this.persistBudget();
       await this.emit({
         kind: 'protocol.repair',
         sourceRef: input.sourceRef,
-        diagnostics: ['end-turn summary missing; entering bounded repair'],
+        diagnostics: [
+          probeRequired
+            ? 'control probe requires summary; entering bounded repair'
+            : 'end-turn summary missing; entering bounded repair',
+        ],
         ownerId: this.control.binding.provider.owner,
       });
       if (this.budget.controlRepairAttempts > this.policy.maxControlRepairAttempts) {
         await this.closeWith({
           status: 'protocol-noncompliant',
-          reason: 'end-turn summary missing after bounded repair attempts',
+          reason: probeRequired
+            ? 'control probe summary missing after bounded repair attempts'
+            : 'end-turn summary missing after bounded repair attempts',
           ownerId: this.control.binding.provider.owner,
           evidenceRefs: [],
           nextAction: 'save raw response and settle through harness control',
@@ -322,11 +389,22 @@ export class AgentIoRequestCoordinator {
       return {
         accepted: false,
         repairRequired: true,
-        reason: 'end-turn summary is required',
+        reason: probeRequired ? 'control probe requires summary' : 'end-turn summary is required',
         decode,
       };
     }
 
+    if (probeRequired) {
+      this.budget = { ...this.budget, turnsSinceProbe: 0 };
+      await this.persistBudget();
+    }
+
+    await this.closeWith({
+      status: 'completed',
+      reason: input.repairing ? 'end-turn repair accepted' : 'end-turn summary accepted',
+      ownerId: this.control.binding.provider.owner,
+      evidenceRefs: [],
+    });
     return { accepted: true, decode };
   }
 
@@ -334,11 +412,11 @@ export class AgentIoRequestCoordinator {
     readonly raw: string;
     readonly sourceRef: string;
   }): Promise<EndTurnResult> {
-    if (this.status !== 'running' || this.closed) {
+    if ((this.status !== 'running' && this.status !== 'repairing') || this.closed) {
       throw this.error('request.not.repairable', 'request must be running before a repair response is accepted');
     }
     this.currentRaw = '';
-    return this.endTurn({ raw: input.raw, sourceRef: input.sourceRef });
+    return this.endTurn({ raw: input.raw, sourceRef: input.sourceRef, repairing: true });
   }
 
   async endOfStream(input: {
@@ -403,6 +481,7 @@ export class AgentIoRequestCoordinator {
       totalTurns: this.budget.totalTurns,
       noProgressTurns: this.budget.noProgressTurns,
       controlRepairAttempts: this.budget.controlRepairAttempts,
+      turnsSinceProbe: this.budget.turnsSinceProbe,
       closed: this.closed,
     };
   }
@@ -434,11 +513,20 @@ export class AgentIoRequestCoordinator {
   }
 
   private async closeWith(closure: AgentIoClosure): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.closure = closure;
-    this.status = closure.status === 'protocol-noncompliant' || closure.status === 'failed' ? 'failed' : closure.status === 'completed' ? 'settled' : closure.status === 'incomplete' ? 'incomplete' : 'unknown';
-    await this.emit({ kind: 'request.settled', sourceRef: this.latestSourceRef, ownerId: closure.ownerId, closure });
+    if (this.closed || this.closing) return;
+    this.closing = true;
+    try {
+      await this.emit(
+        { kind: 'request.settled', sourceRef: this.latestSourceRef, ownerId: closure.ownerId, closure },
+        () => {
+          this.closure = closure;
+          this.status = closure.status === 'protocol-noncompliant' || closure.status === 'failed' ? 'failed' : closure.status === 'completed' ? 'settled' : closure.status === 'incomplete' ? 'incomplete' : 'unknown';
+          this.closed = true;
+        },
+      );
+    } finally {
+      this.closing = false;
+    }
   }
 
   private incompleteClosure(): AgentIoClosure {
@@ -462,7 +550,7 @@ export class AgentIoRequestCoordinator {
 
   private assertOpenRunning(): void {
     if (this.closed) throw this.error('request.closed', 'request is closed');
-    if (this.status !== 'running' && this.status !== 'dispatched') {
+    if (this.status !== 'running' && this.status !== 'repairing' && this.status !== 'dispatched') {
       throw this.error('request.not.running', `request is not running: ${this.status}`);
     }
   }
@@ -480,7 +568,10 @@ export class AgentIoRequestCoordinator {
     await this.emit({ kind, stage });
   }
 
-  private async emit(input: Omit<AgentIoEvent, 'eventId' | 'requestId' | 'attemptId' | 'sequence' | 'occurredAtMs' | 'stage'> & { readonly stage?: AgentHookStage; readonly kind: AgentIoEvent['kind'] }): Promise<void> {
+  private async emit(
+    input: Omit<AgentIoEvent, 'eventId' | 'requestId' | 'attemptId' | 'sequence' | 'occurredAtMs' | 'stage'> & { readonly stage?: AgentHookStage; readonly kind: AgentIoEvent['kind'] },
+    beforePublish?: () => void,
+  ): Promise<void> {
     const event: AgentIoEvent = {
       ...input,
       eventId: `event-${this.requestId}-${input.kind}-${++this.sequence}`,
@@ -491,17 +582,48 @@ export class AgentIoRequestCoordinator {
       stage: input.stage ?? this.stageForKind(input.kind),
     };
     this.emitted.push(event.eventId);
-    await this.onEvent(event);
-    if (input.kind.startsWith('hook.')) return;
+    if (input.kind.startsWith('hook.')) {
+      await this.onEvent(event);
+      return;
+    }
     const results = await this.hooks?.runStage(event.stage, {
       requestId: this.requestId,
       attemptId: this.attemptId,
       sourceRef: this.latestSourceRef,
       correlation: this.control.idempotencyKey,
     }, 'enter');
-    if (results?.some((result) => result.blocked)) {
-      throw this.error('hook.blocked', `core hook blocked stage ${event.stage}`);
+    const enterFailure = results?.find((result) => result.blocked);
+    if (enterFailure) {
+      throw new AgentIoRequestError(
+        'hook.blocked',
+        `core hook blocked stage ${event.stage}`,
+        enterFailure.result.ownerId ?? enterFailure.hookId,
+        false,
+        enterFailure.result.status === 'failed' || enterFailure.result.status === 'waiting'
+          ? enterFailure.result.nextAction ?? `inspect hook ${enterFailure.hookId}`
+          : undefined,
+      );
     }
+    const exitResults = await this.hooks?.runStage(event.stage, {
+      requestId: this.requestId,
+      attemptId: this.attemptId,
+      sourceRef: this.latestSourceRef,
+      correlation: this.control.idempotencyKey,
+    }, 'exit');
+    const exitFailure = exitResults?.find((result) => result.blocked);
+    if (exitFailure) {
+      throw new AgentIoRequestError(
+        'hook.blocked',
+        `core hook blocked stage ${event.stage} exit`,
+        exitFailure.result.ownerId ?? exitFailure.hookId,
+        false,
+        exitFailure.result.status === 'failed' || exitFailure.result.status === 'waiting'
+          ? exitFailure.result.nextAction ?? `inspect hook ${exitFailure.hookId}`
+          : undefined,
+      );
+    }
+    beforePublish?.();
+    await this.onEvent(event);
   }
 
   private stageForKind(kind: AgentIoEvent['kind']): AgentHookStage {

@@ -13,5 +13,5 @@ export function createMemoryRestartBudgetStore(): AgentIoRestartBudgetStore {
 }
 
 export function emptyAgentIoBudgetRecord(): AgentIoBudgetRecord {
-  return { totalTurns: 0, noProgressTurns: 0, controlRepairAttempts: 0, restartCount: 0 };
+  return { totalTurns: 0, noProgressTurns: 0, controlRepairAttempts: 0, turnsSinceProbe: 0, restartCount: 0 };
 }

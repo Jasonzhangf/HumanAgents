@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   AgentIoRequestCoordinator,
+  AgentIoRequestError,
   createMemoryRestartBudgetStore,
   decodeControlBlock,
   type AgentIoClock,
+  type AgentIoBinding,
   type AgentIoEvent,
   type AgentIoPolicy,
   type AgentIoProviderBinding,
@@ -48,6 +50,10 @@ function requestControl(override?: Partial<AgentIoRequestControl>): AgentIoReque
   };
 }
 
+function lockedBinding(): AgentIoBinding {
+  return structuredClone(requestControl().binding);
+}
+
 function requestData(): AgentIoRequestCoordinatorOptions['data'] {
   return {
     inputRefs: ['asset://input'],
@@ -80,6 +86,7 @@ function coordinatorOptions(
 ): AgentIoRequestCoordinatorOptions {
   return {
     control: requestControl(),
+    lockedBinding: lockedBinding(),
     data: requestData(),
     clock: clock.clock,
     budgetStore: store,
@@ -161,6 +168,239 @@ test('streamed deltas decode into one end-turn control and persist turn budget',
   assert.equal(coordinator.snapshot().totalTurns, 1);
   assert.equal(coordinator.snapshot().attempt.turnNumber, 1);
   assert.equal(coordinator.latestControlBlock()?.summary, 'mostly done');
+  assert.equal(coordinator.snapshot().closed, true);
+  assert.equal(coordinator.snapshot().status, 'settled');
+});
+
+test('accepted end-turn runs the exit hook and emits request.settled', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const { events, onEvent } = collectEvents();
+  const registry = createHookRegistry(onEvent, clock.clock.now);
+  let exitCalls = 0;
+  registry.add({
+    hookId: 'settlement-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['request.settled'],
+    onExit: async () => {
+      exitCalls += 1;
+      return { status: 'observed' };
+    },
+  });
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, undefined, registry, onEvent));
+  await coordinator.start();
+
+  const result = await coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' });
+
+  assert.equal(result.accepted, true);
+  assert.equal(exitCalls, 1);
+  assert.equal(coordinator.snapshot().closed, true);
+  assert.ok(events.some((event) => event.kind === 'request.settled' && event.closure?.status === 'completed'));
+});
+
+test('core exit hook failure preserves owner and next action without reporting settled', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const registry = createHookRegistry(() => undefined, clock.clock.now, [{
+    hookId: 'settlement-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['request.settled'],
+    onExit: async () => {
+      throw new Error('settlement gate failed');
+    },
+  }]);
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, undefined, registry));
+  await coordinator.start();
+
+  await assert.rejects(
+    coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' }),
+    (error) => error instanceof AgentIoRequestError
+      && error.code === 'hook.blocked'
+      && error.ownerId === 'settlement-gate'
+      && error.nextAction === 'inspect hook settlement-gate',
+  );
+  assert.equal(coordinator.snapshot().closed, false);
+  assert.equal(coordinator.snapshot().status, 'running');
+});
+
+test('settlement publication failure leaves the request closed and does not republish', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  let settlementPublications = 0;
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(
+    store,
+    clock,
+    undefined,
+    undefined,
+    (event) => {
+      if (event.kind !== 'request.settled') return;
+      settlementPublications += 1;
+      throw new Error('settlement event sink unavailable');
+    },
+  ));
+  await coordinator.start();
+
+  await assert.rejects(
+    coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' }),
+    /settlement event sink unavailable/,
+  );
+
+  assert.equal(coordinator.snapshot().closed, true);
+  assert.equal(coordinator.snapshot().status, 'settled');
+  const closure = await coordinator.endOfStream({ sourceRef: 'response:eof' });
+  assert.equal(closure.status, 'completed');
+  assert.equal(settlementPublications, 1);
+});
+
+test('request rejects stale and mismatched caller bindings before dispatch', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const staleControl = requestControl({
+    binding: {
+      kind: 'task',
+      taskId: 'task-agent-io',
+      assignmentId: 'assignment-agent-io',
+      executionEpoch: 0,
+      bindingFingerprint: 'binding-fingerprint',
+      provider: providerBinding(),
+    },
+  });
+  await assert.rejects(
+    AgentIoRequestCoordinator.create({
+      ...coordinatorOptions(store, clock),
+      control: staleControl,
+    }),
+    (error) => error instanceof AgentIoRequestError && error.code === 'request.binding.stale',
+  );
+
+  const mismatchedProvider = { ...providerBinding(), modelRef: 'model://caller-supplied' };
+  await assert.rejects(
+    AgentIoRequestCoordinator.create({
+      ...coordinatorOptions(store, clock),
+      control: requestControl({
+        binding: {
+          ...requestControl().binding,
+          provider: mismatchedProvider,
+        } as AgentIoRequestControl['binding'],
+      }),
+    }),
+    (error) => error instanceof AgentIoRequestError && error.code === 'request.binding.mismatch',
+  );
+});
+
+test('control probe cadence persists across restart without requiring optional probe fields', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const first = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
+    maxTurnsBetweenProbes: 2,
+    maxControlRepairAttempts: 5,
+  }));
+  await first.start();
+  const missingSummary = await first.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+  assert.equal(missingSummary.repairRequired, true);
+  assert.equal(first.budgetRecord().turnsSinceProbe, 1);
+
+  const second = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
+    maxTurnsBetweenProbes: 2,
+    maxControlRepairAttempts: 5,
+  }));
+  assert.equal(second.budgetRecord().turnsSinceProbe, 1);
+  await second.start();
+  const accepted = await second.repair({
+    raw: '{"summary":"still working","goal":{"status":"in-progress"}}',
+    sourceRef: 'turn:2',
+  });
+  assert.equal(accepted.accepted, true);
+  assert.equal(second.budgetRecord().turnsSinceProbe, 0);
+  assert.equal(second.snapshot().closed, true);
+});
+
+test('bounded repair attempts persist across coordinator recreation', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const policy = {
+    maxControlRepairAttempts: 2,
+    maxNoProgressTurns: 10,
+  };
+
+  const first = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, policy));
+  await first.start();
+  const firstResult = await first.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+  assert.equal(firstResult.repairRequired, true);
+  assert.equal(first.budgetRecord().controlRepairAttempts, 1);
+
+  const second = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, policy));
+  assert.equal(second.budgetRecord().controlRepairAttempts, 1);
+  await second.start();
+  const secondResult = await second.repair({ raw: '{"phase":"continue"}', sourceRef: 'turn:2' });
+  assert.equal(secondResult.repairRequired, true);
+  assert.equal(second.budgetRecord().controlRepairAttempts, 2);
+  assert.equal(second.snapshot().closed, false);
+
+  const third = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, policy));
+  assert.equal(third.budgetRecord().controlRepairAttempts, 2);
+  await third.start();
+  const thirdResult = await third.repair({ raw: '{"phase":"continue"}', sourceRef: 'turn:3' });
+  assert.equal(thirdResult.accepted, false);
+  assert.equal(third.budgetRecord().controlRepairAttempts, 3);
+  assert.equal(third.snapshot().closed, true);
+  assert.equal(third.snapshot().status, 'failed');
+});
+
+test('repair acceptance does not create a tool-intent side effect', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const { events, onEvent } = collectEvents();
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, undefined, undefined, onEvent));
+  await coordinator.start();
+  await coordinator.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+
+  const repaired = await coordinator.repair({
+    raw: '{"summary":"repaired","next":{"kind":"reason","objective":"continue"}}',
+    sourceRef: 'turn:2',
+  });
+
+  assert.equal(repaired.accepted, true);
+  assert.equal(coordinator.snapshot().status, 'settled');
+  assert.equal(coordinator.snapshot().attempt.repairOrdinal, 1);
+  assert.equal(events.some((event) => event.kind === 'tool-intent.decoded'), false);
+  assert.equal(coordinator.snapshot().closed, true);
+});
+
+test('repair state requires the repair path and rejects future execution epochs', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
+    maxControlRepairAttempts: 2,
+  }));
+  await coordinator.start();
+  await coordinator.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+
+  assert.equal(coordinator.snapshot().status, 'repairing');
+  await assert.rejects(
+    coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1-direct' }),
+    (error) => error instanceof AgentIoRequestError && error.code === 'request.not.repairable',
+  );
+
+  const futureControl = requestControl({
+    binding: {
+      kind: 'task',
+      taskId: 'task-agent-io',
+      assignmentId: 'assignment-agent-io',
+      executionEpoch: 2,
+      bindingFingerprint: 'binding-fingerprint',
+      provider: providerBinding(),
+    },
+  });
+  await assert.rejects(
+    AgentIoRequestCoordinator.create({
+      ...coordinatorOptions(store, clock),
+      control: futureControl,
+    }),
+    (error) => error instanceof AgentIoRequestError && error.code === 'request.binding.stale',
+  );
 });
 
 test('partial control decode exposes missing fields and keeps partial raw evidence', () => {
@@ -254,7 +494,8 @@ test('watchdog closes the request on silent duration and no-progress turns', asy
     noProgressAtMs: undefined,
   }));
   await progress.start();
-  await progress.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' });
+  const repairRequired = await progress.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+  assert.equal(repairRequired.repairRequired, true);
   const noProgressClosure = await progress.checkWatchdog();
   assert.equal(noProgressClosure?.status, 'incomplete');
   assert.equal(progress.budgetRecord().noProgressTurns, 1);
@@ -289,7 +530,7 @@ test('watchdog applies max turn duration even while chunks keep the stream activ
   assert.equal(coordinator.snapshot().closed, true);
 });
 
-test('watchdog applies max turn duration per accepted turn, not attempt lifetime', async () => {
+test('watchdog applies max turn duration per turn while a repair remains open', async () => {
   const store = createMemoryRestartBudgetStore();
   const clock = fakeClock();
   const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, {
@@ -302,8 +543,8 @@ test('watchdog applies max turn duration per accepted turn, not attempt lifetime
   await coordinator.start();
 
   clock.now = 900;
-  const first = await coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' });
-  assert.equal(first.accepted, true);
+  const first = await coordinator.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+  assert.equal(first.repairRequired, true);
 
   clock.now = 1_000;
   assert.equal(await coordinator.checkWatchdog(), undefined);
@@ -311,11 +552,8 @@ test('watchdog applies max turn duration per accepted turn, not attempt lifetime
   clock.now = 1_800;
   const second = await coordinator.repair({ raw: VALID_CONTROL, sourceRef: 'turn:2' });
   assert.equal(second.accepted, true);
-
-  clock.now = 2_700;
-  assert.equal(await coordinator.checkWatchdog(), undefined);
+  assert.equal(coordinator.snapshot().closed, true);
   assert.equal(coordinator.budgetRecord().totalTurns, 2);
-  assert.equal(coordinator.snapshot().closed, false);
 });
 
 test('restart budget persists across creates and rejects exhausted restarts', async () => {
