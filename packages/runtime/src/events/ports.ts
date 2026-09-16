@@ -57,6 +57,16 @@ export interface EventExternalOperationPort {
   readExternalOperation(input: ReadExternalOperationInput): Promise<EventExternalOperation | null>;
 }
 
+export interface ReadExternalOperationInput {
+  readonly operationRef: string;
+  readonly consumerKey: string;
+  readonly messageId: string;
+}
+
+export interface EventExternalOperationPort {
+  readExternalOperation(input: ReadExternalOperationInput): Promise<EventExternalOperation | null>;
+}
+
 export interface ListPendingRetryObligationsInput {
   readonly streamId: string;
   readonly consumerKey: string;
