@@ -176,6 +176,9 @@ test('rejects control fields in business payloads recursively', () => {
   assert.throws(() => assertBusinessPayload({ answer: 'ok', steer: true }), ContractError);
   assert.throws(() => assertBusinessPayload({ nested: { steer: true } }), ContractError);
   assert.throws(() => assertBusinessPayload({ nested: [{ executionEpoch: 1 }] }), ContractError);
+  for (const field of ['retry', 'degrade', 'continuation', 'health', 'debug', 'checkpoint', 'operationId'] as const) {
+    assert.throws(() => assertBusinessPayload({ [field]: true }), ContractError);
+  }
   assert.doesNotThrow(() => assertBusinessPayload({ nested: { steerFaith: 'not-control' }, list: [{ checkpointAt: 'not-control' }] }));
   const cyclic = {} as Record<string, unknown>;
   cyclic.self = cyclic;
@@ -684,9 +687,15 @@ test('versioned driver contract keeps dispatch, observation, result, reconcile, 
 
 test('scope ACL and permission revision prevent cross-scope reads and revoked permissions', () => {
   assert.doesNotThrow(() => validateScopeAcl(scopeAcl()));
-  assertScopeAcl(scopeAcl(), {
+  const allowedSubject = {
     principalRef: 'agent-a', scopeRef: 'organ-a::task-a', permissionRevision: 'permission-r1', requestedCapability: 'stop', messageClass: 'control',
-  });
+  } as const;
+  assertScopeAcl(scopeAcl(), allowedSubject);
+  assert.throws(() => assertScopeAcl(scopeAcl(), { ...allowedSubject, principalRef: 'agent-b' }), ContractError);
+  assert.throws(() => assertScopeAcl(scopeAcl(), { ...allowedSubject, scopeRef: 'organ-a::other-task' }), ContractError);
+  assert.throws(() => assertScopeAcl(scopeAcl(), { ...allowedSubject, permissionRevision: 'permission-r2' }), ContractError);
+  assert.throws(() => assertScopeAcl(scopeAcl(), { ...allowedSubject, requestedCapability: 'read' }), ContractError);
+  assert.throws(() => assertScopeAcl(scopeAcl(), { ...allowedSubject, messageClass: 'observation' }), ContractError);
   assert.equal(checkScopeAcl(scopeAcl(), {
     principalRef: 'agent-a', scopeRef: 'organ-a::other-task', permissionRevision: 'permission-r1',
   }).allowed, false);
@@ -701,6 +710,14 @@ test('consumer cursors, receipts, retry obligations, and commit intents keep fin
   validateEventConsumerReceipt(consumerReceipt());
   validateEventRetryObligation(retryObligation());
   validateEventHandlerCommit({ consumerKey: retryObligation().consumerKey, messageId: retryObligation().messageId, retryObligation: retryObligation() });
+  assert.throws(() => validateEventHandlerCommit({
+    consumerKey: retryObligation().consumerKey, messageId: retryObligation().messageId,
+    retryObligation: retryObligation({ state: 'exhausted' }),
+  }), ContractError);
+  assert.throws(() => validateEventHandlerCommit({
+    consumerKey: retryObligation().consumerKey, messageId: retryObligation().messageId,
+    retryObligation: retryObligation({ state: 'cancelled' }),
+  }), ContractError);
   validateEventHandlerCommit({
     consumerKey: consumerReceipt().consumerKey, messageId: consumerReceipt().messageId, disposition: 'applied',
     completionMode: 'journal-atomic', internalEffectFacts: ['asset://effect-a'], externalOperationRefs: [],

@@ -11,8 +11,11 @@ export function advanceConsumerCursor(current: EventConsumerCursor, receipt: Eve
   validateEventConsumerReceipt(receipt);
   if (current.streamId !== receipt.streamId) throw new CoreError('consumer cursor stream mismatch');
   if (current.consumerKey !== receipt.consumerKey) throw new CoreError('consumer cursor key mismatch');
-  const lastHandledSequence = Math.max(current.lastHandledSequence, receipt.handledSequence);
-  return { ...current, lastHandledSequence };
+  if (receipt.handledSequence <= current.lastHandledSequence) return current;
+  if (receipt.handledSequence !== current.lastHandledSequence + 1) {
+    throw new CoreError(`consumer cursor sequence gap: expected ${current.lastHandledSequence + 1}, received ${receipt.handledSequence}`);
+  }
+  return { ...current, lastHandledSequence: receipt.handledSequence };
 }
 
 export function isRetryPending(obligation: EventRetryObligation): boolean {

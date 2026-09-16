@@ -117,6 +117,7 @@ test('epoch fence accepts the current execution only and marks late events stale
     sourceEpoch: 3,
     currentEpoch: 4,
   });
+  assert.throws(() => assertExecutionEventFence(current, { ...matching, executionEpoch: 3 }), EpochError);
   assert.throws(() => assertExecutionEventFence(current, { ...matching, attempt: 1 }), EpochError);
   assert.throws(() => assertExecutionEventFence(current, { ...matching, inputRevision: 6 }), EpochError);
   assert.throws(() => assertExecutionEventFence(current, { ...matching, taskId: id('task', 'task-b') }), EpochError);
@@ -399,6 +400,7 @@ test('consumer cursor advances monotonically and retry obligations stay bounded'
   assert.equal(idempotent.lastHandledSequence, 3);
   const replayed = advanceConsumerCursor(advanced, coreConsumerReceipt({ handledSequence: 1 }));
   assert.equal(replayed.lastHandledSequence, 3);
+  assert.throws(() => advanceConsumerCursor(coreConsumerCursor(), coreConsumerReceipt({ handledSequence: 4 })), CoreError);
   assert.throws(() => advanceConsumerCursor(coreConsumerCursor(), coreConsumerReceipt({ streamId: 'stream-b' })), CoreError);
   assert.throws(() => advanceConsumerCursor(coreConsumerCursor(), coreConsumerReceipt({ consumerKey: 'other-key' })), CoreError);
 
@@ -409,6 +411,8 @@ test('consumer cursor advances monotonically and retry obligations stay bounded'
   assert.equal(canRetryNow(pending, { maxAttempts: 1 }), false);
   assert.equal(canRetryNow(coreRetryObligation({ state: 'exhausted' }), { maxAttempts: 3 }), false);
   assert.throws(() => assertRetryNotExhausted(coreRetryObligation({ state: 'exhausted' }), { maxAttempts: 3 }), CoreError);
+  assert.equal(isRetryPending(coreRetryObligation({ state: 'cancelled' })), false);
+  assert.throws(() => assertRetryNotExhausted(coreRetryObligation({ state: 'cancelled' }), { maxAttempts: 3 }), CoreError);
   assert.throws(() => canRetryNow(pending, { maxAttempts: 0 }), CoreError);
 });
 

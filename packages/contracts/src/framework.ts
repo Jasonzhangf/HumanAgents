@@ -759,6 +759,9 @@ export function validateEventHandlerCommit(input: EventHandlerCommit): void {
     if (input.retryObligation.consumerKey !== input.consumerKey || input.retryObligation.messageId !== input.messageId) {
       throw new ContractError('retry obligation must match handler commit identity');
     }
+    if (input.retryObligation.state !== 'pending') {
+      throw new ContractError('retry intent requires a pending retry obligation');
+    }
     return;
   }
   if (!RECEIPT_DISPOSITIONS.includes(input.disposition)) throw new ContractError(`unknown handler commit disposition: ${input.disposition}`);
