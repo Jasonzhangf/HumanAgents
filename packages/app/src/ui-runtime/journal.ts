@@ -54,6 +54,19 @@ function checkpointIdKey(id: Checkpoint['id']): string {
   return `${id.scope}:${id.value}`;
 }
 
+function checkpointScopeKey(scope: ScopeRef): string {
+  return [
+    `${scope.organId.scope}:${scope.organId.value}`,
+    `${scope.taskId?.scope ?? '-'}:${scope.taskId?.value ?? '-'}`,
+    `${scope.cycleId?.scope ?? '-'}:${scope.cycleId?.value ?? '-'}`,
+    `${scope.operationId?.scope ?? '-'}:${scope.operationId?.value ?? '-'}`,
+  ].join('|');
+}
+
+function checkpointChainKey(id: Checkpoint['id'], scope: ScopeRef): string {
+  return `${checkpointIdKey(id)}|${checkpointScopeKey(scope)}`;
+}
+
 function validateEvidenceRefs(value: unknown, filePath: string, line: number): void {
   if (!Array.isArray(value)) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: event.evidenceRefs are required`);
@@ -180,10 +193,10 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
 
   async readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
     const records = await this.journal().replay();
-    const checkpointById = new Map<string, Checkpoint>();
+    const checkpointByChain = new Map<string, Checkpoint>();
     for (const record of records) {
       if (record.kind === 'checkpoint' && record.checkpoint) {
-        checkpointById.set(checkpointIdKey(record.checkpoint.id), record.checkpoint);
+        checkpointByChain.set(checkpointChainKey(record.checkpoint.id, record.checkpoint.scope), record.checkpoint);
       }
     }
     const businessCheckpoints = records
@@ -205,7 +218,14 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     if (latest.previousCheckpointId === null) {
       return { checkpoint: latest, previous: null };
     }
-    const previous = checkpointById.get(checkpointIdKey(latest.previousCheckpointId));
+    const previous = checkpointByChain.get(checkpointChainKey(latest.previousCheckpointId, latest.scope))
+      ?? (latest.outcome === 'stopped' && latest.scope.operationId
+        ? checkpointByChain.get(checkpointChainKey(latest.previousCheckpointId, {
+          organId: latest.scope.organId,
+          ...(latest.scope.taskId ? { taskId: latest.scope.taskId } : {}),
+          ...(latest.scope.cycleId ? { cycleId: latest.scope.cycleId } : {}),
+        }))
+        : undefined);
     if (!previous) {
       throw new Error(`corrupt UI runtime checkpoint journal ${this.filePath}: previous checkpoint ${latest.previousCheckpointId.value} is missing`);
     }
