@@ -33,6 +33,9 @@ import type { AgentHookStage } from '../agent-io/events.js';
 import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
+import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
+import type { RequirementInboxState } from '../intake/requirement-inbox.js';
+import type { ConfirmationLedgerState } from '../explicit-brain/router.js';
 
 export type RuntimeTaskError = {
   readonly code: string;
@@ -175,6 +178,12 @@ export interface RuntimeTaskJournalPort {
   replay(): readonly RuntimeTaskJournalRecord[];
 }
 
+export interface RuntimeExplicitBrainJournalState {
+  readonly intake: ExplicitIntakeState;
+  readonly inbox: RequirementInboxState;
+  readonly confirmationLedger: ConfirmationLedgerState;
+}
+
 export type RuntimeTaskJournalRecord =
   | {
       readonly kind: 'task.created';
@@ -203,6 +212,10 @@ export type RuntimeTaskJournalRecord =
       readonly event: RuntimeTaskEvent;
       readonly taskOutput?: string;
       readonly error?: RuntimeTaskError;
+    }
+  | {
+      readonly kind: 'explicit-brain.state';
+      readonly state: RuntimeExplicitBrainJournalState;
     };
 
 export class RuntimeTaskControlError extends Error {
@@ -1534,6 +1547,9 @@ export class RuntimeTaskCoordinator {
           if (record.error) task.error = record.error;
           if (record.event.kind === 'provider.tool') task.currentNode = 'provider.tool';
           if (record.event.kind === 'provider.model') task.currentNode = 'provider.model';
+          break;
+        }
+        case 'explicit-brain.state': {
           break;
         }
       }

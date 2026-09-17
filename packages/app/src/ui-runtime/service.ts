@@ -16,6 +16,7 @@ import {
   type ConfirmRequirementDraft,
   type ConfirmedRequirementDraft,
   type ExplicitInput,
+  type ExplicitIntakeState,
   type ExplicitInteractionSnapshot,
   type MatchResult,
   type Proposal,
@@ -24,8 +25,10 @@ import {
 import {
   RequirementInbox,
   type InboxReceipt,
+  type RequirementInboxState,
 } from '../../../runtime/src/intake/requirement-inbox.js';
 import {
+  type ConfirmationLedgerState,
   ConfirmationLedger,
   ExplicitBrainRouterError,
   RequirementSubmissionOwner,
@@ -36,6 +39,7 @@ import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -165,6 +169,7 @@ export class UiRuntimeService {
   private readonly explicitIntake = new ExplicitIntake();
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
+  private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -174,6 +179,7 @@ export class UiRuntimeService {
       {
         submit: async (envelope) => ({ requirementId: envelope.requirementId }),
       },
+      () => this.persistExplicitBrainState(),
     );
     this.mode = options.mode;
     this.coordinator = new RuntimeTaskCoordinator({
@@ -477,11 +483,22 @@ export class UiRuntimeService {
 
   async hydrate(): Promise<void> {
     await this.coordinator.hydrate();
+    const records = this.options.journal?.replay() ?? [];
+    const state = records
+      .filter((record): record is Extract<typeof record, { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
+      .at(-1)?.state;
+    if (!state) return;
+    const restored = state as RuntimeExplicitBrainJournalState;
+    this.explicitIntake.restoreState(restored.intake);
+    this.requirementInbox.restoreState(restored.inbox);
+    this.confirmationLedger.restoreState(restored.confirmationLedger);
   }
 
-  async receiveExplicitInput(input: ExplicitInput): Promise<string> {
+  async receiveExplicitInput(input: ExplicitInput, inputRevision = 1): Promise<string> {
     try {
-      return await this.explicitIntake.receive(input);
+      const interactionId = await this.explicitIntake.receive(input, inputRevision);
+      this.persistExplicitBrainState();
+      return interactionId;
     } catch (error) {
       throw apiError(error);
     }
@@ -498,6 +515,7 @@ export class UiRuntimeService {
   async beginExplicitMatching(interactionId: string): Promise<void> {
     try {
       await this.explicitIntake.beginMatching(interactionId);
+      this.persistExplicitBrainState();
     } catch (error) {
       throw apiError(error);
     }
@@ -506,6 +524,7 @@ export class UiRuntimeService {
   async recordExplicitMatch(interactionId: string, result: MatchResult): Promise<void> {
     try {
       await this.explicitIntake.recordMatch(interactionId, result);
+      this.persistExplicitBrainState();
     } catch (error) {
       throw apiError(error);
     }
@@ -514,6 +533,7 @@ export class UiRuntimeService {
   async proposeExplicitRequirement(interactionId: string, proposal: Proposal): Promise<void> {
     try {
       await this.explicitIntake.propose(interactionId, proposal);
+      this.persistExplicitBrainState();
     } catch (error) {
       throw apiError(error);
     }
@@ -522,7 +542,9 @@ export class UiRuntimeService {
   async completeExplicitStatusQuery(interactionId: string): Promise<StatusQueryReceipt> {
     try {
       await this.explicitIntake.beginStatusCheck(interactionId);
-      return await this.explicitIntake.completeStatusOnly(interactionId);
+      const receipt = await this.explicitIntake.completeStatusOnly(interactionId);
+      this.persistExplicitBrainState();
+      return receipt;
     } catch (error) {
       throw apiError(error);
     }
@@ -554,6 +576,7 @@ export class UiRuntimeService {
         confirmationRef: confirmed.confirmationRef,
         inputRevision: confirmed.inputRevision,
       });
+      this.persistExplicitBrainState();
       return { requirement };
     } catch (error) {
       throw apiError(error);
@@ -561,6 +584,10 @@ export class UiRuntimeService {
   }
 
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
+    let release!: () => void;
+    const previous = this.dispatchTail;
+    this.dispatchTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
     try {
       const consumed: RequirementEnvelope | null = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
       if (!consumed) {
@@ -584,6 +611,7 @@ export class UiRuntimeService {
         requirementId: consumed.requirementId,
       });
       await this.explicitIntake.markDraftDispatched(consumed.draftId);
+      this.persistExplicitBrainState();
       return {
         requirement,
         taskId: task.taskId,
@@ -592,6 +620,19 @@ export class UiRuntimeService {
       };
     } catch (error) {
       throw apiError(error);
+    } finally {
+      release();
     }
+  }
+
+  private persistExplicitBrainState(): void {
+    this.options.journal?.append({
+      kind: 'explicit-brain.state',
+      state: {
+        intake: this.explicitIntake.exportState(),
+        inbox: this.requirementInbox.exportState(),
+        confirmationLedger: this.confirmationLedger.exportState(),
+      },
+    });
   }
 }

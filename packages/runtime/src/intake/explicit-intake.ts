@@ -37,6 +37,7 @@ export interface MatchResult {
 
 export interface RequirementDraft {
   readonly draftId: string;
+  readonly inputRevision: number;
   readonly sourceRef: string;
   readonly normalizedInput: string;
   readonly matchedTasks: readonly MatchedTask[];
@@ -62,6 +63,7 @@ export interface ExplicitInteractionSnapshot {
   readonly condition?: string;
   readonly reason?: string;
   readonly draft?: RequirementDraft;
+  readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
 }
 
@@ -94,8 +96,29 @@ export interface StatusQueryReceipt {
   readonly nextAction: 'present-status';
 }
 
+export interface ExplicitIntakeState {
+  readonly nextInteractionSeq: number;
+  readonly nextDraftSeq: number;
+  readonly interactions: readonly ExplicitInteractionRecordState[];
+}
+
+interface ExplicitInteractionRecordState {
+  readonly interactionId: InteractionId;
+  readonly inputRevision: number;
+  readonly sourceRef: string;
+  readonly state: ExplicitInteractionState;
+  readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
+  readonly nextAction: string;
+  readonly condition?: string;
+  readonly reason?: string;
+  readonly draft?: RequirementDraft;
+  readonly confirmation?: ConfirmedRequirementDraft;
+  readonly history: readonly ExplicitInteractionState[];
+}
+
 interface InteractionRecord {
   readonly interactionId: InteractionId;
+  readonly inputRevision: number;
   readonly sourceRef: string;
   state: ExplicitInteractionState;
   owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
@@ -103,6 +126,7 @@ interface InteractionRecord {
   condition?: string;
   reason?: string;
   draft?: RequirementDraft;
+  confirmation?: ConfirmedRequirementDraft;
   readonly history: ExplicitInteractionState[];
 }
 
@@ -114,7 +138,27 @@ export class ExplicitIntake {
 
   constructor() {}
 
-  async receive(input: ExplicitInput): Promise<InteractionId> {
+  exportState(): ExplicitIntakeState {
+    return {
+      nextInteractionSeq: this.nextInteractionSeq,
+      nextDraftSeq: this.nextDraftSeq,
+      interactions: [...this.interactions.values()].map((interaction) => structuredClone(interaction)),
+    };
+  }
+
+  restoreState(state: ExplicitIntakeState): void {
+    this.interactions.clear();
+    this.draftInteractions.clear();
+    this.nextInteractionSeq = state.nextInteractionSeq;
+    this.nextDraftSeq = state.nextDraftSeq;
+    for (const input of state.interactions) {
+      const interaction = structuredClone(input) as InteractionRecord;
+      this.interactions.set(interaction.interactionId, interaction);
+      if (interaction.draft) this.draftInteractions.set(interaction.draft.draftId, interaction.interactionId);
+    }
+  }
+
+  async receive(input: ExplicitInput, inputRevision = 1): Promise<InteractionId> {
     if (input.channel !== 'business') {
       throw new ExplicitIntakeError(
         'control-channel-required',
@@ -137,11 +181,23 @@ export class ExplicitIntake {
         },
       );
     }
+    if (!Number.isSafeInteger(inputRevision) || inputRevision < 1) {
+      throw new ExplicitIntakeError(
+        'input-revision-invalid',
+        'explicit input revision must be a positive safe integer',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'provide-the-current-input-revision',
+          condition: 'positive-input-revision',
+        },
+      );
+    }
 
     const interactionId = `interaction-${this.nextInteractionSeq}`;
     this.nextInteractionSeq += 1;
     this.interactions.set(interactionId, {
       interactionId,
+      inputRevision,
       sourceRef: input.sourceRef,
       state: 'received',
       owner: 'explicit-intake',
@@ -163,6 +219,7 @@ export class ExplicitIntake {
       condition: interaction.condition,
       reason: interaction.reason,
       draft: interaction.draft,
+      confirmation: interaction.confirmation,
       history: [...interaction.history],
     };
   }
@@ -179,6 +236,7 @@ export class ExplicitIntake {
     }
     interaction.draft = {
       draftId: `draft-${this.nextDraftSeq}`,
+      inputRevision: interaction.inputRevision,
       sourceRef: interaction.sourceRef,
       normalizedInput: result.normalizedInput,
       matchedTasks: [...result.matchedTasks],
@@ -260,7 +318,44 @@ export class ExplicitIntake {
       );
     }
 
-    const interaction = this.requireState(interactionId, ['awaiting-confirmation'], 'confirm requirement');
+    const interaction = this.requireInteraction(interactionId);
+    const draft = interaction.draft;
+    if (!draft) {
+      throw this.invalidState('confirm requirement', 'requirement draft is missing', 'return-to-matching');
+    }
+    if (input.inputRevision !== draft.inputRevision) {
+      throw new ExplicitIntakeError(
+        'confirmation-stale',
+        `confirmation revision ${input.inputRevision} does not match draft revision ${draft.inputRevision}`,
+        {
+          owner: 'human',
+          nextAction: 'reconfirm-the-current-draft-revision',
+          condition: `input-revision-${draft.inputRevision}`,
+        },
+      );
+    }
+    if (interaction.state === 'confirmed') {
+      const confirmation = interaction.confirmation;
+      if (confirmation
+        && confirmation.confirmationRef === input.confirmationRef
+        && confirmation.confirmedBy === input.confirmedBy
+        && confirmation.confirmedAt === input.confirmedAt
+        && confirmation.payloadRef === input.payloadRef) {
+        return structuredClone(confirmation);
+      }
+      throw new ExplicitIntakeError(
+        'confirmation-stale',
+        'confirmed requirement does not match the original confirmation',
+        {
+          owner: 'human',
+          nextAction: 'inspect-the-confirmed-requirement',
+          condition: 'same-confirmation-identity',
+        },
+      );
+    }
+    if (interaction.state !== 'awaiting-confirmation') {
+      throw this.invalidState('confirm requirement', `cannot confirm requirement from ${interaction.state}`, 'inspect-interaction-state');
+    }
     if (!input.confirmationRef || !input.confirmationRef.trim()
       || !input.confirmedBy || !input.confirmedBy.trim()
       || !input.confirmedAt || !Number.isFinite(Date.parse(input.confirmedAt))) {
@@ -275,13 +370,7 @@ export class ExplicitIntake {
       );
     }
 
-    const draft = interaction.draft;
-    if (!draft) {
-      throw this.invalidState('confirm requirement', 'requirement draft is missing', 'return-to-matching');
-    }
-
-    this.transition(interaction, 'confirmed', 'explicit-intake', 'dispatch-confirmed-requirement');
-    return {
+    const confirmation: ConfirmedRequirementDraft = {
       interactionId,
       draftId: draft.draftId,
       inputRevision: input.inputRevision,
@@ -293,6 +382,9 @@ export class ExplicitIntake {
       confirmedBy: input.confirmedBy,
       confirmedAt: input.confirmedAt,
     };
+    interaction.confirmation = confirmation;
+    this.transition(interaction, 'confirmed', 'explicit-intake', 'dispatch-confirmed-requirement');
+    return structuredClone(confirmation);
   }
 
   async markDispatched(interactionId: InteractionId): Promise<void> {

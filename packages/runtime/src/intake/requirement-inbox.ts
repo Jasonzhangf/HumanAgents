@@ -19,6 +19,12 @@ export interface ReadInbox {
   readonly consumerId: string;
 }
 
+export interface RequirementInboxState {
+  readonly nextFifoSeq: number;
+  readonly pendingDraftIds: readonly string[];
+  readonly envelopes: readonly RequirementEnvelope[];
+}
+
 export class RequirementInbox {
   private readonly pending: RequirementEnvelope[] = [];
   private readonly envelopes = new Map<string, RequirementEnvelope>();
@@ -33,6 +39,40 @@ export class RequirementInbox {
 
   get expectedNextFifoSeq(): number {
     return this.nextFifoSeq;
+  }
+
+  exportState(): RequirementInboxState {
+    return {
+      nextFifoSeq: this.nextFifoSeq,
+      pendingDraftIds: this.pending.map((envelope) => envelope.draftId),
+      envelopes: [...this.envelopes.values()].map((envelope) => structuredClone(envelope)),
+    };
+  }
+
+  restoreState(state: RequirementInboxState): void {
+    this.pending.length = 0;
+    this.envelopes.clear();
+    this.requirementIds.clear();
+    this.draftIds.clear();
+    this.nextFifoSeq = state.nextFifoSeq;
+    const byDraft = new Map<string, RequirementEnvelope>();
+    for (const envelope of state.envelopes) {
+      const restored = structuredClone(envelope);
+      byDraft.set(restored.draftId, restored);
+      this.envelopes.set(restored.draftId, restored);
+      this.requirementIds.add(restored.requirementId);
+      this.draftIds.add(restored.draftId);
+      this.confirmedEnvelopes.add(restored);
+    }
+    for (const draftId of state.pendingDraftIds) {
+      const envelope = byDraft.get(draftId);
+      if (!envelope) throw new RequirementInboxError('invalid-state', `pending requirement draft is missing: ${draftId}`, {
+        owner: 'runtime-coordinator',
+        nextAction: 'repair-the-ui-runtime-journal',
+        condition: 'existing-pending-envelope',
+      });
+      this.pending.push(envelope);
+    }
   }
 
   markConfirmed(input: RequirementEnvelope): void {

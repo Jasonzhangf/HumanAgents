@@ -202,6 +202,33 @@ test('status queries and control commands never enter the business inbox', async
   assert.equal(inbox.size, 0);
 });
 
+test('explicit confirmation rejects a stale input revision', async () => {
+  const intake = new ExplicitIntake();
+  const interactionId = await intake.receive(input(), 2);
+  await intake.beginMatching(interactionId);
+  await intake.recordMatch(interactionId, {
+    normalizedInput: 'normalized revisioned input',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await intake.propose(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create a revisioned requirement',
+  });
+  const snapshot = await intake.inspect(interactionId);
+  assert.ok(snapshot.draft);
+
+  await assert.rejects(() => intake.prepareConfirmation({
+    draftId: snapshot.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:stale',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-11T00:00:00.000Z',
+    payloadRef: 'asset://requirements/stale',
+  }), (error: unknown) => error instanceof ExplicitIntakeError && error.code === 'confirmation-stale');
+  assert.equal((await intake.inspect(interactionId)).state, 'awaiting-confirmation');
+});
+
 test('invalid transitions and rejection preserve explicit ownership', async () => {
   const intake = new ExplicitIntake();
   const interactionId = await intake.receive(input());

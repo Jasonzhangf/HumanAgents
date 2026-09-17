@@ -155,6 +155,13 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     }
     return record as unknown as UiRuntimeJournalRecord;
   }
+  if (kind === 'explicit-brain.state') {
+    const state = requireRecordObject(record, 'state', filePath, line);
+    requireRecordObject(state, 'intake', filePath, line);
+    requireRecordObject(state, 'inbox', filePath, line);
+    requireRecordObject(state, 'confirmationLedger', filePath, line);
+    return record as unknown as UiRuntimeJournalRecord;
+  }
   throw new Error(`corrupt UI runtime journal ${filePath}:${line}: unsupported record kind ${kind}`);
 }
 

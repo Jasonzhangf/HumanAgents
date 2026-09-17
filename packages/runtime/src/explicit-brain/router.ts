@@ -77,6 +77,11 @@ export interface RequirementSubmitReceipt {
   readonly inputRevision: number;
 }
 
+export interface ConfirmationLedgerState {
+  readonly drafts: readonly RequirementDraftRevision[];
+  readonly confirmations: readonly ConfirmedRequirementRevision[];
+}
+
 export class ChannelRouter {
   private readonly channels = new Map<string, ChannelBinding>();
   private readonly automaticOccurrences = new Map<string, AutomaticOccurrence>();
@@ -196,6 +201,27 @@ export class ConfirmationLedger {
     this.confirmations.set(input.draftId, { ...input });
   }
 
+  confirmation(draftId: string): ConfirmedRequirementRevision | undefined {
+    const confirmation = this.confirmations.get(draftId);
+    return confirmation ? { ...confirmation } : undefined;
+  }
+
+  exportState(): ConfirmationLedgerState {
+    return {
+      drafts: [...this.drafts.values()].map((draft) => structuredClone(draft)),
+      confirmations: [...this.confirmations.values()].map((confirmation) => structuredClone(confirmation)),
+    };
+  }
+
+  restoreState(state: ConfirmationLedgerState): void {
+    this.drafts.clear();
+    this.confirmations.clear();
+    for (const draft of state.drafts) this.drafts.set(draft.draftId, structuredClone(draft));
+    for (const confirmation of state.confirmations) {
+      this.confirmations.set(confirmation.draftId, structuredClone(confirmation));
+    }
+  }
+
   assertSubmission(input: RequirementSubmitArguments): ConfirmedRequirementRevision {
     const draft = this.drafts.get(input.draftId);
     if (!draft || draft.interactionId !== input.interactionId || draft.inputRevision !== input.inputRevision) {
@@ -233,6 +259,7 @@ export class RequirementSubmissionOwner {
     private readonly ledger: ConfirmationLedger,
     private readonly inbox: Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>,
     private readonly port: RequirementSubmitPort,
+    private readonly onEnvelopeAppended?: (envelope: RequirementEnvelope) => void,
   ) {}
 
   async submit(input: RequirementSubmitArguments): Promise<RequirementSubmitReceipt> {
@@ -279,6 +306,7 @@ export class RequirementSubmissionOwner {
       this.inbox.markConfirmed(envelope);
       await this.inbox.append(envelope);
       pendingState.appended = true;
+      this.onEnvelopeAppended?.(structuredClone(envelope));
     } else {
       pendingState.appended = true;
     }

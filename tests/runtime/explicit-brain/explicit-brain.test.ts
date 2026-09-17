@@ -1069,6 +1069,55 @@ test('requirement submission retries inbox append before invoking the downstream
   assert.equal(downstreamCalls, 1);
 });
 
+test('requirement submission retry reuses the same envelope after append succeeds', async () => {
+  const ledger = new ConfirmationLedger();
+  ledger.registerDraft({
+    interactionId: 'interaction-retry-after-append',
+    draftId: 'draft-retry-after-append',
+    inputRevision: 1,
+    normalizedInput: 'normalized retry after append',
+    intent: 'create',
+    payloadRef: 'asset://draft-retry-after-append',
+  });
+  ledger.confirm({
+    interactionId: 'interaction-retry-after-append',
+    draftId: 'draft-retry-after-append',
+    inputRevision: 1,
+    confirmationRef: 'confirm-retry-after-append',
+    confirmedBy: 'human',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+  });
+  const envelopes: string[] = [];
+  let downstreamAttempts = 0;
+  const owner = new RequirementSubmissionOwner(ledger, {
+    get expectedNextFifoSeq() { return 1; },
+    markConfirmed() {},
+    find() { return undefined; },
+    async append(envelope) {
+      envelopes.push(JSON.stringify(envelope));
+      return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+    },
+  }, {
+    async submit(envelope) {
+      downstreamAttempts += 1;
+      if (downstreamAttempts === 1) throw new Error('downstream unavailable');
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  const input = {
+    interactionId: 'interaction-retry-after-append',
+    draftId: 'draft-retry-after-append',
+    confirmationRef: 'confirm-retry-after-append',
+    inputRevision: 1,
+  };
+
+  await assert.rejects(() => owner.submit(input), /downstream unavailable/);
+  const receipt = await owner.submit(input);
+  assert.equal(receipt.status, 'submitted');
+  assert.equal(envelopes.length, 1);
+  assert.equal(downstreamAttempts, 2);
+});
+
 test('requirement submission serializes concurrent revisions and same-key retries', async () => {
   const ledger = new ConfirmationLedger();
   for (const suffix of ['a', 'b']) {

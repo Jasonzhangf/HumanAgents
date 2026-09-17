@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import { id, type TaskId } from '../../../contracts/src/index.js';
+import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
 import type { RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
@@ -73,6 +74,30 @@ function requireString(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== 'string' || !value.trim()) {
     throw new UiRuntimeApiError('request.missing-field', APP_OWNER, `request field ${key} is required`, `provide a non-empty ${key}`);
+  }
+  return value;
+}
+
+function requirePositiveInteger(body: Record<string, unknown>, key: string): number {
+  const value = body[key];
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a positive safe integer`, `provide a positive ${key}`);
+  }
+  return value as number;
+}
+
+function requireStringArray(body: Record<string, unknown>, key: string): readonly string[] {
+  const value = body[key];
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a string array`, `provide ${key} as a string array`);
+  }
+  return value;
+}
+
+function requireRequirementIntent(body: Record<string, unknown>, key: string): RequirementIntent {
+  const value = requireString(body, key);
+  if (value !== 'append' && value !== 'change' && value !== 'create') {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be append, change, or create`, `provide a valid ${key}`);
   }
   return value;
 }
@@ -156,6 +181,98 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
         directive: typeof body.directive === 'string' ? body.directive : undefined,
       });
       writeJson(response, 201, created);
+      return;
+    }
+    if (path === '/api/explicit/inputs' && method === 'POST') {
+      const body = await readBody(request);
+      const channel = requireString(body, 'channel');
+      if (channel !== 'business' && channel !== 'control') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field channel must be business or control', 'provide business or control');
+      }
+      const inputRevision = body.inputRevision === undefined ? 1 : requirePositiveInteger(body, 'inputRevision');
+      const interactionId = await service.receiveExplicitInput({
+        sourceRef: requireString(body, 'sourceRef'),
+        rawInput: requireString(body, 'rawInput'),
+        channel,
+        ...(typeof body.controlCommand === 'string'
+          ? { controlCommand: body.controlCommand as 'steer' | 'stop' | 'revoke-permission' }
+          : {}),
+      }, inputRevision);
+      writeJson(response, 201, { interactionId });
+      return;
+    }
+    const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
+    if (explicitInteraction && method === 'GET') {
+      writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));
+      return;
+    }
+    const explicitMatching = /^\/api\/explicit\/interactions\/([^/]+)\/matching$/.exec(path);
+    if (explicitMatching && method === 'POST') {
+      await service.beginExplicitMatching(decodeURIComponent(explicitMatching[1]!));
+      writeJson(response, 202, { interactionId: decodeURIComponent(explicitMatching[1]!) });
+      return;
+    }
+    const explicitMatch = /^\/api\/explicit\/interactions\/([^/]+)\/match$/.exec(path);
+    if (explicitMatch && method === 'POST') {
+      const body = await readBody(request);
+      const matchedTasks = body.matchedTasks;
+      if (!Array.isArray(matchedTasks)) {
+        throw new UiRuntimeApiError('request.missing-field', APP_OWNER, 'request field matchedTasks is required', 'provide matchedTasks');
+      }
+      await service.recordExplicitMatch(decodeURIComponent(explicitMatch[1]!), {
+        normalizedInput: requireString(body, 'normalizedInput'),
+        matchedTasks: matchedTasks.map((entry) => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'matchedTasks entries must be objects', 'provide typed matched tasks');
+          }
+          const task = entry as Record<string, unknown>;
+          const relation = requireString(task, 'relation');
+          if (relation !== 'current' && relation !== 'related' && relation !== 'historical') {
+            throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'matched task relation is invalid', 'provide current, related, or historical');
+          }
+          return {
+            taskId: id('task', requireString(task, 'taskId')),
+            relation,
+            status: requireString(task, 'status'),
+          };
+        }),
+        knownFacts: requireStringArray(body, 'knownFacts'),
+      });
+      writeJson(response, 202, { interactionId: decodeURIComponent(explicitMatch[1]!) });
+      return;
+    }
+    const explicitProposal = /^\/api\/explicit\/interactions\/([^/]+)\/proposal$/.exec(path);
+    if (explicitProposal && method === 'POST') {
+      const body = await readBody(request);
+      await service.proposeExplicitRequirement(decodeURIComponent(explicitProposal[1]!), {
+        proposedIntent: requireRequirementIntent(body, 'proposedIntent'),
+        proposal: requireString(body, 'proposal'),
+        ...(body.decisionRefs === undefined ? {} : { decisionRefs: requireStringArray(body, 'decisionRefs') }),
+      });
+      writeJson(response, 202, { interactionId: decodeURIComponent(explicitProposal[1]!) });
+      return;
+    }
+    const explicitStatus = /^\/api\/explicit\/interactions\/([^/]+)\/status-only$/.exec(path);
+    if (explicitStatus && method === 'POST') {
+      writeJson(response, 200, await service.completeExplicitStatusQuery(decodeURIComponent(explicitStatus[1]!)));
+      return;
+    }
+    const explicitConfirmation = /^\/api\/explicit\/interactions\/([^/]+)\/confirmation$/.exec(path);
+    if (explicitConfirmation && method === 'POST') {
+      const body = await readBody(request);
+      const receipt = await service.confirmExplicitRequirement({
+        draftId: requireString(body, 'draftId'),
+        inputRevision: requirePositiveInteger(body, 'inputRevision'),
+        confirmationRef: requireString(body, 'confirmationRef'),
+        confirmedBy: requireString(body, 'confirmedBy'),
+        confirmedAt: requireString(body, 'confirmedAt'),
+        payloadRef: requireString(body, 'payloadRef'),
+      });
+      writeJson(response, 200, receipt);
+      return;
+    }
+    if (path === '/api/explicit/dispatch-next' && method === 'POST') {
+      writeJson(response, 202, await service.dispatchNextExplicitRequirement());
       return;
     }
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);

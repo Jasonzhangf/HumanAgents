@@ -288,6 +288,171 @@ test('explicit brain status query never creates a task or FIFO entry', async () 
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'status-only');
 });
 
+test('explicit brain confirmation retry is idempotent after a submission failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retry-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:task-detail',
+    rawInput: 'retry a confirmed requirement',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'retry a confirmed requirement',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the retry requirement',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  const confirmation = {
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:retry',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    payloadRef: 'asset://requirements/retry',
+  };
+
+  const first = await service.confirmExplicitRequirement(confirmation);
+  const second = await service.confirmExplicitRequirement(confirmation);
+  assert.equal(first.requirement.requirementId, second.requirement.requirementId);
+  assert.equal(second.requirement.status, 'duplicate');
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+});
+
+test('concurrent explicit dispatch starts exactly one execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-dispatch-race-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:task-detail',
+    rawInput: 'dispatch exactly once',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'dispatch exactly once',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the dispatch race requirement',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:dispatch-race',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    payloadRef: 'asset://requirements/dispatch-race',
+  });
+
+  const results = await Promise.allSettled([
+    service.dispatchNextExplicitRequirement(),
+    service.dispatchNextExplicitRequirement(),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (!rejected) throw new Error('expected one rejected dispatch');
+  assert.equal(rejected.reason instanceof UiRuntimeApiError, true);
+  assert.equal((rejected.reason as UiRuntimeApiError).code, 'explicit-brain.inbox.empty');
+});
+
+test('restart restores confirmed interaction and pending explicit inbox state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-restart-'));
+  const first = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await first.receiveExplicitInput({
+    sourceRef: 'ui:task-detail',
+    rawInput: 'survive restart',
+    channel: 'business',
+  });
+  await first.beginExplicitMatching(interactionId);
+  await first.recordExplicitMatch(interactionId, {
+    normalizedInput: 'survive restart',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await first.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the restart requirement',
+  });
+  const proposed = await first.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await first.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:restart',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    payloadRef: 'asset://requirements/restart',
+  });
+
+  const second = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  await second.hydrate();
+  assert.equal((await second.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+  const dispatched = await second.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
+  assert.equal(dispatched.requirement.fifoSeq, 1);
+});
+
+test('explicit brain HTTP routes reach typed service operations and expose typed errors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-http-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+  });
+  try {
+    const inputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:http',
+        rawInput: 'route through HTTP',
+        channel: 'business',
+        inputRevision: 4,
+      }),
+    });
+    assert.equal(inputResponse.status, 201);
+    const input = await inputResponse.json() as { readonly interactionId: string };
+
+    const inspectResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}`);
+    assert.equal(inspectResponse.status, 200);
+    const inspected = await inspectResponse.json() as { readonly state: string; readonly draft?: { readonly inputRevision: number } };
+    assert.equal(inspected.state, 'received');
+    assert.equal(inspected.draft, undefined);
+
+    const staleResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/confirmation`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: 'draft-missing',
+        inputRevision: 4,
+        confirmationRef: 'confirmation:http-stale',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-09-17T00:00:00.000Z',
+        payloadRef: 'asset://requirements/http-stale',
+      }),
+    });
+    assert.equal(staleResponse.status, 409);
+    const stale = await staleResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
+    assert.equal(stale.error.code, 'ExplicitIntakeError');
+    assert.equal(stale.error.ownerId, 'explicit-intake');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
 test('runtime output concatenates repeated provider deltas without suffix dedupe', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-output-dedupe-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({

@@ -28,13 +28,15 @@ No DSH adapter work. No production deployment or real external channel claim wit
 ## Evidence log
 
 - 2026-09-17: Created clean worktree from `origin/main`; design and existing contracts inspected.
-- 2026-09-17: Candidate implementation complete in worktree; no candidate commit yet.
+- 2026-09-17: Candidate `35c7939b9b97dc64a67cce0a41cd504b73774172` completed review-fix
+  changes for input revision binding, idempotent confirmation retry, serialized dispatch,
+  durable explicit-brain state hydration, and typed HTTP routes.
 - Verification: `pnpm exec tsc --noEmit`, `pnpm test:explicit-brain`, `pnpm test:app`,
   `pnpm test:agent-templates`, `pnpm test:release`, full `pnpm test`, and `git diff --check`
-  all PASS.
+  all PASS after the review fixes.
 - Verified in current source tests: explicit confirmation is the only path to FIFO; status-only
   does not enqueue; `intent`, `taskRef`, `normalizedInput`, and `payloadRef` survive
   confirmation/submission; router errors map to typed UI API errors.
-- Unverified: candidate SHA/review/merge/push, real Journal/EventBus wiring for
-  `DecisionTraceJournal`, UI HTTP routes, real git-bug/channel/RCC integration, and post-merge
-  runtime load or crash recovery.
+- Unverified: review-fix candidate SHA/review/merge/push, real Journal/EventBus wiring for
+  `DecisionTraceJournal`, real git-bug/channel/RCC integration, and post-merge runtime load or
+  crash recovery.
