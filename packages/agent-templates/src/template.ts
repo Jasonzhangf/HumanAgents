@@ -71,6 +71,23 @@ function assertSafeRef(value: string, label: string): void {
   }
 }
 
+function assertPromptSegmentRef(value: string, roleId: AgentRole): void {
+  assertNonEmpty(value, 'prompt segment ref');
+  const segments = value.split('/');
+  if (
+    value.startsWith('/')
+    || value.includes('\\')
+    || value.includes('\0')
+    || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+    || !value.endsWith('.md')
+  ) {
+    throw new AgentTemplateError('prompt segment ref must be a safe package-relative Markdown file');
+  }
+  if (segments[0] !== roleId) {
+    throw new AgentTemplateError(`prompt segment ref must stay within the ${roleId} role directory`);
+  }
+}
+
 function assertSubset(values: readonly string[], allowed: readonly string[], label: string): void {
   for (const value of values) {
     if (!allowed.includes(value)) throw new AgentTemplateError(`${label} is not allowed for this role: ${value}`);
@@ -102,6 +119,10 @@ function fnv1a(input: string): string {
 export function digestAgentTemplate(manifest: AgentTemplateManifest): string {
   const { digest: _digest, ...content } = manifest;
   return `fnv1a:${fnv1a(stableStringify(content))}`;
+}
+
+export function digestPromptSegments(promptSegmentRefs: readonly string[]): string {
+  return `fnv1a:${fnv1a(stableStringify(promptSegmentRefs))}`;
 }
 
 function assertMemoryPolicy(policy: MemoryContextPolicy): void {
@@ -137,7 +158,11 @@ export function validateAgentTemplate(
   if (manifest.extends && (manifest.extends.roleId !== '_base' || !VERSION_PATTERN.test(manifest.extends.version))) {
     throw new AgentTemplateError('template may only extend the _base role');
   }
-  assertSafeRef(manifest.systemPromptRef, 'system prompt ref');
+  if (manifest.promptSegmentRefs.length === 0) {
+    throw new AgentTemplateError('template requires at least one prompt segment');
+  }
+  for (const ref of manifest.promptSegmentRefs) assertPromptSegmentRef(ref, manifest.roleId);
+  assertUnique(manifest.promptSegmentRefs, 'prompt segment ref');
   assertSafeRef(manifest.inputSchemaRef, 'input schema ref');
   assertSafeRef(manifest.outputSchemaRef, 'output schema ref');
   assertSafeRef(manifest.policyRef, 'policy ref');
@@ -181,7 +206,8 @@ export function compileAgentTemplate(
     capabilityRefs: [...validation.capabilityRefs],
     skillRefs: [...validation.skillRefs],
     toolCapabilityRefs: [...validation.toolCapabilityRefs],
-    systemPromptRef: validation.manifest.systemPromptRef,
+    promptSegmentRefs: [...validation.manifest.promptSegmentRefs],
+    promptSegmentDigest: digestPromptSegments(validation.manifest.promptSegmentRefs),
     inputSchemaRef: validation.manifest.inputSchemaRef,
     outputSchemaRef: validation.manifest.outputSchemaRef,
     policyRef: validation.manifest.policyRef,
@@ -219,6 +245,7 @@ export function loadAgentTemplate(
     capabilityRefs: [...template.capabilityRefs],
     skillRefs: [...template.skillRefs],
     toolCapabilityRefs: [...template.toolCapabilityRefs],
+    promptSegmentRefs: [...template.promptSegmentRefs],
     memoryContextPolicy: {
       allowedScopes: [...template.memoryContextPolicy.allowedScopes],
       allowedLayers: [...template.memoryContextPolicy.allowedLayers],

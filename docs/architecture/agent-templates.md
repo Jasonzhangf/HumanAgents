@@ -246,7 +246,7 @@ type AgentTemplateManifest = {
   roleId: 'interaction' | 'orchestration' | 'execution' | 'review' | 'memory'
   templateVersion: string
   extends?: { roleId: '_base'; version: string }
-  systemPromptRef: string
+  promptSegmentRefs: string[]
   skillRefs: string[]
   toolCapabilityRefs: string[]
   inputSchemaRef: string
@@ -266,7 +266,8 @@ type AgentTemplateManifest = {
 type CompiledAgentTemplate = {
   roleId: string
   version: string
-  systemPromptDigest: string
+  promptSegmentRefs: string[]
+  promptSegmentDigest: string
   skillRefs: string[]
   toolCapabilityRefs: string[]
   inputSchemaRef: string
@@ -277,11 +278,11 @@ type CompiledAgentTemplate = {
 }
 ```
 
-编译结果只包含已验证引用和 digest，不把完整 prompt、secret 或外部服务凭据复制到业务 payload、metadata 或 debug log。
+编译结果只包含已验证的、有序 `promptSegmentRefs` 和由这些引用计算出的 `promptSegmentDigest`，不把任何 Markdown 正文、secret 或外部服务凭据复制到业务 payload、metadata 或 debug log。每个 prompt segment 必须是当前角色目录下包内相对的 `.md` 文件引用；本阶段只校验引用，不实现文件系统 loader 或读取正文。`promptSegmentDigest` 是引用顺序的 digest，不是文件内容 digest；文件内容 digest 留给后续 loader seam。
 
-## 5. 统一 system prompt 结构
+## 5. 统一 prompt segment 结构
 
-每个 `system.md` 使用同一结构，角色差异体现在内容和引用，而不是结构漂移：
+每个 prompt segment 使用 Markdown 保存，角色差异体现在内容和引用，而不是结构漂移。一个 Agent 的 prompt 由 manifest 中有序的 `promptSegmentRefs` 组成；每一段必须独立保存为 `.md` 文件，代码不得硬编码 prompt 正文。各 segment 使用同一结构：
 
 1. Role identity；
 2. Mission；
@@ -323,7 +324,7 @@ authoring
 
 ### 7.1 authoring
 
-开发者在隔离目录中维护 manifest、prompt、skills、tools capability 引用、schema 和 fixtures。每个引用都必须是包内相对路径或已注册的稳定 ID。
+开发者在隔离目录中维护 manifest、prompt segment Markdown 文件、skills、tools capability 引用、schema 和 fixtures。每个 prompt segment ref 都必须是当前角色目录内的包内相对 `.md` 路径；其他资源引用必须是包内相对路径或已注册的稳定 ID。manifest 必须显式列出 prompt segment，不能扫描目录或把其他角色目录的 prompt 自动带入。
 
 ### 7.2 validate
 

@@ -5,6 +5,7 @@ import {
   assertUniqueTemplateOwners,
   compileAgentTemplate,
   digestAgentTemplate,
+  digestPromptSegments,
   loadAgentTemplate,
   validateAgentTemplate,
   validateConfiguredAgentBinding,
@@ -92,7 +93,7 @@ function template(overrides: Partial<AgentTemplateManifest> = {}): AgentTemplate
     capabilityRefs: ['worker.execute', 'test'],
     skillRefs: ['single-capability-worker'],
     toolCapabilityRefs: ['test'],
-    systemPromptRef: 'execution/system.md',
+    promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'],
     inputSchemaRef: 'execution/schemas/input.json',
     outputSchemaRef: 'execution/schemas/output.json',
     policyRef: 'execution/policies/worker.json',
@@ -121,6 +122,8 @@ test('valid template deterministically validates, compiles, and loads', () => {
   assert.deepEqual(compiled, compileAgentTemplate(manifest, registry));
   assert.equal(compiled.manifestDigest, manifest.digest);
   assert.deepEqual(compiled.capabilityRefs, ['worker.execute', 'test']);
+  assert.deepEqual(compiled.promptSegmentRefs, ['execution/identity.md', 'execution/contract.md']);
+  assert.equal(compiled.promptSegmentDigest, digestPromptSegments(manifest.promptSegmentRefs));
   assert.deepEqual(compiled.memoryContextPolicy.allowedScopes, ['task', 'organ']);
 
   const loaded = loadAgentTemplate(compiled, { driverKind: 'fake', driverCapabilities: ['execute', 'settle'] });
@@ -133,7 +136,14 @@ test('invalid manifest fields, paths, fixtures, and memory policy are rejected',
   assert.throws(() => validateAgentTemplate(template({ templateApiVersion: 2 }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ roleId: 'worker' as AgentRole }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ templateVersion: 'latest' }), registry), AgentTemplateError);
-  assert.throws(() => validateAgentTemplate(template({ systemPromptRef: '../secret.md' }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: [] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution/identity.md', 'execution/identity.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['../secret.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['/execution/identity.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution/../review.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution\\identity.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution/identity.txt'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['review/audit.md'] }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ testFixtureRefs: [] }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({
     memoryContextPolicy: {
@@ -144,6 +154,18 @@ test('invalid manifest fields, paths, fixtures, and memory policy are rejected',
     },
   }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ digest: 'fnv1a:stale' }), registry), AgentTemplateError);
+});
+
+test('prompt segment order is part of the compiled contract without loading prompt content', () => {
+  const first = template({ promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'] });
+  const second = template({ promptSegmentRefs: ['execution/contract.md', 'execution/identity.md'] });
+  const firstCompiled = compileAgentTemplate(first, registry);
+  const secondCompiled = compileAgentTemplate(second, registry);
+
+  assert.notEqual(firstCompiled.promptSegmentDigest, secondCompiled.promptSegmentDigest);
+  assert.deepEqual(firstCompiled.promptSegmentRefs, first.promptSegmentRefs);
+  assert.deepEqual(secondCompiled.promptSegmentRefs, second.promptSegmentRefs);
+  assert.equal('prompt' in firstCompiled, false);
 });
 
 test('undeclared capabilities, skills, tools, and role ceiling violations are rejected', () => {

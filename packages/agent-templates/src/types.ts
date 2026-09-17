@@ -18,7 +18,7 @@ export interface AgentTemplateManifest {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
-  readonly systemPromptRef: string;
+  readonly promptSegmentRefs: readonly string[];
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
   readonly policyRef: string;
@@ -47,7 +47,8 @@ export interface CompiledAgentTemplate {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
-  readonly systemPromptRef: string;
+  readonly promptSegmentRefs: readonly string[];
+  readonly promptSegmentDigest: string;
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
   readonly policyRef: string;
