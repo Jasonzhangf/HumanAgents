@@ -351,9 +351,6 @@ export function createMemoryAnalysisEventHandler(
     }
     const request = requestOutcome.value;
     const admissionOutcome = await options.admission.admit({ request, event });
-    if (admissionOutcome.status === 'attention') {
-      return rejectedCommit(event, options.binding.bindingRef, admissionOutcome.issue.code);
-    }
     if (admissionOutcome.status !== 'ready') {
       return retryCommit(
         event,
