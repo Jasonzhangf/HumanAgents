@@ -1,11 +1,43 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ContractError, id, type MemoryScope } from '../../../packages/contracts/src/index.js';
+import {
+  ContractError,
+  id,
+  type MemoryActorContext,
+  type MemoryQueryRequest,
+  type MemoryScope,
+  type MemorySubmission,
+} from '../../../packages/contracts/src/index.js';
 import { DeterministicMemoryBackend } from '../../../packages/adapters/memory/src/index.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const taskScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const actor: MemoryActorContext = {
+  actorId: 'actor-a',
+  roleId: 'memory',
+  permissions: ['memory.read', 'memory.propose', 'memory.review', 'memory.promote', 'memory.forget'],
+  projectKey: 'project-a',
+};
+
+function memoryQuery(overrides: Partial<MemoryQueryRequest> = {}): MemoryQueryRequest {
+  return {
+    requestId: 'query-a',
+    operationId: id('operation', 'query-a'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project',
+    taskId: task,
+    query: 'fact',
+    kinds: ['semantic'],
+    states: ['approved', 'active'],
+    limit: 10,
+    tokenBudget: 100,
+    inputDigest: 'sha256:query-a',
+    ...overrides,
+  };
+}
 
 test('memory backend performs exact/full-text search, inspect, and compare', async () => {
   const memory = new DeterministicMemoryBackend();
@@ -62,4 +94,263 @@ test('context recall filters layers, enforces budget, and binds attach epoch', a
   const attach = await memory.attach({ agentRuntimeId: 'runtime-a', context: bounded });
   assert.deepEqual(attach, { contextId: bounded.contextId, attached: true });
   await assert.rejects(memory.attach({ agentRuntimeId: 'runtime-a', context: { ...current, executionEpoch: 1 } }), ContractError);
+});
+
+test('memory backend filters task ids exactly and keeps forgetting atomic', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const taskAB = id('task', 'task-ab');
+  memory.addCanonicalRecord({
+    memoryId: 'memory-a',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'fact a',
+    sourceRefs: ['journal://project-a/1'],
+    sourceDigests: ['sha256:a'],
+    taskId: task,
+    sourceScopeRef: 'project-a:task-a',
+    relevanceReason: 'test',
+  });
+  memory.addCanonicalRecord({
+    memoryId: 'memory-ab',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'fact ab',
+    sourceRefs: ['journal://project-a/2'],
+    sourceDigests: ['sha256:ab'],
+    taskId: taskAB,
+    sourceScopeRef: 'project-a:task-ab',
+    relevanceReason: 'test',
+  });
+
+  const queried = await memory.query(memoryQuery());
+  assert.deepEqual(queried.entries.map((entry) => entry.memoryId), ['memory-a']);
+
+  const plan = {
+    planId: 'forget-a',
+    namespace: 'project' as const,
+    projectKey: 'project-a',
+    actions: [
+      { memoryId: 'memory-a', action: 'archive' as const, reason: 'retention', sourceRefs: ['journal://project-a/1'] },
+      { memoryId: 'missing-memory', action: 'archive' as const, reason: 'retention', sourceRefs: ['journal://project-a/3'] },
+    ],
+    protectedRefs: [],
+    createdAt: '2026-09-17T00:00:00Z',
+  };
+  await assert.rejects(
+    memory.planForgetting({ actor, plan }),
+    ContractError,
+  );
+  const unchanged = await memory.query(memoryQuery());
+  assert.equal(unchanged.entries[0].state, 'approved');
+});
+
+test('approved and promoted records preserve per-reference provenance digests', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-a';
+  const evidenceRef = 'journal://project-a/evidence';
+  const promotionRef = 'journal://project-a/promotion-approval';
+  const approvalRef = 'approval://global-promotion';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-a', text: 'checkpoint commit is durable' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:evidence-a', text: 'checkpoint evidence' });
+  await memory.ingest({ scope: taskScope, sourceRef: promotionRef, sourceDigest: 'sha256:promotion-a', text: 'global promotion approval' });
+  await memory.ingest({ scope: taskScope, sourceRef: approvalRef, sourceDigest: 'sha256:approval-a', text: 'global promotion approval receipt' });
+
+  const submission: MemorySubmission = {
+    submissionId: 'submission-a',
+    requestId: 'request-a',
+    operationId: id('operation', 'submission-a'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-a',
+    evidenceRefs: [evidenceRef],
+    observation: 'checkpoint commit is durable',
+    desiredScope: 'project',
+    reason: 'observed at a lifecycle boundary',
+    inputDigest: 'sha256:submission-a',
+  };
+  const submitted = await memory.submitCandidate(submission);
+  assert.equal(submitted.candidateId, 'submission-a');
+
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+  const approved = await memory.query(memoryQuery({ query: 'checkpoint commit is durable' }));
+  assert.deepEqual(approved.entries[0]?.sourceRefs, [contentRef, evidenceRef]);
+  assert.deepEqual(approved.entries[0]?.sourceDigests, ['sha256:candidate-a', 'sha256:evidence-a']);
+
+  await memory.promoteCandidate({
+    candidateId: submitted.candidateId!,
+    from: 'project',
+    to: 'global',
+    actor: { ...actor, roleId: 'review' },
+    reason: 'stable across projects',
+    impactScope: 'all projects',
+    approvalRef,
+    sourceRefs: [promotionRef],
+    promotedAt: '2026-09-17T00:00:00Z',
+  });
+  const promoted = await memory.query(memoryQuery({
+    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
+    namespace: 'global',
+    taskId: undefined,
+    states: ['active'],
+    query: 'checkpoint commit is durable',
+  }));
+  assert.deepEqual(promoted.entries[0]?.sourceRefs, [contentRef, evidenceRef, approvalRef, promotionRef]);
+  assert.deepEqual(promoted.entries[0]?.sourceDigests, ['sha256:candidate-a', 'sha256:evidence-a', 'sha256:approval-a', 'sha256:promotion-a']);
+});
+
+test('approval rejects evidence without a resolvable digest', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-missing-evidence',
+    requestId: 'request-missing-evidence',
+    operationId: id('operation', 'submission-missing-evidence'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef: 'asset://memory/candidate-missing-evidence',
+    contentDigest: 'sha256:candidate-missing-evidence',
+    evidenceRefs: ['journal://project-a/missing'],
+    observation: 'unverified observation',
+    desiredScope: 'project',
+    reason: 'missing evidence must not become canonical',
+    inputDigest: 'sha256:submission-missing-evidence',
+  });
+
+  await assert.rejects(memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'invalid approval attempt',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: ['journal://project-a/missing'],
+  }), ContractError);
+  const queried = await memory.query(memoryQuery({ query: 'unverified observation' }));
+  assert.deepEqual(queried.entries, []);
+
+  await assert.rejects(memory.promoteCandidate({
+    candidateId: submitted.candidateId!,
+    from: 'project',
+    to: 'global',
+    actor: { ...actor, roleId: 'review' },
+    reason: 'failed approval must not become promotable',
+    impactScope: 'all projects',
+    approvalRef: 'approval://missing',
+    sourceRefs: [],
+    promotedAt: '2026-09-17T00:00:00Z',
+  }), ContractError);
+});
+
+test('promotion rejects an unresolvable approval source without changing canonical state', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-approval';
+  const evidenceRef = 'journal://project-a/evidence-approval';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-approval', text: 'promotion requires approval evidence' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:evidence-approval', text: 'promotion evidence' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-approval',
+    requestId: 'request-approval',
+    operationId: id('operation', 'submission-approval'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-approval',
+    evidenceRefs: [evidenceRef],
+    observation: 'promotion requires approval evidence',
+    desiredScope: 'project',
+    reason: 'test missing approval source',
+    inputDigest: 'sha256:submission-approval',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'project evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+
+  await assert.rejects(memory.promoteCandidate({
+    candidateId: submitted.candidateId!,
+    from: 'project',
+    to: 'global',
+    actor: { ...actor, roleId: 'review' },
+    reason: 'invalid promotion attempt',
+    impactScope: 'all projects',
+    approvalRef: 'approval://missing',
+    sourceRefs: [],
+    promotedAt: '2026-09-17T00:00:00Z',
+  }), ContractError);
+
+  const project = await memory.query(memoryQuery({ query: 'promotion requires approval evidence' }));
+  assert.equal(project.entries[0]?.state, 'approved');
+  const global = await memory.query(memoryQuery({
+    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
+    namespace: 'global',
+    taskId: undefined,
+    states: ['active'],
+    query: 'promotion requires approval evidence',
+  }));
+  assert.deepEqual(global.entries, []);
+});
+
+test('final reviews cannot overwrite approved canonical state', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-final-review';
+  const evidenceRef = 'journal://project-a/evidence-final-review';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-final-review', text: 'review is final' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:evidence-final-review', text: 'final review evidence' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-final-review',
+    requestId: 'request-final-review',
+    operationId: id('operation', 'submission-final-review'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-final-review',
+    evidenceRefs: [evidenceRef],
+    observation: 'review is final',
+    desiredScope: 'project',
+    reason: 'test final review state',
+    inputDigest: 'sha256:submission-final-review',
+  });
+  const approve = {
+    candidateId: submitted.candidateId!,
+    decision: 'approve' as const,
+    actor: { ...actor, roleId: 'review' as const },
+    decisionReason: 'evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  };
+  await memory.reviewCandidate(approve);
+  await assert.rejects(memory.reviewCandidate({
+    ...approve,
+    decision: 'reject',
+    decisionReason: 'attempt to overwrite final review',
+  }), ContractError);
+
+  const queried = await memory.query(memoryQuery({ query: 'review is final' }));
+  assert.equal(queried.entries[0]?.state, 'approved');
 });

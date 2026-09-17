@@ -55,20 +55,44 @@ export interface PreparedStopSettlement {
   readonly checkpoint: Checkpoint;
 }
 
+export interface StopSettlementRecovery {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly nextAction: string;
+}
+
 export class StopSettlementCommitError extends ControlError {
   readonly prepared: PreparedStopSettlement;
+  readonly checkpointCommitted: boolean;
+  readonly recovery?: StopSettlementRecovery;
 
-  constructor(message: string, prepared: PreparedStopSettlement, cause: unknown) {
+  constructor(
+    message: string,
+    prepared: PreparedStopSettlement,
+    cause: unknown,
+    options: {
+      readonly checkpointCommitted?: boolean;
+      readonly recovery?: StopSettlementRecovery;
+    } = {},
+  ) {
     super(message, { cause });
     this.name = 'StopSettlementCommitError';
     this.prepared = structuredClone(prepared);
+    this.checkpointCommitted = options.checkpointCommitted ?? false;
+    this.recovery = options.recovery ? structuredClone(options.recovery) : undefined;
   }
 }
 
 export type ControlExecutionEvent = ExecutionEventFence;
 
 export interface CheckpointCommitPort {
-  commit(input: Checkpoint): Promise<{ readonly checkpointId: Checkpoint['id']; readonly committed: true }>;
+  commit(input: Checkpoint): Promise<{
+    readonly checkpointId: Checkpoint['id'];
+    readonly committed: true;
+    readonly recovery?: StopSettlementRecovery;
+  }>;
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -318,13 +342,22 @@ async function commitPreparedStopSettlement(
 ): Promise<StoppedCheckpointReceipt> {
   const canonicalPrepared = structuredClone(prepared);
   const submittedCheckpoint = deepFreeze(structuredClone(canonicalPrepared.checkpoint));
+  let commit: Awaited<ReturnType<CheckpointCommitPort['commit']>>;
   try {
-    const commit = await checkpointPort.commit(submittedCheckpoint);
-    if (!commit.committed || commit.checkpointId.value !== canonicalPrepared.checkpoint.id.value) {
-      throw new ControlError('stopped checkpoint was not committed');
-    }
+    commit = await checkpointPort.commit(submittedCheckpoint);
   } catch (failure) {
     throw new StopSettlementCommitError('stopped checkpoint commit failed', canonicalPrepared, failure);
+  }
+  if (!commit.committed || commit.checkpointId.value !== canonicalPrepared.checkpoint.id.value) {
+    throw new StopSettlementCommitError('stopped checkpoint was not committed', canonicalPrepared, new ControlError('stopped checkpoint was not committed'));
+  }
+  if (commit.recovery) {
+    throw new StopSettlementCommitError(
+      'stopped checkpoint committed but post-commit recovery failed',
+      canonicalPrepared,
+      undefined,
+      { checkpointCommitted: true, recovery: commit.recovery },
+    );
   }
   return {
     state: 'stopped',

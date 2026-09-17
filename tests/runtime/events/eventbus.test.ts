@@ -113,10 +113,19 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   retries = new Map<string, EventRetryObligation>();
   dlq = new Map<string, EventDlqRecord>();
   externalOperations = new Map<string, EventExternalOperation>();
+  barrierIntents = new Map<string, {
+    consumerKey: string;
+    messageId: string;
+    streamId: string;
+    handledSequence: number;
+    intent: Extract<EventHandlerCommit, { completionMode: 'operation-barrier' }>;
+  }>();
+  externalOperationReads: string[] = [];
   appendCalls = 0;
   commitCalls = 0;
   failBeforeCommit = false;
   failAfterCommit = false;
+  beforeCommit?: (input: ConsumerCommitRequest) => void;
 
   private cursorKey(streamId: string, consumerKeyValue: string): string {
     return `${streamId}:${consumerKeyValue}`;
@@ -164,6 +173,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
 
   async commitConsumerCommit(input: ConsumerCommitRequest) {
     if (this.failBeforeCommit) throw new Error('commit failed');
+    this.beforeCommit?.(input);
     const receiptKey = `${input.receipt.consumerKey}:${input.receipt.messageId}`;
     const existing = this.receipts.get(receiptKey);
     if (existing) {
@@ -253,7 +263,30 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventExternalOperation | null> {
+    this.externalOperationReads.push(input.operationRef);
     return this.externalOperations.get(input.operationRef) ?? null;
+  }
+
+  async commitBarrierIntent(input: {
+    consumerKey: string;
+    messageId: string;
+    streamId: string;
+    handledSequence: number;
+    intent: Extract<EventHandlerCommit, { completionMode: 'operation-barrier' }>;
+  }) {
+    const key = eventIdentityKey(input.streamId, input.consumerKey, input.messageId);
+    const existing = this.barrierIntents.get(key);
+    if (existing) return existing;
+    this.barrierIntents.set(key, input);
+    return input;
+  }
+
+  async readBarrierIntent(input: {
+    consumerKey: string;
+    messageId: string;
+    streamId: string;
+  }) {
+    return this.barrierIntents.get(eventIdentityKey(input.streamId, input.consumerKey, input.messageId)) ?? null;
   }
 }
 
@@ -271,7 +304,13 @@ class FakeRegistry implements EventPublisherRegistryPort, EventConsumerRegistryP
 }
 
 function ports(journal: FakeJournal, registry: FakeRegistry): EventBusPorts {
-  return { journal, publishers: registry, consumers: registry, externalOperations: journal };
+  return {
+    journal,
+    publishers: registry,
+    consumers: registry,
+    externalOperations: journal,
+    barrierIntents: journal,
+  };
 }
 
 function applied(messageId = 'message-1', effectRefs: readonly string[] = []): EventHandlerCommit {
@@ -632,6 +671,57 @@ test('duplicate message identity in the same batch executes the handler once', a
   assert.deepEqual(result.cursors.map((cursor) => cursor.streamId), [streamId, streamB]);
 });
 
+test('same-batch duplicate reauthorizes revoked and stale delivery before exposing canonical effects', async () => {
+  for (const change of ['revoke', 'epoch'] as const) {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+    registry.consumers.set(consumerKey, consumer({ streamIds: [streamId, streamB], currentEpoch: 2 }));
+    const bus = ports(journal, registry);
+    const messageId = `same-batch-${change}`;
+
+    await publishEvent(bus, {
+      publisherId: harnessPublisher.publisherId,
+      event: event({ messageId, streamId, executionEpoch: 2 }),
+    });
+    await publishEvent(bus, {
+      publisherId: harnessPublisher.publisherId,
+      event: event({ messageId, streamId: streamB, executionEpoch: 2 }),
+    });
+
+    journal.beforeCommit = (input) => {
+      if (input.receipt.messageId !== messageId || input.receipt.streamId !== streamId) return;
+      journal.beforeCommit = undefined;
+      registry.consumers.set(
+        consumerKey,
+        consumer({
+          streamIds: [streamId, streamB],
+          currentEpoch: change === 'epoch' ? 3 : 2,
+          revoked: change === 'revoke',
+        }),
+      );
+    };
+
+    const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event: delivery }) =>
+      applied(delivery.messageId, [`effect:${change}`]));
+
+    assert.deepEqual(result.committed.map((receipt) => [receipt.streamId, receipt.disposition, receipt.effectRefs]), [
+      [streamId, 'applied', [`effect:${change}`]],
+      [streamB, change === 'epoch' ? 'stale' : 'rejected', []],
+    ]);
+    assert.deepEqual(await journal.readReceipt({ consumerKey, messageId }), {
+      consumerKey,
+      messageId,
+      streamId,
+      handledSequence: 1,
+      disposition: 'applied',
+      effectRefs: [`effect:${change}`],
+      failureRef: undefined,
+    });
+    assert.equal((await journal.readCursor({ streamId: streamB, consumerKey }))?.lastHandledSequence, 1);
+  }
+});
+
 test('retry attempt is coordinator-owned and cannot be forged by the handler', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
@@ -928,7 +1018,7 @@ test('operation-barrier refuses final receipt without settled external operation
       externalOperationRefs: ['operation:op-1'],
     };
   });
-  assert.equal(handlerCalls, 4);
+  assert.equal(handlerCalls, 3);
   assert.deepEqual(unknown.blocked, [{
     consumerKey,
     messageId: 'op-barrier',
@@ -962,7 +1052,7 @@ test('operation-barrier refuses final receipt without settled external operation
     }),
     /external operation consumer key mismatch/,
   );
-  assert.equal(handlerCalls, 5);
+  assert.equal(handlerCalls, 3);
   assert.equal(journal.commitCalls, 0);
   assert.equal(journal.receipts.size, 0);
 
@@ -984,7 +1074,7 @@ test('operation-barrier refuses final receipt without settled external operation
       externalOperationRefs: ['operation:op-1'],
     };
   });
-  assert.equal(handlerCalls, 1);
+  assert.equal(handlerCalls, 0);
   assert.equal(result.committed[0]?.disposition, 'applied');
   assert.deepEqual(result.committed[0]?.effectRefs, ['effect:internal', 'operation:op-1']);
 
@@ -1027,6 +1117,156 @@ test('operation-barrier accepts a reconciled external operation', async () => {
   assert.equal(journal.cursors.size, 1);
 });
 
+test('operation-barrier checks unknown external operation before terminalizing after authorization changes', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+  const messageId = 'op-barrier-auth-change';
+  const operationRef = 'operation:unknown-after-auth-change';
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId, executionEpoch: 2 }),
+  });
+  journal.externalOperations.set(operationRef, {
+    operationRef,
+    consumerKey,
+    messageId,
+    state: 'unknown',
+  });
+
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event: delivery }) => {
+    registry.consumers.set(consumerKey, consumer({ currentEpoch: 3 }));
+    return {
+      consumerKey,
+      messageId: delivery.messageId,
+      disposition: 'applied',
+      completionMode: 'operation-barrier',
+      internalEffectFacts: ['effect:unknown'],
+      externalOperationRefs: [operationRef],
+    };
+  });
+
+  assert.deepEqual(journal.externalOperationReads, [operationRef]);
+  assert.deepEqual(result.blocked, [{
+    consumerKey,
+    messageId,
+    streamId,
+    operationRef,
+    reason: 'unknown-side-effect',
+    action: 'reconcile',
+  }]);
+  assert.equal(result.committed.length, 0);
+  assert.equal(result.cursors.length, 0);
+  assert.equal(journal.receipts.size, 0);
+  assert.equal(journal.cursors.size, 0);
+});
+
+test('operation-barrier recovers the persisted intent across ACL/epoch changes and replay', async () => {
+  for (const change of ['revoke', 'epoch'] as const) {
+    for (const finalState of ['settled', 'reconciled'] as const) {
+      const journal = new FakeJournal();
+      const registry = new FakeRegistry();
+      registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+      const bus = ports(journal, registry);
+      const messageId = `op-barrier-recovery-${change}-${finalState}`;
+      const operationRef = `operation:${messageId}`;
+
+      await publishEvent(bus, {
+        publisherId: harnessPublisher.publisherId,
+        event: event({ messageId, executionEpoch: 2 }),
+      });
+      journal.externalOperations.set(operationRef, {
+        operationRef,
+        consumerKey,
+        messageId,
+        state: 'unknown',
+      });
+
+      let handlerCalls = 0;
+      const first = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event: delivery }) => {
+        handlerCalls += 1;
+        return {
+          consumerKey,
+          messageId: delivery.messageId,
+          disposition: 'applied',
+          completionMode: 'operation-barrier',
+          internalEffectFacts: [`effect:${change}:${finalState}`],
+          externalOperationRefs: [operationRef],
+        };
+      });
+      assert.equal(handlerCalls, 1);
+      assert.equal(first.blocked.length, 1);
+      assert.equal(first.committed.length, 0);
+      assert.equal(first.cursors.length, 0);
+      assert.equal(journal.barrierIntents.size, 1);
+      assert.equal(journal.receipts.size, 0);
+      assert.equal(journal.cursors.size, 0);
+
+      registry.consumers.set(
+        consumerKey,
+        consumer({ currentEpoch: change === 'epoch' ? 3 : 2, revoked: change === 'revoke' }),
+      );
+      const second = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+        throw new Error('recovery must not invoke a new handler after authorization changes');
+      });
+      assert.equal(handlerCalls, 1);
+      assert.equal(second.blocked.length, 1);
+      assert.equal(second.committed.length, 0);
+      assert.equal(second.cursors.length, 0);
+      assert.deepEqual(journal.externalOperationReads, [operationRef, operationRef]);
+      assert.equal(journal.receipts.size, 0);
+      assert.equal(journal.cursors.size, 0);
+
+      journal.externalOperations.set(operationRef, {
+        operationRef,
+        consumerKey,
+        messageId,
+        state: finalState,
+      });
+      const unauthorizedRecovery = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+        throw new Error('settled barrier recovery must not invoke a new handler');
+      });
+      assert.equal(unauthorizedRecovery.committed.length, 0);
+      assert.equal(unauthorizedRecovery.cursors.length, 0);
+      assert.equal(handlerCalls, 1);
+      assert.equal(journal.commitCalls, 0);
+      assert.equal(journal.receipts.size, 0);
+      assert.equal(journal.cursors.size, 0);
+
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+      const recovered = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+        throw new Error('settled barrier recovery must not invoke a new handler');
+      });
+      assert.equal(recovered.committed.length, 1);
+      assert.equal(recovered.committed[0]?.disposition, 'applied');
+      assert.equal(recovered.cursors.length, 1);
+      assert.equal(journal.commitCalls, 1);
+      assert.equal(journal.receipts.size, 1);
+      assert.equal(journal.cursors.size, 1);
+      assert.deepEqual(journal.externalOperationReads, [operationRef, operationRef, operationRef, operationRef]);
+
+      const replayJournal = new FakeJournal();
+      replayJournal.events = [...journal.events];
+      replayJournal.externalOperations = new Map(journal.externalOperations);
+      replayJournal.barrierIntents = new Map(journal.barrierIntents);
+      const replayBus = ports(replayJournal, registry);
+      const replay = await consumeEvents(replayBus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+        throw new Error('rebuild/replay must recover the persisted barrier intent');
+      });
+      assert.equal(replay.committed.length, 1);
+      assert.equal(replay.committed[0]?.disposition, 'applied');
+      assert.equal(replay.cursors.length, 1);
+      assert.equal(replayJournal.receipts.size, 1);
+      assert.equal(replayJournal.cursors.size, 1);
+      assert.deepEqual(replayJournal.externalOperationReads, [operationRef]);
+    }
+  }
+});
+
 test('scope ACL, epoch staleness, and permission revocation are rejected without handler delivery', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
@@ -1067,6 +1307,91 @@ test('scope ACL, epoch staleness, and permission revocation are rejected without
   assert.equal(calls, 0);
   assert.equal(revoked.committed[0]?.disposition, 'rejected');
   assert.equal(revoked.committed[0]?.failureRef, 'consumer-permission-revoked');
+});
+
+test('batch rechecks ACL after awaited handler revokes consumer before later delivery', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'revoke-first', executionEpoch: 2 }),
+  });
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'revoke-second', executionEpoch: 2 }),
+  });
+
+  const handlerCalls: string[] = [];
+  let secondExternalOperations = 0;
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    handlerCalls.push(event.messageId);
+    if (event.messageId === 'revoke-first') {
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 2, revoked: true }));
+      return applied(event.messageId);
+    }
+    secondExternalOperations += 1;
+    return applied(event.messageId, [`operation:${event.messageId}`]);
+  });
+
+  assert.deepEqual(handlerCalls, ['revoke-first']);
+  assert.equal(secondExternalOperations, 0);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.messageId, receipt.disposition]), [
+    ['revoke-first', 'rejected'],
+    ['revoke-second', 'rejected'],
+  ]);
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'revoke-first' }))?.disposition, 'rejected');
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'revoke-second' }))?.disposition, 'rejected');
+
+  const replayCalls: string[] = [];
+  const replay = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    replayCalls.push(event.messageId);
+    return applied(event.messageId);
+  });
+  assert.deepEqual(replayCalls, []);
+  assert.equal(replay.committed.length, 0);
+});
+
+test('batch rechecks epoch after awaited handler advances it', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'epoch-first', executionEpoch: 2 }),
+  });
+  await publishEvent(bus, {
+    publisherId: harnessPublisher.publisherId,
+    event: event({ messageId: 'epoch-second', executionEpoch: 2 }),
+  });
+
+  const handlerCalls: string[] = [];
+  const result = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async ({ event }) => {
+    handlerCalls.push(event.messageId);
+    if (event.messageId === 'epoch-first') {
+      registry.consumers.set(consumerKey, consumer({ currentEpoch: 3 }));
+    }
+    return applied(event.messageId);
+  });
+
+  assert.deepEqual(handlerCalls, ['epoch-first']);
+  assert.deepEqual(result.committed.map((receipt) => [receipt.messageId, receipt.disposition]), [
+    ['epoch-first', 'stale'],
+    ['epoch-second', 'stale'],
+  ]);
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'epoch-first' }))?.disposition, 'stale');
+  assert.equal((await journal.readReceipt({ consumerKey, messageId: 'epoch-second' }))?.disposition, 'stale');
+
+  const replay = await consumeEvents(bus, { consumerKey, limit: 10, now: occurredAt }, async () => {
+    throw new Error('should not deliver after epoch advance');
+  });
+  assert.equal(replay.committed.length, 0);
 });
 
 test('consumer payload must not leak control fields through business payload', async () => {

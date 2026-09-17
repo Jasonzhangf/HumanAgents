@@ -14,8 +14,10 @@ import type { CheckpointCommitPort } from '../../../runtime/src/control/steering
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  type RuntimeExecutionCapabilities,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
   ProviderAgentDriver,
   ProviderAdapterError,
@@ -72,6 +74,7 @@ export interface UiRuntimeServiceOptions {
   readonly attentionPort: AttentionPort;
   readonly providerState: string;
   readonly providerError?: RuntimeTaskErrorProjection;
+  readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
   readonly now?: () => Date;
 }
@@ -120,6 +123,7 @@ export class UiRuntimeService {
       checkpointStoreFor: options.checkpointStoreFor,
       attentionPort: options.attentionPort,
       journal: options.journal,
+      hookRegistry: options.hookRegistry,
       taskIdPrefix: randomUUID(),
       now: options.now,
       createDriver: (input) => new ProviderAgentDriver({
@@ -165,6 +169,10 @@ export class UiRuntimeService {
 
   createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
     return this.coordinator.createTask(input);
+  }
+
+  executionCapabilities(): RuntimeExecutionCapabilities {
+    return this.coordinator.executionCapabilities();
   }
 
   listTasks(): RuntimeTaskListProjection {

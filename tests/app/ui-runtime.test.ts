@@ -19,9 +19,12 @@ import {
   type ProviderStartReceipt,
   type ProviderStopReceipt,
   type ProviderSubmitResult,
+  type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import { AgentRuntime, bindAgentDriver, executeStopControl, type AttentionPort } from '../../packages/runtime/src/index.js';
+import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
@@ -47,7 +50,11 @@ const binding: ProviderBinding = {
   capabilityDigest: 'sha256:ui-test-capability',
 };
 
-function evidence(label: string, scope: { readonly organId: typeof organId; readonly taskId?: { readonly scope: 'task'; readonly value: string }; readonly operationId?: { readonly scope: 'operation'; readonly value: string } }): EvidenceRef {
+function appendCheckpoint(store: FileCheckpointStore, checkpoint: Checkpoint): Promise<unknown> {
+  return store.append({ ownerId: 'app-test', commitId: checkpointCommitId(checkpoint), checkpoint });
+}
+
+function evidence(label: string, scope: ScopeRef): EvidenceRef {
   return {
     evidenceId: id('evidence', `ui-test-${label}`),
     kind: 'operation',
@@ -97,6 +104,7 @@ function serviceFor(
   providerState = 'ready',
   journal?: UiRuntimeJournal,
   now?: () => Date,
+  hookRegistry?: AgentHookRegistry,
 ): UiRuntimeService {
   return new UiRuntimeService({
     mode,
@@ -108,6 +116,7 @@ function serviceFor(
     providerState,
     journal: journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
     ...(now ? { now } : {}),
+    ...(hookRegistry ? { hookRegistry } : {}),
   });
 }
 
@@ -332,24 +341,17 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   const reconstructedDashboard = second.taskDashboard(firstTask.taskId);
   assert.equal(reconstructedDashboard.state, 'succeeded');
   assert.equal(reconstructedDashboard.checkpoint?.outcome, 'succeeded');
-  const store = new FileCheckpointStore(
+  const reconstructed = await new FileCheckpointStore(
     join(root, `task-${firstTask.taskId.value}-cycle-ui-cycle-1.jsonl`),
-  );
-  const operationScoped = await store.readLatest({
+  ).readLatest({
     organId,
     taskId: firstTask.taskId,
     cycleId: id('cycle', 'ui-cycle-1'),
     operationId: firstStarted.operationId,
   });
-  assert.equal(operationScoped, null);
-  const businessScoped = await store.readLatest({
-    organId,
-    taskId: firstTask.taskId,
-    cycleId: id('cycle', 'ui-cycle-1'),
-  });
-  if (!businessScoped) throw new Error('expected business checkpoint');
-  assert.equal(businessScoped.checkpoint.outcome, 'succeeded');
-  assert.equal(businessScoped.checkpoint.scope.operationId, undefined);
+  if (!reconstructed) throw new Error('expected reconstructed checkpoint');
+  assert.equal(reconstructed.checkpoint.outcome, 'succeeded');
+  assert.equal(reconstructed.checkpoint.scope.operationId, undefined);
   assert.deepEqual(second.eventsSince(firstStarted.operationId).map((event) => event.eventId), firstEvents.map((event) => event.eventId));
 
   const secondTask = second.createTask({ title: 'second process' });
@@ -365,49 +367,6 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   const resumed = third.startExecution(firstTask.taskId, { prompt: 'new epoch after restart' });
   assert.equal(resumed.executionEpoch, 2);
   await waitFor(() => assert.equal(third.taskDashboard(firstTask.taskId).state, 'succeeded'));
-});
-
-test('FileCheckpointStore filters latest and previous checkpoints by complete scope', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-store-scope-'));
-  const store = new FileCheckpointStore(join(root, 'shared-cycle.jsonl'));
-  const taskId = id('task', 'task-shared-cycle');
-  const cycleId = id('cycle', 'cycle-shared-cycle');
-  const scopeA = { organId, taskId, cycleId, operationId: id('operation', 'operation-a') };
-  const scopeB = { organId, taskId, cycleId, operationId: id('operation', 'operation-b') };
-  const checkpoint = (input: {
-    readonly id: string;
-    readonly scope: typeof scopeA | typeof scopeB;
-    readonly seq: number;
-    readonly previousCheckpointId: Checkpoint['previousCheckpointId'];
-  }): Checkpoint => ({
-    id: id('checkpoint', input.id),
-    scope: input.scope,
-    cycleId,
-    seq: input.seq,
-    previousCheckpointId: input.previousCheckpointId,
-    directiveRevision: 1,
-    executionEpoch: 1,
-    outcome: 'succeeded',
-    summary: `checkpoint ${input.id}`,
-    recoveryStateRef: evidence(`recovery-${input.id}`, input.scope),
-    evidenceRefs: [evidence(`completion-${input.id}`, input.scope)],
-    next: { kind: 'continue', ref: 'next' },
-  });
-  const sharedId = id('checkpoint', 'checkpoint-shared');
-  const firstA = checkpoint({ id: sharedId.value, scope: scopeA, seq: 1, previousCheckpointId: null });
-  const secondA = checkpoint({ id: 'checkpoint-a-2', scope: scopeA, seq: 2, previousCheckpointId: sharedId });
-  const firstB = checkpoint({ id: sharedId.value, scope: scopeB, seq: 1, previousCheckpointId: null });
-
-  await store.append({ ownerId: 'test-owner', commitId: 'commit-a-1', checkpoint: firstA });
-  await store.append({ ownerId: 'test-owner', commitId: 'commit-a-2', checkpoint: secondA });
-  await store.append({ ownerId: 'test-owner', commitId: 'commit-b-1', checkpoint: firstB });
-
-  const latestA = await store.readLatest(scopeA);
-  assert.equal(latestA?.checkpoint.id.value, secondA.id.value);
-  assert.equal(latestA?.previous?.id.value, firstA.id.value);
-  const latestB = await store.readLatest(scopeB);
-  assert.equal(latestB?.checkpoint.id.value, firstB.id.value);
-  assert.equal(latestB?.previous, null);
 });
 
 test('journal replay fails explicitly instead of silently dropping corrupted projection records', async () => {
@@ -792,6 +751,181 @@ test('restart hydration rejects a checkpoint copied under another task scope', a
   const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   await restarted.hydrate();
   assert.equal(restarted.taskDashboard(targetTask.taskId).state, 'blocked');
+});
+
+test('checkpoint latest reads prefer exact operation chains and fall back to business checkpoints', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-operation-scope-'));
+  const store = new FileCheckpointStore(join(root, 'checkpoints.jsonl'));
+  const taskId = id('task', 'shared-task');
+  const cycleId = id('cycle', 'shared-cycle');
+  const businessScope: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+  };
+  const scopeA: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+    operationId: id('operation', 'operation-a'),
+  };
+  const scopeB: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+    operationId: id('operation', 'operation-b'),
+  };
+
+  const checkpoint = (
+    scope: ScopeRef,
+    seq: number,
+    previousCheckpointId: Checkpoint['previousCheckpointId'],
+  ): Checkpoint => {
+    const label = scope.operationId?.value ?? 'business';
+    return {
+      id: id('checkpoint', `${label}-${seq}`),
+      scope,
+      cycleId,
+      seq,
+      previousCheckpointId,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'succeeded',
+      summary: `${label} checkpoint ${seq}`,
+      recoveryStateRef: evidence(`${label}-${seq}-recovery`, scope),
+      evidenceRefs: [evidence(`${label}-${seq}-completion`, scope)],
+      next: { kind: 'continue', ref: 'retry-closure' },
+    };
+  };
+
+  const checkpointA1 = checkpoint(scopeA, 1, null);
+  const checkpointB1 = checkpoint(scopeB, 1, null);
+  const checkpointA2 = checkpoint(scopeA, 2, checkpointA1.id);
+  const business1 = checkpoint(businessScope, 1, null);
+  const business2 = checkpoint(businessScope, 2, business1.id);
+  const checkpointB2 = checkpoint(scopeB, 2, checkpointB1.id);
+  await appendCheckpoint(store, checkpointA1);
+  await appendCheckpoint(store, checkpointB1);
+  await appendCheckpoint(store, checkpointA2);
+  await appendCheckpoint(store, business1);
+  await appendCheckpoint(store, business2);
+  await appendCheckpoint(store, checkpointB2);
+
+  const retryReadA = await store.readLatest(scopeA);
+  assert.equal(retryReadA?.checkpoint.id.value, checkpointA2.id.value);
+  assert.equal(retryReadA?.previous?.id.value, checkpointA1.id.value);
+
+  const retryReadB = await store.readLatest(scopeB);
+  assert.equal(retryReadB?.checkpoint.id.value, checkpointB2.id.value);
+  assert.equal(retryReadB?.previous?.id.value, checkpointB1.id.value);
+
+  const businessRead = await store.readLatest(businessScope);
+  assert.equal(businessRead?.checkpoint.id.value, business2.id.value);
+  assert.equal(businessRead?.previous?.id.value, business1.id.value);
+
+  const missingOperationRead = await store.readLatest({
+    organId,
+    taskId,
+    cycleId,
+    operationId: id('operation', 'operation-missing'),
+  });
+  assert.equal(missingOperationRead?.checkpoint.id.value, business2.id.value);
+  assert.equal(missingOperationRead?.previous?.id.value, business1.id.value);
+});
+
+test('hydration restores a business predecessor for an operation-scoped stopped checkpoint', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-checkpoint-stopped-predecessor-'));
+  const taskId = id('task', 'ui-task-checkpoint-hydrate-1');
+  const cycleId = id('cycle', 'ui-cycle-1');
+  const operationId = id('operation', 'ui-operation-1');
+  const businessScope: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+  };
+  const operationScope: ScopeRef = {
+    organId,
+    taskId,
+    cycleId,
+    operationId,
+  };
+  const businessCheckpoint: Checkpoint = {
+    id: id('checkpoint', 'hydrate-business-1'),
+    scope: businessScope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'succeeded',
+    summary: 'business checkpoint before stop',
+    recoveryStateRef: evidence('hydrate-business-recovery', businessScope),
+    evidenceRefs: [evidence('hydrate-business-evidence', businessScope)],
+    next: { kind: 'continue', ref: 'task://hydrate/next' },
+  };
+  const stoppedCheckpoint: Checkpoint = {
+    id: id('checkpoint', 'hydrate-stopped-1'),
+    scope: operationScope,
+    cycleId,
+    seq: 2,
+    previousCheckpointId: businessCheckpoint.id,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'stopped',
+    summary: 'stopped checkpoint with business predecessor',
+    recoveryStateRef: evidence('hydrate-stopped-recovery', operationScope),
+    evidenceRefs: [evidence('hydrate-stopped-evidence', operationScope)],
+    next: { kind: 'stop', ref: 'operator-stop' },
+  };
+  const checkpointFile = join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
+  const store = new FileCheckpointStore(checkpointFile);
+  await appendCheckpoint(store, businessCheckpoint);
+  await appendCheckpoint(store, stoppedCheckpoint);
+
+  const latest = await store.readLatest(operationScope);
+  if (!latest) throw new Error('expected latest operation-scoped stopped checkpoint');
+  assert.equal(latest.checkpoint.id.value, stoppedCheckpoint.id.value);
+  assert.equal(latest.previous?.id.value, businessCheckpoint.id.value);
+  assert.equal(latest.previous?.scope.operationId, undefined);
+
+  const createdAt = '2026-01-01T00:00:00.000Z';
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  await writeFile(journalPath, `${[
+    JSON.stringify({
+      kind: 'task.created',
+      taskId,
+      title: 'hydrate stopped predecessor',
+      directive: 'hydrate stopped predecessor',
+      directiveRevision: 1,
+      createdAt,
+      taskCounter: 1,
+    }),
+    JSON.stringify({
+      kind: 'operation.started',
+      operationId,
+      taskId,
+      cycleId,
+      scope: operationScope,
+      executionEpoch: 1,
+      operationCounter: 1,
+      cycleCounter: 1,
+      startedAt: createdAt,
+      input: 'hydrate stopped predecessor',
+    }),
+  ].join('\n')}\n`, 'utf8');
+
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    new UiRuntimeJournal(journalPath),
+  );
+  await service.hydrate();
+  const dashboard = service.taskDashboard(taskId);
+  assert.equal(dashboard.state, 'stopped');
+  assert.equal(dashboard.checkpoint?.outcome, 'stopped');
+  assert.equal(dashboard.checkpoint?.checkpointId, stoppedCheckpoint.id.value);
 });
 
 test('stop during provider observation keeps the stopped projection free of late errors', async () => {
@@ -1371,14 +1505,602 @@ test('ordinary settlement removes stop eligibility before awaiting provider sett
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
 });
 
-test('service composes AgentRuntime and stop control without bypassing the provider port', async () => {
+test('UI admission and decoded-control core hooks gate the real execution entry', async () => {
+  const admissionRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-admission-hook-'));
+  let admissionStarts = 0;
+  const admissionBase = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const admissionPort: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => admissionBase.probe(value),
+    capabilities: (value) => admissionBase.capabilities(value),
+    start: async (value) => {
+      admissionStarts += 1;
+      return admissionBase.start(value);
+    },
+    resume: (value) => admissionBase.resume(value),
+    submit: (value) => admissionBase.submit(value),
+    observe: (value) => admissionBase.observe(value),
+    requestStop: (value) => admissionBase.requestStop(value),
+    settle: (value) => admissionBase.settle(value),
+    close: (value) => admissionBase.close(value),
+  };
+  const admissionHooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-admission-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['request.admitted'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['admission rejected'],
+      ownerId: 'ui-admission-gate',
+      nextAction: 'repair admission',
+    }),
+  }]);
+  const admissionService = serviceFor(admissionRoot, admissionPort, 'fake', 'ready', undefined, undefined, admissionHooks);
+  const admissionTask = admissionService.createTask({ title: 'admission gate' });
+  const admissionStarted = admissionService.startExecution(admissionTask.taskId, { prompt: 'must not dispatch' });
+  await waitFor(() => assert.equal(admissionService.taskDashboard(admissionTask.taskId).state, 'failed'));
+  assert.equal(admissionStarts, 0);
+  assert.equal(admissionService.taskDashboard(admissionTask.taskId).error?.ownerId, 'ui-admission-gate');
+  assert.equal(admissionService.eventsSince(admissionStarted.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded'), false);
+
+  const controlRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-control-hook-'));
+  const controlHooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-control-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['control.decoded'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['decoded control rejected'],
+      ownerId: 'ui-control-gate',
+      nextAction: 'repair decoded control',
+    }),
+  }]);
+  const controlService = serviceFor(
+    controlRoot,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    controlHooks,
+  );
+  const controlTask = controlService.createTask({ title: 'control gate' });
+  const controlStarted = controlService.startExecution(controlTask.taskId, { prompt: 'must not succeed' });
+  await waitFor(() => assert.equal(controlService.taskDashboard(controlTask.taskId).state, 'failed'));
+  assert.equal(controlService.taskDashboard(controlTask.taskId).error?.ownerId, 'ui-control-gate');
+  assert.equal(controlService.eventsSince(controlStarted.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded'), false);
+});
+
+test('post-commit context hook failure preserves checkpoint identity and recovery after coordinator rebuild', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-context-commit-hook-'));
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['post-commit publication failed'],
+      ownerId: 'ui-context-commit-gate',
+      nextAction: 'reconcile committed checkpoint',
+    }),
+  }]);
+  const failingService = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    hooks,
+  );
+  const task = failingService.createTask({ title: 'context commit recovery' });
+  const started = failingService.startExecution(task.taskId, { prompt: 'commit once' });
+  await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
+  const failedDashboard = failingService.taskDashboard(task.taskId);
+  if (!failedDashboard.checkpoint) throw new Error('expected durable checkpoint identity');
+  assert.equal(failedDashboard.checkpoint.outcome, 'succeeded');
+  assert.equal(failedDashboard.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
+  const checkpointPath = join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`);
+  const checkpointJournal = await readFile(checkpointPath, 'utf8');
+  assert.equal(checkpointJournal.trim().split('\n').length, 1);
+  assert.match(checkpointJournal, new RegExp(`checkpoint-${task.taskId.value}-1`));
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+  assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+  assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+  assert.equal(rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded' && event.terminalPhase === 'final'), false);
+});
+
+test('post-commit context hook failure keeps non-succeeded checkpoints blocked after coordinator rebuild', async () => {
+  for (const checkpointOutcome of ['failed', 'blocked', 'waiting', 'cancelled', 'unknown'] as const) {
+    const root = await mkdtemp(join(tmpdir(), `humanagent-ui-context-commit-${checkpointOutcome}-`));
+    const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+      hookId: 'ui-context-commit-gate',
+      version: '1',
+      mode: 'core',
+      stages: ['context.committed'],
+      onEnter: async () => ({
+        status: 'failed' as const,
+        diagnostics: ['post-commit publication failed'],
+        ownerId: 'ui-context-commit-gate',
+        nextAction: 'reconcile committed checkpoint',
+      }),
+    }]);
+    const failingService = serviceFor(
+      root,
+      new FakeReplayExecutionRuntimePort({
+        binding,
+        stepDelayMs: 1,
+        replay: [
+          { kind: 'terminal', state: checkpointOutcome, summary: `execution ${checkpointOutcome}`, terminalState: checkpointOutcome },
+        ],
+      }),
+      'fake',
+      'ready',
+      undefined,
+      undefined,
+      hooks,
+    );
+    const task = failingService.createTask({ title: `context commit recovery ${checkpointOutcome}` });
+    const started = failingService.startExecution(task.taskId, { prompt: `commit ${checkpointOutcome}` });
+    await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
+    const failedDashboard = failingService.taskDashboard(task.taskId);
+    if (!failedDashboard.checkpoint) throw new Error(`expected durable ${checkpointOutcome} checkpoint identity`);
+    assert.equal(failedDashboard.checkpoint.outcome, checkpointOutcome);
+    assert.equal(failedDashboard.error?.ownerId, 'ui-context-commit-gate');
+    assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
+
+    const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+    await rebuilt.hydrate();
+    const recovered = rebuilt.taskDashboard(task.taskId);
+    assert.equal(recovered.state, 'blocked');
+    assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+    assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+    assert.equal(recovered.checkpoint?.outcome, checkpointOutcome);
+    assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
+    assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+    assert.deepEqual(recovered.allowedActions, []);
+    assert.throws(
+      () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked' }),
+      (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+    );
+    assert.equal(
+      rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'),
+      true,
+    );
+  }
+});
+
+test('post-commit context hook failure with provider close failure preserves hook recovery after coordinator rebuild', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-context-commit-close-failure-'));
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['post-commit publication failed'],
+      ownerId: 'ui-context-commit-gate',
+      nextAction: 'reconcile committed checkpoint',
+    }),
+  }]);
+  const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const closeFailure: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => base.probe(value),
+    capabilities: (value) => base.capabilities(value),
+    start: (value) => base.start(value),
+    resume: (value) => base.resume(value),
+    submit: (value) => base.submit(value),
+    observe: (value) => base.observe(value),
+    requestStop: (value) => base.requestStop(value),
+    settle: (value) => base.settle(value),
+    close: async () => ({
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: binding.protocol,
+      state: 'failed',
+      evidenceRefs: [evidence('provider-close-failure', { organId })],
+      ownerId: 'ui-provider-close-owner',
+      nextAction: { kind: 'recover', ref: 'provider-close-recovery' },
+    }),
+  };
+  const failingService = serviceFor(root, closeFailure, 'fake', 'ready', undefined, undefined, hooks);
+  const task = failingService.createTask({ title: 'context commit close recovery' });
+  const started = failingService.startExecution(task.taskId, { prompt: 'commit once with close failure' });
+  await waitFor(() => assert.equal(failingService.taskDashboard(task.taskId).state, 'blocked'));
+  const failedDashboard = failingService.taskDashboard(task.taskId);
+  if (!failedDashboard.checkpoint) throw new Error('expected durable checkpoint identity');
+  assert.equal(failedDashboard.checkpoint.outcome, 'succeeded');
+  assert.equal(failedDashboard.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(failedDashboard.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(failedDashboard.error?.nextAction, 'reconcile committed checkpoint');
+  assert.equal(failedDashboard.error?.cleanupError?.code, 'provider.close.failed');
+  assert.equal(failedDashboard.error?.cleanupError?.ownerId, 'ui-provider-close-owner');
+  assert.equal(failedDashboard.error?.cleanupError?.evidenceRefs?.[0]?.locator, 'test://provider-close-failure');
+  const failureJournal = await readFile(join(root, 'ui-runtime-journal.jsonl'), 'utf8');
+  assert.match(failureJournal, /"cleanupError":\{"code":"provider\.close\.failed","ownerId":"ui-provider-close-owner"/);
+  assert.match(failureJournal, /ui-test-provider-close-failure/);
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+  assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+  assert.equal(recovered.checkpoint?.outcome, 'succeeded');
+  assert.equal(recovered.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+  assert.deepEqual(recovered.allowedActions, []);
+  assert.throws(
+    () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked' }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+  );
+  assert.equal(
+    rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'),
+    true,
+  );
+});
+
+test('formal stop with committed stopped checkpoint and context hook failure stays blocked after coordinator rebuild', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-context-commit-'));
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-stop-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['stopped checkpoint publication failed'],
+      ownerId: 'ui-stop-context-commit-gate',
+      nextAction: 'reconcile stopped checkpoint',
+    }),
+  }]);
+  const stopBase = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 40 });
+  let closeCalls = 0;
+  const stopDriver: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => stopBase.probe(value),
+    capabilities: (value) => stopBase.capabilities(value),
+    start: (value) => stopBase.start(value),
+    resume: (value) => stopBase.resume(value),
+    submit: (value) => stopBase.submit(value),
+    observe: (value) => stopBase.observe(value),
+    requestStop: (value) => stopBase.requestStop(value),
+    settle: (value) => stopBase.settle(value),
+    close: async (value) => {
+      closeCalls += 1;
+      return stopBase.close(value);
+    },
+  };
+  const service = serviceFor(
+    root,
+    stopDriver,
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    hooks,
+  );
+  const task = service.createTask({ title: 'formal stop context recovery' });
+  const started = service.startExecution(task.taskId, { prompt: 'stop with post-commit hook failure' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
+  await assert.rejects(
+    () => service.stop(task.taskId),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'execution.context-commit-hook.blocked',
+  );
+  const failedDashboard = service.taskDashboard(task.taskId);
+  if (!failedDashboard.checkpoint) throw new Error('expected durable stopped checkpoint identity');
+  assert.equal(failedDashboard.state, 'blocked');
+  assert.equal(failedDashboard.checkpoint.outcome, 'stopped');
+  assert.equal(failedDashboard.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(failedDashboard.error?.ownerId, 'ui-stop-context-commit-gate');
+  assert.equal(failedDashboard.error?.nextAction, 'reconcile stopped checkpoint');
+  assert.deepEqual(failedDashboard.allowedActions, []);
+  assert.equal(closeCalls, 1);
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.checkpointId, failedDashboard.checkpoint.checkpointId);
+  assert.equal(recovered.checkpoint?.seq, failedDashboard.checkpoint.seq);
+  assert.equal(recovered.checkpoint?.outcome, 'stopped');
+  assert.equal(recovered.error?.code, 'execution.context-commit-hook.blocked');
+  assert.equal(recovered.error?.ownerId, 'ui-stop-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile stopped checkpoint');
+  assert.deepEqual(recovered.allowedActions, []);
+  assert.throws(
+    () => rebuilt.startExecution(task.taskId, { prompt: 'must not start' }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+  );
+  assert.equal(
+    rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'blocked' && event.terminalPhase === 'final'),
+    true,
+  );
+});
+
+test('post-commit stop recovery fences a late observation and closes the provider once', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-stop-late-observation-'));
+  const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-stop-late-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['stopped checkpoint publication failed'],
+      ownerId: 'ui-stop-late-context-commit-gate',
+      nextAction: 'reconcile stopped checkpoint',
+    }),
+  }]);
+  let releaseLate!: () => void;
+  const lateReady = new Promise<void>((resolve) => {
+    releaseLate = resolve;
+  });
+  let markLateYielded!: () => void;
+  const lateYielded = new Promise<void>((resolve) => {
+    markLateYielded = resolve;
+  });
+  let releaseClose!: () => void;
+  const closeReady = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  let closeCalls = 0;
+  const driver: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => base.probe(value),
+    capabilities: (value) => base.capabilities(value),
+    start: (value) => base.start(value),
+    resume: (value) => base.resume(value),
+    submit: (value) => base.submit(value),
+    observe: async function* (value) {
+      const iterator = base.observe(value)[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      if (first.done || !first.value) return;
+      yield first.value;
+      await lateReady;
+      markLateYielded();
+      yield {
+        ...first.value,
+        eventId: `${first.value.eventId}-late`,
+        kind: 'output',
+        summary: 'late output after stop recovery',
+        outputRefs: ['fake://late-after-stop'],
+      } as ProviderEvent;
+    },
+    requestStop: (value) => base.requestStop(value),
+    settle: (value) => base.settle(value),
+    close: async () => {
+      closeCalls += 1;
+      await closeReady;
+      return base.close(binding);
+    },
+  };
+  const service = serviceFor(root, driver, 'fake', 'ready', undefined, undefined, hooks);
+  const task = service.createTask({ title: 'late observation fence' });
+  const started = service.startExecution(task.taskId, { prompt: 'stop before late event' });
+  await waitFor(() => assert.equal(service.eventsSince(started.operationId).some((event) => event.kind === 'provider.model'), true));
+
+  const stopping = service.stop(task.taskId);
+  await waitFor(() => {
+    const dashboard = service.taskDashboard(task.taskId);
+    assert.equal(dashboard.state, 'blocked');
+    assert.equal(dashboard.checkpoint?.outcome, 'stopped');
+    assert.equal(dashboard.error?.ownerId, 'ui-stop-late-context-commit-gate');
+    assert.equal(dashboard.error?.nextAction, 'reconcile stopped checkpoint');
+    assert.deepEqual(dashboard.allowedActions, []);
+    assert.equal(closeCalls, 1);
+  });
+
+  releaseLate();
+  await lateYielded;
+  assert.equal(service.eventsSince(started.operationId).some((event) => event.summary === 'late output after stop recovery'), false);
+
+  releaseClose();
+  await assert.rejects(
+    () => stopping,
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'execution.context-commit-hook.blocked',
+  );
+  assert.equal(closeCalls, 1);
+  const dashboard = service.taskDashboard(task.taskId);
+  assert.equal(dashboard.checkpoint?.outcome, 'stopped');
+  assert.equal(dashboard.error?.ownerId, 'ui-stop-late-context-commit-gate');
+  assert.deepEqual(dashboard.allowedActions, []);
+  assert.equal(service.eventsSince(started.operationId).filter((event) => event.kind === 'execution.terminal').length, 1);
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.equal(recovered.checkpoint?.outcome, 'stopped');
+  assert.equal(recovered.checkpoint?.checkpointId, dashboard.checkpoint?.checkpointId);
+  assert.equal(recovered.error?.ownerId, 'ui-stop-late-context-commit-gate');
+  assert.deepEqual(recovered.allowedActions, []);
+  assert.throws(
+    () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked after late event' }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+  );
+});
+
+test('post-commit recovery is durable before a suspended provider close can finish', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-suspended-recovery-'));
+  const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const hooks = createHookRegistry(() => undefined, () => Date.now(), [{
+    hookId: 'ui-close-suspended-context-commit-gate',
+    version: '1',
+    mode: 'core',
+    stages: ['context.committed'],
+    onEnter: async () => ({
+      status: 'failed' as const,
+      diagnostics: ['post-commit publication failed'],
+      ownerId: 'ui-close-suspended-context-commit-gate',
+      nextAction: 'reconcile committed checkpoint',
+    }),
+  }]);
+  let releaseClose!: () => void;
+  const closeReady = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  let markCloseFinished!: () => void;
+  const closeFinished = new Promise<void>((resolve) => {
+    markCloseFinished = resolve;
+  });
+  let closeCalls = 0;
+  const driver: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: (value) => base.probe(value),
+    capabilities: (value) => base.capabilities(value),
+    start: (value) => base.start(value),
+    resume: (value) => base.resume(value),
+    submit: (value) => base.submit(value),
+    observe: (value) => base.observe(value),
+    requestStop: (value) => base.requestStop(value),
+    settle: (value) => base.settle(value),
+    close: async () => {
+      closeCalls += 1;
+      await closeReady;
+      const result = await base.close(binding);
+      markCloseFinished();
+      return result;
+    },
+  };
+  const service = serviceFor(root, driver, 'fake', 'ready', undefined, undefined, hooks);
+  const task = service.createTask({ title: 'close suspended recovery' });
+  const started = service.startExecution(task.taskId, { prompt: 'persist recovery before close' });
+  await waitFor(() => {
+    const dashboard = service.taskDashboard(task.taskId);
+    assert.equal(dashboard.state, 'blocked');
+    assert.equal(dashboard.error?.ownerId, 'ui-close-suspended-context-commit-gate');
+    assert.ok(dashboard.checkpoint);
+    assert.equal(closeCalls, 1);
+  });
+
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const journalWhileCloseSuspended = await readFile(journalPath, 'utf8');
+  assert.match(journalWhileCloseSuspended, /"state":"blocked"/);
+  assert.match(journalWhileCloseSuspended, /ui-close-suspended-context-commit-gate/);
+
+  const rebuilt = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding }));
+  await rebuilt.hydrate();
+  const recovered = rebuilt.taskDashboard(task.taskId);
+  assert.equal(recovered.state, 'blocked');
+  assert.ok(recovered.checkpoint);
+  assert.equal(recovered.error?.ownerId, 'ui-close-suspended-context-commit-gate');
+  assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
+  assert.deepEqual(recovered.allowedActions, []);
+  assert.throws(
+    () => rebuilt.startExecution(task.taskId, { prompt: 'must remain blocked while close is pending' }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.startable',
+  );
+
+  releaseClose();
+  await closeFinished;
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'));
+  assert.equal(service.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded' && event.terminalPhase === 'final'), false);
+});
+
+test('actual UI entry follows the provider-neutral composition and keeps hook, context, settlement, and failure evidence visible', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-'));
+  const hookEvents: string[] = [];
+  const hooks = createHookRegistry(
+    (event) => {
+      hookEvents.push(`${event.kind}:${event.stage}:${event.hookPhase ?? 'none'}`);
+    },
+    () => Date.now(),
+    [{
+      hookId: 'ui-runtime-observation-hook',
+      version: '1',
+      mode: 'observation',
+      stages: [
+        'request.created',
+        'request.before-dispatch',
+        'request.dispatched',
+        'attempt.started',
+        'response.received',
+        'response.decoded',
+        'result.mapped',
+        'context.committed',
+        'request.settled',
+      ],
+    }],
+  );
   const port = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
-  const service = serviceFor(root, port);
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, hooks);
   const task = service.createTask({ title: 'composition' });
   const started = service.startExecution(task.taskId, { prompt: 'composition' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
-  assert.equal(service.eventsSince(started.operationId).some((event) => event.evidenceRefs.some((ref) => ref.source === 'humanagent.fake-provider')), true);
+
+  const events = service.eventsSince(started.operationId);
+  assert.equal(events.some((event) => event.evidenceRefs.some((ref) => ref.source === 'humanagent.fake-provider')), true);
+  assert.equal(events.some((event) => event.kind === 'execution.settling'), true);
+  assert.equal(events.some((event) => event.kind === 'checkpoint.committed'), true);
+  assert.equal(events.at(-1)?.kind, 'execution.terminal');
+  assert.equal(events.at(-1)?.terminalPhase, 'final');
+  assert.equal(hookEvents.some((event) => event.endsWith(':request.created:enter')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':response.received:enter')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':response.decoded:exit')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':context.committed:exit')), true);
+  assert.equal(hookEvents.some((event) => event.endsWith(':request.settled:exit')), true);
+
+  const capabilities = service.executionCapabilities();
+  assert.equal(capabilities.providerNeutralHarness.state, 'available');
+  assert.equal(capabilities.requestResponseHooks.state, 'available');
+  assert.equal(capabilities.agentIoRequestLifecycle.state, 'unavailable');
+  assert.match(capabilities.agentIoRequestLifecycle.reason, /raw response chunks/);
+  assert.equal(capabilities.contextCommitReentry.state, 'available');
+  assert.equal(capabilities.checkpointSettlementCancellation.state, 'available');
+  assert.equal(capabilities.eventBus.state, 'unavailable');
+  assert.equal(capabilities.eventBus.ownerId, 'humanagent.runtime.events');
+
+  const failureRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-composition-failure-'));
+  const failingHooks = createHookRegistry(
+    () => undefined,
+    () => Date.now(),
+    [{
+      hookId: 'ui-runtime-blocking-hook',
+      version: '1',
+      mode: 'core',
+      stages: ['request.before-dispatch'],
+      onEnter: async () => ({
+        status: 'failed' as const,
+        diagnostics: ['request hook rejected execution'],
+        ownerId: 'ui-runtime-blocking-hook',
+        nextAction: 'inspect ui-runtime-blocking-hook',
+      }),
+    }],
+  );
+  const failingService = serviceFor(
+    failureRoot,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    failingHooks,
+  );
+  const failedTask = failingService.createTask({ title: 'composition failure' });
+  const failedStart = failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
+  await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
+  const failedEvents = failingService.eventsSince(failedStart.operationId);
+  assert.equal(failedEvents.some((event) => event.kind === 'provider.error' && event.ownerId === 'ui-runtime-blocking-hook'), true);
+  assert.equal(failedEvents.some((event) => event.kind === 'checkpoint.committed' && event.state === 'failed'), true);
+  assert.equal(failedEvents.at(-1)?.kind, 'execution.terminal');
+  assert.equal(failedEvents.at(-1)?.state, 'failed');
+  assert.equal(failedEvents.at(-1)?.terminalPhase, 'final');
+
   assert.equal(typeof AgentRuntime, 'function');
   assert.equal(typeof bindAgentDriver, 'function');
   assert.equal(typeof executeStopControl, 'function');

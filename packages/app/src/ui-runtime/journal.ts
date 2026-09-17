@@ -50,6 +50,30 @@ function requirePositiveInteger(record: Record<string, unknown>, key: string, fi
   }
 }
 
+function checkpointIdKey(id: Checkpoint['id']): string {
+  return `${id.scope}:${id.value}`;
+}
+
+function sameScopedId(
+  left: { readonly scope: string; readonly value: string } | undefined,
+  right: { readonly scope: string; readonly value: string } | undefined,
+): boolean {
+  return left?.scope === right?.scope && left?.value === right?.value;
+}
+
+function checkpointScopeKey(scope: ScopeRef): string {
+  return [
+    `${scope.organId.scope}:${scope.organId.value}`,
+    `${scope.taskId?.scope ?? '-'}:${scope.taskId?.value ?? '-'}`,
+    `${scope.cycleId?.scope ?? '-'}:${scope.cycleId?.value ?? '-'}`,
+    `${scope.operationId?.scope ?? '-'}:${scope.operationId?.value ?? '-'}`,
+  ].join('|');
+}
+
+function checkpointChainKey(id: Checkpoint['id'], scope: ScopeRef): string {
+  return `${checkpointIdKey(id)}|${checkpointScopeKey(scope)}`;
+}
+
 function validateEvidenceRefs(value: unknown, filePath: string, line: number): void {
   if (!Array.isArray(value)) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: event.evidenceRefs are required`);
@@ -176,22 +200,43 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
 
   async readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
     const records = await this.journal().replay();
-    const checkpoints = records
+    const checkpointByChain = new Map<string, Checkpoint>();
+    for (const record of records) {
+      if (record.kind === 'checkpoint' && record.checkpoint) {
+        checkpointByChain.set(checkpointChainKey(record.checkpoint.id, record.checkpoint.scope), record.checkpoint);
+      }
+    }
+    const businessCheckpoints = records
       .filter((record) =>
         record.kind === 'checkpoint'
         && record.checkpoint
-        && record.checkpoint.scope.organId.scope === scope.organId.scope
-        && record.checkpoint.scope.organId.value === scope.organId.value
-        && record.checkpoint.scope.taskId?.scope === scope.taskId?.scope
-        && record.checkpoint.scope.taskId?.value === scope.taskId?.value
-        && record.checkpoint.scope.cycleId?.scope === scope.cycleId?.scope
-        && record.checkpoint.scope.cycleId?.value === scope.cycleId?.value
-        && record.checkpoint.scope.operationId?.scope === scope.operationId?.scope
-        && record.checkpoint.scope.operationId?.value === scope.operationId?.value)
+        && sameScopedId(record.scope.organId, scope.organId)
+        && sameScopedId(record.scope.taskId, scope.taskId)
+        && sameScopedId(record.scope.cycleId, scope.cycleId))
       .map((record) => record.checkpoint as Checkpoint);
+    const exactOperationCheckpoints = scope.operationId
+      ? businessCheckpoints.filter((checkpoint) => sameScopedId(checkpoint.scope.operationId, scope.operationId))
+      : [];
+    const checkpoints = exactOperationCheckpoints.length > 0
+      ? exactOperationCheckpoints
+      : businessCheckpoints.filter((checkpoint) => !checkpoint.scope.operationId);
     const latest = checkpoints.at(-1);
     if (!latest) return null;
-    return { checkpoint: latest, previous: checkpoints.at(-2) ?? null };
+    if (latest.previousCheckpointId === null) {
+      return { checkpoint: latest, previous: null };
+    }
+    const previous = checkpointByChain.get(checkpointChainKey(latest.previousCheckpointId, latest.scope))
+      ?? (latest.outcome === 'stopped' && latest.scope.operationId
+        ? checkpointByChain.get(checkpointChainKey(latest.previousCheckpointId, {
+          organId: latest.scope.organId,
+          ...(latest.scope.taskId ? { taskId: latest.scope.taskId } : {}),
+          ...(latest.scope.cycleId ? { cycleId: latest.scope.cycleId } : {}),
+        }))
+        : undefined);
+    if (!previous) {
+      throw new Error(`corrupt UI runtime checkpoint journal ${this.filePath}: previous checkpoint ${latest.previousCheckpointId.value} is missing`);
+    }
+    return { checkpoint: latest, previous };
   }
 
   async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {

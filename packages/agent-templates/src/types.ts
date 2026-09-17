@@ -18,7 +18,7 @@ export interface AgentTemplateManifest {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
-  readonly systemPromptRef: string;
+  readonly promptSegmentRefs: readonly string[];
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
   readonly policyRef: string;
@@ -47,7 +47,8 @@ export interface CompiledAgentTemplate {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
-  readonly systemPromptRef: string;
+  readonly promptSegmentRefs: readonly string[];
+  readonly promptSegmentDigest: string;
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
   readonly policyRef: string;
@@ -60,6 +61,21 @@ export interface CompiledAgentTemplate {
 export interface LoadedAgentTemplate extends CompiledAgentTemplate {
   readonly driverKind: string;
   readonly driverCapabilities: readonly string[];
+}
+
+export interface AgentPromptSegment {
+  readonly ref: string;
+  readonly content: string;
+  readonly digest: string;
+}
+
+export interface AgentPromptSource {
+  read(ref: string): Promise<string>;
+}
+
+export interface LoadedAgentPromptSegments {
+  readonly segments: readonly AgentPromptSegment[];
+  readonly contentDigest: string;
 }
 
 export interface AgentTemplateRegistry {

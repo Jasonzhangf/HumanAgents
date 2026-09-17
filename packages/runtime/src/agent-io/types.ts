@@ -1,3 +1,5 @@
+import type { AgentIoEvent } from './events.js';
+
 export const AGENT_IO_PROTOCOL_VERSION = 1 as const;
 
 export type AgentIoProviderProtocol = 'responses' | 'anthropic' | 'openai' | 'other-explicit';
@@ -184,12 +186,18 @@ export interface AgentIoRequest {
   readonly closed: boolean;
 }
 
+export interface AgentIoSettlementPublicationIntent {
+  readonly closure: AgentIoClosure;
+  readonly event: AgentIoEvent;
+}
+
 export interface AgentIoBudgetRecord {
   readonly totalTurns: number;
   readonly noProgressTurns: number;
   readonly controlRepairAttempts: number;
   readonly turnsSinceProbe: number;
   readonly restartCount: number;
+  readonly pendingSettlement?: AgentIoSettlementPublicationIntent;
 }
 
 export interface AgentIoRestartBudgetStore {

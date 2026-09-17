@@ -225,19 +225,33 @@ test('core exit hook failure preserves owner and next action without reporting s
   assert.equal(coordinator.snapshot().status, 'running');
 });
 
-test('settlement publication failure leaves the request closed and does not republish', async () => {
+test('settlement publication failure leaves delivery pending and does not falsely complete EOF', async () => {
   const store = createMemoryRestartBudgetStore();
   const clock = fakeClock();
   let settlementPublications = 0;
+  let settlementSinkAvailable = false;
+  let settlementHookCalls = 0;
+  const events = collectEvents();
+  const registry = createHookRegistry(events.onEvent, clock.clock.now);
+  registry.add({
+    hookId: 'settlement-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['request.settled'],
+    onExit: async () => {
+      settlementHookCalls += 1;
+      return { status: 'observed' };
+    },
+  });
   const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(
     store,
     clock,
     undefined,
-    undefined,
+    registry,
     (event) => {
       if (event.kind !== 'request.settled') return;
       settlementPublications += 1;
-      throw new Error('settlement event sink unavailable');
+      if (!settlementSinkAvailable) throw new Error('settlement event sink unavailable');
     },
   ));
   await coordinator.start();
@@ -248,10 +262,151 @@ test('settlement publication failure leaves the request closed and does not repu
   );
 
   assert.equal(coordinator.snapshot().closed, true);
-  assert.equal(coordinator.snapshot().status, 'settled');
-  const closure = await coordinator.endOfStream({ sourceRef: 'response:eof' });
-  assert.equal(closure.status, 'completed');
+  assert.equal(coordinator.snapshot().status, 'incomplete');
+  assert.equal(settlementHookCalls, 1);
+
+  const eofClosure = await coordinator.endOfStream({ sourceRef: 'response:eof' });
+  assert.equal(eofClosure.status, 'incomplete');
+  assert.match(eofClosure.nextAction ?? '', /retry request\.settled publication/);
   assert.equal(settlementPublications, 1);
+  assert.equal(coordinator.pendingSettlementClosure()?.status, 'completed');
+
+  settlementSinkAvailable = true;
+  const retried = await coordinator.retrySettlementPublication();
+  assert.equal(retried?.status, 'completed');
+  assert.equal(coordinator.snapshot().status, 'settled');
+  assert.equal(settlementPublications, 2);
+  assert.equal(settlementHookCalls, 1);
+});
+
+test('settlement intent persistence failure stays incomplete until retry persists the same identity', async () => {
+  const backingStore = createMemoryRestartBudgetStore();
+  let failPendingWrite = true;
+  const pendingEventIds: string[] = [];
+  const store: AgentIoRestartBudgetStore = {
+    read: (requestId) => backingStore.read(requestId),
+    write: async (requestId, record) => {
+      if (record.pendingSettlement) {
+        pendingEventIds.push(record.pendingSettlement.event.eventId);
+        if (failPendingWrite) {
+          failPendingWrite = false;
+          throw new Error('budget store unavailable');
+        }
+      }
+      await backingStore.write(requestId, record);
+    },
+  };
+  const clock = fakeClock();
+  let settlementPublications = 0;
+  let publishedEventId: string | undefined;
+  let settlementHookCalls = 0;
+  const registry = createHookRegistry(() => undefined, clock.clock.now, [{
+    hookId: 'settlement-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['request.settled'],
+    onExit: async () => {
+      settlementHookCalls += 1;
+      return { status: 'observed' };
+    },
+  }]);
+  const coordinator = await AgentIoRequestCoordinator.create({
+    ...coordinatorOptions(store, clock, undefined, registry),
+    onEvent: (event) => {
+      if (event.kind === 'request.settled') {
+        settlementPublications += 1;
+        publishedEventId = event.eventId;
+      }
+    },
+  });
+  await coordinator.start();
+
+  await assert.rejects(
+    coordinator.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' }),
+    /budget store unavailable/,
+  );
+  assert.equal(coordinator.snapshot().status, 'incomplete');
+  assert.equal(coordinator.snapshot().closed, true);
+  assert.equal(settlementPublications, 0);
+  assert.equal(settlementHookCalls, 1);
+  assert.equal((await backingStore.read('request-agent-io'))?.pendingSettlement, undefined);
+
+  const eof = await coordinator.endOfStream({ sourceRef: 'response:eof' });
+  assert.equal(eof.status, 'incomplete');
+  assert.equal(eof.ownerId, 'agent-io-owner');
+  assert.match(eof.nextAction ?? '', /retry settlement intent persistence/);
+
+  const retried = await coordinator.retrySettlementPublication();
+  assert.equal(retried?.status, 'completed');
+  assert.equal(coordinator.snapshot().status, 'settled');
+  assert.equal(settlementPublications, 1);
+  assert.equal(settlementHookCalls, 1);
+  assert.equal(pendingEventIds.length, 2);
+  assert.equal(pendingEventIds[0], pendingEventIds[1]);
+  assert.equal(publishedEventId, pendingEventIds[0]);
+  assert.equal((await backingStore.read('request-agent-io'))?.pendingSettlement, undefined);
+});
+
+test('settlement publication intent survives coordinator recreation and retries once without hooks', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const attempted: AgentIoEvent[] = [];
+  let successfulPublications = 0;
+  let sinkAvailable = false;
+  let settlementHookCalls = 0;
+  const firstRegistry = createHookRegistry(() => undefined, clock.clock.now, [{
+    hookId: 'settlement-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['request.settled'],
+    onExit: async () => {
+      settlementHookCalls += 1;
+      return { status: 'observed' };
+    },
+  }]);
+  const first = await AgentIoRequestCoordinator.create({
+    ...coordinatorOptions(store, clock, { restartBudget: 1 }, firstRegistry),
+    onEvent: (event) => {
+      if (event.kind !== 'request.settled') return;
+      attempted.push(event);
+      if (!sinkAvailable) throw new Error('settlement event sink unavailable');
+      successfulPublications += 1;
+    },
+  });
+  await first.start();
+
+  await assert.rejects(
+    first.endTurn({ raw: VALID_CONTROL, sourceRef: 'turn:1' }),
+    /settlement event sink unavailable/,
+  );
+
+  const second = await AgentIoRequestCoordinator.create({
+    ...coordinatorOptions(store, clock, { restartBudget: 1 }, firstRegistry),
+    onEvent: (event) => {
+      if (event.kind === 'request.settled') {
+        attempted.push(event);
+        if (!sinkAvailable) throw new Error('settlement event sink unavailable');
+        successfulPublications += 1;
+      }
+    },
+  });
+  assert.equal(second.snapshot().status, 'incomplete');
+  assert.equal(second.snapshot().closed, true);
+  assert.equal(second.pendingSettlementClosure()?.status, 'completed');
+  assert.equal((await store.read('request-agent-io'))?.pendingSettlement?.event.eventId, attempted[0]?.eventId);
+
+  sinkAvailable = true;
+  const retried = await second.retrySettlementPublication();
+  assert.equal(retried?.status, 'completed');
+  assert.equal(second.snapshot().status, 'settled');
+  assert.equal(settlementHookCalls, 1);
+  assert.equal(attempted.length, 2);
+  assert.equal(successfulPublications, 1);
+  assert.equal((await store.read('request-agent-io'))?.pendingSettlement, undefined);
+  assert.equal(attempted[0]?.eventId, attempted[1]?.eventId);
+  assert.equal(attempted[0]?.requestId, attempted[1]?.requestId);
+  assert.equal(attempted[0]?.attemptId, attempted[1]?.attemptId);
+  assert.equal(attempted[0]?.sequence, attempted[1]?.sequence);
 });
 
 test('request rejects stale and mismatched caller bindings before dispatch', async () => {
@@ -367,6 +522,73 @@ test('repair acceptance does not create a tool-intent side effect', async () => 
   assert.equal(coordinator.snapshot().attempt.repairOrdinal, 1);
   assert.equal(events.some((event) => event.kind === 'tool-intent.decoded'), false);
   assert.equal(coordinator.snapshot().closed, true);
+});
+
+test('native tool-intent chunks during bounded repair do not publish tool effects or hooks', async () => {
+  const store = createMemoryRestartBudgetStore();
+  const clock = fakeClock();
+  const { events, onEvent } = collectEvents();
+  let toolHookCalls = 0;
+  const registry = createHookRegistry(onEvent, clock.clock.now);
+  registry.add({
+    hookId: 'tool-observer',
+    version: '1',
+    mode: 'observation',
+    stages: ['tool-intent.decoded'],
+    onExit: async () => {
+      toolHookCalls += 1;
+      return { status: 'observed' };
+    },
+  });
+  const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock, undefined, registry, onEvent));
+  await coordinator.start();
+
+  const repairRequired = await coordinator.endTurn({ raw: '{"phase":"continue"}', sourceRef: 'turn:1' });
+  assert.equal(repairRequired.repairRequired, true);
+  assert.equal(coordinator.snapshot().status, 'repairing');
+
+  await coordinator.acceptChunk({
+    sequence: 1,
+    sourceRef: 'response:tool-intent-during-repair',
+    kind: 'tool-intent',
+    toolIntent: { toolRef: 'execute:side-effect', inputRef: 'asset://tool-input' },
+  });
+
+  assert.equal(toolHookCalls, 0);
+  assert.equal(events.some((event) => event.kind === 'tool-intent.decoded'), false);
+  assert.equal(coordinator.snapshot().status, 'repairing');
+
+  const repaired = await coordinator.repair({
+    raw: '{"summary":"repaired","next":{"kind":"reason","objective":"continue"}}',
+    sourceRef: 'turn:2',
+  });
+  assert.equal(repaired.accepted, true);
+  assert.equal(coordinator.snapshot().status, 'settled');
+  assert.equal(toolHookCalls, 0);
+  assert.equal(events.some((event) => event.kind === 'tool-intent.decoded'), false);
+});
+
+test('boolean and blank summaries enter bounded repair instead of settling', async () => {
+  for (const raw of [
+    '{"summary":true,"disposition":"continue","goal":{"status":"in-progress"}}',
+    '{"summary":"   ","disposition":"continue","goal":{"status":"in-progress"}}',
+  ]) {
+    const store = createMemoryRestartBudgetStore();
+    const clock = fakeClock();
+    const coordinator = await AgentIoRequestCoordinator.create(coordinatorOptions(store, clock));
+    await coordinator.start();
+
+    const result = await coordinator.endTurn({ raw, sourceRef: 'turn:1' });
+    assert.equal(result.accepted, false);
+    assert.equal(result.repairRequired, true);
+    assert.equal(coordinator.snapshot().status, 'repairing');
+    assert.equal(coordinator.snapshot().closed, false);
+
+    const repaired = await coordinator.repair({ raw: VALID_CONTROL, sourceRef: 'turn:2' });
+    assert.equal(repaired.accepted, true);
+    assert.equal(coordinator.snapshot().status, 'settled');
+    assert.equal(coordinator.snapshot().closed, true);
+  }
 });
 
 test('repair state requires the repair path and rejects future execution epochs', async () => {

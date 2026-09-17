@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
+import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
 import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, createJsonlCheckpointJournal, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
@@ -100,6 +101,15 @@ class RejectPromptDriver extends FakeAgentDriver {
   }
 }
 
+class PromptCaptureDriver extends FakeAgentDriver {
+  lastPrompt = '';
+
+  override async submit(input: AgentInput): Promise<AgentOutput> {
+    this.lastPrompt = String(input.payload.prompt ?? '');
+    return super.submit(input);
+  }
+}
+
 test('HumanAgent operation identity is stable across driver and provider bindings', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stable-identity-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -140,6 +150,44 @@ test('HumanAgent operation identity is stable across driver and provider binding
 
   const source = await readFile(join(process.cwd(), 'packages/app/src/agent-operation.ts'), 'utf8');
   assert.equal(/adapters[\\/]dsh|dshExecutionOrganId|dshOperationIdFor/.test(source), false);
+});
+
+test('agent operation assembles external builtin prompt segments before driver submission', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-prompt-assets-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const prompts = await loadBuiltinPromptSegments(
+    'execution',
+    join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+  );
+  const configured = { ...configuration, promptCatalog: { execution: prompts } };
+  const driver = new PromptCaptureDriver();
+  const operation = await openAgentOperation({
+    paths,
+    configuration: configured,
+    workspace,
+    sessionId: 'session-prompt-assets',
+    plan: 'default',
+    prompt: 'inspect the configuration',
+    agent: {
+      agentId: 'execution-prompt-assets',
+      roleId: 'execution',
+      templateRef: 'builtin/execution@1.0.0',
+      driverRef: 'fake',
+      skills: ['single-capability-worker'],
+      tools: ['search'],
+      permissions: ['task.read', 'workspace.read'],
+      memoryScopes: ['task'],
+      resourceClass: 'foreground',
+    },
+    composed: { driver },
+  });
+  await operation.start();
+  await operation.submit();
+  await operation.complete();
+  assert.match(driver.lastPrompt, /# Execution Agent/);
+  assert.match(driver.lastPrompt, /# Task input/);
+  assert.match(driver.lastPrompt, /inspect the configuration/);
 });
 
 test('CLI config failures preserve structured owner and next action evidence', async () => {
@@ -186,6 +234,18 @@ test('app composes a provider-neutral execution port and preserves adapter owner
   assert.equal(handle.execution?.binding.provider.providerId, 'provider-integration');
   const observedReadiness = await probeExecutionRuntime(handle.execution!);
   assert.equal(observedReadiness.state, 'ready');
+  const promptDriver = new PromptCaptureDriver();
+  await runAgentOperation({
+    paths: handle.paths,
+    configuration: handle.configuration,
+    workspace,
+    sessionId: 'session-execution-prompt',
+    plan: 'default',
+    prompt: 'verify runtime prompt loading',
+    composed: { driver: promptDriver },
+  });
+  assert.match(promptDriver.lastPrompt, /# Interaction Agent/);
+  assert.match(promptDriver.lastPrompt, /verify runtime prompt loading/);
   await handle.lock.release();
   const resumed = await resumeRuntime({ controlRoot, workspace, sessionId: 'session-execution', execution: runtimeBinding(port) });
   assert.equal(resumed.execution?.port, port);

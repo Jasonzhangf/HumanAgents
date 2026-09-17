@@ -1,0 +1,49 @@
+{
+  "kind": "humanagent.prompt-registry",
+  "schemaVersion": 1,
+  "templateVersion": "1.0.0",
+  "contentDigests": {
+    "interaction": "sha256:d3337c9ff885b098033decff55d4c2fa1ce095fe7ea6462f299bf7731a8a300d",
+    "orchestration": "sha256:1de7d7d3e83f70972eea86e64620bde4244d01a1bdc925f4bded1cbc5ef8c288",
+    "execution": "sha256:90bc73b6ac85d6c6c2d4ce64346555f01d6d535113cbb5472759953d62cc25f7",
+    "review": "sha256:ca89e88b27281039c22c8f2aae15c9dfab51363655c6b0c9d20a16f9476f4cfc",
+    "memory": "sha256:b93ced4a7e090972faa180d13b299e3229a9d3fad7a391e763c6923ca8767961"
+  },
+  "roles": {
+    "interaction": [
+      "interaction/identity.md",
+      "interaction/mission.md",
+      "interaction/input-output.md",
+      "interaction/failure.md",
+      "interaction/boundaries.md"
+    ],
+    "orchestration": [
+      "orchestration/identity.md",
+      "orchestration/mission.md",
+      "orchestration/input-output.md",
+      "orchestration/failure.md",
+      "orchestration/boundaries.md"
+    ],
+    "execution": [
+      "execution/identity.md",
+      "execution/mission.md",
+      "execution/input-output.md",
+      "execution/failure.md",
+      "execution/boundaries.md"
+    ],
+    "review": [
+      "review/identity.md",
+      "review/mission.md",
+      "review/input-output.md",
+      "review/failure.md",
+      "review/boundaries.md"
+    ],
+    "memory": [
+      "memory/identity.md",
+      "memory/mission.md",
+      "memory/input-output.md",
+      "memory/failure.md",
+      "memory/boundaries.md"
+    ]
+  }
+}

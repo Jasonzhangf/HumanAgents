@@ -137,10 +137,12 @@ test('mapToolResult separates business and control values', () => {
   assert.throws(() => mapToolResult({ business: 'x', reason: ' ' }), ContextIndexError);
 });
 
-test('ContextCommitter enforces prepare, commit, publish order', () => {
+test('ContextCommitter enforces prepare, commit, publish order', async () => {
   const events: string[] = [];
   const committer = new ContextCommitter<string>({
-    commit: (context) => events.push(`commit:${context.id}`),
+    commit: (context) => {
+      events.push(`commit:${context.id}`);
+    },
     publish: (context) => events.push(`publish:${context.id}`),
   });
 
@@ -153,31 +155,31 @@ test('ContextCommitter enforces prepare, commit, publish order', () => {
   });
   assert.equal(committer.state('view-1'), 'prepared');
 
-  const committed = committer.commit(prepared);
+  const committed = await committer.commit(prepared);
   assert.equal(committed.state, 'committed');
   assert.equal(committer.state('view-1'), 'committed');
-  assert.deepEqual(committer.commit('view-1'), committed);
-  assert.deepEqual(committer.commit(prepared), committed);
+  assert.deepEqual(await committer.commit('view-1'), committed);
+  assert.deepEqual(await committer.commit(prepared), committed);
   assert.equal(committer.state('view-1'), 'committed');
 
   const published = committer.publish('view-1');
   assert.equal(published.state, 'published');
   assert.equal(committer.state('view-1'), 'published');
-  assert.throws(() => committer.commit('view-1'), ContextCommitError);
+  await assert.rejects(() => committer.commit('view-1'), ContextCommitError);
   assert.equal(committer.state('view-1'), 'published');
   assert.throws(() => committer.publish('view-1'), ContextPublishError);
   assert.deepEqual(events, ['commit:view-1', 'publish:view-1']);
 });
 
-test('ContextCommitter rejects duplicate and unknown contexts', () => {
+test('ContextCommitter rejects duplicate and unknown contexts', async () => {
   const committer = new ContextCommitter<number>();
   committer.prepare({ id: 'view-1', value: 1 });
   assert.throws(() => committer.prepare({ id: 'view-1', value: 2 }), ContextPrepareError);
-  assert.throws(() => committer.commit('missing'), ContextCommitError);
+  await assert.rejects(() => committer.commit('missing'), ContextCommitError);
   assert.throws(() => committer.publish('missing'), ContextPublishError);
 });
 
-test('ContextCommitter keeps a prepared context retryable when commit fails', () => {
+test('ContextCommitter keeps a prepared context retryable when commit fails', async () => {
   let attempts = 0;
   const committer = new ContextCommitter<string>({
     commit: () => {
@@ -187,16 +189,16 @@ test('ContextCommitter keeps a prepared context retryable when commit fails', ()
   });
   const prepared = committer.prepare({ id: 'view-1', value: 'view' });
 
-  assert.throws(() => committer.commit(prepared), Error);
+  await assert.rejects(() => committer.commit(prepared), Error);
   assert.equal(committer.state('view-1'), 'prepared');
 
-  const committed = committer.commit(prepared);
+  const committed = await committer.commit(prepared);
   assert.equal(committed.state, 'committed');
   assert.equal(committer.state('view-1'), 'committed');
   assert.equal(attempts, 2);
 });
 
-test('ContextCommitter returns the existing committed result for the same identity', () => {
+test('ContextCommitter returns the existing committed result for the same identity', async () => {
   let attempts = 0;
   const committer = new ContextCommitter<string>({
     commit: () => {
@@ -205,42 +207,42 @@ test('ContextCommitter returns the existing committed result for the same identi
   });
   const prepared = committer.prepare({ id: 'view-1', revision: 7, value: 'view' });
 
-  const committed = committer.commit(prepared);
-  assert.deepEqual(committer.commit('view-1'), committed);
-  assert.deepEqual(committer.commit(prepared), committed);
+  const committed = await committer.commit(prepared);
+  assert.deepEqual(await committer.commit('view-1'), committed);
+  assert.deepEqual(await committer.commit(prepared), committed);
   assert.equal(committer.state('view-1'), 'committed');
   assert.equal(attempts, 1);
 });
 
-test('ContextCommitter rejects conflicting values on an idempotent retry', () => {
+test('ContextCommitter rejects conflicting values on an idempotent retry', async () => {
   const committer = new ContextCommitter<string>();
   const prepared = committer.prepare({ id: 'view-1', revision: 7, value: 'view' });
-  committer.commit(prepared);
+  await committer.commit(prepared);
 
-  assert.throws(
+  await assert.rejects(
     () => committer.commit({ id: 'view-1', revision: 8, value: 'view', state: 'prepared' }),
     ContextCommitError,
   );
-  assert.throws(
+  await assert.rejects(
     () => committer.commit({ id: 'view-1', revision: 7, value: 'other', state: 'prepared' }),
     ContextCommitError,
   );
   assert.equal(committer.state('view-1'), 'committed');
 });
 
-test('ContextCommitter rejects commit retries after publish without changing state', () => {
+test('ContextCommitter rejects commit retries after publish without changing state', async () => {
   const committer = new ContextCommitter<string>();
   const prepared = committer.prepare({ id: 'published-id', revision: 7, value: 'view' });
-  committer.commit(prepared);
+  await committer.commit(prepared);
   committer.publish(prepared.id);
 
-  assert.throws(() => committer.commit('published-id'), ContextCommitError);
+  await assert.rejects(() => committer.commit('published-id'), ContextCommitError);
   assert.equal(committer.state('published-id'), 'published');
-  assert.throws(() => committer.commit(prepared), ContextCommitError);
+  await assert.rejects(() => committer.commit(prepared), ContextCommitError);
   assert.equal(committer.state('published-id'), 'published');
 });
 
-test('ContextCommitter keeps a committed context retryable when publish fails', () => {
+test('ContextCommitter keeps a committed context retryable when publish fails', async () => {
   let attempts = 0;
   const committer = new ContextCommitter<string>({
     publish: () => {
@@ -249,7 +251,7 @@ test('ContextCommitter keeps a committed context retryable when publish fails', 
     },
   });
   const prepared = committer.prepare({ id: 'view-1', value: 'view' });
-  committer.commit(prepared);
+  await committer.commit(prepared);
 
   assert.throws(() => committer.publish('view-1'), Error);
   assert.equal(committer.state('view-1'), 'committed');
@@ -258,4 +260,80 @@ test('ContextCommitter keeps a committed context retryable when publish fails', 
   assert.equal(published.state, 'published');
   assert.equal(committer.state('view-1'), 'published');
   assert.equal(attempts, 2);
+});
+
+test('ContextCommitter waits for the durable journal receipt before committed/publish', async () => {
+  const events: string[] = [];
+  let resolveDurable!: () => void;
+  const durable = new Promise<void>((resolve) => {
+    resolveDurable = resolve;
+  });
+  const committer = new ContextCommitter<string>({
+    commit: (context) => {
+      events.push(`commit-start:${context.id}`);
+      return durable.then(() => {
+        events.push(`commit-receipt:${context.id}`);
+      });
+    },
+    publish: (context) => events.push(`publish:${context.id}`),
+  });
+  const prepared = committer.prepare({ id: 'view-1', revision: 7, value: 'view' });
+
+  const committedPromise = committer.commit(prepared);
+  assert.equal(committer.state('view-1'), 'prepared');
+  assert.throws(() => committer.publish('view-1'), ContextPublishError);
+  assert.deepEqual(events, ['commit-start:view-1']);
+
+  const sameAttempt = committer.commit('view-1');
+  assert.equal(committer.state('view-1'), 'prepared');
+  assert.deepEqual(events, ['commit-start:view-1']);
+
+  resolveDurable();
+  const committed = await committedPromise;
+  assert.deepEqual(await sameAttempt, committed);
+  assert.equal(committed.state, 'committed');
+  assert.equal(committer.state('view-1'), 'committed');
+  assert.deepEqual(events, ['commit-start:view-1', 'commit-receipt:view-1']);
+
+  const published = committer.publish('view-1');
+  assert.equal(published.state, 'published');
+  assert.equal(committer.state('view-1'), 'published');
+  assert.deepEqual(events, ['commit-start:view-1', 'commit-receipt:view-1', 'publish:view-1']);
+});
+
+test('ContextCommitter keeps a prepared/commit-intent state when the durable journal rejects', async () => {
+  const events: string[] = [];
+  let durableAttempts = 0;
+  let rejectDurable!: (error: Error) => void;
+  const firstDurable = new Promise<void>((_, reject) => {
+    rejectDurable = reject;
+  });
+  const committer = new ContextCommitter<string>({
+    commit: (context) => {
+      durableAttempts += 1;
+      events.push(`commit-start:${context.id}:${durableAttempts}`);
+      if (durableAttempts === 1) {
+        return firstDurable;
+      }
+      return Promise.resolve();
+    },
+  });
+  const prepared = committer.prepare({ id: 'view-1', revision: 7, value: 'view' });
+
+  const firstAttempt = committer.commit(prepared);
+  assert.equal(committer.state('view-1'), 'prepared');
+  rejectDurable(new Error('journal unavailable'));
+
+  await assert.rejects(firstAttempt, Error);
+  assert.equal(committer.state('view-1'), 'prepared');
+  assert.throws(() => committer.publish('view-1'), ContextPublishError);
+  assert.deepEqual(events, ['commit-start:view-1:1']);
+
+  const committed = await committer.commit(prepared);
+  assert.equal(committed.state, 'committed');
+  assert.equal(committer.state('view-1'), 'committed');
+  assert.deepEqual(events, ['commit-start:view-1:1', 'commit-start:view-1:2']);
+
+  assert.equal(await committer.commit(prepared), committed);
+  assert.equal(durableAttempts, 2);
 });

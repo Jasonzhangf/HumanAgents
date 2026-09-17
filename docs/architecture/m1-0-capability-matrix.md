@@ -1,14 +1,21 @@
 # M1-0 Capability and Failure Matrix
 
-Status: `M1-0-REVIEW-RECORDED / NOT-PASS`
-Review time: `2026-09-13T07:14:30-0700` (local), `2026-09-13T14:14:30Z` (UTC)
-Candidate base: `41adc33e62629ae56c7b4eba667d13bd6cb358b8`
-DSH input: commit `c291e7961a515f6d7af9304e7fd1d257929aef26`, tree `e482b49bef64726be8f79380bb35bae569dc3c48`
-Source expansion rechecked: `2026-09-13T07:42:55-0700` (local), `2026-09-13T14:42:55Z` (UTC)
+Status: `M1-0-REBASELINE-CANDIDATE / REVIEW-PENDING / NOT-PASS`
+Review time: `2026-09-16T16:12:51-0700` (local), `2026-09-16T23:12:51Z` (UTC)
+Candidate base: `37ca6fa1ad3db70e017945f449f7b7fb99170972`
+Candidate worktree: `/Volumes/extension/code/humanagent/playground/m1-0-rebaseline-20260916`
+DSH input: commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`, tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`
+Source expansion rechecked: `2026-09-16T22:37:33Z` (UTC)
 
-This is a read-only M1-0 record. It does not implement an adapter, install a
-plugin, make a provider request, or prove M1-0 PASS. Native Astra review and
-parent acceptance remain pending.
+This is a read-only M1-0 rebaseline record. It does not implement an adapter,
+install a plugin, make a provider request, or prove provider/DSH runtime
+completion. Commit-bound Codex review, native Astra M1-0 review and parent
+acceptance remain pending for this candidate.
+
+The prior `c291e7961a515f6d7af9304e7fd1d257929aef26` source review remains
+historical evidence only. This candidate refreshes the source and non-secret
+RCC observations against the currently locked clean DSH worktree at
+`/Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915`.
 
 ## Evidence Rules
 
@@ -27,18 +34,15 @@ performed in this review.
 
 | Time | Command / source | Result and boundary |
 |---|---|---|
-| 07:14:30-0700 | `pwd; git status --short --branch; git rev-parse HEAD` | Worktree is `/Volumes/extension/code/humanagent/playground/m1-0-capability-review`; HEAD is the requested base; status clean. |
-| 07:14:30-0700 | `ls -ld ~/.rcc /Volumes/extension/.rcc` | `~/.rcc -> /Volumes/extension/.rcc`; target is a directory. Path evidence only. |
-| 07:14:30-0700 | `lsof -nP -iTCP:4444 -sTCP:LISTEN` | `rccv3` PID `22700`, TCP `*:4444 (LISTEN)`. Listener evidence only. |
-| 07:14:30-0700 | `rg -n 'allowed_transports|cc-sol|goaichat|providerId|type\s*=' ~/.rcc/config.toml ~/.rcc/provider/{cc,cc-sol,goaichat}/config.v2.toml` | `allowed_transports = ["json", "sse"]`; `cc` and `cc-sol` declare `type = "responses"`; `goaichat` declares `type = "anthropic"`; routes include `cc-sol` and `goaichat`. Non-sensitive field evidence only. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh rev-parse c291...^{tree}; git -C /Volumes/extension/code/dsh ls-tree c291...` | Locked DSH commit is a commit and resolves to tree `e482b49...`. Object inspection, not dirty checkout evidence. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:package.json` | Root declares version `0.1.5-rc.2`, MIT, `pnpm@11.7.0`, Node `^22.19.0 || >=24.0.0`, workspaces, and host build/test scripts. Source declaration only. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:apps/cli/package.json` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`, MIT, and workspace dependencies including Cordis, app boot, agent, headless, session, tool, and LLM packages. Dependency installation is unverified. |
-| 07:14:30-0700 | `git -C /Volumes/extension/code/dsh show c291...:apps/cli/src/bin.ts` and `src/args.ts` | Public launcher has profile boot, `web` alias, `plugin`, and config dump modes; inner app args are passed to the booted profile. `--resume` is an app argument, not a HumanAgent contract. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/llm/llm-pi-ai/package.json`, `src/config.ts`, `src/provider.ts`, `src/index.ts`, `src/catalog.ts` | Confirmed package exports, `PiAiProviderProfile` / `Config.providers`, protocol table, `buildProvider`, and route model/base URL resolution. Source object evidence only. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/core/agent/src/index.ts`, `packages/core/agent-loop/src/index.ts` | Confirmed `AgentRegistry.create`/`resume`, `AgentHandle.dispose`, agent-loop create/resume preconditions, rollback, and publish path. Source object evidence only. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/api/session-controller/src/index.ts`, `src/commands.ts`, `src/types.ts`, `src/history.ts` | Confirmed `cancel` is an admission receipt, `follow` emits snapshot plus event frames, and cancel/create failure exits. Source object evidence only. |
-| 07:42:55-0700 | `git -C /Volumes/extension/code/dsh show c291...:packages/session/session-persistence-jsonl/src/index.ts`, `src/lease.ts` | Confirmed required `root`, lazy create, read/write open, not-found/already-exists/already-owned/corruption failure classes. Source object evidence only. |
+| 15:37:33-0700 | `pwd; git status --short --branch; git rev-parse HEAD` | Worktree is `/Volumes/extension/code/humanagent/playground/m1-0-rebaseline-20260916`; HEAD is `37ca6fa`; status clean. |
+| 15:37:33-0700 | `readlink ~/.rcc; lsof -nP -iTCP:4444 -sTCP:LISTEN` | `~/.rcc -> /Volumes/extension/.rcc`; `rccv3` is listening on `*:4444` (PID observed as `58485`). Path/listener evidence only. |
+| 15:37:33-0700 | `rg -n 'allowed_transports|routecodex_v3_4444' /Users/fanzhang/.rcc/config.toml; rg -n 'providerId|type\s*=' /Users/fanzhang/.rcc/provider/cc/config.v2.toml /Users/fanzhang/.rcc/provider/cc-sol/config.v2.toml /Users/fanzhang/.rcc/provider/goaichat/config.v2.toml` | `/Users/fanzhang/.rcc/config.toml` declares `routecodex_v3_4444` and `allowed_transports = ["json", "sse"]`; the provider files declare `cc`/`cc-sol` as `responses` and `goaichat` as `anthropic`. Only these non-secret matched fields were retained. |
+| 15:37:33-0700 | `curl --max-time 5 -fsS http://127.0.0.1:4444/health` | RCC v3 health returned `status: ok`, `port: 4444`, `server_id: routecodex_v3_4444`, build `0.90.4789`. Health/readiness evidence only. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 status --short --branch; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 rev-parse HEAD^{commit} HEAD^{tree}` | Clean DSH worktree at commit `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`, tree `80b651cca20f29d587518cf07a978f2bc58bc2c1`. Clean source baseline evidence. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:package.json` | Root declares version `0.1.6-alpha.1`, MIT and `pnpm@11.7.0`; source declaration only. |
+| 15:37:33-0700 | `git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:apps/cli/package.json; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:apps/cli/src/bin.ts; git -C /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915 show 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720:apps/cli/src/args.ts` | Public package `@deepseek-ai/dsh`, bin `dsh: lib/bin.js`; profile boot, `web`, `plugin`, config dump, `--patch` and forwarded app arguments are present. Runtime boot/install remains unverified. |
+| 15:37:33-0700 | `if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/node_modules; then echo 'present node_modules'; else echo 'absent node_modules'; fi; if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib; then echo 'present apps/cli/lib'; else echo 'absent apps/cli/lib'; fi; if test -e /Volumes/extension/code/dsh/playground/humanagent-0.1.6-20260915/apps/cli/lib/bin.js; then echo 'present apps/cli/lib/bin.js'; else echo 'absent apps/cli/lib/bin.js'; fi` | Exact output was three lines: `present node_modules`, `absent apps/cli/lib`, `absent apps/cli/lib/bin.js`; no built CLI executable was treated as available. |
+| 15:37:33-0700 | current DSH source seam scan | Confirmed current source contains `AgentRegistry.create`/`resume`, `AgentHandle.dispose`, session-controller `follow`/`cancel`, JSONL persistence `create`/`open`, and Cordis `ctx.effect`/`ctx.on` seams. Source evidence only. |
 
 The original `/Volumes/extension/code/dsh` checkout was not used as clean
 evidence. The previously recorded clean-baseline verification is the project
@@ -72,11 +76,11 @@ capability in this review.
 | Dependencies | `package.json` workspace, pnpm and Node declarations; CLI dependencies include Cordis, app boot, agent/headless/session/tool/LLM packages | `declared; install-unverified` | DSH adapter owner: lock installed dependency tree and compatibility result. |
 | Profile seam | `apps/cli/src/args.ts` supports `--profile`, `--from-default-profile`, ordered `--patch`; `profile-boot.ts` is the boot path | `source-present; boot-unverified` | DSH profile owner: create and lock dedicated `humanagent` profile; do not alter default profile. |
 | Plugin seam | `plugin` command forwards profile plugin arguments to pnpm; CLI package exposes Cordis loader/include/HMR dependencies | `source-present; install/load-unverified` | DSH/plugin owner: identify approved bundle entry, version, digest and dispose behavior. |
-| Session create | `packages/api/session-controller/src/index.ts:244-247` delegates `SessionCommandController.create`; `commands.ts:87-126` validates `workspaceId`/`cwd`, resolves workspace, calls `ensureSession`, attaches workspace, and maps failures in `commands.ts:519-539`; `core/agent/src/index.ts:388-398` requires registered factory and delegates `AgentFactory.createAgent`; `core/agent-loop/src/index.ts:765-836` runs create/setup/publish with rollback | `source-proven; runtime-unverified` | DSH adapter owner: run one real same-entry create receipt, then map to HumanAgent session identity. |
-| Session resume | `core/agent/src/index.ts:401-413` requires factory and delegates `AgentFactory.resume`; `core/agent-loop/src/index.ts:844-927` requires `ctx.sessionPersistence`, opens persisted session for write, reads and repairs interrupted turns, then setup/publishes; failure exits include missing persistence (`:847-848`) and setup/owner abort paths | `source-proven; persistence-runtime-unverified` | DSH adapter owner: prove resume against a real persisted session and map only to `EvidenceRef`. |
+| Session create | `packages/api/session-controller/src/index.ts:244-247` delegates `SessionCommandController.create`; `commands.ts:87-126` validates `workspaceId`/`cwd`, resolves workspace, calls `ensureSession`, attaches workspace, and maps failures in `commands.ts:519-539`; `core/agent/src/index.ts:388-398` requires registered factory and delegates `AgentFactory.createAgent`; `core/agent-loop/src/index.ts:764-848` runs create/setup/publish through `createAgent`/`setupAndPublish`/`initializeAgent` with rollback | `source-proven; runtime-unverified` | DSH adapter owner: run one real same-entry create receipt, then map to HumanAgent session identity. |
+| Session resume | `core/agent/src/index.ts:401-413` requires factory and delegates `AgentFactory.resume`; `core/agent-loop/src/index.ts:857-939` requires `ctx.sessionPersistence`, opens persisted session for write, reads and repairs interrupted turns, then setup/publishes; missing persistence is rejected at `:858-862`, and setup/owner abort paths remain source/runtime boundaries | `source-proven; persistence-runtime-unverified` | DSH adapter owner: prove resume against a real persisted session and map only to `EvidenceRef`. |
 | Events | `api/session-controller/src/index.ts:400-403` delegates `follow`; `history.ts:119-149` subscribes to `session/event` and emits a complete opening snapshot followed by durable event frames plus opted-in assistant frames; `types.ts:427-437` defines `SessionWireEvent`; `types.ts:514-526` defines `SessionFollowFrame` | `source-proven; mapping/runtime-unverified` | DSH adapter owner: record ordered model/tool/error/terminal events and epoch mapping from a real stream. |
 | Tools | CLI dependencies include tool packages; filesystem, bash, web, todo, ask-user and other tool packages are declared | `declared; enabled-set-unverified` | DSH adapter owner: lock one representative tool and its permission/schema/result evidence. |
-| Cancel / close / settle | `api/session-controller/src/commands.ts:497-511` requires live attached agent, rejects not-found/subagent-owner, calls `agent.cancel(..., { keepInbox: true })`, and returns only `SessionCancelValue.accepted: true` (`types.ts:356-359`); `packages/core/agent/src/index.ts:146-163` documents the `AgentHandle.dispose()` interface contract, while the concrete teardown lives at `packages/core/agent-loop/src/index.ts:573-619` (Step A machine quiescence at `:584-598`, Step B session close drain at `:599-607`, Step C registry and bookkeeping at `:608-614`, aggregation at `:615-618`); `:617` creates an `AggregateError` only for the local Step A/B `failures`, while `:615` rethrows a single `failures[0]` unchanged even if that value is itself already an `AggregateError`; the create/resume rollback at `packages/core/agent-loop/src/index.ts:765-927` (`createAgent` `:765-802`, `setupAndPublish` `:805-836`, `resumeWith` `:844-927`) handles abandoned-handle close differently: `createAgent` `:782` explicitly catches `abandoned?.handle.close().catch(() => {})`, `resumeWith` `:883` runs `void abandoned.close()` with no catch, no `await`, and no local rejection handler, and `resumeWith` `:920-923` awaits `handle?.close().catch(() => {})`; `setupAndPublish` discards secondary `stored.handle.close()` / `prepared.dispose()` errors via `.catch(() => {})`; `packages/api/session-controller/src/client/contract/events.ts:177-195` defines `settleAssistant` as a client message-window projection only, not stop/teardown settle evidence; see "Stop / Teardown Source Seam" below | `source-proven; cancel-receipt-only; teardown-source-only; rollback-source-only; runtime-unverified` | DSH adapter error/stop mapping owner: prove cancel, settle, resource release and stopped checkpoint are independent, and that the recorded failure surface (Step A/B/C plus create/resume rollback, including the `resumeWith` abandoned-handle close path) matches the locked source on a real DSH instance. |
+| Cancel / close / settle | `api/session-controller/src/commands.ts:497-511` requires live attached agent, rejects not-found/subagent-owner, calls `agent.cancel(..., { keepInbox: true })`, and returns only `SessionCancelValue.accepted: true` (`types.ts:356-359`); `packages/core/agent/src/index.ts:146-163` documents the `AgentHandle.dispose()` interface contract, while the concrete teardown lives at `packages/core/agent-loop/src/index.ts:573-621` with publication wait, Step A machine quiescence (`:584-600`), Step B session close drain (`:601-609`), Step C registry/bookkeeping (`:610-616`) and aggregation (`:617-621`); `:619` creates an `AggregateError` only for multiple local Step A/B failures, while `:617` rethrows one unchanged. Current create/setup/rollback uses `create` `:702-716`, `createAgent` `:764-801`, `setupAndPublish` `:803-830`, `initializeAgent` `:832-848`, and `resumeWith` `:866-939`; `createAgent` `:781` catches abandoned handle close, `resumeWith` `:896` has an uncaught fire-and-forget close, and `resumeWith` `:933-935` awaits the final handle close. `settleAssistant` at `packages/api/session-controller/src/client/contract/events.ts:177-195` is a client message-window projection only, not stop/teardown settle evidence; see "Stop / Teardown Source Seam" below | `source-proven; cancel-receipt-only; teardown-source-only; rollback-source-only; runtime-unverified` | DSH adapter error/stop mapping owner: prove cancel, settle, resource release and stopped checkpoint are independent, and that the recorded failure surface matches the locked source on a real DSH instance. |
 | Persistence / session log | `session/session-persistence-jsonl/src/index.ts:87-99` requires explicit `root`; `:229-239` registers `ctx.sessionPersistence`; `:299-327` lazy `create` with `SessionAlreadyExistsError`; `:336-406` read/write `open` with `SessionPersistenceNotFoundError` and lock-release cleanup; `:495-499` requires stored log; failure classes include `SessionAlreadyOwnedError`, `SessionPersistenceCorruptionError`, and `SessionFormatUnsupportedError` | `source-proven; filesystem/replay-unverified` | DSH evidence owner: record session log path/digest, append/restore semantics and Journal separation from a real backend. |
 | License | Root `LICENSE` and root/CLI package declarations state MIT; third-party notices are present | `source-verified` | Release owner: verify any selected plugin/bundle dependency licenses before use. |
 | Endpoint / protocol / model binding | `llm-pi-ai/package.json:16-23` exports the package; `src/index.ts:76,82,88,145` exports `Config`, `PiAiProviderProfile`, `supportedProtocols`, and `apply`; `src/config.ts:90-109,221-227` defines provider routes with `api`, `baseURL`, `models`, `modelOverrides`; `src/provider.ts:47-51,172-191` is the auditable protocol table and provider build path; see "Locked DSH Source Seam" below | `source-proven; binding/runtime-unverified` | Provider + DSH owners: produce lock with endpoint ref, protocol, model ref, config digest and capability digest. |
@@ -121,39 +125,43 @@ The `AgentHandle.dispose()` text at `packages/core/agent/src/index.ts:146-163`
 is interface/documentation semantics only. The concrete teardown is the
 memoized reverse-teardown implementation that the ownership tracker and the
 owner effect eventually call, located at
-`packages/core/agent-loop/src/index.ts:573-619`:
+`packages/core/agent-loop/src/index.ts:573-621`:
 
 - The disposer aborts the fused lifecycle (`abort.abort(...)` at `:577`),
   removes the caller and factory abort listeners (`:578-579`), and memoizes
   the single disposal promise in `disposing` so racing owners await the same
   quiescence.
+- Before machine quiescence it awaits an in-flight creation publication at
+  `:586` (`publication.promise`). This creation-announcement wait is part of
+  the current locked source and is included in the teardown boundary.
 - It uses a single local `failures: unknown[] = []` (`:583`) for collected
   errors. Only errors from two `catch` blocks enter that array.
-- `Step A - machine quiescence (`:584-598`)`: one `try` wraps
-  `machine.cancel({ kind: 'disposed' })` (`:592`), `await machine.whenIdle()`
-  (`:593`) and `await machine.scope.dispose()` (`:594`) in that order. The
+- `Step A - machine quiescence (`:584-600`)`: after the publication wait, one `try` wraps
+  `machineReady` when no machine exists (`:591`), then
+  `machine.cancel({ kind: 'disposed' })` (`:594`), `await machine.whenIdle()`
+  (`:595`) and `await machine.scope.dispose()` (`:596`) in that order. The
   first throw exits the `try` and is pushed into `failures`; any later
   `await` inside the same `try` is skipped on that path. When `machine` is
   `undefined` (no driver was constructed) all three calls are skipped and no
   error is recorded here.
-- `Step B - session close drain (`:599-607`)`: a separate `try` awaits
-  `handle?.close()` (`:604`). Any throw is pushed into `failures`. This drain
+- `Step B - session close drain (`:601-609`)`: a separate `try` awaits
+  `handle?.close()` (`:606`). Any throw is pushed into `failures`. This drain
   runs after machine quiescence and is the first place a persistence
   durability failure can surface.
-- `Step C - registry and bookkeeping cleanup (`:608-614`)`: a `try` runs
-  `detachAgent?.()` (`:609`) then `detachSession?.()` (`:610`) with a
-  `finally` that calls `untrack()` (`:612`) and, unless `ownerTriggered`,
-  `await unfollowOwner()` (`:613`). Errors thrown by `detachAgent`,
+- `Step C - registry and bookkeeping cleanup (`:610-616`)`: a `try` runs
+  `detachAgent?.()` (`:611`) then `detachSession?.()` (`:612`) with a
+  `finally` that calls `untrack()` (`:614`) and, unless `ownerTriggered`,
+  `await unfollowOwner()` (`:615`). Errors thrown by `detachAgent`,
   `detachSession`, `untrack` or `unfollowOwner` are NOT pushed into
   `failures` and are NOT collected into the `AggregateError`; they surface
   through normal `try`/`finally` propagation outside this boundary.
   A Step C throw will therefore also prevent the source from reaching the
-  `:615-618` aggregation after that failure propagates.
-- Aggregation (`:615-618`): `failures.length === 1` rethrows `failures[0]`
+  `:617-621` aggregation after that failure propagates.
+- Aggregation (`:617-621`): `failures.length === 1` rethrows `failures[0]`
   directly; `failures.length > 1` throws
   `new AggregateError(failures, 'agent "<id>" disposal failed')`;
   `failures.length === 0` does not throw from this branch. The `new
-  AggregateError` at `:617` only aggregates the local Step A/B `failures`
+  AggregateError` at `:619` only aggregates the local Step A/B `failures`
   collected by the two disposal `catch` blocks. A single `failures[0]` is
   rethrown unchanged, and that value may itself already be a lower-level
   `AggregateError` (for example a JSONL storage close or lock release
@@ -161,35 +169,35 @@ owner effect eventually call, located at
   receives an `AggregateError` when both Step A and Step B failed. Step C
   errors are never included in this local aggregation.
 
-`createAgent` (`packages/core/agent-loop/src/index.ts:765-802`) and
-`resumeWith` (`:844-927`) take a different rollback path through
-`setupAndPublish` (`:805-836`):
+`createAgent` (`packages/core/agent-loop/src/index.ts:764-801`) and
+`resumeWith` (`:866-939`) take a different rollback path through
+`setupAndPublish` (`:803-830`) and `initializeAgent` (`:832-848`):
 
-- The direct `create` path (`:699-716`) uses the same rollback policy:
-  `stored?.handle.close().catch(() => {})` (`:706`) and
-  `void prepared.dispose().catch(() => {})` (`:714`) both suppress secondary
-  rollback errors while the original prepare/setup error is rethrown.
+- The direct `create` path (`:702-716`) calls `initializeAgent`; a direct
+  prepare failure closes `stored?.handle` with `await ...catch(() => {})`
+  (`:709`), while initialization failure is handled by
+  `initializeAgent` (`:832-848`), which cancels the prepared agent at `:839`
+  and awaits `prepared.dispose().catch(() => {})` at `:846` before rethrowing
+  the primary error.
 - The outer `try`/`catch` around `createStoredSession` (`:773-787`) calls
   `preparation[Symbol.dispose]()` and rethrows the original error. The
   `abandoned?.handle.close().catch(() => {})` callback inside `raceAbortCall`
-  (`:782`) is fire-and-forget for the abandoned handle and explicitly
+  (`:781`) is fire-and-forget for the abandoned handle and explicitly
   swallows any secondary close error.
 - `resumeWith`'s write-handle acquisition uses a different
-  `raceAbortCall` callback (`:879-884`): `(abandoned) => { void abandoned.close() }`
-  at `:883` is fire-and-forget, but it has no `.catch`, no `await`, and no
+  `raceAbortCall` callback (`:892-897`): `(abandoned) => { void abandoned.close() }`
+  at `:896` is fire-and-forget, but it has no `.catch`, no `await`, and no
   local rejection handler. An abandoned close rejection is therefore not
   explicitly swallowed by this callback and must be verified as an
   unhandled/dangling promise path separately from `createAgent`'s explicit
   catch and from `resumeWith`'s outer `finally` catch below.
-- `setupAndPublish` first `try` (`:819-824`) wraps `prepare(...)`; on error
-  it does `await stored?.handle.close().catch(() => {})` (`:822`) and
-  rethrows the prepare error. The second `try` (`:825-835`) wraps the
-  `setup` race, `appendUnstoredSuffix` and `prepared.publish`; on error it
-  does `await prepared.dispose().catch(() => {})` (`:833`) and rethrows the
-  setup error. In both branches the secondary close/dispose error is
-  discarded by `.catch(() => {})`; only the primary prepare/setup error
-  reaches the caller.
-- `resumeWith`'s outer `finally` (`:920-923`) runs
+- `setupAndPublish` (`:803-830`) wraps `prepare(...)` and closes
+  `stored?.handle` on a direct prepare error (`:819-822`). Its setup race,
+  suffix append and publish are passed to `initializeAgent` (`:824-829`);
+  the shared initialization rollback cancels and then awaits
+  `prepared.dispose().catch(() => {})` (`:834-847`), discarding only that
+  secondary disposal error while rethrowing the primary error.
+- `resumeWith`'s outer `finally` (`:933-935`) runs
   `preparation?.[Symbol.dispose]()` and
   `await handle?.close().catch(() => {})`, again swallowing the secondary
   close error. The setup error returned from `setupAndPublish` is the
@@ -203,15 +211,15 @@ statements:
   only that one error is pushed into `failures`.
 - `detachAgent`, `detachSession`, `untrack` and `unfollowOwner` are NOT in
   the `failures` aggregation on the direct disposer path.
-- `createAgent` / `setupAndPublish` / `resumeWith` outer `finally` paths
-  deliberately swallow secondary `stored.handle.close()` and
-  `prepared.dispose()` errors via `.catch(() => {})`; the primary
-  prepare/setup/resume error is the caller-facing primary error. The
-  `resumeWith` abandoned-handle path at `:883` is separate: it is
-  fire-and-forget without `.catch`, `await`, or a local rejection handler.
+- `createAgent` / `setupAndPublish` / `resumeWith` rollback paths
+  deliberately suppress secondary close/dispose errors with `.catch(() => {})`
+  in the documented awaited paths; the primary prepare/setup/resume error is
+  the caller-facing primary error. The `resumeWith` abandoned-handle path at
+  `:896` is separate: it is fire-and-forget without `.catch`, `await`, or a
+  local rejection handler.
 - The `AggregateError` returned by the direct disposer is bounded to Step A
   plus Step B errors; it is not a general "all teardown errors are kept"
-  envelope. This does not mean `:617` is the only `AggregateError` a caller
+  envelope. This does not mean `:619` is the only `AggregateError` a caller
   could receive: the direct disposer can rethrow a single Step A/B
   `failures[0]` that is already an `AggregateError`, and primary create /
   prepare / setup / resume errors from rollback paths may also already be
@@ -249,7 +257,7 @@ health capability is `unverified` and cannot be reported as `healthy` or `ready`
 
 | Failure / missing evidence | Status | Required retained evidence | Owner / next action |
 |---|---|---|---|
-| DSH clean source worktree unavailable in this workspace | `evidence-limited` | Locked commit/tree and object-read commands; do not call dirty checkout clean | Parent/DSH owner: use the separately verified clean baseline for any execution gate. |
+| DSH clean source worktree executable unavailable | `dependency-missing / runtime-unverified` | Clean commit/tree is available for source review, but the worktree has no built `apps/cli/lib/bin.js` entrypoint | DSH profile owner: use an approved dedicated profile/build only after the M1-0 gate; do not treat source presence or `node_modules` as boot proof. |
 | DSH dependency installation not performed | `dependency-missing` | Package manager, Node constraint and declared dependency list | DSH profile owner: install/lock only in an approved dedicated profile, then verify. |
 | No approved HumanAgent DSH plugin/bundle identified | `capability-unavailable` | No package name, entrypoint, version or digest was invented | DSH/plugin owner: identify approved bundle and prove load/dispose. |
 | RCC listener absent | `dependency-missing / health-blocked` | Probe error and next probe condition | Provider supervisor: start/restore RCC only under separate authorization. |
@@ -260,8 +268,8 @@ health capability is `unverified` and cannot be reported as `healthy` or `ready`
 | Same-entry provider request | `not-run by constraint` | No request id, payload, response or secret | Provider validation owner: run only after explicit authorization and preserve evidence. |
 | DSH session crash, transport close, plugin incompatibility | `unverified` | Session evidence, operation error, owner, next action and checkpoint result | DSH adapter owner: exercise recorded then real DSH path. |
 | Cancel returned without settle | `unverified; must remain stopping` | Cancel receipt plus settle wait/result; never equate cancel with stopped | Stop controller owner: prove settle, resource release and stopped checkpoint. |
-| Direct teardown resource release, persistence close, and error visibility | `runtime-unverified` | Real DSH evidence for Step A machine quiescence, Step B handle close/persistence durability, Step C detach/untrack/unfollowOwner, the local Step A/B `failures` boundary, and the `:617` `AggregateError` only as the local wrapper created for multiple Step A/B collected errors; record that a single `failures[0]` is rethrown unchanged and may itself be an `AggregateError`; distinguish skipped later Step A calls and out-of-aggregation Step C errors | DSH adapter error/stop mapping owner: instrument/observe a real teardown and map only directly observed results; do not infer release or close success from source presence. |
-| Create/resume rollback resource release, persistence close, and error visibility | `runtime-unverified` | Real DSH evidence that primary prepare/setup/resume errors reach the caller, secondary `stored.handle.close()` / `prepared.dispose()` paths use `.catch(() => {})`, and `resumeWith` `:883` abandoned `void abandoned.close()` has no catch/await/local rejection handler; verify persistence close, resource release, unhandled/dangling promise behavior, and whether primary errors are already `AggregateError`s | DSH adapter error/stop mapping owner: exercise real create/resume rollback paths and record primary outcomes, explicitly discarded secondary outcomes, and dangling abandoned-close behavior without claiming `AggregateError` preservation. |
+| Direct teardown resource release, persistence close, and error visibility | `runtime-unverified` | Real DSH evidence for the publication wait, Step A machine quiescence, Step B handle close/persistence durability, Step C detach/untrack/unfollowOwner, the local Step A/B `failures` boundary, and the `:619` `AggregateError` only as the local wrapper created for multiple Step A/B collected errors; record that a single `failures[0]` is rethrown unchanged and may itself be an `AggregateError`; distinguish skipped later Step A calls and out-of-aggregation Step C errors | DSH adapter error/stop mapping owner: instrument/observe a real teardown and map only directly observed results; do not infer release or close success from source presence. |
+| Create/resume rollback resource release, persistence close, and error visibility | `runtime-unverified` | Real DSH evidence that primary prepare/setup/resume errors reach the caller, `initializeAgent` cancels before awaiting `prepared.dispose().catch(() => {})`, direct prepare failures close stored handles, and `resumeWith` `:896` abandoned `void abandoned.close()` has no catch/await/local rejection handler; verify persistence close, resource release, unhandled/dangling promise behavior, and whether primary errors are already `AggregateError`s | DSH adapter error/stop mapping owner: exercise real create/resume rollback paths and record primary outcomes, explicitly discarded secondary outcomes, and dangling abandoned-close behavior without claiming `AggregateError` preservation. |
 | Journal/checkpoint failure after external settle | `unverified; expected blocked` | External result, failed commit and recovery action | Runtime/Journal owner: preserve recovery responsibility; do not report success. |
 | M1-0 review gate | `pending native Astra` | Candidate SHA, this artifact, focused checks and Astra receipt | Parent: run native Astra; this worker does not claim PASS. |
 

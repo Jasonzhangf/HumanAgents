@@ -862,3 +862,36 @@ test('reentry rejects missing committed closure, wrong checkpoint identity, stal
   );
   assert.equal(closurePort.committed.length, 1);
 });
+
+test('reentry rejects a corrupt journal before admission or closure commit', async () => {
+  const committedCheckpoint = checkpoint(1, null);
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
+  journal.verification = { valid: false, reason: 'broken digest' };
+  const admissionPort = new FakeAdmissionPort();
+
+  await assert.rejects(
+    () => commitReentry({
+      ownerId: 'task-owner',
+      closureId: 'reentry-corrupt-journal',
+      checkpoint: committedCheckpoint,
+      previousExecutionEpoch: 4,
+      newExecutionEpoch: 5,
+      nextAction: { kind: 'continue', ref: 'after-reentry' },
+      journal,
+      closurePort,
+      admissionPort,
+    }),
+    CheckpointSubmissionError,
+  );
+  assert.equal(admissionPort.calls.length, 0);
+  assert.equal(closurePort.committed.length, 1);
+});

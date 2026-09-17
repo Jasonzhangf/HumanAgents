@@ -4,12 +4,28 @@ import type {
   AgentStartRequest,
   CheckpointId,
   EvidenceRef,
+  MemoryActorContext,
+  MemoryCurationResult,
+  MemoryFollowUpRequest,
+  MemoryContextPolicy,
+  MemoryForgettingPlan,
+  MemoryForgettingRequest,
+  MemoryRecallRequest,
+  MemoryPromotionReceipt,
+  MemoryQueryRequest,
+  MemoryReviewReceipt,
+  MemorySubmission,
+  ProceduralMemoryCandidate,
+  ProjectSourceUpdateProposal,
+  SemanticMemoryCandidate,
+  CanonicalMemoryScope,
+  AuditPromptSnapshot,
   NextAction,
   OperationId,
   ScopeRef,
   TaskId,
 } from './index.js';
-import { assertEvidenceRef, assertNextAction } from './index.js';
+import { assertEvidenceRef, assertNextAction, assertScope } from './index.js';
 import { ContractError } from './errors.js';
 
 export type AgentMessageClass = 'control' | 'data' | 'observation';
@@ -258,6 +274,281 @@ export interface EventConsumerReceipt {
   readonly failureRef?: string;
 }
 
+export const MEMORY_NAMESPACES = ['project', 'global'] as const;
+export const MEMORY_KINDS = ['episodic', 'semantic', 'procedural'] as const;
+export const MEMORY_RECORD_STATES = ['candidate', 'approved', 'active', 'superseded', 'expired', 'archived', 'rejected'] as const;
+export const MEMORY_ACTOR_ROLES = ['interaction', 'orchestration', 'review', 'memory', 'system'] as const;
+export const MEMORY_PERMISSIONS = ['memory.read', 'memory.propose', 'memory.review', 'memory.promote', 'memory.forget'] as const;
+export const MEMORY_UPDATE_TARGETS = ['project-agents', 'project-local-skill'] as const;
+
+export interface MemoryTaskBinding {
+  readonly kind: 'task';
+  readonly taskId: TaskId;
+  readonly assignmentId: string;
+  readonly executionEpoch: number;
+  readonly bindingRef: string;
+}
+
+export interface MemoryInteractionBinding {
+  readonly kind: 'interaction';
+  readonly interactionScopeId: string;
+  readonly bindingRef: string;
+}
+
+export type MemoryBinding = MemoryTaskBinding | MemoryInteractionBinding;
+
+export function validateCanonicalMemoryScope(input: CanonicalMemoryScope): void {
+  if (input.namespace === 'project') {
+    nonEmpty(input.projectKey, 'memory projectKey');
+    assertScope(input.organId, 'organ');
+    if (input.taskId !== undefined) assertScopedTask(input.taskId, 'memory taskId');
+    return;
+  }
+  if ((input as { readonly namespace?: string }).namespace !== 'global') {
+    throw new ContractError(`unknown memory namespace: ${(input as { readonly namespace?: string }).namespace ?? 'missing'}`);
+  }
+  if (input.globalId !== 'global') throw new ContractError('global memory identity must be global');
+  if (input.sourceProjectKey !== undefined) nonEmpty(input.sourceProjectKey, 'memory sourceProjectKey');
+  if (input.sourceOrganId !== undefined) assertScope(input.sourceOrganId, 'organ');
+}
+
+export function validateMemoryBinding(input: MemoryBinding): void {
+  nonEmpty(input.bindingRef, 'memory bindingRef');
+  if (input.kind === 'interaction') {
+    nonEmpty(input.interactionScopeId, 'memory interactionScopeId');
+    return;
+  }
+  if ((input as { readonly kind?: string }).kind !== 'task') {
+    throw new ContractError(`unknown memory binding kind: ${(input as { readonly kind?: string }).kind ?? 'missing'}`);
+  }
+  assertScopedTask(input.taskId, 'memory taskId');
+  nonEmpty(input.assignmentId, 'memory assignmentId');
+  assertPositiveSafeInteger(input.executionEpoch, 'memory executionEpoch');
+}
+
+export function validateMemoryActor(input: MemoryActorContext): void {
+  nonEmpty(input.actorId, 'memory actorId');
+  if (!MEMORY_ACTOR_ROLES.includes(input.roleId)) throw new ContractError(`unknown memory actor role: ${input.roleId}`);
+  nonEmpty(input.projectKey, 'memory actor projectKey');
+  for (const permission of input.permissions) {
+    if (!MEMORY_PERMISSIONS.includes(permission)) throw new ContractError(`unknown memory permission: ${permission}`);
+  }
+  if (input.crossProjectGrantRef !== undefined) nonEmpty(input.crossProjectGrantRef, 'memory crossProjectGrantRef');
+}
+
+export function validateEpisodicMemorySource(input: {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly projectKey: string;
+  readonly occurredAt: string;
+  readonly payloadRef: string;
+  readonly kind: string;
+}): void {
+  nonEmpty(input.sourceRef, 'episodic sourceRef');
+  nonEmpty(input.sourceDigest, 'episodic sourceDigest');
+  nonEmpty(input.projectKey, 'episodic projectKey');
+  nonEmpty(input.payloadRef, 'episodic payloadRef');
+  assertValidTime(input.occurredAt, 'episodic occurredAt');
+  if (!['input', 'checkpoint', 'operation', 'tool', 'output', 'error', 'review'].includes(input.kind)) {
+    throw new ContractError(`unknown episodic source kind: ${input.kind}`);
+  }
+}
+
+export function validateSemanticMemoryCandidate(input: SemanticMemoryCandidate): void {
+  nonEmpty(input.candidateId, 'semantic candidateId');
+  if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid semantic namespace');
+  nonEmpty(input.projectKey, 'semantic projectKey');
+  nonEmpty(input.statement, 'semantic statement');
+  assertRefList(input.entities, 'semantic entities');
+  assertRefList(input.sourceRefs, 'semantic sourceRefs');
+  assertRefList(input.sourceDigests, 'semantic sourceDigests');
+  if (input.sourceRefs.length !== input.sourceDigests.length) throw new ContractError('semantic source refs and digests must match');
+  if (!['observed', 'supported', 'confirmed'].includes(input.confidence)) throw new ContractError('invalid semantic confidence');
+  if (input.validity.kind === 'until') assertValidTime(input.validity.until ?? '', 'semantic validity.until');
+  if (input.validity.kind !== 'open' && input.validity.kind !== 'until') throw new ContractError('invalid semantic validity kind');
+  if (input.review !== 'required' && input.review !== 'approved' && input.review !== 'rejected') throw new ContractError('invalid semantic review state');
+  if (input.supersedes !== undefined) assertRefList(input.supersedes, 'semantic supersedes');
+}
+
+export function validateProceduralMemoryCandidate(input: ProceduralMemoryCandidate): void {
+  nonEmpty(input.candidateId, 'procedural candidateId');
+  if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid procedural namespace');
+  nonEmpty(input.projectKey, 'procedural projectKey');
+  nonEmpty(input.name, 'procedural name');
+  nonEmpty(input.intent, 'procedural intent');
+  assertRefList(input.preconditions, 'procedural preconditions');
+  assertNonEmptyRefList(input.steps, 'procedural steps');
+  assertNonEmptyRefList(input.failureBoundaries, 'procedural failureBoundaries');
+  assertNonEmptyRefList(input.successEvidenceRefs, 'procedural successEvidenceRefs');
+  if (!['one-off', 'observed', 'recurring'].includes(input.repeatability)) throw new ContractError('invalid procedural repeatability');
+  if (input.review !== 'required' && input.review !== 'approved' && input.review !== 'rejected') throw new ContractError('invalid procedural review state');
+}
+
+export function validateMemorySubmission(input: MemorySubmission): void {
+  nonEmpty(input.submissionId, 'memory submissionId');
+  nonEmpty(input.requestId, 'memory submission requestId');
+  nonEmpty(input.operationId.value, 'memory submission operationId');
+  nonEmpty(input.bindingRef, 'memory submission bindingRef');
+  validateMemoryActor(input.actor);
+  if (!input.actor.permissions.includes('memory.propose')) throw new ContractError('memory submission actor lacks memory.propose permission');
+  nonEmpty(input.projectKey, 'memory submission projectKey');
+  if (input.actor.projectKey !== input.projectKey) throw new ContractError('memory submission actor project mismatch');
+  if (input.taskId !== undefined) assertScopedTask(input.taskId, 'memory submission taskId');
+  if (!MEMORY_KINDS.includes(input.requestedKind)) throw new ContractError('invalid memory submission kind');
+  nonEmpty(input.contentRef, 'memory submission contentRef');
+  nonEmpty(input.contentDigest, 'memory submission contentDigest');
+  assertNonEmptyRefList(input.evidenceRefs, 'memory submission evidenceRefs');
+  nonEmpty(input.observation, 'memory submission observation');
+  if (!MEMORY_NAMESPACES.includes(input.desiredScope)) throw new ContractError('invalid memory submission desiredScope');
+  nonEmpty(input.reason, 'memory submission reason');
+  nonEmpty(input.inputDigest, 'memory submission inputDigest');
+}
+
+export function validateMemoryQueryRequest(input: MemoryQueryRequest): void {
+  nonEmpty(input.requestId, 'memory query requestId');
+  nonEmpty(input.operationId.value, 'memory query operationId');
+  nonEmpty(input.bindingRef, 'memory query bindingRef');
+  validateMemoryActor(input.actor);
+  if (!input.actor.permissions.includes('memory.read')) throw new ContractError('memory query actor lacks memory.read permission');
+  nonEmpty(input.projectKey, 'memory query projectKey');
+  if (input.actor.projectKey !== input.projectKey) throw new ContractError('memory query actor project mismatch');
+  if (input.taskId !== undefined) assertScopedTask(input.taskId, 'memory query taskId');
+  nonEmpty(input.query, 'memory query query');
+  if (input.kinds.length === 0) throw new ContractError('memory query kinds cannot be empty');
+  for (const kind of input.kinds) if (!MEMORY_KINDS.includes(kind)) throw new ContractError(`unknown memory query kind: ${kind}`);
+  if (input.states.length === 0) throw new ContractError('memory query states cannot be empty');
+  for (const state of input.states) if (!MEMORY_RECORD_STATES.includes(state)) throw new ContractError(`unknown memory query state: ${state}`);
+  assertPositiveSafeInteger(input.limit, 'memory query limit');
+  assertNonNegativeSafeInteger(input.tokenBudget, 'memory query tokenBudget');
+  nonEmpty(input.inputDigest, 'memory query inputDigest');
+  if (input.namespace === 'global' && !input.actor.crossProjectGrantRef) {
+    throw new ContractError('global memory query requires a cross-project grant');
+  }
+}
+
+export function validateMemoryReviewReceipt(input: MemoryReviewReceipt): void {
+  nonEmpty(input.candidateId, 'memory review candidateId');
+  if (!['approve', 'reject', 'defer'].includes(input.decision)) throw new ContractError('invalid memory review decision');
+  validateMemoryActor(input.actor);
+  if (!input.actor.permissions.includes('memory.review')) throw new ContractError('memory review actor lacks memory.review permission');
+  nonEmpty(input.decisionReason, 'memory review decisionReason');
+  assertValidTime(input.decidedAt, 'memory review decidedAt');
+  assertRefList(input.evidenceRefs, 'memory review evidenceRefs');
+}
+
+export function validateMemoryPromotionReceipt(input: MemoryPromotionReceipt): void {
+  nonEmpty(input.candidateId, 'memory promotion candidateId');
+  if (input.from !== 'project' || input.to !== 'global') throw new ContractError('memory promotion must be project to global');
+  validateMemoryActor(input.actor);
+  if (!input.actor.permissions.includes('memory.promote')) throw new ContractError('memory promotion actor lacks permission');
+  nonEmpty(input.reason, 'memory promotion reason');
+  nonEmpty(input.impactScope, 'memory promotion impactScope');
+  nonEmpty(input.approvalRef, 'memory promotion approvalRef');
+  assertRefList(input.sourceRefs, 'memory promotion sourceRefs');
+  assertValidTime(input.promotedAt, 'memory promotion promotedAt');
+}
+
+export function validateMemoryForgettingPlan(input: MemoryForgettingPlan): void {
+  nonEmpty(input.planId, 'memory forgetting planId');
+  if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid forgetting namespace');
+  if (input.namespace === 'project') nonEmpty(input.projectKey, 'forgetting projectKey');
+  assertValidTime(input.createdAt, 'forgetting createdAt');
+  assertRefList(input.protectedRefs, 'forgetting protectedRefs');
+  for (const action of input.actions) {
+    nonEmpty(action.memoryId, 'forgetting memoryId');
+    if (!['supersede', 'expire', 'archive', 'cleanup-projection'].includes(action.action)) throw new ContractError('invalid forgetting action');
+    nonEmpty(action.reason, 'forgetting action reason');
+    if (action.action === 'supersede') nonEmpty(action.replacementRef, 'forgetting replacementRef');
+    assertRefList(action.sourceRefs, 'forgetting action sourceRefs');
+  }
+}
+
+export function validateMemoryForgettingRequest(input: MemoryForgettingRequest): void {
+  validateMemoryActor(input.actor);
+  validateMemoryForgettingPlan(input.plan);
+  if (!input.actor.permissions.includes('memory.forget')) throw new ContractError('memory forgetting actor lacks memory.forget permission');
+  if (input.plan.namespace === 'project') {
+    if (input.actor.projectKey !== input.plan.projectKey) throw new ContractError('memory forgetting actor project mismatch');
+  } else if (!input.actor.crossProjectGrantRef) {
+    throw new ContractError('global memory forgetting requires a cross-project grant');
+  }
+}
+
+export function validateAuditPromptSnapshot(input: AuditPromptSnapshot): void {
+  nonEmpty(input.promptRef, 'audit promptRef');
+  nonEmpty(input.canonicalRef, 'audit canonicalRef');
+  nonEmpty(input.revision, 'audit revision');
+  nonEmpty(input.digest, 'audit digest');
+  assertValidTime(input.loadedAt, 'audit loadedAt');
+}
+
+export function validateProjectSourceUpdateProposal(input: ProjectSourceUpdateProposal): void {
+  if (!MEMORY_UPDATE_TARGETS.includes(input.target)) throw new ContractError('invalid project source update target');
+  nonEmpty(input.sourceRef, 'project source update sourceRef');
+  nonEmpty(input.expectedRevision, 'project source update expectedRevision');
+  nonEmpty(input.expectedDigest, 'project source update expectedDigest');
+  nonEmpty(input.patchRef, 'project source update patchRef');
+  assertRefList(input.evidenceRefs, 'project source update evidenceRefs');
+  nonEmpty(input.ownerRef, 'project source update ownerRef');
+}
+
+export function validateMemoryCurationResult(input: MemoryCurationResult): void {
+  nonEmpty(input.operationId.value, 'memory curation operationId');
+  validateAuditPromptSnapshot(input.auditPrompt);
+  assertRefList(input.sourceRefs, 'memory curation sourceRefs');
+  if (!['candidate', 'duplicate', 'conflict', 'no-op', 'attention'].includes(input.outcome)) throw new ContractError('invalid memory curation outcome');
+  if (input.candidateId !== undefined) nonEmpty(input.candidateId, 'memory curation candidateId');
+  assertRefList(input.matchedMemoryIds, 'memory curation matchedMemoryIds');
+  assertRefList(input.conflictRefs, 'memory curation conflictRefs');
+  nonEmpty(input.explanation, 'memory curation explanation');
+  if (!['review', 'supersede-review', 'retry-analysis', 'none', 'attention'].includes(input.nextAction)) throw new ContractError('invalid memory curation nextAction');
+  if (input.outcome === 'candidate' && !input.candidateId) throw new ContractError('memory candidate outcome requires candidateId');
+  if (input.outcome === 'conflict' && input.conflictRefs.length === 0) throw new ContractError('memory conflict outcome requires conflict refs');
+  if (input.outcome === 'duplicate' && input.matchedMemoryIds.length === 0) throw new ContractError('memory duplicate outcome requires matched memory ids');
+  if (input.outcome === 'no-op' && input.nextAction !== 'none') throw new ContractError('memory no-op outcome requires none next action');
+  if (input.outcome === 'attention' && input.nextAction !== 'attention') throw new ContractError('memory attention outcome requires attention next action');
+}
+
+export function validateMemoryFollowUpRequest(input: MemoryFollowUpRequest): void {
+  nonEmpty(input.requestId, 'memory follow-up requestId');
+  nonEmpty(input.operationId.value, 'memory follow-up operationId');
+  nonEmpty(input.correlationId, 'memory follow-up correlationId');
+  nonEmpty(input.inReplyTo, 'memory follow-up inReplyTo');
+  nonEmpty(input.bindingRef, 'memory follow-up bindingRef');
+  validateMemoryActor(input.actor);
+  nonEmpty(input.projectKey, 'memory follow-up projectKey');
+  if (input.actor.projectKey !== input.projectKey) throw new ContractError('memory follow-up actor project mismatch');
+  if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid memory follow-up namespace');
+  if (input.namespace === 'global' && !input.actor.crossProjectGrantRef) throw new ContractError('global memory follow-up requires a cross-project grant');
+  if (input.taskId !== undefined) assertScopedTask(input.taskId, 'memory follow-up taskId');
+  assertRefList(input.evidenceRefs, 'memory follow-up evidenceRefs');
+  assertRefList(input.evidenceDigests, 'memory follow-up evidenceDigests');
+  if (input.evidenceRefs.length !== input.evidenceDigests.length) throw new ContractError('memory follow-up evidence refs and digests must match');
+  assertRefList(input.sourceRefs, 'memory follow-up sourceRefs');
+  nonEmpty(input.inputDigest, 'memory follow-up inputDigest');
+}
+
+export function validateMemoryContextPolicy(input: MemoryContextPolicy): void {
+  if (input.namespaces.length === 0) throw new ContractError('memory context policy requires a namespace');
+  for (const namespace of input.namespaces) if (!MEMORY_NAMESPACES.includes(namespace)) throw new ContractError(`unknown memory context namespace: ${namespace}`);
+  if (input.layers.length === 0) throw new ContractError('memory context policy requires a layer');
+  for (const layer of input.layers) {
+    if (!['working', 'episodic', 'semantic', 'procedural'].includes(layer)) throw new ContractError(`unknown memory context layer: ${layer}`);
+  }
+  assertPositiveSafeInteger(input.maxTokenBudget, 'memory context policy maxTokenBudget');
+  if (typeof input.allowCandidates !== 'boolean' || typeof input.evidenceRequired !== 'boolean') {
+    throw new ContractError('memory context policy flags must be boolean');
+  }
+}
+
+export function validateMemoryRecallRequest(input: MemoryRecallRequest): void {
+  nonEmpty(input.agentRuntimeId, 'memory recall agentRuntimeId');
+  nonEmpty(input.bindingRef, 'memory recall bindingRef');
+  nonEmpty(input.projectKey, 'memory recall projectKey');
+  validateMemoryContextPolicy(input.policy);
+  if (input.query !== undefined) nonEmpty(input.query, 'memory recall query');
+}
+
 export interface EventHandlerCommitIntent {
   readonly consumerKey: string;
   readonly messageId: string;
@@ -491,6 +782,11 @@ function assertValidTime(value: string, label: string): void {
 
 function assertRefList(refs: readonly string[], label: string): void {
   for (const ref of refs) nonEmpty(ref, label);
+}
+
+function assertNonEmptyRefList(refs: readonly string[], label: string): void {
+  if (refs.length === 0) throw new ContractError(`${label} must not be empty`);
+  assertRefList(refs, label);
 }
 
 function validateEvidenceRefs(refs: readonly EvidenceRef[]): void {

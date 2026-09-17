@@ -129,6 +129,8 @@ export interface RuntimeTaskErrorProjection {
   readonly message: string;
   readonly retryable: boolean;
   readonly nextAction: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+  readonly cleanupError?: RuntimeTaskErrorProjection;
 }
 
 export interface RuntimeTaskDashboardProjection {

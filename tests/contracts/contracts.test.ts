@@ -12,6 +12,10 @@ import {
   validateCheckpointClosureRecord, validateCheckpointReentryRecord, validateControlProbeRecord, validateControlWatchdogPolicy, validateInteractionClosure,
   validateEventConsumerCursor, validateEventConsumerReceipt, validateEventHandlerCommit, validateEventRetryObligation, validateExecutionBinding,
   validateGoalRecord, validateOccurrence, validateProviderBinding, validateProviderCapabilities,
+  validateCanonicalMemoryScope, validateMemoryActor, validateMemoryBinding, validateMemoryCurationResult, validateMemoryFollowUpRequest,
+  validateMemoryForgettingPlan, validateMemoryForgettingRequest, validateMemoryPromotionReceipt, validateMemoryQueryRequest, validateMemoryRecallRequest,
+  validateMemoryReviewReceipt, validateMemorySubmission, validateProjectSourceUpdateProposal,
+  validateAuditPromptSnapshot, validateEpisodicMemorySource, validateProceduralMemoryCandidate, validateSemanticMemoryCandidate,
   validateProviderCloseResult, validateProviderError, validateProviderEvent, validateProviderReadiness, validateProviderRecoveryResult, validateProviderResumeInput,
   validateProviderSettleInput, validateProviderSettlement, validateProviderStartInput, validateProviderStartReceipt, validateProviderStopReceipt,
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
@@ -20,6 +24,8 @@ import {
   type AgentDriverV1, type AgentRequestEnvelope, type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
   type CheckpointClosureRecord, type CheckpointReentryRecord, type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation,
   type ExecutionBinding, type ExecutionRuntimePort, type GoalRecord, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
+  type MemoryActorContext, type MemoryCurationResult, type MemoryForgettingPlan, type MemoryPromotionReceipt, type MemoryQueryRequest,
+  type MemoryReviewReceipt, type MemorySubmission, type ProceduralMemoryCandidate, type ProjectSourceUpdateProposal, type SemanticMemoryCandidate,
   type InteractionClosure,
   type Occurrence, type Reminder, type RuntimeBinding, type SchedulerLease, type ScopeAcl, type Subscription,
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderReadiness,
@@ -28,10 +34,81 @@ import {
   type RequirementEnvelope, type ScopeRef, type WorkAssignment, type WorkResult,
 } from '@humanagent/contracts';
 
+const memoryActor = (overrides: Partial<MemoryActorContext> = {}): MemoryActorContext => ({
+  actorId: 'actor-a',
+  roleId: 'memory',
+  permissions: ['memory.read', 'memory.propose'],
+  projectKey: 'project-a',
+  ...overrides,
+});
+
+const semanticCandidate = (overrides: Partial<SemanticMemoryCandidate> = {}): SemanticMemoryCandidate => ({
+  candidateId: 'semantic-a',
+  namespace: 'project',
+  projectKey: 'project-a',
+  statement: 'checkpoint settles before journal commit',
+  entities: ['checkpoint', 'journal'],
+  sourceRefs: ['journal://project-a/1'],
+  sourceDigests: ['sha256:source-a'],
+  confidence: 'supported',
+  validity: { kind: 'open' },
+  review: 'required',
+  ...overrides,
+});
+
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const scope: ScopeRef = { organId: organ, taskId: task };
 const operation = id('operation', 'operation-a');
+const proceduralCandidate = (overrides: Partial<ProceduralMemoryCandidate> = {}): ProceduralMemoryCandidate => ({
+  candidateId: 'procedural-a',
+  namespace: 'project',
+  projectKey: 'project-a',
+  name: 'checkpoint recovery',
+  intent: 'recover a checkpoint',
+  preconditions: ['journal is valid'],
+  steps: ['read checkpoint', 'reconcile operation'],
+  failureBoundaries: ['unknown side effect'],
+  successEvidenceRefs: ['journal://project-a/2'],
+  repeatability: 'recurring',
+  review: 'required',
+  ...overrides,
+});
+const memorySubmission = (overrides: Partial<MemorySubmission> = {}): MemorySubmission => ({
+  submissionId: 'submission-a',
+  requestId: 'request-a',
+  operationId: operation,
+  bindingRef: 'binding-a',
+  actor: memoryActor(),
+  projectKey: 'project-a',
+  taskId: task,
+  cycleId: id('cycle', 'cycle-a'),
+  requestedKind: 'semantic',
+  contentRef: 'asset://memory/candidate-a',
+  contentDigest: 'sha256:candidate-a',
+  evidenceRefs: ['journal://project-a/1'],
+  observation: 'the checkpoint commit is durable',
+  desiredScope: 'project',
+  reason: 'observed at a lifecycle boundary',
+  inputDigest: 'sha256:input-a',
+  ...overrides,
+});
+const memoryQuery = (overrides: Partial<MemoryQueryRequest> = {}): MemoryQueryRequest => ({
+  requestId: 'query-a',
+  operationId: operation,
+  bindingRef: 'binding-a',
+  actor: memoryActor(),
+  projectKey: 'project-a',
+  namespace: 'project',
+  taskId: task,
+  query: 'checkpoint',
+  kinds: ['semantic'],
+  states: ['approved', 'active'],
+  limit: 10,
+  tokenBudget: 100,
+  inputDigest: 'sha256:query-a',
+  ...overrides,
+});
 const operationScope: ScopeRef = { ...scope, operationId: operation };
 const checkpoint = (seq: number, previousCheckpointId: Checkpoint['previousCheckpointId']): Checkpoint => ({
   id: id('checkpoint', `cp-${seq}`), scope, cycleId: id('cycle', 'cycle-a'), seq, previousCheckpointId,
@@ -266,6 +343,11 @@ test('checkpoint links allow operation-bearing stops after business checkpoints 
     compare: async () => ({ relation: 'same' }),
     detectNovelty: async () => novelty,
     detectRecurrence: async () => recurrence,
+    query: async (input) => ({ requestId: input.requestId, status: 'ready', entries: [], sourceFactRef: 'memory-query-a', omitted: [] }),
+    submitCandidate: async (input) => ({ submissionId: input.submissionId, status: 'accepted', nextAction: 'wait-analysis' }),
+    reviewCandidate: async (input) => input,
+    promoteCandidate: async (input) => input,
+    planForgetting: async (input) => input.plan,
   };
   context.registerAgentDriver(driver);
   context.registerMemoryOperations(memory);
@@ -778,4 +860,189 @@ test('watchdog, goal, schedule, occurrence, reminder, and lease invariants rejec
   validateSchedulerLease(lease());
   assert.throws(() => validateSchedulerLease({ ...lease({ expiresAt: '2026-01-01T00:00:00Z' }) }), ContractError);
   assert.equal(occurrenceIdempotencyKey(occurrence()), 'subscription-a::1::1');
+});
+
+test('memory contracts keep canonical scope, provenance, review, and promotion boundaries explicit', () => {
+  validateCanonicalMemoryScope({ namespace: 'project', projectKey: 'project-a', organId: organ, taskId: task });
+  validateCanonicalMemoryScope({ namespace: 'global', globalId: 'global', sourceProjectKey: 'project-a', sourceOrganId: organ });
+  assert.throws(() => validateCanonicalMemoryScope({ namespace: 'global', globalId: 'organ-a' } as never), ContractError);
+  assert.throws(() => validateCanonicalMemoryScope({ namespace: 'project', projectKey: '', organId: organ }), ContractError);
+
+  validateMemoryBinding({ kind: 'task', taskId: task, assignmentId: 'assignment-a', executionEpoch: 1, bindingRef: 'binding-a' });
+  validateMemoryBinding({ kind: 'interaction', interactionScopeId: 'interaction-a', bindingRef: 'binding-a' });
+  assert.throws(() => validateMemoryBinding({ kind: 'task', taskId: task, assignmentId: '', executionEpoch: 1, bindingRef: 'binding-a' }), ContractError);
+  assert.throws(() => validateMemoryBinding({ kind: 'interaction', interactionScopeId: '', bindingRef: 'binding-a' }), ContractError);
+
+  validateEpisodicMemorySource({
+    sourceRef: 'journal://project-a/1',
+    sourceDigest: 'sha256:source-a',
+    projectKey: 'project-a',
+    occurredAt: '2026-09-17T00:00:00Z',
+    payloadRef: 'asset://payload-a',
+    kind: 'checkpoint',
+  });
+  assert.throws(() => validateEpisodicMemorySource({
+    sourceRef: 'journal://project-a/1',
+    sourceDigest: 'sha256:source-a',
+    projectKey: 'project-a',
+    occurredAt: 'not-a-time',
+    payloadRef: 'asset://payload-a',
+    kind: 'checkpoint',
+  }), ContractError);
+});
+
+test('memory candidates and submissions reject missing evidence and actor project drift', () => {
+  validateSemanticMemoryCandidate(semanticCandidate());
+  assert.throws(() => validateSemanticMemoryCandidate(semanticCandidate({ sourceRefs: ['journal://project-a/1'], sourceDigests: [] })), ContractError);
+  assert.throws(() => validateSemanticMemoryCandidate(semanticCandidate({ validity: { kind: 'until' } })), ContractError);
+  assert.throws(() => validateSemanticMemoryCandidate(semanticCandidate({ review: 'bogus' as never })), ContractError);
+
+  validateProceduralMemoryCandidate(proceduralCandidate());
+  assert.throws(() => validateProceduralMemoryCandidate(proceduralCandidate({ steps: [] })), ContractError);
+  assert.throws(() => validateProceduralMemoryCandidate(proceduralCandidate({ successEvidenceRefs: [] })), ContractError);
+
+  validateMemorySubmission(memorySubmission());
+  assert.throws(() => validateMemorySubmission(memorySubmission({ actor: memoryActor({ projectKey: 'other-project' }) })), ContractError);
+  assert.throws(() => validateMemorySubmission(memorySubmission({ evidenceRefs: [] })), ContractError);
+  assert.throws(() => validateMemorySubmission(memorySubmission({ desiredScope: 'external' as never })), ContractError);
+});
+
+test('memory query, review, promotion, and forgetting enforce owner authority', () => {
+  validateMemoryQueryRequest(memoryQuery());
+  assert.throws(() => validateMemoryQueryRequest(memoryQuery({ namespace: 'global' })), ContractError);
+  validateMemoryQueryRequest(memoryQuery({
+    namespace: 'global',
+    actor: memoryActor({ crossProjectGrantRef: 'grant://global-read' }),
+  }));
+  assert.throws(() => validateMemoryQueryRequest(memoryQuery({ states: [] })), ContractError);
+  assert.throws(() => validateMemoryQueryRequest(memoryQuery({ tokenBudget: -1 })), ContractError);
+
+  const review: MemoryReviewReceipt = {
+    candidateId: 'candidate-a',
+    decision: 'approve',
+    actor: memoryActor({ roleId: 'review', permissions: ['memory.read', 'memory.review'] }),
+    decisionReason: 'evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: ['journal://project-a/review'],
+  };
+  validateMemoryReviewReceipt(review);
+  assert.throws(() => validateMemoryReviewReceipt({ ...review, decision: 'publish' as never }), ContractError);
+
+  const promotion: MemoryPromotionReceipt = {
+    candidateId: 'candidate-a',
+    from: 'project',
+    to: 'global',
+    actor: memoryActor({ roleId: 'review', permissions: ['memory.read', 'memory.promote'] }),
+    reason: 'stable across projects',
+    impactScope: 'all projects',
+    approvalRef: 'approval://global-promotion',
+    sourceRefs: ['journal://project-a/1'],
+    promotedAt: '2026-09-17T00:00:00Z',
+  };
+  validateMemoryPromotionReceipt(promotion);
+  assert.throws(() => validateMemoryPromotionReceipt({ ...promotion, actor: memoryActor() }), ContractError);
+  assert.throws(() => validateMemoryPromotionReceipt({ ...promotion, to: 'project' as never }), ContractError);
+
+  const plan: MemoryForgettingPlan = {
+    planId: 'forget-a',
+    namespace: 'project',
+    projectKey: 'project-a',
+    actions: [{ memoryId: 'memory-old', action: 'supersede', reason: 'replaced by approved fact', replacementRef: 'memory-new', sourceRefs: ['journal://project-a/1'] }],
+    protectedRefs: ['checkpoint://project-a/1'],
+    createdAt: '2026-09-17T00:00:00Z',
+  };
+  validateMemoryForgettingPlan(plan);
+  assert.throws(() => validateMemoryForgettingPlan({ ...plan, actions: [{ memoryId: 'memory-old', action: 'supersede', reason: 'missing replacement', sourceRefs: [] }] }), ContractError);
+  validateMemoryForgettingRequest({
+    actor: memoryActor({ roleId: 'system', permissions: ['memory.read', 'memory.forget'] }),
+    plan,
+  });
+  assert.throws(() => validateMemoryForgettingRequest({
+    actor: memoryActor({ permissions: ['memory.read'] }),
+    plan,
+  }), ContractError);
+  assert.throws(() => validateMemoryForgettingRequest({
+    actor: memoryActor({ roleId: 'system', permissions: ['memory.read', 'memory.forget'], projectKey: 'other-project' }),
+    plan,
+  }), ContractError);
+});
+
+test('memory curation, follow-up, audit prompt, recall policy, and source proposals are typed', () => {
+  const curation: MemoryCurationResult = {
+    operationId: operation,
+    auditPrompt: {
+      promptRef: 'project-memory-audit',
+      canonicalRef: 'source://project-a/audit-prompt',
+      revision: 'r1',
+      digest: 'sha256:prompt-r1',
+      loadedAt: '2026-09-17T00:00:00Z',
+    },
+    sourceRefs: ['journal://project-a/1'],
+    outcome: 'candidate',
+    candidateId: 'candidate-a',
+    matchedMemoryIds: [],
+    conflictRefs: [],
+    explanation: 'candidate requires review',
+    nextAction: 'review',
+  };
+  validateAuditPromptSnapshot(curation.auditPrompt);
+  validateMemoryCurationResult(curation);
+  assert.throws(() => validateMemoryCurationResult({ ...curation, candidateId: undefined }), ContractError);
+  assert.throws(() => validateMemoryCurationResult({ ...curation, outcome: 'conflict', conflictRefs: [] }), ContractError);
+  assert.throws(() => validateMemoryCurationResult({ ...curation, outcome: 'no-op', nextAction: 'review' }), ContractError);
+
+  validateMemoryFollowUpRequest({
+    requestId: 'follow-up-a',
+    operationId: operation,
+    correlationId: 'correlation-a',
+    inReplyTo: 'request-a',
+    bindingRef: 'binding-a',
+    actor: memoryActor(),
+    projectKey: 'project-a',
+    namespace: 'project',
+    evidenceRefs: ['journal://project-a/1'],
+    evidenceDigests: ['sha256:source-a'],
+    sourceRefs: ['journal://project-a/1'],
+    inputDigest: 'sha256:follow-up-a',
+  });
+  assert.throws(() => validateMemoryFollowUpRequest({
+    requestId: 'follow-up-a',
+    operationId: operation,
+    correlationId: 'correlation-a',
+    inReplyTo: 'request-a',
+    bindingRef: 'binding-a',
+    actor: memoryActor(),
+    projectKey: 'project-a',
+    namespace: 'global',
+    evidenceRefs: [],
+    evidenceDigests: [],
+    sourceRefs: [],
+    inputDigest: 'sha256:follow-up-a',
+  }), ContractError);
+
+  validateMemoryRecallRequest({
+    agentRuntimeId: 'runtime-a',
+    bindingRef: 'binding-a',
+    projectKey: 'project-a',
+    policy: { namespaces: ['project', 'global'], layers: ['working', 'semantic'], allowCandidates: false, maxTokenBudget: 100, evidenceRequired: true },
+    query: 'checkpoint',
+  });
+  assert.throws(() => validateMemoryRecallRequest({
+    agentRuntimeId: 'runtime-a',
+    bindingRef: 'binding-a',
+    projectKey: 'project-a',
+    policy: { namespaces: [], layers: ['working'], allowCandidates: false, maxTokenBudget: 100, evidenceRequired: true },
+  }), ContractError);
+
+  const proposal: ProjectSourceUpdateProposal = {
+    target: 'project-agents',
+    sourceRef: 'source://project-a/AGENTS.md',
+    expectedRevision: 'r1',
+    expectedDigest: 'sha256:agents-r1',
+    patchRef: 'patch://project-a/r2',
+    evidenceRefs: ['journal://project-a/1'],
+    ownerRef: 'project-rule-owner',
+  };
+  validateProjectSourceUpdateProposal(proposal);
+  assert.throws(() => validateProjectSourceUpdateProposal({ ...proposal, target: 'global-agents' as never }), ContractError);
 });

@@ -2,7 +2,9 @@ import {
   id,
   type AgentDriver,
   type AgentEvent,
+  type AgentHandle,
   type Attention,
+  type AgentOutput,
   type Checkpoint,
   type CycleId,
   type EvidenceRef,
@@ -16,13 +18,21 @@ import {
   type ScopeRef,
   type TaskId,
 } from '../../../contracts/src/index.js';
-import { recallCheckpoint } from '../checkpoints/coordinator.js';
+import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
+import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { AttentionPort } from '../control/attention.js';
 import type { RequestStopCommand } from '../control/control-command.js';
 import { executeStopControl } from '../control/runtime-stop.js';
-import type { CheckpointCommitPort } from '../control/steering.js';
-import { AgentRuntime, bindAgentDriver } from '../nodes/agent-runtime.js';
+import {
+  StopSettlementCommitError,
+  type CheckpointCommitPort,
+  type StopSettlementRecovery,
+} from '../control/steering.js';
+import type { AgentHookStage } from '../agent-io/events.js';
+import { ContextCommitter, type PublishedContext } from '../context/index.js';
+import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
+import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
 
 export type RuntimeTaskError = {
   readonly code: string;
@@ -30,6 +40,13 @@ export type RuntimeTaskError = {
   readonly message: string;
   readonly retryable: boolean;
   readonly nextAction: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+  readonly cleanupError?: RuntimeTaskError;
+};
+
+type MutableRuntimeTaskError = Omit<RuntimeTaskError, 'evidenceRefs' | 'cleanupError'> & {
+  evidenceRefs?: readonly EvidenceRef[];
+  cleanupError?: RuntimeTaskError;
 };
 
 export type RuntimeTaskEventKind =
@@ -106,6 +123,53 @@ export interface RuntimeExecutionDriverInput {
 
 export type RuntimeExecutionDriverFactory = (input: RuntimeExecutionDriverInput) => RuntimeExecutionDriver;
 
+export interface RuntimeExecutionCapabilities {
+  readonly providerNeutralHarness: {
+    readonly state: 'available';
+    readonly ownerId: 'humanagent.runtime';
+  };
+  readonly requestResponseHooks: {
+    readonly state: 'available';
+    readonly ownerId: 'humanagent.runtime.hooks';
+  };
+  readonly agentIoRequestLifecycle: {
+    readonly state: 'unavailable';
+    readonly ownerId: 'humanagent.runtime.agent-io';
+    readonly reason: string;
+  };
+  readonly contextCommitReentry: {
+    readonly state: 'available';
+    readonly ownerId: 'humanagent.runtime.checkpoints';
+  };
+  readonly checkpointSettlementCancellation: {
+    readonly state: 'available';
+    readonly ownerId: 'humanagent.runtime.control';
+  };
+  readonly eventBus: {
+    readonly state: 'unavailable';
+    readonly ownerId: 'humanagent.runtime.events';
+    readonly reason: string;
+  };
+}
+
+export interface RuntimeContextCommitResult {
+  readonly checkpoint: Checkpoint;
+  readonly context: PublishedContext<Checkpoint>;
+  readonly reentry: CheckpointReentryDecision;
+}
+
+export interface RuntimeExecutionComposition {
+  readonly driver: RuntimeExecutionDriver;
+  readonly runtime: AgentRuntime;
+  readonly capabilities: RuntimeExecutionCapabilities;
+  start(): Promise<AgentHandle>;
+  submit(prompt: string): Promise<AgentOutput>;
+  observe(): AsyncIterable<AgentRuntimeObservation>;
+  settle(): Promise<AgentRuntimeClosure>;
+  commitCheckpoint(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<RuntimeContextCommitResult>;
+  checkpointCommitPort(previous: Checkpoint | null): CheckpointCommitPort;
+}
+
 export interface RuntimeTaskJournalPort {
   append(record: RuntimeTaskJournalRecord): void;
   replay(): readonly RuntimeTaskJournalRecord[];
@@ -163,6 +227,7 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => TaskCheckpointStore;
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
+  readonly hookRegistry?: AgentHookRegistry;
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
 }
@@ -185,12 +250,15 @@ interface TaskRecord {
   allowedActions: string[];
   runtime?: AgentRuntime;
   driver?: RuntimeExecutionDriver;
+  composition?: RuntimeExecutionComposition;
+  checkpointBoundary?: ContextCheckpointBoundary;
   events: RuntimeTaskEvent[];
   checkpoint?: Checkpoint;
   checkpointSeq: number;
   error?: RuntimeTaskError;
   running: boolean;
   stopping: boolean;
+  postCommitRecoveryPending?: boolean;
   executionReady?: Promise<void>;
   resolveExecutionReady?: () => void;
 }
@@ -232,6 +300,7 @@ function providerErrorProjection(error: ProviderError): RuntimeTaskError {
     message: error.message,
     retryable: error.retryable === 'retryable',
     nextAction: toNextActionText(error.nextAction) ?? RUNTIME_OWNER,
+    evidenceRefs: error.evidenceRefs,
   };
 }
 
@@ -293,6 +362,244 @@ function errorFromUnknown(error: unknown): RuntimeTaskError {
   };
 }
 
+function recoveryProjection(recovery: StopSettlementRecovery): RuntimeTaskError {
+  return {
+    code: recovery.code,
+    ownerId: recovery.ownerId,
+    message: recovery.message,
+    retryable: recovery.retryable,
+    nextAction: recovery.nextAction,
+  };
+}
+
+class RuntimeContextCommitError extends RuntimeTaskControlError {
+  constructor(
+    readonly committed: RuntimeContextCommitResult,
+    cause: unknown,
+  ) {
+    const projection = errorFromUnknown(cause);
+    super(
+      'execution.context-commit-hook.blocked',
+      projection.ownerId,
+      projection.message,
+      projection.nextAction,
+    );
+  }
+}
+
+interface RuntimeExecutionCompositionOptions {
+  readonly driver: RuntimeExecutionDriver;
+  readonly runtimeId: string;
+  readonly taskId: TaskId;
+  readonly assignmentId: string;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly scope: ScopeRef;
+  readonly checkpointBoundary: ContextCheckpointBoundary;
+  readonly now: () => Date;
+  readonly hookRegistry?: AgentHookRegistry;
+}
+
+const EXECUTION_CAPABILITIES: RuntimeExecutionCapabilities = {
+  providerNeutralHarness: { state: 'available', ownerId: RUNTIME_OWNER },
+  requestResponseHooks: { state: 'available', ownerId: 'humanagent.runtime.hooks' },
+  agentIoRequestLifecycle: {
+    state: 'unavailable',
+    ownerId: 'humanagent.runtime.agent-io',
+    reason: 'UI execution drivers expose normalized provider events, not AgentIo raw response chunks, durable restart budgets, or settlement publication sinks',
+  },
+  contextCommitReentry: { state: 'available', ownerId: 'humanagent.runtime.checkpoints' },
+  checkpointSettlementCancellation: { state: 'available', ownerId: 'humanagent.runtime.control' },
+  eventBus: {
+    state: 'unavailable',
+    ownerId: 'humanagent.runtime.events',
+    reason: 'UiRuntimeService does not provide the EventBusPorts journal, registry, or external-operation owner',
+  },
+};
+
+class ContextCheckpointBoundary {
+  constructor(private readonly checkpointStore: TaskCheckpointStore) {}
+
+  async commit(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<RuntimeContextCommitResult> {
+    const committer = new ContextCommitter<Checkpoint>({
+      commit: async (prepared) => {
+        const completed = await completeCheckpoint(this.checkpointStore, {
+          ownerId: RUNTIME_OWNER,
+          context: {
+            scope: prepared.value.scope,
+            cycleId: prepared.value.cycleId,
+            executionEpoch: prepared.value.executionEpoch,
+            directiveRevision: prepared.value.directiveRevision,
+          },
+          previous,
+          checkpoint: prepared.value,
+        });
+        if (
+          completed.receipt.checkpointId.value !== prepared.value.id.value
+          || completed.receipt.seq !== prepared.value.seq
+        ) {
+          throw new RuntimeTaskControlError(
+            'checkpoint.commit.receipt.mismatch',
+            'humanagent.runtime.checkpoints',
+            'checkpoint commit receipt does not match the prepared context',
+            'inspect the checkpoint journal and retry the operation',
+          );
+        }
+      },
+    });
+    const prepared = committer.prepare({
+      id: `context-${checkpoint.id.value}`,
+      revision: checkpoint.executionEpoch,
+      value: checkpoint,
+    });
+    const committed = await committer.commit(prepared);
+    const published = committer.publish(committed);
+    return {
+      checkpoint: published.value,
+      context: published,
+      reentry: computeReentryDecision({ outcome: checkpoint.outcome }),
+    };
+  }
+}
+
+class HarnessExecutionComposition implements RuntimeExecutionComposition {
+  readonly runtime: AgentRuntime;
+  readonly capabilities = EXECUTION_CAPABILITIES;
+  private readonly hooks: AgentHookRegistry;
+
+  constructor(private readonly options: RuntimeExecutionCompositionOptions) {
+    this.runtime = new AgentRuntime(options.driver, {
+      runtimeId: options.runtimeId,
+      taskId: options.taskId,
+      assignmentId: options.assignmentId,
+      organId: options.scope.organId,
+      cycleId: options.scope.cycleId,
+      operationId: options.operationId,
+      executionEpoch: options.executionEpoch,
+      ownerRef: RUNTIME_OWNER,
+      recoveryRef: `recovery-${options.operationId.value}`,
+      waitConditionRef: `recovery-${options.operationId.value}`,
+    });
+    bindAgentDriver(this.runtime, options.driver);
+    this.hooks = options.hookRegistry ?? createHookRegistry(() => undefined, () => options.now().getTime());
+  }
+
+  get driver(): RuntimeExecutionDriver {
+    return this.options.driver;
+  }
+
+  async start(): Promise<AgentHandle> {
+    await this.runHook('request.created', 'enter');
+    await this.runHook('request.admitted', 'enter');
+    await this.runHook('request.before-dispatch', 'enter');
+    const handle = await this.runtime.start();
+    if (handle.runtimeId !== this.options.runtimeId || handle.executionEpoch !== this.options.executionEpoch) {
+      throw new RuntimeTaskControlError(
+        'execution.handle.mismatch',
+        RUNTIME_OWNER,
+        'agent driver returned a handle for another runtime or epoch',
+        'reject the adapter response and restart from the owning runtime',
+      );
+    }
+    await this.runHook('request.created', 'exit');
+    await this.runHook('request.admitted', 'exit');
+    await this.runHook('request.before-dispatch', 'exit');
+    await this.runHook('request.dispatched', 'enter');
+    await this.runHook('request.dispatched', 'exit');
+    return handle;
+  }
+
+  async submit(prompt: string): Promise<AgentOutput> {
+    await this.runHook('attempt.started', 'enter');
+    const output = await this.runtime.submit({ prompt });
+    await this.runHook('attempt.started', 'exit');
+    return output;
+  }
+
+  async *observe(): AsyncIterable<AgentRuntimeObservation> {
+    for await (const observation of this.runtime.observe()) {
+      if (!observation.accepted) {
+        yield observation;
+        continue;
+      }
+      await this.runHook('response.received', 'enter');
+      await this.runHook('control.decoded', 'enter');
+      yield observation;
+      await this.runHook('response.received', 'exit');
+      await this.runHook('control.decoded', 'exit');
+      await this.runHook('response.decoded', 'enter');
+      await this.runHook('response.decoded', 'exit');
+    }
+  }
+
+  async settle(): Promise<AgentRuntimeClosure> {
+    await this.runHook('request.settled', 'enter');
+    const closure = await this.runtime.settle();
+    await this.runHook('request.settled', 'exit');
+    return closure;
+  }
+
+  async commitCheckpoint(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<RuntimeContextCommitResult> {
+    await this.runHook('result.mapped', 'enter');
+    const committed = await this.options.checkpointBoundary.commit(checkpoint, previous);
+    try {
+      await this.runHook('context.committed', 'enter');
+      await this.runHook('context.committed', 'exit');
+      await this.runHook('result.mapped', 'exit');
+    } catch (error) {
+      throw new RuntimeContextCommitError(committed, error);
+    }
+    return committed;
+  }
+
+  checkpointCommitPort(previous: Checkpoint | null): CheckpointCommitPort {
+    return {
+      commit: async (checkpoint) => {
+        try {
+          await this.commitCheckpoint(checkpoint, previous);
+          return { checkpointId: checkpoint.id, committed: true };
+        } catch (error) {
+          if (error instanceof RuntimeContextCommitError) {
+            const recovery = errorFromUnknown(error);
+            return {
+              checkpointId: error.committed.checkpoint.id,
+              committed: true,
+              recovery: {
+                code: 'execution.context-commit-hook.blocked',
+                ownerId: recovery.ownerId,
+                message: recovery.message,
+                retryable: recovery.retryable,
+                nextAction: recovery.nextAction,
+              },
+            };
+          }
+          throw error;
+        }
+      },
+    };
+  }
+
+  private async runHook(stage: AgentHookStage, phase: 'enter' | 'exit'): Promise<void> {
+    const results = await this.hooks.runStage(stage, {
+      requestId: this.options.operationId.value,
+      attemptId: `attempt-${this.options.executionEpoch}`,
+      sourceRef: `operation/${this.options.operationId.value}`,
+      correlation: this.options.operationId.value,
+    }, phase);
+    const blocked = results.find((result) => result.blocked);
+    if (!blocked) return;
+    const nextAction = blocked.result.status === 'failed' || blocked.result.status === 'waiting'
+      ? blocked.result.nextAction ?? `inspect hook ${blocked.hookId}`
+      : `inspect hook ${blocked.hookId}`;
+    throw new RuntimeTaskControlError(
+      'execution.hook.blocked',
+      blocked.result.ownerId ?? blocked.hookId,
+      `execution hook ${blocked.hookId} blocked ${stage} ${phase}`,
+      nextAction,
+    );
+  }
+}
+
 export class RuntimeTaskCoordinator {
   private readonly now: () => Date;
   private readonly journal?: RuntimeTaskJournalPort;
@@ -311,6 +618,10 @@ export class RuntimeTaskCoordinator {
     this.journal = options.journal;
     this.taskIdPrefix = options.taskIdPrefix ?? 'runtime';
     this.replayJournal();
+  }
+
+  executionCapabilities(): RuntimeExecutionCapabilities {
+    return EXECUTION_CAPABILITIES;
   }
 
   createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
@@ -386,11 +697,13 @@ export class RuntimeTaskCoordinator {
     record.currentNode = 'provider.execute';
     record.input = prompt;
     record.output = '';
-  record.operationId = operationId;
-  record.executionEpoch = executionEpoch;
-  record.checkpoint = undefined;
-  record.checkpointSeq = 0;
-  record.nextStep = '等待 Provider 事件';
+    record.operationId = operationId;
+    record.executionEpoch = executionEpoch;
+    record.checkpoint = undefined;
+    record.checkpointSeq = 0;
+    record.composition = undefined;
+    record.checkpointBoundary = undefined;
+    record.nextStep = '等待 Provider 事件';
     record.allowedActions = ['stop'];
     record.error = undefined;
     record.updatedAt = this.now().toISOString();
@@ -419,7 +732,7 @@ export class RuntimeTaskCoordinator {
     }
     record.stopping = true;
     await record.executionReady;
-    if (!record.running || !record.runtime || !record.driver || !record.operationId || !record.executionEpoch) {
+    if (!record.running || !record.runtime || !record.driver || !record.composition || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
     }
     const operation = this.operations.get(record.operationId.value);
@@ -441,7 +754,6 @@ export class RuntimeTaskCoordinator {
       locator: `operation/${record.operationId.value}/recovery`,
       scope: stopScope,
     };
-    const store = this.options.checkpointStoreFor(taskId, activeScope.cycleId!);
     const command: RequestStopCommand = {
       source: 'control',
       command: 'steer.request-stop',
@@ -457,7 +769,7 @@ export class RuntimeTaskCoordinator {
       const result = await executeStopControl({
         command,
         driver: record.driver,
-        checkpointPort: store,
+        checkpointPort: record.composition.checkpointCommitPort(record.checkpoint ?? null),
         attentionPort: this.options.attentionPort,
         currentOrganId: this.options.organId,
         currentTaskId: taskId,
@@ -493,6 +805,9 @@ export class RuntimeTaskCoordinator {
       record.updatedAt = this.now().toISOString();
       return { state: 'settling', operationId: record.operationId.value };
     } catch (error) {
+      if (error instanceof StopSettlementCommitError && error.checkpointCommitted && error.recovery) {
+        await this.throwCommittedStopRecovery(record, operation, error, error.recovery);
+      }
       const projection = errorFromUnknown(error);
       record.error = projection;
       this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
@@ -507,13 +822,12 @@ export class RuntimeTaskCoordinator {
 
   async retryStop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
     const record = this.requireTask(taskId);
-    if (!record.stopping || !record.operationId || !record.driver || !record.runtime || !record.executionEpoch) {
+    if (!record.stopping || !record.operationId || !record.driver || !record.runtime || !record.composition || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.recoverable', RUNTIME_OWNER, 'task has no pending stop recovery', 'start an execution first');
     }
     const operation = this.operations.get(record.operationId.value);
     const activeScope = this.scopes.get(record.operationId.value);
     if (!operation || !activeScope?.cycleId) throw new RuntimeTaskControlError('operation.recovery.missing', RUNTIME_OWNER, 'pending stop operation is missing', 'start a new execution');
-    const store = this.options.checkpointStoreFor(taskId, activeScope.cycleId);
     const stopScope: ScopeRef = { ...activeScope };
     const recoveryStateRef: EvidenceRef = {
       evidenceId: id('evidence', `recovery-${record.operationId.value}`),
@@ -541,7 +855,7 @@ export class RuntimeTaskCoordinator {
       const result = await executeStopControl({
         command,
         driver: record.driver,
-        checkpointPort: store,
+        checkpointPort: record.composition.checkpointCommitPort(record.checkpoint ?? null),
         attentionPort: this.options.attentionPort,
         currentOrganId: this.options.organId,
         currentTaskId: taskId,
@@ -577,6 +891,9 @@ export class RuntimeTaskCoordinator {
       record.updatedAt = this.now().toISOString();
       return { state: 'settling', operationId: record.operationId.value };
     } catch (error) {
+      if (error instanceof StopSettlementCommitError && error.checkpointCommitted && error.recovery) {
+        await this.throwCommittedStopRecovery(record, operation, error, error.recovery);
+      }
       const projection = errorFromUnknown(error);
       record.error = projection;
       this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
@@ -638,7 +955,12 @@ export class RuntimeTaskCoordinator {
     };
     let driver: RuntimeExecutionDriver | undefined;
     let runtime: AgentRuntime | undefined;
+    let composition: RuntimeExecutionComposition | undefined;
     try {
+      const checkpointBoundary = new ContextCheckpointBoundary(
+        this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+      );
+      record.checkpointBoundary = checkpointBoundary;
       driver = this.options.createDriver({
         runtimeId,
         taskId: record.taskId,
@@ -649,24 +971,29 @@ export class RuntimeTaskCoordinator {
         inputRefs: [`task://${record.taskId.value}/input/${operation.seq}`],
         ownerId: RUNTIME_OWNER,
       });
-      runtime = new AgentRuntime(driver, {
+      composition = new HarnessExecutionComposition({
+        driver,
         runtimeId,
         taskId: record.taskId,
         assignmentId: `assignment-${operation.operationId.value}`,
+        operationId: operation.operationId,
         executionEpoch: operation.executionEpoch,
-        ownerRef: RUNTIME_OWNER,
-        recoveryRef: `recovery-${operation.operationId.value}`,
-        waitConditionRef: `recovery-${operation.operationId.value}`,
+        scope,
+        checkpointBoundary,
+        now: this.now,
+        hookRegistry: this.options.hookRegistry,
       });
-      bindAgentDriver(runtime, driver);
+      runtime = composition.runtime;
+      record.composition = composition;
       record.driver = driver;
       record.runtime = runtime;
-      await runtime.start();
-      await runtime.submit({ prompt });
+      await composition.start();
+      await composition.submit(prompt);
       record.resolveExecutionReady?.();
       record.resolveExecutionReady = undefined;
-      if (record.stopping) return;
-      for await (const observation of runtime.observe()) {
+      if (record.stopping || record.postCommitRecoveryPending) return;
+      for await (const observation of composition.observe()) {
+        if (record.postCommitRecoveryPending) return;
         if (!observation.accepted) {
           this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
           continue;
@@ -675,6 +1002,7 @@ export class RuntimeTaskCoordinator {
         if (!event.providerEvent) continue;
         this.recordProviderEvent(record, operation, event.providerEvent);
       }
+      if (record.postCommitRecoveryPending) return;
       if (runtime.snapshot().state === 'stopped') {
         this.finalize(record, 'stopped');
         return;
@@ -686,7 +1014,7 @@ export class RuntimeTaskCoordinator {
       record.currentState = '收拢中';
       record.nextStep = '等待 checkpoint';
       record.allowedActions = [];
-      const closure = await runtime.settle();
+      const closure = await composition.settle();
       await this.commitBusinessCheckpoint(record, scope, closure.state);
       const close = await this.closeForExecution(operation.operationId, driver, closure.evidenceRefs);
       if (close.state !== 'closed') {
@@ -695,6 +1023,7 @@ export class RuntimeTaskCoordinator {
       this.pushEvent(record, operation, 'execution.terminal', closure.state, close.retained ? `execution ${closure.state}; provider retained for active executions` : `execution ${closure.state}; provider closed`, [...closure.evidenceRefs, ...close.evidenceRefs], undefined, undefined, undefined, undefined, 'final');
       this.finalize(record, closure.state);
     } catch (error) {
+      if (record.postCommitRecoveryPending) return;
       const startupFailureBeforeReady = record.resolveExecutionReady !== undefined;
       if (record.stopping && !startupFailureBeforeReady) return;
       if (record.state === 'stopped' || runtime?.snapshot().state === 'stopped') {
@@ -702,8 +1031,6 @@ export class RuntimeTaskCoordinator {
         return;
       }
       const projection = errorFromUnknown(error);
-      record.error = projection;
-      this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };
       const errorEvidenceRef: EvidenceRef = {
         evidenceId: id('evidence', `error-${record.operationId?.value ?? 'none'}-${record.checkpointSeq + 1}`),
@@ -713,6 +1040,30 @@ export class RuntimeTaskCoordinator {
         scope: businessScope,
       };
       const errorEvidenceRefs = [...operation.events.filter((event) => event.kind === 'provider.error').flatMap((event) => event.evidenceRefs), errorEvidenceRef];
+      const committedCheckpoint = record.checkpoint;
+      const committedContext = error instanceof RuntimeContextCommitError && committedCheckpoint !== undefined;
+      let committedProjection: MutableRuntimeTaskError | undefined;
+      if (committedContext && committedCheckpoint) {
+        committedProjection = projection;
+        record.error = committedProjection;
+        this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
+        this.pushEvent(
+          record,
+          operation,
+          'execution.terminal',
+          'blocked',
+          'checkpoint committed; post-commit lifecycle requires recovery',
+          [...errorEvidenceRefs, ...committedCheckpoint.evidenceRefs],
+          committedProjection.ownerId,
+          true,
+          committedProjection.nextAction,
+          { error: committedProjection },
+          'final',
+        );
+      } else {
+        record.error = projection;
+        this.pushEvent(record, operation, 'provider.error', 'failed', projection.message, [], projection.ownerId, projection.retryable, projection.nextAction);
+      }
       const outcome: 'failed' | 'blocked' = 'failed';
       const runtimeState = runtime?.snapshot().state ?? 'failed';
       const providerMayBeActive = runtimeState === 'running'
@@ -722,9 +1073,9 @@ export class RuntimeTaskCoordinator {
         || runtimeState === 'blocked';
       let cleanupEvidenceRefs: readonly EvidenceRef[] = [];
       let cleanupFailure: unknown;
-      if (runtime && runtimeState === 'running') {
+      if (composition && runtimeState === 'running') {
         try {
-          const closure = await runtime.settle();
+          const closure = await composition.settle();
           cleanupEvidenceRefs = closure.evidenceRefs;
         } catch (settleError) {
           cleanupFailure = settleError;
@@ -733,14 +1084,37 @@ export class RuntimeTaskCoordinator {
       if (driver) {
         try {
           const close = await this.closeForExecution(operation.operationId, driver, [...errorEvidenceRefs, ...cleanupEvidenceRefs]);
+          cleanupEvidenceRefs = [...cleanupEvidenceRefs, ...close.evidenceRefs];
           if (close.state !== 'closed') {
             throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
           }
-          cleanupEvidenceRefs = [...cleanupEvidenceRefs, ...close.evidenceRefs];
           cleanupFailure = undefined;
         } catch (cleanupError) {
           cleanupFailure = cleanupError;
         }
+      }
+      if (committedProjection && committedCheckpoint) {
+        if (cleanupFailure) {
+          const cleanupProjection: MutableRuntimeTaskError = errorFromUnknown(cleanupFailure);
+          if (!cleanupProjection.evidenceRefs?.length && cleanupEvidenceRefs.length > 0) {
+            cleanupProjection.evidenceRefs = cleanupEvidenceRefs;
+          }
+          committedProjection.cleanupError = cleanupProjection;
+          record.error = committedProjection;
+          this.pushEvent(
+            record,
+            operation,
+            'provider.error',
+            'blocked',
+            cleanupProjection.message,
+            cleanupEvidenceRefs,
+            cleanupProjection.ownerId,
+            true,
+            cleanupProjection.nextAction,
+            { error: committedProjection },
+          );
+        }
+        return;
       }
       if (cleanupFailure) {
         const cleanupProjection = errorFromUnknown(cleanupFailure);
@@ -902,13 +1276,120 @@ export class RuntimeTaskCoordinator {
       evidenceRefs: evidence,
       next,
     };
-    const store = this.options.checkpointStoreFor(record.taskId, executionScope.cycleId!);
-    const commit = await store.commit(checkpoint);
-    if (!commit.committed) throw new RuntimeTaskControlError('checkpoint.commit.failed', RUNTIME_OWNER, 'business checkpoint was not committed', 'inspect the journal and retry');
-    record.checkpoint = checkpoint;
-    record.checkpointSeq = checkpoint.seq;
+    if (!record.composition && !record.checkpointBoundary) {
+      throw new RuntimeTaskControlError(
+        'execution.composition.missing',
+        RUNTIME_OWNER,
+        'execution composition is missing at checkpoint commit boundary',
+        'start a new execution through the UI runtime entry',
+      );
+    }
+    let committed: RuntimeContextCommitResult;
+    try {
+      committed = record.composition
+        ? await record.composition.commitCheckpoint(checkpoint, record.checkpoint ?? null)
+        : await record.checkpointBoundary!.commit(checkpoint, record.checkpoint ?? null);
+    } catch (error) {
+      if (error instanceof RuntimeContextCommitError) {
+        this.recordCommittedCheckpoint(record, error.committed, checkpointOutcome);
+      }
+      throw error;
+    }
+    this.recordCommittedCheckpoint(record, committed, checkpointOutcome);
+  }
+
+  private recordCommittedCheckpoint(
+    record: TaskRecord,
+    committed: RuntimeContextCommitResult,
+    outcome: Checkpoint['outcome'],
+  ): void {
+    record.checkpoint = committed.checkpoint;
+    record.checkpointSeq = committed.checkpoint.seq;
     const operation = record.operationId ? this.operations.get(record.operationId.value) : undefined;
-    if (operation) this.pushEvent(record, operation, 'checkpoint.committed', checkpointOutcome, checkpoint.summary, checkpoint.evidenceRefs);
+    if (operation) this.pushEvent(record, operation, 'checkpoint.committed', outcome, committed.checkpoint.summary, committed.checkpoint.evidenceRefs);
+  }
+
+  private markCommittedCheckpointRecovery(record: TaskRecord, nextAction: string): void {
+    record.postCommitRecoveryPending = true;
+    record.state = 'blocked';
+    record.running = false;
+    record.stopping = false;
+    record.allowedActions = [];
+    record.currentState = 'checkpoint 已提交，等待恢复';
+    record.nextStep = nextAction;
+    record.currentNode = 'checkpoint.commit';
+    record.updatedAt = this.now().toISOString();
+  }
+
+  private async throwCommittedStopRecovery(
+    record: TaskRecord,
+    operation: OperationRecord,
+    error: StopSettlementCommitError,
+    recovery: StopSettlementRecovery,
+  ): Promise<never> {
+    const projection = recoveryProjection(recovery);
+    const committedProjection: MutableRuntimeTaskError = projection;
+    record.checkpoint = error.prepared.checkpoint;
+    record.checkpointSeq = error.prepared.checkpoint.seq;
+    record.error = committedProjection;
+    this.markCommittedCheckpointRecovery(record, committedProjection.nextAction);
+    this.pushEvent(
+      record,
+      operation,
+      'execution.terminal',
+      'blocked',
+      'stopped checkpoint committed; post-commit lifecycle requires recovery',
+      [...error.prepared.checkpoint.evidenceRefs, ...error.prepared.closure.evidenceRefs],
+      committedProjection.ownerId,
+      true,
+      committedProjection.nextAction,
+      { error: committedProjection },
+      'final',
+    );
+    let cleanupError: RuntimeTaskError | undefined;
+    if (record.driver) {
+      try {
+        const close = await this.closeForExecution(
+          operation.operationId,
+          record.driver,
+          [...error.prepared.checkpoint.evidenceRefs, ...error.prepared.closure.evidenceRefs],
+        );
+        if (close.state !== 'closed') {
+          cleanupError = {
+            code: 'provider.close.failed',
+            ownerId: close.ownerId ?? RUNTIME_OWNER,
+            message: `provider close is ${close.state}`,
+            retryable: false,
+            nextAction: toNextActionText(close.nextAction) ?? 'inspect provider close evidence',
+            evidenceRefs: close.evidenceRefs,
+          };
+        }
+      } catch (failure) {
+        cleanupError = errorFromUnknown(failure);
+      }
+    }
+    if (cleanupError) committedProjection.cleanupError = cleanupError;
+    if (cleanupError) {
+      record.error = committedProjection;
+      this.pushEvent(
+        record,
+        operation,
+        'provider.error',
+        'blocked',
+        cleanupError.message,
+        cleanupError.evidenceRefs ?? [],
+        cleanupError.ownerId,
+        true,
+        cleanupError.nextAction,
+        { error: committedProjection },
+      );
+    }
+    throw new RuntimeTaskControlError(
+      'execution.context-commit-hook.blocked',
+      projection.ownerId,
+      projection.message,
+      projection.nextAction,
+    );
   }
 
   private finalize(record: TaskRecord, state: LifecycleState): void {
@@ -1103,6 +1584,10 @@ export class RuntimeTaskCoordinator {
         const checkpoint = recalled.checkpoint;
         task.checkpoint = checkpoint;
         task.checkpointSeq = checkpoint.seq;
+        if (task.error?.code === 'execution.context-commit-hook.blocked') {
+          this.markCommittedCheckpointRecovery(task, task.error.nextAction);
+          continue;
+        }
         task.state = checkpoint.outcome;
         task.running = false;
         task.stopping = false;

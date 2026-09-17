@@ -15,6 +15,7 @@ import type {
   AgentIoRequestData,
   AgentIoRequestStatus,
   AgentIoRestartBudgetStore,
+  AgentIoSettlementPublicationIntent,
 } from './types.js';
 import { DEFAULT_AGENT_IO_POLICY } from './types.js';
 import { emptyAgentIoBudgetRecord } from './budget.js';
@@ -85,6 +86,10 @@ function sameProviderBinding(left: AgentIoBinding['provider'], right: AgentIoBin
     && left.owner === right.owner;
 }
 
+function nonEmptySummary(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 function assertLockedBinding(control: AgentIoRequestControl, locked: AgentIoBinding): void {
   if (control.binding.kind !== locked.kind) {
     throw new AgentIoRequestError(
@@ -133,6 +138,10 @@ export class AgentIoRequestCoordinator {
   private closed = false;
   private closing = false;
   private closure?: AgentIoClosure;
+  private pendingSettlement?: AgentIoClosure;
+  private pendingSettlementEvent?: AgentIoEvent;
+  private settlementIntentPersisted = false;
+  private settlementEvent?: AgentIoEvent;
   private budget: AgentIoBudgetRecord;
   private readonly policy: AgentIoPolicy;
   private readonly emitted: string[] = [];
@@ -186,6 +195,7 @@ export class AgentIoRequestCoordinator {
       );
     }
     const coordinator = new AgentIoRequestCoordinator(options, budget, options.clock.now());
+    if (budget.pendingSettlement) coordinator.restorePendingSettlement(budget.pendingSettlement);
     await coordinator.persistBudget();
     return coordinator;
   }
@@ -206,7 +216,6 @@ export class AgentIoRequestCoordinator {
   async acceptChunk(chunk: AgentIoProviderResponseChunk): Promise<void> {
     this.assertOpenRunning();
     const now = this.nowMs();
-    this.lastActivityAtMs = now;
     if (chunk.sequence < 1 || chunk.sequence <= this.lastChunkSequence) {
       await this.emit({
         kind: 'stream.gap',
@@ -216,6 +225,7 @@ export class AgentIoRequestCoordinator {
       });
       return;
     }
+    this.lastActivityAtMs = now;
     if (chunk.sequence > this.lastChunkSequence + 1) {
       await this.emit({
         kind: 'stream.gap',
@@ -249,6 +259,7 @@ export class AgentIoRequestCoordinator {
         break;
       }
       case 'tool-intent': {
+        if (this.status === 'repairing') return;
         if (!chunk.toolIntent) throw this.error('chunk.tool-intent.invalid', 'tool intent chunk requires toolIntent');
         this.markProgress();
         await this.emit({
@@ -261,6 +272,7 @@ export class AgentIoRequestCoordinator {
         break;
       }
       case 'memory-candidate': {
+        if (this.status === 'repairing') return;
         if (!chunk.memoryCandidate) throw this.error('chunk.memory-candidate.invalid', 'memory candidate chunk requires memoryCandidate');
         this.markProgress();
         await this.emit({
@@ -360,7 +372,8 @@ export class AgentIoRequestCoordinator {
     await this.persistBudget();
 
     const probeRequired = this.budget.turnsSinceProbe >= Math.max(1, this.policy.maxTurnsBetweenProbes);
-    if (decode.status !== 'valid' || !decode.block?.summary) {
+    if (!nonEmptySummary(decode.block?.summary)) {
+      const summaryIssue = decode.block && 'summary' in decode.block ? 'must be a non-empty string' : 'missing';
       this.budget = { ...this.budget, controlRepairAttempts: this.budget.controlRepairAttempts + 1 };
       this.repairOrdinal += 1;
       this.status = 'repairing';
@@ -371,7 +384,7 @@ export class AgentIoRequestCoordinator {
         diagnostics: [
           probeRequired
             ? 'control probe requires summary; entering bounded repair'
-            : 'end-turn summary missing; entering bounded repair',
+            : `end-turn summary ${summaryIssue}; entering bounded repair`,
         ],
         ownerId: this.control.binding.provider.owner,
       });
@@ -389,7 +402,7 @@ export class AgentIoRequestCoordinator {
       return {
         accepted: false,
         repairRequired: true,
-        reason: probeRequired ? 'control probe requires summary' : 'end-turn summary is required',
+        reason: probeRequired ? 'control probe requires summary' : `end-turn summary ${summaryIssue}`,
         decode,
       };
     }
@@ -399,7 +412,6 @@ export class AgentIoRequestCoordinator {
       await this.persistBudget();
     }
 
-    this.currentRaw = '';
     await this.closeWith({
       status: 'completed',
       reason: input.repairing ? 'end-turn repair accepted' : 'end-turn summary accepted',
@@ -438,6 +450,40 @@ export class AgentIoRequestCoordinator {
     const closure = this.incompleteClosure();
     await this.closeWith(closure);
     return structuredClone(closure);
+  }
+
+  async retrySettlementPublication(): Promise<AgentIoClosure | undefined> {
+    if (!this.pendingSettlement || !this.pendingSettlementEvent) return undefined;
+    const closure = this.pendingSettlement;
+    try {
+      if (!this.settlementIntentPersisted) {
+        await this.persistSettlementIntent({ closure, event: this.pendingSettlementEvent });
+      }
+      await this.onEvent(this.pendingSettlementEvent);
+    } catch (error) {
+      this.closure = this.settlementIntentPersisted
+        ? this.settlementDeliveryPendingClosure(closure)
+        : this.settlementIntentPersistencePendingClosure(closure);
+      this.status = 'incomplete';
+      this.closed = true;
+      throw this.error(
+        this.settlementIntentPersisted
+          ? 'settlement.publication.retry.failed'
+          : 'settlement.intent.persistence.retry.failed',
+        `${this.settlementIntentPersisted ? 'settlement publication' : 'settlement intent persistence'} retry failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await this.clearSettlementIntent();
+    this.pendingSettlement = undefined;
+    this.pendingSettlementEvent = undefined;
+    this.closure = structuredClone(closure);
+    this.status = this.statusForClosure(closure);
+    this.closed = true;
+    return structuredClone(this.closure);
+  }
+
+  pendingSettlementClosure(): AgentIoClosure | undefined {
+    return this.pendingSettlement ? structuredClone(this.pendingSettlement) : undefined;
   }
 
   async checkWatchdog(): Promise<AgentIoClosure | undefined> {
@@ -519,15 +565,83 @@ export class AgentIoRequestCoordinator {
     try {
       await this.emit(
         { kind: 'request.settled', sourceRef: this.latestSourceRef, ownerId: closure.ownerId, closure },
-        () => {
-          this.closure = closure;
-          this.status = closure.status === 'protocol-noncompliant' || closure.status === 'failed' ? 'failed' : closure.status === 'completed' ? 'settled' : closure.status === 'incomplete' ? 'incomplete' : 'unknown';
-          this.closed = true;
+        async () => {
+          const event = this.settlementEvent;
+          if (!event) throw this.error('settlement.intent.missing', 'request.settled event was not prepared');
+          await this.persistSettlementIntent({ closure, event });
         },
       );
+      await this.clearSettlementIntent();
+      this.pendingSettlement = undefined;
+      this.pendingSettlementEvent = undefined;
+    } catch (error) {
+      if (this.pendingSettlement && this.pendingSettlementEvent) {
+        this.closure = this.settlementIntentPersisted
+          ? this.settlementDeliveryPendingClosure(closure)
+          : this.settlementIntentPersistencePendingClosure(closure);
+        this.status = 'incomplete';
+      }
+      throw error;
     } finally {
       this.closing = false;
     }
+  }
+
+  private restorePendingSettlement(intent: AgentIoSettlementPublicationIntent): void {
+    this.pendingSettlement = structuredClone(intent.closure);
+    this.pendingSettlementEvent = structuredClone(intent.event);
+    this.settlementIntentPersisted = true;
+    this.closure = this.settlementDeliveryPendingClosure(intent.closure);
+    this.status = 'incomplete';
+    this.closed = true;
+    this.latestSourceRef = intent.event.sourceRef;
+  }
+
+  private async persistSettlementIntent(intent: AgentIoSettlementPublicationIntent): Promise<void> {
+    this.pendingSettlement = structuredClone(intent.closure);
+    this.pendingSettlementEvent = structuredClone(intent.event);
+    this.budget = { ...this.budget, pendingSettlement: structuredClone(intent) };
+    this.settlementIntentPersisted = false;
+    this.closure = this.settlementIntentPersistencePendingClosure(intent.closure);
+    this.status = 'incomplete';
+    this.closed = true;
+    await this.persistBudget();
+    this.settlementIntentPersisted = true;
+    this.closure = intent.closure;
+    this.status = this.statusForClosure(intent.closure);
+  }
+
+  private async clearSettlementIntent(): Promise<void> {
+    const { pendingSettlement: _pendingSettlement, ...budget } = this.budget;
+    await this.budgetStore.write(this.requestId, budget);
+    this.budget = budget;
+  }
+
+  private settlementDeliveryPendingClosure(closure: AgentIoClosure): AgentIoClosure {
+    return {
+      status: 'incomplete',
+      reason: 'request.settled publication failed after durable closure',
+      ownerId: closure.ownerId,
+      evidenceRefs: closure.evidenceRefs,
+      nextAction: 'retry request.settled publication; EOF is not completion',
+    };
+  }
+
+  private settlementIntentPersistencePendingClosure(closure: AgentIoClosure): AgentIoClosure {
+    return {
+      status: 'incomplete',
+      reason: 'request.settled intent persistence failed before durable closure',
+      ownerId: closure.ownerId,
+      evidenceRefs: closure.evidenceRefs,
+      nextAction: 'restore the budget store and retry settlement intent persistence; EOF is not completion',
+    };
+  }
+
+  private statusForClosure(closure: AgentIoClosure): AgentIoRequestStatus {
+    if (closure.status === 'protocol-noncompliant' || closure.status === 'failed') return 'failed';
+    if (closure.status === 'completed') return 'settled';
+    if (closure.status === 'incomplete') return 'incomplete';
+    return 'unknown';
   }
 
   private incompleteClosure(): AgentIoClosure {
@@ -571,7 +685,7 @@ export class AgentIoRequestCoordinator {
 
   private async emit(
     input: Omit<AgentIoEvent, 'eventId' | 'requestId' | 'attemptId' | 'sequence' | 'occurredAtMs' | 'stage'> & { readonly stage?: AgentHookStage; readonly kind: AgentIoEvent['kind'] },
-    beforePublish?: () => void,
+    beforePublish?: () => void | Promise<void>,
   ): Promise<void> {
     const event: AgentIoEvent = {
       ...input,
@@ -582,6 +696,7 @@ export class AgentIoRequestCoordinator {
       occurredAtMs: this.nowMs(),
       stage: input.stage ?? this.stageForKind(input.kind),
     };
+    if (input.kind === 'request.settled') this.settlementEvent = event;
     this.emitted.push(event.eventId);
     if (input.kind.startsWith('hook.')) {
       await this.onEvent(event);
@@ -623,8 +738,9 @@ export class AgentIoRequestCoordinator {
           : undefined,
       );
     }
-    beforePublish?.();
+    await beforePublish?.();
     await this.onEvent(event);
+    if (input.kind === 'request.settled') this.settlementEvent = undefined;
   }
 
   private stageForKind(kind: AgentIoEvent['kind']): AgentHookStage {

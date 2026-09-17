@@ -347,6 +347,9 @@ test('confirmed intake flows through admission, node execution, checkpoint, and 
   const memory = new MemoryCoordinator();
   memory.bindTask({
     taskId: task,
+    assignmentId: 'assignment-wave2',
+    executionEpoch: 1,
+    projectKey: 'project-wave2',
     scope: memoryScope,
     backendRef: 'memory://deterministic',
     indexVersion: memoryBackend.indexVersion,
@@ -356,6 +359,7 @@ test('confirmed intake flows through admission, node execution, checkpoint, and 
   const runtimeMemoryBinding = memory.bindRuntime({
     agentRuntimeId: 'runtime-wave2',
     taskId: task,
+    assignmentId: 'assignment-wave2',
     roleId: 'execution',
     executionEpoch: 1,
   });

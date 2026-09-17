@@ -22,6 +22,9 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
   const binPath = join(packageRoot, 'bin', 'humanagent.mjs');
   await writeFile(binPath, [
     '#!/usr/bin/env node',
+    "import { dirname, join } from 'node:path';",
+    "import { fileURLToPath } from 'node:url';",
+    "process.env.HUMANAGENT_TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'runtime', 'agent-templates', 'templates');",
     "import { formatCliError, main } from '../runtime/app/src/cli.js';",
     'main(process.argv.slice(2)).catch((error) => {',
     '  console.error(formatCliError(error));',
