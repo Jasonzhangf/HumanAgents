@@ -9,7 +9,16 @@ import {
   fromTaskOutput,
   UiProjectionError,
   type AgentRoleDisplay,
+  type AgentFeedbackKind,
+  type AgentFeedbackProjection,
+  type AgentFeedbackState,
+  type AgentRuntimePoolEntryProjection,
+  type AgentRuntimePoolProjection,
+  type AgentRuntimePoolState,
   type AgentWorkCardProjection,
+  type AssignmentProjection,
+  type AssignmentReconcileProjection,
+  type AssignmentStatus,
   type DashboardProjection,
   type DecisionProjection,
   type MemoryComparisonProjection,
@@ -69,6 +78,45 @@ const AGENT_ROLE_TITLES: Record<AgentRoleDisplay, string> = {
   execution: '当前执行',
   review: '完成前复核',
   memory: '经验与 skill 整理',
+};
+
+const RUNTIME_POOL_STATE_LABELS: Record<AgentRuntimePoolState, string> = {
+  available: '可分配',
+  starting: '启动中',
+  idle: '空闲',
+  bound: '已绑定',
+  executing: '执行中',
+  settling: '收拢中',
+  stopped: '已停止',
+  failed: '失败',
+};
+
+const ASSIGNMENT_STATUS_LABELS: Record<AssignmentStatus, string> = {
+  waiting: '等待中',
+  running: '执行中',
+  succeeded: '已完成',
+  failed: '失败',
+  incomplete: '未完成',
+  blocked: '受阻',
+  cancelled: '已取消',
+  stale: '已过期',
+};
+
+const FEEDBACK_STATE_LABELS: Record<AgentFeedbackState, string> = {
+  open: '待处理',
+  recovering: '恢复中',
+  resolved: '已处理',
+  stale: '已过期',
+  blocked: '受阻',
+};
+
+const RECONCILE_STATE_LABELS: Record<AssignmentReconcileProjection['state'], string> = {
+  'not-required': '无需核对',
+  required: '需要核对',
+  reconciling: '核对中',
+  resolved: '已核对',
+  blocked: '核对受阻',
+  stale: '核对过期',
 };
 
 const SOURCE_LABELS: Record<RecentInputProjection['source'], string> = {
@@ -155,10 +203,80 @@ export interface AgentCardSource {
   readonly role: AgentRoleDisplay;
   readonly title?: string;
   readonly statusDisplay: string;
+  readonly current?: string;
+  readonly past?: string;
+  readonly next?: string;
+  readonly needsUser?: boolean;
+  readonly needsUserSummary?: string;
   readonly inputPreview: string;
   readonly outputPreview: string;
   readonly updatedAt?: string;
   readonly processRef?: string;
+}
+
+export interface AgentRuntimePoolEntrySource {
+  readonly runtimeId: string;
+  readonly agentId?: string;
+  readonly role: AgentRoleDisplay;
+  readonly state: AgentRuntimePoolState;
+  readonly currentAssignmentId?: string;
+  readonly executionEpoch?: number;
+  readonly resourceSummary: string;
+  readonly updatedAt?: string;
+}
+
+export interface AgentRuntimePoolSource {
+  readonly available: number;
+  readonly active: number;
+  readonly runtimes: readonly AgentRuntimePoolEntrySource[];
+}
+
+export interface AssignmentSource {
+  readonly assignmentId: string;
+  readonly pipelineNodeId: string;
+  readonly agentId: string;
+  readonly role: AgentRoleDisplay;
+  readonly status: AssignmentStatus;
+  readonly attempt: number;
+  readonly executionEpoch: number;
+  readonly inputRevision: number;
+  readonly objective: string;
+  readonly targetRefs?: readonly string[];
+  readonly inputPreview: string;
+  readonly outputPreview: string;
+  readonly outputRefs?: readonly string[];
+  readonly evidenceRefs?: readonly EvidenceRef[];
+  readonly nextAction?: string;
+  readonly conditionRef?: string;
+  readonly failureRef?: string;
+  readonly parentAssignmentId?: string;
+  readonly reviewRequired?: boolean;
+  readonly mergeGate?: 'required' | 'not-required';
+  readonly updatedAt?: string;
+}
+
+export interface AgentFeedbackSource {
+  readonly feedbackId: string;
+  readonly kind: AgentFeedbackKind;
+  readonly state: AgentFeedbackState;
+  readonly severity?: 'info' | 'attention' | 'blocker';
+  readonly summary: string;
+  readonly ownerId?: string;
+  readonly nextAction?: string;
+  readonly assignmentId?: string;
+  readonly conditionRef?: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+  readonly occurredAt?: string;
+  readonly requiresUser?: boolean;
+}
+
+export interface AssignmentReconcileSource {
+  readonly state: AssignmentReconcileProjection['state'];
+  readonly summary: string;
+  readonly ownerId: string;
+  readonly operationRef?: string;
+  readonly nextAction: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
 }
 
 export interface ExecutionStepSource {
@@ -189,6 +307,10 @@ export interface TaskDashboardProjectionInput {
   readonly objective: string;
   readonly currentStatus: string;
   readonly agentCards: readonly AgentCardSource[];
+  readonly runtimePool?: AgentRuntimePoolSource;
+  readonly assignments?: readonly AssignmentSource[];
+  readonly agentFeedback?: readonly AgentFeedbackSource[];
+  readonly reconcile?: AssignmentReconcileSource;
   readonly executionSteps?: readonly ExecutionStepSource[];
   readonly checkpoint?: CheckpointSource;
   readonly stopRecovery?: StopRecoverySource;
@@ -209,6 +331,9 @@ export interface ObservationNodeSource {
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly childScopeRef?: string;
+  readonly assignment?: AssignmentSource;
+  readonly feedback?: readonly AgentFeedbackSource[];
+  readonly reconcile?: AssignmentReconcileSource;
 }
 
 export interface ObservationScopeSource {
@@ -390,10 +515,96 @@ function toAgentWorkCard(source: AgentCardSource): AgentWorkCardProjection {
     roleDisplay: AGENT_ROLE_LABELS[source.role],
     title: source.title ?? AGENT_ROLE_TITLES[source.role],
     statusDisplay: source.statusDisplay,
+    current: source.current ?? source.statusDisplay,
+    past: source.past ?? source.outputPreview,
+    next: source.next ?? '等待下一步',
+    needsUser: source.needsUser ?? false,
+    needsUserSummary: source.needsUserSummary,
     inputPreview: source.inputPreview,
     outputPreview: source.outputPreview,
     updatedAt: source.updatedAt,
     processRef: source.processRef,
+  };
+}
+
+function toRuntimePoolEntry(source: AgentRuntimePoolEntrySource): AgentRuntimePoolEntryProjection {
+  return {
+    runtimeId: source.runtimeId,
+    agentId: source.agentId,
+    role: source.role,
+    state: source.state,
+    stateDisplay: RUNTIME_POOL_STATE_LABELS[source.state],
+    currentAssignmentId: source.currentAssignmentId,
+    executionEpoch: source.executionEpoch,
+    resourceSummary: source.resourceSummary,
+    updatedAt: source.updatedAt,
+  };
+}
+
+function toRuntimePool(source: AgentRuntimePoolSource | undefined): AgentRuntimePoolProjection {
+  const entries = (source?.runtimes ?? []).map(toRuntimePoolEntry);
+  return {
+    available: source?.available ?? entries.filter((entry) => entry.state === 'available' || entry.state === 'idle').length,
+    active: source?.active ?? entries.filter((entry) => entry.state === 'bound' || entry.state === 'executing' || entry.state === 'settling').length,
+    runtimes: entries,
+  };
+}
+
+function toAssignment(source: AssignmentSource): AssignmentProjection {
+  return {
+    assignmentId: source.assignmentId,
+    pipelineNodeId: source.pipelineNodeId,
+    agentId: source.agentId,
+    role: source.role,
+    status: source.status,
+    statusDisplay: ASSIGNMENT_STATUS_LABELS[source.status],
+    attempt: source.attempt,
+    executionEpoch: source.executionEpoch,
+    inputRevision: source.inputRevision,
+    objective: source.objective,
+    targetRefs: source.targetRefs ?? [],
+    inputPreview: source.inputPreview,
+    outputPreview: source.outputPreview,
+    outputRefs: source.outputRefs ?? [],
+    evidenceRefs: source.evidenceRefs ?? [],
+    nextAction: source.nextAction,
+    conditionRef: source.conditionRef,
+    failureRef: source.failureRef,
+    parentAssignmentId: source.parentAssignmentId,
+    reviewRequired: source.reviewRequired ?? false,
+    mergeGate: source.mergeGate ?? 'not-required',
+    updatedAt: source.updatedAt,
+  };
+}
+
+function toAgentFeedback(source: AgentFeedbackSource): AgentFeedbackProjection {
+  return {
+    feedbackId: source.feedbackId,
+    kind: source.kind,
+    state: source.state,
+    stateDisplay: FEEDBACK_STATE_LABELS[source.state],
+    severity: source.severity,
+    summary: source.summary,
+    ownerId: source.ownerId,
+    nextAction: source.nextAction,
+    assignmentId: source.assignmentId,
+    conditionRef: source.conditionRef,
+    evidenceRefs: source.evidenceRefs ?? [],
+    occurredAt: source.occurredAt,
+    requiresUser: source.requiresUser ?? false,
+  };
+}
+
+function toReconcile(source: AssignmentReconcileSource | undefined): AssignmentReconcileProjection | undefined {
+  if (!source) return undefined;
+  return {
+    state: source.state,
+    stateDisplay: RECONCILE_STATE_LABELS[source.state],
+    summary: source.summary,
+    ownerId: source.ownerId,
+    operationRef: source.operationRef,
+    nextAction: source.nextAction,
+    evidenceRefs: source.evidenceRefs ?? [],
   };
 }
 
@@ -428,6 +639,11 @@ function toStopRecovery(source: StopRecoverySource | undefined): StopRecoveryPro
 }
 
 export function projectTaskDashboard(input: TaskDashboardProjectionInput): TaskDashboardProjection {
+  const assignments = (input.assignments ?? []).map(toAssignment);
+  const agentFeedback = (input.agentFeedback ?? []).map(toAgentFeedback);
+  const requiresUserHandling = input.requiresUserHandling || agentFeedback.some((feedback) => feedback.requiresUser);
+  const userHandlingSummary = input.userHandlingSummary
+    ?? agentFeedback.find((feedback) => feedback.requiresUser)?.summary;
   return {
     surface: 'task-dashboard',
     taskId: input.task.id,
@@ -438,14 +654,18 @@ export function projectTaskDashboard(input: TaskDashboardProjectionInput): TaskD
     objective: input.objective,
     currentStatus: input.currentStatus,
     agentCards: input.agentCards.map(toAgentWorkCard),
+    runtimePool: toRuntimePool(input.runtimePool),
+    assignments,
+    agentFeedback,
     executionSteps: toExecutionSteps(input.executionSteps),
     checkpoint: toCheckpoint(input.checkpoint),
     stopRecovery: toStopRecovery(input.stopRecovery),
     feedback: {
-      required: input.requiresUserHandling,
-      summary: input.userHandlingSummary,
-      entry: input.requiresUserHandling ? 'task-detail' : undefined,
+      required: requiresUserHandling,
+      summary: userHandlingSummary,
+      entry: requiresUserHandling ? 'task-detail' : undefined,
     },
+    reconcile: toReconcile(input.reconcile),
     observationRef: input.observationRef,
   };
 }
@@ -478,6 +698,9 @@ function toObservationDetail(source: ObservationNodeSource): ObservationNodeDeta
     outputs: source.outputRefs.map((ref) => ({ ref, label: ref })),
     evidenceRefs: source.evidenceRefs,
     childScopeRef: source.childScopeRef,
+    assignment: source.assignment ? toAssignment(source.assignment) : undefined,
+    feedback: (source.feedback ?? []).map(toAgentFeedback),
+    reconcile: toReconcile(source.reconcile),
   };
 }
 
@@ -515,6 +738,7 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
       narrowWidth: OBSERVATION_NARROW_RULES,
       mobileOrder: 'single-column',
       drawer: 'read-only-modal',
+      readOnly: true,
     },
   };
 }

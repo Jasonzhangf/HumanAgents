@@ -139,6 +139,11 @@ export interface AgentWorkCardProjection {
   readonly roleDisplay: string;
   readonly title: string;
   readonly statusDisplay: string;
+  readonly current: string;
+  readonly past: string;
+  readonly next: string;
+  readonly needsUser: boolean;
+  readonly needsUserSummary?: string;
   readonly inputPreview: string;
   readonly outputPreview: string;
   readonly updatedAt?: string;
@@ -174,6 +179,82 @@ export interface StopRecoveryProjection {
   readonly evidenceRefs: readonly EvidenceRef[];
 }
 
+export type AgentRuntimePoolState = 'available' | 'starting' | 'idle' | 'bound' | 'executing' | 'settling' | 'stopped' | 'failed';
+
+export interface AgentRuntimePoolEntryProjection {
+  readonly runtimeId: string;
+  readonly agentId?: string;
+  readonly role: AgentRoleDisplay;
+  readonly state: AgentRuntimePoolState;
+  readonly stateDisplay: string;
+  readonly currentAssignmentId?: string;
+  readonly executionEpoch?: number;
+  readonly resourceSummary: string;
+  readonly updatedAt?: string;
+}
+
+export interface AgentRuntimePoolProjection {
+  readonly available: number;
+  readonly active: number;
+  readonly runtimes: readonly AgentRuntimePoolEntryProjection[];
+}
+
+export type AssignmentStatus = 'waiting' | 'running' | 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled' | 'stale';
+
+export interface AssignmentProjection {
+  readonly assignmentId: string;
+  readonly pipelineNodeId: string;
+  readonly agentId: string;
+  readonly role: AgentRoleDisplay;
+  readonly status: AssignmentStatus;
+  readonly statusDisplay: string;
+  readonly attempt: number;
+  readonly executionEpoch: number;
+  readonly inputRevision: number;
+  readonly objective: string;
+  readonly targetRefs: readonly string[];
+  readonly inputPreview: string;
+  readonly outputPreview: string;
+  readonly outputRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly nextAction?: string;
+  readonly conditionRef?: string;
+  readonly failureRef?: string;
+  readonly parentAssignmentId?: string;
+  readonly reviewRequired: boolean;
+  readonly mergeGate: 'required' | 'not-required';
+  readonly updatedAt?: string;
+}
+
+export type AgentFeedbackKind = 'work-result' | 'attention' | 'resource' | 'review' | 'memory' | 'reconcile';
+export type AgentFeedbackState = 'open' | 'recovering' | 'resolved' | 'stale' | 'blocked';
+
+export interface AgentFeedbackProjection {
+  readonly feedbackId: string;
+  readonly kind: AgentFeedbackKind;
+  readonly state: AgentFeedbackState;
+  readonly stateDisplay: string;
+  readonly severity?: 'info' | 'attention' | 'blocker';
+  readonly summary: string;
+  readonly ownerId?: string;
+  readonly nextAction?: string;
+  readonly assignmentId?: string;
+  readonly conditionRef?: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly occurredAt?: string;
+  readonly requiresUser: boolean;
+}
+
+export interface AssignmentReconcileProjection {
+  readonly state: 'not-required' | 'required' | 'reconciling' | 'resolved' | 'blocked' | 'stale';
+  readonly stateDisplay: string;
+  readonly summary: string;
+  readonly ownerId: string;
+  readonly operationRef?: string;
+  readonly nextAction: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
 export interface TaskDashboardProjection {
   readonly surface: 'task-dashboard';
   readonly taskId: TaskId;
@@ -184,7 +265,11 @@ export interface TaskDashboardProjection {
   readonly objective: string;
   readonly currentStatus: string;
   readonly agentCards: readonly AgentWorkCardProjection[];
+  readonly runtimePool: AgentRuntimePoolProjection;
+  readonly assignments: readonly AssignmentProjection[];
+  readonly agentFeedback: readonly AgentFeedbackProjection[];
   readonly feedback: TaskFeedbackProjection;
+  readonly reconcile?: AssignmentReconcileProjection;
   readonly executionSteps: readonly TaskExecutionStepProjection[];
   readonly checkpoint?: AgentCheckpointProjection;
   readonly stopRecovery?: StopRecoveryProjection;
@@ -221,6 +306,9 @@ export interface ObservationNodeDetailProjection {
   readonly outputs: readonly NodePreviewProjection[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly childScopeRef?: string;
+  readonly assignment?: AssignmentProjection;
+  readonly feedback: readonly AgentFeedbackProjection[];
+  readonly reconcile?: AssignmentReconcileProjection;
 }
 
 export interface ObservationScopeProjection {
@@ -238,6 +326,7 @@ export interface ObservationPresentationRules {
   readonly narrowWidth: readonly string[];
   readonly mobileOrder: 'single-column';
   readonly drawer: 'read-only-modal';
+  readonly readOnly: true;
 }
 
 export interface PipelineObservationProjection {

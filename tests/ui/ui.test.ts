@@ -17,6 +17,9 @@ import {
   type ObservationScopeSource,
   type TaskSource,
   type AgentCardSource,
+  type AgentFeedbackSource,
+  type AgentRuntimePoolSource,
+  type AssignmentSource,
   type MemoryEntrySource,
   type SkillCandidateSource,
 } from '../../packages/ui/projection/index.js';
@@ -203,9 +206,252 @@ test('task dashboard projects execution steps, checkpoint, and stop/recovery evi
   assert.equal(projection.stopRecovery?.evidenceRefs[0].locator, 'evidence:ev-recovery');
 });
 
+test('task dashboard projects runtime pool, assignment graph, agent previews, and feedback', () => {
+  const runtimePool: AgentRuntimePoolSource = {
+    available: 1,
+    active: 1,
+    runtimes: [
+      {
+        runtimeId: 'runtime-worker-a',
+        agentId: 'worker-a',
+        role: 'execution',
+        state: 'executing',
+        currentAssignmentId: 'assignment-worker-a',
+        executionEpoch: 2,
+        resourceSummary: '1 个执行 lease',
+        updatedAt: 'PT1M',
+      },
+      {
+        runtimeId: 'runtime-review-a',
+        role: 'review',
+        state: 'idle',
+        resourceSummary: '无活动 lease',
+      },
+    ],
+  };
+  const assignments: AssignmentSource[] = [
+    {
+      assignmentId: 'assignment-worker-a',
+      pipelineNodeId: 'node.execute',
+      agentId: 'worker-a',
+      role: 'execution',
+      status: 'running',
+      attempt: 2,
+      executionEpoch: 2,
+      inputRevision: 7,
+      objective: '补齐观测投影',
+      targetRefs: ['packages/ui'],
+      inputPreview: 'typed projection source',
+      outputPreview: '已补 pool 和 graph',
+      outputRefs: ['artifact://ui-projection'],
+      evidenceRefs: [evidence('ev-assignment')],
+      nextAction: 'continue',
+      reviewRequired: true,
+      mergeGate: 'required',
+      updatedAt: 'PT1M',
+    },
+    {
+      assignmentId: 'assignment-review-a',
+      pipelineNodeId: 'node.review',
+      agentId: 'reviewer-a',
+      role: 'review',
+      status: 'waiting',
+      attempt: 1,
+      executionEpoch: 2,
+      inputRevision: 7,
+      objective: '独立复核',
+      inputPreview: '等待执行结果',
+      outputPreview: '尚未开始',
+      parentAssignmentId: 'assignment-worker-a',
+      reviewRequired: false,
+      mergeGate: 'required',
+    },
+  ];
+  const agentFeedback: AgentFeedbackSource[] = [
+    {
+      feedbackId: 'feedback-review',
+      kind: 'review',
+      state: 'open',
+      severity: 'attention',
+      summary: 'review 发现 1 个 blocker',
+      ownerId: 'review-coordinator',
+      nextAction: 'remediate',
+      assignmentId: 'assignment-worker-a',
+      evidenceRefs: [evidence('ev-review-feedback')],
+      requiresUser: true,
+    },
+    {
+      feedbackId: 'feedback-memory',
+      kind: 'memory',
+      state: 'resolved',
+      summary: '记忆候选等待独立 review',
+      ownerId: 'memory-owner',
+      nextAction: 'review',
+      assignmentId: 'assignment-worker-a',
+      evidenceRefs: [evidence('ev-memory-feedback')],
+      requiresUser: false,
+    },
+  ];
+
+  const projection = projectTaskDashboard({
+    source: readySource,
+    task: task({ state: 'running', title: '补齐 M3 观测' }),
+    userInput: '补齐 M3 观测投影',
+    objective: '让 pool、assignment 和反馈可观测',
+    currentStatus: '执行 agent 正在补齐投影',
+    agentCards: [{
+      agentId: 'worker-a',
+      role: 'execution',
+      statusDisplay: '执行中',
+      current: '补齐 Assignment projection',
+      past: '已读取现有 typed source',
+      next: '等待 review',
+      needsUser: true,
+      needsUserSummary: 'review blocker 需要处理',
+      inputPreview: 'typed projection source',
+      outputPreview: '已补 pool 和 graph',
+      processRef: 'task://task-a/observation/node.execute',
+    }],
+    runtimePool,
+    assignments,
+    agentFeedback,
+    reconcile: {
+      state: 'reconciling',
+      summary: '正在核对未知 operation 的副作用',
+      ownerId: 'operation-owner',
+      operationRef: 'operation://unknown-1',
+      nextAction: 'wait-for-reconcile',
+      evidenceRefs: [evidence('ev-reconcile')],
+    },
+    requiresUserHandling: false,
+  });
+
+  assert.equal(projection.runtimePool.available, 1);
+  assert.equal(projection.runtimePool.active, 1);
+  assert.equal(projection.runtimePool.runtimes[0].stateDisplay, '执行中');
+  assert.equal(projection.runtimePool.runtimes[1].stateDisplay, '空闲');
+  assert.equal(projection.assignments.length, 2);
+  assert.equal(projection.assignments[0].statusDisplay, '执行中');
+  assert.equal(projection.assignments[0].inputPreview, 'typed projection source');
+  assert.equal(projection.assignments[0].outputPreview, '已补 pool 和 graph');
+  assert.equal(projection.assignments[1].parentAssignmentId, 'assignment-worker-a');
+  assert.equal(projection.assignments[0].evidenceRefs[0].locator, 'evidence:ev-assignment');
+  assert.equal(projection.agentFeedback[0].kind, 'review');
+  assert.equal(projection.agentFeedback[0].stateDisplay, '待处理');
+  assert.equal(projection.agentFeedback[1].kind, 'memory');
+  assert.equal(projection.feedback.required, true);
+  assert.equal(projection.feedback.summary, 'review 发现 1 个 blocker');
+  assert.equal(projection.reconcile?.stateDisplay, '核对中');
+  assert.equal(projection.reconcile?.ownerId, 'operation-owner');
+  assert.equal(projection.agentCards[0].current, '补齐 Assignment projection');
+  assert.equal(projection.agentCards[0].past, '已读取现有 typed source');
+  assert.equal(projection.agentCards[0].next, '等待 review');
+  assert.equal(projection.agentCards[0].needsUser, true);
+  assert.equal(projection.agentCards[0].needsUserSummary, 'review blocker 需要处理');
+});
+
+test('task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage', () => {
+  const projection = projectTaskDashboard({
+    source: { ...readySource, state: 'stale' },
+    task: task({ state: 'stale', title: '旧执行结果' }),
+    userInput: '检查旧执行结果',
+    objective: '展示 stale 与 blocked',
+    currentStatus: '旧 execution epoch 结果已拒绝',
+    agentCards: [],
+    runtimePool: {
+      available: 0,
+      active: 0,
+      runtimes: [{
+        runtimeId: 'runtime-old',
+        role: 'execution',
+        state: 'failed',
+        executionEpoch: 1,
+        resourceSummary: 'lease 已释放',
+      }],
+    },
+    assignments: [{
+      assignmentId: 'assignment-old',
+      pipelineNodeId: 'node.execute',
+      agentId: 'worker-old',
+      role: 'execution',
+      status: 'stale',
+      attempt: 1,
+      executionEpoch: 1,
+      inputRevision: 3,
+      objective: '旧 assignment',
+      inputPreview: '旧输入',
+      outputPreview: '结果已过期',
+      nextAction: 'wait',
+    }, {
+      assignmentId: 'assignment-blocked',
+      pipelineNodeId: 'node.blocked',
+      agentId: 'worker-blocked',
+      role: 'execution',
+      status: 'blocked',
+      attempt: 1,
+      executionEpoch: 2,
+      inputRevision: 4,
+      objective: '等待资源',
+      inputPreview: '等待资源 lease',
+      outputPreview: '尚未执行',
+      conditionRef: 'resource.capacity',
+      nextAction: 'wait',
+    }],
+    agentFeedback: [{
+      feedbackId: 'feedback-resource',
+      kind: 'resource',
+      state: 'blocked',
+      severity: 'blocker',
+      summary: '资源不足',
+      ownerId: 'resource-owner',
+      nextAction: 'wait',
+      conditionRef: 'resource.capacity',
+      requiresUser: false,
+    }, {
+      feedbackId: 'feedback-reconcile',
+      kind: 'reconcile',
+      state: 'recovering',
+      summary: '未知 operation 正在核对',
+      ownerId: 'operation-owner',
+      nextAction: 'reconcile',
+      requiresUser: false,
+    }],
+    reconcile: {
+      state: 'blocked',
+      summary: 'reconcile 被资源阻塞',
+      ownerId: 'operation-owner',
+      operationRef: 'operation://unknown-2',
+      nextAction: 'wait-for-resource',
+    },
+    requiresUserHandling: false,
+  });
+
+  assert.equal(projection.state, 'stale');
+  assert.equal(projection.assignments[0].statusDisplay, '已过期');
+  assert.equal(projection.assignments[1].statusDisplay, '受阻');
+  assert.equal(projection.agentFeedback[0].stateDisplay, '受阻');
+  assert.equal(projection.agentFeedback[1].stateDisplay, '恢复中');
+  assert.equal(projection.reconcile?.stateDisplay, '核对受阻');
+  assert.equal(projection.reconcile?.nextAction, 'wait-for-resource');
+  assert.equal('retry' in projection, false);
+  assert.equal('steer' in projection, false);
+  assert.equal(JSON.stringify(projection).includes('"executionEpoch"'), true);
+  assert.equal(JSON.stringify(projection).includes('"steer"'), false);
+  assert.equal(JSON.stringify(projection).includes('"retry"'), false);
+});
+
 test('UI projection code does not read Journal or DSH session logs', async () => {
   const source = await readFile(join(process.cwd(), 'packages', 'ui', 'projection', 'index.ts'), 'utf8');
   assert.equal(/\bJsonlOrganJournal\b|DSH Session|DSH\s+Session\s+Log|sessionLog/i.test(source), false);
+});
+
+test('UI projection stays a typed read-only adapter and hides internal presentation language', async () => {
+  const source = await readFile(join(process.cwd(), 'packages', 'ui', 'projection', 'index.ts'), 'utf8');
+  assert.equal(/from ['"][^'"]*\/runtime\//.test(source), false);
+  assert.equal(/from ['"][^'"]*\/(?:adapters|jsonl|dsh)\//.test(source), false);
+  assert.equal(/\b(?:AgentRuntime|RuntimeTaskCoordinator|JsonlOrganJournal)\b/.test(source), false);
+  assert.equal(source.includes('器官'), false);
+  assert.equal(source.includes('大脑'), false);
 });
 
 test('observation projection supports recursion, drawer details, return, and read-only rules', () => {
@@ -260,6 +506,7 @@ test('observation projection supports recursion, drawer details, return, and rea
   assert.deepEqual(root.scope.nodes[0].evidenceCount, 1);
   assert.deepEqual(root.rules.keyboardFocus, ['nodes are buttons', 'drawer focus moves to selected node', 'drawer close returns focus to trigger', 'breadcrumb return keeps the path visible']);
   assert.deepEqual(root.rules.narrowWidth, ['single-column layout', 'nodes before drawer', 'evidence previews first']);
+  assert.equal(root.rules.readOnly, true);
 
   const enteredInput = enterObservationScope(rootInput(readySource, scopes, ['root']), 'classify.children');
   const entered = projectPipelineObservation(enteredInput);
@@ -273,6 +520,7 @@ test('observation projection supports recursion, drawer details, return, and rea
   assert.deepEqual(withDrawer.selectedNode?.kindDisplay, '执行');
   assert.deepEqual(withDrawer.selectedNode?.inputs[0].ref, 'requirement:184');
   assert.deepEqual(withDrawer.selectedNode?.evidenceRefs[0].locator, 'evidence:ev-queue');
+  assert.deepEqual(withDrawer.selectedNode?.feedback, []);
 
   const back = projectPipelineObservation(returnObservationScope(enteredInput));
   assert.deepEqual(back.scope.scopeRef, 'root');
@@ -290,6 +538,83 @@ test('observation projection supports recursion, drawer details, return, and rea
   assert.deepEqual(failed.state, 'error');
   assert.deepEqual(failed.data.label, '投影失败');
   assert.deepEqual(failed.data.detail, 'projection validation failed');
+});
+
+test('observation drawer maps assignment, feedback, and reconcile while staying read-only', () => {
+  const assignment: AssignmentSource = {
+    assignmentId: 'assignment-observation',
+    pipelineNodeId: 'node.execute',
+    agentId: 'worker-a',
+    role: 'execution',
+    status: 'running',
+    attempt: 1,
+    executionEpoch: 2,
+    inputRevision: 5,
+    objective: '补齐 typed observation',
+    inputPreview: 'typed source',
+    outputPreview: 'drawer 已生成',
+    outputRefs: ['artifact://observation'],
+    evidenceRefs: [evidence('ev-observation-assignment')],
+    reviewRequired: true,
+    mergeGate: 'required',
+  };
+  const feedback: AgentFeedbackSource[] = [{
+    feedbackId: 'feedback-observation',
+    kind: 'attention',
+    state: 'open',
+    severity: 'attention',
+    summary: '需要独立 review',
+    ownerId: 'review-owner',
+    nextAction: 'review',
+    assignmentId: 'assignment-observation',
+    evidenceRefs: [evidence('ev-observation-feedback')],
+    requiresUser: true,
+  }];
+  const scopes: Record<string, ObservationScopeSource> = {
+    root: {
+      scopeRef: 'root',
+      title: '任务处理流水',
+      summary: '只读节点树',
+      projectionSeq: 'seq-200',
+      nodes: [{
+        nodeId: 'node.execute',
+        title: '执行',
+        kind: 'execution',
+        state: 'running',
+        summary: '执行 assignment',
+        owner: 'execution-owner',
+        inputRefs: ['assignment://assignment-observation/input'],
+        outputRefs: ['artifact://observation'],
+        evidenceRefs: [evidence('ev-observation-node')],
+        assignment,
+        feedback,
+        reconcile: {
+          state: 'required',
+          summary: '需要核对未知 operation',
+          ownerId: 'operation-owner',
+          operationRef: 'operation://unknown-3',
+          nextAction: 'reconcile',
+          evidenceRefs: [evidence('ev-observation-reconcile')],
+        },
+      }],
+    },
+  };
+  const projection = projectPipelineObservation(
+    openObservationDrawer({ source: readySource, scopes, scopeStack: ['root'] }, 'node.execute'),
+  );
+  assert.equal(projection.rules.drawer, 'read-only-modal');
+  assert.equal(projection.rules.readOnly, true);
+  assert.equal(projection.selectedNode?.assignment?.assignmentId, 'assignment-observation');
+  assert.equal(projection.selectedNode?.assignment?.inputPreview, 'typed source');
+  assert.equal(projection.selectedNode?.assignment?.outputPreview, 'drawer 已生成');
+  assert.equal(projection.selectedNode?.assignment?.evidenceRefs[0].locator, 'evidence:ev-observation-assignment');
+  assert.equal(projection.selectedNode?.feedback[0].kind, 'attention');
+  assert.equal(projection.selectedNode?.feedback[0].stateDisplay, '待处理');
+  assert.equal(projection.selectedNode?.feedback[0].requiresUser, true);
+  assert.equal(projection.selectedNode?.reconcile?.stateDisplay, '需要核对');
+  assert.equal(projection.selectedNode?.reconcile?.operationRef, 'operation://unknown-3');
+  assert.equal(JSON.stringify(projection).includes('"steer"'), false);
+  assert.equal(JSON.stringify(projection).includes('"retry"'), false);
 });
 
 function rootInput(source: typeof readySource, scopes: Record<string, ObservationScopeSource>, stack: readonly string[]): Parameters<typeof projectPipelineObservation>[0] {
