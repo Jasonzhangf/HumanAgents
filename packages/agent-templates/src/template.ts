@@ -88,6 +88,12 @@ function assertPromptSegmentRef(value: string, roleId: AgentRole): void {
   }
 }
 
+export function validatePromptSegmentRefs(roleId: AgentRole, refs: readonly string[]): void {
+  if (refs.length === 0) throw new AgentTemplateError('template requires at least one prompt segment');
+  for (const ref of refs) assertPromptSegmentRef(ref, roleId);
+  assertUnique(refs, 'prompt segment ref');
+}
+
 function assertSubset(values: readonly string[], allowed: readonly string[], label: string): void {
   for (const value of values) {
     if (!allowed.includes(value)) throw new AgentTemplateError(`${label} is not allowed for this role: ${value}`);
@@ -158,11 +164,7 @@ export function validateAgentTemplate(
   if (manifest.extends && (manifest.extends.roleId !== '_base' || !VERSION_PATTERN.test(manifest.extends.version))) {
     throw new AgentTemplateError('template may only extend the _base role');
   }
-  if (manifest.promptSegmentRefs.length === 0) {
-    throw new AgentTemplateError('template requires at least one prompt segment');
-  }
-  for (const ref of manifest.promptSegmentRefs) assertPromptSegmentRef(ref, manifest.roleId);
-  assertUnique(manifest.promptSegmentRefs, 'prompt segment ref');
+  validatePromptSegmentRefs(manifest.roleId, manifest.promptSegmentRefs);
   assertSafeRef(manifest.inputSchemaRef, 'input schema ref');
   assertSafeRef(manifest.outputSchemaRef, 'output schema ref');
   assertSafeRef(manifest.policyRef, 'policy ref');

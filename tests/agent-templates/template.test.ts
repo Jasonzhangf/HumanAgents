@@ -8,12 +8,12 @@ import {
   AgentTemplateError,
   AGENT_ROLE_IDS,
   assertUniqueTemplateOwners,
-  builtinPromptSegmentRefs,
   compileAgentTemplate,
   createFilePromptSource,
   digestAgentTemplate,
   digestPromptSegments,
   loadAgentTemplate,
+  loadBuiltinPromptRegistry,
   loadBuiltinPromptSegments,
   loadAgentPromptSegments,
   validateAgentTemplate,
@@ -259,9 +259,10 @@ test('prompt loader rejects missing markdown files', async () => {
 
 test('builtin roles resolve all external markdown prompt segments', async () => {
   const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const registry = await loadBuiltinPromptRegistry(templateRoot);
   for (const roleId of AGENT_ROLE_IDS) {
     const loaded = await loadBuiltinPromptSegments(roleId, templateRoot);
-    assert.equal(loaded.segments.length, builtinPromptSegmentRefs(roleId).length);
+    assert.equal(loaded.segments.length, registry.roles[roleId].length);
     assert.ok(loaded.segments.every((segment) => segment.content.trim().length > 0));
     assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
   }

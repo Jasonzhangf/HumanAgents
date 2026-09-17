@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { access, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, cp, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -274,10 +274,12 @@ test('assembled CLI bin remains executable', async () => {
   const fixtureValue = await fixture();
   const releaseRoot = join(fixtureValue.root, 'release');
   await mkdir(join(fixtureValue.projectRoot, 'dist', 'app'), { recursive: true });
+  await cp(join(process.cwd(), 'packages', 'agent-templates', 'templates'), join(fixtureValue.projectRoot, 'packages', 'agent-templates', 'templates'), { recursive: true });
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'placeholder.txt'), 'runtime\n', 'utf8');
   const result = await assemblePackage({ projectRoot: fixtureValue.projectRoot, releaseRoot, version: '0.1.0' });
   const mode = (await stat(join(result.packageRoot, 'bin', 'humanagent.mjs'))).mode;
   assert.equal(mode & 0o111, 0o111);
+  assert.equal((await stat(join(result.packageRoot, 'templates', 'builtin', 'prompt-registry.json'))).isFile(), true);
 });
 
 async function releaseFixture() {

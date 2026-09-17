@@ -1,26 +1,58 @@
 import { join } from 'node:path';
 import { AgentTemplateError } from './errors.js';
 import { createFilePromptSource, loadAgentPromptSegments } from './prompt-loader.js';
+import { validatePromptSegmentRefs } from './template.js';
 import { AGENT_ROLE_IDS, type AgentRole, type LoadedAgentPromptSegments } from './types.js';
 
-const BUILTIN_PROMPT_SEGMENT_REFS: Readonly<Record<AgentRole, readonly string[]>> = {
-  interaction: ['interaction/identity.md', 'interaction/mission.md', 'interaction/input-output.md', 'interaction/failure.md', 'interaction/boundaries.md'],
-  orchestration: ['orchestration/identity.md', 'orchestration/mission.md', 'orchestration/input-output.md', 'orchestration/failure.md', 'orchestration/boundaries.md'],
-  execution: ['execution/identity.md', 'execution/mission.md', 'execution/input-output.md', 'execution/failure.md', 'execution/boundaries.md'],
-  review: ['review/identity.md', 'review/mission.md', 'review/input-output.md', 'review/failure.md', 'review/boundaries.md'],
-  memory: ['memory/identity.md', 'memory/mission.md', 'memory/input-output.md', 'memory/failure.md', 'memory/boundaries.md'],
-};
+export interface BuiltinPromptRegistry {
+  readonly kind: 'humanagent.prompt-registry';
+  readonly schemaVersion: 1;
+  readonly templateVersion: string;
+  readonly roles: Readonly<Record<AgentRole, readonly string[]>>;
+}
 
-export function builtinPromptSegmentRefs(roleId: AgentRole): readonly string[] {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export async function loadBuiltinPromptRegistry(templateRoot: string): Promise<BuiltinPromptRegistry> {
+  const source = createFilePromptSource(join(templateRoot, 'builtin'));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await source.read('prompt-registry.json')) as unknown;
+  } catch (error) {
+    if (error instanceof AgentTemplateError) throw error;
+    throw new AgentTemplateError(`builtin prompt registry is invalid: ${String(error)}`);
+  }
+  if (!isRecord(parsed) || parsed.kind !== 'humanagent.prompt-registry' || parsed.schemaVersion !== 1
+    || typeof parsed.templateVersion !== 'string' || !isRecord(parsed.roles)) {
+    throw new AgentTemplateError('builtin prompt registry has an invalid shape');
+  }
+  const roles = {} as Record<AgentRole, readonly string[]>;
+  for (const roleId of AGENT_ROLE_IDS) {
+    const refs = parsed.roles[roleId];
+    if (!Array.isArray(refs) || refs.some((ref) => typeof ref !== 'string')) {
+      throw new AgentTemplateError(`builtin prompt registry is missing role refs: ${roleId}`);
+    }
+    validatePromptSegmentRefs(roleId, refs);
+    roles[roleId] = [...refs];
+  }
+  const unknownRole = Object.keys(parsed.roles).find((roleId) => !(AGENT_ROLE_IDS as readonly string[]).includes(roleId));
+  if (unknownRole) throw new AgentTemplateError(`builtin prompt registry has unknown role: ${unknownRole}`);
+  return { kind: 'humanagent.prompt-registry', schemaVersion: 1, templateVersion: parsed.templateVersion, roles };
+}
+
+export async function builtinPromptSegmentRefs(templateRoot: string, roleId: AgentRole): Promise<readonly string[]> {
+  const registry = await loadBuiltinPromptRegistry(templateRoot);
   if (!AGENT_ROLE_IDS.includes(roleId)) throw new AgentTemplateError(`invalid builtin prompt role: ${roleId}`);
-  return [...BUILTIN_PROMPT_SEGMENT_REFS[roleId]];
+  return [...registry.roles[roleId]];
 }
 
 export async function loadBuiltinPromptSegments(
   roleId: AgentRole,
   templateRoot: string,
 ): Promise<LoadedAgentPromptSegments> {
-  const promptSegmentRefs = builtinPromptSegmentRefs(roleId);
+  const promptSegmentRefs = await builtinPromptSegmentRefs(templateRoot, roleId);
   return loadAgentPromptSegments(
     { promptSegmentRefs },
     createFilePromptSource(join(templateRoot, 'builtin')),
