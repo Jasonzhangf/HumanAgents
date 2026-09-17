@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests",
+    "noEmitOnError": true
+  },
+  "include": [
+    "node-modules.d.ts",
+    "**/*.ts",
+    "../../../packages/runtime/src/orchestration/**/*.ts",
+    "../../../packages/runtime/src/review/**/*.ts",
+    "../../../packages/runtime/src/admission/**/*.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/core/src/**/*.ts"
+  ]
+}
