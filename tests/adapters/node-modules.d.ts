@@ -105,6 +105,7 @@ declare module "node:fs/promises" {
     path: string | URL,
     options?: { recursive?: boolean }
   ): Promise<string | undefined>;
+  function symlink(target: string | URL, path: string | URL, type?: string): Promise<void>;
   function mkdtemp(prefix: string): Promise<string>;
   function open(path: string | URL, flags?: string): Promise<FileHandle>;
   function readdir(path: string | URL, options: { withFileTypes: true }): Promise<Dirent[]>;

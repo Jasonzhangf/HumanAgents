@@ -1,4 +1,5 @@
 /// <reference path="./node-modules.d.ts" />
+export * from './sources.js';
 import { link, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, normalize } from 'node:path';
 import { kill, pid } from 'node:process';

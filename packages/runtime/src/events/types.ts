@@ -25,6 +25,7 @@ export type EventPublisherKind = 'harness' | 'agent' | 'external';
 export interface EventEnvelope {
   readonly messageId: string;
   readonly streamId: string;
+  readonly kind?: string;
   readonly class: EventClass;
   readonly scope: ScopeRef;
   readonly occurredAt: string;

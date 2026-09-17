@@ -5,9 +5,11 @@ declare module 'node:fs/promises' {
     close(): Promise<void>;
   }
   interface Stats {
+    isFile(): boolean;
     isSymbolicLink(): boolean;
   }
   function readFile(path: string | URL, encoding: 'utf8'): Promise<string>;
+  function realpath(path: string | URL): Promise<string>;
   function mkdir(path: string | URL, options?: { recursive?: boolean }): Promise<string | undefined>;
   function open(path: string | URL, flags?: string): Promise<FileHandle>;
   function lstat(path: string | URL): Promise<Stats>;
@@ -18,8 +20,19 @@ declare module 'node:fs/promises' {
 
 declare module 'node:path' {
   function dirname(path: string): string;
+  function join(...paths: string[]): string;
   function isAbsolute(path: string): boolean;
   function normalize(path: string): string;
+  function relative(from: string, to: string): string;
+  function resolve(...paths: string[]): string;
+}
+
+declare module 'node:crypto' {
+  interface Hash {
+    update(data: string): Hash;
+    digest(encoding: 'hex'): string;
+  }
+  function createHash(algorithm: string): Hash;
 }
 
 declare module 'node:process' {

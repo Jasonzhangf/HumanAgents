@@ -525,6 +525,7 @@ export function validateMemoryFollowUpRequest(input: MemoryFollowUpRequest): voi
   nonEmpty(input.inReplyTo, 'memory follow-up inReplyTo');
   nonEmpty(input.bindingRef, 'memory follow-up bindingRef');
   validateMemoryActor(input.actor);
+  if (!input.actor.permissions.includes('memory.propose')) throw new ContractError('memory follow-up actor lacks memory.propose permission');
   nonEmpty(input.projectKey, 'memory follow-up projectKey');
   if (input.actor.projectKey !== input.projectKey) throw new ContractError('memory follow-up actor project mismatch');
   if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid memory follow-up namespace');
