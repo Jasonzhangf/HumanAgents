@@ -98,6 +98,25 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     this.canonicalRecords.set(input.memoryId, { ...input });
   }
 
+  private sourceDigest(sourceRef: string): string {
+    const record = this.records.get(sourceRef);
+    if (!record) throw new ContractError(`memory source not found: ${sourceRef}`);
+    return record.sourceDigest;
+  }
+
+  private mergeSourceRefs(
+    existingRefs: readonly string[],
+    existingDigests: readonly string[],
+    addedRefs: readonly string[],
+  ): { readonly sourceRefs: readonly string[]; readonly sourceDigests: readonly string[] } {
+    const existing = new Map(existingRefs.map((sourceRef, index) => [sourceRef, existingDigests[index]!]));
+    const sourceRefs = [...new Set([...existingRefs, ...addedRefs])];
+    return {
+      sourceRefs,
+      sourceDigests: sourceRefs.map((sourceRef) => existing.get(sourceRef) ?? this.sourceDigest(sourceRef)),
+    };
+  }
+
   async search(input: { readonly scope: MemoryScope; readonly query: string; readonly limit: number }): Promise<readonly { readonly sourceRef: string; readonly summary: string }[]> {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new ContractError('memory search limit must be positive');
     const query = input.query.trim().toLowerCase();
@@ -198,7 +217,10 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     candidate.state = input.decision === 'approve' ? 'approved' : input.decision === 'reject' ? 'rejected' : 'candidate';
     if (candidate.state === 'approved') {
       const submission = candidate.submission;
-      this.canonicalRecords.set(candidateRecordId(input.candidateId), {
+      if (this.sourceDigest(submission.contentRef) !== submission.contentDigest) {
+        throw new ContractError('memory submission content digest does not match the ingested source');
+      }
+      this.addCanonicalRecord({
         memoryId: candidateRecordId(input.candidateId),
         namespace: 'project',
         projectKey: submission.projectKey,
@@ -206,7 +228,10 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
         state: 'approved',
         summary: submission.observation,
         sourceRefs: [submission.contentRef, ...submission.evidenceRefs],
-        sourceDigests: [submission.contentDigest],
+        sourceDigests: [
+          this.sourceDigest(submission.contentRef),
+          ...submission.evidenceRefs.map((sourceRef) => this.sourceDigest(sourceRef)),
+        ],
         taskId: submission.taskId,
         sourceScopeRef: `${submission.projectKey}:${submission.taskId?.value ?? 'interaction'}`,
         relevanceReason: submission.reason,
@@ -225,12 +250,14 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     candidate.promotion = input;
     const approved = this.canonicalRecords.get(candidateRecordId(input.candidateId));
     if (!approved) throw new ContractError('approved memory record is unavailable');
-    this.canonicalRecords.set(candidateRecordId(input.candidateId), {
+    const sources = this.mergeSourceRefs(approved.sourceRefs, approved.sourceDigests, input.sourceRefs);
+    this.addCanonicalRecord({
       ...approved,
       namespace: 'global',
       projectKey: undefined,
       state: 'active',
-      sourceRefs: [...new Set([...approved.sourceRefs, ...input.sourceRefs])],
+      sourceRefs: sources.sourceRefs,
+      sourceDigests: sources.sourceDigests,
       relevanceReason: input.reason,
     });
     return input;

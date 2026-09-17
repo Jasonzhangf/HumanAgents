@@ -6,6 +6,7 @@ import {
   type MemoryActorContext,
   type MemoryQueryRequest,
   type MemoryScope,
+  type MemorySubmission,
 } from '../../../packages/contracts/src/index.js';
 import { DeterministicMemoryBackend } from '../../../packages/adapters/memory/src/index.js';
 
@@ -145,4 +146,99 @@ test('memory backend filters task ids exactly and keeps forgetting atomic', asyn
   );
   const unchanged = await memory.query(memoryQuery());
   assert.equal(unchanged.entries[0].state, 'approved');
+});
+
+test('approved and promoted records preserve per-reference provenance digests', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-a';
+  const evidenceRef = 'journal://project-a/evidence';
+  const promotionRef = 'journal://project-a/promotion-approval';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-a', text: 'checkpoint commit is durable' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:evidence-a', text: 'checkpoint evidence' });
+  await memory.ingest({ scope: taskScope, sourceRef: promotionRef, sourceDigest: 'sha256:promotion-a', text: 'global promotion approval' });
+
+  const submission: MemorySubmission = {
+    submissionId: 'submission-a',
+    requestId: 'request-a',
+    operationId: id('operation', 'submission-a'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-a',
+    evidenceRefs: [evidenceRef],
+    observation: 'checkpoint commit is durable',
+    desiredScope: 'project',
+    reason: 'observed at a lifecycle boundary',
+    inputDigest: 'sha256:submission-a',
+  };
+  const submitted = await memory.submitCandidate(submission);
+  assert.equal(submitted.candidateId, 'submission-a');
+
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+  const approved = await memory.query(memoryQuery({ query: 'checkpoint commit is durable' }));
+  assert.deepEqual(approved.entries[0]?.sourceRefs, [contentRef, evidenceRef]);
+  assert.deepEqual(approved.entries[0]?.sourceDigests, ['sha256:candidate-a', 'sha256:evidence-a']);
+
+  await memory.promoteCandidate({
+    candidateId: submitted.candidateId!,
+    from: 'project',
+    to: 'global',
+    actor: { ...actor, roleId: 'review' },
+    reason: 'stable across projects',
+    impactScope: 'all projects',
+    approvalRef: 'approval://global-promotion',
+    sourceRefs: [promotionRef],
+    promotedAt: '2026-09-17T00:00:00Z',
+  });
+  const promoted = await memory.query(memoryQuery({
+    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
+    namespace: 'global',
+    taskId: undefined,
+    states: ['active'],
+    query: 'checkpoint commit is durable',
+  }));
+  assert.deepEqual(promoted.entries[0]?.sourceRefs, [contentRef, evidenceRef, promotionRef]);
+  assert.deepEqual(promoted.entries[0]?.sourceDigests, ['sha256:candidate-a', 'sha256:evidence-a', 'sha256:promotion-a']);
+});
+
+test('approval rejects evidence without a resolvable digest', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-missing-evidence',
+    requestId: 'request-missing-evidence',
+    operationId: id('operation', 'submission-missing-evidence'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef: 'asset://memory/candidate-missing-evidence',
+    contentDigest: 'sha256:candidate-missing-evidence',
+    evidenceRefs: ['journal://project-a/missing'],
+    observation: 'unverified observation',
+    desiredScope: 'project',
+    reason: 'missing evidence must not become canonical',
+    inputDigest: 'sha256:submission-missing-evidence',
+  });
+
+  await assert.rejects(memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'invalid approval attempt',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: ['journal://project-a/missing'],
+  }), ContractError);
+  const queried = await memory.query(memoryQuery({ query: 'unverified observation' }));
+  assert.deepEqual(queried.entries, []);
 });
