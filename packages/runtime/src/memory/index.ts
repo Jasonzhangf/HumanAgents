@@ -24,6 +24,7 @@ import {
 } from '../../../contracts/src/index.js';
 
 export * from './agent.js';
+export * from './events.js';
 
 export const MEMORY_COORDINATOR_OWNER = 'memory-coordinator';
 

@@ -152,6 +152,14 @@ export interface EventDelivery {
   readonly retryKey?: string;
 }
 
+export function eventIdentityKey(
+  streamId: string,
+  consumerKey: string,
+  messageId: string,
+): string {
+  return `${streamId.length}:${streamId}${consumerKey.length}:${consumerKey}${messageId.length}:${messageId}`;
+}
+
 export type EventConsumerHandler = (
   delivery: EventDelivery,
 ) => EventHandlerCommit | Promise<EventHandlerCommit>;

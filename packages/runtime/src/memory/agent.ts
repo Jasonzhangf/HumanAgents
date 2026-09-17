@@ -38,7 +38,11 @@ export interface MemoryAgentIssue {
     | 'memory-agent-follow-up-conflict'
     | 'memory-agent-update-denied'
     | 'memory-agent-update-conflict'
-    | 'memory-agent-update-validation-failed';
+    | 'memory-agent-update-validation-failed'
+    | 'memory-agent-event-unsupported'
+    | 'memory-agent-event-invalid'
+    | 'memory-agent-event-scope-mismatch'
+    | 'memory-agent-event-evidence-missing';
   readonly state: MemoryAgentFailureState;
   readonly ownerId: string;
   readonly message: string;
@@ -155,6 +159,8 @@ function issue(
     nextAction: state === 'waiting' ? { kind: 'wait', ref: target } : { kind: 'recover', ref: target },
   };
 }
+
+export const memoryAgentIssue = issue;
 
 function scopeKey(scope: MemoryScope): string {
   return `${scope.kind}:${scope.organId.value}:${scope.taskId?.value ?? ''}`;

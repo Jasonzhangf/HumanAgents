@@ -18,25 +18,26 @@ import type {
   EventPublisherRegistryPort,
   EventExternalOperationPort,
 } from './ports.js';
-import type {
-  ConsumerCommitRequest,
-  ConsumerCursor,
-  ConsumeEventsInput,
-  ConsumerProcessResult,
-  EventConsumerBinding,
-  EventConsumerHandler,
-  EventConsumerReceipt,
-  EventDlqRecord,
-  EventEnvelope,
-  EventExternalOperation,
-  EventHandlerCommit,
-  EventHandlerCommitIntent,
-  EventHandlerRetryIntent,
-  EventOperationBarrierDriver,
-  EventOperationBarrierIntent,
-  EventOperationBlocked,
-  EventRecord,
-  EventRetryObligation,
+import {
+  eventIdentityKey,
+  type ConsumerCommitRequest,
+  type ConsumerCursor,
+  type ConsumeEventsInput,
+  type ConsumerProcessResult,
+  type EventConsumerBinding,
+  type EventConsumerHandler,
+  type EventConsumerReceipt,
+  type EventDlqRecord,
+  type EventEnvelope,
+  type EventExternalOperation,
+  type EventHandlerCommit,
+  type EventHandlerCommitIntent,
+  type EventHandlerRetryIntent,
+  type EventOperationBarrierDriver,
+  type EventOperationBarrierIntent,
+  type EventOperationBlocked,
+  type EventRecord,
+  type EventRetryObligation,
 } from './types.js';
 
 export interface EventBusPorts {
@@ -98,16 +99,12 @@ function assertEventPayload(event: EventEnvelope): void {
   if (event.payload) assertBusinessPayload(event.payload);
 }
 
-function identityKey(streamId: string, consumerKey: string, messageId: string): string {
-  return `${streamId.length}:${streamId}${consumerKey.length}:${consumerKey}${messageId.length}:${messageId}`;
-}
-
 function receiptKey(streamId: string, consumerKey: string, messageId: string): string {
-  return identityKey(streamId, consumerKey, messageId);
+  return eventIdentityKey(streamId, consumerKey, messageId);
 }
 
 function retryKey(streamId: string, consumerKey: string, messageId: string): string {
-  return identityKey(streamId, consumerKey, messageId);
+  return eventIdentityKey(streamId, consumerKey, messageId);
 }
 
 function uniqueRefs(refs: readonly string[]): readonly string[] {
