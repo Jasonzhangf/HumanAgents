@@ -34,6 +34,7 @@ export type MemoryAnalysisTrigger = (typeof MEMORY_ANALYSIS_TRIGGERS)[number];
 export interface MemoryAnalysisWakeBinding {
   readonly bindingRef: string;
   readonly projectKey: string;
+  readonly executionEpoch: number;
   readonly scope: MemoryScope;
   readonly taskId?: TaskId;
   readonly actor: MemoryActorContext;
@@ -115,6 +116,9 @@ function eventIssue(
 function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome<never> | null {
   if (!binding.bindingRef.trim()) return eventIssue('memory-agent-event-invalid', 'memory analysis binding ref is required', 'memory-binding');
   if (!binding.projectKey.trim()) return eventIssue('memory-agent-event-invalid', 'memory analysis project key is required', 'memory-binding');
+  if (!Number.isSafeInteger(binding.executionEpoch) || binding.executionEpoch < 1) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding execution epoch must be positive', 'memory-binding');
+  }
   if (binding.actor.projectKey !== binding.projectKey) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis actor belongs to another project', 'memory-permission');
   }
@@ -160,6 +164,9 @@ export function createMemoryAnalysisRequestedEvent(
   input: MemoryAnalysisRequestedEventInput,
 ): EventEnvelope {
   nonEmpty(input.messageId, 'memory analysis message id');
+  if (!safeOperationSegment(input.messageId)) {
+    throw new Error('memory analysis message id cannot form a stable operation id');
+  }
   nonEmpty(input.streamId, 'memory analysis stream id');
   nonEmpty(input.summary, 'memory analysis summary');
   if (!Number.isFinite(Date.parse(input.occurredAt))) throw new Error('memory analysis occurredAt is invalid');
@@ -208,6 +215,9 @@ export function memoryAnalysisRequestFromEvent(
   }
   if (event.executionEpoch === undefined) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis event requires an execution epoch', 'memory-analysis-event');
+  }
+  if (event.executionEpoch !== binding.executionEpoch) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis event execution epoch does not match the wake binding', 'memory-analysis-event');
   }
   if (!scopeMatchesEvent(binding.scope, event.scope)) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis event scope does not match the wake binding', 'memory-analysis-scope');

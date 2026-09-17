@@ -48,6 +48,7 @@ const actor: MemoryActorContext = {
 const binding: MemoryAnalysisWakeBinding = {
   bindingRef: 'memory-binding:task-a',
   projectKey: 'project-a',
+  executionEpoch: 2,
   scope: memoryScope,
   taskId: task,
   actor,
@@ -358,8 +359,13 @@ test('memory analysis consumer rejects malformed events without invoking admissi
     ...event({ messageId: 'wrong-kind' }),
     kind: 'memory.other',
   };
+  const unsafeMessageId: EventEnvelope = {
+    ...event({ messageId: 'unsafe-message-id' }),
+    messageId: 'message:a',
+  };
   const cases: readonly EventEnvelope[] = [
     wrongKind,
+    unsafeMessageId,
     event({ executionEpoch: 3, messageId: 'wrong-epoch' }),
   ];
 
@@ -416,6 +422,40 @@ test('memory analysis consumer rejects malformed events without invoking admissi
   assert.equal(admissions, 0);
   assert.equal(result.committed[0]?.disposition, 'rejected');
   assert.equal(result.committed[0]?.failureRef, 'memory-agent-event-evidence-missing');
+});
+
+test('memory analysis consumer rejects stale and future epochs even without a consumer epoch fence', async () => {
+  for (const executionEpoch of [1, 3]) {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    registry.consumers.set(binding.bindingRef, {
+      ...consumer,
+      currentEpoch: undefined,
+    });
+    const bus = ports(journal, registry);
+    await publishEvent(bus, {
+      publisherId: publisher.publisherId,
+      event: event({ messageId: `wrong-binding-epoch-${executionEpoch}`, executionEpoch }),
+    });
+    let admissions = 0;
+    const result = await consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: {
+          admit: async () => {
+            admissions += 1;
+            return { status: 'ready', value: { admissionRef: 'must-not-admit' } };
+          },
+        },
+        now: () => occurredAt,
+      }),
+    );
+    assert.equal(admissions, 0);
+    assert.equal(result.committed[0]?.disposition, 'rejected');
+    assert.equal(result.committed[0]?.failureRef, 'memory-agent-event-invalid');
+  }
 });
 
 test('memory analysis consumer preserves a waiting admission as a durable retry obligation', async () => {
@@ -486,6 +526,16 @@ test('memory analysis event kind is stable and data-only', () => {
   const envelope = event();
   assert.equal(envelope.kind, MEMORY_ANALYSIS_REQUESTED_KIND);
   assert.equal(envelope.class, 'data');
+  assert.throws(() => createMemoryAnalysisRequestedEvent({
+    messageId: 'message:a',
+    streamId,
+    scope,
+    occurredAt,
+    summary: 'invalid',
+    evidenceRefs: [evidence('checkpoint-a')],
+    executionEpoch: 2,
+    trigger: 'completion',
+  }), /cannot form a stable operation id/);
   assert.throws(() => createMemoryAnalysisRequestedEvent({
     messageId: 'missing-evidence',
     streamId,
