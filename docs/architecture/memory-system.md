@@ -43,7 +43,7 @@ supersede / expire / archive / index rebuild
 4. 主 Agent/Runtime 负责捕获和使用临时 context；Memory Agent 负责在边界事件后提炼、比较、提出候选和请求 review，不能自行把事实或 Skill 写成 approved，也不能改变 Task/Checkpoint/Operation。
 5. 遗忘首先改变可见性和投影；物理删除只允许作用于可重建数据，不能删除仍被恢复或批准记录引用的来源。
 
-本候选只更新设计和原文存档，尚未修改 `packages/contracts`、`packages/config`、`packages/runtime` 或 adapter。迁移完成前，当前 `MemoryScope` 的 `task / organ / approved-global` 仍按旧契约运行；不能把旧的 `organ` 或 `approved-global` 输入解释成本文的新 project/global 语义。§10 的映射与 §11 的切片是后续实现合同，不是当前代码已完成的能力。
+`packages/contracts`、`packages/config`、`packages/runtime` 和 deterministic memory adapter 已实现第一批 project/global 类型、权限、binding、candidate/review/promotion/forgetting 与查询边界；Journal canonical scope、持久化 migration 和真实 Memory Agent provider 尚未完成。迁移完成前，当前 `MemoryScope` 的 `task / organ / approved-global` 仍按旧契约运行；不能把旧的 `organ` 或 `approved-global` 输入解释成本文的新 project/global 语义。§10 的映射与 §11 的切片是后续实现合同。
 
 ## 2. 记忆边界：项目与全局
 
@@ -653,6 +653,7 @@ interface MemorySubmission {
 interface MemorySubmissionReceipt {
   readonly submissionId: string;
   readonly status: 'accepted' | 'duplicate' | 'queued' | 'rejected';
+  readonly candidateId?: string;
   readonly operationId?: string;
   readonly sourceRef?: string;
   readonly sourceFactRef?: string;
@@ -856,7 +857,7 @@ UI 继续通过 `MemoryInteractionPort` 访问记忆；这是用户查询和 rev
 interface MemoryActorContext {
   readonly actorId: string;
   readonly roleId: 'interaction' | 'orchestration' | 'review' | 'memory' | 'system';
-  readonly permissions: readonly ('memory.read' | 'memory.review' | 'memory.promote' | 'memory.forget')[];
+  readonly permissions: readonly ('memory.read' | 'memory.propose' | 'memory.review' | 'memory.promote' | 'memory.forget')[];
   readonly projectKey: string;
   readonly crossProjectGrantRef?: string;
 }
@@ -868,11 +869,11 @@ interface MemoryInteractionPort {
   compare(input: { readonly actor: MemoryActorContext; readonly leftRef: string; readonly rightRef: string }): Promise<MemoryComparisonView>;
   review(input: { readonly actor: MemoryActorContext; readonly candidateId: string; readonly decision: 'approve' | 'reject' | 'defer'; readonly decisionReason: string }): Promise<MemoryReviewReceipt>;
   promote(input: { readonly actor: MemoryActorContext; readonly candidateId: string; readonly from: 'project'; readonly to: 'global'; readonly reason: string; readonly impactScope: string; readonly approvalRef: string; readonly sourceRefs: readonly string[] }): Promise<MemoryPromotionReceipt>;
-  planForgetting(input: { readonly actor: MemoryActorContext; readonly projectKey: string; readonly namespace: 'project' | 'global' }): Promise<MemoryForgettingPlan>;
+  planForgetting(input: MemoryForgettingRequest): Promise<MemoryForgettingPlan>;
 }
 ```
 
-`MemoryViewHandle`、`MemoryView`、`MemoryDetailView`、`MemoryComparisonView`、`MemoryReviewReceipt`、`MemoryPromotionReceipt` 和 `MemoryForgettingPlan` 是后续 contracts 的 typed result；此处用名义类型表达边界，不允许 UI 自行读取 Journal、Index、artifact、local Skill source 或 Skill Registry。每次 global query 必须由 `actor.permissions` 和 `crossProjectGrantRef` 证明授权；review 必须有 actor、decision 和 reason；promotion 必须有 `memory.promote`、批准记录、来源列表和影响范围。校验失败显式拒绝。`review` 与 `promote` 只追加 Organ Journal command/result，真正的 approved record 仍由 review/registry owner 落盘。
+`MemoryViewHandle`、`MemoryView`、`MemoryDetailView`、`MemoryComparisonView`、`MemoryReviewReceipt`、`MemoryPromotionReceipt` 和 `MemoryForgettingPlan` 是 typed result；此处不允许 UI 自行读取 Journal、Index、artifact、local Skill source 或 Skill Registry。每次 global query 必须由 `actor.permissions` 和 `crossProjectGrantRef` 证明授权；review 必须有 `memory.review`、actor、decision 和 reason；promotion 必须有 `memory.promote`、批准记录、来源列表和影响范围；forgetting 必须有 `memory.forget`，并用 `MemoryForgettingRequest { actor, plan }` 绑定执行者与计划。校验失败显式拒绝。`review` 与 `promote` 只追加 Organ Journal command/result，真正的 approved record 仍由 review/registry owner 落盘。
 
 ## 8. 状态与真源
 

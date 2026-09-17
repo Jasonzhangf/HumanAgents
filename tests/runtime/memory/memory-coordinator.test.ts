@@ -20,6 +20,9 @@ const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const otherTask = id('task', 'task-b');
 const taskScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const taskProjectKey = 'project-a';
+const taskAssignmentId = 'assignment-a';
+const taskExecutionEpoch = 2;
 
 function makeCandidate(overrides: Partial<SkillCandidate> = {}): SkillCandidate {
   return {
@@ -67,9 +70,10 @@ function makePorts(overrides: {
     attach: number;
     search: number;
     ingest: number;
+    review: number;
   };
 } {
-  const calls = { recall: 0, attach: 0, search: 0, ingest: 0 };
+  const calls = { recall: 0, attach: 0, search: 0, ingest: 0, review: 0 };
   const operations: MemoryOperationsPort = {
     ingest: async (input) => {
       calls.ingest += 1;
@@ -84,6 +88,20 @@ function makePorts(overrides: {
     compare: async () => ({ relation: 'same' }),
     detectNovelty: async (input): Promise<NoveltyResult> => ({ classification: 'novel', matchedRefs: [], reason: input.candidateRef }),
     detectRecurrence: async (): Promise<RecurrenceResult> => ({ classification: 'recurring', occurrences: [{ ref: 'journal://task-a/recur', digest: 'sha256:recur' }], reason: 'observed twice' }),
+    query: async (input) => ({ requestId: input.requestId, status: 'ready', entries: [], sourceFactRef: 'memory-query:test', omitted: [] }),
+    submitCandidate: async (input) => ({
+      submissionId: input.submissionId,
+      status: 'accepted',
+      candidateId: `candidate:${input.submissionId}`,
+      operationId: input.operationId,
+      nextAction: 'wait-analysis',
+    }),
+    reviewCandidate: async (input) => {
+      calls.review += 1;
+      return input;
+    },
+    promoteCandidate: async (input) => input,
+    planForgetting: async (input) => input.plan,
   };
   const injection: AgentMemoryContextInjectionPort = {
     recall: async (input) => {
@@ -112,6 +130,9 @@ function setup(overrides: {
   const ports = overrides.ports ?? makePorts();
   const taskReceipt = coordinator.bindTask({
     taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
     scope: taskScope,
     backendRef: 'memory://fake',
     indexVersion: 'fake-memory-v1',
@@ -122,8 +143,9 @@ function setup(overrides: {
   const runtimeOutcome = coordinator.bindRuntime({
     agentRuntimeId: 'runtime-a',
     taskId: task,
+    assignmentId: taskAssignmentId,
     roleId: 'execution',
-    executionEpoch: 2,
+    executionEpoch: taskExecutionEpoch,
   });
   assert.equal(runtimeOutcome.status, 'ready');
   return { coordinator, ports, taskReceipt, runtimeBinding: runtimeOutcome.status === 'ready' ? runtimeOutcome.value : undefined };
@@ -252,6 +274,9 @@ test('memory coordinator exposes missing and mismatched bindings as owned issues
   const ports = makePorts();
   coordinator.bindTask({
     taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
     scope: taskScope,
     backendRef: 'memory://fake',
     operations: ports.operations,
@@ -260,18 +285,230 @@ test('memory coordinator exposes missing and mismatched bindings as owned issues
   const bound = coordinator.bindRuntime({
     agentRuntimeId: 'runtime-a',
     taskId: task,
+    assignmentId: taskAssignmentId,
     roleId: 'execution',
-    executionEpoch: 2,
+    executionEpoch: taskExecutionEpoch,
   });
   assert.equal(bound.status, 'ready');
   const stale = coordinator.bindRuntime({
     agentRuntimeId: 'runtime-a',
     taskId: task,
+    assignmentId: taskAssignmentId,
     roleId: 'memory',
-    executionEpoch: 2,
+    executionEpoch: taskExecutionEpoch,
   });
   assert.equal(stale.status, 'attention');
   assert.equal(stale.status === 'attention' && stale.issue.code, 'memory-binding-mismatch');
+});
+
+test('memory coordinator rejects task runtime assignment and epoch drift', async () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  coordinator.bindTask({
+    taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
+    scope: taskScope,
+    backendRef: 'memory://fake',
+    operations: ports.operations,
+    injection: ports.injection,
+  });
+
+  const assignmentMismatch = coordinator.bindRuntime({
+    agentRuntimeId: 'runtime-assignment-mismatch',
+    taskId: task,
+    assignmentId: 'assignment-other',
+    roleId: 'execution',
+    executionEpoch: taskExecutionEpoch,
+  });
+  assert.equal(assignmentMismatch.status, 'attention');
+  assert.equal(assignmentMismatch.status === 'attention' && assignmentMismatch.issue.code, 'memory-binding-mismatch');
+
+  const epochMismatch = coordinator.bindRuntime({
+    agentRuntimeId: 'runtime-epoch-mismatch',
+    taskId: task,
+    assignmentId: taskAssignmentId,
+    roleId: 'execution',
+    executionEpoch: taskExecutionEpoch + 1,
+  });
+  assert.equal(epochMismatch.status, 'attention');
+  assert.equal(epochMismatch.status === 'attention' && epochMismatch.issue.code, 'memory-binding-mismatch');
+});
+
+test('memory coordinator reuses a compatible project backend and rejects conflicts without partial binding', () => {
+  const coordinator = new MemoryCoordinator();
+  const firstPorts = makePorts();
+  const conflictingPorts = makePorts();
+  coordinator.bindTask({
+    taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
+    scope: taskScope,
+    backendRef: 'memory://first',
+    operations: firstPorts.operations,
+    injection: firstPorts.injection,
+  });
+
+  const reused = coordinator.bindTask({
+    taskId: otherTask,
+    assignmentId: 'assignment-b',
+    executionEpoch: 1,
+    projectKey: taskProjectKey,
+    scope: { kind: 'task', organId: organ, taskId: otherTask },
+    backendRef: 'memory://first',
+    operations: firstPorts.operations,
+    injection: firstPorts.injection,
+  });
+  assert.equal(reused.taskId.value, otherTask.value);
+
+  const thirdTask = id('task', 'task-c');
+  let conflict: unknown;
+  try {
+    coordinator.bindTask({
+      taskId: thirdTask,
+      assignmentId: 'assignment-c',
+      executionEpoch: 1,
+      projectKey: taskProjectKey,
+      scope: { kind: 'task', organId: organ, taskId: thirdTask },
+      backendRef: 'memory://conflict',
+      operations: conflictingPorts.operations,
+      injection: conflictingPorts.injection,
+    });
+  } catch (error) {
+    conflict = error;
+  }
+  assert.ok(conflict instanceof MemoryCoordinatorError);
+  if (!(conflict instanceof MemoryCoordinatorError)) throw new Error('expected project binding conflict');
+  assert.ok(conflict.message.includes('memory backend binding conflicts'));
+  const retry = coordinator.bindTask({
+    taskId: thirdTask,
+    assignmentId: 'assignment-c',
+    executionEpoch: 1,
+    projectKey: taskProjectKey,
+    scope: { kind: 'task', organId: organ, taskId: thirdTask },
+    backendRef: 'memory://first',
+    operations: firstPorts.operations,
+    injection: firstPorts.injection,
+  });
+  assert.equal(retry.taskId.value, thirdTask.value);
+});
+
+test('memory coordinator resolves candidate operations by canonical candidate identity, not insertion order', async () => {
+  const coordinator = new MemoryCoordinator();
+  const firstPorts = makePorts();
+  const secondPorts = makePorts();
+  const first = coordinator.bindInteraction({
+    interactionScopeId: 'interaction-a',
+    projectKey: 'project-a',
+    backendRef: 'memory://first',
+    operations: firstPorts.operations,
+    injection: firstPorts.injection,
+  });
+  coordinator.bindInteraction({
+    interactionScopeId: 'interaction-b',
+    projectKey: 'project-b',
+    backendRef: 'memory://second',
+    operations: secondPorts.operations,
+    injection: secondPorts.injection,
+  });
+  const actor = {
+    actorId: 'actor-a',
+    roleId: 'memory' as const,
+    permissions: ['memory.read', 'memory.propose', 'memory.review', 'memory.promote'] as const,
+    projectKey: 'project-a',
+  };
+  const submission = {
+    submissionId: 'submission-a',
+    requestId: 'request-a',
+    operationId: id('operation', 'operation-a'),
+    bindingRef: first.bindingId,
+    actor,
+    projectKey: 'project-a',
+    requestedKind: 'semantic' as const,
+    contentRef: 'asset://memory/candidate-a',
+    contentDigest: 'sha256:candidate-a',
+    evidenceRefs: ['journal://project-a/1'],
+    observation: 'checkpoint commit is durable',
+    desiredScope: 'project' as const,
+    reason: 'observed at a lifecycle boundary',
+    inputDigest: 'sha256:input-a',
+  };
+  const submitted = await coordinator.submitCandidate(submission);
+  assert.equal(submitted.status, 'ready');
+
+  const reviewed = await coordinator.reviewCandidate({
+    candidateId: 'candidate:submission-a',
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: ['journal://project-a/review'],
+  });
+  assert.equal(reviewed.status, 'ready');
+  assert.equal(firstPorts.calls.review, 1);
+  assert.equal(secondPorts.calls.review, 0);
+});
+
+test('memory coordinator rejects query, review, and promotion project drift', async () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const interaction = coordinator.bindInteraction({
+    interactionScopeId: 'interaction-project-a',
+    projectKey: 'project-a',
+    backendRef: 'memory://project-a',
+    operations: ports.operations,
+    injection: ports.injection,
+  });
+  const actor = {
+    actorId: 'actor-a',
+    roleId: 'review' as const,
+    permissions: ['memory.read', 'memory.propose', 'memory.review', 'memory.promote'] as const,
+    projectKey: 'project-b',
+  };
+
+  const queried = await coordinator.query({
+    requestId: 'query-a',
+    operationId: id('operation', 'query-a'),
+    bindingRef: interaction.bindingId,
+    actor: { ...actor, projectKey: 'project-b' },
+    projectKey: 'project-b',
+    namespace: 'project',
+    query: 'checkpoint',
+    kinds: ['semantic'],
+    states: ['approved'],
+    limit: 10,
+    tokenBudget: 100,
+    inputDigest: 'sha256:query-a',
+  });
+  assert.equal(queried.status, 'attention');
+  assert.equal(queried.status === 'attention' && queried.issue.code, 'memory-binding-mismatch');
+
+  const reviewed = await coordinator.reviewCandidate({
+    candidateId: 'candidate-a',
+    decision: 'approve',
+    actor,
+    decisionReason: 'evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: ['journal://project-a/review'],
+  });
+  assert.equal(reviewed.status, 'attention');
+  assert.equal(reviewed.status === 'attention' && reviewed.issue.code, 'memory-binding-missing');
+
+  const promoted = await coordinator.promoteCandidate({
+    candidateId: 'candidate-a',
+    from: 'project',
+    to: 'global',
+    actor,
+    reason: 'stable across projects',
+    impactScope: 'all projects',
+    approvalRef: 'approval://global-promotion',
+    sourceRefs: ['journal://project-a/1'],
+    promotedAt: '2026-09-17T00:00:00Z',
+  });
+  assert.equal(promoted.status, 'attention');
+  assert.equal(promoted.status === 'attention' && promoted.issue.code, 'memory-binding-missing');
 });
 
 test('memory unavailable and attach failures are explicit, not fake RAG success', async () => {
@@ -300,6 +537,9 @@ test('memory unavailable and attach failures are explicit, not fake RAG success'
   const attachCoordinator = new MemoryCoordinator();
   attachCoordinator.bindTask({
     taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
     scope: taskScope,
     backendRef: 'memory://fake',
     operations: attachCalls.operations,
@@ -309,8 +549,9 @@ test('memory unavailable and attach failures are explicit, not fake RAG success'
   attachCoordinator.bindRuntime({
     agentRuntimeId: 'runtime-a',
     taskId: task,
+    assignmentId: taskAssignmentId,
     roleId: 'execution',
-    executionEpoch: 2,
+    executionEpoch: taskExecutionEpoch,
   });
   await attachCoordinator.recall({
     agentRuntimeId: 'runtime-a',
@@ -439,6 +680,9 @@ test('memory coordinator validates search and exposes search failures', async ()
   const okPorts = makePorts();
   okCoordinator.bindTask({
     taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
     scope: taskScope,
     backendRef: 'memory://fake',
     operations: okPorts.operations,
@@ -447,8 +691,9 @@ test('memory coordinator validates search and exposes search failures', async ()
   okCoordinator.bindRuntime({
     agentRuntimeId: 'runtime-a',
     taskId: task,
+    assignmentId: taskAssignmentId,
     roleId: 'memory',
-    executionEpoch: 2,
+    executionEpoch: taskExecutionEpoch,
   });
   const search = await okCoordinator.search({ agentRuntimeId: 'runtime-a', query: 'directive', limit: 5 });
   assert.equal(search.status, 'ready');
@@ -459,6 +704,9 @@ test('memory coordinator validates search and exposes search failures', async ()
   const downCoordinator = new MemoryCoordinator();
   downCoordinator.bindTask({
     taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
     scope: taskScope,
     backendRef: 'memory://fake',
     operations: downPorts.operations,
@@ -468,8 +716,9 @@ test('memory coordinator validates search and exposes search failures', async ()
   downCoordinator.bindRuntime({
     agentRuntimeId: 'runtime-a',
     taskId: task,
+    assignmentId: taskAssignmentId,
     roleId: 'memory',
-    executionEpoch: 2,
+    executionEpoch: taskExecutionEpoch,
   });
   const down = await downCoordinator.search({ agentRuntimeId: 'runtime-a', query: 'directive', limit: 5 });
   assert.equal(down.status, 'waiting');

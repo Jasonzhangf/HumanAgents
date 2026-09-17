@@ -194,6 +194,20 @@ export interface HarnessPluginContext {
   registerAgentMemoryContextInjection(port: AgentMemoryContextInjectionPort): void;
 }
 
+export type MemoryNamespace = 'project' | 'global';
+export type CanonicalMemoryScope =
+  | {
+      readonly namespace: 'project';
+      readonly projectKey: string;
+      readonly organId: OrganId;
+      readonly taskId?: TaskId;
+    }
+  | {
+      readonly namespace: 'global';
+      readonly globalId: 'global';
+      readonly sourceProjectKey?: string;
+      readonly sourceOrganId?: OrganId;
+    };
 export interface MemoryScope { readonly kind: 'task' | 'organ' | 'approved-global'; readonly taskId?: TaskId; readonly organId: OrganId; }
 export type ContextLayer = 'current' | 'task-recent' | 'related' | 'approved-long-term' | 'raw';
 export interface AgentMemoryContextRequest { readonly agentRuntimeId: string; readonly roleId: string; readonly taskId: TaskId; readonly scope: MemoryScope; readonly layers: readonly ContextLayer[]; readonly query?: string; readonly tokenBudget: number; readonly executionEpoch: number; readonly evidenceRequired: boolean; }
@@ -231,6 +245,309 @@ export interface MemoryOperationsPort {
   compare(input: { readonly leftRef: string; readonly rightRef: string }): Promise<{ readonly relation: 'same' | 'different' | 'unknown' }>;
   detectNovelty(input: NoveltyRequest): Promise<NoveltyResult>;
   detectRecurrence(input: RecurrenceRequest): Promise<RecurrenceResult>;
+  query(input: MemoryQueryRequest): Promise<MemoryQueryResponse>;
+  submitCandidate(input: MemorySubmission): Promise<MemorySubmissionReceipt>;
+  reviewCandidate(input: MemoryReviewReceipt): Promise<MemoryReviewReceipt>;
+  promoteCandidate(input: MemoryPromotionReceipt): Promise<MemoryPromotionReceipt>;
+  planForgetting(input: MemoryForgettingRequest): Promise<MemoryForgettingPlan>;
+}
+
+export type MemoryRecordState = 'candidate' | 'approved' | 'active' | 'superseded' | 'expired' | 'archived' | 'rejected';
+export type MemoryKind = 'episodic' | 'semantic' | 'procedural';
+
+export interface EpisodicMemorySource {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly projectKey: string;
+  readonly taskId?: TaskId;
+  readonly cycleId?: CycleId;
+  readonly sessionRef?: string;
+  readonly occurredAt: string;
+  readonly kind: 'input' | 'checkpoint' | 'operation' | 'tool' | 'output' | 'error' | 'review';
+  readonly payloadRef: string;
+}
+
+export interface SemanticMemoryCandidate {
+  readonly candidateId: string;
+  readonly namespace: MemoryNamespace;
+  readonly projectKey: string;
+  readonly statement: string;
+  readonly entities: readonly string[];
+  readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
+  readonly confidence: 'observed' | 'supported' | 'confirmed';
+  readonly validity: { readonly kind: 'open' | 'until'; readonly until?: string };
+  readonly supersedes?: readonly string[];
+  readonly review: 'required' | 'approved' | 'rejected';
+}
+
+export interface ProceduralMemoryCandidate {
+  readonly candidateId: string;
+  readonly namespace: MemoryNamespace;
+  readonly projectKey: string;
+  readonly name: string;
+  readonly intent: string;
+  readonly preconditions: readonly string[];
+  readonly steps: readonly string[];
+  readonly failureBoundaries: readonly string[];
+  readonly successEvidenceRefs: readonly string[];
+  readonly repeatability: 'one-off' | 'observed' | 'recurring';
+  readonly review: 'required' | 'approved' | 'rejected';
+}
+
+export interface MemoryReviewReceipt {
+  readonly candidateId: string;
+  readonly decision: 'approve' | 'reject' | 'defer';
+  readonly actor: MemoryActorContext;
+  readonly decisionReason: string;
+  readonly decidedAt: string;
+  readonly evidenceRefs: readonly string[];
+}
+
+export interface MemoryPromotionReceipt {
+  readonly candidateId: string;
+  readonly from: 'project';
+  readonly to: 'global';
+  readonly actor: MemoryActorContext;
+  readonly reason: string;
+  readonly impactScope: string;
+  readonly approvalRef: string;
+  readonly sourceRefs: readonly string[];
+  readonly promotedAt: string;
+}
+
+export interface MemoryForgettingPlan {
+  readonly planId: string;
+  readonly namespace: MemoryNamespace;
+  readonly projectKey?: string;
+  readonly actions: readonly {
+    readonly memoryId: string;
+    readonly action: 'supersede' | 'expire' | 'archive' | 'cleanup-projection';
+    readonly reason: string;
+    readonly replacementRef?: string;
+    readonly sourceRefs: readonly string[];
+  }[];
+  readonly protectedRefs: readonly string[];
+  readonly createdAt: string;
+}
+
+export interface MemoryForgettingRequest {
+  readonly actor: MemoryActorContext;
+  readonly plan: MemoryForgettingPlan;
+}
+
+export interface MemorySubmission {
+  readonly submissionId: string;
+  readonly requestId: string;
+  readonly operationId: OperationId;
+  readonly bindingRef: string;
+  readonly actor: MemoryActorContext;
+  readonly projectKey: string;
+  readonly taskId?: TaskId;
+  readonly cycleId?: CycleId;
+  readonly requestedKind: MemoryKind;
+  readonly contentRef: string;
+  readonly contentDigest: string;
+  readonly evidenceRefs: readonly string[];
+  readonly observation: string;
+  readonly desiredScope: MemoryNamespace;
+  readonly reason: string;
+  readonly inputDigest: string;
+}
+
+export interface MemorySubmissionReceipt {
+  readonly submissionId: string;
+  readonly status: 'accepted' | 'duplicate' | 'queued' | 'rejected';
+  readonly candidateId?: string;
+  readonly operationId?: OperationId;
+  readonly sourceRef?: string;
+  readonly sourceFactRef?: string;
+  readonly nextAction: 'none' | 'wait-analysis' | 'review-required' | 'attention';
+}
+
+export interface MemoryQueryRequest {
+  readonly requestId: string;
+  readonly operationId: OperationId;
+  readonly bindingRef: string;
+  readonly actor: MemoryActorContext;
+  readonly projectKey: string;
+  readonly namespace: MemoryNamespace;
+  readonly taskId?: TaskId;
+  readonly query: string;
+  readonly kinds: readonly MemoryKind[];
+  readonly states: readonly MemoryRecordState[];
+  readonly limit: number;
+  readonly tokenBudget: number;
+  readonly inputDigest: string;
+}
+
+export interface MemoryQueryEntry {
+  readonly memoryId: string;
+  readonly namespace: MemoryNamespace;
+  readonly kind: MemoryKind;
+  readonly state: MemoryRecordState;
+  readonly summary: string;
+  readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
+  readonly projectKey?: string;
+  readonly sourceScopeRef: string;
+  readonly relevanceReason: string;
+}
+
+export interface MemoryQueryResponse {
+  readonly requestId: string;
+  readonly status: 'ready' | 'waiting' | 'attention';
+  readonly entries: readonly MemoryQueryEntry[];
+  readonly indexVersion?: string;
+  readonly sourceFactRef: string;
+  readonly nextCursor?: string;
+  readonly omitted: readonly { readonly reason: string; readonly ref?: string }[];
+}
+
+export interface AuditPromptSnapshot {
+  readonly promptRef: string;
+  readonly canonicalRef: string;
+  readonly revision: string;
+  readonly digest: string;
+  readonly loadedAt: string;
+}
+
+export type ProjectAutoUpdateTarget = 'project-agents' | 'project-local-skill';
+
+export interface ProjectSourceUpdateProposal {
+  readonly target: ProjectAutoUpdateTarget;
+  readonly sourceRef: string;
+  readonly expectedRevision: string;
+  readonly expectedDigest: string;
+  readonly patchRef: string;
+  readonly evidenceRefs: readonly string[];
+  readonly ownerRef: string;
+}
+
+export interface MemoryActorContext {
+  readonly actorId: string;
+  readonly roleId: 'interaction' | 'orchestration' | 'review' | 'memory' | 'system';
+  readonly permissions: readonly ('memory.read' | 'memory.propose' | 'memory.review' | 'memory.promote' | 'memory.forget')[];
+  readonly projectKey: string;
+  readonly crossProjectGrantRef?: string;
+}
+
+export interface MemoryCurationResult {
+  readonly operationId: OperationId;
+  readonly auditPrompt: AuditPromptSnapshot;
+  readonly sourceRefs: readonly string[];
+  readonly outcome: 'candidate' | 'duplicate' | 'conflict' | 'no-op' | 'attention';
+  readonly candidateId?: string;
+  readonly matchedMemoryIds: readonly string[];
+  readonly conflictRefs: readonly string[];
+  readonly explanation: string;
+  readonly nextAction: 'review' | 'supersede-review' | 'retry-analysis' | 'none' | 'attention';
+}
+
+export interface MemoryFollowUpRequest {
+  readonly requestId: string;
+  readonly operationId: OperationId;
+  readonly correlationId: string;
+  readonly inReplyTo: string;
+  readonly bindingRef: string;
+  readonly actor: MemoryActorContext;
+  readonly projectKey: string;
+  readonly namespace: MemoryNamespace;
+  readonly taskId?: TaskId;
+  readonly evidenceRefs: readonly string[];
+  readonly evidenceDigests: readonly string[];
+  readonly sourceRefs: readonly string[];
+  readonly inputDigest: string;
+}
+
+export interface MemoryContextPolicy {
+  readonly namespaces: readonly MemoryNamespace[];
+  readonly layers: readonly ('working' | 'episodic' | 'semantic' | 'procedural')[];
+  readonly allowCandidates: boolean;
+  readonly maxTokenBudget: number;
+  readonly evidenceRequired: boolean;
+}
+
+export interface MemoryRecallRequest {
+  readonly agentRuntimeId: string;
+  readonly bindingRef: string;
+  readonly projectKey: string;
+  readonly policy: MemoryContextPolicy;
+  readonly query?: string;
+}
+
+export interface MemoryInteractionPort {
+  open(input: {
+    readonly actor: MemoryActorContext;
+    readonly projectKey: string;
+    readonly namespace: MemoryNamespace;
+    readonly taskId?: TaskId;
+  }): Promise<MemoryViewHandle>;
+  query(input: {
+    readonly actor: MemoryActorContext;
+    readonly projectKey: string;
+    readonly namespace: MemoryNamespace;
+    readonly query: string;
+    readonly limit: number;
+  }): Promise<MemoryView>;
+  inspect(input: {
+    readonly actor: MemoryActorContext;
+    readonly sourceRef: string;
+    readonly sourceDigest: string;
+  }): Promise<MemoryDetailView>;
+  compare(input: {
+    readonly actor: MemoryActorContext;
+    readonly leftRef: string;
+    readonly rightRef: string;
+  }): Promise<MemoryComparisonView>;
+  review(input: {
+    readonly actor: MemoryActorContext;
+    readonly candidateId: string;
+    readonly decision: 'approve' | 'reject' | 'defer';
+    readonly decisionReason: string;
+  }): Promise<MemoryReviewReceipt>;
+  promote(input: {
+    readonly actor: MemoryActorContext;
+    readonly candidateId: string;
+    readonly from: 'project';
+    readonly to: 'global';
+    readonly reason: string;
+    readonly impactScope: string;
+    readonly approvalRef: string;
+    readonly sourceRefs: readonly string[];
+  }): Promise<MemoryPromotionReceipt>;
+  planForgetting(input: MemoryForgettingRequest): Promise<MemoryForgettingPlan>;
+}
+
+export interface MemoryViewHandle {
+  readonly handleId: string;
+  readonly actorId: string;
+  readonly projectKey: string;
+  readonly namespace: MemoryNamespace;
+  readonly taskId?: TaskId;
+  readonly readOnly: true;
+}
+
+export interface MemoryView {
+  readonly handle: MemoryViewHandle;
+  readonly entries: readonly MemoryQueryEntry[];
+  readonly indexVersion?: string;
+  readonly omitted: readonly { readonly reason: string; readonly ref?: string }[];
+}
+
+export interface MemoryDetailView {
+  readonly handle: MemoryViewHandle;
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly content: string;
+}
+
+export interface MemoryComparisonView {
+  readonly handle: MemoryViewHandle;
+  readonly leftRef: string;
+  readonly rightRef: string;
+  readonly relation: 'same' | 'different' | 'unknown';
+  readonly evidenceRefs: readonly string[];
 }
 
 export interface OrganHealthSnapshot { readonly organId: OrganId; readonly checkedAt: string; readonly expiresAt: string; readonly overall: HealthState; readonly functions: readonly { readonly functionId: string; readonly status: 'healthy' | 'degraded' | 'failed' | 'unknown'; readonly measurements: readonly { readonly name: string; readonly value: string | number; readonly unit?: string }[]; readonly evidenceRefs: readonly EvidenceRef[] }[]; }

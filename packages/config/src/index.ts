@@ -45,6 +45,14 @@ export interface UserConfig {
     readonly defaultAgent?: string;
     readonly reviewRequired?: boolean;
   };
+  readonly memory?: {
+    readonly update: {
+      readonly auto: boolean;
+    };
+    readonly audit: {
+      readonly promptRef: string;
+    };
+  };
   readonly execution?: {
     readonly maxConcurrentTasks?: number;
     readonly stopTimeoutMs?: number;
@@ -104,6 +112,8 @@ export class ConfigurationError extends Error {
     this.nextAction = nextAction;
   }
 }
+
+export const DEFAULT_MEMORY_AUDIT_PROMPT_REF = 'project-memory-audit';
 
 function fail(code: string, message: string, nextAction = '修正配置后重新运行'): never {
   throw new ConfigurationError(code, message, nextAction);
@@ -313,9 +323,27 @@ function validateDshExecution(value: unknown, label: string): DshExecutionConfig
   };
 }
 
+function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']> {
+  const memory = asRecord(value, 'memory');
+  rejectUnknownKeys(memory, ['update', 'audit'], 'memory config');
+  const update = memory.update === undefined ? {} : asRecord(memory.update, 'memory.update');
+  const audit = memory.audit === undefined ? {} : asRecord(memory.audit, 'memory.audit');
+  rejectUnknownKeys(update, ['auto'], 'memory.update');
+  rejectUnknownKeys(audit, ['prompt_ref'], 'memory.audit');
+  const auto = update.auto === undefined ? false : update.auto;
+  if (typeof auto !== 'boolean') fail('config-invalid', 'memory.update.auto must be boolean');
+  const promptRef = audit.prompt_ref === undefined
+    ? DEFAULT_MEMORY_AUDIT_PROMPT_REF
+    : asString(audit.prompt_ref, 'memory.audit.prompt_ref');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/.test(promptRef) || promptRef.split('/').includes('..')) {
+    fail('config-invalid', 'memory.audit.prompt_ref must be a typed source reference');
+  }
+  return { update: { auto }, audit: { promptRef } };
+}
+
 export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   for (const key of INTERNAL_CONFIG_KEYS) if (key in value) fail('config-policy', `user config cannot define internal key: ${key}`);
-  rejectUnknownKeys(value, ['schemaVersion', 'agents', 'project', 'execution'], 'user config');
+  rejectUnknownKeys(value, ['schemaVersion', 'agents', 'project', 'memory', 'execution'], 'user config');
   if (value.schemaVersion !== CONFIG_SCHEMA_VERSION) fail('config-version', `unsupported user config schema: ${String(value.schemaVersion)}`);
   if (!Array.isArray(value.agents) || value.agents.length === 0) fail('config-invalid', 'at least one agent is required');
   const agents = value.agents.map(validateAgent);
@@ -325,6 +353,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
     ids.add(agent.agentId);
   }
   const project = value.project === undefined ? undefined : asRecord(value.project, 'project');
+  const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'user project config');
   if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh'], 'user execution config');
@@ -339,6 +368,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
       ...(project.defaultAgent === undefined ? {} : { defaultAgent: asString(project.defaultAgent, 'project.defaultAgent') }),
       ...(project.reviewRequired === undefined ? {} : { reviewRequired: project.reviewRequired === true || project.reviewRequired === false ? project.reviewRequired : fail('config-invalid', 'project.reviewRequired must be boolean') }),
     }}),
+    ...(memory === undefined ? {} : { memory }),
     ...(execution === undefined ? {} : { execution: {
       ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks: maxConcurrentTasks as number }),
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
@@ -349,9 +379,10 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
 
 export function validateProjectOverride(value: Record<string, unknown>): Partial<UserConfig> {
   for (const key of INTERNAL_CONFIG_KEYS) if (key in value) fail('config-policy', 'project config cannot define internal key: ' + key);
-  const unknownKeys = Object.keys(value).filter((key) => key !== 'project' && key !== 'execution');
+  const unknownKeys = Object.keys(value).filter((key) => key !== 'project' && key !== 'memory' && key !== 'execution');
   if (unknownKeys.length > 0) fail('config-policy', 'project config contains unsupported key: ' + unknownKeys[0]);
   const project = value.project === undefined ? undefined : asRecord(value.project, 'project');
+  const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'project project config');
   if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs'], 'project execution config');
@@ -364,6 +395,7 @@ export function validateProjectOverride(value: Record<string, unknown>): Partial
       ...(project.defaultAgent === undefined ? {} : { defaultAgent: asString(project.defaultAgent, 'project.defaultAgent') }),
       ...(project.reviewRequired === undefined ? {} : { reviewRequired: project.reviewRequired === true || project.reviewRequired === false ? project.reviewRequired : fail('config-invalid', 'project.reviewRequired must be boolean') }),
     }}),
+    ...(memory === undefined ? {} : { memory }),
     ...(execution === undefined ? {} : { execution: {
       ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks: maxConcurrentTasks as number }),
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
@@ -700,6 +732,7 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
     schemaVersion: user.schemaVersion,
     agents: [...user.agents],
     project: { ...user.project, ...projectOverride?.project },
+    memory: projectOverride?.memory ?? user.memory,
     execution: { ...user.execution, ...projectOverride?.execution },
   };
   const templateRoot = configuredTemplateRoot();

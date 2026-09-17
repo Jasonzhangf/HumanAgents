@@ -464,3 +464,56 @@ test('rejects misspelled user and project configuration keys', async () => {
   }
   assert.equal(String(projectError).includes('project execution config contains unsupported key: maxConcurrntTasks'), true);
 });
+
+test('parses memory update and audit config with safe defaults', () => {
+  const parsed = parseToml('schemaVersion = 1\n[memory.update]\nauto = true\n[memory.audit]\nprompt_ref = "project-memory-audit"\n');
+  const parsedMemory = parsed.memory as {
+    readonly update: { readonly auto: boolean };
+    readonly audit: { readonly prompt_ref: string };
+  };
+  assert.equal(parsedMemory.update.auto, true);
+  assert.equal(parsedMemory.audit.prompt_ref, 'project-memory-audit');
+
+  const agents = [{
+    agentId: 'memory-default',
+    roleId: 'memory',
+    templateRef: 'builtin/memory@1.0.0',
+    driverRef: 'fake',
+    skills: ['history-search', 'novelty-review', 'recurrence-review'],
+    tools: ['memory.search', 'memory.ask', 'task.history', 'session.history'],
+    permissions: ['task.read', 'memory.read', 'memory.propose'],
+    memoryScopes: ['task'],
+    resourceClass: 'background',
+  }];
+  const disabled = validateUserConfig({ schemaVersion: 1, agents, memory: {} });
+  assert.equal(disabled.memory?.update.auto, false);
+  assert.equal(disabled.memory?.audit.promptRef, 'project-memory-audit');
+
+  const enabled = validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    memory: { update: { auto: true }, audit: { prompt_ref: 'source://project-a/audit@r2' } },
+  });
+  assert.equal(enabled.memory?.update.auto, true);
+  assert.equal(enabled.memory?.audit.promptRef, 'source://project-a/audit@r2');
+
+  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { update: { auto: 'yes' } } }), /memory.update.auto must be boolean/);
+  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt: 'embedded text' } } }), /memory.audit contains unsupported key: prompt/);
+  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '' } } }), /memory.audit.prompt_ref must be a non-empty string/);
+  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '../prompt' } } }), /memory.audit.prompt_ref must be a typed source reference/);
+});
+
+test('project memory overrides remain project-scoped and explicit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-memory-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[memory.update]\nauto = true\n[memory.audit]\nprompt_ref = "source://project-a/audit@r2"\n', 'utf8');
+  const loaded = await loadConfiguration(paths);
+  assert.equal(loaded.effective.memory?.update.auto, true);
+  assert.equal(loaded.effective.memory?.audit.promptRef, 'source://project-a/audit@r2');
+
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[memory.update]\nauto = true\ntarget = "global"\n', 'utf8');
+  await assert.rejects(() => loadConfiguration(paths), /memory.update contains unsupported key: target/);
+});

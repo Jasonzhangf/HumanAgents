@@ -1,11 +1,42 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ContractError, id, type MemoryScope } from '../../../packages/contracts/src/index.js';
+import {
+  ContractError,
+  id,
+  type MemoryActorContext,
+  type MemoryQueryRequest,
+  type MemoryScope,
+} from '../../../packages/contracts/src/index.js';
 import { DeterministicMemoryBackend } from '../../../packages/adapters/memory/src/index.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const taskScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const actor: MemoryActorContext = {
+  actorId: 'actor-a',
+  roleId: 'memory',
+  permissions: ['memory.read', 'memory.propose', 'memory.review', 'memory.promote', 'memory.forget'],
+  projectKey: 'project-a',
+};
+
+function memoryQuery(overrides: Partial<MemoryQueryRequest> = {}): MemoryQueryRequest {
+  return {
+    requestId: 'query-a',
+    operationId: id('operation', 'query-a'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project',
+    taskId: task,
+    query: 'fact',
+    kinds: ['semantic'],
+    states: ['approved', 'active'],
+    limit: 10,
+    tokenBudget: 100,
+    inputDigest: 'sha256:query-a',
+    ...overrides,
+  };
+}
 
 test('memory backend performs exact/full-text search, inspect, and compare', async () => {
   const memory = new DeterministicMemoryBackend();
@@ -62,4 +93,56 @@ test('context recall filters layers, enforces budget, and binds attach epoch', a
   const attach = await memory.attach({ agentRuntimeId: 'runtime-a', context: bounded });
   assert.deepEqual(attach, { contextId: bounded.contextId, attached: true });
   await assert.rejects(memory.attach({ agentRuntimeId: 'runtime-a', context: { ...current, executionEpoch: 1 } }), ContractError);
+});
+
+test('memory backend filters task ids exactly and keeps forgetting atomic', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const taskAB = id('task', 'task-ab');
+  memory.addCanonicalRecord({
+    memoryId: 'memory-a',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'fact a',
+    sourceRefs: ['journal://project-a/1'],
+    sourceDigests: ['sha256:a'],
+    taskId: task,
+    sourceScopeRef: 'project-a:task-a',
+    relevanceReason: 'test',
+  });
+  memory.addCanonicalRecord({
+    memoryId: 'memory-ab',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'fact ab',
+    sourceRefs: ['journal://project-a/2'],
+    sourceDigests: ['sha256:ab'],
+    taskId: taskAB,
+    sourceScopeRef: 'project-a:task-ab',
+    relevanceReason: 'test',
+  });
+
+  const queried = await memory.query(memoryQuery());
+  assert.deepEqual(queried.entries.map((entry) => entry.memoryId), ['memory-a']);
+
+  const plan = {
+    planId: 'forget-a',
+    namespace: 'project' as const,
+    projectKey: 'project-a',
+    actions: [
+      { memoryId: 'memory-a', action: 'archive' as const, reason: 'retention', sourceRefs: ['journal://project-a/1'] },
+      { memoryId: 'missing-memory', action: 'archive' as const, reason: 'retention', sourceRefs: ['journal://project-a/3'] },
+    ],
+    protectedRefs: [],
+    createdAt: '2026-09-17T00:00:00Z',
+  };
+  await assert.rejects(
+    memory.planForgetting({ actor, plan }),
+    ContractError,
+  );
+  const unchanged = await memory.query(memoryQuery());
+  assert.equal(unchanged.entries[0].state, 'approved');
 });

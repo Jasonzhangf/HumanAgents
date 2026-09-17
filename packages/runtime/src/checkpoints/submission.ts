@@ -393,6 +393,10 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
       }
       return { state: 'committed', record: existing };
     }
+    const verification = await input.journal.verify(input.checkpoint.scope);
+    if (!verification.valid) {
+      throw new CheckpointSubmissionError(`checkpoint journal is invalid: ${verification.reason}`);
+    }
     const latest = await input.journal.readLatest(input.checkpoint.scope);
     if (!latest || !sameCheckpoint(latest.checkpoint, input.checkpoint)) {
       throw new CheckpointSubmissionError('reentry checkpoint is not the committed latest checkpoint');
