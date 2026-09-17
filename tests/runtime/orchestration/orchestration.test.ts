@@ -332,6 +332,7 @@ test('runtime pool rejects startup completed after dispose and cleans the genera
   await started;
   const disposing = await pool.dispose();
   assert.equal(disposing.status, 'disposed');
+  assert.deepEqual(factory.disposeInputs, []);
 
   releaseStart();
   const acquired = await acquiring;

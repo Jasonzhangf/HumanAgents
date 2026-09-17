@@ -406,7 +406,6 @@ export class AgentRuntimePoolManager {
   }
 
   private disposeRuntime(runtime: RuntimeRecord): Promise<void> {
-    if (runtime.state === 'disposed') return Promise.resolve();
     if (runtime.disposePromise) return runtime.disposePromise;
     const binding = runtime.lease ?? runtime.binding;
     runtime.disposePromise = (async () => {
@@ -487,6 +486,10 @@ export class AgentRuntimePoolManager {
     const issues: OrchestrationIssue[] = [];
     for (const runtime of this.runtimes.values()) {
       if (runtime.state === 'disposed') continue;
+      if (runtime.state === 'spawning') {
+        runtime.state = 'disposed';
+        continue;
+      }
       try {
         await this.disposeRuntime(runtime);
       } catch (error) {
