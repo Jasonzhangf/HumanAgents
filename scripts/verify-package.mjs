@@ -16,10 +16,11 @@ await mkdir(workspace, { recursive: true });
 execFileSync('npm', ['install', '--prefix', prefix, '--ignore-scripts', packagePath], { stdio: 'inherit' });
 const cli = join(prefix, 'node_modules', '.bin', 'humanagent');
 execFileSync(cli, ['doctor', '--workspace', workspace, '--control-root', controlRoot], { stdio: 'inherit' });
-execFileSync(cli, ['run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'package-smoke'], { stdio: 'inherit' });
+const runArgs = ['run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'package-smoke', '--prompt', 'package smoke'];
+execFileSync(cli, runArgs, { stdio: 'inherit' });
 let lifecycleError = '';
 try {
-  execFileSync(cli, ['run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'package-smoke'], { encoding: 'utf8' });
+  execFileSync(cli, runArgs, { encoding: 'utf8' });
 } catch (error) {
   lifecycleError = `${error.stdout || ''}${error.stderr || ''}`;
 }

@@ -275,12 +275,17 @@ test('assembled CLI bin remains executable', async () => {
   const releaseRoot = join(fixtureValue.root, 'release');
   await mkdir(join(fixtureValue.projectRoot, 'dist', 'app'), { recursive: true });
   await mkdir(join(fixtureValue.projectRoot, 'dist', 'app', 'agent-templates', 'templates', 'builtin'), { recursive: true });
+  await mkdir(join(fixtureValue.projectRoot, 'packages', 'contracts', 'dist'), { recursive: true });
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'agent-templates', 'templates', 'builtin', 'prompt-registry.json'), '{}\n', 'utf8');
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'placeholder.txt'), 'runtime\n', 'utf8');
+  await writeFile(join(fixtureValue.projectRoot, 'packages', 'contracts', 'dist', 'index.js'), 'export const id = (scope, value) => ({ scope, value });\n', 'utf8');
   const result = await assemblePackage({ projectRoot: fixtureValue.projectRoot, releaseRoot, version: '0.1.0' });
   const mode = (await stat(join(result.packageRoot, 'bin', 'humanagent.mjs'))).mode;
   assert.equal(mode & 0o111, 0o111);
   assert.equal((await stat(join(result.packageRoot, 'runtime', 'agent-templates', 'templates', 'builtin', 'prompt-registry.json'))).isFile(), true);
+  const contractsPackage = JSON.parse(await readFile(join(result.packageRoot, 'runtime', 'node_modules', '@humanagent', 'contracts', 'package.json'), 'utf8'));
+  assert.equal(contractsPackage.name, '@humanagent/contracts');
+  assert.equal(contractsPackage.exports['.'], './dist/index.js');
 });
 
 async function releaseFixture() {

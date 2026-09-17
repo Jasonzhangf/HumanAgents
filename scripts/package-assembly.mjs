@@ -10,6 +10,15 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
   await cp(join(projectRoot, 'dist', 'app'), join(packageRoot, 'runtime'), { recursive: true });
   const artifactDigest = await treeDigest(join(projectRoot, 'dist', 'app'));
   if (await treeDigest(join(packageRoot, 'runtime')) !== artifactDigest) throw new Error('packaged runtime does not match compiled artifact');
+  const contractsRoot = join(packageRoot, 'runtime', 'node_modules', '@humanagent', 'contracts');
+  await mkdir(contractsRoot, { recursive: true });
+  await cp(join(projectRoot, 'packages', 'contracts', 'dist'), join(contractsRoot, 'dist'), { recursive: true });
+  await writeFile(join(contractsRoot, 'package.json'), JSON.stringify({
+    name: '@humanagent/contracts',
+    version,
+    type: 'module',
+    exports: { '.': './dist/index.js' },
+  }, null, 2) + '\n', 'utf8');
   const packageJson = {
     name: 'humanagent-cli',
     version,
