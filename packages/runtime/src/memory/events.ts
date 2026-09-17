@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   id,
   type BusinessPayload,
@@ -84,18 +85,8 @@ function safeOperationSegment(value: string): boolean {
 }
 
 function operationIdForEvent(event: EventRecord): string {
-  const hash = (value: string): string => {
-    let result = 0x811c9dc5;
-    for (let index = 0; index < value.length; index += 1) {
-      result ^= value.charCodeAt(index);
-      result = Math.imul(result, 0x01000193) >>> 0;
-    }
-    return result.toString(16).padStart(8, '0');
-  };
-  const stream = hash(event.streamId);
-  const message = hash(event.messageId);
-  const pair = hash(`${event.streamId.length}\0${event.messageId.length}\0${stream}\0${message}`);
-  return `memory-analysis-${stream}${message}${pair}`;
+  const identity = `${event.streamId.length}:${event.streamId}${event.messageId.length}:${event.messageId}`;
+  return `memory-analysis-${createHash('sha256').update(identity).digest('hex')}`;
 }
 
 function sameId(

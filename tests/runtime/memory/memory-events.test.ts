@@ -386,6 +386,34 @@ test('memory analysis operation ids distinguish the same message id on different
   assert.equal(new Set(operationIds).size, 2);
 });
 
+test('memory analysis operation ids distinguish colliding short-hash message ids', async () => {
+  const operationIds: string[] = [];
+  for (const messageId of ['d-xj', 'xFla']) {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    const bus = ports(journal, registry);
+    await publishEvent(bus, {
+      publisherId: publisher.publisherId,
+      event: event({ messageId, streamId: streamId }),
+    });
+    await consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: {
+          admit: async ({ request }) => {
+            operationIds.push(request.operationId.value);
+            return { status: 'ready', value: { admissionRef: `admission-${messageId}` } };
+          },
+        },
+        now: () => occurredAt,
+      }),
+    );
+  }
+  assert.equal(new Set(operationIds).size, 2);
+});
+
 test('memory analysis operation ids stay valid for contract-valid stream ids', async () => {
   const stream = `stream:${'a'.repeat(120)}`;
   const journal = new FakeJournal();
@@ -416,7 +444,7 @@ test('memory analysis operation ids stay valid for contract-valid stream ids', a
   );
   assert.ok(operationId);
   if (operationId === undefined) throw new Error('missing operation id');
-  assert.equal(operationId.length, 40);
+  assert.equal(operationId.length, 80);
   assert.ok(operationId.startsWith('memory-analysis-'));
 });
 
