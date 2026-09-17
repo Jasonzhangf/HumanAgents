@@ -1,0 +1,5 @@
+{
+  "fixture": "explicit-brain-negative",
+  "description": "Unconfirmed requirements and runtime-only capabilities must be rejected.",
+  "expected": "rejected"
+}

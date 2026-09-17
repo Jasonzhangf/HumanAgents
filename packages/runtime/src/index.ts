@@ -19,3 +19,4 @@ export * from './nodes/node-strategies.js';
 export * from './nodes/node-types.js';
 export * from './review/index.js';
 export * from './ui-runtime/coordinator.js';
+export * from './explicit-brain/index.js';

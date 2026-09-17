@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cwd } from 'node:process';
@@ -9,11 +9,13 @@ import {
   AgentTemplateError,
   AGENT_ROLE_IDS,
   assertUniqueTemplateOwners,
+  builtinAgentTemplateRegistry,
   compileAgentTemplate,
   createFilePromptSource,
   digestAgentTemplate,
   digestPromptSegments,
   loadAgentTemplate,
+  loadBuiltinAgentTemplate,
   loadBuiltinPromptRegistry,
   loadBuiltinPromptSegments,
   loadAgentPromptSegments,
@@ -269,17 +271,64 @@ test('builtin roles resolve all external markdown prompt segments', async () => 
   }
 });
 
+test('interaction 1.1.0 exposes only its versioned model-facing tools', () => {
+  const current = builtinAgentTemplateRegistry('interaction', '1.1.0');
+  assert.equal(current.toolCapabilities.includes('input.receive'), false);
+  assert.equal(current.toolCapabilities.includes('proposal.render'), false);
+  assert.equal(current.toolCapabilities.includes('interaction.propose'), true);
+  assert.equal(current.toolCapabilities.includes('requirement.submit'), true);
+});
+
 test('builtin prompt loading rejects version and content drift', async () => {
   const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
   const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-prompts-'));
   execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
   await assert.rejects(
     () => loadBuiltinPromptSegments('execution', root, '2.0.0'),
-    /version is not locked/,
+    /unsupported builtin prompt registry version|version is not locked/,
   );
   await writeFile(join(root, 'builtin', 'execution', 'identity.md'), '# drift\n', 'utf8');
   await assert.rejects(
     () => loadBuiltinPromptSegments('execution', root, '1.0.0'),
     /content drift detected/,
+  );
+});
+
+test('builtin template loading rejects a declared resource that is missing', async () => {
+  const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-template-'));
+  execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
+  execFileSync('rm', [join(root, 'builtin', 'interaction', 'v1.1.0', 'policy.json')]);
+
+  await assert.rejects(
+    () => loadBuiltinAgentTemplate(root, 'interaction', '1.1.0'),
+    /builtin template resource is missing: interaction\/v1\.1\.0\/policy\.json/,
+  );
+});
+
+test('builtin template loading validates the manifest even without an external registry', async () => {
+  const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-template-invalid-'));
+  execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
+  const manifestPath = join(root, 'builtin', 'interaction', 'v1.1.0', 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as AgentTemplateManifest;
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, digest: 'fnv1a:forged' }, null, 2) + '\n', 'utf8');
+
+  await assert.rejects(
+    () => loadBuiltinAgentTemplate(root, 'interaction', '1.1.0'),
+    /template digest does not match its locked content/,
+  );
+});
+
+test('builtin template loading rejects unsupported or mismatched versions', async () => {
+  const root = join(cwd(), 'packages', 'agent-templates', 'templates');
+
+  await assert.rejects(
+    () => loadBuiltinAgentTemplate(root, 'interaction', '2.0.0'),
+    /unsupported builtin template version: interaction@2\.0\.0/,
+  );
+  await assert.rejects(
+    () => loadBuiltinAgentTemplate(root, 'execution', '1.1.0'),
+    /unsupported builtin template version: execution@1\.1\.0/,
   );
 });

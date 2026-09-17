@@ -1,0 +1,41 @@
+{
+  "kind": "humanagent.agent-observation-projection",
+  "projectionRef": "builtin/interaction@1.1.0",
+  "readOnly": true,
+  "fields": [
+    {
+      "name": "runtimeBindingRef",
+      "source": "runtime.binding"
+    },
+    {
+      "name": "interactionId",
+      "source": "interaction.id"
+    },
+    {
+      "name": "decision",
+      "source": "agent.decision"
+    },
+    {
+      "name": "toolIntents",
+      "source": "agent.tool-intents"
+    },
+    {
+      "name": "receipts",
+      "source": "operation.receipts"
+    },
+    {
+      "name": "attentionRefs",
+      "source": "attention.refs"
+    },
+    {
+      "name": "evidenceRefs",
+      "source": "decision.evidence"
+    }
+  ],
+  "forbiddenActions": [
+    "consume-requirement",
+    "modify-queue",
+    "retry-operation",
+    "execute-steer"
+  ]
+}

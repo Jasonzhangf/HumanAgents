@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/interaction/1.1.0/output",
+  "title": "Explicit Brain Interaction Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "toolIntents"
+  ],
+  "properties": {
+    "replyRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decisionId",
+        "interactionId",
+        "kind",
+        "selectedAction",
+        "summary",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "decisionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "interactionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "input-classification",
+            "task-match",
+            "intent",
+            "attention-triage",
+            "priority-proposal",
+            "route-selection",
+            "notification-policy",
+            "memory-trigger"
+          ]
+        },
+        "selectedAction": {
+          "enum": [
+            "answer",
+            "ask-user",
+            "create-attention",
+            "update-attention",
+            "submit-requirement",
+            "submit-trigger",
+            "report-bug",
+            "request-memory",
+            "notify",
+            "wait",
+            "reject"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "toolIntents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "toolIntentId",
+          "toolRef",
+          "arguments",
+          "argumentsDigest",
+          "reasonRefs",
+          "selectedBecause"
+        ],
+        "properties": {
+          "toolIntentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "interactionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "toolRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "arguments": {
+            "type": "object"
+          },
+          "argumentsDigest": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reasonRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "selectedBecause": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

@@ -187,6 +187,107 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   assert.equal(journal.includes('"source":"humanagent.fake-provider"'), false);
 });
 
+test('explicit brain confirmation is the only path from input to FIFO execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-brain-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:task-detail',
+    rawInput: 'summarize the current task evidence',
+    channel: 'business',
+  });
+
+  assert.equal(service.listTasks().counts.total, 0);
+  const awaiting = await service.inspectExplicitInteraction(interactionId);
+  assert.equal(awaiting.state, 'received');
+  assert.equal(awaiting.draft, undefined);
+
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'summarize the current task evidence',
+    matchedTasks: [],
+    knownFacts: ['no matching task'],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create a task for the confirmed evidence request',
+  });
+
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.equal(proposed.state, 'awaiting-confirmation');
+  assert.ok(proposed.draft);
+  assert.equal(service.listTasks().counts.total, 0);
+
+  await assert.rejects(
+    () => service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:explicit-brain',
+      confirmedBy: '',
+      confirmedAt: '2026-09-17T00:00:00.000Z',
+      payloadRef: 'asset://requirements/explicit-brain',
+    }),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'ExplicitIntakeError'
+      && error.httpStatus === 409,
+  );
+  assert.equal(service.listTasks().counts.total, 0);
+
+  const receipt = await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:explicit-brain',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    payloadRef: 'asset://requirements/explicit-brain',
+  });
+  assert.equal(receipt.requirement.requirementId, 'requirement:draft-1:1');
+  assert.equal(receipt.requirement.status, 'submitted');
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.fifoSeq, 1);
+  assert.equal(dispatched.taskId.value.startsWith('ui-task-'), true);
+  assert.equal(dispatched.executionEpoch, 1);
+  await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'succeeded'));
+  assert.equal(service.taskDashboard(dispatched.taskId).input, 'asset://requirements/explicit-brain');
+  assert.match(service.taskDashboard(dispatched.taskId).output, /fake replay/);
+  const events = service.eventsSince(dispatched.operationId);
+  assert.deepEqual(events.map((event) => event.kind), [
+    'execution.started',
+    'provider.model',
+    'provider.output',
+    'provider.tool',
+    'provider.output',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ]);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
+test('explicit brain status query never creates a task or FIFO entry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:task-detail',
+    rawInput: 'what is the current status?',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  const receipt = await service.completeExplicitStatusQuery(interactionId);
+
+  assert.deepEqual(receipt, {
+    kind: 'status-only',
+    interactionId,
+    owner: 'explicit-intake',
+    nextAction: 'present-status',
+  });
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'status-only');
+});
+
 test('runtime output concatenates repeated provider deltas without suffix dedupe', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-output-dedupe-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({

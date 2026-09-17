@@ -1,0 +1,15 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests-explicit-brain",
+    "noEmitOnError": true
+  },
+  "include": [
+    "**/*.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/agent-templates/src/**/*.ts",
+    "../../../packages/runtime/src/**/*.ts"
+  ]
+}

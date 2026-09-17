@@ -155,6 +155,34 @@ export type EventConsumerHandler = (
   delivery: EventDelivery,
 ) => EventHandlerCommit | Promise<EventHandlerCommit>;
 
+export interface EventOperationBarrierIntent {
+  readonly consumerKey: string;
+  readonly messageId: string;
+  readonly disposition: Exclude<EventConsumerDisposition, 'terminal-failure'>;
+  readonly completionMode: 'operation-barrier';
+  readonly internalEffectFacts: readonly string[];
+  readonly externalOperationRefs: readonly string[];
+  readonly failureRef?: string;
+}
+
+/**
+ * A barrier driver owns the ordering boundary: persist the exact commit intent
+ * first, then perform external work, then return the same intent for settlement.
+ * `recover` is optional and must only reconcile or idempotently re-drive
+ * operations that were persisted before an interrupted execution.
+ */
+export interface EventOperationBarrierDriver {
+  prepare(delivery: EventDelivery): Promise<EventHandlerCommit>;
+  execute(
+    delivery: EventDelivery,
+    intent: EventOperationBarrierIntent,
+  ): Promise<void>;
+  recover?(
+    delivery: EventDelivery,
+    intent: EventOperationBarrierIntent,
+  ): Promise<void>;
+}
+
 export interface ConsumeEventsInput {
   readonly consumerKey: string;
   readonly limit: number;

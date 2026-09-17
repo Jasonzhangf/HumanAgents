@@ -1,0 +1,132 @@
+{
+  "kind": "humanagent.agent-template",
+  "templateApiVersion": 1,
+  "roleId": "interaction",
+  "templateVersion": "1.1.0",
+  "extends": {
+    "roleId": "_base",
+    "version": "1.0.0"
+  },
+  "capabilityRefs": [
+    "task.query",
+    "task.match",
+    "runtime.status",
+    "queue.inspect",
+    "resource.query",
+    "bug.query",
+    "bug.inspect",
+    "channel.query",
+    "memory.search",
+    "memory.inspect",
+    "memory.compare",
+    "memory.save_candidate",
+    "memory.operation.status",
+    "interaction.ask",
+    "interaction.propose",
+    "interaction.approve",
+    "channel.reply",
+    "channel.notify",
+    "requirement.submit",
+    "trigger.submit",
+    "route.submit",
+    "resource.request",
+    "subscription.request",
+    "attention.list",
+    "attention.inspect",
+    "attention.triage",
+    "attention.ack",
+    "attention.defer",
+    "attention.notify",
+    "attention.resolve",
+    "bug.report",
+    "bug.propose-update",
+    "bug.resolve",
+    "bug.reopen"
+  ],
+  "skillRefs": [
+    "input-normalization",
+    "channel-routing",
+    "task-matching",
+    "status-explanation",
+    "confirmation",
+    "attention-triage",
+    "priority-classification",
+    "async-memory-feedback",
+    "error-notification"
+  ],
+  "toolCapabilityRefs": [
+    "task.query",
+    "task.match",
+    "runtime.status",
+    "queue.inspect",
+    "resource.query",
+    "bug.query",
+    "bug.inspect",
+    "channel.query",
+    "memory.search",
+    "memory.inspect",
+    "memory.compare",
+    "memory.save_candidate",
+    "memory.operation.status",
+    "interaction.ask",
+    "interaction.propose",
+    "interaction.approve",
+    "channel.reply",
+    "channel.notify",
+    "requirement.submit",
+    "trigger.submit",
+    "route.submit",
+    "resource.request",
+    "subscription.request",
+    "attention.list",
+    "attention.inspect",
+    "attention.triage",
+    "attention.ack",
+    "attention.defer",
+    "attention.notify",
+    "attention.resolve",
+    "bug.report",
+    "bug.propose-update",
+    "bug.resolve",
+    "bug.reopen"
+  ],
+  "promptSegmentRefs": [
+    "interaction/profiles/explicit-brain/identity.md",
+    "interaction/profiles/explicit-brain/mission.md",
+    "interaction/profiles/explicit-brain/input-output.md",
+    "interaction/profiles/explicit-brain/failure.md",
+    "interaction/profiles/explicit-brain/boundaries.md"
+  ],
+  "inputSchemaRef": "interaction/v1.1.0/schemas/input.json",
+  "outputSchemaRef": "interaction/v1.1.0/schemas/output.json",
+  "policyRef": "interaction/v1.1.0/policy.json",
+  "observationProjectionRef": "interaction/v1.1.0/observation.json",
+  "testFixtureRefs": [
+    "interaction/v1.1.0/fixtures/positive.json",
+    "interaction/v1.1.0/fixtures/negative.json"
+  ],
+  "memoryContextPolicy": {
+    "allowedScopes": [
+      "task",
+      "organ",
+      "approved-global"
+    ],
+    "allowedLayers": [
+      "current",
+      "task-recent",
+      "related",
+      "approved-long-term",
+      "raw"
+    ],
+    "maxTokenBudget": 8192,
+    "required": false
+  },
+  "driverRequirements": {
+    "allowedDriverKinds": [
+      "fake",
+      "dsh"
+    ],
+    "requiredCapabilities": []
+  },
+  "digest": "fnv1a:194ed7a3"
+}

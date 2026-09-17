@@ -17,24 +17,117 @@ import {
   type MemoryContextScope,
 } from './types.js';
 
+const INTERACTION_1_0_CAPABILITIES = ['input.receive', 'input.normalize', 'task.match', 'task.query', 'status.explain', 'intent.confirm'] as const;
+const INTERACTION_1_1_CAPABILITIES = [
+  'input.receive',
+  'input.normalize',
+  'task.match',
+  'task.query',
+  'status.explain',
+  'intent.confirm',
+  'runtime.status',
+  'queue.inspect',
+  'resource.query',
+  'bug.query',
+  'bug.inspect',
+  'channel.query',
+  'memory.search',
+  'memory.inspect',
+  'memory.compare',
+  'memory.save_candidate',
+  'memory.operation.status',
+  'interaction.ask',
+  'interaction.propose',
+  'interaction.approve',
+  'channel.reply',
+  'channel.notify',
+  'requirement.submit',
+  'trigger.submit',
+  'route.submit',
+  'resource.request',
+  'subscription.request',
+  'attention.list',
+  'attention.inspect',
+  'attention.triage',
+  'attention.ack',
+  'attention.defer',
+  'attention.notify',
+  'attention.resolve',
+  'bug.report',
+  'bug.propose-update',
+  'bug.resolve',
+  'bug.reopen',
+] as const;
+
 const ROLE_CAPABILITIES: Readonly<Record<AgentRole, readonly string[]>> = {
-  interaction: ['input.receive', 'input.normalize', 'task.match', 'task.query', 'status.explain', 'intent.confirm'],
+  interaction: [...INTERACTION_1_0_CAPABILITIES, ...INTERACTION_1_1_CAPABILITIES.slice(INTERACTION_1_0_CAPABILITIES.length)],
   orchestration: ['plan', 'resource.allocate', 'queue.query', 'task.query', 'assignment.create', 'result.submit', 'review.orchestrate'],
   execution: ['worker.execute', 'search', 'coding', 'test', 'build'],
   review: ['audit.read', 'architecture.review', 'baseline.review', 'quality.review', 'security.review', 'delivery.review'],
   memory: ['memory.search', 'memory.ask', 'task.history', 'session.history', 'recurrence', 'novelty'],
 };
 
+const INTERACTION_1_0_SKILLS = ['input-normalization', 'task-matching', 'status-explanation', 'confirmation'] as const;
+const INTERACTION_1_1_SKILLS = [
+  'input-normalization',
+  'channel-routing',
+  'task-matching',
+  'status-explanation',
+  'confirmation',
+  'attention-triage',
+  'priority-classification',
+  'async-memory-feedback',
+  'error-notification',
+] as const;
+
 const ROLE_SKILLS: Readonly<Record<AgentRole, readonly string[]>> = {
-  interaction: ['input-normalization', 'task-matching', 'status-explanation', 'confirmation'],
+  interaction: [...INTERACTION_1_1_SKILLS],
   orchestration: ['stage-planning', 'resource-planning', 'result-checking', 'review-orchestration'],
   execution: ['single-capability-worker'],
   review: ['audit-standards', 'evidence-review'],
   memory: ['history-search', 'novelty-review', 'recurrence-review'],
 };
 
+const INTERACTION_1_0_TOOLS = ['input.receive', 'task.query', 'proposal.render'] as const;
+const INTERACTION_1_1_TOOLS = [
+  'task.query',
+  'task.match',
+  'runtime.status',
+  'queue.inspect',
+  'resource.query',
+  'bug.query',
+  'bug.inspect',
+  'channel.query',
+  'memory.search',
+  'memory.inspect',
+  'memory.compare',
+  'memory.save_candidate',
+  'memory.operation.status',
+  'interaction.ask',
+  'interaction.propose',
+  'interaction.approve',
+  'channel.reply',
+  'channel.notify',
+  'requirement.submit',
+  'trigger.submit',
+  'route.submit',
+  'resource.request',
+  'subscription.request',
+  'attention.list',
+  'attention.inspect',
+  'attention.triage',
+  'attention.ack',
+  'attention.defer',
+  'attention.notify',
+  'attention.resolve',
+  'bug.report',
+  'bug.propose-update',
+  'bug.resolve',
+  'bug.reopen',
+] as const;
+
 const ROLE_TOOLS: Readonly<Record<AgentRole, readonly string[]>> = {
-  interaction: ['input.receive', 'task.query', 'proposal.render'],
+  interaction: [...INTERACTION_1_0_TOOLS, ...INTERACTION_1_1_TOOLS.filter((tool) => !INTERACTION_1_0_TOOLS.includes(tool as never))],
   orchestration: ['task.query', 'queue.query', 'resource.query', 'assignment.create', 'result.submit'],
   execution: ['search', 'coding', 'test', 'build'],
   review: ['read.audit', 'test.audit', 'result.audit'],
@@ -44,8 +137,38 @@ const ROLE_TOOLS: Readonly<Record<AgentRole, readonly string[]>> = {
 const MEMORY_SCOPES: readonly MemoryContextScope[] = ['task', 'organ', 'approved-global'];
 const MEMORY_LAYERS: readonly MemoryContextLayer[] = ['current', 'task-recent', 'related', 'approved-long-term', 'raw'];
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const INTERACTION_1_0_PERMISSIONS = ['task.read', 'task.propose'] as const;
+const INTERACTION_1_1_PERMISSIONS = [
+  'task.read',
+  'task.propose',
+  'runtime.read',
+  'queue.read',
+  'resource.read',
+  'bug.read',
+  'bug.report',
+  'bug.propose-update',
+  'bug.resolve',
+  'bug.reopen',
+  'channel.read',
+  'channel.reply',
+  'channel.notify',
+  'memory.read',
+  'memory.propose',
+  'attention.read',
+  'attention.triage',
+  'attention.ack',
+  'attention.defer',
+  'attention.notify',
+  'attention.resolve',
+  'requirement.submit',
+  'trigger.submit',
+  'route.submit',
+  'resource.request',
+  'subscription.request',
+] as const;
+
 const ROLE_PERMISSIONS: Readonly<Record<AgentRole, readonly string[]>> = {
-  interaction: ['task.read', 'task.propose'],
+  interaction: [...INTERACTION_1_0_PERMISSIONS, ...INTERACTION_1_1_PERMISSIONS.slice(INTERACTION_1_0_PERMISSIONS.length)],
   orchestration: ['task.read', 'assignment.create', 'review.schedule'],
   execution: ['task.read', 'assignment.execute', 'workspace.read', 'workspace.write'],
   review: ['task.read', 'review.read'],
@@ -104,6 +227,32 @@ function assertDeclared(values: readonly string[], declared: readonly string[], 
   for (const value of values) {
     if (!declared.includes(value)) throw new AgentTemplateError(`undeclared ${label}: ${value}`);
   }
+}
+
+function roleCapabilities(roleId: AgentRole, version: string): readonly string[] {
+  return roleId === 'interaction' && version === '1.0.0' ? INTERACTION_1_0_CAPABILITIES : ROLE_CAPABILITIES[roleId];
+}
+
+function roleSkills(roleId: AgentRole, version: string): readonly string[] {
+  return roleId === 'interaction' && version === '1.0.0' ? INTERACTION_1_0_SKILLS : ROLE_SKILLS[roleId];
+}
+
+function roleTools(roleId: AgentRole, version: string): readonly string[] {
+  if (roleId === 'interaction') {
+    return version === '1.0.0' ? INTERACTION_1_0_TOOLS : INTERACTION_1_1_TOOLS;
+  }
+  return ROLE_TOOLS[roleId];
+}
+
+export function builtinAgentTemplateRegistry(
+  roleId: AgentRole,
+  templateVersion = '1.0.0',
+): AgentTemplateRegistry {
+  return {
+    capabilities: [...roleCapabilities(roleId, templateVersion)],
+    skills: [...roleSkills(roleId, templateVersion)],
+    toolCapabilities: [...roleTools(roleId, templateVersion)],
+  };
 }
 
 function stableStringify(value: unknown): string {
@@ -178,9 +327,9 @@ export function validateAgentTemplate(
   assertUnique(manifest.skillRefs, 'skill ref');
   assertUnique(manifest.toolCapabilityRefs, 'tool capability ref');
   assertUnique(manifest.testFixtureRefs, 'test fixture ref');
-  assertSubset(manifest.capabilityRefs, ROLE_CAPABILITIES[manifest.roleId], 'capability');
-  assertSubset(manifest.skillRefs, ROLE_SKILLS[manifest.roleId], 'skill');
-  assertSubset(manifest.toolCapabilityRefs, ROLE_TOOLS[manifest.roleId], 'tool capability');
+  assertSubset(manifest.capabilityRefs, roleCapabilities(manifest.roleId, manifest.templateVersion), 'capability');
+  assertSubset(manifest.skillRefs, roleSkills(manifest.roleId, manifest.templateVersion), 'skill');
+  assertSubset(manifest.toolCapabilityRefs, roleTools(manifest.roleId, manifest.templateVersion), 'tool capability');
   assertDeclared(manifest.capabilityRefs, registry.capabilities, 'capability');
   assertDeclared(manifest.skillRefs, registry.skills, 'skill');
   assertDeclared(manifest.toolCapabilityRefs, registry.toolCapabilities, 'tool capability');
@@ -279,15 +428,19 @@ export function assertUniqueTemplateOwners(owners: readonly AgentTemplateOwner[]
 export function validateConfiguredAgentBinding(binding: ConfiguredAgentBinding): void {
   if (!AGENT_ROLE_IDS.includes(binding.roleId)) throw new AgentTemplateError(`invalid configured agent role: ${binding.roleId}`);
   const expectedPrefix = `builtin/${binding.roleId}@`;
-  if (binding.templateRef !== `${expectedPrefix}1.0.0`) {
+  if (binding.templateRef !== `${expectedPrefix}1.0.0` && binding.templateRef !== `${expectedPrefix}1.1.0`) {
     throw new AgentTemplateError(`template ref is not locked to the configured role: ${binding.templateRef}`);
   }
+  const version = binding.templateRef.slice(expectedPrefix.length);
   if (binding.driverRef !== 'fake' && binding.driverRef !== 'dsh') {
     throw new AgentTemplateError(`driver is not enabled in the MVP host: ${binding.driverRef}`);
   }
-  assertSubset(binding.skills, ROLE_SKILLS[binding.roleId], 'skill');
-  assertSubset(binding.tools, ROLE_TOOLS[binding.roleId], 'tool');
-  assertSubset(binding.permissions, ROLE_PERMISSIONS[binding.roleId], 'permission');
+  const skills = roleSkills(binding.roleId, version);
+  const tools = roleTools(binding.roleId, version);
+  const permissions = binding.roleId === 'interaction' && version === '1.0.0' ? INTERACTION_1_0_PERMISSIONS : ROLE_PERMISSIONS[binding.roleId];
+  assertSubset(binding.skills, skills, 'skill');
+  assertSubset(binding.tools, tools, 'tool');
+  assertSubset(binding.permissions, permissions, 'permission');
   assertUnique(binding.skills, 'skill');
   assertUnique(binding.tools, 'tool');
   assertUnique(binding.permissions, 'permission');

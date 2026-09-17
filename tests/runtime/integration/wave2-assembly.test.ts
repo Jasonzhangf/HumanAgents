@@ -9,6 +9,7 @@ import {
   type EvidenceRef,
   type MemoryScope,
   type OperationId,
+  type RequirementEnvelope,
   type ScopeRef,
   type WorkAssignment,
   type WorkResult,
@@ -18,11 +19,13 @@ import { FakeAgentDriver } from '../../../packages/adapters/testing/src/index.js
 import {
   AgentRuntime,
   bindAgentDriver,
+  ConfirmationLedger,
   ExplicitIntake,
   HarnessNodeRuntime,
   MemoryCoordinator,
   NODE_STRATEGY_REFS,
   RequirementInbox,
+  RequirementSubmissionOwner,
   appendTaskRevision,
   assertReviewAssignment,
   checkAdmission,
@@ -145,10 +148,14 @@ class PostCommitMarkStoppedFailureRuntime extends AgentRuntime {
 
 async function confirmRequirement(): Promise<{
   readonly inbox: RequirementInbox;
-  readonly envelope: Awaited<ReturnType<ExplicitIntake['confirm']>>;
+  readonly envelope: RequirementEnvelope;
 }> {
   const inbox = new RequirementInbox();
-  const intake = new ExplicitIntake(inbox);
+  const intake = new ExplicitIntake();
+  const ledger = new ConfirmationLedger();
+  const submissions = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) { return { requirementId: envelope.requirementId }; },
+  });
   const interactionId = await intake.receive({
     sourceRef: 'ui:task-wave2',
     rawInput: 'append integration evidence',
@@ -166,14 +173,40 @@ async function confirmRequirement(): Promise<{
   });
   const snapshot = await intake.inspect(interactionId);
   assert.ok(snapshot.draft);
-  const envelope = await intake.confirm({
+  const confirmed = await intake.prepareConfirmation({
     draftId: snapshot.draft.draftId,
-    requirementId: 'requirement-wave2',
     inputRevision: 1,
+    confirmationRef: 'confirmation:requirement-wave2',
     confirmedBy: 'human:operator',
     confirmedAt: '2026-09-11T00:00:00.000Z',
     payloadRef: requirementPayloadRef,
   });
+  ledger.registerDraft({
+    interactionId: confirmed.interactionId,
+    draftId: confirmed.draftId,
+    inputRevision: confirmed.inputRevision,
+    normalizedInput: confirmed.normalizedInput,
+    intent: confirmed.intent,
+    taskRef: confirmed.taskRef,
+    payloadRef: confirmed.payloadRef,
+  });
+  ledger.confirm({
+    interactionId: confirmed.interactionId,
+    draftId: confirmed.draftId,
+    inputRevision: confirmed.inputRevision,
+    confirmationRef: confirmed.confirmationRef,
+    confirmedBy: confirmed.confirmedBy,
+    confirmedAt: confirmed.confirmedAt,
+  });
+  const receipt = await submissions.submit({
+    interactionId: confirmed.interactionId,
+    draftId: confirmed.draftId,
+    confirmationRef: confirmed.confirmationRef,
+    inputRevision: confirmed.inputRevision,
+  });
+  const envelope = inbox.find(receipt.draftId);
+  assert.ok(envelope);
+  await intake.markDraftDispatched(envelope.draftId);
   return { inbox, envelope };
 }
 

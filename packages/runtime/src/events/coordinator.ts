@@ -32,6 +32,8 @@ import type {
   EventHandlerCommit,
   EventHandlerCommitIntent,
   EventHandlerRetryIntent,
+  EventOperationBarrierDriver,
+  EventOperationBarrierIntent,
   EventOperationBlocked,
   EventRecord,
   EventRetryObligation,
@@ -49,10 +51,6 @@ export interface PublishEventInput {
   readonly publisherId: string;
   readonly event: EventEnvelope;
 }
-
-type EventOperationBarrierIntent = EventHandlerCommitIntent & {
-  readonly completionMode: 'operation-barrier';
-};
 
 export interface EventBarrierIntent {
   readonly consumerKey: string;
@@ -189,7 +187,7 @@ async function persistBarrierIntent(
   ports: EventBusPorts,
   consumer: EventConsumerBinding,
   event: EventRecord,
-  intent: EventOperationBarrierIntent,
+  intent: EventHandlerCommitIntent & { readonly completionMode: 'operation-barrier' },
 ): Promise<EventOperationBarrierIntent> {
   assertCommitIntentShape(consumer, event, intent);
   const requested: EventBarrierIntent = {
@@ -202,6 +200,40 @@ async function persistBarrierIntent(
   const stored = await ports.barrierIntents.commitBarrierIntent(requested);
   assertCanonicalBarrierIntent(stored, requested);
   return stored.intent;
+}
+
+async function prepareBarrier(
+  ports: EventBusPorts,
+  consumer: EventConsumerBinding,
+  event: EventRecord,
+  delivery: Parameters<EventConsumerHandler>[0],
+  driver: EventOperationBarrierDriver,
+): Promise<EventHandlerCommit> {
+  const prepared = await driver.prepare(delivery);
+  if (isRetryIntent(prepared)) return prepared;
+  if (prepared.completionMode === 'journal-atomic') return prepared;
+  if (prepared.completionMode !== 'operation-barrier') {
+    throw new EventConsumerError('barrier driver must prepare an operation-barrier commit');
+  }
+  const persisted = await persistBarrierIntent(
+    ports,
+    consumer,
+    event,
+    prepared as EventHandlerCommitIntent & { readonly completionMode: 'operation-barrier' },
+  );
+  await driver.execute(delivery, persisted);
+  return persisted;
+}
+
+async function recoverBarrier(
+  driver: EventOperationBarrierDriver,
+  delivery: Parameters<EventConsumerHandler>[0],
+  intent: EventOperationBarrierIntent,
+): Promise<void> {
+  if (!driver.recover) {
+    throw new EventConsumerError('persisted barrier requires a recover-capable driver');
+  }
+  await driver.recover(delivery, intent);
 }
 
 async function assertCommitIntent(
@@ -561,6 +593,7 @@ async function deliverToHandler(
   attempt: number,
   retryKeyValue: string | undefined,
   handler: EventConsumerHandler,
+  barrierDriver: EventOperationBarrierDriver | undefined,
   updatedAt: string,
 ): Promise<{
   readonly receipt?: ConsumerProcessResult['committed'][number];
@@ -568,7 +601,10 @@ async function deliverToHandler(
   readonly dlq?: EventDlqRecord;
   readonly blocked?: EventOperationBlocked;
 }> {
-  const commit = await handler({ event, attempt, retryKey: retryKeyValue });
+  const delivery = { event, attempt, retryKey: retryKeyValue };
+  const commit = barrierDriver
+    ? await prepareBarrier(ports, consumer, event, delivery, barrierDriver)
+    : await handler(delivery);
   let barrierChecked = false;
   if (!isRetryIntent(commit) && commit.completionMode === 'operation-barrier') {
     const persisted = await persistBarrierIntent(ports, consumer, event, commit as EventOperationBarrierIntent);
@@ -618,6 +654,7 @@ async function processEvent(
   consumerKey: string,
   event: EventRecord,
   handler: EventConsumerHandler,
+  barrierDriver: EventOperationBarrierDriver | undefined,
   updatedAt: string,
 ): Promise<{
   readonly receipt?: ConsumerProcessResult['committed'][number];
@@ -631,6 +668,13 @@ async function processEvent(
     messageId: event.messageId,
   });
   if (persistedBarrier) {
+    if (barrierDriver) {
+      await recoverBarrier(
+        barrierDriver,
+        { event, attempt: 1 },
+        persistedBarrier.intent,
+      );
+    }
     const recoveryAuthorization = await authorizeEvent(ports, consumerKey, event);
     const blocked = await assertCommitIntent(
       ports,
@@ -725,6 +769,7 @@ async function processEvent(
       obligation ? obligation.attempt + 1 : 1,
       obligation?.retryKey,
       handler,
+      barrierDriver,
       updatedAt,
     );
   }
@@ -734,11 +779,13 @@ export async function consumeEvents(
   ports: EventBusPorts,
   input: ConsumeEventsInput,
   handler: EventConsumerHandler,
+  barrierDriver?: EventOperationBarrierDriver,
 ): Promise<ConsumerProcessResult>;
 export async function consumeEvents(
   ports: EventBusPorts,
   input: ConsumeEventsInput,
   handler: EventConsumerHandler,
+  barrierDriver?: EventOperationBarrierDriver,
 ): Promise<ConsumerProcessResult> {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new EventConsumerError('consumer limit must be positive');
   const updatedAt = nowIso(input.now);
@@ -791,7 +838,7 @@ export async function consumeEvents(
         continue;
       }
       seen.add(key);
-      const result = await processEvent(ports, consumer.consumerKey, event, handler, updatedAt);
+      const result = await processEvent(ports, consumer.consumerKey, event, handler, barrierDriver, updatedAt);
       if (result.receipt) committed.push(result.receipt);
       if (result.retry) retries.push(result.retry);
       if (result.dlq) dlq.push(result.dlq);

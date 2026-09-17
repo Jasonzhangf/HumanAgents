@@ -1252,3 +1252,4 @@ export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionId
 }
 
 export * from './framework.js';
+export * from './explicit-brain.js';

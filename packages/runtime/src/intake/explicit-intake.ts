@@ -1,10 +1,8 @@
 import type {
-  RequirementEnvelope,
   RequirementIntent,
   TaskId,
 } from '../../../contracts/src/index.js';
 import { ExplicitIntakeError } from './errors.js';
-import { RequirementInbox } from './requirement-inbox.js';
 
 export type InteractionId = string;
 export type ExplicitInteractionState =
@@ -69,11 +67,24 @@ export interface ExplicitInteractionSnapshot {
 
 export interface ConfirmRequirementDraft {
   readonly draftId: string;
-  readonly requirementId: string;
   readonly inputRevision: number;
+  readonly confirmationRef: string;
   readonly confirmedBy: string;
   readonly confirmedAt: string;
   readonly payloadRef: string;
+}
+
+export interface ConfirmedRequirementDraft {
+  readonly interactionId: InteractionId;
+  readonly draftId: string;
+  readonly inputRevision: number;
+  readonly normalizedInput: string;
+  readonly intent: RequirementIntent;
+  readonly taskRef?: TaskId;
+  readonly payloadRef: string;
+  readonly confirmationRef: string;
+  readonly confirmedBy: string;
+  readonly confirmedAt: string;
 }
 
 export interface StatusQueryReceipt {
@@ -101,7 +112,7 @@ export class ExplicitIntake {
   private nextInteractionSeq = 1;
   private nextDraftSeq = 1;
 
-  constructor(private readonly inbox: RequirementInbox) {}
+  constructor() {}
 
   async receive(input: ExplicitInput): Promise<InteractionId> {
     if (input.channel !== 'business') {
@@ -235,7 +246,7 @@ export class ExplicitIntake {
     this.transition(interaction, 'rejected', 'explicit-intake', 'close-interaction', 'rejection-recorded');
   }
 
-  async confirm(input: ConfirmRequirementDraft): Promise<RequirementEnvelope> {
+  async prepareConfirmation(input: ConfirmRequirementDraft): Promise<ConfirmedRequirementDraft> {
     const interactionId = this.draftInteractions.get(input.draftId);
     if (!interactionId) {
       throw new ExplicitIntakeError(
@@ -250,10 +261,12 @@ export class ExplicitIntake {
     }
 
     const interaction = this.requireState(interactionId, ['awaiting-confirmation'], 'confirm requirement');
-    if (!input.confirmedBy || !input.confirmedBy.trim() || !input.confirmedAt || !Number.isFinite(Date.parse(input.confirmedAt))) {
+    if (!input.confirmationRef || !input.confirmationRef.trim()
+      || !input.confirmedBy || !input.confirmedBy.trim()
+      || !input.confirmedAt || !Number.isFinite(Date.parse(input.confirmedAt))) {
       throw new ExplicitIntakeError(
         'explicit-confirmation-required',
-        'confirmedBy and confirmedAt are required',
+        'confirmationRef, confirmedBy, and confirmedAt are required',
         {
           owner: 'human',
           nextAction: 'provide-explicit-confirmation',
@@ -267,24 +280,40 @@ export class ExplicitIntake {
       throw this.invalidState('confirm requirement', 'requirement draft is missing', 'return-to-matching');
     }
 
-    const envelope: RequirementEnvelope = {
-      requirementId: input.requirementId,
+    this.transition(interaction, 'confirmed', 'explicit-intake', 'dispatch-confirmed-requirement');
+    return {
+      interactionId,
       draftId: draft.draftId,
       inputRevision: input.inputRevision,
+      normalizedInput: draft.normalizedInput,
       intent: draft.proposedIntent,
       taskRef: draft.matchedTasks.find((task) => task.relation === 'current')?.taskId,
-      normalizedInput: draft.normalizedInput,
+      payloadRef: input.payloadRef,
+      confirmationRef: input.confirmationRef,
       confirmedBy: input.confirmedBy,
       confirmedAt: input.confirmedAt,
-      fifoSeq: this.inbox.expectedNextFifoSeq,
-      payloadRef: input.payloadRef,
     };
+  }
 
-    this.inbox.markConfirmed(envelope);
-    await this.inbox.append(envelope);
-    this.transition(interaction, 'confirmed', 'explicit-intake', 'dispatch-confirmed-requirement');
+  async markDispatched(interactionId: InteractionId): Promise<void> {
+    const interaction = this.requireState(interactionId, ['confirmed'], 'mark requirement dispatched');
     this.transition(interaction, 'dispatched', 'runtime-coordinator', 'consume-inbox');
-    return envelope;
+  }
+
+  async markDraftDispatched(draftId: string): Promise<void> {
+    const interactionId = this.draftInteractions.get(draftId);
+    if (!interactionId) {
+      throw new ExplicitIntakeError(
+        'draft-not-found',
+        'dispatched draft does not exist',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'existing-draft',
+        },
+      );
+    }
+    await this.markDispatched(interactionId);
   }
 
   private requireInteraction(input: InteractionId): InteractionRecord {

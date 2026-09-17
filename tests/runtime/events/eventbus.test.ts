@@ -1117,6 +1117,139 @@ test('operation-barrier accepts a reconciled external operation', async () => {
   assert.equal(journal.cursors.size, 1);
 });
 
+test('operation-barrier driver persists intent before effects and recovers without replaying effects', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer());
+  const bus = ports(journal, registry);
+  const messageId = 'op-barrier-driver';
+  const operationRef = 'operation:op-barrier-driver';
+  const order: string[] = [];
+
+  await publishEvent(bus, { publisherId: harnessPublisher.publisherId, event: event({ messageId }) });
+  await assert.rejects(
+    () => consumeEvents(
+      bus,
+      { consumerKey, limit: 10, now: occurredAt },
+      async () => { throw new Error('driver mode must not invoke the legacy handler'); },
+      {
+        async prepare({ event: delivery }) {
+          order.push('prepare');
+          return {
+            consumerKey,
+            messageId: delivery.messageId,
+            disposition: 'applied',
+            completionMode: 'operation-barrier',
+            internalEffectFacts: ['effect:driver'],
+            externalOperationRefs: [operationRef],
+          };
+        },
+        async execute() {
+          order.push('execute');
+          throw new Error('interrupted after intent persistence');
+        },
+        async recover() {
+          order.push('recover');
+          throw new Error('still unknown');
+        },
+      },
+    ),
+    /interrupted after intent persistence/,
+  );
+  assert.deepEqual(order, ['prepare', 'execute']);
+  assert.equal(journal.barrierIntents.size, 1);
+  assert.equal(journal.receipts.size, 0);
+
+  journal.externalOperations.set(operationRef, {
+    operationRef,
+    consumerKey,
+    messageId,
+    state: 'unknown',
+  });
+  const blocked = await consumeEvents(
+    bus,
+    { consumerKey, limit: 10, now: occurredAt },
+    async () => { throw new Error('driver mode must not invoke the legacy handler'); },
+    {
+      async prepare() { throw new Error('persisted intent must not be prepared twice'); },
+      async execute() { throw new Error('persisted intent must not execute twice'); },
+      async recover() { order.push('recover-unknown'); },
+    },
+  );
+  assert.deepEqual(order, ['prepare', 'execute', 'recover-unknown']);
+  assert.deepEqual(blocked.blocked, [{
+    consumerKey,
+    messageId,
+    streamId,
+    operationRef,
+    reason: 'unknown-side-effect',
+    action: 'reconcile',
+  }]);
+  assert.equal(journal.receipts.size, 0);
+
+  journal.externalOperations.set(operationRef, {
+    operationRef,
+    consumerKey,
+    messageId,
+    state: 'reconciled',
+  });
+  const recovered = await consumeEvents(
+    bus,
+    { consumerKey, limit: 10, now: occurredAt },
+    async () => { throw new Error('driver mode must not invoke the legacy handler'); },
+    {
+      async prepare() { throw new Error('persisted intent must not be prepared twice'); },
+      async execute() { throw new Error('persisted intent must not execute twice'); },
+      async recover() { order.push('recover-reconciled'); },
+    },
+  );
+  assert.deepEqual(order, ['prepare', 'execute', 'recover-unknown', 'recover-reconciled']);
+  assert.equal(recovered.committed[0]?.disposition, 'applied');
+  assert.deepEqual(recovered.committed[0]?.effectRefs, ['effect:driver', operationRef]);
+  assert.equal(journal.receipts.size, 1);
+  assert.equal(journal.cursors.size, 1);
+});
+
+test('operation-barrier driver can reject journal-atomically without executing effects', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer());
+  const bus = ports(journal, registry);
+  let executeCalls = 0;
+
+  await publishEvent(bus, { publisherId: harnessPublisher.publisherId, event: event({ messageId: 'driver-rejected' }) });
+  const result = await consumeEvents(
+    bus,
+    { consumerKey, limit: 10, now: occurredAt },
+    async () => { throw new Error('driver mode must not invoke the legacy handler'); },
+    {
+      async prepare({ event: delivery }) {
+        return {
+          consumerKey,
+          messageId: delivery.messageId,
+          disposition: 'rejected',
+          completionMode: 'journal-atomic',
+          internalEffectFacts: [],
+          externalOperationRefs: [],
+          failureRef: 'bug-report-payload-missing',
+        };
+      },
+      async execute() {
+        executeCalls += 1;
+      },
+    },
+  );
+
+  assert.equal(executeCalls, 0);
+  assert.equal(result.committed[0]?.disposition, 'rejected');
+  assert.equal(result.committed[0]?.failureRef, 'bug-report-payload-missing');
+  assert.equal(result.cursors[0]?.lastHandledSequence, 1);
+  assert.equal(journal.receipts.size, 1);
+  assert.equal(journal.cursors.size, 1);
+});
+
 test('operation-barrier checks unknown external operation before terminalizing after authorization changes', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();

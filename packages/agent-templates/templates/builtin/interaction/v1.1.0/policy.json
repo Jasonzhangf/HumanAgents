@@ -1,0 +1,47 @@
+{
+  "kind": "humanagent.agent-policy",
+  "policyRef": "builtin/interaction@1.1.0",
+  "scope": "interaction",
+  "confirmation": {
+    "requiredForBusinessRequirement": true,
+    "bindingFields": [
+      "interactionId",
+      "draftId",
+      "inputRevision",
+      "confirmationRef"
+    ]
+  },
+  "controlPlane": {
+    "commandsUseBusinessRequirementQueue": false,
+    "modelMayModify": [
+      "attention",
+      "bug",
+      "journal",
+      "memory",
+      "priority",
+      "task"
+    ]
+  },
+  "attention": {
+    "priorityOwnedByFramework": true,
+    "requiredFields": [
+      "impact",
+      "urgency",
+      "blocking",
+      "userDecisionRequired",
+      "affectedRefs",
+      "evidenceRefs",
+      "reasonRefs",
+      "proposedNextAction"
+    ]
+  },
+  "memory": {
+    "candidateSubmissionOnly": true,
+    "approvalOwnedByMemoryAgent": true
+  },
+  "failure": {
+    "preserveOriginalError": true,
+    "unknownExternalEffect": "reconcile",
+    "forbiddenFallback": true
+  }
+}

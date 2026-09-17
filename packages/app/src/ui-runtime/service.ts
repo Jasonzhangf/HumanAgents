@@ -12,6 +12,28 @@ import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import {
+  ExplicitIntake,
+  type ConfirmRequirementDraft,
+  type ConfirmedRequirementDraft,
+  type ExplicitInput,
+  type ExplicitInteractionSnapshot,
+  type MatchResult,
+  type Proposal,
+  type StatusQueryReceipt,
+} from '../../../runtime/src/intake/explicit-intake.js';
+import {
+  RequirementInbox,
+  type InboxReceipt,
+} from '../../../runtime/src/intake/requirement-inbox.js';
+import {
+  ConfirmationLedger,
+  ExplicitBrainRouterError,
+  RequirementSubmissionOwner,
+  type RequirementSubmitReceipt,
+} from '../../../runtime/src/explicit-brain/router.js';
+import { IntakeError } from '../../../runtime/src/intake/errors.js';
+import type { RequirementEnvelope } from '../../../contracts/src/index.js';
+import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
   type RuntimeExecutionCapabilities,
@@ -79,6 +101,17 @@ export interface UiRuntimeServiceOptions {
   readonly now?: () => Date;
 }
 
+export interface ExplicitBrainReceipt {
+  readonly requirement: RequirementSubmitReceipt;
+}
+
+export interface ExplicitBrainDispatchReceipt {
+  readonly requirement: InboxReceipt;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+}
+
 function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
   if (LIFECYCLE_STATES.has(state)) return state as RuntimeTaskSnapshot['state'];
   if (state === 'model' || state === 'output' || state === 'tool') return 'succeeded';
@@ -87,6 +120,20 @@ function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
 
 function apiError(error: unknown): UiRuntimeApiError {
   if (error instanceof UiRuntimeApiError) return error;
+  if (error instanceof IntakeError) {
+    return new UiRuntimeApiError(error.name, error.owner, error.message, error.nextAction, 409);
+  }
+  if (error instanceof ExplicitBrainRouterError) {
+    return new UiRuntimeApiError(
+      error.code,
+      'explicit-brain-router',
+      error.message,
+      error.code === 'confirmation-required' || error.code === 'confirmation-stale'
+        ? 'confirm the current requirement draft'
+        : 'inspect the explicit brain route or submission',
+      409,
+    );
+  }
   if (error instanceof RuntimeTaskControlError) {
     const status = error.code.endsWith('.not.found') ? 404 : error.code === 'execution.input.required' ? 400 : 409;
     return new UiRuntimeApiError(error.code, error.ownerId, error.message, error.nextAction, status);
@@ -114,9 +161,20 @@ function apiError(error: unknown): UiRuntimeApiError {
 export class UiRuntimeService {
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
+  private readonly requirementInbox = new RequirementInbox();
+  private readonly explicitIntake = new ExplicitIntake();
+  private readonly confirmationLedger = new ConfirmationLedger();
+  private readonly requirementSubmissions: RequirementSubmissionOwner;
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
+    this.requirementSubmissions = new RequirementSubmissionOwner(
+      this.confirmationLedger,
+      this.requirementInbox,
+      {
+        submit: async (envelope) => ({ requirementId: envelope.requirementId }),
+      },
+    );
     this.mode = options.mode;
     this.coordinator = new RuntimeTaskCoordinator({
       organId: options.organId,
@@ -419,5 +477,121 @@ export class UiRuntimeService {
 
   async hydrate(): Promise<void> {
     await this.coordinator.hydrate();
+  }
+
+  async receiveExplicitInput(input: ExplicitInput): Promise<string> {
+    try {
+      return await this.explicitIntake.receive(input);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async inspectExplicitInteraction(interactionId: string): Promise<ExplicitInteractionSnapshot> {
+    try {
+      return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async beginExplicitMatching(interactionId: string): Promise<void> {
+    try {
+      await this.explicitIntake.beginMatching(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async recordExplicitMatch(interactionId: string, result: MatchResult): Promise<void> {
+    try {
+      await this.explicitIntake.recordMatch(interactionId, result);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async proposeExplicitRequirement(interactionId: string, proposal: Proposal): Promise<void> {
+    try {
+      await this.explicitIntake.propose(interactionId, proposal);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async completeExplicitStatusQuery(interactionId: string): Promise<StatusQueryReceipt> {
+    try {
+      await this.explicitIntake.beginStatusCheck(interactionId);
+      return await this.explicitIntake.completeStatusOnly(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async confirmExplicitRequirement(input: ConfirmRequirementDraft): Promise<ExplicitBrainReceipt> {
+    try {
+      const confirmed: ConfirmedRequirementDraft = await this.explicitIntake.prepareConfirmation(input);
+      this.confirmationLedger.registerDraft({
+        interactionId: confirmed.interactionId,
+        draftId: confirmed.draftId,
+        inputRevision: confirmed.inputRevision,
+        normalizedInput: confirmed.normalizedInput,
+        intent: confirmed.intent,
+        taskRef: confirmed.taskRef,
+        payloadRef: confirmed.payloadRef,
+      });
+      this.confirmationLedger.confirm({
+        interactionId: confirmed.interactionId,
+        draftId: confirmed.draftId,
+        inputRevision: confirmed.inputRevision,
+        confirmationRef: confirmed.confirmationRef,
+        confirmedBy: confirmed.confirmedBy,
+        confirmedAt: confirmed.confirmedAt,
+      });
+      const requirement = await this.requirementSubmissions.submit({
+        interactionId: confirmed.interactionId,
+        draftId: confirmed.draftId,
+        confirmationRef: confirmed.confirmationRef,
+        inputRevision: confirmed.inputRevision,
+      });
+      return { requirement };
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
+    try {
+      const consumed: RequirementEnvelope | null = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
+      if (!consumed) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.inbox.empty',
+          RUNTIME_OWNER,
+          'requirement inbox has no pending entry',
+          'wait for a confirmed requirement',
+          409,
+        );
+      }
+      const task = consumed.taskRef
+        ? this.coordinator.taskSnapshot(consumed.taskRef)
+        : this.coordinator.createTask({
+            title: consumed.normalizedInput,
+            directive: consumed.normalizedInput,
+          });
+      const started = this.coordinator.startExecution(task.taskId, { prompt: consumed.payloadRef });
+      const requirement = await this.requirementInbox.acknowledge({
+        consumerId: RUNTIME_OWNER,
+        requirementId: consumed.requirementId,
+      });
+      await this.explicitIntake.markDraftDispatched(consumed.draftId);
+      return {
+        requirement,
+        taskId: task.taskId,
+        operationId: started.operationId,
+        executionEpoch: started.executionEpoch,
+      };
+    } catch (error) {
+      throw apiError(error);
+    }
   }
 }

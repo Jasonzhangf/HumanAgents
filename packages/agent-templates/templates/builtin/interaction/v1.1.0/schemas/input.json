@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/interaction/1.1.0/input",
+  "title": "Explicit Brain Interaction Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "interactionId",
+    "sourceRef",
+    "channelId",
+    "inputRevision",
+    "idempotencyKey",
+    "rawInputRef",
+    "occurredAt"
+  ],
+  "properties": {
+    "interactionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "channelId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rawInputRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

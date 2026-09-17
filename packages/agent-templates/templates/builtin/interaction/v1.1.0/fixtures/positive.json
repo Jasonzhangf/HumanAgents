@@ -1,0 +1,5 @@
+{
+  "fixture": "explicit-brain-positive",
+  "description": "A confirmed business requirement can submit; an approved automatic event can submit a trigger.",
+  "expected": "accepted"
+}

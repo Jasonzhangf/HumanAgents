@@ -8,3 +8,4 @@ export * from './health.js';
 export * from './bindings.js';
 export * from './events.js';
 export * from './checkpoint-control.js';
+export * from './attention.js';
