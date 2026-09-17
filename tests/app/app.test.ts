@@ -234,6 +234,18 @@ test('app composes a provider-neutral execution port and preserves adapter owner
   assert.equal(handle.execution?.binding.provider.providerId, 'provider-integration');
   const observedReadiness = await probeExecutionRuntime(handle.execution!);
   assert.equal(observedReadiness.state, 'ready');
+  const promptDriver = new PromptCaptureDriver();
+  await runAgentOperation({
+    paths: handle.paths,
+    configuration: handle.configuration,
+    workspace,
+    sessionId: 'session-execution-prompt',
+    plan: 'default',
+    prompt: 'verify runtime prompt loading',
+    composed: { driver: promptDriver },
+  });
+  assert.match(promptDriver.lastPrompt, /# Interaction Agent/);
+  assert.match(promptDriver.lastPrompt, /verify runtime prompt loading/);
   await handle.lock.release();
   const resumed = await resumeRuntime({ controlRoot, workspace, sessionId: 'session-execution', execution: runtimeBinding(port) });
   assert.equal(resumed.execution?.port, port);

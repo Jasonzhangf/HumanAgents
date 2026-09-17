@@ -2,6 +2,20 @@ import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type Loade
 import { AppLifecycleError } from './errors.js';
 import { bindExecutionRuntime, type RuntimeExecutionBinding } from './execution.js';
 import { SessionStore, type SessionLock, type SessionSnapshot } from './session-store.js';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export function configureBuiltinPromptRoot(): void {
+  if (process.env.HUMANAGENT_TEMPLATE_ROOT) return;
+  const moduleRoot = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleRoot, '../../agent-templates/templates'),
+    join(moduleRoot, '../../../../../packages/agent-templates/templates'),
+  ];
+  const templateRoot = candidates.find((candidate) => existsSync(join(candidate, 'builtin', 'prompt-registry.json')));
+  if (templateRoot) process.env.HUMANAGENT_TEMPLATE_ROOT = templateRoot;
+}
 
 export interface RuntimeHandle {
   readonly paths: RuntimePaths;
@@ -12,6 +26,7 @@ export interface RuntimeHandle {
 }
 
 export async function openRuntime(input: { readonly workspace: string; readonly controlRoot?: string; readonly plan: string; readonly sessionId: string; readonly execution?: RuntimeExecutionBinding }): Promise<RuntimeHandle> {
+  configureBuiltinPromptRoot();
   const paths = await resolveRuntimePaths({ workspace: input.workspace, controlRoot: input.controlRoot });
   await ensureControlLayout(paths);
   const configuration = await loadConfiguration(paths);
@@ -30,6 +45,7 @@ export async function openRuntime(input: { readonly workspace: string; readonly 
 }
 
 export async function resumeRuntime(input: { readonly workspace: string; readonly controlRoot?: string; readonly sessionId: string; readonly execution?: RuntimeExecutionBinding }): Promise<RuntimeHandle> {
+  configureBuiltinPromptRoot();
   const paths = await resolveRuntimePaths({ workspace: input.workspace, controlRoot: input.controlRoot });
   await ensureControlLayout(paths);
   const configuration = await loadConfiguration(paths);

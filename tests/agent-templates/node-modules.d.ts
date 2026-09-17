@@ -7,10 +7,13 @@ declare module 'node:assert/strict' {
     deepEqual(actual: unknown, expected: unknown, message?: string): void;
     match(actual: string, expected: RegExp, message?: string): void;
     ok(value: unknown, message?: string): void;
-    rejects(fn: () => Promise<unknown>, error?: new (...args: never[]) => Error | RegExp): Promise<void>;
+    rejects(fn: () => Promise<unknown>, error?: (new (...args: never[]) => Error) | RegExp | ((error: unknown) => boolean)): Promise<void>;
   }
   const assert: Assert;
   export = assert;
+}
+declare module 'node:child_process' {
+  export function execFileSync(file: string, args?: readonly string[], options?: { encoding?: string; stdio?: string }): string;
 }
 declare module 'node:test' {
   const test: (name: string, fn: () => void) => void;

@@ -362,6 +362,8 @@ Harness 在启动或安装时验证：
 
 对于 task-bound runtime，只有 Harness Runtime 在完成资源准入、Task binding、execution epoch 和 checkpoint recall 后，才把编译结果装配成 Agent Runtime Context。交互 agent 使用独立的 `interactionScopeId`，它接收原始输入、任务查询和确认请求，不要求预先存在 Task 或 checkpoint；一旦用户确认，Harness 才创建 Task binding 并重新装配后台 agent。运行时不重新扫描目录，不读取未锁定的新文件；它只读取已编译引用，并把实际文件内容 digest 绑定到本次装配结果。
 
+内置模板的 `prompt-registry.json` 同时保存每个 role 的 `templateVersion` 和 prompt `contentDigest`。加载时必须将配置中的 `builtin/<role>@<version>` 与 registry 版本匹配，并将按引用顺序读取的 Markdown 内容与锁定 digest 匹配；版本或内容漂移都以 `template-invalid` 拒绝，不能静默使用新文件。
+
 ## 8. 端口和启动接口
 
 高层只依赖自己的端口：

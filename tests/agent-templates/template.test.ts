@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -266,4 +267,19 @@ test('builtin roles resolve all external markdown prompt segments', async () => 
     assert.ok(loaded.segments.every((segment) => segment.content.trim().length > 0));
     assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
   }
+});
+
+test('builtin prompt loading rejects version and content drift', async () => {
+  const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-prompts-'));
+  execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
+  await assert.rejects(
+    () => loadBuiltinPromptSegments('execution', root, '2.0.0'),
+    /version is not locked/,
+  );
+  await writeFile(join(root, 'builtin', 'execution', 'identity.md'), '# drift\n', 'utf8');
+  await assert.rejects(
+    () => loadBuiltinPromptSegments('execution', root, '1.0.0'),
+    /content drift detected/,
+  );
 });

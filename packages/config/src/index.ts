@@ -707,7 +707,9 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
   if (templateRoot) {
     for (const roleId of [...new Set(effective.agents.map((agent) => agent.roleId))]) {
       try {
-        promptCatalog[roleId] = await loadBuiltinPromptSegments(roleId, templateRoot);
+        const agent = effective.agents.find((candidate) => candidate.roleId === roleId);
+        const templateVersion = agent?.templateRef.slice(`builtin/${roleId}@`.length);
+        promptCatalog[roleId] = await loadBuiltinPromptSegments(roleId, templateRoot, templateVersion);
       } catch (error) {
         fail('template-invalid', error instanceof Error ? error.message : String(error), '修复已安装 Agent prompt 文件后重试');
       }
