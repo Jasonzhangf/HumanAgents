@@ -105,10 +105,14 @@ class FakeRuntimeFactory implements OrchestrationRuntimeFactoryPort {
   readonly disposeInputs: Array<Parameters<OrchestrationRuntimeFactoryPort['dispose']>[0]> = [];
   readonly startFailures = new Set<string>();
   readonly disposeFailures = new Set<string>();
+  startGate?: Promise<void>;
+  startStarted?: () => void;
 
   async start(input: Parameters<OrchestrationRuntimeFactoryPort['start']>[0]) {
     this.starts.push(input.runtimeId);
     this.startInputs.push(input);
+    this.startStarted?.();
+    if (this.startGate) await this.startGate;
     if (this.startFailures.has(input.runtimeId)) throw new Error(`startup failed: ${input.runtimeId}`);
     return {
       runtimeId: input.runtimeId,
@@ -285,6 +289,70 @@ test('runtime pool fences release by assignment, lease, generation, and executio
   }
 
   assert.equal((await pool.release(acquired.lease, { scope })).status, 'released');
+});
+
+test('explicit failed runtime remains failed and is never reused', async () => {
+  const { pool, factory } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'failed-a', capabilities: ['execute'], state: 'failed' }],
+  });
+
+  assert.equal(pool.inspect().runtimes[0]?.state, 'failed');
+  const acquired = await pool.acquire({
+    requiredCapabilities: ['execute'],
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+  });
+
+  assert.equal(acquired.status, 'waiting');
+  if (acquired.status === 'acquired') return;
+  assert.equal(acquired.issue.conditionRef, 'orchestration.runtime.max');
+  assert.deepEqual(factory.starts, []);
+  assert.equal(pool.inspect().runtimes[0]?.state, 'failed');
+});
+
+test('runtime pool rejects startup completed after dispose and cleans the generation once', async () => {
+  let releaseStart!: () => void;
+  const factory = new FakeRuntimeFactory();
+  factory.startGate = new Promise<void>((resolve) => {
+    releaseStart = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    factory.startStarted = resolve;
+  });
+  const pool = new AgentRuntimePoolManager({ maxRuntimes: 1, factory });
+
+  const acquiring = pool.acquire({
+    requiredCapabilities: ['execute'],
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+  });
+  await started;
+  const disposing = await pool.dispose();
+  assert.equal(disposing.status, 'disposed');
+
+  releaseStart();
+  const acquired = await acquiring;
+  assert.equal(acquired.status, 'blocked');
+  if (acquired.status === 'acquired') return;
+  assert.equal(acquired.issue.code, 'runtime-startup-invalidated');
+  assert.equal(acquired.issue.ownerId, 'orchestration-runtime-manager');
+  assert.deepEqual(factory.disposeInputs, [{
+    runtimeId: 'orchestration-runtime-1',
+    generation: 1,
+    executionEpoch: 1,
+    ownerId: 'orchestration-runtime-manager',
+    assignmentId: 'assignment-a',
+  }]);
+  assert.equal(pool.inspect().runtimes[0]?.state, 'disposed');
+  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
+
+  const secondDispose = await pool.dispose();
+  assert.equal(secondDispose.status, 'disposed');
+  assert.equal(secondDispose.alreadyDisposed, true);
+  assert.equal(factory.disposeInputs.length, 1);
 });
 
 test('runtime pool cleans failed generation, advances on retry, and disposes the active generation once', async () => {

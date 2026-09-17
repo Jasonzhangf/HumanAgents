@@ -25,6 +25,12 @@ interface RuntimeRecord {
   capabilities: readonly string[];
   state: 'idle' | 'running' | 'spawning' | 'failed' | 'disposed';
   lease?: RuntimePoolLease;
+  binding?: {
+    readonly executionEpoch: number;
+    readonly ownerId: string;
+    readonly assignmentId: string;
+  };
+  disposePromise?: Promise<void>;
 }
 
 export interface RuntimePoolAcquireInput {
@@ -185,7 +191,7 @@ export class AgentRuntimePoolManager {
         runtimeId: runtime.runtimeId,
         generation,
         capabilities: [...runtime.capabilities],
-        state: runtime.state === 'failed' ? 'idle' : runtime.state ?? 'idle',
+        state: runtime.state ?? 'idle',
       });
       this.generationSequence = Math.max(this.generationSequence, generation);
     }
@@ -280,6 +286,11 @@ export class AgentRuntimePoolManager {
       generation,
       capabilities: [],
       state: 'spawning',
+      binding: {
+        executionEpoch: input.executionEpoch,
+        ownerId: decision.ownerId,
+        assignmentId: input.assignmentId,
+      },
     };
     this.runtimes.set(spawning.runtimeId, spawning);
     try {
@@ -292,6 +303,47 @@ export class AgentRuntimePoolManager {
         requiredCapabilities: [...input.requiredCapabilities],
         scope: input.scope,
       });
+      if (
+        this.disposed
+        || this.runtimes.get(spawning.runtimeId) !== spawning
+        || spawning.state !== 'spawning'
+      ) {
+        let cleanupIssue: OrchestrationIssue | undefined;
+        try {
+          await this.disposeRuntime(spawning);
+        } catch (cleanupError) {
+          cleanupIssue = issueFromError(cleanupError, {
+            code: 'runtime-startup-cleanup-failed',
+            ownerId: decision.ownerId,
+            scope: input.scope,
+            conditionRef: `orchestration.runtime.startup.cleanup.${spawning.runtimeId}`,
+            fallbackEvidenceRefs: input.evidenceRefs,
+          });
+        }
+        const startupIssue = issue(
+          'runtime-startup-invalidated',
+          decision.ownerId,
+          this.disposed
+            ? 'runtime pool was disposed while runtime startup was pending'
+            : 'runtime generation was invalidated while startup was pending',
+          { kind: 'recover', ref: 'orchestration.runtime.startup' },
+          input.evidenceRefs ?? [evidence(input.scope, 'orchestration.runtime.startup')],
+          'orchestration.runtime.startup',
+        );
+        return {
+          status: 'blocked',
+          issue: cleanupIssue
+            ? issue(
+                startupIssue.code,
+                startupIssue.ownerId,
+                `${startupIssue.reason}; cleanup failed: ${cleanupIssue.reason}`,
+                cleanupIssue.nextAction,
+                [...startupIssue.evidenceRefs, ...cleanupIssue.evidenceRefs],
+                cleanupIssue.conditionRef,
+              )
+            : startupIssue,
+        };
+      }
       if (started.runtimeId !== spawning.runtimeId || started.generation !== spawning.generation) {
         throw new OrchestrationPortError('runtime factory returned a mismatched runtime identity', {
           ownerId: decision.ownerId,
@@ -319,13 +371,8 @@ export class AgentRuntimePoolManager {
     } catch (error) {
       let cleanupIssue: OrchestrationIssue | undefined;
       try {
-        await this.factory.dispose({
-          runtimeId: spawning.runtimeId,
-          generation: spawning.generation,
-          executionEpoch: input.executionEpoch,
-          ownerId: decision.ownerId,
-          assignmentId: input.assignmentId,
-        });
+        await this.disposeRuntime(spawning);
+        this.runtimes.delete(spawning.runtimeId);
       } catch (cleanupError) {
         cleanupIssue = issueFromError(cleanupError, {
           code: 'runtime-startup-cleanup-failed',
@@ -335,7 +382,6 @@ export class AgentRuntimePoolManager {
           fallbackEvidenceRefs: input.evidenceRefs,
         });
       }
-      this.runtimes.delete(spawning.runtimeId);
       const startupIssue = issueFromError(error, {
         code: 'runtime-startup-failed',
         ownerId: decision.ownerId,
@@ -357,6 +403,27 @@ export class AgentRuntimePoolManager {
           : startupIssue,
       };
     }
+  }
+
+  private disposeRuntime(runtime: RuntimeRecord): Promise<void> {
+    if (runtime.state === 'disposed') return Promise.resolve();
+    if (runtime.disposePromise) return runtime.disposePromise;
+    const binding = runtime.lease ?? runtime.binding;
+    runtime.disposePromise = (async () => {
+      await this.factory.dispose({
+        runtimeId: runtime.runtimeId,
+        generation: runtime.generation,
+        executionEpoch: binding?.executionEpoch ?? 1,
+        ownerId: binding?.ownerId ?? this.ownerId,
+        ...(binding?.assignmentId ? { assignmentId: binding.assignmentId } : {}),
+      });
+      runtime.state = 'disposed';
+      runtime.lease = undefined;
+    })().catch((error) => {
+      runtime.state = 'failed';
+      throw error;
+    });
+    return runtime.disposePromise;
   }
 
   private createLease(
@@ -421,17 +488,8 @@ export class AgentRuntimePoolManager {
     for (const runtime of this.runtimes.values()) {
       if (runtime.state === 'disposed') continue;
       try {
-        await this.factory.dispose({
-          runtimeId: runtime.runtimeId,
-          generation: runtime.generation,
-          executionEpoch: runtime.lease?.executionEpoch ?? 1,
-          ownerId: runtime.lease?.ownerId ?? this.ownerId,
-          ...(runtime.lease ? { assignmentId: runtime.lease.assignmentId } : {}),
-        });
-        runtime.state = 'disposed';
-        runtime.lease = undefined;
+        await this.disposeRuntime(runtime);
       } catch (error) {
-        runtime.state = 'failed';
         issues.push(issueFromError(error, {
           code: 'runtime-dispose-failed',
           ownerId: this.ownerId,
