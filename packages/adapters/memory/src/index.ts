@@ -213,14 +213,16 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     const candidate = submissionId === undefined ? undefined : this.candidates.get(submissionId);
     if (!candidate) throw new ContractError(`memory candidate not found: ${input.candidateId}`);
     if (input.actor.projectKey !== candidate.submission.projectKey) throw new ContractError('memory review actor project mismatch');
-    candidate.review = input;
-    candidate.state = input.decision === 'approve' ? 'approved' : input.decision === 'reject' ? 'rejected' : 'candidate';
-    if (candidate.state === 'approved') {
+    if (candidate.state === 'approved' || candidate.state === 'rejected') {
+      throw new ContractError('memory candidate review is already final');
+    }
+    if (input.decision === 'approve') {
       const submission = candidate.submission;
-      if (this.sourceDigest(submission.contentRef) !== submission.contentDigest) {
+      const contentDigest = this.sourceDigest(submission.contentRef);
+      if (contentDigest !== submission.contentDigest) {
         throw new ContractError('memory submission content digest does not match the ingested source');
       }
-      this.addCanonicalRecord({
+      const canonicalRecord: CanonicalRecord = {
         memoryId: candidateRecordId(input.candidateId),
         namespace: 'project',
         projectKey: submission.projectKey,
@@ -229,14 +231,20 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
         summary: submission.observation,
         sourceRefs: [submission.contentRef, ...submission.evidenceRefs],
         sourceDigests: [
-          this.sourceDigest(submission.contentRef),
+          contentDigest,
           ...submission.evidenceRefs.map((sourceRef) => this.sourceDigest(sourceRef)),
         ],
         taskId: submission.taskId,
         sourceScopeRef: `${submission.projectKey}:${submission.taskId?.value ?? 'interaction'}`,
         relevanceReason: submission.reason,
-      });
+      };
+      this.addCanonicalRecord(canonicalRecord);
+      candidate.review = input;
+      candidate.state = 'approved';
+      return input;
     }
+    candidate.review = input;
+    candidate.state = input.decision === 'reject' ? 'rejected' : 'candidate';
     return input;
   }
 
@@ -247,11 +255,10 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     if (!candidate) throw new ContractError(`memory candidate not found: ${input.candidateId}`);
     if (input.actor.projectKey !== candidate.submission.projectKey) throw new ContractError('memory promotion actor project mismatch');
     if (candidate.state !== 'approved') throw new ContractError('memory promotion requires an approved candidate');
-    candidate.promotion = input;
     const approved = this.canonicalRecords.get(candidateRecordId(input.candidateId));
     if (!approved) throw new ContractError('approved memory record is unavailable');
-    const sources = this.mergeSourceRefs(approved.sourceRefs, approved.sourceDigests, input.sourceRefs);
-    this.addCanonicalRecord({
+    const sources = this.mergeSourceRefs(approved.sourceRefs, approved.sourceDigests, [input.approvalRef, ...input.sourceRefs]);
+    const promoted: CanonicalRecord = {
       ...approved,
       namespace: 'global',
       projectKey: undefined,
@@ -259,7 +266,9 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
       sourceRefs: sources.sourceRefs,
       sourceDigests: sources.sourceDigests,
       relevanceReason: input.reason,
-    });
+    };
+    this.addCanonicalRecord(promoted);
+    candidate.promotion = input;
     return input;
   }
 
