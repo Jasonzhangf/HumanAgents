@@ -103,7 +103,14 @@ interface PreparedOperation {
 
 function assemblePrompt(input: OpenAgentOperationInput, agent: AgentConfig): { prompt: string; promptRef?: string } {
   const loaded = input.configuration.promptCatalog[agent.roleId];
-  if (!loaded) return { prompt: input.prompt };
+  if (!loaded) {
+    throw new AppLifecycleError(
+      'template-invalid',
+      `prompt catalog is missing for configured agent role: ${agent.roleId}`,
+      'repair the locked builtin prompt assets and reload configuration',
+      OWNER,
+    );
+  }
   const systemPrompt = loaded.segments.map((segment) => segment.content).join('\n\n');
   return {
     prompt: `${systemPrompt}\n\n# Task input\n\n${input.prompt}`,

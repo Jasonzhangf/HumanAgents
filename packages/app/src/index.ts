@@ -17,6 +17,8 @@ export function configureBuiltinPromptRoot(): void {
   if (templateRoot) process.env.HUMANAGENT_TEMPLATE_ROOT = templateRoot;
 }
 
+configureBuiltinPromptRoot();
+
 export interface RuntimeHandle {
   readonly paths: RuntimePaths;
   readonly configuration: LoadedConfiguration;
