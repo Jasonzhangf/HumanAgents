@@ -3,7 +3,7 @@ import { mkdir, open as openFile, readFile, realpath, stat } from 'node:fs/promi
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import { loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole } from '../../agent-templates/src/index.js';
+import { loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments } from '../../agent-templates/src/index.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
@@ -88,6 +88,7 @@ export interface LoadedConfiguration {
   readonly projectOverride?: Partial<UserConfig>;
   readonly effective: UserConfig;
   readonly agentRoster: readonly AgentConfig[];
+  readonly promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>>;
 }
 
 export class ConfigurationError extends Error {
@@ -702,14 +703,15 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
     execution: { ...user.execution, ...projectOverride?.execution },
   };
   const templateRoot = configuredTemplateRoot();
+  const promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>> = {};
   if (templateRoot) {
     for (const roleId of [...new Set(effective.agents.map((agent) => agent.roleId))]) {
       try {
-        await loadBuiltinPromptSegments(roleId, templateRoot);
+        promptCatalog[roleId] = await loadBuiltinPromptSegments(roleId, templateRoot);
       } catch (error) {
         fail('template-invalid', error instanceof Error ? error.message : String(error), '修复已安装 Agent prompt 文件后重试');
       }
     }
   }
-  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents] };
+  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents], promptCatalog };
 }

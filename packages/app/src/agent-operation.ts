@@ -101,6 +101,16 @@ interface PreparedOperation {
   readonly attentionPort: AttentionPort;
 }
 
+function assemblePrompt(input: OpenAgentOperationInput, agent: AgentConfig): { prompt: string; promptRef?: string } {
+  const loaded = input.configuration.promptCatalog[agent.roleId];
+  if (!loaded) return { prompt: input.prompt };
+  const systemPrompt = loaded.segments.map((segment) => segment.content).join('\n\n');
+  return {
+    prompt: `${systemPrompt}\n\n# Task input\n\n${input.prompt}`,
+    promptRef: `humanagent://template/${agent.roleId}/${loaded.contentDigest}`,
+  };
+}
+
 function selectAgent(input: OpenAgentOperationInput): AgentConfig {
   if (input.agent) return input.agent;
   const defaultAgentId = input.configuration.effective.project?.defaultAgent;
@@ -170,6 +180,7 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
     cycleId,
   });
   const journal = checkpointJournal(input.paths);
+  const assembled = assemblePrompt(input, agent);
   const recalled = await recallCheckpoint(journal, { ownerId: OWNER, scope });
   const previous = input.newChain ? null : recalled;
   const recoveryStateRef: EvidenceRef = {
@@ -190,8 +201,11 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
       operationId,
       executionEpoch,
       ownerRef: OWNER,
-      input: { prompt: input.prompt },
-      inputRefs: [`humanagent://session/${input.sessionId}/input/${directiveRevision}`],
+      input: { prompt: assembled.prompt },
+      inputRefs: [
+        `humanagent://session/${input.sessionId}/input/${directiveRevision}`,
+        ...(assembled.promptRef === undefined ? [] : [assembled.promptRef]),
+      ],
       waitConditionRef: `humanagent://session/${input.sessionId}/condition`,
       recoveryRef: recoveryStateRef.locator,
     },
@@ -200,7 +214,7 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
     agent,
     paths: input.paths,
     sessionId: input.sessionId,
-    prompt: input.prompt,
+    prompt: assembled.prompt,
     runtimeId,
     executionEpoch,
     taskId,

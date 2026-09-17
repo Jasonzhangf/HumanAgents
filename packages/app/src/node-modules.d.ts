@@ -23,6 +23,10 @@ declare module 'node:os' {
   export function homedir(): string;
 }
 
+declare module 'node:url' {
+  export function fileURLToPath(url: string | URL): string;
+}
+
 declare module 'node:child_process' {
   import type { EventEmitter } from 'node:events';
 

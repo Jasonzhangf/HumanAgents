@@ -5,7 +5,8 @@ import { AppLifecycleError } from './errors.js';
 import { closeRuntime, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -44,6 +45,7 @@ function providerBindingFromOptions(
 }
 
 export async function main(args: readonly string[]): Promise<void> {
+  process.env.HUMANAGENT_TEMPLATE_ROOT ??= join(dirname(fileURLToPath(import.meta.url)), '../../agent-templates/templates');
   const command = args[0] ?? 'help';
   const workspace = option(args, '--workspace') ?? process.cwd();
   const controlRoot = option(args, '--control-root');

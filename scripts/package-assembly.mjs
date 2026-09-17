@@ -8,7 +8,6 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
   await rm(packageRoot, { recursive: true, force: true });
   await mkdir(join(packageRoot, 'bin'), { recursive: true });
   await cp(join(projectRoot, 'dist', 'app'), join(packageRoot, 'runtime'), { recursive: true });
-  await cp(join(projectRoot, 'packages', 'agent-templates', 'templates'), join(packageRoot, 'templates'), { recursive: true });
   const artifactDigest = await treeDigest(join(projectRoot, 'dist', 'app'));
   if (await treeDigest(join(packageRoot, 'runtime')) !== artifactDigest) throw new Error('packaged runtime does not match compiled artifact');
   const packageJson = {
@@ -17,7 +16,7 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
     private: false,
     type: 'module',
     bin: { humanagent: './bin/humanagent.mjs' },
-    files: ['bin', 'runtime', 'templates'],
+    files: ['bin', 'runtime'],
   };
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify(packageJson, null, 2) + '\n', 'utf8');
   const binPath = join(packageRoot, 'bin', 'humanagent.mjs');
@@ -25,7 +24,7 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
     '#!/usr/bin/env node',
     "import { dirname, join } from 'node:path';",
     "import { fileURLToPath } from 'node:url';",
-    "process.env.HUMANAGENT_TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates');",
+    "process.env.HUMANAGENT_TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'runtime', 'agent-templates', 'templates');",
     "import { formatCliError, main } from '../runtime/app/src/cli.js';",
     'main(process.argv.slice(2)).catch((error) => {',
     '  console.error(formatCliError(error));',
