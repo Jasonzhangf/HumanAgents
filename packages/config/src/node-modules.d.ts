@@ -18,7 +18,7 @@ declare module 'node:fs' {
 }
 declare module 'node:crypto' {
   export function createHash(algorithm: string): {
-    update(value: string | Uint8Array): { digest(encoding: 'hex'): string };
+    update(value: string | Uint8Array, encoding?: 'utf8'): { digest(encoding: 'hex'): string };
   };
 }
 declare module 'node:os' {
@@ -32,6 +32,7 @@ declare module 'node:path' {
   export function isAbsolute(path: string): boolean;
   export function join(...paths: string[]): string;
   export function normalize(path: string): string;
+  export function relative(from: string, to: string): string;
   export function resolve(...paths: string[]): string;
   export const sep: string;
 }

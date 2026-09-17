@@ -3,7 +3,7 @@ import { mkdir, open as openFile, readFile, realpath, stat } from 'node:fs/promi
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import { validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole } from '../../agent-templates/src/index.js';
+import { loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments } from '../../agent-templates/src/index.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
@@ -88,6 +88,7 @@ export interface LoadedConfiguration {
   readonly projectOverride?: Partial<UserConfig>;
   readonly effective: UserConfig;
   readonly agentRoster: readonly AgentConfig[];
+  readonly promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>>;
 }
 
 export class ConfigurationError extends Error {
@@ -514,6 +515,11 @@ function defaultUserToml(): string {
   ].join('\n');
 }
 
+function configuredTemplateRoot(): string | undefined {
+  const value = (globalThis as { process?: { env?: { HUMANAGENT_TEMPLATE_ROOT?: string } } }).process?.env?.HUMANAGENT_TEMPLATE_ROOT;
+  return value && value.trim() ? value : undefined;
+}
+
 export async function resolveRuntimePaths(options: { readonly workspace: string; readonly controlRoot?: string }): Promise<RuntimePaths> {
   const environmentHome = (globalThis as { process?: { env?: { HUMANAGENT_HOME?: string } } }).process?.env?.HUMANAGENT_HOME;
   const controlRoot = await canonicalizeControlRoot(resolve(options.controlRoot ?? environmentHome ?? join(homedir(), '.humanagent')));
@@ -696,5 +702,18 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
     project: { ...user.project, ...projectOverride?.project },
     execution: { ...user.execution, ...projectOverride?.execution },
   };
-  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents] };
+  const templateRoot = configuredTemplateRoot();
+  const promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>> = {};
+  if (templateRoot) {
+    for (const roleId of AGENT_ROLES) {
+      try {
+        const agent = effective.agents.find((candidate) => candidate.roleId === roleId);
+        const templateVersion = agent?.templateRef.slice(`builtin/${roleId}@`.length) ?? '1.0.0';
+        promptCatalog[roleId] = await loadBuiltinPromptSegments(roleId, templateRoot, templateVersion);
+      } catch (error) {
+        fail('template-invalid', error instanceof Error ? error.message : String(error), '修复已安装 Agent prompt 文件后重试');
+      }
+    }
+  }
+  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents], promptCatalog };
 }

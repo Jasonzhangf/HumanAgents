@@ -1,11 +1,22 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { cwd } from 'node:process';
 import test from 'node:test';
 import {
   AgentTemplateError,
+  AGENT_ROLE_IDS,
   assertUniqueTemplateOwners,
   compileAgentTemplate,
+  createFilePromptSource,
   digestAgentTemplate,
+  digestPromptSegments,
   loadAgentTemplate,
+  loadBuiltinPromptRegistry,
+  loadBuiltinPromptSegments,
+  loadAgentPromptSegments,
   validateAgentTemplate,
   validateConfiguredAgentBinding,
   type AgentRole,
@@ -92,7 +103,7 @@ function template(overrides: Partial<AgentTemplateManifest> = {}): AgentTemplate
     capabilityRefs: ['worker.execute', 'test'],
     skillRefs: ['single-capability-worker'],
     toolCapabilityRefs: ['test'],
-    systemPromptRef: 'execution/system.md',
+    promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'],
     inputSchemaRef: 'execution/schemas/input.json',
     outputSchemaRef: 'execution/schemas/output.json',
     policyRef: 'execution/policies/worker.json',
@@ -121,6 +132,8 @@ test('valid template deterministically validates, compiles, and loads', () => {
   assert.deepEqual(compiled, compileAgentTemplate(manifest, registry));
   assert.equal(compiled.manifestDigest, manifest.digest);
   assert.deepEqual(compiled.capabilityRefs, ['worker.execute', 'test']);
+  assert.deepEqual(compiled.promptSegmentRefs, ['execution/identity.md', 'execution/contract.md']);
+  assert.equal(compiled.promptSegmentDigest, digestPromptSegments(manifest.promptSegmentRefs));
   assert.deepEqual(compiled.memoryContextPolicy.allowedScopes, ['task', 'organ']);
 
   const loaded = loadAgentTemplate(compiled, { driverKind: 'fake', driverCapabilities: ['execute', 'settle'] });
@@ -133,7 +146,14 @@ test('invalid manifest fields, paths, fixtures, and memory policy are rejected',
   assert.throws(() => validateAgentTemplate(template({ templateApiVersion: 2 }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ roleId: 'worker' as AgentRole }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ templateVersion: 'latest' }), registry), AgentTemplateError);
-  assert.throws(() => validateAgentTemplate(template({ systemPromptRef: '../secret.md' }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: [] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution/identity.md', 'execution/identity.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['../secret.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['/execution/identity.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution/../review.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution\\identity.md'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['execution/identity.txt'] }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({ promptSegmentRefs: ['review/audit.md'] }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ testFixtureRefs: [] }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({
     memoryContextPolicy: {
@@ -144,6 +164,18 @@ test('invalid manifest fields, paths, fixtures, and memory policy are rejected',
     },
   }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ digest: 'fnv1a:stale' }), registry), AgentTemplateError);
+});
+
+test('prompt segment order is part of the compiled contract without loading prompt content', () => {
+  const first = template({ promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'] });
+  const second = template({ promptSegmentRefs: ['execution/contract.md', 'execution/identity.md'] });
+  const firstCompiled = compileAgentTemplate(first, registry);
+  const secondCompiled = compileAgentTemplate(second, registry);
+
+  assert.notEqual(firstCompiled.promptSegmentDigest, secondCompiled.promptSegmentDigest);
+  assert.deepEqual(firstCompiled.promptSegmentRefs, first.promptSegmentRefs);
+  assert.deepEqual(secondCompiled.promptSegmentRefs, second.promptSegmentRefs);
+  assert.equal('prompt' in firstCompiled, false);
 });
 
 test('undeclared capabilities, skills, tools, and role ceiling violations are rejected', () => {
@@ -200,4 +232,54 @@ test('configured agent bindings enable fake and explicit dsh drivers without imp
     tools: ['search'],
     permissions: ['task.read', 'workspace.read'],
   }), AgentTemplateError);
+});
+
+test('prompt segments are loaded from independent markdown files in manifest order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-prompts-'));
+  await mkdir(join(root, 'execution'), { recursive: true });
+  await writeFile(join(root, 'execution', 'identity.md'), '# Identity\n', 'utf8');
+  await writeFile(join(root, 'execution', 'contract.md'), '# Contract\n', 'utf8');
+
+  const compiled = compileAgentTemplate(template(), registry);
+  const loaded = await loadAgentPromptSegments(compiled, createFilePromptSource(root));
+  assert.deepEqual(loaded.segments.map((segment) => segment.ref), compiled.promptSegmentRefs);
+  assert.deepEqual(loaded.segments.map((segment) => segment.content), ['# Identity\n', '# Contract\n']);
+  assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.notEqual(loaded.contentDigest, compiled.promptSegmentDigest);
+});
+
+test('prompt loader rejects missing markdown files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-prompts-'));
+  await mkdir(join(root, 'execution'), { recursive: true });
+  const compiled = compileAgentTemplate(template(), registry);
+  await assert.rejects(
+    () => loadAgentPromptSegments(compiled, createFilePromptSource(root)),
+    AgentTemplateError,
+  );
+});
+
+test('builtin roles resolve all external markdown prompt segments', async () => {
+  const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const registry = await loadBuiltinPromptRegistry(templateRoot);
+  for (const roleId of AGENT_ROLE_IDS) {
+    const loaded = await loadBuiltinPromptSegments(roleId, templateRoot);
+    assert.equal(loaded.segments.length, registry.roles[roleId].length);
+    assert.ok(loaded.segments.every((segment) => segment.content.trim().length > 0));
+    assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
+  }
+});
+
+test('builtin prompt loading rejects version and content drift', async () => {
+  const sourceRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-builtin-prompts-'));
+  execFileSync('cp', ['-R', join(sourceRoot, 'builtin'), root]);
+  await assert.rejects(
+    () => loadBuiltinPromptSegments('execution', root, '2.0.0'),
+    /version is not locked/,
+  );
+  await writeFile(join(root, 'builtin', 'execution', 'identity.md'), '# drift\n', 'utf8');
+  await assert.rejects(
+    () => loadBuiltinPromptSegments('execution', root, '1.0.0'),
+    /content drift detected/,
+  );
 });

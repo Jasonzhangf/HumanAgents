@@ -7,6 +7,10 @@ declare module 'node:crypto' {
   export function randomUUID(): string;
 }
 
+declare module 'node:fs' {
+  export function existsSync(path: string): boolean;
+}
+
 declare module 'node:path' {
   export function basename(path: string): string;
   export function dirname(path: string): string;
@@ -21,6 +25,10 @@ declare module 'node:path' {
 
 declare module 'node:os' {
   export function homedir(): string;
+}
+
+declare module 'node:url' {
+  export function fileURLToPath(url: string | URL): string;
 }
 
 declare module 'node:child_process' {
