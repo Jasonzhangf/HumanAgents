@@ -84,9 +84,18 @@ function safeOperationSegment(value: string): boolean {
 }
 
 function operationIdForEvent(event: EventRecord): string {
-  const streamId = `${event.streamId.length.toString(16)}x${event.streamId}`;
-  const messageId = `${event.messageId.length.toString(16)}x${event.messageId}`;
-  return `memory-analysis-${streamId}-${messageId}`;
+  const hash = (value: string): string => {
+    let result = 0x811c9dc5;
+    for (let index = 0; index < value.length; index += 1) {
+      result ^= value.charCodeAt(index);
+      result = Math.imul(result, 0x01000193) >>> 0;
+    }
+    return result.toString(16).padStart(8, '0');
+  };
+  const stream = hash(event.streamId);
+  const message = hash(event.messageId);
+  const pair = hash(`${event.streamId.length}\0${event.messageId.length}\0${stream}\0${message}`);
+  return `memory-analysis-${stream}${message}${pair}`;
 }
 
 function sameId(

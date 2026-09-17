@@ -302,7 +302,7 @@ test('memory analysis event maps committed evidence into a typed request', async
     binding,
     admission: {
       admit: async ({ request, event: delivered }) => {
-        assert.equal(request.operationId.value, 'memory-analysis-11xmemory-boundaries-9xmessage-a');
+        assert.ok(request.operationId.value.startsWith('memory-analysis-'));
         assert.equal(request.bindingRef, binding.bindingRef);
         assert.equal(request.projectKey, 'project-a');
         assert.equal(request.trigger, 'completion');
@@ -384,6 +384,40 @@ test('memory analysis operation ids distinguish the same message id on different
     );
   }
   assert.equal(new Set(operationIds).size, 2);
+});
+
+test('memory analysis operation ids stay valid for contract-valid stream ids', async () => {
+  const stream = `stream:${'a'.repeat(120)}`;
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.consumers.set(binding.bindingRef, {
+    ...consumer,
+    streamIds: [stream],
+  });
+  const bus = ports(journal, registry);
+  await publishEvent(bus, {
+    publisherId: publisher.publisherId,
+    event: event({ messageId: 'message-a', streamId: stream }),
+  });
+  let operationId: string | undefined;
+  await consumeEvents(
+    bus,
+    { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+    createMemoryAnalysisEventHandler({
+      binding,
+      admission: {
+        admit: async ({ request }) => {
+          operationId = request.operationId.value;
+          return { status: 'ready', value: { admissionRef: 'admission-valid-stream' } };
+        },
+      },
+      now: () => occurredAt,
+    }),
+  );
+  assert.ok(operationId);
+  if (operationId === undefined) throw new Error('missing operation id');
+  assert.equal(operationId.length, 40);
+  assert.ok(operationId.startsWith('memory-analysis-'));
 });
 
 test('memory analysis consumer rejects malformed events without invoking admission', async () => {
