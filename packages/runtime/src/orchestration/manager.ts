@@ -1,7 +1,6 @@
 import {
   assertEvidenceRef,
   id,
-  type Attention,
   type EvidenceRef,
   type NextAction,
   type ScopeRef,
