@@ -1,0 +1,16 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/communication",
+    "noEmitOnError": true
+  },
+  "include": [
+    "node-modules.d.ts",
+    "**/*.ts",
+    "../../../packages/runtime/src/communication/**/*.ts",
+    "../../../packages/runtime/src/events/**/*.ts",
+    "../../../packages/contracts/src/**/*.ts"
+  ]
+}
