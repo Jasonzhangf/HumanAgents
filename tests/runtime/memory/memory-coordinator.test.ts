@@ -71,9 +71,10 @@ function makePorts(overrides: {
     search: number;
     ingest: number;
     review: number;
+    query: number;
   };
 } {
-  const calls = { recall: 0, attach: 0, search: 0, ingest: 0, review: 0 };
+  const calls = { recall: 0, attach: 0, search: 0, ingest: 0, review: 0, query: 0 };
   const operations: MemoryOperationsPort = {
     ingest: async (input) => {
       calls.ingest += 1;
@@ -88,7 +89,10 @@ function makePorts(overrides: {
     compare: async () => ({ relation: 'same' }),
     detectNovelty: async (input): Promise<NoveltyResult> => ({ classification: 'novel', matchedRefs: [], reason: input.candidateRef }),
     detectRecurrence: async (): Promise<RecurrenceResult> => ({ classification: 'recurring', occurrences: [{ ref: 'journal://task-a/recur', digest: 'sha256:recur' }], reason: 'observed twice' }),
-    query: async (input) => ({ requestId: input.requestId, status: 'ready', entries: [], sourceFactRef: 'memory-query:test', omitted: [] }),
+    query: async (input) => {
+      calls.query += 1;
+      return { requestId: input.requestId, status: 'ready', entries: [], sourceFactRef: 'memory-query:test', omitted: [] };
+    },
     submitCandidate: async (input) => ({
       submissionId: input.submissionId,
       status: 'accepted',
@@ -645,6 +649,43 @@ test('memory coordinator rejects query, review, and promotion project drift', as
   });
   assert.equal(promoted.status, 'attention');
   assert.equal(promoted.status === 'attention' && promoted.issue.code, 'memory-binding-missing');
+});
+
+test('memory coordinator denies global query without a cross-project grant before backend access', async () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const interaction = coordinator.bindInteraction({
+    interactionScopeId: 'interaction-project-a',
+    projectKey: taskProjectKey,
+    backendRef: 'memory://project-a',
+    operations: ports.operations,
+    injection: ports.injection,
+  });
+  const actor = {
+    actorId: 'actor-a',
+    roleId: 'memory' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: taskProjectKey,
+  };
+
+  const queried = await coordinator.query({
+    requestId: 'query-global',
+    operationId: id('operation', 'query-global'),
+    bindingRef: interaction.bindingId,
+    actor,
+    projectKey: taskProjectKey,
+    namespace: 'global',
+    query: 'fact',
+    kinds: ['semantic'],
+    states: ['approved'],
+    limit: 10,
+    tokenBudget: 100,
+    inputDigest: 'sha256:query-global',
+  });
+
+  assert.equal(queried.status, 'attention');
+  assert.equal(queried.status === 'attention' && queried.issue.code, 'memory-capability-denied');
+  assert.equal(ports.calls.query, 0);
 });
 
 test('memory unavailable and attach failures are explicit, not fake RAG success', async () => {

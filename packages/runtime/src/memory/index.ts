@@ -394,6 +394,16 @@ export class MemoryCoordinator {
         ownerId,
       );
     }
+    if (input.namespace === 'global' && !input.actor.crossProjectGrantRef) {
+      return this.failure(
+        'memory-capability-denied',
+        undefined,
+        'global memory query requires a cross-project grant',
+        'memory-permission',
+        'attention',
+        ownerId,
+      );
+    }
     try {
       return { status: 'ready', value: await operations.query(input) };
     } catch (error) {
