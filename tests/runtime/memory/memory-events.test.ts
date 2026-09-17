@@ -302,7 +302,7 @@ test('memory analysis event maps committed evidence into a typed request', async
     binding,
     admission: {
       admit: async ({ request, event: delivered }) => {
-        assert.equal(request.operationId.value, 'memory-analysis-message-a');
+        assert.equal(request.operationId.value, 'memory-analysis-11xmemory-boundaries-9xmessage-a');
         assert.equal(request.bindingRef, binding.bindingRef);
         assert.equal(request.projectKey, 'project-a');
         assert.equal(request.trigger, 'completion');
@@ -352,6 +352,38 @@ test('memory analysis consumer commits one receipt and does not redeliver after 
   const replay = await consumeEvents(bus, { consumerKey: binding.bindingRef, limit: 10, now: occurredAt }, handler);
   assert.equal(admissions, 1);
   assert.equal(replay.committed.length, 0);
+});
+
+test('memory analysis operation ids distinguish the same message id on different streams', async () => {
+  const operationIds: string[] = [];
+  for (const stream of ['stream-a', 'stream-b']) {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    registry.consumers.set(binding.bindingRef, {
+      ...consumer,
+      streamIds: [stream],
+    });
+    const bus = ports(journal, registry);
+    await publishEvent(bus, {
+      publisherId: publisher.publisherId,
+      event: event({ messageId: 'shared-message', streamId: stream }),
+    });
+    await consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: {
+          admit: async ({ request }) => {
+            operationIds.push(request.operationId.value);
+            return { status: 'ready', value: { admissionRef: `admission-${stream}` } };
+          },
+        },
+        now: () => occurredAt,
+      }),
+    );
+  }
+  assert.equal(new Set(operationIds).size, 2);
 });
 
 test('memory analysis consumer rejects malformed events without invoking admission', async () => {

@@ -83,6 +83,12 @@ function safeOperationSegment(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,96}$/.test(value);
 }
 
+function operationIdForEvent(event: EventRecord): string {
+  const streamId = `${event.streamId.length.toString(16)}x${event.streamId}`;
+  const messageId = `${event.messageId.length.toString(16)}x${event.messageId}`;
+  return `memory-analysis-${streamId}-${messageId}`;
+}
+
 function sameId(
   left: { readonly scope: string; readonly value: string } | undefined,
   right: { readonly scope: string; readonly value: string } | undefined,
@@ -249,7 +255,7 @@ export function memoryAnalysisRequestFromEvent(
   return {
     status: 'ready',
     value: {
-      operationId: id('operation', `memory-analysis-${event.messageId}`),
+      operationId: id('operation', operationIdForEvent(event)),
       bindingRef: binding.bindingRef,
       actor: {
         ...binding.actor,
