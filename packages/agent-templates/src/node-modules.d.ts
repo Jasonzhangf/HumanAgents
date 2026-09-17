@@ -18,6 +18,10 @@ declare module 'node:os' {
   export function tmpdir(): string;
 }
 
+declare module 'node:process' {
+  export function cwd(): string;
+}
+
 declare module 'node:path' {
   export function isAbsolute(path: string): boolean;
   export function join(...paths: string[]): string;

@@ -2,15 +2,19 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { cwd } from 'node:process';
 import test from 'node:test';
 import {
   AgentTemplateError,
+  AGENT_ROLE_IDS,
   assertUniqueTemplateOwners,
+  builtinPromptSegmentRefs,
   compileAgentTemplate,
   createFilePromptSource,
   digestAgentTemplate,
   digestPromptSegments,
   loadAgentTemplate,
+  loadBuiltinPromptSegments,
   loadAgentPromptSegments,
   validateAgentTemplate,
   validateConfiguredAgentBinding,
@@ -251,4 +255,14 @@ test('prompt loader rejects missing markdown files', async () => {
     () => loadAgentPromptSegments(compiled, createFilePromptSource(root)),
     AgentTemplateError,
   );
+});
+
+test('builtin roles resolve all external markdown prompt segments', async () => {
+  const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  for (const roleId of AGENT_ROLE_IDS) {
+    const loaded = await loadBuiltinPromptSegments(roleId, templateRoot);
+    assert.equal(loaded.segments.length, builtinPromptSegmentRefs(roleId).length);
+    assert.ok(loaded.segments.every((segment) => segment.content.trim().length > 0));
+    assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
+  }
 });
