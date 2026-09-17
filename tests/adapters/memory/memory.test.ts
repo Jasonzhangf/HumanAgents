@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   ContractError,
@@ -8,7 +10,13 @@ import {
   type MemoryScope,
   type MemorySubmission,
 } from '../../../packages/contracts/src/index.js';
-import { DeterministicMemoryBackend } from '../../../packages/adapters/memory/src/index.js';
+import {
+  DeterministicMemoryBackend,
+  FilesystemMemoryPersistence,
+  MemoryPersistenceError,
+  type MemoryPersistencePort,
+  type MemoryPersistenceSnapshot,
+} from '../../../packages/adapters/memory/src/index.js';
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
@@ -99,7 +107,9 @@ test('context recall filters layers, enforces budget, and binds attach epoch', a
 test('memory backend filters task ids exactly and keeps forgetting atomic', async () => {
   const memory = new DeterministicMemoryBackend();
   const taskAB = id('task', 'task-ab');
-  memory.addCanonicalRecord({
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://project-a/1', sourceDigest: 'sha256:a', text: 'fact a' });
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://project-a/2', sourceDigest: 'sha256:ab', text: 'fact ab' });
+  await memory.addCanonicalRecord({
     memoryId: 'memory-a',
     namespace: 'project',
     projectKey: 'project-a',
@@ -112,7 +122,7 @@ test('memory backend filters task ids exactly and keeps forgetting atomic', asyn
     sourceScopeRef: 'project-a:task-a',
     relevanceReason: 'test',
   });
-  memory.addCanonicalRecord({
+  await memory.addCanonicalRecord({
     memoryId: 'memory-ab',
     namespace: 'project',
     projectKey: 'project-a',
@@ -257,6 +267,40 @@ test('approval rejects evidence without a resolvable digest', async () => {
   }), ContractError);
 });
 
+test('approval deduplicates content provenance repeated in evidence refs', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-deduplicated';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-deduplicated', text: 'deduplicated approval source' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-deduplicated',
+    requestId: 'request-deduplicated',
+    operationId: id('operation', 'submission-deduplicated'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-deduplicated',
+    evidenceRefs: [contentRef],
+    observation: 'deduplicated approval source',
+    desiredScope: 'project',
+    reason: 'producer must match persistence invariants',
+    inputDigest: 'sha256:submission-deduplicated',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'content and evidence share one source',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [contentRef],
+  });
+  const queried = await memory.query(memoryQuery({ query: 'deduplicated approval source' }));
+  assert.deepEqual(queried.entries[0]?.sourceRefs, [contentRef]);
+  assert.deepEqual(queried.entries[0]?.sourceDigests, ['sha256:candidate-deduplicated']);
+});
+
 test('promotion rejects an unresolvable approval source without changing canonical state', async () => {
   const memory = new DeterministicMemoryBackend();
   const contentRef = 'asset://memory/candidate-approval';
@@ -353,4 +397,613 @@ test('final reviews cannot overwrite approved canonical state', async () => {
 
   const queried = await memory.query(memoryQuery({ query: 'review is final' }));
   assert.equal(queried.entries[0]?.state, 'approved');
+});
+
+test('final promotions cannot overwrite global provenance', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-final-promotion';
+  const evidenceRef = 'journal://project-a/evidence-final-promotion';
+  const firstApprovalRef = 'approval://global-final-promotion-first';
+  const secondApprovalRef = 'approval://global-final-promotion-second';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-final-promotion', text: 'promotion is final' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:evidence-final-promotion', text: 'promotion evidence' });
+  await memory.ingest({ scope: taskScope, sourceRef: firstApprovalRef, sourceDigest: 'sha256:approval-first', text: 'first approval' });
+  await memory.ingest({ scope: taskScope, sourceRef: secondApprovalRef, sourceDigest: 'sha256:approval-second', text: 'second approval' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-final-promotion',
+    requestId: 'request-final-promotion',
+    operationId: id('operation', 'submission-final-promotion'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-final-promotion',
+    evidenceRefs: [evidenceRef],
+    observation: 'promotion is final',
+    desiredScope: 'project',
+    reason: 'test final promotion state',
+    inputDigest: 'sha256:submission-final-promotion',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'project evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+  const promotion = {
+    candidateId: submitted.candidateId!,
+    from: 'project' as const,
+    to: 'global' as const,
+    actor: { ...actor, roleId: 'review' as const },
+    reason: 'stable across projects',
+    impactScope: 'all projects',
+    approvalRef: firstApprovalRef,
+    sourceRefs: [],
+    promotedAt: '2026-09-17T00:00:00Z',
+  };
+  await memory.promoteCandidate(promotion);
+  await assert.rejects(memory.promoteCandidate({
+    ...promotion,
+    approvalRef: secondApprovalRef,
+    reason: 'attempt to replace global provenance',
+  }), ContractError);
+
+  const promoted = await memory.query(memoryQuery({
+    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
+    namespace: 'global',
+    taskId: undefined,
+    states: ['active'],
+    query: 'promotion is final',
+  }));
+  assert.deepEqual(promoted.entries[0]?.sourceRefs, [contentRef, evidenceRef, firstApprovalRef]);
+});
+
+test('promotion creates an independent global record and preserves the project record', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const contentRef = 'asset://memory/candidate-independent';
+  const evidenceRef = 'journal://project-a/evidence-independent';
+  const approvalRef = 'approval://global-independent';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:candidate-independent', text: 'independent global record' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:evidence-independent', text: 'independent evidence' });
+  await memory.ingest({ scope: taskScope, sourceRef: approvalRef, sourceDigest: 'sha256:approval-independent', text: 'independent approval' });
+
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-independent',
+    requestId: 'request-independent',
+    operationId: id('operation', 'submission-independent'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:candidate-independent',
+    evidenceRefs: [evidenceRef],
+    observation: 'independent global record',
+    desiredScope: 'project',
+    reason: 'test independent promotion',
+    inputDigest: 'sha256:submission-independent',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'project record approved',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+  await memory.promoteCandidate({
+    candidateId: submitted.candidateId!,
+    from: 'project',
+    to: 'global',
+    actor: { ...actor, roleId: 'review' },
+    reason: 'independent global promotion',
+    impactScope: 'all projects',
+    approvalRef,
+    sourceRefs: [],
+    promotedAt: '2026-09-17T00:00:00Z',
+  });
+
+  const project = await memory.query(memoryQuery({ query: 'independent global record', states: ['approved'] }));
+  const global = await memory.query(memoryQuery({
+    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
+    namespace: 'global',
+    taskId: undefined,
+    states: ['active'],
+    query: 'independent global record',
+  }));
+  assert.equal(project.entries.length, 1);
+  assert.equal(global.entries.length, 1);
+  assert.equal(project.entries[0]?.memoryId, `memory-candidate:${submitted.candidateId}`);
+  assert.equal(global.entries[0]?.memoryId, `global:memory-candidate:${submitted.candidateId}`);
+  assert.notEqual(project.entries[0]?.memoryId, global.entries[0]?.memoryId);
+});
+
+test('memory backend persists and reloads canonical state without losing review or provenance', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-restart-'));
+  const persistence = new FilesystemMemoryPersistence(join(root, 'memory.json'));
+  const memory = new DeterministicMemoryBackend(persistence);
+  const contentRef = 'asset://memory/persisted';
+  const evidenceRef = 'journal://project-a/persisted-evidence';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:persisted', text: 'persisted memory fact' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:persisted-evidence', text: 'persisted evidence' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-persisted',
+    requestId: 'request-persisted',
+    operationId: id('operation', 'submission-persisted'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:persisted',
+    evidenceRefs: [evidenceRef],
+    observation: 'persisted memory fact',
+    desiredScope: 'project',
+    reason: 'restart recovery test',
+    inputDigest: 'sha256:submission-persisted',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'approved before restart',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+
+  const restarted = await DeterministicMemoryBackend.fromPersistence(persistence);
+  const queried = await restarted.query(memoryQuery({ query: 'persisted memory fact' }));
+  assert.equal(queried.entries.length, 1);
+  assert.equal(queried.entries[0]?.state, 'approved');
+  assert.deepEqual(queried.entries[0]?.sourceDigests, ['sha256:persisted', 'sha256:persisted-evidence']);
+  assert.deepEqual(await restarted.inspect({ sourceRef: contentRef }), {
+    sourceRef: contentRef,
+    sourceDigest: 'sha256:persisted',
+    text: 'persisted memory fact',
+  });
+  await rm(root, { recursive: true, force: true });
+});
+
+test('memory persistence preserves submission cycle identity across restart', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-cycle-'));
+  const persistence = new FilesystemMemoryPersistence(join(root, 'memory.json'));
+  const cycle = id('cycle', 'cycle-a');
+  const memory = new DeterministicMemoryBackend(persistence);
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/cycle-source', sourceDigest: 'sha256:cycle-source', text: 'cycle scoped source' });
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/cycle-evidence', sourceDigest: 'sha256:cycle-evidence', text: 'cycle scoped evidence' });
+  await memory.submitCandidate({
+    submissionId: 'submission-cycle',
+    requestId: 'request-cycle',
+    operationId: id('operation', 'submission-cycle'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    cycleId: cycle,
+    requestedKind: 'semantic',
+    contentRef: 'journal://task-a/cycle-source',
+    contentDigest: 'sha256:cycle-source',
+    evidenceRefs: ['journal://task-a/cycle-evidence'],
+    observation: 'cycle scoped source',
+    desiredScope: 'project',
+    reason: 'cycle identity persistence test',
+    inputDigest: 'sha256:submission-cycle',
+  });
+
+  const restarted = await DeterministicMemoryBackend.fromPersistence(persistence);
+  await restarted.reviewCandidate({
+    candidateId: 'submission-cycle',
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'cycle identity remains intact',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: ['journal://task-a/cycle-evidence'],
+  });
+  const snapshot = await persistence.load();
+  assert.deepEqual(snapshot?.candidates[0]?.submission.cycleId, cycle);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('source locks reject drift after restart and persistence snapshots round-trip', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-lock-'));
+  const file = join(root, 'memory.json');
+  const persistence = new FilesystemMemoryPersistence(file);
+  const memory = new DeterministicMemoryBackend(persistence);
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/locked', sourceDigest: 'sha256:locked', text: 'locked source' });
+  await assert.rejects(
+    memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/locked', sourceDigest: 'sha256:drift', text: 'drifted source' }),
+    ContractError,
+  );
+
+  const restarted = await DeterministicMemoryBackend.fromPersistence(persistence);
+  await assert.rejects(
+    restarted.ingest({ scope: taskScope, sourceRef: 'journal://task-a/locked', sourceDigest: 'sha256:drift', text: 'drifted source' }),
+    ContractError,
+  );
+  const raw = JSON.parse(await readFile(file, 'utf8')) as MemoryPersistenceSnapshot;
+  assert.equal(raw.version, 1);
+  assert.equal(raw.records[0]?.sourceRef, 'journal://task-a/locked');
+  assert.equal(raw.sourceLocks[0]?.sourceDigest, 'sha256:locked');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('filesystem memory persistence rejects corrupt snapshots and atomically replaces prior state', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-persistence-'));
+  const file = join(root, 'memory.json');
+  const persistence = new FilesystemMemoryPersistence(file);
+  await writeFile(file, '{"version":1,"records":[]}\n', 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  const store: MemoryPersistencePort = {
+    snapshot: undefined,
+    async load() { return this.snapshot; },
+    async save(snapshot) { this.snapshot = snapshot; },
+  } as MemoryPersistencePort & { snapshot?: MemoryPersistenceSnapshot };
+  const backend = new DeterministicMemoryBackend(store);
+  await backend.ingest({ scope: taskScope, sourceRef: 'journal://task-a/first', sourceDigest: 'sha256:first', text: 'first' });
+  await backend.ingest({ scope: taskScope, sourceRef: 'journal://task-a/second', sourceDigest: 'sha256:second', text: 'second' });
+  const snapshot = await store.load();
+  assert.equal(snapshot?.records.length, 2);
+  assert.equal(snapshot?.sourceLocks.length, 2);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('filesystem memory persistence rejects malformed nested state and dangling references', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-invalid-state-'));
+  const file = join(root, 'memory.json');
+  const persistence = new FilesystemMemoryPersistence(file);
+  const valid = {
+    version: 1,
+    revision: 1,
+    records: [{
+      scope: taskScope,
+      sourceRef: 'journal://task-a/valid',
+      sourceDigest: 'sha256:valid',
+      text: 'valid source',
+    }],
+    canonicalRecords: [],
+    candidates: [],
+    candidateIds: [],
+    forgettingPlans: [],
+    sourceLocks: [{
+      sourceRef: 'journal://task-a/valid',
+      sourceDigest: 'sha256:valid',
+      scope: taskScope,
+    }],
+    attachedEpochs: [],
+    attachedContextIds: [],
+  };
+
+  await writeFile(file, `${JSON.stringify({ ...valid, records: [null] })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    sourceLocks: [{
+      sourceRef: 'journal://task-a/valid',
+      sourceDigest: 'sha256:drifted',
+      scope: taskScope,
+    }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    candidateIds: [{ candidateId: 'candidate-dangling', submissionId: 'missing-submission' }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    attachedContextIds: [{ agentRuntimeId: 'runtime-without-epoch', contextId: 'context-a' }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    canonicalRecords: [{
+      memoryId: 'canonical-dangling-source',
+      namespace: 'project',
+      projectKey: 'project-a',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'dangling canonical provenance',
+      sourceRefs: ['journal://task-a/missing'],
+      sourceDigests: ['sha256:missing'],
+      taskId: task,
+      sourceScopeRef: 'project-a:task-a',
+      relevanceReason: 'snapshot invariant test',
+    }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    canonicalRecords: [{
+      memoryId: 'canonical-duplicate-source',
+      namespace: 'project',
+      projectKey: 'project-a',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'duplicate canonical provenance',
+      sourceRefs: ['journal://task-a/valid', 'journal://task-a/valid'],
+      sourceDigests: ['sha256:valid', 'sha256:valid'],
+      taskId: task,
+      sourceScopeRef: 'project-a:task-a',
+      relevanceReason: 'snapshot invariant test',
+    }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    canonicalRecords: [{
+      memoryId: 'canonical-digest-mismatch',
+      namespace: 'project',
+      projectKey: 'project-a',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'mismatched canonical provenance',
+      sourceRefs: ['journal://task-a/valid'],
+      sourceDigests: ['sha256:tampered'],
+      taskId: task,
+      sourceScopeRef: 'project-a:task-a',
+      relevanceReason: 'snapshot invariant test',
+    }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await writeFile(file, `${JSON.stringify({
+    ...valid,
+    candidates: [{
+      submission: {
+        submissionId: 'submission-inconsistent',
+        requestId: 'request-inconsistent',
+        operationId: id('operation', 'submission-inconsistent'),
+        bindingRef: 'binding-a',
+        actor,
+        projectKey: 'project-a',
+        taskId: task,
+        requestedKind: 'semantic',
+        contentRef: 'journal://task-a/valid',
+        contentDigest: 'sha256:valid',
+        evidenceRefs: ['journal://task-a/valid'],
+        observation: 'invalid candidate state',
+        desiredScope: 'project',
+        reason: 'snapshot invariant test',
+        inputDigest: 'sha256:submission-inconsistent',
+      },
+      candidateId: 'submission-inconsistent',
+      state: 'approved',
+    }],
+    candidateIds: [{ candidateId: 'submission-inconsistent', submissionId: 'submission-inconsistent' }],
+  })}\n`, 'utf8');
+  await assert.rejects(
+    persistence.load(),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-snapshot-invalid',
+  );
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('filesystem memory persistence rejects stale writers without losing the committed update', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-cas-'));
+  const file = join(root, 'memory.json');
+  const firstPersistence = new FilesystemMemoryPersistence(file);
+  const secondPersistence = new FilesystemMemoryPersistence(file);
+  const first = new DeterministicMemoryBackend(firstPersistence);
+  const second = new DeterministicMemoryBackend(secondPersistence);
+
+  await first.ingest({ scope: taskScope, sourceRef: 'journal://task-a/first', sourceDigest: 'sha256:first', text: 'first' });
+  await second.reload();
+  await second.ingest({ scope: taskScope, sourceRef: 'journal://task-a/second', sourceDigest: 'sha256:second', text: 'second' });
+  await assert.rejects(
+    first.ingest({ scope: taskScope, sourceRef: 'journal://task-a/stale', sourceDigest: 'sha256:stale', text: 'stale' }),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-conflict',
+  );
+
+  const committed = await firstPersistence.load();
+  assert.deepEqual(committed?.records.map((record) => record.sourceRef), [
+    'journal://task-a/first',
+    'journal://task-a/second',
+  ]);
+  assert.equal(committed?.revision, 2);
+
+  await first.ingest({ scope: taskScope, sourceRef: 'journal://task-a/recovered', sourceDigest: 'sha256:recovered', text: 'recovered' });
+  const recovered = await firstPersistence.load();
+  assert.deepEqual(recovered?.records.map((record) => record.sourceRef), [
+    'journal://task-a/first',
+    'journal://task-a/second',
+    'journal://task-a/recovered',
+  ]);
+  assert.equal(recovered?.revision, 3);
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('same backend serializes concurrent mutations without losing either update', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-concurrent-'));
+  const persistence = new FilesystemMemoryPersistence(join(root, 'memory.json'));
+  const memory = new DeterministicMemoryBackend(persistence);
+
+  await Promise.all([
+    memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/concurrent-first', sourceDigest: 'sha256:concurrent-first', text: 'first concurrent source' }),
+    memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/concurrent-second', sourceDigest: 'sha256:concurrent-second', text: 'second concurrent source' }),
+  ]);
+
+  const snapshot = await persistence.load();
+  assert.equal(snapshot?.revision, 2);
+  assert.deepEqual(snapshot?.records.map((record) => record.sourceRef), [
+    'journal://task-a/concurrent-first',
+    'journal://task-a/concurrent-second',
+  ]);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('canonical record insertion is durable across restart', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-canonical-'));
+  const persistence = new FilesystemMemoryPersistence(join(root, 'memory.json'));
+  const memory = new DeterministicMemoryBackend(persistence);
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/canonical', sourceDigest: 'sha256:canonical', text: 'canonical source' });
+  await memory.addCanonicalRecord({
+    memoryId: 'memory-canonical',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'canonical source',
+    sourceRefs: ['journal://task-a/canonical'],
+    sourceDigests: ['sha256:canonical'],
+    taskId: task,
+    sourceScopeRef: 'project-a:task-a',
+    relevanceReason: 'canonical persistence test',
+  });
+
+  const restarted = await DeterministicMemoryBackend.fromPersistence(persistence);
+  const queried = await restarted.query(memoryQuery({ query: 'canonical source' }));
+  assert.equal(queried.entries.length, 1);
+  assert.equal(queried.entries[0]?.memoryId, 'memory-canonical');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('canonical record insertion rejects missing or mismatched provenance in memory-only mode', async () => {
+  const memory = new DeterministicMemoryBackend();
+  await memory.ingest({ scope: taskScope, sourceRef: 'journal://task-a/canonical-valid', sourceDigest: 'sha256:canonical-valid', text: 'canonical valid source' });
+
+  await assert.rejects(
+    memory.addCanonicalRecord({
+      memoryId: 'memory-missing-source',
+      namespace: 'project',
+      projectKey: 'project-a',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'missing source',
+      sourceRefs: ['journal://task-a/missing'],
+      sourceDigests: ['sha256:missing'],
+      taskId: task,
+      sourceScopeRef: 'project-a:task-a',
+      relevanceReason: 'provenance validation test',
+    }),
+    ContractError,
+  );
+  await assert.rejects(
+    memory.addCanonicalRecord({
+      memoryId: 'memory-mismatched-source',
+      namespace: 'project',
+      projectKey: 'project-a',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'mismatched source',
+      sourceRefs: ['journal://task-a/canonical-valid'],
+      sourceDigests: ['sha256:mismatched'],
+      taskId: task,
+      sourceScopeRef: 'project-a:task-a',
+      relevanceReason: 'provenance validation test',
+    }),
+    ContractError,
+  );
+  assert.deepEqual((await memory.query(memoryQuery({ query: 'missing source' }))).entries, []);
+});
+
+test('persistence failures do not expose uncommitted memory mutations', async () => {
+  let snapshot: MemoryPersistenceSnapshot | undefined;
+  let failNextSave = false;
+  const persistence: MemoryPersistencePort = {
+    async load() {
+      return snapshot;
+    },
+    async save(next) {
+      if (failNextSave) {
+        failNextSave = false;
+        throw new MemoryPersistenceError(
+          'memory-persistence-io-failure',
+          'injected memory persistence failure',
+          { kind: 'recover', ref: 'memory-persistence-adapter' },
+        );
+      }
+      snapshot = next;
+    },
+  };
+  const memory = new DeterministicMemoryBackend(persistence);
+  const contentRef = 'asset://memory/uncommitted';
+  const evidenceRef = 'journal://project-a/uncommitted-evidence';
+
+  failNextSave = true;
+  await assert.rejects(
+    memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:uncommitted', text: 'uncommitted source' }),
+    MemoryPersistenceError,
+  );
+  await assert.rejects(memory.inspect({ sourceRef: contentRef }), ContractError);
+
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:uncommitted', text: 'uncommitted source' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:uncommitted-evidence', text: 'uncommitted evidence' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-uncommitted',
+    requestId: 'request-uncommitted',
+    operationId: id('operation', 'submission-uncommitted'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:uncommitted',
+    evidenceRefs: [evidenceRef],
+    observation: 'uncommitted source',
+    desiredScope: 'project',
+    reason: 'persistence failure test',
+    inputDigest: 'sha256:submission-uncommitted',
+  });
+
+  failNextSave = true;
+  await assert.rejects(memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'must not persist after a failed save',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  }), MemoryPersistenceError);
+  assert.deepEqual((await memory.query(memoryQuery({ query: 'uncommitted source' }))).entries, []);
+
+  await memory.reload();
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'reject',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'reloaded state remains a candidate',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+  assert.deepEqual((await memory.query(memoryQuery({ query: 'uncommitted source' }))).entries, []);
 });

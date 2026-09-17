@@ -39,6 +39,132 @@ function appendInChild(url: string, file: string, commitId: string): Promise<voi
 test('append, latest, replay and verify checkpoint chain across events', async () => { const { journal } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const second = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(2, first.checkpoint!.id) }); assert.equal((await journal.latest())!.seq, 3); assert.equal((await journal.replay()).length, 3); assert.equal((await journal.verify()).valid, true); assert.equal(second.checkpoint!.previousCheckpointId!.value, 'cp-1'); });
 test('rejects duplicate and broken sequence records', async () => { const { journal, file } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const raw = await readFile(file, 'utf8'); const [a, b] = raw.trim().split('\n').map((line) => JSON.parse(line) as { seq: number; previousRecordDigest: string | null }); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, seq: a.seq })}\n`, 'utf8'); let result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /duplicate/); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, previousRecordDigest: 'sha256:wrong' })}\n`, 'utf8'); result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /predecessor/); });
 test('commitId is idempotent for the same facts and conflicts for different facts', async () => { const { journal, file } = await fixture(); const scope = { organId: organ, taskId: task }; const first = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); const replay = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); assert.equal(replay.seq, first.seq); assert.equal(replay.commitId, 'job-1'); assert.equal((await readFile(file, 'utf8')).trim().split('\n').length, 1); await assert.rejects(() => journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 2 } }), JournalCommitConflictError); const second = await journal.append({ commitId: 'job-2', kind: 'event', scope, payload: { step: 2 } }); assert.equal(second.seq, 2); assert.equal((await journal.findByCommitId('job-1'))!.seq, 1); assert.equal((await journal.findByCommitId('job-2'))!.seq, 2); });
+test('legacy v1 commit facts remain replayable after memory envelope support', async () => {
+  const { journal, file } = await fixture();
+  const scope = { organId: organ, taskId: task };
+  const first = await journal.append({ commitId: 'legacy-job', kind: 'event', scope, payload: { step: 1 } });
+  const legacyDigest = (await import('node:crypto')).createHash('sha256').update(JSON.stringify({
+    kind: 'event',
+    scope,
+    checkpoint: null,
+    payload: { step: 1 },
+  })).digest('hex');
+  const raw = JSON.parse(await readFile(file, 'utf8')) as { commitFactDigest: string };
+  assert.equal(raw.commitFactDigest, `sha256:${legacyDigest}`);
+  const replay = await journal.append({ commitId: 'legacy-job', kind: 'event', scope, payload: { step: 1 } });
+  assert.equal(replay.seq, first.seq);
+  assert.equal((await journal.verify()).valid, true);
+});
+test('memory envelope rejects cross-scope provenance before append', async () => {
+  const { journal } = await fixture();
+  const otherProject = 'project-b';
+  const otherOrgan = id('organ', 'organ-b');
+  const otherTask = id('task', 'task-b');
+  const otherCycle = id('cycle', 'cycle-b');
+  const source = {
+    sourceRef: 'journal://project-b/source',
+    sourceDigest: 'sha256:source-b',
+    projectKey: otherProject,
+    taskId: otherTask,
+    cycleId: otherCycle,
+    occurredAt: '2026-09-17T00:00:00Z',
+    kind: 'checkpoint' as const,
+    payloadRef: 'asset://payload-b',
+  };
+
+  await assert.rejects(
+    journal.append({
+      kind: 'event',
+      scope: { organId: organ, taskId: task },
+      memoryScope: { namespace: 'global', globalId: 'global' },
+      memorySource: source,
+      payload: { observed: true },
+    }),
+    JournalIntegrityError,
+  );
+  await assert.rejects(
+    journal.append({
+      kind: 'event',
+      scope: { organId: organ, taskId: task },
+      memoryScope: {
+        namespace: 'global',
+        globalId: 'global',
+        sourceProjectKey: otherProject,
+        sourceOrganId: otherOrgan,
+      },
+      memorySource: source,
+      payload: { observed: true },
+    }),
+    JournalIntegrityError,
+  );
+});
+test('global memory envelope permits omitted source project provenance', async () => {
+  const { journal } = await fixture();
+  const record = await journal.append({
+    kind: 'event',
+    scope: { organId: organ, taskId: task },
+    memoryScope: { namespace: 'global', globalId: 'global' },
+    memorySource: {
+      sourceRef: 'journal://project-a/global-source',
+      sourceDigest: 'sha256:global-source',
+      projectKey: 'project-a',
+      taskId: task,
+      occurredAt: '2026-09-17T00:00:00Z',
+      kind: 'checkpoint',
+      payloadRef: 'asset://global-payload',
+    },
+    payload: { observed: true },
+  });
+  assert.deepEqual((await journal.replayMemory({ namespace: 'global', globalId: 'global' })).map((entry) => entry.seq), [record.seq]);
+});
+test('memory envelope rejects mismatched task and cycle scope kinds before append and verify', async () => {
+  const { journal, file } = await fixture();
+  const scope = { organId: organ, taskId: task, cycleId: cycle };
+  const invalidTaskSource = {
+    sourceRef: 'journal://project-a/invalid-task-scope',
+    sourceDigest: 'sha256:invalid-task-scope',
+    projectKey: 'project-a',
+    taskId: { scope: 'organ', value: task.value },
+    occurredAt: '2026-09-17T00:00:00Z',
+    kind: 'checkpoint' as const,
+    payloadRef: 'asset://invalid-task-scope',
+  };
+  await assert.rejects(
+    journal.append({
+      kind: 'event',
+      scope,
+      memoryScope: { namespace: 'global', globalId: 'global' },
+      memorySource: invalidTaskSource as never,
+      payload: { observed: true },
+    }),
+    JournalIntegrityError,
+  );
+
+  const valid = await journal.append({
+    kind: 'event',
+    scope,
+    memoryScope: { namespace: 'global', globalId: 'global' },
+    memorySource: {
+      ...invalidTaskSource,
+      taskId: task,
+      cycleId: cycle,
+      sourceRef: 'journal://project-a/valid-scope',
+      sourceDigest: 'sha256:valid-scope',
+    },
+    payload: { observed: true },
+  });
+  const raw = JSON.parse(await readFile(file, 'utf8')) as {
+    memorySource: { cycleId: { scope: string; value: string } };
+    recordDigest: string;
+  };
+  raw.memorySource.cycleId = { scope: 'organ', value: cycle.value };
+  const digest = (await import('node:crypto')).createHash('sha256').update(JSON.stringify({ ...raw, recordDigest: undefined })).digest('hex');
+  await writeFile(file, `${JSON.stringify({ ...raw, recordDigest: `sha256:${digest}` })}\n`, 'utf8');
+  const verified = await journal.verify();
+  assert.equal(verified.valid, false);
+  assert.match(verified.error!, /episodic cycleId|memory source cycle/);
+  assert.equal(valid.seq, 1);
+});
 test('serializes cross-process appends under the same journal ownership', async () => { const { journal, file } = await fixture(); const moduleUrl = new URL('../../../packages/adapters/jsonl/src/index.js', import.meta.url).href; await Promise.all([appendInChild(moduleUrl, file, 'child-a'), appendInChild(moduleUrl, file, 'child-b')]); const records = await journal.replay(); const byCommit = new Map(records.map((record) => [record.commitId, record] as const)); assert.equal(records.length, 2); assert.deepEqual(records.map((record) => record.seq), [1, 2]); assert.ok(byCommit.has('child-a')); assert.ok(byCommit.has('child-b')); assert.equal(records[0]!.previousRecordDigest, null); assert.equal(records[1]!.previousRecordDigest, records[0]!.recordDigest); });
 test('creates a missing journal parent for first append and recover', async () => { const root = await mkdtemp(join(tmpdir(), 'humanagent-journal-parent-')); const appendJournal = new JsonlOrganJournal(join(root, 'append', 'nested', 'organ.jsonl')); const recoverJournal = new JsonlOrganJournal(join(root, 'recover', 'nested', 'organ.jsonl')); const record = await appendJournal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { first: true } }); const recovered = await recoverJournal.recover(); assert.equal(record.seq, 1); assert.deepEqual(recovered, { valid: true, records: [] }); });
 test('rejects broken checkpoint predecessor links', async () => { const { journal } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await assert.rejects(() => journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(3, first.checkpoint!.id) }), JournalIntegrityError); });

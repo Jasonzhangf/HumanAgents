@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests",
+    "noEmitOnError": true
+  },
+  "include": [
+    "../node-modules.d.ts",
+    "../../../packages/adapters/memory/src/**/*.ts",
+    "./**/*.ts"
+  ]
+}
