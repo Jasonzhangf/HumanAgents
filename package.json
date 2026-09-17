@@ -15,7 +15,7 @@
     "build:runtime": "tsc -p tests/runtime/tsconfig.json && tsc -p tests/runtime/admission/tsconfig.json && tsc -p tests/runtime/agent-io/tsconfig.json && tsc -p tests/runtime/checkpoints/tsconfig.json && tsc -p tests/runtime/context/tsconfig.json && tsc -p tests/runtime/control/tsconfig.json && tsc -p tests/runtime/events/tsconfig.json && tsc -p tests/runtime/hooks/tsconfig.json && tsc -p tests/runtime/intake/tsconfig.json && tsc -p tests/runtime/memory/tsconfig.json && tsc -p tests/runtime/nodes/tsconfig.json && tsc -p tests/runtime/orchestration/tsconfig.json && tsc -p tests/runtime/communication/tsconfig.json && tsc -p tests/runtime/review/tsconfig.json",
     "build:acp": "tsc -p tests/adapters/acp/tsconfig.json",
     "test:explicit-brain": "pnpm build:contracts && pnpm exec tsc -p tests/runtime/explicit-brain/tsconfig.json && node --test dist/tests-explicit-brain/tests/runtime/explicit-brain/explicit-brain.test.js",
-    "build:tests": "tsc -p tests/config/tsconfig.json && tsc -p tests/app/tsconfig.json",
+    "build:tests": "tsc -p tests/config/tsconfig.json && tsc -p tests/app/tsconfig.json && tsc -p tests/adapters/memory/tsconfig.json",
     "build:raw": "node scripts/clean-build.mjs && pnpm build:contracts && pnpm build:config && pnpm build:app && pnpm build:runtime && pnpm build:acp && pnpm build:tests",
     "build": "node scripts/run-build.mjs",
     "build:release": "node scripts/build-release.mjs",
