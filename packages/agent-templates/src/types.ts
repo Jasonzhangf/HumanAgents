@@ -63,6 +63,21 @@ export interface LoadedAgentTemplate extends CompiledAgentTemplate {
   readonly driverCapabilities: readonly string[];
 }
 
+export interface AgentPromptSegment {
+  readonly ref: string;
+  readonly content: string;
+  readonly digest: string;
+}
+
+export interface AgentPromptSource {
+  read(ref: string): Promise<string>;
+}
+
+export interface LoadedAgentPromptSegments {
+  readonly segments: readonly AgentPromptSegment[];
+  readonly contentDigest: string;
+}
+
 export interface AgentTemplateRegistry {
   readonly skills: readonly string[];
   readonly toolCapabilities: readonly string[];

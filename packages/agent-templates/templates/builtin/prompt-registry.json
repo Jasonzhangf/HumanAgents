@@ -1,0 +1,42 @@
+{
+  "kind": "humanagent.prompt-registry",
+  "schemaVersion": 1,
+  "templateVersion": "1.0.0",
+  "roles": {
+    "interaction": [
+      "interaction/identity.md",
+      "interaction/mission.md",
+      "interaction/input-output.md",
+      "interaction/failure.md",
+      "interaction/boundaries.md"
+    ],
+    "orchestration": [
+      "orchestration/identity.md",
+      "orchestration/mission.md",
+      "orchestration/input-output.md",
+      "orchestration/failure.md",
+      "orchestration/boundaries.md"
+    ],
+    "execution": [
+      "execution/identity.md",
+      "execution/mission.md",
+      "execution/input-output.md",
+      "execution/failure.md",
+      "execution/boundaries.md"
+    ],
+    "review": [
+      "review/identity.md",
+      "review/mission.md",
+      "review/input-output.md",
+      "review/failure.md",
+      "review/boundaries.md"
+    ],
+    "memory": [
+      "memory/identity.md",
+      "memory/mission.md",
+      "memory/input-output.md",
+      "memory/failure.md",
+      "memory/boundaries.md"
+    ]
+  }
+}

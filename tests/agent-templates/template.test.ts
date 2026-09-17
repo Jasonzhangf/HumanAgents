@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   AgentTemplateError,
   assertUniqueTemplateOwners,
   compileAgentTemplate,
+  createFilePromptSource,
   digestAgentTemplate,
   digestPromptSegments,
   loadAgentTemplate,
+  loadAgentPromptSegments,
   validateAgentTemplate,
   validateConfiguredAgentBinding,
   type AgentRole,
@@ -222,4 +227,28 @@ test('configured agent bindings enable fake and explicit dsh drivers without imp
     tools: ['search'],
     permissions: ['task.read', 'workspace.read'],
   }), AgentTemplateError);
+});
+
+test('prompt segments are loaded from independent markdown files in manifest order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-prompts-'));
+  await mkdir(join(root, 'execution'), { recursive: true });
+  await writeFile(join(root, 'execution', 'identity.md'), '# Identity\n', 'utf8');
+  await writeFile(join(root, 'execution', 'contract.md'), '# Contract\n', 'utf8');
+
+  const compiled = compileAgentTemplate(template(), registry);
+  const loaded = await loadAgentPromptSegments(compiled, createFilePromptSource(root));
+  assert.deepEqual(loaded.segments.map((segment) => segment.ref), compiled.promptSegmentRefs);
+  assert.deepEqual(loaded.segments.map((segment) => segment.content), ['# Identity\n', '# Contract\n']);
+  assert.match(loaded.contentDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.notEqual(loaded.contentDigest, compiled.promptSegmentDigest);
+});
+
+test('prompt loader rejects missing markdown files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-prompts-'));
+  await mkdir(join(root, 'execution'), { recursive: true });
+  const compiled = compileAgentTemplate(template(), registry);
+  await assert.rejects(
+    () => loadAgentPromptSegments(compiled, createFilePromptSource(root)),
+    AgentTemplateError,
+  );
 });

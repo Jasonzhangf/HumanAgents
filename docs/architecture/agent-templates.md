@@ -148,7 +148,20 @@ agent-templates/
     tests/
 ```
 
-实现阶段建议将这些目录放在 HumanAgent 自己的 template registry 中；外部 template pack 必须通过显式 manifest 注册。不能通过扫描目录、文件名猜测角色，也不能把一个角色目录下的 system prompt 或 tools 自动带入另一个角色。
+MVP 的内置 prompt 分段对应为：
+
+```text
+packages/agent-templates/templates/builtin/
+  interaction/{identity,mission,input-output,failure,boundaries}.md
+  orchestration/{identity,mission,input-output,failure,boundaries}.md
+  execution/{identity,mission,input-output,failure,boundaries}.md
+  review/{identity,mission,input-output,failure,boundaries}.md
+  memory/{identity,mission,input-output,failure,boundaries}.md
+```
+
+这些文件是 prompt 正文的唯一真源；TypeScript 只保存安全引用、能力边界和 digest，不复制正文。
+
+当前内置 prompt 已落在 `packages/agent-templates/templates/builtin/`。每个角色的每一段 prompt 都是独立 `.md` 文件，并由 manifest 引用；外部 template pack 仍必须通过显式 manifest 注册。不能通过扫描目录、文件名猜测角色，也不能把一个角色目录下的 system prompt 或 tools 自动带入另一个角色。
 
 ### 3.1 Codex / `~/.agent` Skill 兼容层
 
@@ -278,7 +291,7 @@ type CompiledAgentTemplate = {
 }
 ```
 
-编译结果只包含已验证的、有序 `promptSegmentRefs` 和由这些引用计算出的 `promptSegmentDigest`，不把任何 Markdown 正文、secret 或外部服务凭据复制到业务 payload、metadata 或 debug log。每个 prompt segment 必须是当前角色目录下包内相对的 `.md` 文件引用；本阶段只校验引用，不实现文件系统 loader 或读取正文。`promptSegmentDigest` 是引用顺序的 digest，不是文件内容 digest；文件内容 digest 留给后续 loader seam。
+编译结果只包含已验证的、有序 `promptSegmentRefs` 和由这些引用计算出的 `promptSegmentDigest`，不把任何 Markdown 正文、secret 或外部服务凭据复制到业务 payload、metadata 或 debug log。每个 prompt segment 必须是当前角色目录下包内相对的 `.md` 文件引用。运行时通过 `AgentPromptSource` 显式读取引用，内置的 filesystem source 会校验模板根、拒绝路径逃逸、拒绝缺失/空文件，并返回按引用顺序计算的内容 digest。`promptSegmentDigest` 是引用顺序的 digest；运行时的 `contentDigest` 是实际 Markdown 内容 digest，二者不能互相冒充。
 
 ## 5. 统一 prompt segment 结构
 
@@ -347,7 +360,7 @@ Harness 在启动或安装时验证：
 
 ### 7.4 load
 
-对于 task-bound runtime，只有 Harness Runtime 在完成资源准入、Task binding、execution epoch 和 checkpoint recall 后，才把编译结果装配成 Agent Runtime Context。交互 agent 使用独立的 `interactionScopeId`，它接收原始输入、任务查询和确认请求，不要求预先存在 Task 或 checkpoint；一旦用户确认，Harness 才创建 Task binding 并重新装配后台 agent。运行时不重新扫描目录，不读取未锁定的新文件。
+对于 task-bound runtime，只有 Harness Runtime 在完成资源准入、Task binding、execution epoch 和 checkpoint recall 后，才把编译结果装配成 Agent Runtime Context。交互 agent 使用独立的 `interactionScopeId`，它接收原始输入、任务查询和确认请求，不要求预先存在 Task 或 checkpoint；一旦用户确认，Harness 才创建 Task binding 并重新装配后台 agent。运行时不重新扫描目录，不读取未锁定的新文件；它只读取已编译引用，并把实际文件内容 digest 绑定到本次装配结果。
 
 ## 8. 端口和启动接口
 
