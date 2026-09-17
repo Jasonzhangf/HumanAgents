@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "../../../dist/tests-acp",
+    "rootDir": "../../../",
+    "noEmitOnError": true
+  },
+  "include": [
+    "./node-modules.d.ts",
+    "../../../packages/adapters/acp/**/*.ts",
+    "./**/*.ts"
+  ]
+}
