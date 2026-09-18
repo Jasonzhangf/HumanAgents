@@ -31,6 +31,8 @@ interface RuntimeRecord {
     readonly assignmentId: string;
   };
   disposePromise?: Promise<void>;
+  startupSettled?: Promise<void>;
+  startupIssue?: OrchestrationIssue;
 }
 
 export interface RuntimePoolAcquireInput {
@@ -293,6 +295,10 @@ export class AgentRuntimePoolManager {
       },
     };
     this.runtimes.set(spawning.runtimeId, spawning);
+    let resolveStartup!: () => void;
+    spawning.startupSettled = new Promise<void>((resolve) => {
+      resolveStartup = resolve;
+    });
     try {
       const started = await this.factory.start({
         runtimeId: decision.runtimeId,
@@ -330,18 +336,20 @@ export class AgentRuntimePoolManager {
           input.evidenceRefs ?? [evidence(input.scope, 'orchestration.runtime.startup')],
           'orchestration.runtime.startup',
         );
+        const returnedIssue = cleanupIssue
+          ? issue(
+              startupIssue.code,
+              startupIssue.ownerId,
+              `${startupIssue.reason}; cleanup failed: ${cleanupIssue.reason}`,
+              cleanupIssue.nextAction,
+              [...startupIssue.evidenceRefs, ...cleanupIssue.evidenceRefs],
+              cleanupIssue.conditionRef,
+            )
+          : startupIssue;
+        if (cleanupIssue) spawning.startupIssue = returnedIssue;
         return {
           status: 'blocked',
-          issue: cleanupIssue
-            ? issue(
-                startupIssue.code,
-                startupIssue.ownerId,
-                `${startupIssue.reason}; cleanup failed: ${cleanupIssue.reason}`,
-                cleanupIssue.nextAction,
-                [...startupIssue.evidenceRefs, ...cleanupIssue.evidenceRefs],
-                cleanupIssue.conditionRef,
-              )
-            : startupIssue,
+          issue: returnedIssue,
         };
       }
       if (started.runtimeId !== spawning.runtimeId || started.generation !== spawning.generation) {
@@ -389,19 +397,23 @@ export class AgentRuntimePoolManager {
         conditionRef: 'orchestration.runtime.startup',
         fallbackEvidenceRefs: input.evidenceRefs,
       });
+      const returnedIssue = cleanupIssue
+        ? issue(
+            startupIssue.code,
+            startupIssue.ownerId,
+            `${startupIssue.reason}; cleanup failed: ${cleanupIssue.reason}`,
+            cleanupIssue.nextAction,
+            [...startupIssue.evidenceRefs, ...cleanupIssue.evidenceRefs],
+            cleanupIssue.conditionRef,
+          )
+        : startupIssue;
+      spawning.startupIssue = returnedIssue;
       return {
         status: 'blocked',
-        issue: cleanupIssue
-          ? issue(
-              startupIssue.code,
-              startupIssue.ownerId,
-              `${startupIssue.reason}; cleanup failed: ${cleanupIssue.reason}`,
-              cleanupIssue.nextAction,
-              [...startupIssue.evidenceRefs, ...cleanupIssue.evidenceRefs],
-              cleanupIssue.conditionRef,
-            )
-          : startupIssue,
+        issue: returnedIssue,
       };
+    } finally {
+      resolveStartup();
     }
   }
 
@@ -485,12 +497,17 @@ export class AgentRuntimePoolManager {
     const alreadyDisposed = this.disposed;
     this.disposed = true;
     const issues: OrchestrationIssue[] = [];
-    for (const runtime of this.runtimes.values()) {
-      if (runtime.state === 'disposed') continue;
-      if (runtime.state === 'spawning') {
-        runtime.state = 'disposed';
+    const runtimes = [...this.runtimes.values()];
+    for (const runtime of runtimes) {
+      await runtime.startupSettled;
+    }
+    for (const runtime of runtimes) {
+      if (runtime.startupIssue) {
+        issues.push(runtime.startupIssue);
+        runtime.startupIssue = undefined;
         continue;
       }
+      if (runtime.state === 'disposed') continue;
       try {
         await this.disposeRuntime(runtime);
       } catch (error) {
