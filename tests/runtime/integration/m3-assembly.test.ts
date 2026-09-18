@@ -284,6 +284,20 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
   const latest = await assembly.readLatestCheckpoint();
   assert.equal(latest?.checkpoint.id.value, checkpoint.id.value);
   assert.equal(checkpoints.appended.length, 1);
+  const otherCycle = id('cycle', 'm3-other-cycle');
+  await assert.rejects(
+    () => assembly.appendCheckpoint({
+      ownerId: 'm3-orchestration',
+      commitId: 'm3-invalid-cycle',
+      checkpoint: {
+        ...checkpoint,
+        id: id('checkpoint', 'm3-invalid-cycle'),
+        cycleId: otherCycle,
+        scope: { ...scope, cycleId: otherCycle },
+      },
+    }),
+    Error,
+  );
 
   const projection = projectTaskDashboard({
     source: { state: 'ready', label: task.title, updatedAt: '2026-09-18T00:00:00.000Z' },

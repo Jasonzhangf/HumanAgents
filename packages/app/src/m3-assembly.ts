@@ -151,8 +151,12 @@ export function createM3Assembly(options: M3AssemblyOptions): M3Assembly {
     feedbackPort,
     checkpointJournal: options.checkpointJournal,
     async appendCheckpoint(input) {
-      if (input.checkpoint.scope.organId.value !== options.scope.organId.value
-        || input.checkpoint.scope.taskId?.value !== options.scope.taskId?.value) {
+      const checkpointScope = input.checkpoint.scope;
+      if (checkpointScope.organId.value !== options.scope.organId.value
+        || checkpointScope.taskId?.value !== options.scope.taskId?.value
+        || checkpointScope.cycleId?.value !== options.scope.cycleId?.value
+        || checkpointScope.operationId?.value !== options.scope.operationId?.value
+        || input.checkpoint.cycleId.value !== options.scope.cycleId?.value) {
         throw new Error('M3 assembly checkpoint scope does not match the task scope');
       }
       return options.checkpointJournal.append(input);
