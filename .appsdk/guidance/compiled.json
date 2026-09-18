@@ -1,8 +1,8 @@
 {
   "enforcement": "advisory",
   "harness": "appsdk-development-process-control",
-  "manifest_hash": "sha256:21e94a4366f03e644d3eac797179f50276eb40a7ff52c405f2fd4ff4d3bf54ab",
-  "project_contract_digest": "sha256:4d92a63304ed949257d3e017768ad840447869f3bef1bb16af19b4dbadb41b9a",
+  "manifest_hash": "sha256:c5700d557e90d8f5bdb3cadec2a260446702771b228f1799e7cc11c9fb7ae2b1",
+  "project_contract_digest": "sha256:ce1f2098d96edefc0ad587af581eca334919864e66e5ed4b85a2ae8433174ed7",
   "rules": [
     {
       "description": "Read only rule sources declared by the project contract.",
@@ -97,9 +97,9 @@
       "source_id": "project-agents"
     },
     {
-      "contract_digest": "sha256:d1ef60799f60327cf6af6e22db0dab1cc1f849ba2d24eec7e1141ec6096bf317",
+      "contract_digest": "sha256:cfb18bf5cee0f67b525114eaad32e52826047c1c47a13b7b80c194b015d591ef",
       "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
-      "digest": "sha256:14ac510145faad77608c97cca48dac9e22fc2998f4fe40093155f94b523fd574",
+      "digest": "sha256:3db5406d07c093d42cde78133da17dfcb4aa96ff1e51eaca216b42a83128a460",
       "kind": "skill",
       "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
       "precedence": 200,
@@ -180,7 +180,7 @@
           "evidence": [
             "migration-route"
           ],
-          "instruction": "Choose preserve-and-migrate or the explicitly authorized fresh-init/reset route for the named legacy control plane.",
+          "instruction": "Choose preserve-and-migrate or the explicitly authorized clean-epoch reset for each named control-plane owner.",
           "node_id": "choose_route",
           "owner": "project"
         },
@@ -188,7 +188,7 @@
           "evidence": [
             "migration-record"
           ],
-          "instruction": "Execute the canonical migration once, or for a clean non-main existing project run appsdk init --fresh --discard-legacy once.",
+          "instruction": "Execute the canonical AppSDK migration/reset and the separate Collab migration/reset through their respective owners; never substitute one transaction for the other.",
           "node_id": "apply_route",
           "owner": "project"
         },
