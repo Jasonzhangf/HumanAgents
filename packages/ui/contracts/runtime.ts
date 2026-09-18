@@ -1,4 +1,4 @@
-import type { EvidenceRef, LifecycleState, TaskId } from '@humanagent/contracts';
+import type { EvidenceRef, HealthState, LifecycleState, OrganId, TaskId } from '@humanagent/contracts';
 import type { TaskDetailProjection } from './models.js';
 
 export type { TaskDetailProjection };
@@ -33,6 +33,37 @@ export interface RuntimeStatusProjection {
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly detail?: string;
   readonly modes: readonly RuntimeModeStatus[];
+}
+
+export type OrganHealthDimension =
+  | 'liveness'
+  | 'readiness'
+  | 'correctness'
+  | 'continuity'
+  | 'capacity'
+  | 'dependency';
+
+export interface OrganHealthDimensionProjection {
+  readonly dimension: OrganHealthDimension;
+  readonly status: 'healthy' | 'degraded' | 'failed' | 'unknown';
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly measurements: readonly {
+    readonly name: string;
+    readonly value: string | number;
+    readonly unit?: string;
+  }[];
+}
+
+export interface OrganHealthProjection {
+  readonly surface: 'organ-health';
+  readonly organId: OrganId;
+  readonly lifecycleState: string;
+  readonly healthState: HealthState;
+  readonly checkedAt: string;
+  readonly expiresAt: string;
+  readonly stale: boolean;
+  readonly dimensions: readonly OrganHealthDimensionProjection[];
+  readonly evidenceRefs: readonly EvidenceRef[];
 }
 
 export interface RuntimeRecentInputProjection {

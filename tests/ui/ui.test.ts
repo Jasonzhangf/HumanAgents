@@ -681,6 +681,9 @@ test('command validation keeps observation read-only and decisions on explicit i
   assert.doesNotThrow(
     () => validateUiCommand({ commandId: 'ok-1', surface: 'task-detail', kind: 'confirm-draft', draftId: 'draft-1', intent: 'append', taskId, normalizedInput: '补齐证据', confirmedBy: 'human', payloadRef: 'asset://req' }),
   );
+  assert.doesNotThrow(
+    () => validateUiCommand({ commandId: 'ok-2', surface: 'memory-interaction', kind: 'review-skill', candidateId: 'skill-1', decision: 'approve', decisionReason: '证据完整' }),
+  );
 });
 
 test('runtime UI consumes typed API without hardcoded success or direct source access', async () => {

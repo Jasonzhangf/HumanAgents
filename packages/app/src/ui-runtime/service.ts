@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  assertNotExpired,
   type Attention,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
@@ -15,7 +16,15 @@ import {
   type AgentStartRequest,
   type CycleId,
   type ExecutionRuntimePort,
+  type MemoryActorContext,
+  type MemoryComparisonView,
+  type MemoryDetailView,
+  type MemoryInteractionPort,
+  type MemoryNamespace,
+  type MemoryReviewReceipt,
+  type MemoryView,
   type MemoryScope,
+  type OrganHealthSnapshot,
   type OperationId,
   type OrganId,
   type ProviderBinding,
@@ -64,9 +73,15 @@ import {
 import {
   MemoryCoordinator,
   MemoryCoordinatorError,
+  createMemoryInteractionPort,
   type MemoryContextReceipt,
   type MemoryIssue,
 } from '../../../runtime/src/memory/index.js';
+import {
+  OrganHealthManager,
+  OrganHealthError,
+  healthEvidenceRefs,
+} from '../../../runtime/src/health/index.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
@@ -83,6 +98,8 @@ import {
   type RuntimeTaskErrorProjection,
   type RuntimeTaskListProjection,
   type TaskDetailProjection,
+  type OrganHealthProjection,
+  type OrganHealthDimensionProjection,
 } from '../../../ui/contracts/runtime.js';
 import {
   projectRuntimeDashboard,
@@ -91,7 +108,7 @@ import {
   projectRuntimeTaskDashboard,
   projectRuntimeTaskList,
 } from '../../../ui/projection/runtime.js';
-import { projectTaskDetail } from '../../../ui/projection/index.js';
+import { projectMemoryInteraction, projectTaskDetail } from '../../../ui/projection/index.js';
 import type { RuntimeObservationNodeInput, RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
@@ -122,6 +139,8 @@ export interface UiRuntimeMemoryComposition {
   readonly projectKey: string;
   readonly roleId?: string;
   readonly tokenBudget?: number;
+  readonly interaction?: MemoryInteractionPort;
+  readonly bindingRef?: string;
 }
 
 export interface UiRuntimeServiceOptions {
@@ -163,6 +182,13 @@ interface BoundMemoryContext {
   readonly receipt: MemoryContextReceipt;
 }
 
+export interface MemoryContextPending {
+  readonly state: 'pending';
+  readonly operationId: string;
+  readonly ownerId: string;
+  readonly nextAction: string;
+}
+
 function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
   if (LIFECYCLE_STATES.has(state)) return state as RuntimeTaskSnapshot['state'];
   if (state === 'model' || state === 'output' || state === 'tool') return 'succeeded';
@@ -188,6 +214,37 @@ function apiError(error: unknown): UiRuntimeApiError {
   if (error instanceof RuntimeTaskControlError) {
     const status = error.code.endsWith('.not.found') ? 404 : error.code === 'execution.input.required' ? 400 : 409;
     return new UiRuntimeApiError(error.code, error.ownerId, error.message, error.nextAction, status);
+  }
+  if (error instanceof MemoryCoordinatorError) {
+    const bindingMissing = error.message.startsWith('memory-binding-missing')
+      || error.message.startsWith('memory interaction binding is not registered');
+    const sourceMissing = error.message.startsWith('memory source is unavailable')
+      || error.message.includes('memory source is not visible in the bound scope');
+    const code = bindingMissing
+      ? 'memory-binding-missing'
+      : sourceMissing
+        ? 'memory-source-not-found'
+        : /^memory-[a-z-]+/u.exec(error.message)?.[0] ?? 'memory-interaction.invalid';
+    return new UiRuntimeApiError(
+      code,
+      'memory-coordinator',
+      error.message,
+      code === 'memory-binding-missing'
+        ? 'refresh the memory binding'
+        : code === 'memory-source-not-found'
+          ? 'select an existing memory detail'
+        : 'inspect the memory interaction request and retry',
+      bindingMissing || sourceMissing ? 404 : 409,
+    );
+  }
+  if (error instanceof OrganHealthError) {
+    return new UiRuntimeApiError(
+      error.code,
+      error.ownerId,
+      error.message,
+      error.nextAction,
+      409,
+    );
   }
   if (error instanceof ProviderAdapterError) {
     const providerError = error.providerError;
@@ -219,6 +276,8 @@ export class UiRuntimeService {
   private readonly dispatchLedger = new Map<string, DispatchLedgerEntry>();
   private readonly memory: UiRuntimeMemoryComposition;
   private readonly memoryInjection: MemoryContextCapture;
+  private readonly memoryInteraction: MemoryInteractionPort;
+  private readonly healthManager: OrganHealthManager;
   private readonly memoryContexts = new Map<string, BoundMemoryContext>();
   private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
@@ -226,6 +285,38 @@ export class UiRuntimeService {
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
     this.memoryInjection = new MemoryContextCapture(this.memory.backend);
+    this.healthManager = new OrganHealthManager({
+      organId: options.organId,
+      probe: {
+        probe: () => options.port.probe(options.binding),
+      },
+      now: () => this.now(),
+    });
+    if (this.memory.interaction) {
+      this.memoryInteraction = this.memory.interaction;
+    } else {
+      const interactionBinding = this.memory.coordinator.bindInteraction({
+        interactionScopeId: `runtime:${this.memory.projectKey}`,
+        projectKey: this.memory.projectKey,
+        backendRef: 'memory://deterministic',
+        indexVersion: this.memory.backend.indexVersion,
+        operations: this.memory.backend,
+        injection: this.memory.backend,
+      });
+      this.memoryInteraction = createMemoryInteractionPort({
+        coordinator: this.memory.coordinator,
+        bindingFor: ({ projectKey, namespace }) => (
+          projectKey === this.memory.projectKey
+            ? {
+                projectKey,
+                namespace,
+                bindingRef: this.memory.bindingRef ?? interactionBinding.bindingId,
+              }
+            : undefined
+        ),
+        now: () => this.now().toISOString(),
+      });
+    }
     this.requirementSubmissions = new RequirementSubmissionOwner(
       this.confirmationLedger,
       this.requirementInbox,
@@ -270,6 +361,247 @@ export class UiRuntimeService {
       );
     }
     return structuredClone(context.receipt);
+  }
+
+  memoryContextStatus(operationId: OperationId): {
+    readonly httpStatus: 200 | 202;
+    readonly body: MemoryContextReceipt | MemoryContextPending;
+  } {
+    const receipt = this.memoryContexts.get(operationId.value);
+    if (receipt) return { httpStatus: 200, body: this.memoryContextReceipt(operationId) };
+    let task: RuntimeTaskSnapshot;
+    try {
+      task = this.coordinator.taskSnapshot(this.coordinator.operationTask(operationId));
+    } catch {
+      throw new UiRuntimeApiError(
+        'memory-binding-missing',
+        'memory-coordinator',
+        `memory context is missing for operation: ${operationId.value}`,
+        'start an execution before requesting memory context',
+        404,
+      );
+    }
+    let terminal: RuntimeTaskSnapshot['events'][number] | undefined;
+    for (let index = task.events.length - 1; index >= 0; index -= 1) {
+      const event = task.events[index]!;
+      if (event.operationId === operationId.value && event.terminalPhase === 'final') {
+        terminal = event;
+        break;
+      }
+    }
+    if (terminal && (terminal.state === 'failed' || terminal.state === 'blocked')) {
+      throw new UiRuntimeApiError(
+        terminal.state === 'blocked' ? 'memory-context-blocked' : 'memory-context-failed',
+        terminal.ownerId ?? RUNTIME_OWNER,
+        terminal.summary,
+        terminal.nextAction ?? 'inspect the execution failure',
+        terminal.state === 'blocked' ? 409 : 500,
+        terminal.evidenceRefs,
+      );
+    }
+    if (terminal) {
+      throw new UiRuntimeApiError(
+        'memory-context-unavailable',
+        'memory-coordinator',
+        `memory context is unavailable for terminal operation: ${operationId.value}`,
+        'start a new execution and request its memory context',
+        409,
+      );
+    }
+    return {
+      httpStatus: 202,
+      body: {
+        state: 'pending',
+        operationId: operationId.value,
+        ownerId: 'memory-coordinator',
+        nextAction: 'wait for the execution memory binding to complete',
+      },
+    };
+  }
+
+  private now(): Date {
+    return this.options.now?.() ?? new Date();
+  }
+
+  private memoryActor(): MemoryActorContext {
+    const configuredRole = this.memory.roleId;
+    const roleId: MemoryActorContext['roleId'] = configuredRole === 'review'
+      || configuredRole === 'orchestration'
+      || configuredRole === 'memory'
+      || configuredRole === 'system'
+      ? configuredRole
+      : 'interaction';
+    const permissions: MemoryActorContext['permissions'] = roleId === 'review'
+      ? ['memory.read', 'memory.review']
+      : ['memory.read'];
+    return {
+      actorId: 'ui-memory-interaction',
+      roleId,
+      permissions,
+      projectKey: this.memory.projectKey,
+    };
+  }
+
+  async memorySummary(input: {
+    readonly namespace?: MemoryNamespace;
+    readonly query?: string;
+    readonly limit?: number;
+  } = {}) {
+    try {
+      const namespace = input.namespace ?? 'project';
+      const query = input.query?.trim();
+      const view = query
+        ? await this.memoryInteraction.query({
+            actor: this.memoryActor(),
+            projectKey: this.memory.projectKey,
+            namespace,
+            query,
+            limit: input.limit ?? 20,
+          })
+        : {
+            handle: await this.memoryInteraction.open({
+              actor: this.memoryActor(),
+              projectKey: this.memory.projectKey,
+              namespace,
+            }),
+            entries: [],
+            indexVersion: this.memory.backend.indexVersion,
+            omitted: [],
+          };
+      return projectMemoryInteraction({
+        source: {
+          state: 'ready',
+          label: 'Memory Interaction',
+          detail: 'typed projection from the deterministic memory backend',
+        },
+        scope: this.memory.projectKey,
+        summary: query
+          ? view.entries.length === 0
+            ? '当前没有匹配的长期记忆'
+            : `当前有 ${view.entries.length} 条匹配记录`
+          : '未指定过滤条件',
+        indexState: view.indexVersion ?? this.memory.backend.indexVersion,
+        entries: view.entries.map((entry) => ({
+          id: entry.memoryId,
+          sourceRef: entry.sourceRefs[0] ?? entry.memoryId,
+          scope: entry.sourceScopeRef,
+          summary: entry.summary,
+          digest: entry.sourceDigests[0] ?? '',
+          evidenceRefs: [],
+        })),
+        skillCandidates: [],
+        inspectEnabled: true,
+        compareEnabled: true,
+      });
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async memoryQuery(input: {
+    readonly namespace?: MemoryNamespace;
+    readonly query: string;
+    readonly limit?: number;
+  }): Promise<MemoryView> {
+    try {
+      return await this.memoryInteraction.query({
+        actor: this.memoryActor(),
+        projectKey: this.memory.projectKey,
+        namespace: input.namespace ?? 'project',
+        query: input.query,
+        limit: input.limit ?? 20,
+      });
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async memoryInspect(input: {
+    readonly sourceRef: string;
+    readonly sourceDigest: string;
+  }): Promise<MemoryDetailView> {
+    try {
+      return await this.memoryInteraction.inspect({
+        actor: this.memoryActor(),
+        sourceRef: input.sourceRef,
+        sourceDigest: input.sourceDigest,
+      });
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async memoryCompare(input: {
+    readonly leftRef: string;
+    readonly rightRef: string;
+  }): Promise<MemoryComparisonView> {
+    try {
+      return await this.memoryInteraction.compare({
+        actor: this.memoryActor(),
+        leftRef: input.leftRef,
+        rightRef: input.rightRef,
+      });
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async reviewSkillCandidate(input: {
+    readonly candidateId: string;
+    readonly decision: 'approve' | 'reject' | 'defer';
+    readonly decisionReason: string;
+  }): Promise<MemoryReviewReceipt> {
+    try {
+      return await this.memoryInteraction.review({
+        actor: this.memoryActor(),
+        candidateId: input.candidateId,
+        decision: input.decision,
+        decisionReason: input.decisionReason,
+      });
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async healthProbe(): Promise<OrganHealthProjection> {
+    try {
+      return this.projectHealth(await this.healthManager.probe());
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async healthSnapshot(): Promise<OrganHealthProjection> {
+    try {
+      return this.projectHealth(await this.healthManager.snapshot());
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  private projectHealth(snapshot: OrganHealthSnapshot): OrganHealthProjection {
+    let stale = false;
+    try {
+      assertNotExpired(snapshot.expiresAt, this.now());
+    } catch {
+      stale = true;
+    }
+    return {
+      surface: 'organ-health',
+      organId: snapshot.organId,
+      lifecycleState: this.status().state,
+      healthState: snapshot.overall,
+      checkedAt: snapshot.checkedAt,
+      expiresAt: snapshot.expiresAt,
+      stale,
+      dimensions: snapshot.functions.map((fn) => ({
+        dimension: 'readiness',
+        status: fn.status,
+        evidenceRefs: fn.evidenceRefs,
+        measurements: fn.measurements,
+      })),
+      evidenceRefs: healthEvidenceRefs(snapshot),
+    };
   }
 
   private createMemoryBoundDriver(input: RuntimeExecutionDriverInput): RuntimeExecutionDriver {
