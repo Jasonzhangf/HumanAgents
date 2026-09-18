@@ -868,7 +868,7 @@ test('attention results preserve recovery ownership and never become success', a
   assert.equal(feedback.events.some((event) => event.kind === 'attention'), true);
 });
 
-test('dispose releases assigned runtimes and reports dispose failures', async () => {
+test('dispose retries a failed runtime cleanup and remains idempotent after success', async () => {
   const factory = new FakeRuntimeFactory();
   const { pool } = factoryPool({
     maxRuntimes: 1,
@@ -885,8 +885,40 @@ test('dispose releases assigned runtimes and reports dispose failures', async ()
   factory.disposeFailures.add('runtime-a');
   const failed = await pool.dispose();
   assert.equal(failed.status, 'blocked');
+  assert.equal(failed.alreadyDisposed, false);
   assert.equal(failed.issues[0]?.ownerId, 'orchestration-runtime-manager');
   assert.equal(failed.issues[0]?.nextAction.kind, 'recover');
+  assert.equal(pool.inspect().runtimes[0]?.state, 'failed');
+  assert.equal(pool.inspect().runtimes[0]?.lease?.assignmentId, 'assignment-a');
+
+  factory.disposeFailures.delete('runtime-a');
+  const retried = await pool.dispose();
+  assert.equal(retried.status, 'disposed');
+  assert.equal(retried.alreadyDisposed, true);
+  assert.deepEqual(retried.issues, []);
+  assert.equal(pool.inspect().runtimes[0]?.state, 'disposed');
+  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
+  assert.deepEqual(factory.disposeInputs, [
+    {
+      runtimeId: 'runtime-a',
+      generation: 1,
+      executionEpoch: 1,
+      ownerId: 'orchestration-runtime-manager',
+      assignmentId: 'assignment-a',
+    },
+    {
+      runtimeId: 'runtime-a',
+      generation: 1,
+      executionEpoch: 1,
+      ownerId: 'orchestration-runtime-manager',
+      assignmentId: 'assignment-a',
+    },
+  ]);
+
+  const secondRetry = await pool.dispose();
+  assert.equal(secondRetry.status, 'disposed');
+  assert.equal(secondRetry.alreadyDisposed, true);
+  assert.equal(factory.disposeInputs.length, 2);
 });
 
 test('dispatch is idempotent for terminal assignments and duplicate work results do not repeat merge', async () => {

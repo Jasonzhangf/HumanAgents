@@ -420,6 +420,7 @@ export class AgentRuntimePoolManager {
       runtime.lease = undefined;
     })().catch((error) => {
       runtime.state = 'failed';
+      runtime.disposePromise = undefined;
       throw error;
     });
     return runtime.disposePromise;
