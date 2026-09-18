@@ -3,12 +3,15 @@ import test from 'node:test';
 import {
   MemoryCoordinator,
   MemoryCoordinatorError,
+  createMemoryInteractionPort,
   type SkillCandidate,
 } from '../../../packages/runtime/src/memory/index.js';
 import {
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
   type MemoryOperationsPort,
+  type MemoryQueryRequest,
+  type MemoryQueryResponse,
   type MemoryScope,
   type NoveltyResult,
   type RecurrenceResult,
@@ -62,6 +65,7 @@ function makePorts(overrides: {
   readonly recallFailure?: () => never;
   readonly attachFailure?: () => never;
   readonly searchFailure?: () => never;
+  readonly query?: (input: MemoryQueryRequest) => Promise<MemoryQueryResponse>;
 } = {}): {
   readonly operations: MemoryOperationsPort;
   readonly injection: AgentMemoryContextInjectionPort;
@@ -91,6 +95,7 @@ function makePorts(overrides: {
     detectRecurrence: async (): Promise<RecurrenceResult> => ({ classification: 'recurring', occurrences: [{ ref: 'journal://task-a/recur', digest: 'sha256:recur' }], reason: 'observed twice' }),
     query: async (input) => {
       calls.query += 1;
+      if (overrides.query) return overrides.query(input);
       return { requestId: input.requestId, status: 'ready', entries: [], sourceFactRef: 'memory-query:test', omitted: [] };
     },
     submitCandidate: async (input) => ({
@@ -918,4 +923,191 @@ test('memory coordinator marks skill candidates review-required without auto-ing
   assert.equal(ports.calls.ingest, 0);
   assert.throws(() => coordinator.proposeSkillCandidate(makeCandidate({ evidenceRefs: [] })), MemoryCoordinatorError);
   assert.throws(() => coordinator.proposeSkillCandidate(makeCandidate({ uniqueness: 'novel' as never })), MemoryCoordinatorError);
+});
+
+test('memory interaction port dispatches typed views and review through the coordinator', async () => {
+  const { coordinator, ports } = setup();
+  const actor = {
+    actorId: 'interaction-agent',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read', 'memory.propose', 'memory.review'] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+    now: () => '2026-09-17T00:00:00.000Z',
+  });
+
+  const handle = await interaction.open({
+    actor,
+    projectKey: taskProjectKey,
+    namespace: 'project',
+    taskId: task,
+  });
+  assert.equal(handle.readOnly, true);
+  assert.equal(handle.actorId, actor.actorId);
+
+  const view = await interaction.query({
+    actor,
+    projectKey: taskProjectKey,
+    namespace: 'project',
+    query: 'directive',
+    limit: 5,
+  });
+  assert.equal(view.handle.projectKey, taskProjectKey);
+  assert.equal(ports.calls.query, 1);
+
+  const submission = {
+    submissionId: 'interaction-submission-a',
+    requestId: 'interaction-request-a',
+    operationId: id('operation', 'interaction-operation-a'),
+    bindingRef: 'memory-binding:task-a',
+    actor,
+    projectKey: taskProjectKey,
+    taskId: task,
+    requestedKind: 'semantic' as const,
+    candidateCategory: 'project-fact' as const,
+    contentRef: 'asset://memory/interaction-candidate-a',
+    contentDigest: 'sha256:interaction-candidate-a',
+    evidenceRefs: ['journal://task-a/1'],
+    observation: 'checkpoint commit is durable',
+    desiredScope: 'project' as const,
+    reason: 'observed at a lifecycle boundary',
+    inputDigest: 'sha256:interaction-input-a',
+  };
+  const submitted = await coordinator.submitCandidate(submission);
+  assert.equal(submitted.status, 'ready');
+  if (submitted.status !== 'ready' || submitted.value.candidateId === undefined) {
+    throw new Error('expected interaction submission candidate');
+  }
+
+  const reviewed = await interaction.review({
+    actor,
+    candidateId: submitted.value.candidateId,
+    decision: 'approve',
+    decisionReason: 'evidence is complete',
+  });
+  assert.equal(reviewed.candidateId, submitted.value.candidateId);
+  assert.equal(ports.calls.review, 1);
+
+  await assert.rejects(
+    () => interaction.open({
+      actor,
+      projectKey: taskProjectKey,
+      namespace: 'global',
+      taskId: task,
+    }),
+    /global memory view cannot be bound to a task/,
+  );
+});
+
+test('memory interaction port verifies source digest pairs and compares by source digest', async () => {
+  const entries = {
+    'journal://task-a/1': {
+      memoryId: 'memory-a',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'same summary',
+      sourceRefs: ['journal://task-a/1'],
+      sourceDigests: ['sha256:same'],
+      projectKey: taskProjectKey,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+    'journal://task-a/2': {
+      memoryId: 'memory-b',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'same summary',
+      sourceRefs: ['journal://task-a/2'],
+      sourceDigests: ['sha256:same'],
+      projectKey: taskProjectKey,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+    'journal://task-a/3': {
+      memoryId: 'memory-c',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'different summary',
+      sourceRefs: ['journal://task-a/3'],
+      sourceDigests: ['sha256:different'],
+      projectKey: taskProjectKey,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+  } as const;
+  const { coordinator } = setup({
+    ports: makePorts({
+      query: async (input) => ({
+        requestId: input.requestId,
+        status: 'ready' as const,
+        entries: [entries[input.query as keyof typeof entries]].filter(Boolean),
+        sourceFactRef: 'memory-query:test',
+        omitted: [],
+      }),
+    }),
+  });
+  const actor = {
+    actorId: 'interaction-inspect-agent',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+    now: () => '2026-09-17T00:00:00.000Z',
+  });
+
+  const detail = await interaction.inspect({
+    actor,
+    sourceRef: 'journal://task-a/1',
+    sourceDigest: 'sha256:same',
+  });
+  assert.equal(detail.content, 'same summary');
+  assert.equal(detail.sourceDigest, 'sha256:same');
+
+  await assert.rejects(
+    () => interaction.inspect({
+      actor,
+      sourceRef: 'journal://task-a/1',
+      sourceDigest: 'sha256:wrong',
+    }),
+    /memory source is unavailable/,
+  );
+
+  const same = await interaction.compare({
+    actor,
+    leftRef: 'journal://task-a/1',
+    rightRef: 'journal://task-a/2',
+  });
+  assert.equal(same.relation, 'same');
+  assert.deepEqual(same.evidenceRefs, ['journal://task-a/1', 'journal://task-a/2']);
+
+  const different = await interaction.compare({
+    actor,
+    leftRef: 'journal://task-a/1',
+    rightRef: 'journal://task-a/3',
+  });
+  assert.equal(different.relation, 'different');
+
+  const unknown = await interaction.compare({
+    actor,
+    leftRef: 'journal://task-a/1',
+    rightRef: 'journal://task-a/missing',
+  });
+  assert.equal(unknown.relation, 'unknown');
 });

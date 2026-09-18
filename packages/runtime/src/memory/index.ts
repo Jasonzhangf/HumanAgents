@@ -8,10 +8,15 @@ import {
   type AgentMemoryContextInjectionPort,
   type AgentMemoryContextRequest,
   type ContextLayer,
+  type MemoryActorContext,
   type MemoryOperationsPort,
   type MemoryBinding,
   type MemoryForgettingPlan,
   type MemoryForgettingRequest,
+  type MemoryComparisonView,
+  type MemoryDetailView,
+  type MemoryInteractionPort,
+  type MemoryNamespace,
   type MemoryPromotionReceipt,
   type MemoryQueryRequest,
   type MemoryQueryResponse,
@@ -19,7 +24,10 @@ import {
   type MemoryScope,
   type MemorySubmission,
   type MemorySubmissionReceipt,
+  type MemoryView,
+  type MemoryViewHandle,
   type NextAction,
+  type OperationId,
   type TaskId,
 } from '../../../contracts/src/index.js';
 
@@ -163,6 +171,253 @@ export interface MemoryContextAttachRequest {
   readonly scope: MemoryScope;
   readonly executionEpoch: number;
   readonly context: AgentMemoryContext;
+}
+
+export interface MemoryInteractionBindingRef {
+  readonly projectKey: string;
+  readonly namespace: MemoryNamespace;
+  readonly taskId?: TaskId;
+  readonly bindingRef: string;
+}
+
+export interface MemoryInteractionAdapterOptions {
+  readonly coordinator: MemoryCoordinator;
+  readonly bindingFor: (input: {
+    readonly actor: MemoryActorContext;
+    readonly projectKey: string;
+    readonly namespace: MemoryNamespace;
+    readonly taskId?: TaskId;
+  }) => MemoryInteractionBindingRef | undefined;
+  readonly now?: () => string;
+  readonly operationId?: () => OperationId;
+}
+
+function interactionHandle(input: {
+  readonly actor: MemoryActorContext;
+  readonly projectKey: string;
+  readonly namespace: MemoryNamespace;
+  readonly taskId?: TaskId;
+}): MemoryViewHandle {
+  return {
+    handleId: `memory-view:${input.actor.actorId}:${input.projectKey}:${input.namespace}:${input.taskId?.value ?? 'all'}`,
+    actorId: input.actor.actorId,
+    projectKey: input.projectKey,
+    namespace: input.namespace,
+    ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    readOnly: true,
+  };
+}
+
+function assertMemoryActorProject(actor: MemoryActorContext, projectKey: string): void {
+  if (actor.projectKey !== projectKey) {
+    throw new MemoryCoordinatorError('memory interaction actor project does not match the requested project');
+  }
+}
+
+function assertNamespaceTask(namespace: MemoryNamespace, taskId: TaskId | undefined): void {
+  if (namespace === 'global' && taskId !== undefined) {
+    throw new MemoryCoordinatorError('global memory view cannot be bound to a task');
+  }
+}
+
+function requireReady<T>(outcome: MemoryOutcome<T>): T {
+  if (outcome.status === 'ready') return outcome.value;
+  throw new MemoryCoordinatorError(`${outcome.issue.code}: ${outcome.issue.message}`);
+}
+
+export function createMemoryInteractionPort(options: MemoryInteractionAdapterOptions): MemoryInteractionPort {
+  const now = options.now ?? (() => new Date().toISOString());
+  let sequence = 0;
+  const nextOperationId = options.operationId ?? (() => {
+    sequence += 1;
+    return {
+      scope: 'operation',
+      value: `memory-interaction-${Date.now().toString(36)}-${sequence.toString(36)}`,
+    };
+  });
+  const bindingFor = (input: {
+    readonly actor: MemoryActorContext;
+    readonly projectKey: string;
+    readonly namespace: MemoryNamespace;
+    readonly taskId?: TaskId;
+  }): string => {
+    assertMemoryActorProject(input.actor, input.projectKey);
+    assertNamespaceTask(input.namespace, input.taskId);
+    const binding = options.bindingFor(input);
+    if (!binding) {
+      throw new MemoryCoordinatorError('memory interaction binding is not registered');
+    }
+    if (
+      binding.projectKey !== input.projectKey
+      || binding.namespace !== input.namespace
+    ) {
+      throw new MemoryCoordinatorError('memory interaction binding does not match the requested view');
+    }
+    if (input.taskId !== undefined && binding.taskId?.value !== input.taskId.value) {
+      throw new MemoryCoordinatorError('memory interaction binding does not match the requested task');
+    }
+    return binding.bindingRef;
+  };
+
+  return {
+    async open(input): Promise<MemoryViewHandle> {
+      bindingFor(input);
+      return interactionHandle(input);
+    },
+    async query(input): Promise<MemoryView> {
+      const bindingRef = bindingFor({
+        actor: input.actor,
+        projectKey: input.projectKey,
+        namespace: input.namespace,
+      });
+      const response = requireReady(await options.coordinator.query({
+        requestId: `memory-view-query:${input.actor.actorId}:${Date.now().toString(36)}`,
+        operationId: nextOperationId(),
+        bindingRef,
+        actor: input.actor,
+        projectKey: input.projectKey,
+        namespace: input.namespace,
+        query: input.query,
+        kinds: ['episodic', 'semantic', 'procedural'],
+        states: ['approved', 'active'],
+        limit: input.limit,
+        tokenBudget: Number.MAX_SAFE_INTEGER,
+        inputDigest: `sha256:memory-view-query:${input.query}`,
+      }));
+      return {
+        handle: interactionHandle(input),
+        entries: response.entries.map((entry) => ({ ...entry })),
+        ...(response.indexVersion === undefined ? {} : { indexVersion: response.indexVersion }),
+        omitted: response.omitted.map((entry) => ({ ...entry })),
+      };
+    },
+    async inspect(input): Promise<MemoryDetailView> {
+      assertMemoryActorProject(input.actor, input.actor.projectKey);
+      const bindingRef = bindingFor({
+        actor: input.actor,
+        projectKey: input.actor.projectKey,
+        namespace: 'project',
+      });
+      const response = requireReady(await options.coordinator.query({
+        requestId: `memory-view-inspect:${input.actor.actorId}:${Date.now().toString(36)}`,
+        operationId: nextOperationId(),
+        bindingRef,
+        actor: input.actor,
+        projectKey: input.actor.projectKey,
+        namespace: 'project',
+        query: input.sourceRef,
+        kinds: ['episodic', 'semantic', 'procedural'],
+        states: ['approved', 'active', 'superseded', 'archived'],
+        limit: 1,
+        tokenBudget: Number.MAX_SAFE_INTEGER,
+        inputDigest: input.sourceDigest,
+      }));
+      const match = response.entries.find((entry) => entry.sourceRefs.some((sourceRef, index) => (
+        sourceRef === input.sourceRef && entry.sourceDigests[index] === input.sourceDigest
+      )));
+      if (!match) {
+        throw new MemoryCoordinatorError(`memory source is unavailable: ${input.sourceRef}`);
+      }
+      return {
+        handle: interactionHandle({
+          actor: input.actor,
+          projectKey: input.actor.projectKey,
+          namespace: 'project',
+        }),
+        sourceRef: input.sourceRef,
+        sourceDigest: input.sourceDigest,
+        content: match.summary,
+      };
+    },
+    async compare(input): Promise<MemoryComparisonView> {
+      const bindingRef = bindingFor({
+        actor: input.actor,
+        projectKey: input.actor.projectKey,
+        namespace: 'project',
+      });
+      const [left, right] = await Promise.all([
+        options.coordinator.query({
+          requestId: `memory-view-compare-left:${input.actor.actorId}:${Date.now().toString(36)}`,
+          operationId: nextOperationId(),
+          bindingRef,
+          actor: input.actor,
+          projectKey: input.actor.projectKey,
+          namespace: 'project',
+          query: input.leftRef,
+          kinds: ['episodic', 'semantic', 'procedural'],
+          states: ['approved', 'active'],
+          limit: 1,
+          tokenBudget: Number.MAX_SAFE_INTEGER,
+          inputDigest: `sha256:${input.leftRef}`,
+        }),
+        options.coordinator.query({
+          requestId: `memory-view-compare-right:${input.actor.actorId}:${Date.now().toString(36)}`,
+          operationId: nextOperationId(),
+          bindingRef,
+          actor: input.actor,
+          projectKey: input.actor.projectKey,
+          namespace: 'project',
+          query: input.rightRef,
+          kinds: ['episodic', 'semantic', 'procedural'],
+          states: ['approved', 'active'],
+          limit: 1,
+          tokenBudget: Number.MAX_SAFE_INTEGER,
+          inputDigest: `sha256:${input.rightRef}`,
+        }),
+      ]);
+      const leftEntries = left.status === 'ready' ? left.value.entries : [];
+      const rightEntries = right.status === 'ready' ? right.value.entries : [];
+      const leftEntry = leftEntries.find((entry) => entry.sourceRefs.includes(input.leftRef));
+      const rightEntry = rightEntries.find((entry) => entry.sourceRefs.includes(input.rightRef));
+      const leftDigest = leftEntry?.sourceDigests[leftEntry.sourceRefs.indexOf(input.leftRef)];
+      const rightDigest = rightEntry?.sourceDigests[rightEntry.sourceRefs.indexOf(input.rightRef)];
+      const relation = leftDigest === undefined || rightDigest === undefined
+        ? 'unknown'
+        : leftDigest === rightDigest
+          ? 'same'
+          : 'different';
+      return {
+        handle: interactionHandle({
+          actor: input.actor,
+          projectKey: input.actor.projectKey,
+          namespace: 'project',
+        }),
+        leftRef: input.leftRef,
+        rightRef: input.rightRef,
+        relation,
+        evidenceRefs: [
+          ...(leftEntry?.sourceRefs ?? []),
+          ...(rightEntry?.sourceRefs ?? []),
+        ],
+      };
+    },
+    async review(input): Promise<MemoryReviewReceipt> {
+      return requireReady(await options.coordinator.reviewCandidate({
+        candidateId: input.candidateId,
+        decision: input.decision,
+        actor: input.actor,
+        decisionReason: input.decisionReason,
+        decidedAt: now(),
+        evidenceRefs: [input.candidateId],
+      }));
+    },
+    async promote(input): Promise<MemoryPromotionReceipt> {
+      return requireReady(await options.coordinator.promoteCandidate({
+        candidateId: input.candidateId,
+        from: input.from,
+        to: input.to,
+        actor: input.actor,
+        reason: input.reason,
+        impactScope: input.impactScope,
+        approvalRef: input.approvalRef,
+        sourceRefs: [...input.sourceRefs],
+        promotedAt: now(),
+      }));
+    },
+    async planForgetting(input): Promise<MemoryForgettingPlan> {
+      return requireReady(await options.coordinator.planForgetting(input));
+    },
+  };
 }
 
 export type SkillCandidateUniqueness = 'unique' | 'variant' | 'duplicate' | 'unknown';

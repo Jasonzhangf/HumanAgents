@@ -4,6 +4,8 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   EvidenceRef,
   MemoryActorContext,
+  MemoryAgentStatePort,
+  MemoryInteractionPort,
   MemoryProjectSourceSnapshot,
   MemoryScope,
   ProjectSourceUpdateProposal,
@@ -19,6 +21,7 @@ import {
 import {
   MemoryAgent,
   MemoryCoordinator,
+  createMemoryInteractionPort,
   createMemoryAnalysisEventHandler,
   memoryAgentIssue,
   type MemoryAnalysisAdmissionPort,
@@ -78,6 +81,7 @@ export interface MemoryCompositionInput {
 export interface MemoryComposition {
   readonly backend: DeterministicMemoryBackend;
   readonly coordinator: MemoryCoordinator;
+  readonly interaction: MemoryInteractionPort;
   readonly persistence: MemoryPersistencePort;
   readonly sources: FilesystemMemorySourceAdapter;
   readonly agent: MemoryAgent;
@@ -653,9 +657,30 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
   });
   const coordinator = new MemoryCoordinator();
   bindCoordinator(coordinator, input, backend);
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace }) => {
+      if (projectKey !== input.projectKey) return undefined;
+      if (input.binding.interactionScopeId !== undefined) {
+        return {
+          projectKey,
+          namespace,
+          bindingRef: input.binding.bindingRef,
+        };
+      }
+      if (input.binding.taskId === undefined) return undefined;
+      return {
+        projectKey,
+        namespace,
+        taskId: input.binding.taskId,
+        bindingRef: input.binding.bindingRef,
+      };
+    },
+  });
   return {
     backend,
     coordinator,
+    interaction,
     persistence,
     sources,
     agent,
