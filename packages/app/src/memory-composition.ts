@@ -563,6 +563,7 @@ function bindCoordinator(
   }
   if (taskId !== undefined && input.assignmentId !== undefined) {
     coordinator.bindTask({
+      bindingRef: input.binding.bindingRef,
       taskId,
       assignmentId: input.assignmentId,
       executionEpoch: input.binding.executionEpoch,

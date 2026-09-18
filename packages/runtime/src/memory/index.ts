@@ -997,6 +997,7 @@ export class MemoryCoordinator {
   }
 
   bindTask(input: {
+    readonly bindingRef?: string;
     readonly taskId: TaskId;
     readonly assignmentId: string;
     readonly executionEpoch: number;
@@ -1018,6 +1019,9 @@ export class MemoryCoordinator {
     if (input.indexVersion !== undefined) nonEmpty(input.indexVersion, 'memory index version');
     const ownerId = input.ownerId === undefined ? MEMORY_COORDINATOR_OWNER : nonEmpty(input.ownerId, 'memory owner');
     const failurePolicy = input.failurePolicy ?? 'attention';
+    const bindingId = input.bindingRef === undefined
+      ? `memory-binding:${input.taskId.value}`
+      : nonEmpty(input.bindingRef, 'memory binding ref');
     if (failurePolicy !== 'waiting' && failurePolicy !== 'attention') {
       throw new MemoryCoordinatorError(`invalid memory failure policy: ${failurePolicy}`);
     }
@@ -1025,6 +1029,9 @@ export class MemoryCoordinator {
     if (existing) {
       const compatible = sameMemoryScope(existing.scope, input.scope)
         && existing.projectKey === projectKey
+        existing.bindingId === bindingId
+        && existing.assignmentId === assignmentId
+        && existing.executionEpoch === input.executionEpoch
         && existing.backendRef === backendRef
         && existing.indexVersion === input.indexVersion
         && existing.operations === input.operations
@@ -1057,7 +1064,7 @@ export class MemoryCoordinator {
       return this.taskReceipt(advanced);
     }
     const binding: MemoryTaskBinding = {
-      bindingId: `memory-binding:${input.taskId.value}`,
+      bindingId,
       kind: 'task',
       taskId: input.taskId,
       assignmentId,

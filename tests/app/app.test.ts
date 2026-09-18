@@ -508,8 +508,50 @@ test('memory composition binds task and runtime identity to the rooted backend',
   });
   assert.equal(recalled.status, 'ready');
   if (recalled.status !== 'ready') throw new Error('expected memory recall');
-  assert.equal(recalled.value.bindingId, `memory-binding:${taskId.value}`);
+  assert.equal(recalled.value.bindingId, binding.bindingRef);
   assert.deepEqual(scope.taskId, taskId);
+});
+
+test('memory composition uses the trusted task binding ref for explicit brain memory operations', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-task-tools-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const { composed, binding } = await composeMemoryFixture({
+    paths,
+    workspace,
+    assignmentId: 'assignment-memory-task-tools',
+    agentRuntimeId: 'runtime-memory-task-tools',
+    roleId: 'memory',
+  });
+
+  const view = await composed.interaction.query({
+    actor: binding.actor,
+    projectKey: binding.projectKey,
+    namespace: 'project',
+    query: 'missing',
+    limit: 5,
+  });
+  assert.equal(view.entries.length, 0);
+
+  const receipt = await composed.submissions.submitCandidate({
+    submissionId: 'submission:memory-task-tools',
+    requestId: 'request:memory-task-tools',
+    operationId: id('operation', 'memory-task-tools'),
+    bindingRef: binding.bindingRef,
+    actor: binding.actor,
+    projectKey: binding.projectKey,
+    taskId: binding.taskId,
+    requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
+    contentRef: 'content:memory-task-tools',
+    contentDigest: 'sha256:content-memory-task-tools',
+    evidenceRefs: ['source:memory-task-tools'],
+    observation: 'task-bound explicit brain memory submission',
+    desiredScope: 'project',
+    reason: 'regression coverage for the trusted task binding ref',
+    inputDigest: 'sha256:input-memory-task-tools',
+  });
+  assert.equal(receipt.status, 'accepted');
+  assert.equal(receipt.nextAction, 'wait-analysis');
 });
 
 test('memory composition registers interaction bindings for the interaction port', async () => {
