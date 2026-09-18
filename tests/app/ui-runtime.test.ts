@@ -867,6 +867,46 @@ test('expired organ health evidence is reported as stale unknown without changin
   }
 });
 
+test('organ health projection uses instant semantics for offset timestamps', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-offset-'));
+  const base = new FakeReplayExecutionRuntimePort({ binding });
+  const offsetExpiry: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: async () => ({
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: binding.protocol,
+      state: 'ready',
+      capabilityDigest: binding.capabilityDigest,
+      version: 'offset-health-probe',
+      checkedAt: '2026-09-18T08:59:00.000Z',
+      expiresAt: '2026-09-18T10:00:40.000+01:00',
+      evidenceRefs: [evidence('offset-readiness', { organId })],
+    }),
+    capabilities: (value) => base.capabilities(value),
+    start: (input) => base.start(input),
+    resume: (input) => base.resume(input),
+    submit: (input) => base.submit(input),
+    observe: (input) => base.observe(input),
+    requestStop: (input) => base.requestStop(input),
+    settle: (input) => base.settle(input),
+    close: (value) => base.close(value),
+  };
+  const service = serviceFor(
+    root,
+    offsetExpiry,
+    'fake',
+    'ready',
+    undefined,
+    () => new Date('2026-09-18T10:00:30.000Z'),
+  );
+
+  const health = await service.healthProbe();
+  assert.equal(health.healthState, 'unknown');
+  assert.equal(health.stale, true);
+  assert.equal(health.dimensions[0]?.status, 'unknown');
+});
+
 test('organ health HTTP preserves provider failure ownership and recovery evidence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-error-'));
   const readinessEvidence = evidence('provider-readiness-failure', { organId });

@@ -67,7 +67,26 @@ test('organ health manager owns probe results and snapshot reads without re-prob
   current = new Date('2026-09-18T12:02:00.000Z');
   const expired = await manager.snapshot();
   assert.equal(expired.overall, 'unknown');
+  assert.equal(expired.functions[0]?.status, 'unknown');
   assert.equal(probeCount, 1);
+});
+
+test('organ health manager compares timestamp instants instead of timestamp strings', async () => {
+  const manager = new OrganHealthManager({
+    organId,
+    probe: {
+      probe: async () => readiness({
+        state: 'ready',
+        checkedAt: '2026-09-18T08:59:00.000Z',
+        expiresAt: '2026-09-18T10:00:40.000+01:00',
+      }),
+    },
+    now: () => new Date('2026-09-18T10:00:30.000Z'),
+  });
+
+  const snapshot = await manager.probe();
+  assert.equal(snapshot.overall, 'unknown');
+  assert.equal(snapshot.functions[0]?.status, 'unknown');
 });
 
 test('organ health manager reports missing snapshot explicitly', async () => {

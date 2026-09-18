@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  assertNotExpired,
   type Attention,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
@@ -579,7 +580,12 @@ export class UiRuntimeService {
   }
 
   private projectHealth(snapshot: OrganHealthSnapshot): OrganHealthProjection {
-    const stale = snapshot.overall === 'unknown' && snapshot.expiresAt <= this.now().toISOString();
+    let stale = false;
+    try {
+      assertNotExpired(snapshot.expiresAt, this.now());
+    } catch {
+      stale = true;
+    }
     return {
       surface: 'organ-health',
       organId: snapshot.organId,

@@ -45,9 +45,13 @@ export class OrganHealthManager {
         OWNER_ID,
       );
     }
+    const expired = timestampExpired(snapshot.expiresAt, this.now());
     return structuredClone({
       ...snapshot,
-      overall: classifyHealthSnapshot({ snapshot, now: this.now() }),
+      overall: expired ? 'unknown' : classifyHealthSnapshot({ snapshot, now: this.now() }),
+      functions: expired
+        ? snapshot.functions.map((fn) => ({ ...fn, status: 'unknown' as const }))
+        : snapshot.functions,
     });
   }
 
@@ -122,8 +126,12 @@ function readinessStatus(state: ProviderReadiness['state']): OrganHealthSnapshot
 }
 
 function readinessExpired(readiness: ProviderReadiness, now: Date): boolean {
+  return timestampExpired(readiness.expiresAt, now);
+}
+
+function timestampExpired(expiresAt: string, now: Date): boolean {
   try {
-    assertNotExpired(readiness.expiresAt, now);
+    assertNotExpired(expiresAt, now);
     return false;
   } catch {
     return true;
