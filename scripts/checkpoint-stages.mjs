@@ -8,6 +8,7 @@ export function checkpointStages({ includePackaging = false, releaseVersion = co
       { kind: 'path', value: 'dist/config' },
       { kind: 'path', value: 'dist/tests' },
       { kind: 'path', value: 'dist/tests-runtime-intake' },
+      { kind: 'path', value: 'dist/tests-acp' },
       { kind: 'path', value: 'packages/contracts/dist' },
     ] },
     { name: 'regression', owner: 'regression', dependsOn: ['compile'], command: ['pnpm', 'run', 'test:compiled'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'tests' }, { kind: 'path', value: 'scripts' }] },

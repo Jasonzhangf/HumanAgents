@@ -265,6 +265,7 @@ test('compile checkpoint owns every raw build output and excludes release output
     'dist/config',
     'dist/tests',
     'dist/tests-runtime-intake',
+    'dist/tests-acp',
     'packages/contracts/dist',
   ]);
   assert.deepEqual(regression.command, ['pnpm', 'run', 'test:compiled']);
