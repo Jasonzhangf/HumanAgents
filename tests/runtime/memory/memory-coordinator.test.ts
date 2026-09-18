@@ -1111,3 +1111,30 @@ test('memory interaction port verifies source digest pairs and compares by sourc
   });
   assert.equal(unknown.relation, 'unknown');
 });
+
+test('memory interaction compare preserves coordinator denial instead of returning unknown', async () => {
+  const { coordinator } = setup();
+  const actor = {
+    actorId: 'interaction-denied-agent',
+    roleId: 'interaction' as const,
+    permissions: [] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+  });
+
+  await assert.rejects(
+    () => interaction.compare({
+      actor,
+      leftRef: 'journal://task-a/1',
+      rightRef: 'journal://task-a/2',
+    }),
+    /memory-capability-denied/,
+  );
+});

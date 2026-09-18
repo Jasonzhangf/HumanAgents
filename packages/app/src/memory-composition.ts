@@ -523,7 +523,7 @@ function bindCoordinator(
   coordinator: MemoryCoordinator,
   input: MemoryCompositionInput,
   backend: DeterministicMemoryBackend,
-): void {
+): { readonly interactionBindingRef?: string } {
   const taskId = input.binding.taskId;
   const hasRuntimeBinding = input.agentRuntimeId !== undefined || input.roleId !== undefined;
   if (input.assignmentId !== undefined && taskId === undefined) {
@@ -560,6 +560,25 @@ function bindCoordinator(
       injection: backend,
     });
   }
+  if (input.binding.interactionScopeId !== undefined) {
+    const interaction = coordinator.bindInteraction({
+      interactionScopeId: input.binding.interactionScopeId,
+      projectKey: input.projectKey,
+      backendRef: 'memory://deterministic',
+      indexVersion: backend.indexVersion,
+      operations: backend,
+      injection: backend,
+    });
+    if (hasRuntimeBinding) {
+      throw new AppLifecycleError(
+        'memory-binding-invalid',
+        'interaction binding cannot also use a task runtime binding',
+        'use exactly one memory binding kind',
+        OWNER,
+      );
+    }
+    return { interactionBindingRef: interaction.bindingId };
+  }
   if (hasRuntimeBinding) {
     const outcome = coordinator.bindRuntime({
       agentRuntimeId: input.agentRuntimeId!,
@@ -577,6 +596,7 @@ function bindCoordinator(
       );
     }
   }
+  return {};
 }
 
 export async function composeMemory(input: MemoryCompositionInput): Promise<MemoryComposition> {
@@ -656,16 +676,16 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     admission,
   });
   const coordinator = new MemoryCoordinator();
-  bindCoordinator(coordinator, input, backend);
+  const coordinatorBindings = bindCoordinator(coordinator, input, backend);
   const interaction = createMemoryInteractionPort({
     coordinator,
     bindingFor: ({ projectKey, namespace }) => {
       if (projectKey !== input.projectKey) return undefined;
-      if (input.binding.interactionScopeId !== undefined) {
+      if (coordinatorBindings.interactionBindingRef !== undefined) {
         return {
           projectKey,
           namespace,
-          bindingRef: input.binding.bindingRef,
+          bindingRef: coordinatorBindings.interactionBindingRef,
         };
       }
       if (input.binding.taskId === undefined) return undefined;

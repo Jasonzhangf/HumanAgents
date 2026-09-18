@@ -365,8 +365,8 @@ export function createMemoryInteractionPort(options: MemoryInteractionAdapterOpt
           inputDigest: `sha256:${input.rightRef}`,
         }),
       ]);
-      const leftEntries = left.status === 'ready' ? left.value.entries : [];
-      const rightEntries = right.status === 'ready' ? right.value.entries : [];
+      const leftEntries = requireReady(left).entries;
+      const rightEntries = requireReady(right).entries;
       const leftEntry = leftEntries.find((entry) => entry.sourceRefs.includes(input.leftRef));
       const rightEntry = rightEntries.find((entry) => entry.sourceRefs.includes(input.rightRef));
       const leftDigest = leftEntry?.sourceDigests[leftEntry.sourceRefs.indexOf(input.leftRef)];

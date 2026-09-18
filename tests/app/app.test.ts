@@ -510,6 +510,61 @@ test('memory composition binds task and runtime identity to the rooted backend',
   assert.deepEqual(scope.taskId, taskId);
 });
 
+test('memory composition registers interaction bindings for the interaction port', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-interaction-binding-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const interactionScopeId = 'interaction-memory-composition';
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'audit.md'), '# Memory audit\n', 'utf8');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Project rules\n', 'utf8');
+  await mkdir(join(workspace, 'project-memory'), { recursive: true });
+  await writeFile(join(workspace, 'project-memory', 'SKILL.md'), '# Project memory\n', 'utf8');
+  const actor = {
+    actorId: 'interaction-memory-composition-actor',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: paths.projectKey,
+  };
+  const composed = await composeMemory({
+    paths,
+    projectKey: paths.projectKey,
+    workspaceCwd: workspace,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    auditPromptRoot,
+    auditPromptRef: 'audit',
+    autoUpdate: false,
+    binding: {
+      bindingRef: 'memory-binding:interaction-composition',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'memory-interaction-composition') },
+      interactionScopeId,
+      mainAgentId: 'main-agent-interaction-composition',
+      actor,
+    },
+    mainAgentId: 'main-agent-interaction-composition',
+  });
+
+  const handle = await composed.interaction.open({
+    actor,
+    projectKey: paths.projectKey,
+    namespace: 'project',
+  });
+  assert.equal(handle.readOnly, true);
+  const view = await composed.interaction.query({
+    actor,
+    projectKey: paths.projectKey,
+    namespace: 'project',
+    query: 'missing',
+    limit: 5,
+  });
+  assert.equal(view.entries.length, 0);
+});
+
 test('memory composition rejects partial runtime bindings explicitly', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-partial-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
