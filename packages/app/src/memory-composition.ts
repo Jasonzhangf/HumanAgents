@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   EvidenceRef,
   MemoryActorContext,
@@ -62,8 +62,8 @@ export interface MemoryCompositionInput {
   readonly workspaceCwd: string;
   readonly sessionsRoot: string;
   readonly runNotesRoot: string;
-  readonly localSkillRoot: string;
-  readonly localSkillName: string;
+  readonly localSkillRoot?: string;
+  readonly localSkillName?: string;
   readonly auditPromptRoot: string;
   readonly auditPromptRef: string;
   readonly autoUpdate: boolean;
@@ -109,8 +109,8 @@ export async function composeRuntimeMemory(
     workspaceCwd,
     sessionsRoot: input.paths.sessionsRoot,
     runNotesRoot: input.paths.runNotesRoot,
-    localSkillRoot: workspaceCwd,
-    localSkillName: basename(workspaceCwd),
+    localSkillRoot: input.configuration.projectSourceManifest.sources?.localSkill?.root,
+    localSkillName: input.configuration.projectSourceManifest.sources?.localSkill?.name,
     auditPromptRoot,
     auditPromptRef: input.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
     autoUpdate: input.configuration.effective.memory?.update.auto ?? false,
@@ -320,8 +320,8 @@ async function assertCompositionPathEquals(actual: string, expected: string, lab
 
 export function createProjectSourceUpdateOwner(input: {
   readonly workspaceCwd: string;
-  readonly localSkillRoot: string;
-  readonly localSkillName: string;
+  readonly localSkillRoot?: string;
+  readonly localSkillName?: string;
   readonly projectKey: string;
   readonly locksRoot: string;
   readonly patchReader?: MemoryProjectPatchReader;
@@ -334,6 +334,14 @@ export function createProjectSourceUpdateOwner(input: {
       }
       if (current.projectKey !== input.projectKey || current.target !== proposal.target) {
         throw new AppLifecycleError('memory-update-conflict', 'project source identity does not match the configured owner', 'refresh the proposal from the configured project source', OWNER);
+      }
+      if (proposal.target === 'project-local-skill' && (!input.localSkillRoot || !input.localSkillName)) {
+        throw new AppLifecycleError(
+          'memory-update-unavailable',
+          'project local Skill source is not declared in project.json',
+          '补全 project.json sources.localSkill 后重试',
+          OWNER,
+        );
       }
       if (proposal.sourceRef !== current.sourceRef
         || proposal.expectedRevision !== current.revision
@@ -350,10 +358,10 @@ export function createProjectSourceUpdateOwner(input: {
       }
       const lock = await acquireSourceUpdateLock(input.locksRoot, 'project source update');
       try {
-        const targetRoot = proposal.target === 'project-agents' ? input.workspaceCwd : input.localSkillRoot;
+        const targetRoot = proposal.target === 'project-agents' ? input.workspaceCwd : input.localSkillRoot!;
         const relativePath = proposal.target === 'project-agents'
           ? 'AGENTS.md'
-          : join(input.localSkillName, 'SKILL.md');
+          : join(input.localSkillName!, 'SKILL.md');
         const path = await resolveProjectSourcePath(targetRoot, relativePath, 'project source update');
         const before = await readFile(path, 'utf8');
         if (digest(before) !== current.digest) {
@@ -580,7 +588,15 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     await assertCompositionPathEquals(input.workspaceCwd, input.paths.workspaceCwd, 'memory workspace');
     await assertCompositionPathEquals(input.sessionsRoot, input.paths.sessionsRoot, 'memory sessions root');
     await assertCompositionPathEquals(input.runNotesRoot, input.paths.runNotesRoot, 'memory run notes root');
-    await assertCompositionPathEquals(input.localSkillRoot, input.paths.workspaceCwd, 'memory local skill root');
+    if (input.localSkillRoot !== undefined && input.localSkillName === undefined) {
+      throw new AppLifecycleError(
+        'memory-path-invalid',
+        'memory local skill name is missing for the declared source root',
+        'resolve project.json sources.localSkill before composing memory',
+        OWNER,
+      );
+    }
+    if (input.localSkillRoot !== undefined) await realpath(input.localSkillRoot);
     await assertCompositionPath(input.paths.controlRoot, input.auditPromptRoot, 'memory audit prompt root');
   } catch (error) {
     if (error instanceof AppLifecycleError) throw error;

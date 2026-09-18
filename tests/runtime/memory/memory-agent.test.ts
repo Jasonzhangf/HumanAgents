@@ -340,3 +340,32 @@ test('memory agent rejects auto update when the project source digest drifted', 
   assert.equal(result.status, 'attention');
   assert.equal(result.status === 'attention' && result.issue.code, 'memory-agent-update-conflict');
 });
+
+test('memory agent surfaces an unavailable local Skill as attention with manifest recovery', async () => {
+  const proposal: ProjectSourceUpdateProposal = {
+    target: 'project-local-skill',
+    sourceRef: 'skill://project/project-a/project-a/SKILL.md@old',
+    expectedRevision: 'sha256:old',
+    expectedDigest: 'sha256:old',
+    patchRef: 'patch://project-a/skill',
+    evidenceRefs: ['journal://project-a/evidence'],
+    ownerRef: 'project-skill-owner',
+  };
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: {
+      readProject: async () => { throw { code: 'memory-source-unavailable', nextAction: 'project.json#sources.localSkill' }; },
+      list: async () => [],
+    },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('must not apply'); } },
+  }), makeOperations().operations);
+  const result = await agent.applyProjectUpdate({ proposal, projectKey: 'project-a' });
+  assert.equal(result.status, 'attention');
+  if (result.status !== 'attention') throw new Error('expected source attention');
+  assert.equal(result.issue.code, 'memory-agent-source-unavailable');
+  assert.equal(result.issue.nextAction.ref, 'project.json#sources.localSkill');
+});

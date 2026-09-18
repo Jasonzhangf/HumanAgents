@@ -203,7 +203,16 @@ function sourceErrorOutcome(error: unknown): MemoryAgentOutcome<never> {
   if (code === 'memory-source-invalid') {
     return { status: 'attention', issue: issue('memory-agent-source-invalid', 'attention', error instanceof Error ? error.message : 'memory source is invalid', 'memory-source-integrity') };
   }
-  return { status: 'waiting', issue: issue('memory-agent-source-unavailable', 'waiting', error instanceof Error ? error.message : 'memory source is unavailable', 'memory-source-ready') };
+  const nextAction = (error as { readonly nextAction?: unknown }).nextAction;
+  return {
+    status: 'attention',
+    issue: issue(
+      'memory-agent-source-unavailable',
+      'attention',
+      error instanceof Error ? error.message : 'memory source is unavailable',
+      typeof nextAction === 'string' && nextAction.length > 0 ? nextAction : 'project.json#sources.localSkill',
+    ),
+  };
 }
 
 export class MemoryAgent {

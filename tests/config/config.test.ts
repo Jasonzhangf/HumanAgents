@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, parseToml, resolveRuntimePaths, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
+import { ensureControlLayout, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
 
 test('parses agent array tables and sections', () => {
   const value = parseToml('schemaVersion = 1\n[[agents]]\nagentId = "one"\nroleId = "interaction"\ntemplateRef = "t"\ndriverRef = "fake"\nskills = ["a"]\ntools = ["b"]\npermissions = ["c"]\nmemoryScopes = ["task"]\nresourceClass = "foreground"\n[project]\nreviewRequired = true\n');
@@ -30,6 +30,43 @@ test('resolves all persistence below control root and keeps workspace separate',
   assert.equal(paths.projectKey, (await realpath(workspace)).replaceAll('/', '-') || '-');
   const loaded = await loadConfiguration(paths);
   assert.equal(loaded.agentRoster.length, 2);
+});
+
+test('resolves an explicitly declared cwd-named local Skill source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-project-source-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await writeFile(paths.projectManifest, JSON.stringify({
+    schemaVersion: 1,
+    projectKey: paths.projectKey,
+    workspaceCwd: paths.workspaceCwd,
+    sources: { localSkill: { root, name: 'workspace' } },
+  }), 'utf8');
+  const manifest = await resolveProjectSourceManifest(paths);
+  assert.equal(JSON.stringify(manifest.sources?.localSkill), JSON.stringify({ root: await realpath(root), name: 'workspace' }));
+});
+
+test('rejects malformed, duplicate, identity-mismatched, non-absolute, and misnamed project sources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-project-source-invalid-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const cases: readonly [string, unknown, RegExp][] = [
+    ['malformed', [], /project manifest must be a JSON object/],
+    ['identity', { schemaVersion: 1, projectKey: 'other', workspaceCwd: paths.workspaceCwd }, /project manifest does not match/],
+    ['non-absolute', { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd, sources: { localSkill: { root: 'relative', name: 'workspace' } } }, /absolute path/],
+    ['misnamed', { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd, sources: { localSkill: { root, name: 'other' } } }, /canonical workspace basename/],
+    ['duplicate', { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd, sources: { localSkill: [{ root, name: 'workspace' }, { root, name: 'workspace' }] } }, /single object/],
+  ];
+  for (const [, manifest, expected] of cases) {
+    await writeFile(paths.projectManifest, JSON.stringify(manifest), 'utf8');
+    await assert.rejects(() => resolveProjectSourceManifest(paths), expected);
+  }
 });
 
 test('uses HUMANAGENT_HOME when no explicit control root is provided', async () => {
