@@ -762,6 +762,105 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
   assert.equal(mergeCalls, 1);
 });
 
+test('duplicate dispatch returns recoverable progress while execution is pending', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
+  });
+  let releaseExecution!: () => void;
+  let markExecutionStarted!: () => void;
+  const executionGate = new Promise<void>((resolve) => {
+    releaseExecution = resolve;
+  });
+  const executionStarted = new Promise<void>((resolve) => {
+    markExecutionStarted = resolve;
+  });
+  let executionCalls = 0;
+  const execution: ExecutionAgentPort = {
+    async execute() {
+      executionCalls += 1;
+      markExecutionStarted();
+      await executionGate;
+      return { result: result({ nextAction: 'settle' }), criteria: criteria() };
+    },
+  };
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: execution,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  const input = {
+    stageNodeId: 'node-a',
+    assignment: assignment(),
+    agentId: 'agent-a',
+    scope,
+  };
+
+  const firstDispatch = manager.dispatch(input);
+  await executionStarted;
+  const leaseDuringExecution = pool.inspect().runtimes[0]?.lease?.leaseId;
+  const repeated = await manager.dispatch(input);
+
+  assert.equal(repeated.status, 'running');
+  assert.equal(repeated.assignment.status, 'running');
+  assert.equal(repeated.issue?.code, 'assignment-progress-pending');
+  assert.equal(repeated.issue?.nextAction.kind, 'continue');
+  assert.equal(executionCalls, 1);
+  assert.equal(pool.inspect().runtimes[0]?.lease?.leaseId, leaseDuringExecution);
+
+  releaseExecution();
+  const first = await firstDispatch;
+  assert.equal(first.status, 'succeeded');
+  assert.equal(executionCalls, 1);
+});
+
+test('duplicate dispatch returns recoverable progress while runtime startup is pending', async () => {
+  const factory = new FakeRuntimeFactory();
+  const { pool } = factoryPool({ maxRuntimes: 1, factory });
+  let releaseStartup!: () => void;
+  let markStartupStarted!: () => void;
+  factory.startGate = new Promise<void>((resolve) => {
+    releaseStartup = resolve;
+  });
+  const startupStarted = new Promise<void>((resolve) => {
+    markStartupStarted = resolve;
+  });
+  factory.startStarted = markStartupStarted;
+  const execution = new StaticExecutionAgent([
+    { result: result({ nextAction: 'settle' }), criteria: criteria() },
+  ]);
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: execution,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  const input = {
+    stageNodeId: 'node-a',
+    assignment: assignment(),
+    agentId: 'agent-a',
+    scope,
+  };
+
+  const firstDispatch = manager.dispatch(input);
+  await startupStarted;
+  const repeated = await manager.dispatch(input);
+
+  assert.equal(repeated.status, 'running');
+  assert.notEqual(repeated.assignment.status, 'blocked');
+  assert.equal(repeated.issue?.code, 'assignment-progress-pending');
+  assert.equal(repeated.issue?.nextAction.kind, 'continue');
+  assert.equal(factory.startInputs.length, 1);
+  assert.equal(pool.inspect().runtimes[0]?.lease, undefined);
+
+  releaseStartup();
+  const first = await firstDispatch;
+  assert.equal(first.status, 'succeeded');
+  assert.equal(factory.startInputs.length, 1);
+  assert.equal(execution.inputs.length, 1);
+});
+
 test('resource admission blocked keeps the same assignment reusable after release', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 1,

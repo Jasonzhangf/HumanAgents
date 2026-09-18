@@ -15,7 +15,7 @@ import {
   type ReviewDecision,
   type ReviewResult,
 } from '../review/index.js';
-import { AssignmentGraph, type AssignmentResultAcceptance } from './assignment-graph.js';
+import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
 import { AgentRuntimePoolManager } from './runtime-pool.js';
 import type {
@@ -174,6 +174,7 @@ export class OrchestrationManager {
   private readonly mergeCoordinator?: MergeCoordinatorPort;
   private readonly feedback?: OrchestrationFeedbackPort;
   private readonly maxAttempts: number;
+  private readonly inFlightDispatches = new Map<string, Promise<OrchestrationDispatchResult>>();
 
   constructor(options: OrchestrationManagerOptions) {
     if (!options.ownerId.trim()) throw new OrchestrationError('orchestration owner is required', {
@@ -218,19 +219,12 @@ export class OrchestrationManager {
 
   async dispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
     const planned = this.graph.createAssignment(input.stageNodeId, input.assignment);
+    const key = assignmentKey(input.assignment);
+    if (this.inFlightDispatches.has(key)) {
+      return this.progressResult(planned);
+    }
     if (planned.status === 'running' && planned.result) {
-      return {
-        status: 'running',
-        assignment: planned,
-        issue: issue(
-          'assignment-progress-pending',
-          planned.ownerId,
-          planned.reason,
-          planned.nextAction,
-          planned.evidenceRefs,
-        ),
-        reviewResults: planned.reviewResults,
-      };
+      return this.progressResult(planned);
     }
     if (
       planned.status === 'succeeded'
@@ -269,6 +263,21 @@ export class OrchestrationManager {
       return this.blockedResult(planned, unavailable, input.scope);
     }
 
+    const pending = this.dispatchWithLease(input, planned);
+    this.inFlightDispatches.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.inFlightDispatches.get(key) === pending) {
+        this.inFlightDispatches.delete(key);
+      }
+    }
+  }
+
+  private async dispatchWithLease(
+    input: DispatchInput,
+    planned: AssignmentRecord,
+  ): Promise<OrchestrationDispatchResult> {
     const acquired = await this.runtimePool.acquire({
       requiredCapabilities: input.assignment.requiredCapabilities,
       ownerId: this.ownerId,
@@ -325,6 +334,21 @@ export class OrchestrationManager {
       evidenceRefs: [evidence(input.scope, 'orchestration.dispatch.no-result')],
     });
     return result;
+  }
+
+  private progressResult(record: AssignmentRecord): OrchestrationDispatchResult {
+    return {
+      status: 'running',
+      assignment: record,
+      issue: issue(
+        'assignment-progress-pending',
+        record.ownerId,
+        record.reason,
+        record.nextAction,
+        record.evidenceRefs,
+      ),
+      reviewResults: record.reviewResults,
+    };
   }
 
   private async executeWithLease(
