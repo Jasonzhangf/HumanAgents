@@ -117,6 +117,8 @@ export type { ComposedAgentDriver, DshCompositionInput } from './agent-driver-co
 export { openAgentOperation, prepareAgentOperation, AgentOperationController } from './agent-operation.js';
 export type { AgentOperationSnapshot, OpenAgentOperationInput } from './agent-operation.js';
 export { createJsonlCheckpointJournal } from './checkpoint-journal.js';
+export { createM3Assembly } from './m3-assembly.js';
+export type { M3Assembly, M3AssemblyOptions } from './m3-assembly.js';
 export { checkpointIdFor, resumeAgentOperation, runAgentOperation } from './run-operation.js';
 export type {
   ResumeAgentOperationInput,
