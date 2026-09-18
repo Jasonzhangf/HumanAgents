@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeRuntimeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -296,18 +296,9 @@ test('CLI host failures remain structured', async () => {
 });
 
 test('CLI serve composes rooted memory and keeps it across process restart', async () => {
-  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
-  const skillRoot = join(root, 'declared-skills');
-  await mkdir(join(skillRoot, 'workspace'), { recursive: true });
-  await writeFile(join(skillRoot, 'workspace', 'SKILL.md'), '# declared project Skill\n', 'utf8');
-  await writeFile(paths.projectManifest, JSON.stringify({
-    schemaVersion: 1,
-    projectKey: paths.projectKey,
-    workspaceCwd: paths.workspaceCwd,
-    sources: { localSkill: { root: skillRoot, name: 'workspace' } },
-  }) + '\n', 'utf8');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const sourceRef = 'journal://cli-memory/restart-proof';
   const sourceDigest = 'sha256:cli-memory-restart-proof';
@@ -492,26 +483,6 @@ test('memory composition binds task and runtime identity to the rooted backend',
   if (recalled.status !== 'ready') throw new Error('expected memory recall');
   assert.equal(recalled.value.bindingId, `memory-binding:${taskId.value}`);
   assert.deepEqual(scope.taskId, taskId);
-});
-
-test('runtime memory resolves the cwd-named Skill through the project source manifest', async () => {
-  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-skill-source-');
-  const skillRoot = join(root, 'declared-skills');
-  await mkdir(join(skillRoot, 'workspace'), { recursive: true });
-  await writeFile(join(skillRoot, 'workspace', 'SKILL.md'), '# declared project Skill\n', 'utf8');
-  const paths = await resolveRuntimePaths({ controlRoot, workspace });
-  await writeFile(paths.projectManifest, JSON.stringify({
-    schemaVersion: 1,
-    projectKey: paths.projectKey,
-    workspaceCwd: paths.workspaceCwd,
-    sources: { localSkill: { root: skillRoot, name: 'workspace' } },
-  }) + '\n', 'utf8');
-  const configuration = await loadConfiguration(paths);
-
-  const composed = await composeRuntimeMemory({ paths, configuration });
-  const source = await composed.sources.readProject({ projectKey: paths.projectKey, target: 'project-local-skill' });
-  assert.equal(source.content, '# declared project Skill\n');
-  assert.match(source.canonicalRef, /skill:\/\/project\/.*\/workspace\/SKILL\.md/);
 });
 
 test('memory composition rejects partial runtime bindings explicitly', async () => {

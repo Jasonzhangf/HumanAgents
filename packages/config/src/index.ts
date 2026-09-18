@@ -89,11 +89,6 @@ export interface RuntimePaths {
   readonly runNotesRoot: string;
 }
 
-export interface ProjectLocalSkillSource {
-  readonly root: string;
-  readonly name: string;
-}
-
 export interface LoadedConfiguration {
   readonly paths: RuntimePaths;
   readonly internal: InternalConfig;
@@ -657,46 +652,6 @@ export async function ensureControlLayout(paths: RuntimePaths): Promise<void> {
   try { existing = JSON.parse(projectContents) as { projectKey?: string; workspaceCwd?: string }; }
   catch { fail('project-manifest-corrupt', 'project manifest is not valid JSON', '保留原文件并修复 project.json 后重试'); }
   if (existing.projectKey !== paths.projectKey || existing.workspaceCwd !== paths.workspaceCwd) fail('project-identity-mismatch', 'project manifest does not match canonical workspace');
-}
-
-export async function resolveProjectLocalSkillSource(paths: RuntimePaths): Promise<ProjectLocalSkillSource> {
-  rejectManagedFile(paths.projectManifest);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(paths.projectManifest, 'utf8')) as unknown;
-  } catch (error) {
-    fail('project-source-manifest-invalid', `project source manifest is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, '修复 project.json 后重试');
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    fail('project-source-manifest-invalid', 'project source manifest must be an object', '修复 project.json 后重试');
-  }
-  const manifest = parsed as {
-    readonly schemaVersion?: unknown;
-    readonly projectKey?: unknown;
-    readonly workspaceCwd?: unknown;
-    readonly sources?: unknown;
-  };
-  if (manifest.schemaVersion !== 1 || manifest.projectKey !== paths.projectKey || manifest.workspaceCwd !== paths.workspaceCwd) {
-    fail('project-source-manifest-invalid', 'project source manifest identity does not match resolved runtime paths', '重新解析 runtime paths 后修复 project.json');
-  }
-  const sources = manifest.sources;
-  if (typeof sources !== 'object' || sources === null || Array.isArray(sources)) {
-    fail('project-source-missing', 'project source manifest does not declare a local Skill', 'declare sources.localSkill in project.json');
-  }
-  const localSkill = (sources as { readonly localSkill?: unknown }).localSkill;
-  if (typeof localSkill !== 'object' || localSkill === null || Array.isArray(localSkill)) {
-    fail('project-source-missing', 'project source manifest does not declare a local Skill', 'declare sources.localSkill in project.json');
-  }
-  const root = (localSkill as { readonly root?: unknown }).root;
-  const name = (localSkill as { readonly name?: unknown }).name;
-  if (typeof root !== 'string' || !root.trim() || !isAbsolute(root)) {
-    fail('project-source-manifest-invalid', 'project local Skill root must be an absolute path', 'declare an absolute sources.localSkill.root in project.json');
-  }
-  const workspaceName = paths.workspaceCwd.split(/[\\/]/u).at(-1);
-  if (typeof name !== 'string' || !name.trim() || name !== workspaceName) {
-    fail('project-source-manifest-invalid', 'project local Skill name must equal the workspace basename', 'declare the unique cwd-named Skill in project.json');
-  }
-  return { root, name };
 }
 
 function rejectSymlinkComponents(candidate: string, controlRoot: string): void {
