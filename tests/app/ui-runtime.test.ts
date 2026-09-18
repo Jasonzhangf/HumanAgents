@@ -552,8 +552,8 @@ test('memory interaction HTTP routes reject unknown detail and an invalid memory
   }
 });
 
-test('organ health probe and snapshot expose bounded dimensions, evidence, and independent lifecycle state', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-'));
+test('memory interaction HTTP routes reject unconfigured global access without hiding project access', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-global-denied-'));
   const runtime = await startUiRuntime({
     mode: 'fake',
     organId,
@@ -564,9 +564,86 @@ test('organ health probe and snapshot expose bounded dimensions, evidence, and i
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-memory-global-denied'),
+  });
+  try {
+    for (const path of [
+      '/api/memory/summary?namespace=global',
+      '/api/memory/query?namespace=global&query=memory',
+    ]) {
+      const response = await fetch(`${runtime.server.url}${path}`);
+      assert.equal(response.status, 409);
+      const body = await response.json() as {
+        readonly error: {
+          readonly code: string;
+          readonly ownerId: string;
+          readonly nextAction: string;
+        };
+      };
+      assert.equal(body.error.code, 'memory-capability-denied');
+      assert.equal(body.error.ownerId, 'memory-coordinator');
+      assert.match(body.error.nextAction, /cross-project grant|project namespace/u);
+    }
+
+    const projectSummary = await fetch(`${runtime.server.url}/api/memory/summary`);
+    assert.equal(projectSummary.status, 200);
+    const projectQuery = await fetch(`${runtime.server.url}/api/memory/query?query=memory`);
+    assert.equal(projectQuery.status, 200);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('organ health probe and snapshot expose bounded dimensions, evidence, and independent lifecycle state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-'));
+  const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  let probeCount = 0;
+  const port: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: async (value) => {
+      probeCount += 1;
+      return base.probe(value);
+    },
+    capabilities: (value) => base.capabilities(value),
+    start: (input) => base.start(input),
+    resume: (input) => base.resume(input),
+    submit: (input) => base.submit(input),
+    observe: (input) => base.observe(input),
+    requestStop: (input) => base.requestStop(input),
+    settle: (input) => base.settle(input),
+    close: (value) => base.close(value),
+  };
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
     memory: testMemory('project-ui-organ-health'),
   });
   try {
+    const snapshotBeforeProbe = await fetch(`${runtime.server.url}/api/health/snapshot`);
+    assert.equal(snapshotBeforeProbe.status, 409);
+    const snapshotError = await snapshotBeforeProbe.json() as {
+      readonly error: {
+        readonly code: string;
+        readonly ownerId: string;
+        readonly nextAction: string;
+      };
+    };
+    assert.equal(snapshotError.error.code, 'health-snapshot-missing');
+    assert.equal(snapshotError.error.ownerId, 'humanagent.runtime.health');
+    assert.match(snapshotError.error.nextAction, /health probe/u);
+    assert.equal(probeCount, 0);
+
+    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`);
+    assert.equal(probeResponse.status, 200);
+    assert.equal(probeCount, 1);
+
     for (const path of ['/api/health/probe', '/api/health/snapshot']) {
       const response = await fetch(`${runtime.server.url}${path}`);
       assert.equal(response.status, 200);
@@ -599,6 +676,11 @@ test('organ health probe and snapshot expose bounded dimensions, evidence, and i
       assert.ok((body.dimensions[0]?.evidenceRefs.length ?? 0) > 0);
       assert.ok(body.evidenceRefs.length > 0);
     }
+    assert.equal(probeCount, 2);
+
+    const snapshotOnly = await fetch(`${runtime.server.url}/api/health/snapshot`);
+    assert.equal(snapshotOnly.status, 200);
+    assert.equal(probeCount, 2);
   } finally {
     await runtime.server.close();
   }

@@ -23,6 +23,7 @@ import {
   type MemoryReviewReceipt,
   type MemoryView,
   type MemoryScope,
+  type OrganHealthSnapshot,
   type OperationId,
   type OrganId,
   type ProviderBinding,
@@ -75,6 +76,11 @@ import {
   type MemoryContextReceipt,
   type MemoryIssue,
 } from '../../../runtime/src/memory/index.js';
+import {
+  OrganHealthManager,
+  OrganHealthError,
+  healthEvidenceRefs,
+} from '../../../runtime/src/health/index.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
@@ -223,6 +229,15 @@ function apiError(error: unknown): UiRuntimeApiError {
       bindingMissing || sourceMissing ? 404 : 409,
     );
   }
+  if (error instanceof OrganHealthError) {
+    return new UiRuntimeApiError(
+      error.code,
+      error.ownerId,
+      error.message,
+      error.nextAction,
+      409,
+    );
+  }
   if (error instanceof ProviderAdapterError) {
     const providerError = error.providerError;
     return new UiRuntimeApiError(
@@ -254,6 +269,7 @@ export class UiRuntimeService {
   private readonly memory: UiRuntimeMemoryComposition;
   private readonly memoryInjection: MemoryContextCapture;
   private readonly memoryInteraction: MemoryInteractionPort;
+  private readonly healthManager: OrganHealthManager;
   private readonly memoryContexts = new Map<string, BoundMemoryContext>();
   private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
@@ -261,6 +277,13 @@ export class UiRuntimeService {
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
     this.memoryInjection = new MemoryContextCapture(this.memory.backend);
+    this.healthManager = new OrganHealthManager({
+      organId: options.organId,
+      probe: {
+        probe: () => options.port.probe(options.binding),
+      },
+      now: () => this.now(),
+    });
     if (this.memory.interaction) {
       this.memoryInteraction = this.memory.interaction;
     } else {
@@ -478,52 +501,38 @@ export class UiRuntimeService {
 
   async healthProbe(): Promise<OrganHealthProjection> {
     try {
-      const readiness = await this.options.port.probe(this.options.binding);
-      const now = this.now().getTime();
-      const expiresAtTime = Date.parse(readiness.expiresAt);
-      const stale = !Number.isFinite(expiresAtTime) || expiresAtTime <= now;
-      const status = stale
-        ? 'unknown'
-        : readiness.state === 'ready'
-          ? 'healthy'
-          : readiness.state === 'degraded'
-            ? 'degraded'
-            : 'failed';
-      const dimensions: readonly OrganHealthDimensionProjection[] = [
-        {
-          dimension: 'readiness',
-          status,
-          evidenceRefs: readiness.evidenceRefs,
-          measurements: [
-            { name: 'providerState', value: readiness.state },
-            ...(readiness.version ? [{ name: 'providerVersion', value: readiness.version }] : []),
-          ],
-        },
-      ];
-      return {
-        surface: 'organ-health',
-        organId: this.options.organId,
-        lifecycleState: this.status().state,
-        healthState: stale
-          ? 'unknown'
-          : readiness.state === 'ready'
-            ? 'healthy'
-            : readiness.state === 'degraded'
-              ? 'degraded'
-              : 'unhealthy',
-        checkedAt: readiness.checkedAt,
-        expiresAt: readiness.expiresAt,
-        stale,
-        dimensions,
-        evidenceRefs: readiness.evidenceRefs,
-      };
+      return this.projectHealth(await this.healthManager.probe());
     } catch (error) {
       throw apiError(error);
     }
   }
 
   async healthSnapshot(): Promise<OrganHealthProjection> {
-    return this.healthProbe();
+    try {
+      return this.projectHealth(await this.healthManager.snapshot());
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  private projectHealth(snapshot: OrganHealthSnapshot): OrganHealthProjection {
+    const stale = snapshot.overall === 'unknown' && snapshot.expiresAt <= this.now().toISOString();
+    return {
+      surface: 'organ-health',
+      organId: snapshot.organId,
+      lifecycleState: this.status().state,
+      healthState: snapshot.overall,
+      checkedAt: snapshot.checkedAt,
+      expiresAt: snapshot.expiresAt,
+      stale,
+      dimensions: snapshot.functions.map((fn) => ({
+        dimension: 'readiness',
+        status: fn.status,
+        evidenceRefs: fn.evidenceRefs,
+        measurements: fn.measurements,
+      })),
+      evidenceRefs: healthEvidenceRefs(snapshot),
+    };
   }
 
   private createMemoryBoundDriver(input: RuntimeExecutionDriverInput): RuntimeExecutionDriver {

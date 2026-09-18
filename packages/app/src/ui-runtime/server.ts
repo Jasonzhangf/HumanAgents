@@ -176,6 +176,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
     if (path === '/api/memory/summary' && method === 'GET') {
       const namespace = url.searchParams.get('namespace');
+      if (namespace === 'global') {
+        throw new UiRuntimeApiError(
+          'memory-capability-denied',
+          'memory-coordinator',
+          'global memory access requires an authorized cross-project grant',
+          'request a cross-project grant or use the project namespace',
+          409,
+        );
+      }
       if (namespace !== null && namespace !== 'project' && namespace !== 'global') {
         throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'summary field namespace must be project or global', 'provide project or global');
       }
@@ -188,6 +197,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
     if (path === '/api/memory/query' && method === 'GET') {
       const namespace = url.searchParams.get('namespace');
+      if (namespace === 'global') {
+        throw new UiRuntimeApiError(
+          'memory-capability-denied',
+          'memory-coordinator',
+          'global memory access requires an authorized cross-project grant',
+          'request a cross-project grant or use the project namespace',
+          409,
+        );
+      }
       if (namespace !== null && namespace !== 'project' && namespace !== 'global') {
         throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'query field namespace must be project or global', 'provide project or global');
       }

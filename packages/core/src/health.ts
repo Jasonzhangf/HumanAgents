@@ -83,7 +83,7 @@ export function classifyHealthSnapshot(input: {
   });
 }
 
-export function assertHealthSnapshotOwnership(snapshot: OrganHealthSnapshot, publisher: HealthPublisher): void {
+export function assertHealthSnapshotOwnership(snapshot: OrganHealthSnapshot, publisher: HealthPublisher, now?: Date): void {
   assertHarnessHealthPublisher(publisher);
   if (!snapshot.organId.value) throw new HealthError('snapshot organ id is required');
   const checkedAt = Date.parse(snapshot.checkedAt);
@@ -91,6 +91,6 @@ export function assertHealthSnapshotOwnership(snapshot: OrganHealthSnapshot, pub
   if (!Number.isFinite(checkedAt)) throw new HealthError('checkedAt must be a valid timestamp');
   if (!Number.isFinite(expiresAt) || expiresAt <= checkedAt) throw new HealthError('expiresAt must be later than checkedAt');
   if (snapshot.functions.length === 0) throw new HealthError('health snapshot requires function results');
-  const classified = classifyHealthSnapshot({ snapshot });
+  const classified = classifyHealthSnapshot({ snapshot, now });
   if (snapshot.overall !== classified) throw new HealthError('snapshot overall does not match classified health');
 }
