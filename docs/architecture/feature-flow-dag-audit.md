@@ -28,8 +28,11 @@ receipt, a merge, or a release as interchangeable. Each is a separate gate.
 
 ## 1. As-Is DAG
 
-The As-Is DAG has three historical slices that reached a closed path and one
-current memory slice that stops before acceptance and delivery.
+The As-Is DAG has two historical slices whose gate manifests record PASS
+verdicts and one current memory slice that stops before acceptance and
+delivery. The historical acceptance receipts are referenced by the manifests
+but are not independently readable in this checkout, so their acceptance
+status is audited as partial rather than complete.
 
 ### 1.1 Historical slice: Real single DSH agent
 
@@ -41,8 +44,8 @@ current memory slice that stops before acceptance and delivery.
 | `I-DSH-1` | Implementation | Implement DSH adapter, driver, lifecycle, and CLI path. | Design and DSH source lock | DSH implementation | `D-DSH-1` | `packages/adapters/dsh/`, `packages/app/src/` | Candidate-bound DSH tests | `287a2f61cdfac79d321166b201a36b438d9d374b` | `COMPLETE` |
 | `V-DSH-1` | Verification | Verify typecheck, build, focused DSH tests, full tests, lifecycle, and real CLI entry. | Implementation candidate | Candidate-bound gate results | `I-DSH-1` | `docs/evidence/real-single-dsh-agent/gates.json` commands | `gates.json` commands and artifact hashes | `docs/evidence/real-single-dsh-agent/` | `COMPLETE` |
 | `E-DSH-1` | Evidence | Persist candidate-bound receipts, checkpoint, session artifact, screenshots, and gate manifest. | Verification outputs | Evidence bundle | `V-DSH-1` | `docs/evidence/real-single-dsh-agent/gates.json` | Artifact SHA-256 entries | `docs/evidence/real-single-dsh-agent/` | `COMPLETE` |
-| `A-DSH-1` | Acceptance | Independent review accepts the exact candidate. | Candidate and evidence | PASS receipt and zero P0/P1 findings | `E-DSH-1` | Candidate `287a2f6...` | `implementationReview` and `finalVerdict` | `gates.json` review block; receipt path is referenced as `.agent-collab/review/humanagent-real-single-dsh-agent-287a2f6/review.final.md` | `COMPLETE`, with receipt-path availability caveat |
-| `M-DSH-1` | Integration | Merge accepted candidate into main. | Acceptance and main base | Main merge commit | `A-DSH-1` | `37965991017345e690865dfae1fc46d030fa607c` | Main merge tree recorded | `gates.json` candidate block | `COMPLETE` |
+| `A-DSH-1` | Acceptance | Independent review accepts the exact candidate. | Candidate and evidence | PASS verdict and zero P0/P1 findings recorded | `E-DSH-1` | Candidate `287a2f6...` | `implementationReview` and `finalVerdict` | `gates.json` review block; receipt path is referenced as `.agent-collab/review/humanagent-real-single-dsh-agent-287a2f6/review.final.md`, but that receipt is unavailable in this checkout | `PARTIAL: verdict recorded, receipt not independently readable` |
+| `M-DSH-1` | Integration | Merge the candidate into main. | Candidate, partial acceptance, and main base | Main merge commit | `A-DSH-1` | `37965991017345e690865dfae1fc46d030fa607c` | Main merge tree recorded | `gates.json` candidate block and Git history | `PARTIAL: merge is recorded, upstream acceptance receipt is unavailable` |
 | `L-DSH-1` | Delivery | Release the merged capability as a production artifact. | Main merge | Production release | `M-DSH-1` | `README.md` explicitly says production release is not complete | No production release artifact found | `dist/release` absent | `MISSING` |
 
 ### 1.2 Historical slice: UI Provider Loop
@@ -55,7 +58,7 @@ current memory slice that stops before acceptance and delivery.
 | `I-UI-1` | Implementation | Implement UI runtime HTTP API, provider ports, projection, and real entry. | Design | UI/provider implementation | `D-UI-1` | `packages/app/src/ui-runtime/`, `packages/ui/`, `packages/adapters/provider/` | Candidate-bound test and proof runs | `56840b3d62d1d9db943e4d5376ff3febe99d979c` | `COMPLETE` |
 | `V-UI-1` | Verification | Run typecheck, full tests, release gates, and real RCC responses/openai proof. | Implementation candidate | Verification outputs | `I-UI-1` | `gates.json` commands | Real RCC 4444 probe/execute/stop/settle/checkpoint/close | `docs/evidence/ui-provider-loop/gates.json` | `COMPLETE` |
 | `E-UI-1` | Evidence | Persist proof JSON, source digest, acceptance results, and gate manifest. | Verification outputs | Evidence bundle | `V-UI-1` | `docs/evidence/ui-provider-loop/` | Artifact SHA-256 and source digest | `docs/evidence/ui-provider-loop/` | `COMPLETE` |
-| `A-UI-1` | Acceptance | Independent review accepts the exact reviewed UI/provider commit. | Candidate and evidence | PASS receipt and zero P0/P1 findings | `E-UI-1` | `56840b3...` | `reviewVerdict`, `reviewFindings` | `gates.json` review block | `COMPLETE`, with receipt-path availability caveat |
+| `A-UI-1` | Acceptance | Independent review accepts the exact reviewed UI/provider commit. | Candidate and evidence | PASS verdict and zero P0/P1 findings recorded | `E-UI-1` | `56840b3...` | `reviewVerdict`, `reviewFindings` | `gates.json` review block; no independently readable receipt is bound in this checkout | `PARTIAL: verdict recorded, receipt not independently readable` |
 | `M-UI-1` | Integration | Merge accepted candidate into main. | Acceptance and main base | Main merge commit | `A-UI-1` | README states the candidate entered main; merge SHA is not recorded in the gate file | Main merge evidence not fully bound in `gates.json` | README and Git history | `PARTIAL` |
 | `L-UI-1` | Delivery | Release the merged capability as a production artifact. | Main merge | Production release | `M-UI-1` | `README.md` explicitly says production release is not complete | No production release artifact found | `dist/release` absent | `MISSING` |
 
@@ -90,10 +93,12 @@ main integration, or production release.
 ### A. Orphan Requirement
 
 The DSH and UI Provider Loop requirements have downstream implementation,
-verification, evidence, and acceptance. The memory M3 requirement has
-implementation and focused verification, but no current-candidate evidence,
-acceptance, integration, or delivery. The production release requirement is
-explicitly unmet in `README.md`.
+verification, and evidence, and their gate manifests record acceptance. Those
+historical acceptance receipts are not independently readable in this
+checkout, so their acceptance status is `PARTIAL` rather than `COMPLETE`. The
+memory M3 requirement has implementation and focused verification, but no
+current-candidate evidence, acceptance, integration, or delivery. The
+production release requirement is explicitly unmet in `README.md`.
 
 ### B. Orphan Implementation
 
@@ -139,8 +144,10 @@ legal terminal delivery node.
 
 ### H. Dead Node
 
-No dead node was found in the historical closed slices. The current candidate
-has no acceptance or delivery node, so those are missing rather than dead.
+No dead node was found in the historical implementation and verification
+slices. The historical acceptance receipts are unavailable, and the current
+candidate has no acceptance or delivery node, so those are partial or missing
+rather than dead.
 
 ### I. Cycle
 
@@ -228,7 +235,8 @@ is low-risk, reversible, single-owner, and fully covered by focused tests.
 | No current evidence that `a54ff98` was reviewed against the exact memory interaction branch scope | `MISSING_VERIFICATION` | Review receipt for `2f4bb30`; branch divergence |
 
 No `INVALID_CYCLE`, `REDUNDANT_NODE`, or `WRONG_DEPENDENCY` was found in the
-reconstructed paths.
+reconstructed paths. Historical acceptance and integration nodes are
+`MISSING_BINDING`/partial where their referenced receipts are unavailable.
 
 ## 5. Minimal Migration Plan
 
