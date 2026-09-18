@@ -1,0 +1,72 @@
+{
+  "goal_id": "humanagent-appsdk-governance-init-20260915T045500Z",
+  "raw_request": "Initialize AppSDK governance for the existing HumanAgent repository without changing business source or project-owned rules.",
+  "understood_objective": "Initialize AppSDK governance for HumanAgent's new governance module in an isolated worktree, preserving existing project owners, architecture, goals, and business source; this init does not claim AppSDK module coverage for HumanAgent business packages.",
+  "acceptance_criteria": [
+    "AppSDK governance resources exist under HumanAgent without changing existing business source or AGENTS.md.",
+    "The AppSDK project contract records the new humanagent-governance module boundaries; existing HumanAgent business source remains owner-truth under project AGENTS.md and is not claimed as AppSDK module-bound by this init.",
+    "appsdk verify reports the initialized HumanAgent project contract as current and development-ready for the contract_bound initialization stage.",
+    "appsdk compile produces the project artifact from the initialized governance contract.",
+    "The resulting governance state is recorded on the isolated codex/gov-contract-humanagent worktree."
+  ],
+  "non_goals": [
+    "No UI, provider, DSH, runtime, release, packaging, or deployment changes.",
+    "No rewrite, relocation, or semantic change of existing HumanAgent business source.",
+    "No replacement of HumanAgent's existing project AGENTS.md, owner map, architecture, goals, or delivery gates.",
+    "No AppSDK module coverage claim for existing HumanAgent business packages in this initialization step.",
+    "No merge, push, or remote publication in this initialization step.",
+    "No Collab, Guide, bug, task, or release state is fabricated when no live runtime evidence exists."
+  ],
+  "assumptions": [
+    "The HumanAgent repository root is the AppSDK project root and project_root is '.'.",
+    "Existing source and documentation remain authoritative; AppSDK initialization only adds its own governance resources.",
+    "This is an isolated non-main worktree based on origin/main HEAD 5fb25ee0955a65ba77f90a6642921a5cf85524d5."
+  ],
+  "ambiguities": [],
+  "questions": [],
+  "scope": {
+    "feature_id": "humanagent.governance-contract",
+    "module_id": "humanagent-governance",
+    "resource_ids": [
+      "project_contract",
+      "sdk_bundle",
+      "installed_sdk_resources",
+      "sdk_lock",
+      "canonical_governance_maps",
+      "compiled_artifact"
+    ],
+    "allowed_paths": [
+      ".appsdk/**",
+      ".appsdk-control/**",
+      ".appsdk-prepare.json",
+      ".gitignore",
+      "contracts/**",
+      "active/lib/**",
+      "generated/**",
+      "protected/**"
+    ],
+    "forbidden_paths": [
+      "../**",
+      "AGENTS.md",
+      "packages/**",
+      "tests/**",
+      "scripts/**",
+      "docs/**",
+      "README.md",
+      "note.md",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "tsconfig.json"
+    ]
+  },
+  "risk_decisions": [
+    "AppSDK governance is initialized as a project_refactor, not as a rewrite of the existing HumanAgent implementation.",
+    "The existing project AGENTS.md and business source remain the owner truth; AppSDK only adds machine-checkable governance resources.",
+    "Compile is bound to the repository's existing typecheck command instead of a placeholder module build."
+  ],
+  "status": "confirmed",
+  "confirmed_by": "Jason",
+  "confirmed_at": "2026-09-15T04:55:00Z",
+  "created_at": "2026-09-15T04:48:59Z"
+}

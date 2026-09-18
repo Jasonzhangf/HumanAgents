@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "project_id": "humanagent",
+  "sdk": {"name": "appsdk", "version": "0.1.6", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "lifecycle": {"stage": "contract_bound"},
+  "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
+  "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
+  "guidance": {
+    "enforcement": "advisory",
+    "compiled_manifest": ".appsdk/guidance/compiled.json",
+    "rule_sources": [
+      {"source_id":"project-agents","kind":"agents","path":"AGENTS.md","required":false,"precedence":100},
+      {"source_id":"appsdk-governance-skill","kind":"skill","path":".appsdk/skills/appsdk-project-governance/SKILL.md","contract_path":".appsdk/skills/appsdk-project-governance/appsdk-guidance.json","required":true,"precedence":200}
+    ]
+  },
+  "governance": {
+    "playground_root": "playground/experiments/**",
+    "active_root": "active/lib/**",
+    "protected_root": "protected/**",
+    "generated_root": "generated/**",
+    "active_kind": "immutable_consumable_library",
+    "protected_kinds": ["source", "contracts", "history"],
+    "generated_kinds": ["compiler_output", "indexes"],
+    "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
+    "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
+    "runtime_forbidden_roots": ["playground/**", "generated/**", "protected/source/**"],
+    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/pre-review-validation-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/collaboration-index.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/merge-queue-state.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json",
+    "playground_retention": "archive_then_remove",
+    "debug_merge_comment_required": true
+  },
+  "lifecycles": {"issue": "open", "library": "draft", "source_snapshot": "mutable", "artifact": "generated"},
+  "modules": [
+    {
+      "module_id": "humanagent-governance",
+      "stage": "source_implemented",
+      "owned_paths": [
+        ".appsdk/**",
+        ".appsdk-prepare.json",
+        ".gitignore",
+        "contracts/**"
+      ],
+      "source_owner": "humanagent-governance",
+      "active_artifact": "active/lib/humanagent-governance/**",
+      "generated_outputs": [
+        "generated/**"
+      ],
+      "contract_paths": [
+        ".appsdk/project.json",
+        ".appsdk/goal.json",
+        ".appsdk/sdk.lock",
+        ".appsdk/sdk-resources.json",
+        ".appsdk/contracts/**",
+        "contracts/**"
+      ],
+      "dependency_modules": [],
+      "build": {
+        "program": "sh",
+        "args": [
+          "-c",
+          "pnpm run typecheck && mkdir -p generated/modules/humanagent-governance/lib && cp .appsdk/project.json generated/modules/humanagent-governance/lib/governance-contract.json"
+        ],
+        "working_directory": "."
+      },
+      "artifact_paths": [
+        "governance-contract.json"
+      ],
+      "regression": {
+        "required_before_freeze": true,
+        "suite_id": "humanagent-appsdk-governance",
+        "command": {
+          "program": "pnpm",
+          "args": [
+            "run",
+            "test:release"
+          ],
+          "working_directory": "."
+        },
+        "input_paths": [
+          ".appsdk/project.json",
+          ".appsdk/goal.json",
+          ".appsdk/sdk.lock",
+          ".appsdk/sdk-resources.json",
+          ".appsdk/contracts/**",
+          "contracts/**"
+        ],
+        "minimum_test_count": 1,
+        "allow_skipped": false,
+        "ordinary_mode_after_freeze": "disabled",
+        "reenable_on": [
+          "source_change",
+          "contract_change",
+          "public_api_change",
+          "artifact_change",
+          "dependency_change"
+        ]
+      }
+    }
+  ]
+}

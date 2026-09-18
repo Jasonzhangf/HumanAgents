@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "preparation_id": "humanagent-appsdk-governance-init-20260915T045500Z",
+  "status": "confirmed",
+  "objective": "Initialize AppSDK governance for HumanAgent's new governance module without changing business source or project-owned rules; existing business packages remain owner-truth under project AGENTS.md.",
+  "change_kind": "project_refactor",
+  "project_root": ".",
+  "legacy_roots": [
+    "packages/**",
+    "tests/**",
+    "scripts/**",
+    "docs/**",
+    "README.md",
+    "note.md",
+    "AGENTS.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.json"
+  ],
+  "new_roots": [
+    ".appsdk/**",
+    ".appsdk-control/**",
+    "playground/**",
+    "active/lib/**",
+    "protected/**",
+    "generated/**"
+  ],
+  "protected_roots": [
+    "protected/source/**",
+    "protected/contracts/**",
+    "protected/history/**"
+  ],
+  "runtime_forbidden_roots": [
+    "playground/**",
+    "generated/**",
+    "protected/source/**"
+  ],
+  "boundary": {
+    "allowed_paths": [
+      ".appsdk/**",
+      ".appsdk-control/**",
+      "playground/**",
+      "active/lib/**",
+      "protected/**",
+      "generated/**",
+      "contracts/**"
+    ],
+    "forbidden_paths": [
+      "../**",
+      "tmp/**",
+      ".agent-collab/**"
+    ],
+    "payload_control_separation": "confirmed: AppSDK lifecycle, routing, review, promotion, freeze, and SDK lock facts are control resources only; HumanAgent task, provider, DSH, and UI payloads cannot carry or reconstruct them."
+  },
+  "acceptance_criteria": [
+    "AppSDK governance resources exist under HumanAgent without changing existing business source or AGENTS.md.",
+    "appsdk verify reports the initialized project contract as current and development-ready for the contract_bound initialization stage; business package module coverage is not claimed by this init.",
+    "appsdk compile passes for the initialized project contract.",
+    "The resulting governance state is recorded on the isolated codex/appsdk-governance-init worktree."
+  ],
+  "non_goals": [
+    "No UI, provider, DSH, runtime, release, packaging, or deployment changes.",
+    "No rewrite, relocation, or semantic change of existing HumanAgent business source.",
+    "No replacement of HumanAgent's existing project AGENTS.md, owner map, architecture, goals, or delivery gates.",
+    "No AppSDK module coverage claim for existing HumanAgent business packages in this initialization step.",
+    "No merge, push, or remote publication in this initialization step.",
+    "No Collab, Guide, bug, task, or release state is fabricated when no live runtime evidence exists."
+  ],
+  "assumptions": [
+    "The HumanAgent repository root is the AppSDK project root and project_root is '.'.",
+    "Existing source and documentation remain authoritative; AppSDK initialization only adds its own governance resources.",
+    "This is an isolated non-main worktree based on current local main HEAD 921e0f613b879604dab8703685a097ab11e9b85c."
+  ],
+  "questions": [],
+  "confirmed_by": "Jason",
+  "confirmed_at": "2026-09-15T04:55:00Z",
+  "created_at": "2026-09-15T04:48:59Z"
+}

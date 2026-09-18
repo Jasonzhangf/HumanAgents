@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {
+      "module_id": "humanagent-governance",
+      "status": "active",
+      "owner": "humanagent-governance",
+      "owned_paths": [
+        ".appsdk/**",
+        ".appsdk-prepare.json",
+        ".gitignore",
+        "contracts/**"
+      ],
+      "forbidden_paths": [
+        "AGENTS.md",
+        "packages/**",
+        "tests/**",
+        "scripts/**",
+        "docs/**"
+      ],
+      "verification_gates": [
+        "contract_valid",
+        "sdk_lock_integrity",
+        "fix_lifecycle_graph",
+        "mainline_merge_identity"
+      ]
+    }
+  ]
+}
