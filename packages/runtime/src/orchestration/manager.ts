@@ -218,6 +218,20 @@ export class OrchestrationManager {
 
   async dispatch(input: DispatchInput): Promise<OrchestrationDispatchResult> {
     const planned = this.graph.createAssignment(input.stageNodeId, input.assignment);
+    if (planned.status === 'running' && planned.result) {
+      return {
+        status: 'running',
+        assignment: planned,
+        issue: issue(
+          'assignment-progress-pending',
+          planned.ownerId,
+          planned.reason,
+          planned.nextAction,
+          planned.evidenceRefs,
+        ),
+        reviewResults: planned.reviewResults,
+      };
+    }
     if (
       planned.status === 'succeeded'
       || planned.status === 'failed'
@@ -263,7 +277,12 @@ export class OrchestrationManager {
       scope: input.scope,
     });
     if (acquired.status !== 'acquired') {
-      return this.blockedResult(planned, acquired.issue, input.scope);
+      return {
+        status: 'blocked',
+        assignment: planned,
+        issue: acquired.issue,
+        reviewResults: planned.reviewResults,
+      };
     }
     const lease = acquired.lease;
     let result: OrchestrationDispatchResult | undefined;
@@ -448,7 +467,7 @@ export class OrchestrationManager {
     if (!reviewRequired) {
       return {
         status: 'succeeded',
-        assignment: accepted.record,
+        assignment: this.graph.markSucceeded(input.assignment, accepted.record.evidenceRefs),
         reviewResults: accepted.record.reviewResults,
       };
     }
@@ -676,9 +695,10 @@ export class OrchestrationManager {
       );
     }
     if (input.assignment.mergeGate !== 'required') {
+      const completed = this.graph.markSucceeded(input.assignment, gate.evidenceRefs);
       return {
         status: 'succeeded',
-        assignment: this.graph.get(input.assignment) ?? record,
+        assignment: completed,
         reviewResults,
       };
     }

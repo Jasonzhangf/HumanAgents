@@ -454,7 +454,12 @@ test('assignment graph accepts a complete successful path and is idempotent by a
   });
   assert.equal(accepted.accepted, true);
   if (!accepted.accepted) return;
-  assert.equal(accepted.record.status, 'succeeded');
+  assert.equal(accepted.record.status, 'running');
+  assert.equal(accepted.record.result?.status, 'succeeded');
+  assert.equal(graph.getStage('node-a')?.state, 'running');
+
+  const completed = graph.markSucceeded(assignment(), accepted.record.evidenceRefs);
+  assert.equal(completed.status, 'succeeded');
   assert.equal(graph.getStage('node-a')?.state, 'succeeded');
 
   const repeated = graph.acceptResult(assignment(), {
@@ -678,6 +683,129 @@ test('merge-required work passes review before merge and records merged status',
   assert.equal(dispatched.status, 'merged');
   assert.equal(dispatched.assignment.status, 'merged');
   assert.equal(dispatched.mergeOutcome?.status, 'merged');
+});
+
+test('duplicate dispatch returns recoverable progress while review is pending', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute', 'quality.review'] }],
+  });
+  const execution = new StaticExecutionAgent([
+    { result: result(), criteria: criteria() },
+  ]);
+  const review = new PassingReviewAgent();
+  let releaseReview!: () => void;
+  let markReviewStarted!: () => void;
+  const reviewGate = new Promise<void>((resolve) => {
+    releaseReview = resolve;
+  });
+  const reviewStarted = new Promise<void>((resolve) => {
+    markReviewStarted = resolve;
+  });
+  let releaseMerge!: () => void;
+  let markMergeStarted!: () => void;
+  const mergeGate = new Promise<void>((resolve) => {
+    releaseMerge = resolve;
+  });
+  const mergeStarted = new Promise<void>((resolve) => {
+    markMergeStarted = resolve;
+  });
+  let mergeCalls = 0;
+  review.review = async (input) => {
+    markReviewStarted();
+    await reviewGate;
+    return PassingReviewAgent.prototype.review.call(review, input);
+  };
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: execution,
+    reviewAgent: review,
+    mergeCoordinator: {
+      async merge() {
+        mergeCalls += 1;
+        markMergeStarted();
+        await mergeGate;
+        return { status: 'merged', evidenceRefs: [evidence('merge')] };
+      },
+    },
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  const input = {
+    stageNodeId: 'node-a',
+    assignment: assignment({ mergeGate: 'required' as const }),
+    agentId: 'agent-a',
+    scope,
+    reviewKinds: ['quality' as const],
+    reviewSubjectDigests: ['sha256:artifact-a'],
+  };
+
+  const firstDispatch = manager.dispatch(input);
+  await reviewStarted;
+  const repeatedDuringReview = await manager.dispatch(input);
+  releaseReview();
+  await mergeStarted;
+  const repeatedDuringMerge = await manager.dispatch(input);
+  releaseMerge();
+  const first = await firstDispatch;
+
+  assert.equal(first.status, 'merged');
+  assert.equal(repeatedDuringReview.status, 'running');
+  assert.equal(repeatedDuringReview.assignment.status, 'running');
+  assert.equal(repeatedDuringReview.issue?.ownerId, 'orchestration-manager');
+  assert.equal(repeatedDuringReview.issue?.nextAction.kind, 'continue');
+  assert.equal(repeatedDuringMerge.status, 'running');
+  assert.equal(repeatedDuringMerge.assignment.status, 'running');
+  assert.equal(repeatedDuringMerge.issue?.ownerId, 'orchestration-manager');
+  assert.equal(repeatedDuringMerge.issue?.nextAction.kind, 'continue');
+  assert.equal(execution.inputs.length, 1);
+  assert.equal(mergeCalls, 1);
+});
+
+test('resource admission blocked keeps the same assignment reusable after release', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
+  });
+  const held = await pool.acquire({
+    requiredCapabilities: ['execute'],
+    executionEpoch: 1,
+    assignmentId: 'assignment-other',
+    scope,
+  });
+  assert.equal(held.status, 'acquired');
+  if (held.status !== 'acquired') return;
+
+  const execution = new StaticExecutionAgent([
+    { result: result({ nextAction: 'settle' }), criteria: criteria() },
+  ]);
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: execution,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  const input = {
+    stageNodeId: 'node-a',
+    assignment: assignment(),
+    agentId: 'agent-a',
+    scope,
+  };
+
+  const blocked = await manager.dispatch(input);
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.assignment.status, 'planned');
+  assert.equal(blocked.issue?.ownerId, 'orchestration-manager');
+  assert.equal(blocked.issue?.nextAction.kind, 'wait');
+  assert.equal(manager.graph.listAssignments().length, 1);
+
+  const released = await pool.release(held.lease, { scope });
+  assert.equal(released.status, 'released');
+  const retried = await manager.dispatch(input);
+  assert.equal(retried.status, 'succeeded');
+  assert.equal(retried.assignment.status, 'succeeded');
+  assert.equal(retried.assignment.assignment.assignmentId, blocked.assignment.assignment.assignmentId);
+  assert.equal(execution.inputs.length, 1);
 });
 
 test('feedback failures surface as blocked business outcomes instead of success', async () => {

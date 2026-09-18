@@ -497,9 +497,15 @@ export class AssignmentGraph {
     let reason: string;
     let nextAction: NextAction;
     if (input.result.status === 'succeeded') {
-      status = 'succeeded';
-      reason = 'work result satisfied success criteria';
-      nextAction = { kind: 'continue', ref: `review.${key.assignmentId}` };
+      const reviewRequired = input.result.nextAction === 'review' || record.assignment.mergeGate === 'required';
+      status = 'running';
+      reason = reviewRequired
+        ? 'work result satisfied success criteria; assignment awaits review or merge'
+        : 'work result satisfied success criteria; assignment awaits completion';
+      nextAction = {
+        kind: 'continue',
+        ref: reviewRequired ? `review.${key.assignmentId}` : `settle.${key.assignmentId}`,
+      };
     } else if (input.result.status === 'failed' || input.result.status === 'incomplete') {
       const maxAttempts = input.maxAttempts ?? record.assignment.attempt;
       if (record.assignment.attempt < maxAttempts) {
@@ -584,6 +590,28 @@ export class AssignmentGraph {
 
   markEscalated(key: AssignmentKey, reason: string, nextAction: NextAction, evidenceRefs: readonly EvidenceRef[]): AssignmentRecord {
     return this.updateStatus(key, 'escalated', reason, nextAction, evidenceRefs);
+  }
+
+  markSucceeded(key: AssignmentKey, evidenceRefs: readonly EvidenceRef[]): AssignmentRecord {
+    const record = this.requireRecord(key);
+    if (record.status === 'succeeded') return cloneRecord(record);
+    if (record.status !== 'running' || record.result?.status !== 'succeeded') {
+      throw new AssignmentGraphError('assignment can only succeed after accepting a successful work result', {
+        ownerId: record.ownerId,
+        reason: 'assignment.succeeded.invalid',
+        nextAction: { kind: 'recover', ref: `assignment.${key.assignmentId}` },
+        evidenceRefs: record.evidenceRefs.length > 0
+          ? record.evidenceRefs
+          : [evidence(record.assignment.taskId, 'assignment.succeeded.invalid')],
+      });
+    }
+    return this.updateStatus(
+      key,
+      'succeeded',
+      'assignment completed after work result acceptance',
+      { kind: 'continue', ref: `settle.${key.assignmentId}` },
+      evidenceRefs,
+    );
   }
 
   markMerged(key: AssignmentKey, evidenceRefs: readonly EvidenceRef[]): AssignmentRecord {
