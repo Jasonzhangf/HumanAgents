@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeRuntimeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -68,6 +68,31 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   await ensureControlLayout(paths);
   return { root, controlRoot, workspace };
 }
+
+test('runtime memory resolves declared local Skill and keeps undeclared source explicit', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-project-source-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await writeFile(join(workspace, 'AGENTS.md'), '# Project\n', 'utf8');
+  const initialConfiguration = await loadConfiguration(paths);
+  const unavailable = await composeRuntimeMemory({ paths, configuration: initialConfiguration });
+  await assert.rejects(
+    () => unavailable.sources.readProject({ projectKey: paths.projectKey, target: 'project-local-skill' }),
+    (error: unknown) => (error as { code?: string; nextAction?: string }).code === 'memory-source-unavailable'
+      && (error as { nextAction?: string }).nextAction === 'project.json#sources.localSkill',
+  );
+  const workspaceName = workspace.split('/').at(-1)!;
+  await writeFile(join(workspace, 'SKILL.md'), '# Declared Skill\n', 'utf8');
+  await writeFile(paths.projectManifest, JSON.stringify({
+    schemaVersion: 1,
+    projectKey: paths.projectKey,
+    workspaceCwd: paths.workspaceCwd,
+    sources: { localSkill: { root, name: workspaceName } },
+  }), 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const composed = await composeRuntimeMemory({ paths, configuration });
+  const source = await composed.sources.readProject({ projectKey: paths.projectKey, target: 'project-local-skill' });
+  assert.equal(source.content, '# Declared Skill\n');
+});
 
 async function waitFor(assertion: () => void | Promise<void>, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;

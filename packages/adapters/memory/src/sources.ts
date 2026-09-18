@@ -38,8 +38,8 @@ export interface FilesystemMemorySourceOptions {
   readonly sessionsRoot: string;
   readonly runNotesRoot: string;
   readonly projectKey: string;
-  readonly localSkillRoot: string;
-  readonly localSkillName: string;
+  readonly localSkillRoot?: string;
+  readonly localSkillName?: string;
   readonly auditPromptRoot: string;
   readonly now?: () => string;
 }
@@ -137,8 +137,11 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
     nonEmpty(options.sessionsRoot, 'memory sessions root');
     nonEmpty(options.runNotesRoot, 'memory run notes root');
     nonEmpty(options.projectKey, 'memory project key');
-    nonEmpty(options.localSkillRoot, 'memory local skill root');
-    requireSafeSegment(options.localSkillName, 'memory local skill name');
+    if ((options.localSkillRoot === undefined) !== (options.localSkillName === undefined)) {
+      throw new MemorySourceError('memory-source-invalid', 'memory local skill source root and name must be declared together');
+    }
+    if (options.localSkillRoot !== undefined) nonEmpty(options.localSkillRoot, 'memory local skill root');
+    if (options.localSkillName !== undefined) requireSafeSegment(options.localSkillName, 'memory local skill name');
     nonEmpty(options.auditPromptRoot, 'memory audit prompt root');
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -230,6 +233,14 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
         now: this.now,
       });
       return { ...snapshot(source), projectKey: this.options.projectKey, target: input.target, content: source.content };
+    }
+    if (this.options.localSkillRoot === undefined || this.options.localSkillName === undefined) {
+      throw new MemorySourceError(
+        'memory-source-unavailable',
+        'project local Skill source is not declared in project.json',
+        MEMORY_SOURCE_ADAPTER_OWNER,
+        'project.json#sources.localSkill',
+      );
     }
     const source = await readSourceFile({
       root: this.options.localSkillRoot,

@@ -89,6 +89,20 @@ export interface RuntimePaths {
   readonly runNotesRoot: string;
 }
 
+export interface ProjectLocalSkillSource {
+  readonly root: string;
+  readonly name: string;
+}
+
+export interface ProjectSourceManifest {
+  readonly schemaVersion: number;
+  readonly projectKey: string;
+  readonly workspaceCwd: string;
+  readonly sources?: {
+    readonly localSkill?: ProjectLocalSkillSource;
+  };
+}
+
 export interface LoadedConfiguration {
   readonly paths: RuntimePaths;
   readonly internal: InternalConfig;
@@ -97,6 +111,7 @@ export interface LoadedConfiguration {
   readonly effective: UserConfig;
   readonly agentRoster: readonly AgentConfig[];
   readonly promptCatalog: Partial<Record<AgentRole, LoadedAgentPromptSegments>>;
+  readonly projectSourceManifest: ProjectSourceManifest;
 }
 
 export class ConfigurationError extends Error {
@@ -117,6 +132,93 @@ export const DEFAULT_MEMORY_AUDIT_PROMPT_REF = 'project-memory-audit';
 
 function fail(code: string, message: string, nextAction = '修正配置后重新运行'): never {
   throw new ConfigurationError(code, message, nextAction);
+}
+
+function validateProjectSourceManifestShape(value: unknown, paths: RuntimePaths): ProjectSourceManifest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    fail('project-manifest-corrupt', 'project manifest must be a JSON object', '修复 project.json 后重试');
+  }
+  const manifest = value as {
+    readonly schemaVersion?: unknown;
+    readonly projectKey?: unknown;
+    readonly workspaceCwd?: unknown;
+    readonly sources?: unknown;
+  };
+  if (manifest.schemaVersion !== 1) {
+    fail('project-manifest-corrupt', 'project manifest schema version is unsupported', '修复 project.json schemaVersion 后重试');
+  }
+  if (manifest.projectKey !== paths.projectKey || manifest.workspaceCwd !== paths.workspaceCwd) {
+    fail('project-identity-mismatch', 'project manifest does not match canonical workspace');
+  }
+  if (manifest.sources === undefined) {
+    return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd };
+  }
+  if (typeof manifest.sources !== 'object' || manifest.sources === null || Array.isArray(manifest.sources)) {
+    fail('project-source-manifest-invalid', 'project manifest sources must be an object', '修复 project.json sources 后重试');
+  }
+  const sources = manifest.sources as { readonly localSkill?: unknown };
+  const unknownSources = Object.keys(sources).filter((key) => key !== 'localSkill');
+  if (unknownSources.length > 0) {
+    fail('project-source-manifest-invalid', `project manifest contains unsupported source: ${unknownSources[0]}`, '只保留声明的 project source 后重试');
+  }
+  if (sources.localSkill === undefined) {
+    return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd, sources: {} };
+  }
+  if (typeof sources.localSkill !== 'object' || sources.localSkill === null || Array.isArray(sources.localSkill)) {
+    fail('project-source-manifest-invalid', 'project manifest localSkill source must be a single object', '修复 project.json sources.localSkill 后重试');
+  }
+  const localSkill = sources.localSkill as { readonly root?: unknown; readonly name?: unknown };
+  const localSkillKeys = Object.keys(localSkill);
+  if (localSkillKeys.some((key) => key !== 'root' && key !== 'name')) {
+    fail('project-source-manifest-invalid', 'project manifest localSkill source contains unsupported fields', '只保留 sources.localSkill.root/name 后重试');
+  }
+  if (typeof localSkill.root !== 'string' || !isAbsolute(localSkill.root)) {
+    fail('project-source-manifest-invalid', 'project manifest localSkill root must be an absolute path', '修复 project.json sources.localSkill.root 后重试');
+  }
+  const workspaceName = paths.workspaceCwd.split(sep).at(-1) ?? '';
+  if (typeof localSkill.name !== 'string' || localSkill.name !== workspaceName || localSkill.name === '.' || localSkill.name === '..' || localSkill.name.includes('/') || localSkill.name.includes('\\')) {
+    fail('project-source-manifest-invalid', 'project manifest localSkill name must equal the canonical workspace basename', '修复 project.json sources.localSkill.name 后重试');
+  }
+  return {
+    schemaVersion: 1,
+    projectKey: paths.projectKey,
+    workspaceCwd: paths.workspaceCwd,
+    sources: { localSkill: { root: localSkill.root, name: localSkill.name } },
+  };
+}
+
+export async function resolveProjectSourceManifest(paths: RuntimePaths): Promise<ProjectSourceManifest> {
+  let projectContents: string;
+  try {
+    projectContents = await readFile(paths.projectManifest, 'utf8');
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') {
+      return { schemaVersion: 1, projectKey: paths.projectKey, workspaceCwd: paths.workspaceCwd };
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(projectContents) as unknown;
+  } catch {
+    fail('project-manifest-corrupt', 'project manifest is not valid JSON', '保留原文件并修复 project.json 后重试');
+  }
+  const manifest = validateProjectSourceManifestShape(parsed, paths);
+  const localSkill = manifest.sources?.localSkill;
+  if (localSkill) {
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = await realpath(localSkill.root);
+      if (!(await stat(canonicalRoot)).isDirectory()) {
+        fail('project-source-manifest-invalid', 'project manifest localSkill root is not a directory', '修复 project.json sources.localSkill.root 后重试');
+      }
+    } catch (error) {
+      if (error instanceof ConfigurationError) throw error;
+      fail('project-source-manifest-invalid', 'project manifest localSkill root is unavailable', '修复 project.json sources.localSkill.root 后重试');
+    }
+    return { ...manifest, sources: { localSkill: { root: canonicalRoot, name: localSkill.name } } };
+  }
+  return manifest;
 }
 
 function stripComment(line: string): string {
@@ -707,6 +809,7 @@ function rejectManagedFile(filePath: string): void {
 
 export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConfiguration> {
   await ensureControlLayout(paths);
+  const projectSourceManifest = await resolveProjectSourceManifest(paths);
   const configuredInternal = validateInternalConfig(parseToml(await readRequired(join(paths.controlRoot, 'internal.toml'), defaultInternalToml())), paths.controlRoot);
   const internal = {
     ...configuredInternal,
@@ -748,5 +851,5 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
       }
     }
   }
-  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents], promptCatalog };
+  return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents], promptCatalog, projectSourceManifest };
 }

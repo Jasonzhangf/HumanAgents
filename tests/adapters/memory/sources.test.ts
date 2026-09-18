@@ -148,6 +148,25 @@ test('project source list fails explicitly when an allowlisted local skill is mi
   );
 });
 
+test('undeclared local Skill returns a typed unavailable source with manifest next action', async () => {
+  const fixtureValue = await fixture();
+  const adapter = new FilesystemMemorySourceAdapter({
+    workspaceCwd: fixtureValue.workspace,
+    sessionsRoot: fixtureValue.sessions,
+    runNotesRoot: fixtureValue.runNotes,
+    projectKey: 'project-a',
+    auditPromptRoot: fixtureValue.promptRoot,
+  });
+  await assert.rejects(
+    adapter.readProject({ projectKey: 'project-a', target: 'project-local-skill' }),
+    (error: unknown) => error instanceof MemorySourceError
+      && error.code === 'memory-source-unavailable'
+      && error.nextAction === 'project.json#sources.localSkill',
+  );
+  const agents = await adapter.readProject({ projectKey: 'project-a', target: 'project-agents' });
+  assert.equal(agents.target, 'project-agents');
+});
+
 test('malformed run manifests fail as invalid sources instead of leaking runtime errors', async () => {
   const { adapter, runNotes } = await fixture();
   await writeFile(join(runNotes, 'session-a.manifest.json'), 'null\n', 'utf8');
