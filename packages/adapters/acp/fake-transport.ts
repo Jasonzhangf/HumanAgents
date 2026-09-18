@@ -378,6 +378,8 @@ export class DeterministicAcpDriverTransport implements AcpDriverTransport {
     this.options = options;
     this.sessionKinds = [...(options.sessionKinds ?? ['interaction', 'task'])];
     this.capabilitiesList = [...(options.capabilities ?? [
+      'session.open',
+      'session.load',
       'observe',
       'request',
       'cancel',

@@ -267,6 +267,19 @@ test('delegated tool proof is required and external peer claims do not grant cap
     (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
   );
 
+  const limitedTransport = new DeterministicAcpDriverTransport(driverBinding, {
+    capabilities: ['session.open', 'session.load', 'observe'],
+  });
+  const limitedAdapter = new AcpDriverAdapter(driverBinding, limitedTransport);
+  await limitedAdapter.open({ acpSessionId: 'driver-limited', binding: taskBinding }, delegationProof);
+  await assert.rejects(
+    () => limitedAdapter.request({
+      acpSessionId: 'driver-limited',
+      envelope: requestEnvelope(taskBinding, 'driver-limited-request'),
+    }, delegationProof),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+
   const adapter = new AcpDriverAdapter(driverBinding, new DeterministicAcpDriverTransport(driverBinding));
   await assert.rejects(
     () => adapter.open({ acpSessionId: 'driver-no-proof', binding: taskBinding }),

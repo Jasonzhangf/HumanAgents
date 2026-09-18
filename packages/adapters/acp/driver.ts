@@ -52,6 +52,13 @@ interface DriverSession {
   closed: boolean;
 }
 
+interface DriverNegotiation {
+  readonly capabilities: readonly string[];
+  readonly sessionKinds: readonly ('interaction' | 'task')[];
+  readonly proofRef: string;
+  readonly permissionRevision: string;
+}
+
 function driverEvidence(binding: AcpDriverBinding, locator: string): EvidenceRef {
   return {
     evidenceId: {
@@ -84,6 +91,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   private readonly guard: AcpDriverBindingGuard;
   private readonly sessions = new Map<string, DriverSession>();
   private readonly closedSessions = new Set<string>();
+  private negotiation?: DriverNegotiation;
 
   constructor(
     private readonly binding: AcpDriverBinding,
@@ -120,6 +128,12 @@ export class AcpDriverAdapter implements AcpDriverPort {
     if (sessionKinds.length === 0) {
       throw capabilityUnavailable('ACP driver transport does not provide the delegated session kind', ACP_DRIVER_OWNER, [driverEvidence(this.binding, 'capabilities')], this.binding);
     }
+    this.negotiation = {
+      capabilities: remote.capabilities.filter((capability) => delegatedCapabilities.includes(capability)),
+      sessionKinds,
+      proofRef: proof.proofRef,
+      permissionRevision: proof.permissionRevision,
+    };
     return {
       capabilities,
       sessionKinds,
@@ -129,7 +143,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async open(input: AcpDriverOpenRequest, proof?: AcpDelegationProof): Promise<AcpDriverOpenResult> {
-    this.guard.assertDelegation(proof, 'session.open');
+    await this.ensureCapability(proof, 'session.open');
     this.assertBinding(input.binding);
     if (this.sessions.has(input.acpSessionId)) {
       const existing = this.sessions.get(input.acpSessionId)!;
@@ -165,7 +179,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async load(input: AcpDriverLoadRequest, proof?: AcpDelegationProof): Promise<AcpDriverOpenResult> {
-    this.guard.assertDelegation(proof, 'session.load');
+    await this.ensureCapability(proof, 'session.load');
     this.assertBinding(input.binding);
     if (input.binding.kind === 'task') {
       if (input.binding.executionEpoch !== this.binding.executionEpoch) {
@@ -201,7 +215,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async *observe(input: AcpDriverObserveRequest, proof?: AcpDelegationProof): AsyncIterable<AcpObservationUpdate> {
-    this.guard.assertDelegation(proof, 'observe');
+    await this.ensureCapability(proof, 'observe');
     this.requireSession(input.acpSessionId);
     try {
       for await (const update of this.transport.observe(input)) {
@@ -213,7 +227,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async request(input: AcpDriverRequest, proof?: AcpDelegationProof): Promise<AgentDispatchReceipt> {
-    this.guard.assertDelegation(proof, 'request');
+    await this.ensureCapability(proof, 'request');
     const session = this.requireSession(input.acpSessionId);
     try {
       validateAgentRequestEnvelope(input.envelope);
@@ -281,8 +295,8 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async cancel(input: AcpDriverCancelRequest, proof?: AcpDelegationProof): Promise<AcpCancelReceipt> {
+    await this.ensureCapability(proof, 'cancel');
     const session = this.requireSession(input.acpSessionId);
-    this.guard.assertDelegation(proof, 'cancel');
     if (!input.requestId.trim() || !input.attemptId.trim()) {
       throw acpError(
         'protocol-error',
@@ -364,7 +378,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async reconcile(input: AcpDriverReconcileRequest, proof?: AcpDelegationProof): Promise<AgentReconcileResult> {
-    this.guard.assertDelegation(proof, 'reconcile');
+    await this.ensureCapability(proof, 'reconcile');
     const session = this.requireSession(input.acpSessionId);
     this.assertSessionKind(session.binding, 'task', 'reconcile');
     if (!input.requestId.trim() || !input.attemptId.trim() || !input.operationRef.trim()) {
@@ -412,7 +426,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async settle(input: AcpDriverSettleRequest, proof?: AcpDelegationProof): Promise<AgentSettleReceipt> {
-    this.guard.assertDelegation(proof, 'settle');
+    await this.ensureCapability(proof, 'settle');
     const session = this.requireSession(input.acpSessionId);
     this.assertSessionKind(session.binding, 'task', 'settle');
     if (!input.requestId.trim() || !input.attemptId.trim()) {
@@ -555,6 +569,24 @@ export class AcpDriverAdapter implements AcpDriverPort {
         { kind: 'recover', ref: 'refresh-driver-binding' },
         [driverEvidence(this.binding, 'binding')],
         { binding: this.binding },
+      );
+    }
+  }
+
+  private async ensureCapability(proof: AcpDelegationProof | undefined, capability: string): Promise<void> {
+    this.guard.assertProof(proof);
+    this.guard.assertDelegation(proof, capability);
+    if (!this.negotiation
+      || this.negotiation.proofRef !== proof.proofRef
+      || this.negotiation.permissionRevision !== proof.permissionRevision) {
+      await this.capabilities({ requestedCapabilities: [] }, proof);
+    }
+    if (!this.negotiation?.capabilities.includes(capability)) {
+      throw capabilityUnavailable(
+        `ACP driver transport does not provide delegated capability: ${capability}`,
+        ACP_DRIVER_OWNER,
+        [driverEvidence(this.binding, `capability-${capability}`)],
+        this.binding,
       );
     }
   }
