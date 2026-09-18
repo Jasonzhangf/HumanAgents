@@ -38,6 +38,8 @@ import {
 import {
   FileCheckpointStore,
   FakeReplayExecutionRuntimePort,
+  MemoryBoundExecutionDriver,
+  MemoryContextCapture,
   UiRuntimeJournal,
   UiRuntimeApiError,
   UiRuntimeService,
@@ -214,6 +216,171 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
       && error.httpStatus === 409,
   );
   assert.equal(service.memoryContextReceipt(second.operationId).executionEpoch, second.executionEpoch);
+});
+
+test('memory-bound execution driver binds and attaches context before provider resume', async () => {
+  const taskId = id('task', 'resume-memory-task');
+  const operationId = id('operation', 'resume-memory-operation');
+  const scope: ScopeRef = { organId, taskId, operationId };
+  const coordinator = new MemoryCoordinator();
+  const backend = new DeterministicMemoryBackend();
+  backend.addContextEntry({
+    scope: { kind: 'task', organId, taskId },
+    sourceRef: 'journal://resume-memory/current',
+    sourceDigest: 'sha256:resume-memory-current',
+    text: 'resume must attach the current memory context',
+    layer: 'current',
+    summary: 'resume memory context',
+  });
+  let providerResumed = false;
+  const providerDriver = {
+    kind: 'test-provider-driver',
+    async capabilities() { return { driverKind: 'test-provider-driver', capabilities: [], version: '1' }; },
+    async start() { throw new Error('start must not run'); },
+    async resume(input: Parameters<typeof MemoryBoundExecutionDriver.prototype.resume>[0]) {
+      providerResumed = true;
+      return { runtimeId: input.runtimeId, executionEpoch: input.executionEpoch };
+    },
+    async submit() { throw new Error('submit must not run'); },
+    async *observe() {},
+    async requestStop() { throw new Error('requestStop must not run'); },
+    async settle() { throw new Error('settle must not run'); },
+    async close() {
+      return {
+        bindingId: binding.bindingId,
+        providerId: binding.providerId,
+        protocol: binding.protocol,
+        state: 'closed' as const,
+        evidenceRefs: [],
+      };
+    },
+  };
+  const driver = new MemoryBoundExecutionDriver(
+    providerDriver,
+    {
+      runtimeId: 'resume-memory-runtime',
+      taskId,
+      operationId,
+      executionEpoch: 2,
+      assignmentId: 'assignment-resume-memory',
+      scope,
+      inputRefs: ['task://resume-memory/input/1'],
+      ownerId: 'humanagent.runtime',
+    },
+    {
+      coordinator,
+      backend,
+      projectKey: 'project-resume-memory',
+      roleId: 'execution',
+    },
+    new MemoryContextCapture(backend),
+    () => undefined,
+  );
+
+  const handle = await driver.resume({
+    runtimeId: 'resume-memory-runtime',
+    taskId,
+    operationId,
+    executionEpoch: 2,
+    assignmentId: 'assignment-resume-memory',
+    checkpointId: id('checkpoint', 'resume-memory-checkpoint'),
+  });
+
+  assert.equal(providerResumed, true);
+  assert.equal(handle.runtimeId, 'resume-memory-runtime');
+  assert.equal(handle.executionEpoch, 2);
+  const recalled = await coordinator.recall({
+    agentRuntimeId: 'resume-memory-runtime',
+    roleId: 'execution',
+    taskId,
+    scope: { kind: 'task', organId, taskId },
+    layers: ['current'],
+    tokenBudget: 4096,
+    executionEpoch: 2,
+    evidenceRequired: true,
+  });
+  assert.equal(recalled.status, 'ready');
+  if (recalled.status === 'ready') {
+    assert.equal(recalled.value.entries[0]?.sourceRef, 'journal://resume-memory/current');
+  }
+});
+
+test('memory-bound execution driver rejects conflicting bindings before provider resume', async () => {
+  const taskId = id('task', 'resume-memory-conflict-task');
+  const operationId = id('operation', 'resume-memory-conflict-operation');
+  const coordinator = new MemoryCoordinator();
+  const backend = new DeterministicMemoryBackend();
+  coordinator.bindTask({
+    taskId,
+    assignmentId: 'assignment-existing',
+    executionEpoch: 1,
+    projectKey: 'project-resume-memory-conflict',
+    scope: { kind: 'task', organId, taskId },
+    backendRef: 'memory://project-resume-memory-conflict',
+    indexVersion: backend.indexVersion,
+    operations: backend,
+    injection: new MemoryContextCapture(backend),
+    ownerId: 'humanagent.app',
+  });
+  let providerResumed = false;
+  const providerDriver = {
+    kind: 'test-provider-driver',
+    async capabilities() { return { driverKind: 'test-provider-driver', capabilities: [], version: '1' }; },
+    async start() { throw new Error('start must not run'); },
+    async resume() {
+      providerResumed = true;
+      throw new Error('resume must not run');
+    },
+    async submit() { throw new Error('submit must not run'); },
+    async *observe() {},
+    async requestStop() { throw new Error('requestStop must not run'); },
+    async settle() { throw new Error('settle must not run'); },
+    async close() {
+      return {
+        bindingId: binding.bindingId,
+        providerId: binding.providerId,
+        protocol: binding.protocol,
+        state: 'closed' as const,
+        evidenceRefs: [],
+      };
+    },
+  };
+  const driver = new MemoryBoundExecutionDriver(
+    providerDriver,
+    {
+      runtimeId: 'resume-memory-conflict-runtime',
+      taskId,
+      operationId,
+      executionEpoch: 1,
+      assignmentId: 'assignment-conflict',
+      scope: { organId, taskId, operationId },
+      inputRefs: ['task://resume-memory-conflict/input/1'],
+      ownerId: 'humanagent.runtime',
+    },
+    {
+      coordinator,
+      backend,
+      projectKey: 'project-resume-memory-conflict',
+      roleId: 'execution',
+    },
+    new MemoryContextCapture(backend),
+    () => undefined,
+  );
+
+  await assert.rejects(
+    () => driver.resume({
+      runtimeId: 'resume-memory-conflict-runtime',
+      taskId,
+      operationId,
+      executionEpoch: 1,
+      assignmentId: 'assignment-conflict',
+      checkpointId: id('checkpoint', 'resume-memory-conflict-checkpoint'),
+    }),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'memory-binding-mismatch'
+      && error.httpStatus === 409,
+  );
+  assert.equal(providerResumed, false);
 });
 
 test('fake execution completes through Runtime projection with SSE, output, checkpoint, and read-only observation', async () => {

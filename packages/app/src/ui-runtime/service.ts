@@ -767,7 +767,7 @@ function memoryScope(input: RuntimeExecutionDriverInput): MemoryScope {
   return { kind: 'task', organId: input.scope.organId, taskId: input.taskId };
 }
 
-class MemoryContextCapture implements AgentMemoryContextInjectionPort {
+export class MemoryContextCapture implements AgentMemoryContextInjectionPort {
   private readonly contexts = new Map<string, AgentMemoryContext>();
 
   constructor(private readonly backend: DeterministicMemoryBackend) {}
@@ -790,7 +790,7 @@ class MemoryContextCapture implements AgentMemoryContextInjectionPort {
   }
 }
 
-class MemoryBoundExecutionDriver implements AgentDriver {
+export class MemoryBoundExecutionDriver implements AgentDriver {
   readonly kind: string;
   private binding?: {
     readonly context: AgentMemoryContext;
@@ -798,7 +798,7 @@ class MemoryBoundExecutionDriver implements AgentDriver {
   };
 
   constructor(
-    private readonly driver: ProviderAgentDriver,
+    private readonly driver: AgentDriver & { close(): Promise<ProviderCloseResult> },
     private readonly input: RuntimeExecutionDriverInput,
     private readonly composition: UiRuntimeMemoryComposition,
     private readonly injection: MemoryContextCapture,
@@ -812,85 +812,12 @@ class MemoryBoundExecutionDriver implements AgentDriver {
   }
 
   async start(input: AgentStartRequest): Promise<AgentHandle> {
-    if (!this.binding) {
-      const backendRef = `memory://${this.composition.projectKey}`;
-      const scope = memoryScope(this.input);
-      try {
-        this.composition.coordinator.bindTask({
-          taskId: this.input.taskId,
-          assignmentId: this.input.assignmentId,
-          executionEpoch: this.input.executionEpoch,
-          projectKey: this.composition.projectKey,
-          scope,
-          backendRef,
-          indexVersion: this.composition.backend.indexVersion,
-          operations: this.composition.backend,
-          injection: this.injection,
-          ownerId: APP_OWNER,
-        });
-      } catch (error) {
-        if (error instanceof MemoryCoordinatorError) {
-          throw new UiRuntimeApiError(
-            'memory-binding-mismatch',
-            'memory-coordinator',
-            error.message,
-            'start a new task or refresh memory binding',
-            409,
-          );
-        }
-        throw error;
-      }
-      const runtimeBinding = this.composition.coordinator.bindRuntime({
-        agentRuntimeId: this.input.runtimeId,
-        taskId: this.input.taskId,
-        assignmentId: this.input.assignmentId,
-        roleId: this.composition.roleId ?? 'execution',
-        executionEpoch: this.input.executionEpoch,
-      });
-      if (runtimeBinding.status !== 'ready') throw memoryFailure(runtimeBinding.issue);
-      const request: AgentMemoryContextRequest = {
-        agentRuntimeId: this.input.runtimeId,
-        roleId: this.composition.roleId ?? 'execution',
-        taskId: this.input.taskId,
-        scope,
-        layers: ['current'],
-        tokenBudget: this.composition.tokenBudget ?? 4096,
-        executionEpoch: this.input.executionEpoch,
-        evidenceRequired: true,
-      };
-      const recalled = await this.composition.coordinator.recall(request);
-      if (recalled.status !== 'ready') throw memoryFailure(recalled.issue);
-      const context = this.injection.take(this.input.runtimeId, recalled.value.contextId);
-      if (!context) {
-        throw new UiRuntimeApiError(
-          'memory-context-unavailable',
-          'memory-coordinator',
-          'memory context was not captured from the bound injection port',
-          'recall memory context before attaching it',
-          409,
-        );
-      }
-      const attached = await this.composition.coordinator.attach({
-        agentRuntimeId: this.input.runtimeId,
-        taskId: this.input.taskId,
-        scope,
-        executionEpoch: this.input.executionEpoch,
-        context,
-      });
-      if (attached.status !== 'ready') throw memoryFailure(attached.issue);
-      this.binding = {
-        context,
-        receipt: recalled.value,
-      };
-      this.onBound({
-        executionEpoch: recalled.value.executionEpoch,
-        receipt: recalled.value,
-      });
-    }
+    await this.bindMemory();
     return this.driver.start(input);
   }
 
-  resume(input: AgentResumeRequest): Promise<AgentHandle> {
+  async resume(input: AgentResumeRequest): Promise<AgentHandle> {
+    await this.bindMemory();
     return this.driver.resume(input);
   }
 
@@ -912,6 +839,83 @@ class MemoryBoundExecutionDriver implements AgentDriver {
 
   close(): Promise<ProviderCloseResult> {
     return this.driver.close();
+  }
+
+  private async bindMemory(): Promise<void> {
+    if (this.binding) return;
+    const backendRef = `memory://${this.composition.projectKey}`;
+    const scope = memoryScope(this.input);
+    try {
+      this.composition.coordinator.bindTask({
+        taskId: this.input.taskId,
+        assignmentId: this.input.assignmentId,
+        executionEpoch: this.input.executionEpoch,
+        projectKey: this.composition.projectKey,
+        scope,
+        backendRef,
+        indexVersion: this.composition.backend.indexVersion,
+        operations: this.composition.backend,
+        injection: this.injection,
+        ownerId: APP_OWNER,
+      });
+    } catch (error) {
+      if (error instanceof MemoryCoordinatorError) {
+        throw new UiRuntimeApiError(
+          'memory-binding-mismatch',
+          'memory-coordinator',
+          error.message,
+          'start a new task or refresh memory binding',
+          409,
+        );
+      }
+      throw error;
+    }
+    const runtimeBinding = this.composition.coordinator.bindRuntime({
+      agentRuntimeId: this.input.runtimeId,
+      taskId: this.input.taskId,
+      assignmentId: this.input.assignmentId,
+      roleId: this.composition.roleId ?? 'execution',
+      executionEpoch: this.input.executionEpoch,
+    });
+    if (runtimeBinding.status !== 'ready') throw memoryFailure(runtimeBinding.issue);
+    const request: AgentMemoryContextRequest = {
+      agentRuntimeId: this.input.runtimeId,
+      roleId: this.composition.roleId ?? 'execution',
+      taskId: this.input.taskId,
+      scope,
+      layers: ['current'],
+      tokenBudget: this.composition.tokenBudget ?? 4096,
+      executionEpoch: this.input.executionEpoch,
+      evidenceRequired: true,
+    };
+    const recalled = await this.composition.coordinator.recall(request);
+    if (recalled.status !== 'ready') throw memoryFailure(recalled.issue);
+    const context = this.injection.take(this.input.runtimeId, recalled.value.contextId);
+    if (!context) {
+      throw new UiRuntimeApiError(
+        'memory-context-unavailable',
+        'memory-coordinator',
+        'memory context was not captured from the bound injection port',
+        'recall memory context before attaching it',
+        409,
+      );
+    }
+    const attached = await this.composition.coordinator.attach({
+      agentRuntimeId: this.input.runtimeId,
+      taskId: this.input.taskId,
+      scope,
+      executionEpoch: this.input.executionEpoch,
+      context,
+    });
+    if (attached.status !== 'ready') throw memoryFailure(attached.issue);
+    this.binding = {
+      context,
+      receipt: recalled.value,
+    };
+    this.onBound({
+      executionEpoch: recalled.value.executionEpoch,
+      receipt: recalled.value,
+    });
   }
 
 }

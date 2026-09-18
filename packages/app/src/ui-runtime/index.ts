@@ -151,7 +151,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
 }
 
 export { UiRuntimeApiError } from './errors.js';
-export { UiRuntimeService } from './service.js';
+export { MemoryBoundExecutionDriver, MemoryContextCapture, UiRuntimeService } from './service.js';
 export type { TaskCheckpointStore, UiRuntimeMemoryComposition } from './service.js';
 export { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
 export { FakeReplayExecutionRuntimePort } from './fake-port.js';
