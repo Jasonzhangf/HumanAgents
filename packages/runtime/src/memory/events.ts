@@ -18,6 +18,7 @@ import {
 import {
   MEMORY_AGENT_OWNER,
   memoryAgentIssue,
+  type MemoryAgentIssue,
   type MemoryAgentOutcome,
   type MemoryAnalysisRequest,
 } from './agent.js';
@@ -61,9 +62,24 @@ export interface MemoryAnalysisEventConsumerOptions {
   readonly retryOwnerRef?: string;
 }
 
-const TERMINAL_MEMORY_ADMISSION_ATTENTION_CODES = new Set([
-  'memory-agent-source-invalid',
-]);
+const MEMORY_ADMISSION_ATTENTION_DISPOSITION: Record<MemoryAgentIssue['code'], 'retry' | 'reject'> = {
+  'memory-agent-binding-missing': 'reject',
+  'memory-agent-binding-mismatch': 'reject',
+  'memory-agent-source-unavailable': 'retry',
+  'memory-agent-source-invalid': 'reject',
+  'memory-agent-source-scope-denied': 'reject',
+  'memory-agent-prompt-unavailable': 'retry',
+  'memory-agent-analysis-unavailable': 'retry',
+  'memory-agent-follow-up-stale': 'reject',
+  'memory-agent-follow-up-conflict': 'reject',
+  'memory-agent-update-denied': 'reject',
+  'memory-agent-update-conflict': 'reject',
+  'memory-agent-update-validation-failed': 'reject',
+  'memory-agent-event-unsupported': 'reject',
+  'memory-agent-event-invalid': 'reject',
+  'memory-agent-event-scope-mismatch': 'reject',
+  'memory-agent-event-evidence-missing': 'reject',
+};
 
 export interface MemoryAnalysisRequestedEventInput {
   readonly messageId: string;
@@ -357,7 +373,7 @@ export function createMemoryAnalysisEventHandler(
     const admissionOutcome = await options.admission.admit({ request, event });
     if (
       admissionOutcome.status === 'attention'
-      && TERMINAL_MEMORY_ADMISSION_ATTENTION_CODES.has(admissionOutcome.issue.code)
+      && MEMORY_ADMISSION_ATTENTION_DISPOSITION[admissionOutcome.issue.code] === 'reject'
     ) {
       return rejectedCommit(event, options.binding.bindingRef, admissionOutcome.issue.code);
     }
