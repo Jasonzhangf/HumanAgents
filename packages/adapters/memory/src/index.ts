@@ -1,7 +1,7 @@
 /// <reference path="./node-modules.d.ts" />
 export * from './sources.js';
 import { link, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, normalize } from 'node:path';
+import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { kill, pid } from 'node:process';
 import {
   ContractError,
@@ -70,6 +70,7 @@ export const MEMORY_PERSISTENCE_OWNER = 'memory-persistence-adapter';
 
 export interface MemoryPersistenceSnapshot {
   readonly version: 1;
+  readonly partition?: 'project' | 'global';
   readonly revision: number;
   readonly records: readonly RecordEntry[];
   readonly canonicalRecords: readonly CanonicalRecord[];
@@ -343,6 +344,9 @@ function normalizeAttachedContext(value: unknown, label: string): { readonly age
 function assertSnapshot(value: unknown): MemoryPersistenceSnapshot {
   const input = assertObject(value, 'snapshot');
   if (input.version !== 1) invalidSnapshot(`unsupported version: ${String(input.version)}`);
+  const partition = input.partition === undefined
+    ? undefined
+    : enumValue(input.partition, ['project', 'global'] as const, 'partition');
   const revision = nonNegativeSafeInteger(input.revision, 'revision');
   const rawRecords = input.records;
   const rawCanonicalRecords = input.canonicalRecords;
@@ -374,6 +378,18 @@ function assertSnapshot(value: unknown): MemoryPersistenceSnapshot {
   const sourceLocks = rawSourceLocks.map((lock, index) => normalizeSourceLock(lock, `sourceLocks[${index}]`));
   const attachedEpochs = rawAttachedEpochs.map((attached, index) => normalizeAttachedEpoch(attached, `attachedEpochs[${index}]`));
   const attachedContextIds = rawAttachedContextIds.map((attached, index) => normalizeAttachedContext(attached, `attachedContextIds[${index}]`));
+
+  if (partition === 'project' && canonicalRecords.some((record) => record.namespace !== 'project')) {
+    invalidSnapshot('project partition cannot contain global canonical records');
+  }
+  if (partition === 'global') {
+    if (canonicalRecords.some((record) => record.namespace !== 'global')) {
+      invalidSnapshot('global partition cannot contain project canonical records');
+    }
+    if (candidates.length > 0 || candidateIds.length > 0) {
+      invalidSnapshot('global partition cannot contain candidates');
+    }
+  }
 
   const recordsByRef = new Map<string, RecordEntry>();
   for (const record of records) {
@@ -446,7 +462,10 @@ function assertSnapshot(value: unknown): MemoryPersistenceSnapshot {
       if (globalRecord) invalidSnapshot(`candidate has a global canonical record without promotion: ${candidateId}`);
       continue;
     }
-    if (!globalRecord) invalidSnapshot(`promoted candidate has no global canonical record: ${candidateId}`);
+    if (!globalRecord) {
+      if (partition === 'project') continue;
+      invalidSnapshot(`promoted candidate has no global canonical record: ${candidateId}`);
+    }
     if (globalRecord.namespace !== 'global' || !['active', 'superseded', 'expired', 'archived'].includes(globalRecord.state)) {
       invalidSnapshot(`promoted candidate global canonical state mismatch: ${candidateId}`);
     }
@@ -483,6 +502,7 @@ function assertSnapshot(value: unknown): MemoryPersistenceSnapshot {
 
   return {
     version: 1,
+    ...(partition === undefined ? {} : { partition }),
     revision,
     records,
     canonicalRecords,
@@ -712,6 +732,326 @@ export class FilesystemMemoryPersistence implements MemoryPersistencePort {
       if (parent === current) return;
       current = parent;
     }
+  }
+}
+
+interface RootedMemoryPersistenceTransaction {
+  readonly version: 1;
+  readonly revision: number;
+  readonly projectRevision: number;
+  readonly globalRevision: number;
+  readonly project: MemoryPersistenceSnapshot;
+  readonly global: MemoryPersistenceSnapshot;
+}
+
+export interface RootedMemoryPersistenceRoots {
+  readonly project: string;
+  readonly global: string;
+}
+
+function normalizePersistenceRoot(root: string, label: string): string {
+  if (!root.trim() || !isAbsolute(root) || normalize(root) !== root || dirname(root) === root) {
+    throw persistenceError('memory-persistence-path-invalid', `${label} persistence root must be an absolute normalized directory path`, MEMORY_PERSISTENCE_OWNER);
+  }
+  return root;
+}
+
+async function assertNoSymlinkPath(path: string): Promise<void> {
+  let current = path;
+  for (;;) {
+    try {
+      const stats = await lstat(current);
+      if (stats.isSymbolicLink()) {
+        throw persistenceError('memory-persistence-path-invalid', `memory persistence path contains a symlink: ${current}`, MEMORY_PERSISTENCE_OWNER);
+      }
+    } catch (error) {
+      if (error instanceof MemoryPersistenceError) throw error;
+      if ((error as { code?: string }).code !== 'ENOENT') throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+async function writeJsonAtomically(filePath: string, value: unknown): Promise<void> {
+  const parent = dirname(filePath);
+  const tempPath = `${filePath}.${pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}.tmp`;
+  await assertNoSymlinkPath(filePath);
+  await mkdir(parent, { recursive: true });
+  await assertNoSymlinkPath(filePath);
+  try {
+    const handle = await open(tempPath, 'wx');
+    try {
+      await handle.writeFile(`${JSON.stringify(value)}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tempPath, filePath);
+    const directory = await open(parent, 'r');
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    if (error instanceof MemoryPersistenceError) throw error;
+    throw persistenceError('memory-persistence-io-failure', `memory persistence transaction write failed: ${error instanceof Error ? error.message : String(error)}`, MEMORY_PERSISTENCE_OWNER, error);
+  }
+}
+
+function emptyPartition(partition: 'project' | 'global', revision = 0): MemoryPersistenceSnapshot {
+  return {
+    version: 1,
+    partition,
+    revision,
+    records: [],
+    canonicalRecords: [],
+    candidates: [],
+    candidateIds: [],
+    forgettingPlans: [],
+    sourceLocks: [],
+    attachedEpochs: [],
+    attachedContextIds: [],
+  };
+}
+
+function mergeUnique<T>(
+  left: readonly T[],
+  right: readonly T[],
+  key: (value: T) => string,
+  label: string,
+): T[] {
+  const merged = new Map<string, T>();
+  for (const value of [...left, ...right]) {
+    const valueKey = key(value);
+    const existing = merged.get(valueKey);
+    if (existing === undefined) {
+      merged.set(valueKey, value);
+      continue;
+    }
+    if (JSON.stringify(existing) !== JSON.stringify(value)) {
+      invalidSnapshot(`${label} conflict: ${valueKey}`);
+    }
+  }
+  return [...merged.values()];
+}
+
+function mergePartitions(
+  project: MemoryPersistenceSnapshot | undefined,
+  global: MemoryPersistenceSnapshot | undefined,
+): MemoryPersistenceSnapshot | undefined {
+  if (project === undefined && global === undefined) return undefined;
+  const projectPartition = project ?? emptyPartition('project');
+  const globalPartition = global ?? emptyPartition('global');
+  const merged: MemoryPersistenceSnapshot = {
+    version: 1,
+    revision: Math.max(projectPartition.revision, globalPartition.revision),
+    records: mergeUnique(projectPartition.records, globalPartition.records, (record) => record.sourceRef, 'memory source record'),
+    canonicalRecords: mergeUnique(projectPartition.canonicalRecords, globalPartition.canonicalRecords, (record) => record.memoryId, 'canonical memory record'),
+    candidates: mergeUnique(projectPartition.candidates, globalPartition.candidates, (candidate) => candidate.submission.submissionId, 'memory candidate'),
+    candidateIds: mergeUnique(projectPartition.candidateIds, globalPartition.candidateIds, (candidate) => candidate.candidateId, 'memory candidate id'),
+    forgettingPlans: mergeUnique(projectPartition.forgettingPlans, globalPartition.forgettingPlans, (plan) => plan.planId, 'memory forgetting plan'),
+    sourceLocks: mergeUnique(projectPartition.sourceLocks, globalPartition.sourceLocks, (lock) => lock.sourceRef, 'memory source lock'),
+    attachedEpochs: mergeUnique(projectPartition.attachedEpochs, globalPartition.attachedEpochs, (attached) => attached.agentRuntimeId, 'memory attached epoch'),
+    attachedContextIds: mergeUnique(projectPartition.attachedContextIds, globalPartition.attachedContextIds, (attached) => attached.agentRuntimeId, 'memory attached context'),
+  };
+  return assertSnapshot(merged);
+}
+
+function globalRecords(snapshot: MemoryPersistenceSnapshot): MemoryPersistenceSnapshot {
+  const globalCanonical = snapshot.canonicalRecords.filter((record) => record.namespace === 'global');
+  const refs = new Set(globalCanonical.flatMap((record) => record.sourceRefs));
+  const records = snapshot.records.filter((record) => refs.has(record.sourceRef));
+  const sourceLocks = snapshot.sourceLocks.filter((lock) => refs.has(lock.sourceRef));
+  return assertSnapshot({
+    version: 1,
+    partition: 'global',
+    revision: 1,
+    records,
+    canonicalRecords: globalCanonical,
+    candidates: [],
+    candidateIds: [],
+    forgettingPlans: snapshot.forgettingPlans.filter((plan) => plan.namespace === 'global'),
+    sourceLocks,
+    attachedEpochs: [],
+    attachedContextIds: [],
+  });
+}
+
+function globalOnlyRefs(snapshot: MemoryPersistenceSnapshot): Set<string> {
+  const globalRefs = new Set(snapshot.canonicalRecords
+    .filter((record) => record.namespace === 'global')
+    .flatMap((record) => record.sourceRefs));
+  const projectRefs = new Set(snapshot.canonicalRecords
+    .filter((record) => record.namespace === 'project')
+    .flatMap((record) => record.sourceRefs));
+  return new Set([...globalRefs].filter((ref) => !projectRefs.has(ref)));
+}
+
+function splitSnapshot(
+  snapshot: MemoryPersistenceSnapshot,
+  projectRevision: number,
+  globalRevision: number,
+): RootedMemoryPersistenceTransaction {
+  const globalRefs = globalOnlyRefs(snapshot);
+  const project = assertSnapshot({
+    version: 1,
+    partition: 'project',
+    revision: projectRevision,
+    records: snapshot.records.filter((record) => !globalRefs.has(record.sourceRef)),
+    canonicalRecords: snapshot.canonicalRecords.filter((record) => record.namespace === 'project'),
+    candidates: snapshot.candidates,
+    candidateIds: snapshot.candidateIds,
+    forgettingPlans: snapshot.forgettingPlans.filter((plan) => plan.namespace === 'project'),
+    sourceLocks: snapshot.sourceLocks.filter((lock) => !globalRefs.has(lock.sourceRef)),
+    attachedEpochs: snapshot.attachedEpochs,
+    attachedContextIds: snapshot.attachedContextIds,
+  });
+  const global = {
+    ...globalRecords(snapshot),
+    revision: globalRevision,
+  };
+  return {
+    version: 1,
+    revision: snapshot.revision,
+    projectRevision,
+    globalRevision,
+    project,
+    global,
+  };
+}
+
+function assertTransaction(value: unknown): RootedMemoryPersistenceTransaction {
+  const input = assertObject(value, 'memory persistence transaction');
+  if (input.version !== 1) invalidSnapshot(`unsupported transaction version: ${String(input.version)}`);
+  const revision = positiveSafeInteger(input.revision, 'transaction.revision');
+  const projectRevision = positiveSafeInteger(input.projectRevision, 'transaction.projectRevision');
+  const globalRevision = positiveSafeInteger(input.globalRevision, 'transaction.globalRevision');
+  const project = assertSnapshot(input.project);
+  const global = assertSnapshot(input.global);
+  if (project.partition !== 'project') invalidSnapshot('transaction project partition is invalid');
+  if (global.partition !== 'global') invalidSnapshot('transaction global partition is invalid');
+  if (project.revision !== projectRevision || global.revision !== globalRevision) {
+    invalidSnapshot('transaction revision does not match its partitions');
+  }
+  if (Math.max(projectRevision, globalRevision) !== revision) {
+    invalidSnapshot('transaction revision does not match its partitions');
+  }
+  return { version: 1, revision, projectRevision, globalRevision, project, global };
+}
+
+export class RootedMemoryPersistence implements MemoryPersistencePort {
+  private readonly projectFile: string;
+  private readonly globalFile: string;
+  private readonly transactionFile: string;
+  private readonly project: FilesystemMemoryPersistence;
+  private readonly global: FilesystemMemoryPersistence;
+
+  constructor(roots: RootedMemoryPersistenceRoots) {
+    const projectRoot = normalizePersistenceRoot(roots.project, 'project');
+    const globalRoot = normalizePersistenceRoot(roots.global, 'global');
+    this.projectFile = join(projectRoot, 'snapshot.json');
+    this.globalFile = join(globalRoot, 'snapshot.json');
+    this.transactionFile = join(projectRoot, 'snapshot.transaction.json');
+    this.project = new FilesystemMemoryPersistence(this.projectFile);
+    this.global = new FilesystemMemoryPersistence(this.globalFile);
+  }
+
+  async load(): Promise<MemoryPersistenceSnapshot | undefined> {
+    const lock = await acquireLock(this.transactionFile);
+    try {
+      return await this.loadUnlocked();
+    } catch (error) {
+      if (error instanceof MemoryPersistenceError) throw error;
+      throw persistenceError('memory-persistence-io-failure', `rooted memory persistence load failed: ${error instanceof Error ? error.message : String(error)}`, MEMORY_PERSISTENCE_OWNER, error);
+    } finally {
+      await releaseLock(lock);
+    }
+  }
+
+  async save(snapshot: MemoryPersistenceSnapshot): Promise<void> {
+    const normalized = assertSnapshot(snapshot);
+    const lock = await acquireLock(this.transactionFile);
+    try {
+      const current = await this.loadUnlocked();
+      const currentRevision = current?.revision ?? 0;
+      if (normalized.revision !== currentRevision + 1) {
+        throw persistenceError(
+          'memory-persistence-conflict',
+          `rooted memory persistence revision conflict: expected ${currentRevision + 1}, received ${normalized.revision}`,
+          MEMORY_PERSISTENCE_OWNER,
+        );
+      }
+      const [currentProject, currentGlobal] = await Promise.all([this.project.load(), this.global.load()]);
+      const transaction = splitSnapshot(
+        normalized,
+        (currentProject?.revision ?? 0) + 1,
+        (currentGlobal?.revision ?? 0) + 1,
+      );
+      await writeJsonAtomically(this.transactionFile, transaction);
+      await this.applyTransaction(transaction);
+      await rm(this.transactionFile, { force: true });
+    } catch (error) {
+      if (error instanceof MemoryPersistenceError) throw error;
+      throw persistenceError('memory-persistence-io-failure', `rooted memory persistence save failed: ${error instanceof Error ? error.message : String(error)}`, MEMORY_PERSISTENCE_OWNER, error);
+    } finally {
+      await releaseLock(lock);
+    }
+  }
+
+  private async loadUnlocked(): Promise<MemoryPersistenceSnapshot | undefined> {
+    const transaction = await this.readTransaction();
+    if (transaction !== undefined) {
+      await this.applyTransaction(transaction);
+      await rm(this.transactionFile, { force: true });
+    }
+    const [project, global] = await Promise.all([this.project.load(), this.global.load()]);
+    return mergePartitions(project, global);
+  }
+
+  private async readTransaction(): Promise<RootedMemoryPersistenceTransaction | undefined> {
+    await assertNoSymlinkPath(this.transactionFile);
+    const raw = await readFile(this.transactionFile, 'utf8').catch((error: unknown) => {
+      if ((error as { code?: string }).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (raw === undefined) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw persistenceError('memory-persistence-snapshot-invalid', 'memory persistence transaction is invalid JSON', 'memory-persistence-snapshot', error);
+    }
+    return assertTransaction(parsed);
+  }
+
+  private async applyTransaction(transaction: RootedMemoryPersistenceTransaction): Promise<void> {
+    await this.writePartition(this.project, transaction.project);
+    await this.writePartition(this.global, transaction.global);
+  }
+
+  private async writePartition(
+    persistence: FilesystemMemoryPersistence,
+    target: MemoryPersistenceSnapshot,
+  ): Promise<void> {
+    const current = await persistence.load();
+    if (current === undefined) {
+      await persistence.save(target);
+      return;
+    }
+    if (current.revision === target.revision) {
+      if (JSON.stringify(current) !== JSON.stringify(target)) {
+        throw persistenceError('memory-persistence-conflict', `memory persistence partition revision ${target.revision} has different content`, MEMORY_PERSISTENCE_OWNER);
+      }
+      return;
+    }
+    if (current.revision + 1 !== target.revision) {
+      throw persistenceError('memory-persistence-conflict', `memory persistence partition revision conflict: expected ${current.revision + 1}, received ${target.revision}`, MEMORY_PERSISTENCE_OWNER);
+    }
+    await persistence.save(target);
   }
 }
 

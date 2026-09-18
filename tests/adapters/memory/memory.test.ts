@@ -14,6 +14,7 @@ import {
   DeterministicMemoryBackend,
   FilesystemMemoryPersistence,
   MemoryPersistenceError,
+  RootedMemoryPersistence,
   type MemoryPersistencePort,
   type MemoryPersistenceSnapshot,
 } from '../../../packages/adapters/memory/src/index.js';
@@ -867,6 +868,142 @@ test('same backend serializes concurrent mutations without losing either update'
     'journal://task-a/concurrent-first',
     'journal://task-a/concurrent-second',
   ]);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('rooted persistence isolates project and global partitions and recovers a transaction', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-rooted-'));
+  const roots = {
+    project: join(root, 'project'),
+    global: join(root, 'global'),
+  };
+  const persistence = new RootedMemoryPersistence(roots);
+  const memory = await DeterministicMemoryBackend.fromPersistence(persistence);
+  const contentRef = 'asset://memory/rooted-candidate';
+  const evidenceRef = 'journal://project-a/rooted-evidence';
+  const approvalRef = 'approval://rooted-promotion';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:rooted-candidate', text: 'rooted project memory' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:rooted-evidence', text: 'rooted evidence' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-rooted',
+    requestId: 'request-rooted',
+    operationId: id('operation', 'submission-rooted'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:rooted-candidate',
+    evidenceRefs: [evidenceRef],
+    observation: 'rooted project memory',
+    desiredScope: 'project',
+    reason: 'root isolation test',
+    inputDigest: 'sha256:submission-rooted',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'approved before promotion',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+
+  const projectFile = join(roots.project, 'snapshot.json');
+  const globalFile = join(roots.global, 'snapshot.json');
+  const projectBeforePromotion = JSON.parse(await readFile(projectFile, 'utf8')) as MemoryPersistenceSnapshot;
+  const globalBeforePromotion = JSON.parse(await readFile(globalFile, 'utf8')) as MemoryPersistenceSnapshot;
+  assert.equal(projectBeforePromotion.canonicalRecords.length, 1);
+  assert.equal(projectBeforePromotion.candidates.length, 1);
+  assert.equal(globalBeforePromotion.canonicalRecords.length, 0);
+  assert.equal(globalBeforePromotion.candidates.length, 0);
+
+  await memory.ingest({ scope: taskScope, sourceRef: approvalRef, sourceDigest: 'sha256:rooted-promotion', text: 'rooted promotion approval' });
+  await memory.promoteCandidate({
+    candidateId: submitted.candidateId!,
+    from: 'project',
+    to: 'global',
+    actor: { ...actor, roleId: 'review' },
+    reason: 'rooted global promotion',
+    impactScope: 'all projects',
+    approvalRef,
+    sourceRefs: [],
+    promotedAt: '2026-09-17T00:00:00Z',
+  });
+
+  const projectAfterPromotion = JSON.parse(await readFile(projectFile, 'utf8')) as MemoryPersistenceSnapshot;
+  const globalAfterPromotion = JSON.parse(await readFile(globalFile, 'utf8')) as MemoryPersistenceSnapshot;
+  assert.equal(projectAfterPromotion.candidates.length, 1);
+  assert.equal(projectAfterPromotion.records.some((record) => record.sourceRef === approvalRef), false);
+  assert.equal(projectAfterPromotion.sourceLocks.some((lock) => lock.sourceRef === approvalRef), false);
+  assert.equal(globalAfterPromotion.candidates.length, 0);
+  assert.deepEqual(globalAfterPromotion.canonicalRecords.map((record) => record.namespace), ['global']);
+  assert.equal(globalAfterPromotion.records.some((record) => record.sourceRef === approvalRef), true);
+
+  const walRef = 'journal://task-a/rooted-wal';
+  const projectRevision = projectAfterPromotion.revision + 1;
+  const globalRevision = globalAfterPromotion.revision + 1;
+  await writeFile(join(roots.project, 'snapshot.transaction.json'), `${JSON.stringify({
+    version: 1,
+    revision: Math.max(projectRevision, globalRevision),
+    projectRevision,
+    globalRevision,
+    project: {
+      ...projectAfterPromotion,
+      revision: projectRevision,
+      records: [...projectAfterPromotion.records, {
+        scope: taskScope,
+        sourceRef: walRef,
+        sourceDigest: 'sha256:rooted-wal',
+        text: 'rooted WAL source',
+      }],
+      sourceLocks: [...projectAfterPromotion.sourceLocks, {
+        sourceRef: walRef,
+        sourceDigest: 'sha256:rooted-wal',
+        scope: taskScope,
+      }],
+    },
+    global: {
+      ...globalAfterPromotion,
+      revision: globalRevision,
+    },
+  })}\n`, 'utf8');
+
+  const recovered = await new RootedMemoryPersistence(roots).load();
+  assert.equal(recovered?.records.some((record) => record.sourceRef === walRef), true);
+  await assert.rejects(readFile(join(roots.project, 'snapshot.transaction.json'), 'utf8'), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('rooted persistence rejects stale writers and filesystem roots', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-rooted-cas-'));
+  const roots = {
+    project: join(root, 'project'),
+    global: join(root, 'global'),
+  };
+  const firstPersistence = new RootedMemoryPersistence(roots);
+  const secondPersistence = new RootedMemoryPersistence(roots);
+  const first = await DeterministicMemoryBackend.fromPersistence(firstPersistence);
+  const second = await DeterministicMemoryBackend.fromPersistence(secondPersistence);
+
+  await first.ingest({ scope: taskScope, sourceRef: 'journal://task-a/rooted-first', sourceDigest: 'sha256:rooted-first', text: 'first rooted source' });
+  await second.reload();
+  await second.ingest({ scope: taskScope, sourceRef: 'journal://task-a/rooted-second', sourceDigest: 'sha256:rooted-second', text: 'second rooted source' });
+  await assert.rejects(
+    first.ingest({ scope: taskScope, sourceRef: 'journal://task-a/rooted-stale', sourceDigest: 'sha256:rooted-stale', text: 'stale rooted source' }),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-conflict',
+  );
+  const committed = await firstPersistence.load();
+  assert.deepEqual(committed?.records.map((record) => record.sourceRef), [
+    'journal://task-a/rooted-first',
+    'journal://task-a/rooted-second',
+  ]);
+
+  assert.throws(
+    () => new RootedMemoryPersistence({ project: '/', global: roots.global }),
+    (error: unknown) => error instanceof MemoryPersistenceError && error.code === 'memory-persistence-path-invalid',
+  );
   await rm(root, { recursive: true, force: true });
 });
 

@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, createJsonlCheckpointJournal, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { JsonlOrganJournal, JournalCommitConflictError } from '../../packages/adapters/jsonl/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -65,6 +66,63 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   return { root, controlRoot, workspace };
+}
+
+async function composeMemoryFixture(input: {
+  readonly paths: Awaited<ReturnType<typeof resolveRuntimePaths>>;
+  readonly workspace: string;
+  readonly projectKey?: string;
+  readonly bindingProjectKey?: string;
+  readonly evidenceSource?: {
+    read(input: {
+      readonly projectKey: string;
+      readonly scope: { readonly kind: 'task' | 'organ' | 'approved-global'; readonly organId: ReturnType<typeof id<'organ'>>; readonly taskId?: ReturnType<typeof id<'task'>> };
+      readonly evidence: EvidenceRef;
+    }): Promise<{ readonly sourceRef: string; readonly sourceDigest: string; readonly text: string }>;
+  };
+  readonly assignmentId?: string;
+  readonly agentRuntimeId?: string;
+  readonly roleId?: string;
+}) {
+  const organId = id('organ', 'memory-composition-organ');
+  const taskId = id('task', 'memory-composition-task');
+  const scope = { organId: organId, taskId };
+  const memoryScope = { kind: 'task' as const, organId: organId, taskId };
+  const actor = {
+    actorId: 'memory-composition-actor',
+    roleId: 'memory' as const,
+    permissions: ['memory.read', 'memory.propose'] as const,
+    projectKey: input.paths.projectKey,
+  };
+  const binding = {
+    bindingRef: 'memory-binding:composition',
+    projectKey: input.bindingProjectKey ?? input.paths.projectKey,
+    executionEpoch: 1,
+    scope: memoryScope,
+    taskId,
+    actor,
+  };
+  const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'audit.md'), '# Memory audit\n', 'utf8');
+  const composed = await composeMemory({
+    paths: input.paths,
+    projectKey: input.projectKey ?? input.paths.projectKey,
+    workspaceCwd: input.workspace,
+    sessionsRoot: input.paths.sessionsRoot,
+    runNotesRoot: input.paths.runNotesRoot,
+    localSkillRoot: input.workspace,
+    localSkillName: 'project-memory',
+    auditPromptRoot,
+    auditPromptRef: 'audit',
+    autoUpdate: false,
+    binding,
+    ...(input.assignmentId === undefined ? {} : { assignmentId: input.assignmentId }),
+    ...(input.agentRuntimeId === undefined ? {} : { agentRuntimeId: input.agentRuntimeId }),
+    ...(input.roleId === undefined ? {} : { roleId: input.roleId }),
+    ...(input.evidenceSource === undefined ? {} : { evidenceSource: input.evidenceSource }),
+  });
+  return { composed, binding, scope, taskId, organId };
 }
 
 class CrashSubmitDriver extends FakeAgentDriver {
@@ -218,6 +276,354 @@ test('CLI host failures remain structured', async () => {
     assert.equal(typeof parsed.error.nextAction, 'string');
     return true;
   });
+});
+
+test('memory composition binds task and runtime identity to the rooted backend', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const { composed, binding, scope, taskId } = await composeMemoryFixture({
+    paths,
+    workspace,
+    assignmentId: 'assignment-memory-composition',
+    agentRuntimeId: 'runtime-memory-composition',
+    roleId: 'execution',
+  });
+  const recalled = await composed.coordinator.recall({
+    agentRuntimeId: 'runtime-memory-composition',
+    roleId: 'execution',
+    taskId,
+    scope: binding.scope,
+    layers: ['current'],
+    tokenBudget: 10,
+    executionEpoch: 1,
+    evidenceRequired: true,
+  });
+  assert.equal(recalled.status, 'ready');
+  if (recalled.status !== 'ready') throw new Error('expected memory recall');
+  assert.equal(recalled.value.bindingId, `memory-binding:${taskId.value}`);
+  assert.deepEqual(scope.taskId, taskId);
+});
+
+test('memory composition rejects partial runtime bindings explicitly', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-partial-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await assert.rejects(
+    () => composeMemoryFixture({
+      paths,
+      workspace,
+      assignmentId: 'assignment-memory-partial',
+      agentRuntimeId: 'runtime-memory-partial',
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-binding-incomplete'
+      && error.ownerId === 'humanagent.app.memory-composition',
+  );
+});
+
+test('memory composition rejects project identity mismatch before opening persistence', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-project-mismatch-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await assert.rejects(
+    () => composeMemoryFixture({
+      paths,
+      workspace,
+      projectKey: 'other-project',
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-project-mismatch'
+      && error.ownerId === 'humanagent.app.memory-composition',
+  );
+});
+
+test('memory composition ingests typed evidence before admitting analysis', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-admission-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const evidenceText = 'typed memory composition evidence';
+  const { composed, binding, scope } = await composeMemoryFixture({
+    paths,
+    workspace,
+    evidenceSource: {
+      read: async ({ evidence }) => ({
+        sourceRef: evidence.locator,
+        sourceDigest: evidence.digest!,
+        text: evidenceText,
+      }),
+    },
+  });
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'memory-composition-evidence'),
+    kind: 'operation',
+    source: 'test',
+    locator: 'journal://memory-composition/evidence',
+    digest: `sha256:${createHash('sha256').update(evidenceText).digest('hex')}`,
+    scope,
+  };
+  const event = {
+    ...createMemoryAnalysisRequestedEvent({
+      messageId: 'memory-composition-message',
+      streamId: 'memory-composition-stream',
+      scope,
+      occurredAt: '2026-09-17T00:00:00.000Z',
+      summary: 'memory composition analysis',
+      evidenceRefs: [evidence],
+      executionEpoch: 1,
+      trigger: 'completion',
+    }),
+    publisherId: 'memory-composition-publisher',
+    sequence: 1,
+    committedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const requestOutcome = memoryAnalysisRequestFromEvent(event, binding);
+  assert.equal(requestOutcome.status, 'ready');
+  if (requestOutcome.status !== 'ready') throw new Error('expected memory analysis request');
+  const admitted = await composed.admission.admit({ request: requestOutcome.value, event });
+  assert.equal(admitted.status, 'ready', admitted.status === 'attention' ? admitted.issue.message : '');
+  assert.equal(await composed.backend.inspect({ sourceRef: evidence.locator }).then((source) => source.sourceDigest), evidence.digest);
+});
+
+test('memory composition returns attention when evidence is missing or drifted', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-evidence-attention-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const { composed, binding, scope } = await composeMemoryFixture({ paths, workspace });
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'memory-composition-missing-evidence'),
+    kind: 'operation',
+    source: 'test',
+    locator: 'journal://memory-composition/missing-evidence',
+    digest: 'sha256:memory-composition-missing-evidence',
+    scope,
+  };
+  const event = {
+    ...createMemoryAnalysisRequestedEvent({
+      messageId: 'memory-composition-missing-message',
+      streamId: 'memory-composition-missing-stream',
+      scope,
+      occurredAt: '2026-09-17T00:00:00.000Z',
+      summary: 'memory composition missing evidence',
+      evidenceRefs: [evidence],
+      executionEpoch: 1,
+      trigger: 'completion',
+    }),
+    publisherId: 'memory-composition-publisher',
+    sequence: 1,
+    committedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const requestOutcome = memoryAnalysisRequestFromEvent(event, binding);
+  assert.equal(requestOutcome.status, 'ready');
+  if (requestOutcome.status !== 'ready') throw new Error('expected memory analysis request');
+  const admitted = await composed.admission.admit({ request: requestOutcome.value, event });
+  assert.equal(admitted.status, 'attention');
+  if (admitted.status !== 'attention') throw new Error('expected attention');
+  assert.equal(admitted.issue.code, 'memory-agent-source-invalid');
+
+  const driftedEvidenceText = 'drifted memory composition evidence';
+  const driftedEvidenceDigest = `sha256:${createHash('sha256').update(driftedEvidenceText).digest('hex')}`;
+  const drifted = await composeMemoryFixture({
+    paths,
+    workspace,
+    evidenceSource: {
+      read: async ({ evidence }) => ({
+        sourceRef: evidence.locator,
+        sourceDigest: driftedEvidenceDigest,
+        text: 'different evidence text',
+      }),
+    },
+  });
+  const driftedEvent = {
+    ...event,
+    messageId: 'memory-composition-drifted-message',
+    evidenceRefs: [{
+      ...event.evidenceRefs[0],
+      digest: driftedEvidenceDigest,
+    }],
+  };
+  const driftedRequest = memoryAnalysisRequestFromEvent(driftedEvent, drifted.binding);
+  assert.equal(driftedRequest.status, 'ready');
+  if (driftedRequest.status !== 'ready') throw new Error('expected drifted memory analysis request');
+  const driftedAdmission = await drifted.composed.admission.admit({ request: driftedRequest.value, event: driftedEvent });
+  assert.equal(driftedAdmission.status, 'attention');
+  if (driftedAdmission.status !== 'attention') throw new Error('expected drifted evidence attention');
+  assert.equal(driftedAdmission.issue.code, 'memory-agent-source-invalid');
+});
+
+test('project source updates require a typed patch reader', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-patch-reader-');
+  const current = {
+    projectKey: 'project-a',
+    target: 'project-agents' as const,
+    content: 'current',
+    sourceRef: 'project://project-a/AGENTS.md',
+    canonicalRef: 'project://project-a/AGENTS.md',
+    revision: 'sha256:current',
+    digest: `sha256:${createHash('sha256').update('current').digest('hex')}`,
+    loadedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const owner = createProjectSourceUpdateOwner({
+    workspaceCwd: workspace,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    projectKey: 'project-a',
+    locksRoot: join(controlRoot, 'locks'),
+  });
+  await assert.rejects(
+    () => owner.apply({
+      current,
+      auto: true,
+      proposal: {
+        target: 'project-agents',
+        sourceRef: current.sourceRef,
+        expectedRevision: current.revision,
+        expectedDigest: current.digest,
+        patchRef: 'typed://patch',
+        evidenceRefs: [],
+        ownerRef: 'project-owner',
+      },
+    }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-unavailable',
+  );
+});
+
+test('project source updates reject source identity drift before writing', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-patch-identity-');
+  const current = {
+    projectKey: 'project-a',
+    target: 'project-agents' as const,
+    content: 'current',
+    sourceRef: 'project://project-a/AGENTS.md',
+    canonicalRef: 'project://project-a/AGENTS.md',
+    revision: 'sha256:current',
+    digest: `sha256:${createHash('sha256').update('current').digest('hex')}`,
+    loadedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const owner = createProjectSourceUpdateOwner({
+    workspaceCwd: workspace,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    projectKey: 'project-a',
+    locksRoot: join(controlRoot, 'locks'),
+    patchReader: {
+      read: async () => ({ content: 'next' }),
+    },
+  });
+  const proposal = {
+    target: 'project-agents' as const,
+    sourceRef: current.sourceRef,
+    expectedRevision: current.revision,
+    expectedDigest: current.digest,
+    patchRef: 'typed://patch',
+    evidenceRefs: [],
+    ownerRef: 'project-owner',
+  };
+  await assert.rejects(
+    () => owner.apply({
+      current: { ...current, projectKey: 'other-project' },
+      auto: true,
+      proposal,
+    }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-conflict',
+  );
+  await assert.rejects(
+    () => owner.apply({
+      current: { ...current, target: 'project-local-skill' },
+      auto: true,
+      proposal,
+    }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-conflict',
+  );
+});
+
+test('project source updates recheck source digest before commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-patch-race-');
+  const original = 'current';
+  await writeFile(join(workspace, 'AGENTS.md'), original, 'utf8');
+  const current = {
+    projectKey: 'project-a',
+    target: 'project-agents' as const,
+    content: original,
+    sourceRef: 'project://project-a/AGENTS.md',
+    canonicalRef: 'project://project-a/AGENTS.md',
+    revision: `sha256:${createHash('sha256').update(original).digest('hex')}`,
+    digest: `sha256:${createHash('sha256').update(original).digest('hex')}`,
+    loadedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const owner = createProjectSourceUpdateOwner({
+    workspaceCwd: workspace,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    projectKey: 'project-a',
+    locksRoot: join(controlRoot, 'locks'),
+    patchReader: {
+      read: async () => {
+        await writeFile(join(workspace, 'AGENTS.md'), 'newer', 'utf8');
+        return { content: 'next' };
+      },
+    },
+  });
+  await assert.rejects(
+    () => owner.apply({
+      current,
+      auto: true,
+      proposal: {
+        target: 'project-agents',
+        sourceRef: current.sourceRef,
+        expectedRevision: current.revision,
+        expectedDigest: current.digest,
+        patchRef: 'typed://patch',
+        evidenceRefs: [],
+        ownerRef: 'project-owner',
+      },
+    }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-conflict',
+  );
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), 'newer');
+  assert.deepEqual((await readdir(workspace)).filter((name) => name.endsWith('.tmp')), []);
+});
+
+test('project source updates reject symlinked source roots', async () => {
+  const { root, workspace } = await createConfiguredWorkspace('humanagent-app-memory-patch-symlink-');
+  const controlRoot = join(root, 'control');
+  const actualSkillRoot = join(root, 'actual-skill-root');
+  const linkedSkillRoot = join(root, 'linked-skill-root');
+  await mkdir(join(actualSkillRoot, 'project-memory'), { recursive: true });
+  await writeFile(join(actualSkillRoot, 'project-memory', 'SKILL.md'), 'current', 'utf8');
+  await symlink(actualSkillRoot, linkedSkillRoot);
+  const current = {
+    projectKey: 'project-a',
+    target: 'project-local-skill' as const,
+    content: 'current',
+    sourceRef: 'skill://project/project-a/project-memory/SKILL.md',
+    canonicalRef: 'skill://project/project-a/project-memory/SKILL.md',
+    revision: 'sha256:current',
+    digest: `sha256:${createHash('sha256').update('current').digest('hex')}`,
+    loadedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const owner = createProjectSourceUpdateOwner({
+    workspaceCwd: workspace,
+    localSkillRoot: linkedSkillRoot,
+    localSkillName: 'project-memory',
+    projectKey: 'project-a',
+    locksRoot: join(controlRoot, 'locks'),
+    patchReader: {
+      read: async () => ({ content: 'next' }),
+    },
+  });
+  await assert.rejects(
+    () => owner.apply({
+      current,
+      auto: true,
+      proposal: {
+        target: 'project-local-skill',
+        sourceRef: current.sourceRef,
+        expectedRevision: current.revision,
+        expectedDigest: current.digest,
+        patchRef: 'typed://patch',
+        evidenceRefs: [],
+        ownerRef: 'project-owner',
+      },
+    }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-path-invalid',
+  );
+  assert.equal(await readFile(join(actualSkillRoot, 'project-memory', 'SKILL.md'), 'utf8'), 'current');
 });
 
 test('app composes a provider-neutral execution port and preserves adapter ownership', async () => {
