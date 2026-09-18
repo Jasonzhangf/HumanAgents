@@ -129,7 +129,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
       throw capabilityUnavailable('ACP driver transport does not provide the delegated session kind', ACP_DRIVER_OWNER, [driverEvidence(this.binding, 'capabilities')], this.binding);
     }
     this.negotiation = {
-      capabilities: remote.capabilities.filter((capability) => delegatedCapabilities.includes(capability)),
+      capabilities,
       sessionKinds,
       proofRef: proof.proofRef,
       permissionRevision: proof.permissionRevision,

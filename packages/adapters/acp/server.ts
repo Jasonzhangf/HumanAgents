@@ -282,7 +282,7 @@ export class AcpServerAdapter implements AcpServerPort {
       binding: opened.binding,
       runtimeId: opened.runtimeId,
       permissionRevision: opened.permissionRevision,
-      capabilities: [...opened.capabilities],
+      capabilities: opened.capabilities.filter((capability) => requested.includes(capability)),
       evidenceRefs: [...opened.evidenceRefs],
       openedAt: opened.openedAt,
     };
@@ -378,7 +378,7 @@ export class AcpServerAdapter implements AcpServerPort {
 
   async *observe(input: AcpObserveRequest): AsyncIterable<AcpObservationUpdate> {
     const session = this.requireSession(input.acpSessionId);
-    this.assertCapability('observe');
+    this.assertSessionCapability(session, 'observe');
     try {
       for await (const update of this.runtime.observe({
         runtimeId: session.record.runtimeId,
@@ -395,7 +395,7 @@ export class AcpServerAdapter implements AcpServerPort {
 
   async request(input: AcpRequest): Promise<AgentDispatchReceipt> {
     const session = this.requireSession(input.acpSessionId);
-    this.assertCapability('request');
+    this.assertSessionCapability(session, 'request');
     try {
       validateAgentRequestEnvelope(input.envelope);
     } catch (error) {
@@ -470,7 +470,7 @@ export class AcpServerAdapter implements AcpServerPort {
 
   async cancel(input: AcpCancelRequest): Promise<AcpCancelReceipt> {
     const session = this.requireSession(input.acpSessionId);
-    this.assertCapability('cancel');
+    this.assertSessionCapability(session, 'cancel');
     assertAttemptIdentity(input, session.record.evidenceRefs);
     if (session.record.binding.kind === 'task' && !input.operationId?.value.trim()) {
       throw acpError(
@@ -560,7 +560,7 @@ export class AcpServerAdapter implements AcpServerPort {
 
   async reconcile(input: AcpReconcileRequest): Promise<AgentReconcileResult> {
     const session = this.requireSession(input.acpSessionId);
-    this.assertCapability('reconcile');
+    this.assertSessionCapability(session, 'reconcile');
     if (session.record.binding.kind !== 'task') {
       throw acpError(
         'session-kind-mismatch',
@@ -616,7 +616,7 @@ export class AcpServerAdapter implements AcpServerPort {
 
   async settle(input: AcpSettleRequest): Promise<AgentSettleReceipt> {
     const session = this.requireSession(input.acpSessionId);
-    this.assertCapability('settle');
+    this.assertSessionCapability(session, 'settle');
     if (session.record.binding.kind !== 'task') {
       throw acpError(
         'session-kind-mismatch',
@@ -702,6 +702,18 @@ export class AcpServerAdapter implements AcpServerPort {
   private assertCapability(capability: string): void {
     if (!this.negotiated?.capabilities.includes(capability)) {
       throw capabilityUnavailable(`ACP capability was not negotiated: ${capability}`, ACP_SERVER_OWNER, this.negotiated?.evidenceRefs ?? [], this.binding);
+    }
+  }
+
+  private assertSessionCapability(session: ServerSession, capability: string): void {
+    this.assertCapability(capability);
+    if (!session.record.capabilities.includes(capability)) {
+      throw capabilityUnavailable(
+        `ACP capability was not requested for session: ${capability}`,
+        ACP_SERVER_OWNER,
+        session.record.evidenceRefs,
+        this.binding,
+      );
     }
   }
 

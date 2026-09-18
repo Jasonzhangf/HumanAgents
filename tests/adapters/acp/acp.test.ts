@@ -203,6 +203,26 @@ test('capability negotiation is intersection-only and unnegotiated calls fail ex
     }),
     (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
   );
+
+  const subsetAdapter = server();
+  await subsetAdapter.initialize({
+    proof,
+    requestedCapabilities: serverBinding.allowedCapabilities,
+    requestedSessionKinds: ['task'],
+  });
+  await subsetAdapter.open({
+    acpSessionId: 'acp-session-subset',
+    proof,
+    binding: taskBinding,
+    requestedCapabilities: ['session.open'],
+  });
+  await assert.rejects(
+    () => subsetAdapter.request({
+      acpSessionId: 'acp-session-subset',
+      envelope: requestEnvelope(taskBinding, 'acp-session-subset-request'),
+    }),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
 });
 
 test('capability negotiation intersects runtime session kinds and rejects unauthorized admission', async () => {
@@ -276,6 +296,20 @@ test('delegated tool proof is required and external peer claims do not grant cap
     () => limitedAdapter.request({
       acpSessionId: 'driver-limited',
       envelope: requestEnvelope(taskBinding, 'driver-limited-request'),
+    }, delegationProof),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+
+  const subsetAdapter = new AcpDriverAdapter(
+    driverBinding,
+    new DeterministicAcpDriverTransport(driverBinding),
+  );
+  await subsetAdapter.capabilities({ requestedCapabilities: ['session.open', 'session.load', 'observe'] }, delegationProof);
+  await subsetAdapter.open({ acpSessionId: 'driver-subset', binding: taskBinding }, delegationProof);
+  await assert.rejects(
+    () => subsetAdapter.request({
+      acpSessionId: 'driver-subset',
+      envelope: requestEnvelope(taskBinding, 'driver-subset-request'),
     }, delegationProof),
     (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
   );
