@@ -587,7 +587,7 @@ test('framework executor records accepted and denied tool decisions without trus
   assert.equal(traces.query({ interactionRef: 'interaction-a', admission: 'rejected' }).length, 1);
 });
 
-test('decision trace journal survives owner recreation and remains queryable by interaction', () => {
+test('decision trace journal preserves history after recreation and new appends', () => {
   const persisted: string[] = [];
   const firstOwner = new AttentionTriageOwner(new DecisionTraceJournal({
     persist: (record) => persisted.push(JSON.stringify(record)),
@@ -618,6 +618,28 @@ test('decision trace journal survives owner recreation and remains queryable by 
     load: () => persisted.map((record) => JSON.parse(record)),
   }));
   assert.equal(recreatedOwner.queryTraces({ attentionRef: triage.attentionId }).length, 1);
+  recreatedOwner.triage({
+    sourceRef: 'source:replay-after-restart',
+    kind: 'operation-failure',
+    impact: 'medium',
+    urgency: 'low',
+    blocking: 'none',
+    userDecisionRequired: false,
+    affectedRefs: ['operation:replay-after-restart'],
+    evidenceRefs: [evidence('replay-after-restart')],
+    reasonRefs: ['replay-after-restart'],
+    proposedNextAction: 'retry',
+  }, {
+    ownerId: 'runtime-operation-owner',
+    runtimeBindingRef: 'binding-explicit-brain',
+    scopeRef: 'scope:organ-a',
+    scope: { organId },
+    createdAt: '2026-09-17T00:00:01.000Z',
+    inputDigest: 'sha256:replay-after-restart',
+  });
+  const tracesAfterAppend = recreatedOwner.queryTraces();
+  assert.equal(tracesAfterAppend.length, 2);
+  assert.equal(tracesAfterAppend.some((trace) => trace.semantic?.interactionRef === 'source:replay-after-restart'), true);
 });
 
 test('channel routing supports manual and automatic events without fabricating confirmation', () => {

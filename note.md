@@ -36,6 +36,11 @@ No DSH adapter work. No production deployment or real external channel claim wit
 - 2026-09-17: Review-fix changes now persist `rawInput` in explicit interaction state and reject
   unsupported control requests explicitly at the HTTP boundary instead of claiming that channel
   is accepted.
+- 2026-09-17: Independent review `explicit-brain-reviewfix-d8689f8b` returned FAIL with a P1
+  finding in `DecisionTraceJournal`: after restart, a new append hid previously loaded durable
+  traces from later queries. The journal now hydrates persisted records into its in-memory
+  collection before append/query, and a regression asserts history remains visible after a new
+  append.
 - Verification: `pnpm exec tsc --noEmit`, `pnpm test:explicit-brain`, `pnpm test:app`,
   `pnpm test:agent-templates`, `pnpm test:release`, full `pnpm test`, and `git diff --check`
   all PASS after the review fixes.
@@ -43,5 +48,5 @@ No DSH adapter work. No production deployment or real external channel claim wit
   does not enqueue; `intent`, `taskRef`, `normalizedInput`, and `payloadRef` survive
   confirmation/submission; router errors map to typed UI API errors.
 - Unverified: latest review-fix candidate SHA/review/merge/push, real Journal/EventBus wiring
-  for `DecisionTraceJournal`, real git-bug/channel/RCC integration, and post-merge runtime load
-  or crash recovery.
+  beyond the typed decision-trace port, real git-bug/channel/RCC integration, and post-merge
+  runtime load or crash recovery.

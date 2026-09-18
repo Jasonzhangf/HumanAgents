@@ -91,6 +91,7 @@ export interface DecisionTracePort {
 
 export class DecisionTraceJournal implements DecisionTracePort {
   private readonly records: DecisionTraceRecord[] = [];
+  private loaded = false;
 
   constructor(private readonly options: {
     readonly persist: (record: DecisionTraceRecord) => void;
@@ -98,6 +99,7 @@ export class DecisionTraceJournal implements DecisionTracePort {
   }) {}
 
   append(record: DecisionTraceRecord): DecisionTraceRecord {
+    this.hydrate();
     const copy = structuredClone(record);
     this.options.persist(copy);
     this.records.push(copy);
@@ -105,12 +107,18 @@ export class DecisionTraceJournal implements DecisionTracePort {
   }
 
   query(query: DecisionTraceQuery = {}): readonly DecisionTraceRecord[] {
-    const records = this.records.length > 0 ? this.records : this.options.load();
-    return records.filter((record) => matchesDecisionTrace(record, query)).map((record) => structuredClone(record));
+    this.hydrate();
+    return this.records.filter((record) => matchesDecisionTrace(record, query)).map((record) => structuredClone(record));
   }
 
   recordToolDecision(input: DecisionTraceRecord): DecisionTraceRecord {
     return this.append(input);
+  }
+
+  private hydrate(): void {
+    if (this.loaded) return;
+    this.records.push(...this.options.load().map((record) => structuredClone(record)));
+    this.loaded = true;
   }
 }
 
