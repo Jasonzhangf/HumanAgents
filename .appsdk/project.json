@@ -50,7 +50,6 @@
         ".appsdk/goal.json",
         ".appsdk/sdk.lock",
         ".appsdk/sdk-resources.json",
-        ".appsdk/contracts/**",
         "contracts/**"
       ],
       "dependency_modules": [],

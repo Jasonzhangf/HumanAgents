@@ -57,7 +57,7 @@
     "AppSDK governance resources exist under HumanAgent without changing existing business source or AGENTS.md.",
     "appsdk verify reports the initialized project contract as current and development-ready for the contract_bound initialization stage; business package module coverage is not claimed by this init.",
     "appsdk compile passes for the initialized project contract.",
-    "The resulting governance state is recorded on the isolated codex/appsdk-governance-init worktree."
+    "The resulting governance state is recorded on the isolated codex/gov-contract-humanagent-20260918 worktree."
   ],
   "non_goals": [
     "No UI, provider, DSH, runtime, release, packaging, or deployment changes.",
@@ -70,7 +70,7 @@
   "assumptions": [
     "The HumanAgent repository root is the AppSDK project root and project_root is '.'.",
     "Existing source and documentation remain authoritative; AppSDK initialization only adds its own governance resources.",
-    "This is an isolated non-main worktree based on current local main HEAD 921e0f613b879604dab8703685a097ab11e9b85c."
+    "This is an isolated non-main worktree based on origin/main 5fb25ee0955a65ba77f90a6642921a5cf85524d5."
   ],
   "questions": [],
   "confirmed_by": "Jason",
