@@ -103,6 +103,23 @@ function testMemory(projectKey: string) {
   };
 }
 
+class DelayedMemoryBackend extends DeterministicMemoryBackend {
+  constructor(private readonly gate: Promise<void>) {
+    super();
+  }
+
+  override async recall(input: Parameters<DeterministicMemoryBackend['recall']>[0]) {
+    await this.gate;
+    return super.recall(input);
+  }
+}
+
+class FailingMemoryBackend extends DeterministicMemoryBackend {
+  override async recall(): Promise<never> {
+    throw new Error('forced memory recall failure');
+  }
+}
+
 async function waitFor(assertion: () => void, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
@@ -219,7 +236,116 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
       && error.code === 'memory-binding-mismatch'
       && error.httpStatus === 409,
   );
+  assert.throws(
+    () => service.memoryContextStatus(first.operationId),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'memory-binding-mismatch'
+      && error.httpStatus === 409,
+  );
   assert.equal(service.memoryContextReceipt(second.operationId).executionEpoch, second.executionEpoch);
+});
+
+test('memory context HTTP route reports pending while the accepted execution is binding memory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-pending-'));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DelayedMemoryBackend(gate),
+      projectKey: 'project-ui-memory-pending',
+      roleId: 'execution',
+    },
+  });
+  try {
+    const created = await fetch(`${runtime.server.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'pending memory binding' }),
+    });
+    const task = await created.json() as { readonly taskId: { readonly value: string } };
+    const startedResponse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'wait for memory binding' }),
+    });
+    const started = await startedResponse.json() as { readonly operationId: string };
+
+    const pendingResponse = await fetch(`${runtime.server.url}/api/executions/${encodeURIComponent(started.operationId)}/memory-context`);
+    assert.equal(pendingResponse.status, 202);
+    const pending = await pendingResponse.json() as { readonly state: string; readonly operationId: string };
+    assert.equal(pending.state, 'pending');
+    assert.equal(pending.operationId, started.operationId);
+
+    const unknownResponse = await fetch(`${runtime.server.url}/api/executions/unknown-operation/memory-context`);
+    assert.equal(unknownResponse.status, 404);
+
+    release();
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(id('task', task.taskId.value)).state, 'succeeded'));
+    const receiptResponse = await fetch(`${runtime.server.url}/api/executions/${encodeURIComponent(started.operationId)}/memory-context`);
+    assert.equal(receiptResponse.status, 200);
+    const receipt = await receiptResponse.json() as { readonly executionEpoch: number };
+    assert.equal(receipt.executionEpoch, 1);
+  } finally {
+    release();
+    await runtime.server.close();
+  }
+});
+
+test('memory context HTTP route exposes terminal memory binding failure instead of pending forever', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-failure-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new FailingMemoryBackend(),
+      projectKey: 'project-ui-memory-failure',
+      roleId: 'execution',
+    },
+  });
+  try {
+    const created = await fetch(`${runtime.server.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'failed memory binding' }),
+    });
+    const task = await created.json() as { readonly taskId: { readonly value: string } };
+    const startedResponse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'fail memory binding' }),
+    });
+    const started = await startedResponse.json() as { readonly operationId: string };
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(id('task', task.taskId.value)).state, 'failed'));
+
+    const response = await fetch(`${runtime.server.url}/api/executions/${encodeURIComponent(started.operationId)}/memory-context`);
+    assert.equal(response.status, 500);
+    const body = await response.json() as { readonly error: { readonly code: string; readonly ownerId: string; readonly message: string } };
+    assert.equal(body.error.code, 'memory-context-failed');
+    assert.equal(body.error.ownerId, 'humanagent.runtime');
+    assert.match(body.error.message, /memory context injection is unavailable/);
+  } finally {
+    await runtime.server.close();
+  }
 });
 
 test('memory interaction HTTP routes expose typed summary, query, inspect, compare, and explicit review', async () => {

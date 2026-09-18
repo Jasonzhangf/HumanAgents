@@ -414,7 +414,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     if (executionMemoryContext && method === 'GET') {
       const operationId = id('operation', decodeURIComponent(executionMemoryContext[1]!));
       service.operationTask(operationId);
-      writeJson(response, 200, service.memoryContextReceipt(operationId));
+      const receipt = service.memoryContextStatus(operationId);
+      writeJson(response, receipt.httpStatus, receipt.body);
       return;
     }
     if (path.startsWith('/api/')) {

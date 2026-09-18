@@ -181,6 +181,13 @@ interface BoundMemoryContext {
   readonly receipt: MemoryContextReceipt;
 }
 
+export interface MemoryContextPending {
+  readonly state: 'pending';
+  readonly operationId: string;
+  readonly ownerId: string;
+  readonly nextAction: string;
+}
+
 function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
   if (LIFECYCLE_STATES.has(state)) return state as RuntimeTaskSnapshot['state'];
   if (state === 'model' || state === 'output' || state === 'tool') return 'succeeded';
@@ -353,6 +360,62 @@ export class UiRuntimeService {
       );
     }
     return structuredClone(context.receipt);
+  }
+
+  memoryContextStatus(operationId: OperationId): {
+    readonly httpStatus: 200 | 202;
+    readonly body: MemoryContextReceipt | MemoryContextPending;
+  } {
+    const receipt = this.memoryContexts.get(operationId.value);
+    if (receipt) return { httpStatus: 200, body: this.memoryContextReceipt(operationId) };
+    let task: RuntimeTaskSnapshot;
+    try {
+      task = this.coordinator.taskSnapshot(this.coordinator.operationTask(operationId));
+    } catch {
+      throw new UiRuntimeApiError(
+        'memory-binding-missing',
+        'memory-coordinator',
+        `memory context is missing for operation: ${operationId.value}`,
+        'start an execution before requesting memory context',
+        404,
+      );
+    }
+    let terminal: RuntimeTaskSnapshot['events'][number] | undefined;
+    for (let index = task.events.length - 1; index >= 0; index -= 1) {
+      const event = task.events[index]!;
+      if (event.operationId === operationId.value && event.terminalPhase === 'final') {
+        terminal = event;
+        break;
+      }
+    }
+    if (terminal && (terminal.state === 'failed' || terminal.state === 'blocked')) {
+      throw new UiRuntimeApiError(
+        terminal.state === 'blocked' ? 'memory-context-blocked' : 'memory-context-failed',
+        terminal.ownerId ?? RUNTIME_OWNER,
+        terminal.summary,
+        terminal.nextAction ?? 'inspect the execution failure',
+        terminal.state === 'blocked' ? 409 : 500,
+        terminal.evidenceRefs,
+      );
+    }
+    if (terminal) {
+      throw new UiRuntimeApiError(
+        'memory-context-unavailable',
+        'memory-coordinator',
+        `memory context is unavailable for terminal operation: ${operationId.value}`,
+        'start a new execution and request its memory context',
+        409,
+      );
+    }
+    return {
+      httpStatus: 202,
+      body: {
+        state: 'pending',
+        operationId: operationId.value,
+        ownerId: 'memory-coordinator',
+        nextAction: 'wait for the execution memory binding to complete',
+      },
+    };
   }
 
   private now(): Date {
