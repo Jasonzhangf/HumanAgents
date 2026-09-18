@@ -210,7 +210,9 @@ test('approved and promoted records preserve per-reference provenance digests', 
     reason: 'stable across projects',
     impactScope: 'all projects',
     approvalRef,
+    approvalDigest: 'sha256:approval-a',
     sourceRefs: [promotionRef],
+    sourceDigests: ['sha256:promotion-a'],
     promotedAt: '2026-09-17T00:00:00Z',
   });
   const promoted = await memory.query(memoryQuery({
@@ -263,7 +265,9 @@ test('approval rejects evidence without a resolvable digest', async () => {
     reason: 'failed approval must not become promotable',
     impactScope: 'all projects',
     approvalRef: 'approval://missing',
+    approvalDigest: 'sha256:missing',
     sourceRefs: [],
+    sourceDigests: [],
     promotedAt: '2026-09-17T00:00:00Z',
   }), ContractError);
 });
@@ -342,7 +346,9 @@ test('promotion rejects an unresolvable approval source without changing canonic
     reason: 'invalid promotion attempt',
     impactScope: 'all projects',
     approvalRef: 'approval://missing',
+    approvalDigest: 'sha256:missing',
     sourceRefs: [],
+    sourceDigests: [],
     promotedAt: '2026-09-17T00:00:00Z',
   }), ContractError);
 
@@ -443,13 +449,16 @@ test('final promotions cannot overwrite global provenance', async () => {
     reason: 'stable across projects',
     impactScope: 'all projects',
     approvalRef: firstApprovalRef,
+    approvalDigest: 'sha256:approval-first',
     sourceRefs: [],
+    sourceDigests: [],
     promotedAt: '2026-09-17T00:00:00Z',
   };
   await memory.promoteCandidate(promotion);
   await assert.rejects(memory.promoteCandidate({
     ...promotion,
     approvalRef: secondApprovalRef,
+    approvalDigest: 'sha256:approval-second',
     reason: 'attempt to replace global provenance',
   }), ContractError);
 
@@ -505,7 +514,9 @@ test('promotion creates an independent global record and preserves the project r
     reason: 'independent global promotion',
     impactScope: 'all projects',
     approvalRef,
+    approvalDigest: 'sha256:approval-independent',
     sourceRefs: [],
+    sourceDigests: [],
     promotedAt: '2026-09-17T00:00:00Z',
   });
 
@@ -928,7 +939,9 @@ test('rooted persistence isolates project and global partitions and recovers a t
     reason: 'rooted global promotion',
     impactScope: 'all projects',
     approvalRef,
+    approvalDigest: 'sha256:rooted-promotion',
     sourceRefs: [],
+    sourceDigests: [],
     promotedAt: '2026-09-17T00:00:00Z',
   });
 
