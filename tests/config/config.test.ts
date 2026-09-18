@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, parseToml, resolveRuntimePaths, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
+import { ensureControlLayout, loadConfiguration, parseToml, resolveProjectLocalSkillSource, resolveRuntimePaths, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
 
 test('parses agent array tables and sections', () => {
   const value = parseToml('schemaVersion = 1\n[[agents]]\nagentId = "one"\nroleId = "interaction"\ntemplateRef = "t"\ndriverRef = "fake"\nskills = ["a"]\ntools = ["b"]\npermissions = ["c"]\nmemoryScopes = ["task"]\nresourceClass = "foreground"\n[project]\nreviewRequired = true\n');
@@ -30,6 +30,33 @@ test('resolves all persistence below control root and keeps workspace separate',
   assert.equal(paths.projectKey, (await realpath(workspace)).replaceAll('/', '-') || '-');
   const loaded = await loadConfiguration(paths);
   assert.equal(loaded.agentRoster.length, 2);
+});
+
+test('resolves the cwd-named local Skill from the project source manifest', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-skill-source-'));
+  const workspace = join(root, 'workspace');
+  const skillRoot = join(root, 'declared-skills');
+  await mkdir(workspace);
+  await mkdir(join(skillRoot, 'workspace'), { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(paths.projectManifest, JSON.stringify({
+    schemaVersion: 1,
+    projectKey: paths.projectKey,
+    workspaceCwd: paths.workspaceCwd,
+    sources: { localSkill: { root: skillRoot, name: 'workspace' } },
+  }) + '\n', 'utf8');
+
+  const resolved = await resolveProjectLocalSkillSource(paths);
+  assert.equal(resolved.root, skillRoot);
+  assert.equal(resolved.name, 'workspace');
+  await writeFile(paths.projectManifest, JSON.stringify({
+    schemaVersion: 1,
+    projectKey: paths.projectKey,
+    workspaceCwd: paths.workspaceCwd,
+    sources: { localSkill: { root: skillRoot, name: 'wrong-name' } },
+  }) + '\n', 'utf8');
+  await assert.rejects(() => resolveProjectLocalSkillSource(paths), /workspace basename/);
 });
 
 test('uses HUMANAGENT_HOME when no explicit control root is provided', async () => {

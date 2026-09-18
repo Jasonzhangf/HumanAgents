@@ -453,7 +453,10 @@ export function validateMemoryPromotionReceipt(input: MemoryPromotionReceipt): v
   nonEmpty(input.reason, 'memory promotion reason');
   nonEmpty(input.impactScope, 'memory promotion impactScope');
   nonEmpty(input.approvalRef, 'memory promotion approvalRef');
+  nonEmpty(input.approvalDigest, 'memory promotion approvalDigest');
   assertRefList(input.sourceRefs, 'memory promotion sourceRefs');
+  assertRefList(input.sourceDigests, 'memory promotion sourceDigests');
+  if (input.sourceRefs.length !== input.sourceDigests.length) throw new ContractError('memory promotion source refs and digests must match');
   assertValidTime(input.promotedAt, 'memory promotion promotedAt');
 }
 

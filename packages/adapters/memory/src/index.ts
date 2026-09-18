@@ -271,7 +271,9 @@ function normalizePromotion(value: unknown, label: string): MemoryPromotionRecei
     reason: requiredString(input.reason, `${label}.reason`),
     impactScope: requiredString(input.impactScope, `${label}.impactScope`),
     approvalRef: requiredString(input.approvalRef, `${label}.approvalRef`),
+    approvalDigest: requiredString(input.approvalDigest, `${label}.approvalDigest`),
     sourceRefs: stringArray(input.sourceRefs, `${label}.sourceRefs`),
+    sourceDigests: stringArray(input.sourceDigests, `${label}.sourceDigests`),
     promotedAt: requiredString(input.promotedAt, `${label}.promotedAt`),
   };
   validatePersistedContract(label, () => validateMemoryPromotionReceipt(promotion));
@@ -1279,6 +1281,30 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     };
   }
 
+  private mergeSourceRefsWithDigests(
+    existingRefs: readonly string[],
+    existingDigests: readonly string[],
+    addedRefs: readonly string[],
+    addedDigests: readonly string[],
+  ): { readonly sourceRefs: readonly string[]; readonly sourceDigests: readonly string[] } {
+    if (addedRefs.length !== addedDigests.length) throw new ContractError('memory promotion source refs and digests must match');
+    const digests = new Map(existingRefs.map((sourceRef, index) => [sourceRef, existingDigests[index]!]));
+    for (const [index, sourceRef] of addedRefs.entries()) {
+      const sourceDigest = addedDigests[index]!;
+      const existingDigest = digests.get(sourceRef);
+      if (existingDigest !== undefined) {
+        if (existingDigest !== sourceDigest) throw new ContractError(`memory source digest mismatch: ${sourceRef}`);
+        continue;
+      }
+      if (this.records.get(sourceRef)?.sourceDigest !== sourceDigest) {
+        throw new ContractError(`memory source digest mismatch or unavailable: ${sourceRef}`);
+      }
+      digests.set(sourceRef, sourceDigest);
+    }
+    const sourceRefs = [...digests.keys()];
+    return { sourceRefs, sourceDigests: sourceRefs.map((sourceRef) => digests.get(sourceRef)!) };
+  }
+
   async search(input: { readonly scope: MemoryScope; readonly query: string; readonly limit: number }): Promise<readonly { readonly sourceRef: string; readonly summary: string }[]> {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new ContractError('memory search limit must be positive');
     const query = input.query.trim().toLowerCase();
@@ -1429,7 +1455,12 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
       if (candidate.promotion !== undefined) throw new ContractError('memory candidate promotion is already final');
       const approved = this.canonicalRecords.get(candidateRecordId(input.candidateId));
       if (!approved) throw new ContractError('approved memory record is unavailable');
-      const sources = this.mergeSourceRefs(approved.sourceRefs, approved.sourceDigests, [input.approvalRef, ...input.sourceRefs]);
+      const sources = this.mergeSourceRefsWithDigests(
+        approved.sourceRefs,
+        approved.sourceDigests,
+        [input.approvalRef, ...input.sourceRefs],
+        [input.approvalDigest, ...input.sourceDigests],
+      );
       const promoted: CanonicalRecord = {
         ...approved,
         memoryId: `global:${approved.memoryId}`,

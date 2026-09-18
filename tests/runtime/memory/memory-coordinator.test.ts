@@ -644,7 +644,9 @@ test('memory coordinator rejects query, review, and promotion project drift', as
     reason: 'stable across projects',
     impactScope: 'all projects',
     approvalRef: 'approval://global-promotion',
+    approvalDigest: 'sha256:approval-global-promotion',
     sourceRefs: ['journal://project-a/1'],
+    sourceDigests: ['sha256:a'],
     promotedAt: '2026-09-17T00:00:00Z',
   });
   assert.equal(promoted.status, 'attention');

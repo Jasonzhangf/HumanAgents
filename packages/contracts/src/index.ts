@@ -312,7 +312,9 @@ export interface MemoryPromotionReceipt {
   readonly reason: string;
   readonly impactScope: string;
   readonly approvalRef: string;
+  readonly approvalDigest: string;
   readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
   readonly promotedAt: string;
 }
 
@@ -565,7 +567,9 @@ export interface MemoryInteractionPort {
     readonly reason: string;
     readonly impactScope: string;
     readonly approvalRef: string;
+    readonly approvalDigest: string;
     readonly sourceRefs: readonly string[];
+    readonly sourceDigests: readonly string[];
   }): Promise<MemoryPromotionReceipt>;
   planForgetting(input: MemoryForgettingRequest): Promise<MemoryForgettingPlan>;
 }

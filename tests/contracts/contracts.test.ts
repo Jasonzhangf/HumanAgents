@@ -936,10 +936,13 @@ test('memory query, review, promotion, and forgetting enforce owner authority', 
     reason: 'stable across projects',
     impactScope: 'all projects',
     approvalRef: 'approval://global-promotion',
+    approvalDigest: 'sha256:approval-global-promotion',
     sourceRefs: ['journal://project-a/1'],
+    sourceDigests: ['sha256:source-a'],
     promotedAt: '2026-09-17T00:00:00Z',
   };
   validateMemoryPromotionReceipt(promotion);
+  assert.throws(() => validateMemoryPromotionReceipt({ ...promotion, sourceDigests: [] }), ContractError);
   assert.throws(() => validateMemoryPromotionReceipt({ ...promotion, actor: memoryActor() }), ContractError);
   assert.throws(() => validateMemoryPromotionReceipt({ ...promotion, to: 'project' as never }), ContractError);
 

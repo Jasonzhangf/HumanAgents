@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   EvidenceRef,
   MemoryActorContext,
@@ -9,7 +9,7 @@ import type {
   ProjectSourceUpdateProposal,
 } from '../../contracts/src/index.js';
 import { id } from '../../contracts/src/index.js';
-import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
+import { resolveProjectLocalSkillSource, type LoadedConfiguration, type RuntimePaths } from '../../config/src/index.js';
 import {
   DeterministicMemoryBackend,
   FilesystemMemorySourceAdapter,
@@ -95,6 +95,7 @@ export async function composeRuntimeMemory(
 ): Promise<MemoryComposition> {
   const projectKey = input.paths.projectKey;
   const workspaceCwd = input.paths.workspaceCwd;
+  const localSkill = await resolveProjectLocalSkillSource(input.paths);
   const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
   await mkdir(auditPromptRoot, { recursive: true });
   const actor: MemoryActorContext = {
@@ -109,8 +110,8 @@ export async function composeRuntimeMemory(
     workspaceCwd,
     sessionsRoot: input.paths.sessionsRoot,
     runNotesRoot: input.paths.runNotesRoot,
-    localSkillRoot: workspaceCwd,
-    localSkillName: basename(workspaceCwd),
+    localSkillRoot: localSkill.root,
+    localSkillName: localSkill.name,
     auditPromptRoot,
     auditPromptRef: input.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
     autoUpdate: input.configuration.effective.memory?.update.auto ?? false,
@@ -580,7 +581,7 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     await assertCompositionPathEquals(input.workspaceCwd, input.paths.workspaceCwd, 'memory workspace');
     await assertCompositionPathEquals(input.sessionsRoot, input.paths.sessionsRoot, 'memory sessions root');
     await assertCompositionPathEquals(input.runNotesRoot, input.paths.runNotesRoot, 'memory run notes root');
-    await assertCompositionPathEquals(input.localSkillRoot, input.paths.workspaceCwd, 'memory local skill root');
+    await assertNoSymlinkBelow(input.localSkillRoot, join(input.localSkillRoot, input.localSkillName), 'memory local skill root');
     await assertCompositionPath(input.paths.controlRoot, input.auditPromptRoot, 'memory audit prompt root');
   } catch (error) {
     if (error instanceof AppLifecycleError) throw error;
