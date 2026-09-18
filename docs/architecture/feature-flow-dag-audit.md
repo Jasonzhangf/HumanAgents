@@ -4,7 +4,6 @@
 日期：2026-09-18
 审计源提交：`3332cca4d2acbcaaa71e69c1c1f68de45cfbe19d`
 审计源树：`1592a065bc87068ccd40837c07590acc9e4a0244`
-文档承载提交：`2048f3794b6f363363a2585c503a12a4e56d3e0e`
 
 ## 0. Scope and Method
 
@@ -16,8 +15,7 @@ verification appear only as bindings on architecture nodes.
 
 The source claims are bound to the audited source commit and tree above. The
 document carrier commit adds only this file; its own hash is not an audit
-input because embedding that hash would be self-referential. The carrier
-commit's parent is the audited source commit.
+input because embedding that hash would be self-referential.
 
 The As-Is graph is reconstructed from the current repository, not from a
 normal-project template. A node exists only when an implementation, contract,
