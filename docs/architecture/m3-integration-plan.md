@@ -66,7 +66,18 @@ implementation files.
   alternate state sources.
 - Merge is allowed only after integration review and Astra M3 PASS.
 
-## 5. Delivery evidence
+## 5. Integration review corrections
+
+The first integration candidate `e63433e` was rejected by Codex review because
+the ACP driver did not enforce `session.open` and `session.load` delegation.
+Candidate `4532ef0` added those checks and negative tests, but the follow-up
+review also found that remote capability negotiation was returned without
+constraining later driver operations. The final candidate `04e0602` persists
+the negotiated intersection, lazily negotiates before proof-bound operations,
+and rejects operations absent from the remote capability set. ACP focused
+tests and the full runtime gate were rerun after both corrections.
+
+## 6. Delivery evidence
 
 The final report must separately record:
 
