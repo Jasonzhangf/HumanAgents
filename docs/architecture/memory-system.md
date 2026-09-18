@@ -98,7 +98,8 @@ auto = false
 prompt_ref = "project-memory-audit"
 ```
 
-`prompt_ref` 只标识一个由 project source/manifest 解析的独立审计提示词来源；它不是提示词正文，也不是系统内置默认提示词。项目可以随时替换该来源，下一次 analysis operation 读取新 revision。source adapter 必须返回 canonical ref、revision、digest 和读取时间；来源缺失、不可读或 ref 不可解析时，审计进入 `attention`，不得使用隐藏的系统 prompt 猜测补齐。
+`prompt_ref` 当前只接受安全文件名，由 source adapter 从 control root 的
+`memory-audit/<prompt_ref>.md` 读取。它不是提示词正文，也不是系统内置默认提示词。项目可以随时替换该文件，下一次 analysis operation 读取新 revision。source adapter 必须返回 canonical ref、revision、digest 和读取时间；来源缺失、不可读或 ref 不可解析时，审计进入 `attention`，不得使用隐藏的系统 prompt 猜测补齐。typed `source://` URI 在独立 source/manifest 解析器接入前显式拒绝。
 
 ```text
 auto = false
@@ -110,6 +111,11 @@ auto = true
   → Project Rule owner 或 local Skill owner 校验并自动应用低风险、project-scoped patch
   → 记录 old digest、patch digest、new digest 和 evidence
 ```
+
+当前 CLI 运行时尚未接入能够从分析 proposal 生成 typed project patch 的 `MemoryProjectPatchReader`，因此
+`memory.update.auto=true` 必须在配置加载阶段以 `config-capability` 明确拒绝，不能接受配置后在
+`composeMemory` 阶段才以 `memory-update-unavailable` 失败。接入该 reader 后，配置解析才可重新开放
+`auto=true`；本节其余 target、owner、compare-and-commit 和审计规则不变。
 
 这个开关只控制当前 project 的：
 
@@ -430,7 +436,7 @@ Memory Agent + Memory Operations Backend
 
 ### 4.5 独立审计提示词
 
-审计提示词是可替换的分析输入，不是 Memory Agent system prompt 的一部分，也不是 contracts、控制状态或记忆内容。`packages/config` 只解析 `memory.audit.prompt_ref`；Source adapter 按 ref 读取当前 project 配置的 prompt source，并在每次 boundary analysis operation 开始时固定一份 prompt snapshot：
+审计提示词是可替换的分析输入，不是 Memory Agent system prompt 的一部分，也不是 contracts、控制状态或记忆内容。`packages/config` 只解析 `memory.audit.prompt_ref`；当前 MVP 将该 ref 作为安全文件名，由 Source adapter 从 control root 的 `memory-audit/` 读取对应 Markdown 文件，并在每次 boundary analysis operation 开始时固定一份 prompt snapshot。独立 source/manifest URI 尚未接入，不能被当作文件名隐式解释：
 
 ```ts
 interface AuditPromptSnapshot {
@@ -1002,7 +1008,7 @@ contracts: namespace/source/candidate/state types
 8. forgetting fixture 完成：新批准记录 supersede 旧记录；derived Index 可重建；仍被 checkpoint/approved record 引用的 Journal 来源不可删除。
 9. boundary fixture 覆盖 blocked、checkpoint rewind 和 task completion：主 Agent 的 live context 不被 Memory Agent 修改；Memory Agent 能从 committed source 生成 project fact、project experience、profile、global 和 Skill update candidates。
 10. local Skill update fixture 证明重复且成功的 procedural evidence 才能形成带 source ref/revision/diff/evidence 的唯一 cwd-named Skill update proposal；没有 local Skill owner review 不能生效。
-11. auto update fixture 覆盖 `auto=false` proposal-only、`auto=true` project `AGENTS.md`/唯一 local Skill patch、digest conflict、验证失败和 global/external/prompt target 拒绝；自动更新不能越过对应 owner。
+11. auto update fixture 覆盖 `auto=false` proposal-only、`auto=true` project `AGENTS.md`/唯一 local Skill patch、digest conflict、验证失败和 global/external/prompt target 拒绝；当前 CLI 尚未接入 typed patch reader 时，配置必须在加载阶段拒绝 `auto=true`，自动更新不能越过对应 owner。
 12. audit prompt fixture 证明 prompt source 可独立替换；每个 operation 固定 prompt ref/revision/digest，下一次 operation 使用新版本，且 prompt 不能改变 control fact 或自动更新范围。
 13. interaction binding fixture 证明无 Task 的 Agent 可通过可信 `bindingRef` recall 和提交 candidate；task binding 仍校验 `taskId + assignmentId + executionEpoch`，Memory 层不创建伪 Task 或拥有 epoch。
 

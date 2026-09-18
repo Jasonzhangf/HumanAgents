@@ -309,6 +309,30 @@ test('CLI config failures preserve structured owner and next action evidence', a
   });
 });
 
+test('CLI rejects memory auto update before composing memory without a patch reader', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-memory-auto-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await appendFile(join(controlRoot, 'config.toml'), '\n[memory.update]\nauto = true\n', 'utf8');
+  assert.throws(() => execFileSync(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'doctor',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+    const parsed = JSON.parse(error.stderr);
+    assert.equal(parsed.error.code, 'config-capability');
+    assert.equal(parsed.error.ownerId, 'config-loader');
+    assert.match(parsed.error.message, /memory\.update\.auto is unavailable/);
+    return true;
+  });
+});
+
 test('CLI host failures remain structured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-host-error-'));
   const workspace = join(root, 'workspace');

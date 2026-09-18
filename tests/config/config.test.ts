@@ -526,18 +526,23 @@ test('parses memory update and audit config with safe defaults', () => {
   assert.equal(disabled.memory?.update.auto, false);
   assert.equal(disabled.memory?.audit.promptRef, 'project-memory-audit');
 
-  const enabled = validateUserConfig({
+  const namedPrompt = validateUserConfig({
     schemaVersion: 1,
     agents,
-    memory: { update: { auto: true }, audit: { prompt_ref: 'source://project-a/audit@r2' } },
+    memory: { audit: { prompt_ref: 'project-audit-v2' } },
   });
-  assert.equal(enabled.memory?.update.auto, true);
-  assert.equal(enabled.memory?.audit.promptRef, 'source://project-a/audit@r2');
+  assert.equal(namedPrompt.memory?.update.auto, false);
+  assert.equal(namedPrompt.memory?.audit.promptRef, 'project-audit-v2');
 
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { update: { auto: 'yes' } } }), /memory.update.auto must be boolean/);
+  assert.throws(
+    () => validateUserConfig({ schemaVersion: 1, agents, memory: { update: { auto: true } } }),
+    /memory.update.auto is unavailable/,
+  );
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt: 'embedded text' } } }), /memory.audit contains unsupported key: prompt/);
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '' } } }), /memory.audit.prompt_ref must be a non-empty string/);
-  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '../prompt' } } }), /memory.audit.prompt_ref must be a typed source reference/);
+  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '../prompt' } } }), /memory.audit.prompt_ref must be a safe audit prompt file name/);
+  assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: 'source://project-a/audit@r2' } } }), /memory.audit.prompt_ref must be a safe audit prompt file name/);
 });
 
 test('project memory overrides remain project-scoped and explicit', async () => {
@@ -546,10 +551,10 @@ test('project memory overrides remain project-scoped and explicit', async () => 
   await mkdir(workspace);
   const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
   await ensureControlLayout(paths);
-  await writeFile(join(paths.projectRoot, 'config.toml'), '[memory.update]\nauto = true\n[memory.audit]\nprompt_ref = "source://project-a/audit@r2"\n', 'utf8');
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[memory.update]\nauto = false\n[memory.audit]\nprompt_ref = "project-audit-v2"\n', 'utf8');
   const loaded = await loadConfiguration(paths);
-  assert.equal(loaded.effective.memory?.update.auto, true);
-  assert.equal(loaded.effective.memory?.audit.promptRef, 'source://project-a/audit@r2');
+  assert.equal(loaded.effective.memory?.update.auto, false);
+  assert.equal(loaded.effective.memory?.audit.promptRef, 'project-audit-v2');
 
   await writeFile(join(paths.projectRoot, 'config.toml'), '[memory.update]\nauto = true\ntarget = "global"\n', 'utf8');
   await assert.rejects(() => loadConfiguration(paths), /memory.update contains unsupported key: target/);

@@ -200,6 +200,18 @@ test('audit prompt revision is stable per snapshot and changes after source repl
   assert.notEqual(second.digest, first.digest);
 });
 
+test('audit prompt refs reject typed source paths until manifest resolution is implemented', async () => {
+  const { adapter } = await fixture();
+  await assert.rejects(
+    adapter.readPrompt({ projectKey: 'project-a', promptRef: 'source://project-a/project-memory-audit@r2' }),
+    (error: unknown) => error instanceof MemorySourceError && error.code === 'memory-source-invalid',
+  );
+  await assert.rejects(
+    adapter.readPrompt({ projectKey: 'project-a', promptRef: 'nested/project-memory-audit' }),
+    (error: unknown) => error instanceof MemorySourceError && error.code === 'memory-source-invalid',
+  );
+});
+
 test('project and audit sources escape their allowlisted roots when canonical realpath leaves the root', async () => {
   const f = await fixture({ writeSkill: false });
   const outside = await mkdtemp(join(tmpdir(), 'humanagent-source-outside-'));
