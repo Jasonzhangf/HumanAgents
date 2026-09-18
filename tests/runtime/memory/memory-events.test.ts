@@ -588,7 +588,7 @@ test('memory analysis consumer preserves a waiting admission as a durable retry 
   assert.equal(journal.receipts.size, 0);
 });
 
-test('memory analysis consumer preserves recoverable admission attention as a durable retry obligation', async () => {
+test('memory analysis consumer rejects deterministic admission attention without retry', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
   const bus = ports(journal, registry);
@@ -615,14 +615,14 @@ test('memory analysis consumer preserves recoverable admission attention as a du
     }),
   );
 
-  assert.equal(result.retries.length, 1);
-  assert.equal(result.retries[0]?.attempt, 1);
-  assert.equal(result.retries[0]?.ownerRef, 'memory-agent');
-  assert.equal(result.retries[0]?.failureRef, 'memory-agent-source-invalid');
-  assert.equal(result.committed.length, 0);
-  assert.equal(result.cursors.length, 0);
-  assert.equal(journal.cursors.size, 0);
-  assert.equal(journal.receipts.size, 0);
+  assert.equal(result.retries.length, 0);
+  assert.equal(result.committed.length, 1);
+  assert.equal(result.committed[0]?.disposition, 'rejected');
+  assert.equal(result.committed[0]?.failureRef, 'memory-agent-source-invalid');
+  assert.equal(journal.retries.size, 0);
+  assert.equal(result.cursors.length, 1);
+  assert.equal(journal.cursors.size, 1);
+  assert.equal(journal.receipts.size, 1);
 });
 
 test('memory analysis consumer rejects a binding mismatch before admission', async () => {
