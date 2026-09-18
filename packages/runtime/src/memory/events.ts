@@ -351,7 +351,7 @@ export function createMemoryAnalysisEventHandler(
     }
     const request = requestOutcome.value;
     const admissionOutcome = await options.admission.admit({ request, event });
-    if (admissionOutcome.status === 'attention') {
+    if (admissionOutcome.status === 'attention' && admissionOutcome.issue.nextAction.kind === 'recover') {
       return rejectedCommit(event, options.binding.bindingRef, admissionOutcome.issue.code);
     }
     if (admissionOutcome.status !== 'ready') {

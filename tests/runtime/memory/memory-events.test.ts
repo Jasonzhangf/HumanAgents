@@ -625,6 +625,43 @@ test('memory analysis consumer rejects deterministic admission attention without
   assert.equal(journal.receipts.size, 1);
 });
 
+test('memory analysis consumer retries transient admission attention without terminal receipt', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  const bus = ports(journal, registry);
+  await publishEvent(bus, { publisherId: publisher.publisherId, event: event() });
+
+  const result = await consumeEvents(
+    bus,
+    { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+    createMemoryAnalysisEventHandler({
+      binding,
+      admission: {
+        admit: async () => ({
+          status: 'attention',
+          issue: {
+            code: 'memory-agent-source-unavailable',
+            state: 'attention',
+            ownerId: 'memory-agent',
+            message: 'evidence reader is temporarily unavailable',
+            nextAction: { kind: 'wait', ref: 'memory-evidence-ready' },
+          },
+        }),
+      },
+      now: () => occurredAt,
+    }),
+  );
+
+  assert.equal(result.retries.length, 1);
+  assert.equal(result.retries[0]?.attempt, 1);
+  assert.equal(result.retries[0]?.ownerRef, 'memory-agent');
+  assert.equal(result.retries[0]?.failureRef, 'memory-agent-source-unavailable');
+  assert.equal(result.committed.length, 0);
+  assert.equal(result.cursors.length, 0);
+  assert.equal(journal.cursors.size, 0);
+  assert.equal(journal.receipts.size, 0);
+});
+
 test('memory analysis consumer rejects a binding mismatch before admission', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
