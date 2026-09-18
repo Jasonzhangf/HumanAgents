@@ -129,7 +129,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async open(input: AcpDriverOpenRequest, proof?: AcpDelegationProof): Promise<AcpDriverOpenResult> {
-    this.guard.assertProof(proof);
+    this.guard.assertDelegation(proof, 'session.open');
     this.assertBinding(input.binding);
     if (this.sessions.has(input.acpSessionId)) {
       const existing = this.sessions.get(input.acpSessionId)!;
@@ -165,7 +165,7 @@ export class AcpDriverAdapter implements AcpDriverPort {
   }
 
   async load(input: AcpDriverLoadRequest, proof?: AcpDelegationProof): Promise<AcpDriverOpenResult> {
-    this.guard.assertProof(proof);
+    this.guard.assertDelegation(proof, 'session.load');
     this.assertBinding(input.binding);
     if (input.binding.kind === 'task') {
       if (input.binding.executionEpoch !== this.binding.executionEpoch) {

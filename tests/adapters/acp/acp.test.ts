@@ -116,7 +116,7 @@ const driverBinding: AcpDriverBinding = {
   taskId,
   assignmentId: taskBinding.kind === 'task' ? taskBinding.assignmentId : 'assignment-a',
   executionEpoch: taskBinding.kind === 'task' ? taskBinding.executionEpoch : 1,
-  delegatedCapabilities: ['observe', 'request', 'cancel', 'reconcile', 'settle'],
+  delegatedCapabilities: ['session.open', 'session.load', 'observe', 'request', 'cancel', 'reconcile', 'settle'],
   delegationProofRef: 'proof://driver-a',
   permissionRevision: 'permission-r1',
 };
@@ -246,8 +246,24 @@ test('delegated tool proof is required and external peer claims do not grant cap
     delegatedCapabilities: ['observe'],
   };
   const noCapabilityAdapter = new AcpDriverAdapter(noCapability, new DeterministicAcpDriverTransport(noCapability));
+  const observeOnlyProof: AcpDelegationProof = {
+    ...delegationProof,
+    delegatedCapabilities: ['observe'],
+  };
   await assert.rejects(
     () => noCapabilityAdapter.capabilities({ requestedCapabilities: ['request'] }),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+  await assert.rejects(
+    () => noCapabilityAdapter.open({ acpSessionId: 'driver-observe-only-open', binding: taskBinding }, observeOnlyProof),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+  await assert.rejects(
+    () => noCapabilityAdapter.load({
+      acpSessionId: 'driver-observe-only-load',
+      binding: taskBinding,
+      reason: 'observe-only load must be denied',
+    }, observeOnlyProof),
     (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
   );
 
@@ -332,7 +348,7 @@ test('driver task sessions can observe while interaction sessions reject task-on
     ...driverBinding,
     taskId: undefined,
     assignmentId: undefined,
-    delegatedCapabilities: ['observe', 'request', 'cancel', 'reconcile', 'settle'],
+    delegatedCapabilities: ['session.open', 'session.load', 'observe', 'request', 'cancel', 'reconcile', 'settle'],
   };
   const interactionDriver = new AcpDriverAdapter(
     interactionDriverBinding,
@@ -528,7 +544,7 @@ test('transport errors and no-response are visible and never become success', as
 
   const failingDriverBinding: AcpDriverBinding = {
     ...driverBinding,
-    delegatedCapabilities: ['observe', 'request', 'cancel', 'reconcile', 'settle'],
+    delegatedCapabilities: ['session.open', 'session.load', 'observe', 'request', 'cancel', 'reconcile', 'settle'],
   };
   const failingProof: AcpDelegationProof = {
     ...delegationProof,
