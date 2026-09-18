@@ -336,6 +336,142 @@ test('memory coordinator rejects task runtime assignment and epoch drift', async
   assert.equal(epochMismatch.status === 'attention' && epochMismatch.issue.code, 'memory-binding-mismatch');
 });
 
+test('memory coordinator advances a task binding only with a new assignment and epoch', async () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const base = {
+    taskId: task,
+    projectKey: taskProjectKey,
+    scope: taskScope,
+    backendRef: 'memory://fake',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: ports.injection,
+  };
+  const epochOneBinding = coordinator.bindTask({ ...base, assignmentId: 'assignment-a', executionEpoch: 1 });
+  coordinator.bindRuntime({
+    agentRuntimeId: 'runtime-epoch-1',
+    taskId: task,
+    assignmentId: 'assignment-a',
+    roleId: 'execution',
+    executionEpoch: 1,
+  });
+  const epochOne = await coordinator.recall({
+    agentRuntimeId: 'runtime-epoch-1',
+    roleId: 'execution',
+    taskId: task,
+    scope: taskScope,
+    layers: ['current'],
+    tokenBudget: 8,
+    executionEpoch: 1,
+    evidenceRequired: true,
+  });
+  assert.equal(epochOne.status, 'ready');
+
+  const advanced = coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 2 });
+  assert.equal(advanced.assignmentId, 'assignment-b');
+  assert.equal(advanced.executionEpoch, 2);
+  const epochTwo = coordinator.bindRuntime({
+    agentRuntimeId: 'runtime-epoch-2',
+    taskId: task,
+    assignmentId: 'assignment-b',
+    roleId: 'execution',
+    executionEpoch: 2,
+  });
+  assert.equal(epochTwo.status, 'ready');
+
+  const staleRecall = await coordinator.recall({
+    agentRuntimeId: 'runtime-epoch-1',
+    roleId: 'execution',
+    taskId: task,
+    scope: taskScope,
+    layers: ['current'],
+    tokenBudget: 8,
+    executionEpoch: 1,
+    evidenceRequired: true,
+  });
+  assert.equal(staleRecall.status, 'attention');
+  assert.equal(staleRecall.status === 'attention' && staleRecall.issue.code, 'memory-binding-missing');
+  const staleAttach = await coordinator.attach({
+    agentRuntimeId: 'runtime-epoch-1',
+    taskId: task,
+    scope: taskScope,
+    executionEpoch: 1,
+    context: makeContext({ runtimeId: 'runtime-epoch-1', epoch: 1, budget: 8 }),
+  });
+  assert.equal(staleAttach.status, 'attention');
+  assert.equal(staleAttach.status === 'attention' && staleAttach.issue.code, 'memory-binding-missing');
+  const staleSearch = await coordinator.search({ agentRuntimeId: 'runtime-epoch-1', query: 'directive', limit: 5 });
+  assert.equal(staleSearch.status, 'attention');
+  assert.equal(staleSearch.status === 'attention' && staleSearch.issue.code, 'memory-binding-missing');
+  const staleQuery = await coordinator.query({
+    requestId: 'query-epoch-1',
+    operationId: id('operation', 'query-epoch-1'),
+    bindingRef: epochOneBinding.bindingId,
+    actor: {
+      actorId: 'actor-epoch-1',
+      roleId: 'memory',
+      permissions: ['memory.read'],
+      projectKey: taskProjectKey,
+    },
+    projectKey: taskProjectKey,
+    namespace: 'project',
+    query: 'directive',
+    kinds: ['semantic'],
+    states: ['approved'],
+    limit: 5,
+    tokenBudget: 100,
+    inputDigest: 'sha256:query-epoch-1',
+  });
+  assert.equal(staleQuery.status, 'attention');
+  assert.equal(staleQuery.status === 'attention' && staleQuery.issue.code, 'memory-binding-missing');
+});
+
+test('memory coordinator rejects invalid binding advances without mutating current state', () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const base = {
+    taskId: task,
+    projectKey: taskProjectKey,
+    scope: taskScope,
+    backendRef: 'memory://fake',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: ports.injection,
+  };
+  coordinator.bindTask({ ...base, assignmentId: 'assignment-a', executionEpoch: 2 });
+
+  assert.throws(
+    () => coordinator.bindTask({ ...base, assignmentId: 'assignment-a', executionEpoch: 3 }),
+    MemoryCoordinatorError,
+  );
+  assert.throws(
+    () => coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 2 }),
+    MemoryCoordinatorError,
+  );
+  assert.throws(
+    () => coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 1 }),
+    MemoryCoordinatorError,
+  );
+  assert.throws(
+    () => coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 3, scope: { kind: 'organ', organId: organ, taskId: task } }),
+    MemoryCoordinatorError,
+  );
+  assert.throws(
+    () => coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 3, backendRef: 'memory://other' }),
+    MemoryCoordinatorError,
+  );
+
+  const stillCurrent = coordinator.bindRuntime({
+    agentRuntimeId: 'runtime-current',
+    taskId: task,
+    assignmentId: 'assignment-a',
+    roleId: 'execution',
+    executionEpoch: 2,
+  });
+  assert.equal(stillCurrent.status, 'ready');
+});
+
 test('memory coordinator reuses a compatible project backend and rejects conflicts without partial binding', () => {
   const coordinator = new MemoryCoordinator();
   const firstPorts = makePorts();

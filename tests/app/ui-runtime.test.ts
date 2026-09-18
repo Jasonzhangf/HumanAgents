@@ -22,7 +22,13 @@ import {
   type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
-import { AgentRuntime, bindAgentDriver, executeStopControl, type AttentionPort } from '../../packages/runtime/src/index.js';
+import {
+  AgentRuntime,
+  MemoryCoordinator,
+  bindAgentDriver,
+  executeStopControl,
+  type AttentionPort,
+} from '../../packages/runtime/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
@@ -38,6 +44,7 @@ import {
   buildFakeExecutionPort,
   startUiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 
 const organId = id('organ', 'organ-ui-test');
 const binding: ProviderBinding = {
@@ -119,6 +126,85 @@ function serviceFor(
     ...(hookRegistry ? { hookRegistry } : {}),
   });
 }
+
+test('ui runtime binds memory to the real operation identity and exposes deterministic recall evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-binding-'));
+  const memory = new DeterministicMemoryBackend();
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: memory,
+      projectKey: 'project-ui-memory',
+      roleId: 'execution',
+    },
+  });
+  try {
+    const task = runtime.service.createTask({ title: 'memory binding' });
+    memory.addContextEntry({
+      scope: { kind: 'task', organId, taskId: task.taskId },
+      sourceRef: 'journal://ui-memory/current',
+      sourceDigest: 'sha256:ui-memory-current',
+      text: 'deterministic memory binding evidence',
+      layer: 'current',
+      summary: 'deterministic memory binding evidence',
+    });
+
+    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall memory' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const receipt = runtime.service.memoryContextReceipt(started.operationId);
+    assert.equal(receipt.executionEpoch, started.executionEpoch);
+    assert.equal(receipt.taskId.value, task.taskId.value);
+    assert.equal(receipt.entries[0]?.sourceRef, 'journal://ui-memory/current');
+    assert.equal(receipt.entries[0]?.sourceDigest, 'sha256:ui-memory-current');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('ui runtime rejects stale memory epoch recall after the task advances', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-stale-'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'project-ui-memory-stale',
+      roleId: 'execution',
+    },
+  });
+  const task = service.createTask({ title: 'stale memory epoch' });
+  const first = service.startExecution(task.taskId, { prompt: 'first epoch' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  const second = service.startExecution(task.taskId, { prompt: 'second epoch' });
+  assert.equal(second.executionEpoch, first.executionEpoch + 1);
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  assert.equal(service.taskDashboard(task.taskId).error, undefined);
+
+  assert.throws(
+    () => service.memoryContextReceipt(first.operationId),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'memory-binding-mismatch'
+      && error.httpStatus === 409,
+  );
+  assert.equal(service.memoryContextReceipt(second.operationId).executionEpoch, second.executionEpoch);
+});
 
 test('fake execution completes through Runtime projection with SSE, output, checkpoint, and read-only observation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-fake-'));

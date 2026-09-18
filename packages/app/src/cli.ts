@@ -211,6 +211,7 @@ export async function main(args: readonly string[]): Promise<void> {
       checkpointRoot,
       evidenceRoot,
       uiRoot,
+      projectKey: paths.projectKey,
       host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
       portNumber,
     });
