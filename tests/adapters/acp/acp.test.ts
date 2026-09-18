@@ -15,6 +15,8 @@ import {
   DeterministicAcpRuntimeTransport,
   type AcpDelegationProof,
   type AcpPeerProof,
+  type AcpRuntimeLoadRequest,
+  type AcpRuntimeSession,
 } from '../../../packages/adapters/acp/index.js';
 
 const taskId = id('task', 'task-a');
@@ -221,6 +223,74 @@ test('capability negotiation is intersection-only and unnegotiated calls fail ex
       acpSessionId: 'acp-session-subset',
       envelope: requestEnvelope(taskBinding, 'acp-session-subset-request'),
     }),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+});
+
+test('server load cannot expand the session capability subset before or after close', async () => {
+  class ExpandingLoadRuntime extends DeterministicAcpRuntimeTransport {
+    override async load(input: AcpRuntimeLoadRequest): Promise<AcpRuntimeSession> {
+      const loaded = await super.load(input);
+      return {
+        ...loaded,
+        capabilities: [...loaded.capabilities, 'observe', 'request'],
+      };
+    }
+  }
+
+  const adapter = new AcpServerAdapter(serverBinding, new ExpandingLoadRuntime(serverBinding));
+  await adapter.initialize({
+    proof,
+    requestedCapabilities: serverBinding.allowedCapabilities,
+    requestedSessionKinds: ['task'],
+  });
+  const opened = await adapter.open({
+    acpSessionId: 'acp-load-subset',
+    proof,
+    binding: taskBinding,
+    requestedCapabilities: ['session.open'],
+  });
+  assert.deepEqual(opened.capabilities, ['session.open']);
+
+  const loaded = await adapter.load({
+    acpSessionId: 'acp-load-subset',
+    proof,
+    binding: taskBinding,
+    expectedExecutionEpoch: taskBinding.kind === 'task' ? taskBinding.executionEpoch : undefined,
+    reason: 'resume without expanding session capabilities',
+  });
+  assert.deepEqual(loaded.capabilities, ['session.open']);
+  await assert.rejects(
+    async () => {
+      for await (const _update of adapter.observe({ acpSessionId: 'acp-load-subset' })) {
+        // The capability check must fail before any observation is yielded.
+      }
+    },
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+  await assert.rejects(
+    () => adapter.request({
+      acpSessionId: 'acp-load-subset',
+      envelope: requestEnvelope(taskBinding, 'acp-load-subset-request'),
+    }),
+    (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
+  );
+
+  await adapter.close({ acpSessionId: 'acp-load-subset', reason: 'recover later' });
+  const recovered = await adapter.load({
+    acpSessionId: 'acp-load-subset',
+    proof,
+    binding: taskBinding,
+    expectedExecutionEpoch: taskBinding.kind === 'task' ? taskBinding.executionEpoch : undefined,
+    reason: 'recover without expanding session capabilities',
+  });
+  assert.deepEqual(recovered.capabilities, ['session.open']);
+  await assert.rejects(
+    async () => {
+      for await (const _update of adapter.observe({ acpSessionId: 'acp-load-subset' })) {
+        // The capability check must fail before any observation is yielded.
+      }
+    },
     (error) => error instanceof AcpAdapterError && error.code === 'capability-unavailable',
   );
 });

@@ -46,6 +46,11 @@ interface ServerSession {
   readonly scopeRef: string;
 }
 
+interface ClosedServerSession {
+  readonly receipt: AcpCloseReceipt;
+  readonly record: AcpSessionRecord;
+}
+
 function sessionEvidenceForId(acpSessionId: string, locator: string): EvidenceRef {
   return {
     evidenceId: {
@@ -160,7 +165,7 @@ export class AcpServerAdapter implements AcpServerPort {
   private readonly binding: AcpServerBinding;
   private readonly guard: AcpServerBindingGuard;
   private readonly sessions = new Map<string, ServerSession>();
-  private readonly closedSessions = new Map<string, AcpCloseReceipt>();
+  private readonly closedSessions = new Map<string, ClosedServerSession>();
   private negotiated?: AcpNegotiatedCapabilities;
 
   constructor(
@@ -313,7 +318,15 @@ export class AcpServerAdapter implements AcpServerPort {
       );
     }
     const existing = this.sessions.get(input.acpSessionId);
+    const closed = this.closedSessions.get(input.acpSessionId);
     if (existing) this.assertSessionBinding(existing, input.binding, 'load');
+    else if (closed) this.assertSessionBinding(closed, input.binding, 'load');
+    const sessionCapabilities = existing?.record.capabilities
+      ?? closed?.record.capabilities
+      ?? this.negotiated!.capabilities;
+    const requestedCapabilities = sessionCapabilities.filter((capability) => (
+      this.negotiated!.capabilities.includes(capability)
+    ));
     let opened;
     try {
       opened = await this.runtime.load({
@@ -322,7 +335,7 @@ export class AcpServerAdapter implements AcpServerPort {
         principalRef: input.proof.principalRef,
         scopeRef: input.proof.scopeRef,
         permissionRevision: input.proof.permissionRevision,
-        requestedCapabilities: this.negotiated!.capabilities,
+        requestedCapabilities,
         ...(input.expectedExecutionEpoch === undefined ? {} : { expectedExecutionEpoch: input.expectedExecutionEpoch }),
         ...(input.checkpointId === undefined ? {} : { checkpointId: input.checkpointId }),
         reason: input.reason,
@@ -367,7 +380,7 @@ export class AcpServerAdapter implements AcpServerPort {
       binding: opened.binding,
       runtimeId: opened.runtimeId,
       permissionRevision: opened.permissionRevision,
-      capabilities: [...opened.capabilities],
+      capabilities: opened.capabilities.filter((capability) => requestedCapabilities.includes(capability)),
       evidenceRefs: [...opened.evidenceRefs],
       openedAt: opened.openedAt,
     };
@@ -660,7 +673,9 @@ export class AcpServerAdapter implements AcpServerPort {
 
   async close(input: AcpCloseRequest): Promise<AcpCloseReceipt> {
     const prior = this.closedSessions.get(input.acpSessionId);
-    if (prior) return { ...prior, idempotent: true, evidenceRefs: [...prior.evidenceRefs] };
+    if (prior) {
+      return { ...prior.receipt, idempotent: true, evidenceRefs: [...prior.receipt.evidenceRefs] };
+    }
     const session = this.requireSession(input.acpSessionId);
     let result;
     try {
@@ -681,7 +696,10 @@ export class AcpServerAdapter implements AcpServerPort {
     };
     if (receipt.closed) {
       this.sessions.delete(input.acpSessionId);
-      this.closedSessions.set(input.acpSessionId, receipt);
+      this.closedSessions.set(input.acpSessionId, {
+        receipt,
+        record: this.cloneRecord(session.record),
+      });
     }
     return receipt;
   }
@@ -723,7 +741,11 @@ export class AcpServerAdapter implements AcpServerPort {
     }
   }
 
-  private assertSessionBinding(session: ServerSession, binding: AgentBinding, operation: string): void {
+  private assertSessionBinding(
+    session: Pick<ServerSession, 'record'>,
+    binding: AgentBinding,
+    operation: string,
+  ): void {
     if (!sameAgentBinding(session.record.binding, binding)) {
       throw acpError(
         'identity-mismatch',
@@ -745,7 +767,7 @@ export class AcpServerAdapter implements AcpServerPort {
           'ACP session is closed',
           ACP_SERVER_OWNER,
           { kind: 'recover', ref: 'open-new-session' },
-          this.closedSessions.get(acpSessionId)?.evidenceRefs ?? [],
+          this.closedSessions.get(acpSessionId)?.receipt.evidenceRefs ?? [],
           { binding: this.binding },
         );
       }
