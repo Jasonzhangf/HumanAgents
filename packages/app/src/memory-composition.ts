@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   EvidenceRef,
+  MemoryActorContext,
   MemoryProjectSourceSnapshot,
   MemoryScope,
   ProjectSourceUpdateProposal,
 } from '../../contracts/src/index.js';
-import type { RuntimePaths } from '../../config/src/index.js';
+import { id } from '../../contracts/src/index.js';
+import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
 import {
   DeterministicMemoryBackend,
   FilesystemMemorySourceAdapter,
@@ -81,6 +83,45 @@ export interface MemoryComposition {
   readonly agent: MemoryAgent;
   readonly admission: MemoryAnalysisAdmissionPort;
   readonly eventHandler: EventConsumerHandler;
+}
+
+export interface RuntimeMemoryCompositionInput {
+  readonly paths: RuntimePaths;
+  readonly configuration: LoadedConfiguration;
+}
+
+export async function composeRuntimeMemory(
+  input: RuntimeMemoryCompositionInput,
+): Promise<MemoryComposition> {
+  const projectKey = input.paths.projectKey;
+  const workspaceCwd = input.paths.workspaceCwd;
+  const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  const actor: MemoryActorContext = {
+    actorId: 'memory-agent',
+    roleId: 'memory',
+    permissions: ['memory.read', 'memory.propose'],
+    projectKey,
+  };
+  return composeMemory({
+    paths: input.paths,
+    projectKey,
+    workspaceCwd,
+    sessionsRoot: input.paths.sessionsRoot,
+    runNotesRoot: input.paths.runNotesRoot,
+    localSkillRoot: workspaceCwd,
+    localSkillName: basename(workspaceCwd),
+    auditPromptRoot,
+    auditPromptRef: input.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+    autoUpdate: input.configuration.effective.memory?.update.auto ?? false,
+    binding: {
+      bindingRef: `memory-binding:${projectKey}`,
+      projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
+      actor,
+    },
+  });
 }
 
 function digest(value: string): string {

@@ -137,7 +137,7 @@ export interface UiRuntimeServiceOptions {
   readonly journal?: UiRuntimeJournal;
   readonly now?: () => Date;
   readonly projectKey?: string;
-  readonly memory?: UiRuntimeMemoryComposition;
+  readonly memory: UiRuntimeMemoryComposition;
 }
 
 export interface ExplicitBrainReceipt {
@@ -224,11 +224,7 @@ export class UiRuntimeService {
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
-    this.memory = options.memory ?? {
-      coordinator: new MemoryCoordinator(),
-      backend: new DeterministicMemoryBackend(),
-      projectKey: options.projectKey ?? options.organId.value,
-    };
+    this.memory = options.memory;
     this.memoryInjection = new MemoryContextCapture(this.memory.backend);
     this.requirementSubmissions = new RequirementSubmissionOwner(
       this.confirmationLedger,

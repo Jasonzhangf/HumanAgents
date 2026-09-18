@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,7 @@ import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAge
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
+import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
 import { JsonlOrganJournal, JournalCommitConflictError } from '../../packages/adapters/jsonl/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
@@ -66,6 +67,22 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   return { root, controlRoot, workspace };
+}
+
+async function waitFor(assertion: () => void | Promise<void>, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+  while (Date.now() < deadline) {
+    try {
+      await assertion();
+      return;
+    } catch (error) {
+      last = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  if (last instanceof Error) throw last;
+  await assertion();
 }
 
 async function composeMemoryFixture(input: {
@@ -276,6 +293,170 @@ test('CLI host failures remain structured', async () => {
     assert.equal(typeof parsed.error.nextAction, 'string');
     return true;
   });
+});
+
+test('CLI serve composes rooted memory and keeps it across process restart', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const sourceRef = 'journal://cli-memory/restart-proof';
+  const sourceDigest = 'sha256:cli-memory-restart-proof';
+
+  const serve = async (): Promise<{
+    readonly process: {
+      readonly stdout: { on(event: 'data', listener: (chunk: Uint8Array) => void): unknown };
+      readonly once: {
+        (event: 'error', listener: (error: Error) => void): unknown;
+        (event: 'exit', listener: (code: number | null) => void): unknown;
+      };
+      readonly exitCode: number | null;
+      kill(signal?: string): boolean;
+    };
+    readonly stderrText: () => string;
+    readonly url: string;
+    readonly memoryRoot: string;
+  }> => {
+    const child = spawn(process.execPath, [
+      cli,
+      'serve',
+      '--workspace',
+      workspace,
+      '--control-root',
+      controlRoot,
+      '--mode',
+      'fake',
+      '--port',
+      '0',
+    ], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Uint8Array) => {
+      stderr += String(chunk);
+    });
+    const launched = await new Promise<{ readonly url: string; readonly memoryRoot: string }>((resolve, reject) => {
+      let output = '';
+      const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}`)), 5_000);
+      child.stdout.on('data', (chunk: Uint8Array) => {
+        output += String(chunk);
+        try {
+          const parsed = JSON.parse(output.trim()) as { readonly url?: string; readonly memoryRoot?: string };
+          if (parsed.url && parsed.memoryRoot) {
+            clearTimeout(timeout);
+            resolve({ url: parsed.url, memoryRoot: parsed.memoryRoot });
+          }
+        } catch {
+          // The CLI may print partial JSON while the process is starting.
+        }
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`serve exited before startup (${String(code)}): ${output}`));
+      });
+    });
+    return { process: child, stderrText: () => stderr, ...launched };
+  };
+
+  const stop = async (runtime: Awaited<ReturnType<typeof serve>>): Promise<void> => {
+    runtime.process.kill('SIGTERM');
+    await new Promise<void>((resolve) => {
+      if (runtime.process.exitCode !== null) {
+        resolve();
+        return;
+      }
+      runtime.process.once('exit', () => resolve());
+    });
+  };
+
+  const readMemoryContext = async (
+    runtime: Awaited<ReturnType<typeof serve>>,
+    taskId: string,
+    operationId: string,
+  ): Promise<{
+    readonly bindingId?: string;
+    readonly executionEpoch?: number;
+    readonly entries?: readonly { readonly sourceRef: string }[];
+  }> => {
+    let context: {
+      readonly bindingId?: string;
+      readonly executionEpoch?: number;
+      readonly entries?: readonly { readonly sourceRef: string }[];
+    } | undefined;
+    await waitFor(async () => {
+      const receipt = await fetch(`${runtime.url}/api/executions/${encodeURIComponent(operationId)}/memory-context`);
+      if (receipt.status !== 200) {
+        const task = await fetch(`${runtime.url}/api/tasks/${encodeURIComponent(taskId)}`);
+        const events = await fetch(`${runtime.url}/api/executions/${encodeURIComponent(operationId)}/events`);
+        throw new Error(`memory context ${receipt.status}: ${await task.text()}; events=${await events.text()}; stderr=${runtime.stderrText()}`);
+      }
+      context = await receipt.json() as typeof context;
+    });
+    assert.ok(context);
+    return context as NonNullable<typeof context>;
+  };
+
+  const first = await serve();
+  let taskId: string;
+  try {
+    const created = await fetch(`${first.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'rooted memory before restart' }),
+    });
+    assert.equal(created.status, 201);
+    const task = await created.json() as { readonly taskId: { readonly value: string } };
+    taskId = task.taskId.value;
+  } finally {
+    await stop(first);
+  }
+
+  const rooted = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence({
+    project: join(paths.memoryRoot, 'project'),
+    global: paths.globalMemoryRoot,
+  }));
+  await rooted.addContextEntry({
+    scope: { kind: 'task', organId: id('organ', 'humanagent-ui'), taskId: id('task', taskId) },
+    sourceRef,
+    sourceDigest,
+    text: 'rooted memory available after CLI restart',
+    layer: 'current',
+    summary: 'rooted memory available after CLI restart',
+  });
+
+  const second = await serve();
+  try {
+    assert.equal(second.memoryRoot, first.memoryRoot);
+    const started = await fetch(`${second.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after restart' }),
+    });
+    assert.equal(started.status, 202);
+    const operation = await started.json() as { readonly operationId: string; readonly executionEpoch: number };
+    const context = await readMemoryContext(second, taskId, operation.operationId);
+    assert.equal(context.bindingId, `memory-binding:${taskId}`);
+    assert.equal(context.executionEpoch, operation.executionEpoch);
+    assert.equal(context.entries?.some((entry) => entry.sourceRef === sourceRef), true);
+  } finally {
+    await stop(second);
+  }
+
+  const third = await serve();
+  try {
+    const started = await fetch(`${third.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after another restart' }),
+    });
+    assert.equal(started.status, 202);
+    const operation = await started.json() as { readonly operationId: string; readonly executionEpoch: number };
+    const context = await readMemoryContext(third, taskId, operation.operationId);
+    assert.equal(context.bindingId, `memory-binding:${taskId}`);
+    assert.equal(context.executionEpoch, operation.executionEpoch);
+    assert.equal(context.entries?.some((entry) => entry.sourceRef === sourceRef), true);
+  } finally {
+    await stop(third);
+  }
 });
 
 test('memory composition binds task and runtime identity to the rooted backend', async () => {

@@ -47,7 +47,7 @@ export interface UiRuntimeLaunchOptions {
   readonly host?: string;
   readonly portNumber?: number;
   readonly projectKey?: string;
-  readonly memory?: UiRuntimeMemoryComposition;
+  readonly memory: UiRuntimeMemoryComposition;
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -138,7 +138,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     providerError,
     journal: new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl')),
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
-    ...(options.memory ? { memory: options.memory } : {}),
+    memory: options.memory,
   });
   await service.hydrate();
   const server = await startUiRuntimeServer({

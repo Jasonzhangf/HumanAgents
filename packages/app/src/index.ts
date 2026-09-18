@@ -130,6 +130,7 @@ export { readRunManifest, writeRunManifest } from './run-manifest.js';
 export type { RunManifest } from './run-manifest.js';
 export {
   composeMemory,
+  composeRuntimeMemory,
   createProjectSourceUpdateOwner,
 } from './memory-composition.js';
 export type {
@@ -138,6 +139,7 @@ export type {
   MemoryEvidenceSnapshot,
   MemoryEvidenceSourcePort,
   MemoryProjectPatchReader,
+  RuntimeMemoryCompositionInput,
 } from './memory-composition.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
