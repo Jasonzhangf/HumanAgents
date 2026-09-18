@@ -526,6 +526,18 @@ function bindCoordinator(
 ): { readonly interactionBindingRef?: string } {
   const taskId = input.binding.taskId;
   const hasRuntimeBinding = input.agentRuntimeId !== undefined || input.roleId !== undefined;
+  if (input.binding.interactionScopeId !== undefined && (
+    taskId !== undefined
+    || input.assignmentId !== undefined
+    || hasRuntimeBinding
+  )) {
+    throw new AppLifecycleError(
+      'memory-binding-invalid',
+      'interaction binding cannot also use a task binding',
+      'use exactly one memory binding kind',
+      OWNER,
+    );
+  }
   if (input.assignmentId !== undefined && taskId === undefined) {
     throw new AppLifecycleError(
       'memory-binding-incomplete',
@@ -569,14 +581,6 @@ function bindCoordinator(
       operations: backend,
       injection: backend,
     });
-    if (hasRuntimeBinding) {
-      throw new AppLifecycleError(
-        'memory-binding-invalid',
-        'interaction binding cannot also use a task runtime binding',
-        'use exactly one memory binding kind',
-        OWNER,
-      );
-    }
     return { interactionBindingRef: interaction.bindingId };
   }
   if (hasRuntimeBinding) {

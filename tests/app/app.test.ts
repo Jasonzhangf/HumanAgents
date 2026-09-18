@@ -125,6 +125,7 @@ async function composeMemoryFixture(input: {
   readonly assignmentId?: string;
   readonly agentRuntimeId?: string;
   readonly roleId?: string;
+  readonly interactionScopeId?: string;
 }) {
   const organId = id('organ', 'memory-composition-organ');
   const taskId = id('task', 'memory-composition-task');
@@ -142,6 +143,7 @@ async function composeMemoryFixture(input: {
     executionEpoch: 1,
     scope: memoryScope,
     taskId,
+    ...(input.interactionScopeId === undefined ? {} : { interactionScopeId: input.interactionScopeId }),
     actor,
   };
   const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
@@ -577,6 +579,22 @@ test('memory composition rejects partial runtime bindings explicitly', async () 
     }),
     (error: unknown) => error instanceof AppLifecycleError
       && error.code === 'memory-binding-incomplete'
+      && error.ownerId === 'humanagent.app.memory-composition',
+  );
+});
+
+test('memory composition rejects mixed task and interaction bindings before registering coordinator state', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-mixed-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await assert.rejects(
+    () => composeMemoryFixture({
+      paths,
+      workspace,
+      assignmentId: 'assignment-memory-mixed',
+      interactionScopeId: 'interaction-memory-mixed',
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-binding-invalid'
       && error.ownerId === 'humanagent.app.memory-composition',
   );
 });
