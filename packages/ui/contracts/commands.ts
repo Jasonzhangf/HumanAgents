@@ -93,8 +93,8 @@ export type MemoryInteractionCommand =
     })
   | (UiCommandBase<'memory-interaction', 'review-skill'> & {
       readonly candidateId: string;
-      readonly decision: 'approve' | 'reject' | 'revise' | 'defer';
-      readonly revision?: string;
+      readonly decision: 'approve' | 'reject' | 'defer';
+      readonly decisionReason: string;
     })
   | UiCommandBase<'memory-interaction', 'navigate.task-detail'>;
 

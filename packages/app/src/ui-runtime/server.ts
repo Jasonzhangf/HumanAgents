@@ -166,6 +166,67 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       writeJson(response, 200, service.status());
       return;
     }
+    if (path === '/api/health/probe' && method === 'GET') {
+      writeJson(response, 200, await service.healthProbe());
+      return;
+    }
+    if (path === '/api/health/snapshot' && method === 'GET') {
+      writeJson(response, 200, await service.healthSnapshot());
+      return;
+    }
+    if (path === '/api/memory/summary' && method === 'GET') {
+      const namespace = url.searchParams.get('namespace');
+      if (namespace !== null && namespace !== 'project' && namespace !== 'global') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'summary field namespace must be project or global', 'provide project or global');
+      }
+      writeJson(response, 200, await service.memorySummary({
+        ...(namespace === null ? {} : { namespace }),
+        ...(url.searchParams.get('query') === null ? {} : { query: url.searchParams.get('query')! }),
+        ...(url.searchParams.get('limit') === null ? {} : { limit: requirePositiveInteger({ limit: Number(url.searchParams.get('limit')) }, 'limit') }),
+      }));
+      return;
+    }
+    if (path === '/api/memory/query' && method === 'GET') {
+      const namespace = url.searchParams.get('namespace');
+      if (namespace !== null && namespace !== 'project' && namespace !== 'global') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'query field namespace must be project or global', 'provide project or global');
+      }
+      writeJson(response, 200, await service.memoryQuery({
+        ...(namespace === null ? {} : { namespace }),
+        query: url.searchParams.get('query') ?? '',
+        ...(url.searchParams.get('limit') === null ? {} : { limit: requirePositiveInteger({ limit: Number(url.searchParams.get('limit')) }, 'limit') }),
+      }));
+      return;
+    }
+    if (path === '/api/memory/inspect' && method === 'POST') {
+      const body = await readBody(request);
+      writeJson(response, 200, await service.memoryInspect({
+        sourceRef: requireString(body, 'sourceRef'),
+        sourceDigest: requireString(body, 'sourceDigest'),
+      }));
+      return;
+    }
+    if (path === '/api/memory/compare' && method === 'POST') {
+      const body = await readBody(request);
+      writeJson(response, 200, await service.memoryCompare({
+        leftRef: requireString(body, 'leftRef'),
+        rightRef: requireString(body, 'rightRef'),
+      }));
+      return;
+    }
+    if (path === '/api/memory/review' && method === 'POST') {
+      const body = await readBody(request);
+      const decision = requireString(body, 'decision');
+      if (decision !== 'approve' && decision !== 'reject' && decision !== 'defer') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field decision must be approve, reject, or defer', 'provide a valid review decision');
+      }
+      writeJson(response, 200, await service.reviewSkillCandidate({
+        candidateId: requireString(body, 'candidateId'),
+        decision,
+        decisionReason: requireString(body, 'decisionReason'),
+      }));
+      return;
+    }
     if (path === '/api/dashboard' && method === 'GET') {
       writeJson(response, 200, service.dashboard());
       return;

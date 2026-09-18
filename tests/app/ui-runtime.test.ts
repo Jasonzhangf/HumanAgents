@@ -9,6 +9,9 @@ import {
   type Checkpoint,
   type EvidenceRef,
   type ExecutionRuntimePort,
+  type MemoryActorContext,
+  type MemoryScope,
+  type MemorySubmission,
   type ProviderBinding,
   type ProviderCapabilities,
   type ProviderCloseResult,
@@ -216,6 +219,366 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
       && error.httpStatus === 409,
   );
   assert.equal(service.memoryContextReceipt(second.operationId).executionEpoch, second.executionEpoch);
+});
+
+test('memory interaction HTTP routes expose typed summary, query, inspect, compare, and explicit review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-interaction-'));
+  const projectKey = 'project-ui-memory-interaction';
+  const scope: MemoryScope = { kind: 'organ', organId };
+  const actor: MemoryActorContext = {
+    actorId: 'memory-test-agent',
+    roleId: 'memory',
+    permissions: ['memory.read', 'memory.propose'],
+    projectKey,
+  };
+  const memory = new DeterministicMemoryBackend();
+  const coordinator = new MemoryCoordinator();
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator,
+      backend: memory,
+      projectKey,
+      roleId: 'memory',
+    },
+  });
+  try {
+    await memory.ingest({
+      scope,
+      sourceRef: 'journal://ui-memory-interaction/one',
+      sourceDigest: 'sha256:ui-memory-interaction-one',
+      text: 'memory interaction source one',
+    });
+    await memory.ingest({
+      scope,
+      sourceRef: 'journal://ui-memory-interaction/two',
+      sourceDigest: 'sha256:ui-memory-interaction-two',
+      text: 'memory interaction source two',
+    });
+    await memory.addCanonicalRecord({
+      memoryId: 'memory-ui-interaction-one',
+      namespace: 'project',
+      projectKey,
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'memory interaction approved record',
+      sourceRefs: ['journal://ui-memory-interaction/one', 'journal://ui-memory-interaction/two'],
+      sourceDigests: ['sha256:ui-memory-interaction-one', 'sha256:ui-memory-interaction-two'],
+      sourceScopeRef: projectKey,
+      relevanceReason: 'HTTP memory interaction test',
+    });
+
+    const summary = await fetch(`${runtime.server.url}/api/memory/summary`);
+    assert.equal(summary.status, 200);
+    const summaryBody = await summary.json() as {
+      readonly surface: string;
+      readonly summary: string;
+      readonly entries: readonly unknown[];
+    };
+    assert.equal(summaryBody.surface, 'memory-interaction');
+    assert.equal(summaryBody.summary, '未指定过滤条件');
+    assert.deepEqual(summaryBody.entries, []);
+
+    const query = await fetch(`${runtime.server.url}/api/memory/query?query=approved&limit=5`);
+    assert.equal(query.status, 200);
+    const queryBody = await query.json() as {
+      readonly entries: readonly { readonly memoryId: string; readonly sourceRefs: readonly string[] }[];
+      readonly indexVersion?: string;
+    };
+    assert.equal(queryBody.entries[0]?.memoryId, 'memory-ui-interaction-one');
+    assert.deepEqual(queryBody.entries[0]?.sourceRefs, [
+      'journal://ui-memory-interaction/one',
+      'journal://ui-memory-interaction/two',
+    ]);
+    assert.equal(queryBody.indexVersion, memory.indexVersion);
+
+    const inspect = await fetch(`${runtime.server.url}/api/memory/inspect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'journal://ui-memory-interaction/one',
+        sourceDigest: 'sha256:ui-memory-interaction-one',
+      }),
+    });
+    assert.equal(inspect.status, 200);
+    const inspectBody = await inspect.json() as { readonly content: string };
+    assert.equal(inspectBody.content, 'memory interaction source one');
+
+    const compare = await fetch(`${runtime.server.url}/api/memory/compare`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        leftRef: 'journal://ui-memory-interaction/one',
+        rightRef: 'journal://ui-memory-interaction/two',
+      }),
+    });
+    assert.equal(compare.status, 200);
+    const compareBody = await compare.json() as { readonly relation: string };
+    assert.equal(compareBody.relation, 'different');
+
+    const submission: MemorySubmission = {
+      submissionId: 'submission-ui-memory-interaction',
+      requestId: 'request-ui-memory-interaction',
+      operationId: id('operation', 'memory-interaction-submission'),
+      bindingRef: 'memory-binding:unused',
+      actor: {
+        ...actor,
+        permissions: ['memory.read', 'memory.propose'],
+      },
+      projectKey,
+      requestedKind: 'semantic',
+      contentRef: 'journal://ui-memory-interaction/one',
+      contentDigest: 'sha256:ui-memory-interaction-one',
+      evidenceRefs: ['journal://ui-memory-interaction/two'],
+      observation: 'memory interaction review candidate',
+      desiredScope: 'project',
+      reason: 'HTTP review test',
+      inputDigest: 'sha256:ui-memory-interaction-submission',
+    };
+    const submitted = await coordinator.submitCandidate({
+      ...submission,
+      bindingRef: `memory-binding:interaction:runtime:${projectKey}`,
+    });
+    assert.equal(submitted.status, 'ready');
+    const candidateId = submitted.status === 'ready' ? submitted.value.candidateId : undefined;
+    if (!candidateId) throw new Error('expected memory interaction candidate');
+
+    await assert.rejects(
+      () => memory.promoteCandidate({
+        candidateId,
+        from: 'project',
+        to: 'global',
+        actor: {
+          actorId: 'memory-promotion-test',
+          roleId: 'review',
+          permissions: ['memory.promote'],
+          projectKey,
+        },
+        reason: 'must wait for explicit review',
+        impactScope: 'all projects',
+        approvalRef: 'approval://ui-memory-interaction',
+        approvalDigest: 'sha256:ui-memory-interaction-approval',
+        sourceRefs: [],
+        sourceDigests: [],
+        promotedAt: '2026-09-18T00:00:00.000Z',
+      }),
+      /memory promotion requires an approved candidate/,
+    );
+
+    const review = await fetch(`${runtime.server.url}/api/memory/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        candidateId,
+        decision: 'approve',
+        decisionReason: 'HTTP review evidence is complete',
+      }),
+    });
+    assert.equal(review.status, 200);
+    const reviewBody = await review.json() as {
+      readonly candidateId: string;
+      readonly decision: string;
+      readonly decisionReason: string;
+    };
+    assert.equal(reviewBody.candidateId, candidateId);
+    assert.equal(reviewBody.decision, 'approve');
+    assert.equal(reviewBody.decisionReason, 'HTTP review evidence is complete');
+
+    const promoted = await memory.query({
+      requestId: 'request-ui-memory-promotion-check',
+      operationId: id('operation', 'memory-interaction-promotion-check'),
+      bindingRef: 'memory-binding:unused',
+      actor: {
+        actorId: 'memory-promotion-check',
+        roleId: 'review',
+        permissions: ['memory.read'],
+        projectKey,
+        crossProjectGrantRef: 'grant://ui-memory-interaction-global',
+      },
+      projectKey,
+      namespace: 'global',
+      query: 'memory interaction review candidate',
+      kinds: ['episodic', 'semantic', 'procedural'],
+      states: ['approved', 'active'],
+      limit: 5,
+      tokenBudget: 1000,
+      inputDigest: 'sha256:ui-memory-promotion-check',
+    });
+    assert.deepEqual(promoted.entries, []);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('memory interaction HTTP routes reject unknown detail and an invalid memory binding', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-errors-'));
+  const validRuntime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: testMemory('project-ui-memory-errors'),
+  });
+  try {
+    const unknownDetail = await fetch(`${validRuntime.server.url}/api/memory/inspect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'journal://ui-memory-errors/missing',
+        sourceDigest: 'sha256:ui-memory-errors-missing',
+      }),
+    });
+    assert.equal(unknownDetail.status, 404);
+    const unknownDetailBody = await unknownDetail.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
+    assert.equal(unknownDetailBody.error.code, 'memory-source-not-found');
+    assert.equal(unknownDetailBody.error.ownerId, 'memory-coordinator');
+  } finally {
+    await validRuntime.server.close();
+  }
+
+  const invalidRuntime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'invalid-checkpoints'),
+    evidenceRoot: join(root, 'invalid-evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      ...testMemory('project-ui-memory-errors'),
+      bindingRef: 'memory-binding:missing-ui-memory-errors',
+    },
+  });
+  try {
+    const invalidBinding = await fetch(`${invalidRuntime.server.url}/api/memory/query?query=memory`);
+    assert.equal(invalidBinding.status, 404);
+    const invalidBindingBody = await invalidBinding.json() as { readonly error: { readonly code: string } };
+    assert.equal(invalidBindingBody.error.code, 'memory-binding-missing');
+  } finally {
+    await invalidRuntime.server.close();
+  }
+});
+
+test('organ health probe and snapshot expose bounded dimensions, evidence, and independent lifecycle state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: testMemory('project-ui-organ-health'),
+  });
+  try {
+    for (const path of ['/api/health/probe', '/api/health/snapshot']) {
+      const response = await fetch(`${runtime.server.url}${path}`);
+      assert.equal(response.status, 200);
+      const body = await response.json() as {
+        readonly surface: string;
+        readonly organId: { readonly value: string };
+        readonly lifecycleState: string;
+        readonly healthState: string;
+        readonly checkedAt: string;
+        readonly expiresAt: string;
+        readonly stale: boolean;
+        readonly dimensions: readonly {
+          readonly dimension: string;
+          readonly status: string;
+          readonly evidenceRefs: readonly { readonly evidenceId: { readonly value: string } }[];
+          readonly measurements: readonly { readonly name: string; readonly value: string | number }[];
+        }[];
+        readonly evidenceRefs: readonly { readonly evidenceId: { readonly value: string } }[];
+      };
+      assert.equal(body.surface, 'organ-health');
+      assert.equal(body.organId.value, organId.value);
+      assert.equal(body.lifecycleState, 'ready');
+      assert.equal(body.healthState, 'healthy');
+      assert.equal(body.stale, false);
+      assert.match(body.checkedAt, /^\d{4}-\d{2}-\d{2}T/u);
+      assert.match(body.expiresAt, /^\d{4}-\d{2}-\d{2}T/u);
+      assert.equal(body.dimensions[0]?.dimension, 'readiness');
+      assert.equal(body.dimensions[0]?.status, 'healthy');
+      assert.equal(body.dimensions[0]?.measurements.find((measurement) => measurement.name === 'providerState')?.value, 'ready');
+      assert.ok((body.dimensions[0]?.evidenceRefs.length ?? 0) > 0);
+      assert.ok(body.evidenceRefs.length > 0);
+    }
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('expired organ health evidence is reported as stale unknown without changing lifecycle state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-stale-'));
+  const base = new FakeReplayExecutionRuntimePort({ binding });
+  const expired: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: async () => ({
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: binding.protocol,
+      state: 'ready',
+      capabilityDigest: binding.capabilityDigest,
+      version: 'stale-health-probe',
+      checkedAt: '2026-09-17T00:00:00.000Z',
+      expiresAt: '2026-09-17T00:01:00.000Z',
+      evidenceRefs: [evidence('expired-readiness', { organId })],
+    }),
+    capabilities: (value) => base.capabilities(value),
+    start: (input) => base.start(input),
+    resume: (input) => base.resume(input),
+    submit: (input) => base.submit(input),
+    observe: (input) => base.observe(input),
+    requestStop: (input) => base.requestStop(input),
+    settle: (input) => base.settle(input),
+    close: (value) => base.close(value),
+  };
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: expired,
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: testMemory('project-ui-organ-health-stale'),
+  });
+  try {
+    const response = await fetch(`${runtime.server.url}/api/health/probe`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      readonly lifecycleState: string;
+      readonly healthState: string;
+      readonly stale: boolean;
+      readonly dimensions: readonly { readonly status: string }[];
+    };
+    assert.equal(body.lifecycleState, 'ready');
+    assert.equal(body.healthState, 'unknown');
+    assert.equal(body.stale, true);
+    assert.equal(body.dimensions[0]?.status, 'unknown');
+  } finally {
+    await runtime.server.close();
+  }
 });
 
 test('memory-bound execution driver binds and attaches context before provider resume', async () => {
