@@ -112,6 +112,14 @@ function workResult(): WorkResult {
   };
 }
 
+function feedbackResult(executionEpoch: number, attempt: number): WorkResult {
+  return {
+    ...workResult(),
+    attempt,
+    executionEpoch,
+  };
+}
+
 class MemoryEventJournal implements EventJournalPort {
   readonly events: EventRecord[] = [];
 
@@ -261,6 +269,11 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
   assert.equal(dispatched.assignment.status, 'merged');
   assert.deepEqual(events.events.map((event) => event.class), ['data', 'data', 'control']);
   assert.deepEqual(events.events.map((event) => event.publisherId), ['m3-harness', 'm3-harness', 'm3-harness']);
+  const messageIds = events.events.map((event) => event.messageId);
+  assert.equal(new Set(messageIds).size, messageIds.length);
+  for (const event of events.events) {
+    assert.equal(event.messageId.includes(`:${dispatched.assignment.assignment.assignmentId}:1:1:`), true);
+  }
 
   const checkpoint: Checkpoint = {
     id: id('checkpoint', 'm3-checkpoint'),
@@ -329,4 +342,50 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
   assert.equal(projection.taskId.value, taskId.value);
   assert.equal(projection.agentCards[0]?.outputPreview, 'M3 modules assembled');
   assert.equal(projection.runtimePool.runtimes[0]?.runtimeId, 'm3-runtime');
+});
+
+test('M3 feedback identity is idempotent per event and distinct across execution epochs', async () => {
+  const { assembly, events } = createAssembly();
+  const oldAssignment = assignment({ executionEpoch: 1 });
+  const retryAssignment = assignment({ attempt: 2, executionEpoch: 1 });
+  const newAssignment = assignment({ executionEpoch: 2 });
+
+  await assembly.feedbackPort.publish({
+    kind: 'work-result',
+    assignment: oldAssignment,
+    result: feedbackResult(1, 1),
+    ownerId: 'm3-orchestration',
+    scope,
+    evidenceRefs: [evidence('work')],
+  });
+  await assembly.feedbackPort.publish({
+    kind: 'work-result',
+    assignment: oldAssignment,
+    result: feedbackResult(1, 1),
+    ownerId: 'm3-orchestration',
+    scope,
+    evidenceRefs: [evidence('work')],
+  });
+  await assembly.feedbackPort.publish({
+    kind: 'work-result',
+    assignment: retryAssignment,
+    result: feedbackResult(1, 2),
+    ownerId: 'm3-orchestration',
+    scope,
+    evidenceRefs: [evidence('work')],
+  });
+  await assembly.feedbackPort.publish({
+    kind: 'work-result',
+    assignment: newAssignment,
+    result: feedbackResult(2, 1),
+    ownerId: 'm3-orchestration',
+    scope,
+    evidenceRefs: [evidence('work')],
+  });
+
+  assert.equal(events.events[0]?.messageId, events.events[1]?.messageId);
+  assert.equal(new Set(events.events.map((event) => event.messageId)).size, 3);
+  assert.equal(events.events[0]?.messageId.includes(':m3-assignment:1:1:'), true);
+  assert.equal(events.events[2]?.messageId.includes(':m3-assignment:2:1:'), true);
+  assert.equal(events.events[3]?.messageId.includes(':m3-assignment:1:2:'), true);
 });

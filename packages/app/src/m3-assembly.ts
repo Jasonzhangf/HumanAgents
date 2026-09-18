@@ -80,13 +80,18 @@ function eventSummary(event: OrchestrationFeedbackEvent): string {
 
 function eventIdentity(event: OrchestrationFeedbackEvent): string {
   const evidence = event.evidenceRefs.map((ref) => ref.evidenceId.value).join(',') || 'no-evidence';
+  const assignment = [
+    event.assignment.assignmentId,
+    event.assignment.attempt,
+    event.assignment.executionEpoch,
+  ].join(':');
   switch (event.kind) {
     case 'review-feedback':
-      return `${event.kind}:${event.reviewResult.resultId}:${evidence}`;
+      return `${event.kind}:${assignment}:${event.reviewResult.resultId}:${evidence}`;
     case 'merge-outcome':
-      return `${event.kind}:${event.assignment.assignmentId}:${event.outcome.status}:${evidence}`;
+      return `${event.kind}:${assignment}:${event.outcome.status}:${evidence}`;
     default:
-      return `${event.kind}:${event.assignment.assignmentId}:${event.assignment.attempt}:${evidence}`;
+      return `${event.kind}:${assignment}:${evidence}`;
   }
 }
 
