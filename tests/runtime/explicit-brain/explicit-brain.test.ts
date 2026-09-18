@@ -12,6 +12,7 @@ import {
   validateChannelBinding,
   type BugReportArguments,
   type EvidenceRef,
+  type MemoryInteractionPort,
   type MemoryOperationRequestedEvent,
   type RequirementEnvelope,
   type ToolIntent,
@@ -34,6 +35,8 @@ import {
   ExplicitBrainDecisionError,
   ExplicitBrainDecisionExecutor,
   ExplicitBrainAdmissionError,
+  ExplicitBrainMemoryToolError,
+  ExplicitBrainMemoryToolExecutor,
   ExplicitBrainRouterError,
   MemoryOperationProjection,
   MemoryOperationProjectionError,
@@ -1666,6 +1669,272 @@ test('memory save candidate enriches runtime-only identity instead of accepting 
       context: { ...context, projectKey: 'project:other' },
     }),
     /memory actor project does not match runtime project/,
+  );
+});
+
+test('memory tool executor dispatches admitted capabilities through typed memory owners', async () => {
+  const calls: string[] = [];
+  const interaction: MemoryInteractionPort = {
+    async open() {
+      throw new Error('not used');
+    },
+    async query(input) {
+      calls.push(`query:${input.namespace}`);
+      return {
+        handle: {
+          handleId: 'memory-view:test',
+          actorId: 'explicit-brain',
+          projectKey: 'project:humanagent',
+          namespace: input.namespace,
+          readOnly: true as const,
+        },
+        entries: [{
+          memoryId: 'memory:alpha',
+          namespace: 'project' as const,
+          kind: 'semantic' as const,
+          state: 'approved' as const,
+          summary: 'alpha',
+          sourceRefs: ['source:alpha'],
+          sourceDigests: ['sha256:alpha'],
+          projectKey: 'project:humanagent',
+          sourceScopeRef: 'scope:organ-a',
+          relevanceReason: 'exact source',
+        }],
+        omitted: [],
+      };
+    },
+    async resolveSource(input) {
+      calls.push(`resolve:${input.sourceRef}`);
+      return {
+        sourceRef: input.sourceRef,
+        sourceDigest: 'sha256:alpha',
+      };
+    },
+    async inspect(input) {
+      calls.push(`inspect:${input.sourceDigest}`);
+      return {
+        handle: {
+          handleId: 'memory-view:test',
+          actorId: 'explicit-brain',
+          projectKey: 'project:humanagent',
+          namespace: 'project' as const,
+          readOnly: true as const,
+        },
+        sourceRef: input.sourceRef,
+        sourceDigest: input.sourceDigest,
+        content: 'alpha',
+      };
+    },
+    async compare(input) {
+      calls.push(`compare:${input.leftRef}:${input.rightRef}`);
+      return {
+        handle: {
+          handleId: 'memory-view:test',
+          actorId: 'explicit-brain',
+          projectKey: 'project:humanagent',
+          namespace: 'project' as const,
+          readOnly: true as const,
+        },
+        leftRef: input.leftRef,
+        rightRef: input.rightRef,
+        relation: 'same' as const,
+        evidenceRefs: [input.leftRef, input.rightRef],
+      };
+    },
+    async review() {
+      throw new Error('not used');
+    },
+    async promote() {
+      throw new Error('not used');
+    },
+    async planForgetting() {
+      throw new Error('not used');
+    },
+  };
+  const executor = new ExplicitBrainMemoryToolExecutor({
+    binding: binding(),
+    interaction,
+    submissions: {
+      async submitCandidate(submission) {
+        calls.push(`submit:${submission.submissionId}`);
+        return {
+          submissionId: submission.submissionId,
+          status: 'accepted',
+          operationId: submission.operationId,
+          nextAction: 'wait-analysis',
+        };
+      },
+    },
+    context: {
+      requestId: 'request:memory-tool',
+      operationId,
+      projectKey: 'project:humanagent',
+      actor: {
+        actorId: 'explicit-brain',
+        roleId: 'interaction',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: 'project:humanagent',
+      },
+      contentDigest: 'sha256:content-a',
+      observation: 'explicit tool invocation',
+    },
+  });
+  const receipt = (toolIntent: ToolIntent) => ({
+    admitted: true as const,
+    toolRef: toolIntent.toolRef as
+      | 'memory.search'
+      | 'memory.inspect'
+      | 'memory.compare'
+      | 'memory.save_candidate',
+    capabilityRef: toolIntent.toolRef as
+      | 'memory.search'
+      | 'memory.inspect'
+      | 'memory.compare'
+      | 'memory.save_candidate',
+    bindingRef: 'binding-explicit-brain',
+    executionEpoch: 4,
+    argumentsDigest: toolIntent.argumentsDigest,
+  });
+
+  const searchIntent = intent('memory.search', { query: 'alpha', limit: 3 });
+  const view = await executor.execute(searchIntent, receipt(searchIntent));
+  assert.equal('entries' in view ? view.entries[0]?.summary : undefined, 'alpha');
+
+  const inspectIntent = intent('memory.inspect', { sourceRef: 'source:alpha' });
+  const detail = await executor.execute(inspectIntent, receipt(inspectIntent));
+  assert.equal('content' in detail ? detail.content : undefined, 'alpha');
+  assert.equal('content' in detail ? detail.sourceDigest : undefined, 'sha256:alpha');
+
+  const compareIntent = intent('memory.compare', {
+    leftRef: 'source:alpha',
+    rightRef: 'source:beta',
+  });
+  const comparison = await executor.execute(compareIntent, receipt(compareIntent));
+  assert.equal('relation' in comparison ? comparison.relation : undefined, 'same');
+
+  const saveIntent = intent('memory.save_candidate', {
+    submissionId: 'submission:memory-tool',
+    requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
+    contentRef: 'content:memory-tool',
+    evidenceRefs: ['source:memory-tool'],
+    desiredScope: 'project',
+    reason: 'explicit request',
+    bindingRef: 'model-supplied-binding',
+    projectKey: 'model-supplied-project',
+    actor: {
+      actorId: 'model-supplied-actor',
+      roleId: 'system',
+      permissions: ['memory.promote'],
+      projectKey: 'model-supplied-project',
+    },
+  });
+  const submission = await executor.execute(saveIntent, receipt(saveIntent));
+  assert.equal('submissionId' in submission ? submission.submissionId : undefined, 'submission:memory-tool');
+  assert.deepEqual(calls, [
+    'query:project',
+    'resolve:source:alpha',
+    'inspect:sha256:alpha',
+    'compare:source:alpha:source:beta',
+    'submit:submission:memory-tool',
+  ]);
+
+  await assert.rejects(
+    () => {
+      const unsupported = intent('task.query', { queryRef: 'task:alpha' });
+      return executor.execute(unsupported, receipt(unsupported));
+    },
+    (error: unknown) => error instanceof ExplicitBrainMemoryToolError
+      && error.code === 'unsupported-tool',
+  );
+
+  const denied = new ExplicitBrainMemoryToolExecutor({
+    binding: binding(),
+    interaction: {
+      ...interaction,
+      async query() {
+        throw new Error('memory backend unavailable');
+      },
+    },
+    submissions: {
+      async submitCandidate() {
+        throw new Error('not used');
+      },
+    },
+    context: {
+      requestId: 'request:memory-tool-denied',
+      operationId,
+      projectKey: 'project:humanagent',
+      actor: {
+        actorId: 'explicit-brain',
+        roleId: 'interaction',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: 'project:humanagent',
+      },
+      contentDigest: 'sha256:content-denied',
+      observation: 'backend failure',
+    },
+  });
+  await assert.rejects(
+    () => denied.execute(searchIntent, receipt(searchIntent)),
+    /memory backend unavailable/,
+  );
+
+  const drifted = new ExplicitBrainMemoryToolExecutor({
+    binding: binding(),
+    interaction: {
+      ...interaction,
+      async resolveSource(input) {
+        return {
+          sourceRef: input.sourceRef,
+          sourceDigest: 'sha256:drifted',
+        };
+      },
+      async inspect(input) {
+        if (input.sourceDigest !== 'sha256:alpha') {
+          throw new Error(`memory source digest drifted: ${input.sourceRef}`);
+        }
+        return interaction.inspect(input);
+      },
+    },
+    submissions: {
+      async submitCandidate() {
+        throw new Error('not used');
+      },
+    },
+    context: {
+      requestId: 'request:memory-tool-drifted',
+      operationId,
+      projectKey: 'project:humanagent',
+      actor: {
+        actorId: 'explicit-brain',
+        roleId: 'interaction',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: 'project:humanagent',
+      },
+      contentDigest: 'sha256:content-drifted',
+      observation: 'digest drift',
+    },
+  });
+  await assert.rejects(
+    () => drifted.execute(inspectIntent, receipt(inspectIntent)),
+    (error: unknown) => error instanceof Error
+      && error.message === 'memory source digest drifted: source:alpha',
+  );
+
+  await assert.rejects(
+    () => executor.execute(inspectIntent, { ...receipt(inspectIntent), bindingRef: 'binding-other' }),
+    (error: unknown) => error instanceof ExplicitBrainMemoryToolError
+      && error.code === 'invalid-admission-receipt',
+  );
+  await assert.rejects(
+    () => executor.execute(inspectIntent, {
+      ...receipt(inspectIntent),
+      toolRef: 'memory.compare',
+      capabilityRef: 'memory.compare',
+    }),
+    (error: unknown) => error instanceof ExplicitBrainMemoryToolError
+      && error.code === 'invalid-admission-receipt',
   );
 });
 

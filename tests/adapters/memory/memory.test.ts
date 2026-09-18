@@ -61,6 +61,33 @@ test('memory backend performs exact/full-text search, inspect, and compare', asy
   assert.deepEqual(await memory.compare({ leftRef: 'journal://task-a/1', rightRef: 'missing' }), { relation: 'unknown' });
 });
 
+test('memory query can resolve a canonical record by exact source ref', async () => {
+  const memory = new DeterministicMemoryBackend();
+  await memory.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/source',
+    sourceDigest: 'sha256:source',
+    text: 'source content',
+  });
+  await memory.addCanonicalRecord({
+    memoryId: 'memory-source',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'summary does not contain the source ref',
+    sourceRefs: ['journal://task-a/source'],
+    sourceDigests: ['sha256:source'],
+    taskId: task,
+    sourceScopeRef: 'task:organ-a:task-a',
+    relevanceReason: 'exact source',
+  });
+
+  const queried = await memory.query(memoryQuery({ query: 'journal://task-a/source' }));
+  assert.equal(queried.entries.length, 1);
+  assert.equal(queried.entries[0]?.memoryId, 'memory-source');
+});
+
 test('memory backend search, inspect, and context failures are explicit', async () => {
   const memory = new DeterministicMemoryBackend();
   await assert.rejects(memory.search({ scope: taskScope, query: '', limit: 1 }), ContractError);

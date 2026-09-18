@@ -3,12 +3,15 @@ import test from 'node:test';
 import {
   MemoryCoordinator,
   MemoryCoordinatorError,
+  createMemoryInteractionPort,
   type SkillCandidate,
 } from '../../../packages/runtime/src/memory/index.js';
 import {
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
   type MemoryOperationsPort,
+  type MemoryQueryRequest,
+  type MemoryQueryResponse,
   type MemoryScope,
   type NoveltyResult,
   type RecurrenceResult,
@@ -62,6 +65,7 @@ function makePorts(overrides: {
   readonly recallFailure?: () => never;
   readonly attachFailure?: () => never;
   readonly searchFailure?: () => never;
+  readonly query?: (input: MemoryQueryRequest) => Promise<MemoryQueryResponse>;
 } = {}): {
   readonly operations: MemoryOperationsPort;
   readonly injection: AgentMemoryContextInjectionPort;
@@ -85,12 +89,13 @@ function makePorts(overrides: {
       if (overrides.searchFailure) overrides.searchFailure();
       return [{ sourceRef: 'journal://task-a/current', summary: 'directive summary' }];
     },
-    inspect: async (input) => ({ sourceRef: input.sourceRef, sourceDigest: 'sha256:current', text: 'text' }),
+    inspect: async (input) => ({ sourceRef: input.sourceRef, sourceDigest: 'sha256:current', text: 'source text' }),
     compare: async () => ({ relation: 'same' }),
     detectNovelty: async (input): Promise<NoveltyResult> => ({ classification: 'novel', matchedRefs: [], reason: input.candidateRef }),
     detectRecurrence: async (): Promise<RecurrenceResult> => ({ classification: 'recurring', occurrences: [{ ref: 'journal://task-a/recur', digest: 'sha256:recur' }], reason: 'observed twice' }),
     query: async (input) => {
       calls.query += 1;
+      if (overrides.query) return overrides.query(input);
       return { requestId: input.requestId, status: 'ready', entries: [], sourceFactRef: 'memory-query:test', omitted: [] };
     },
     submitCandidate: async (input) => ({
@@ -535,6 +540,36 @@ test('memory coordinator reuses a compatible project backend and rejects conflic
   assert.equal(retry.taskId.value, thirdTask.value);
 });
 
+test('memory coordinator keeps binding-local refs, owners, and injections out of project backend identity', () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const otherPorts = makePorts();
+  coordinator.bindInteraction({
+    interactionScopeId: 'interaction-local-binding',
+    projectKey: taskProjectKey,
+    backendRef: 'memory://interaction',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: ports.injection,
+    ownerId: 'interaction-owner',
+  });
+
+  const taskReceipt = coordinator.bindTask({
+    taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
+    scope: taskScope,
+    backendRef: 'memory://task',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: otherPorts.injection,
+    ownerId: 'task-owner',
+  });
+
+  assert.equal(taskReceipt.taskId.value, task.value);
+});
+
 test('memory coordinator resolves candidate operations by canonical candidate identity, not insertion order', async () => {
   const coordinator = new MemoryCoordinator();
   const firstPorts = makePorts();
@@ -918,4 +953,476 @@ test('memory coordinator marks skill candidates review-required without auto-ing
   assert.equal(ports.calls.ingest, 0);
   assert.throws(() => coordinator.proposeSkillCandidate(makeCandidate({ evidenceRefs: [] })), MemoryCoordinatorError);
   assert.throws(() => coordinator.proposeSkillCandidate(makeCandidate({ uniqueness: 'novel' as never })), MemoryCoordinatorError);
+});
+
+test('memory interaction port dispatches typed views and review through the coordinator', async () => {
+  const { coordinator, ports } = setup();
+  const actor = {
+    actorId: 'interaction-agent',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read', 'memory.propose', 'memory.review'] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+    now: () => '2026-09-17T00:00:00.000Z',
+  });
+
+  const handle = await interaction.open({
+    actor,
+    projectKey: taskProjectKey,
+    namespace: 'project',
+    taskId: task,
+  });
+  assert.equal(handle.readOnly, true);
+  assert.equal(handle.actorId, actor.actorId);
+
+  const view = await interaction.query({
+    actor,
+    projectKey: taskProjectKey,
+    namespace: 'project',
+    query: 'directive',
+    limit: 5,
+  });
+  assert.equal(view.handle.projectKey, taskProjectKey);
+  assert.equal(ports.calls.query, 1);
+
+  const submission = {
+    submissionId: 'interaction-submission-a',
+    requestId: 'interaction-request-a',
+    operationId: id('operation', 'interaction-operation-a'),
+    bindingRef: 'memory-binding:task-a',
+    actor,
+    projectKey: taskProjectKey,
+    taskId: task,
+    requestedKind: 'semantic' as const,
+    candidateCategory: 'project-fact' as const,
+    contentRef: 'asset://memory/interaction-candidate-a',
+    contentDigest: 'sha256:interaction-candidate-a',
+    evidenceRefs: ['journal://task-a/1'],
+    observation: 'checkpoint commit is durable',
+    desiredScope: 'project' as const,
+    reason: 'observed at a lifecycle boundary',
+    inputDigest: 'sha256:interaction-input-a',
+  };
+  const submitted = await coordinator.submitCandidate(submission);
+  assert.equal(submitted.status, 'ready');
+  if (submitted.status !== 'ready' || submitted.value.candidateId === undefined) {
+    throw new Error('expected interaction submission candidate');
+  }
+
+  const reviewed = await interaction.review({
+    actor,
+    candidateId: submitted.value.candidateId,
+    decision: 'approve',
+    decisionReason: 'evidence is complete',
+  });
+  assert.equal(reviewed.candidateId, submitted.value.candidateId);
+  assert.equal(ports.calls.review, 1);
+
+  await assert.rejects(
+    () => interaction.open({
+      actor,
+      projectKey: taskProjectKey,
+      namespace: 'global',
+      taskId: task,
+    }),
+    /global memory view cannot be bound to a task/,
+  );
+});
+
+test('memory interaction port verifies source digest pairs and compares by source digest', async () => {
+  const entries = {
+    'journal://task-a/1': {
+      memoryId: 'memory-a',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'same summary',
+      sourceRefs: ['journal://task-a/1'],
+      sourceDigests: ['sha256:current'],
+      projectKey: taskProjectKey,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+    'journal://task-a/2': {
+      memoryId: 'memory-b',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'same summary',
+      sourceRefs: ['journal://task-a/2'],
+      sourceDigests: ['sha256:current'],
+      projectKey: taskProjectKey,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+    'journal://task-a/3': {
+      memoryId: 'memory-c',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'different summary',
+      sourceRefs: ['journal://task-a/3'],
+      sourceDigests: ['sha256:different'],
+      projectKey: taskProjectKey,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+  } as const;
+  const { coordinator, ports } = setup({
+    ports: makePorts({
+      query: async (input) => ({
+        requestId: input.requestId,
+        status: 'ready' as const,
+        entries: [entries[input.query as keyof typeof entries]].filter(Boolean),
+        sourceFactRef: 'memory-query:test',
+        omitted: [],
+      }),
+    }),
+  });
+  const actor = {
+    actorId: 'interaction-inspect-agent',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+    now: () => '2026-09-17T00:00:00.000Z',
+  });
+
+  const detail = await interaction.inspect({
+    actor,
+    sourceRef: 'journal://task-a/1',
+    sourceDigest: 'sha256:current',
+  });
+  assert.equal(detail.content, 'source text');
+  assert.equal(detail.sourceDigest, 'sha256:current');
+
+  await assert.rejects(
+    () => interaction.inspect({
+      actor,
+      sourceRef: 'journal://task-a/1',
+      sourceDigest: 'sha256:wrong',
+    }),
+    /memory source is unavailable/,
+  );
+
+  const same = await interaction.compare({
+    actor,
+    leftRef: 'journal://task-a/1',
+    rightRef: 'journal://task-a/2',
+  });
+  assert.equal(same.relation, 'same');
+  assert.deepEqual(same.evidenceRefs, ['journal://task-a/1', 'journal://task-a/2']);
+
+  const different = await interaction.compare({
+    actor,
+    leftRef: 'journal://task-a/1',
+    rightRef: 'journal://task-a/3',
+  });
+  assert.equal(different.relation, 'different');
+
+  const unknown = await interaction.compare({
+    actor,
+    leftRef: 'journal://task-a/1',
+    rightRef: 'journal://task-a/missing',
+  });
+  assert.equal(unknown.relation, 'unknown');
+});
+
+test('memory interaction port resolves source identity and reads full source content through the bound backend', async () => {
+  const { coordinator } = setup({
+    ports: makePorts({
+      query: async (input) => ({
+        requestId: input.requestId,
+        status: 'ready' as const,
+        entries: (() => {
+          assert.equal(/^memory-source-[0-9a-f]{24}$/.test(input.operationId.value), true);
+          return [{
+            memoryId: 'memory-project-a',
+            namespace: 'project' as const,
+            kind: 'semantic' as const,
+            state: 'approved' as const,
+            summary: 'project-a source',
+            sourceRefs: ['journal://task-a/1'],
+            sourceDigests: ['sha256:current'],
+            projectKey: taskProjectKey,
+            taskId: task,
+            sourceScopeRef: `task:${organ.value}:${task.value}`,
+            relevanceReason: 'exact source',
+          }];
+        })(),
+        sourceFactRef: 'memory-query:test',
+        omitted: [],
+      }),
+    }),
+  });
+  const actor = {
+    actorId: 'interaction-source-resolver',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+  });
+
+  const resolved = await interaction.resolveSource({
+    actor,
+    projectKey: taskProjectKey,
+    sourceRef: 'journal://task-a/1',
+  });
+  assert.deepEqual(resolved, {
+    sourceRef: 'journal://task-a/1',
+    sourceDigest: 'sha256:current',
+  });
+
+  const detail = await interaction.inspect({
+    actor,
+    sourceRef: 'journal://task-a/1',
+    sourceDigest: resolved.sourceDigest,
+  });
+  assert.equal(detail.content, 'source text');
+});
+
+test('memory interaction port authorizes full source reads through the binding project and task scope', async () => {
+  const entries = {
+    'journal://task-a/1': {
+      memoryId: 'memory-project-a',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'project-a source',
+      sourceRefs: ['journal://task-a/1'],
+      sourceDigests: ['sha256:current'],
+      projectKey: taskProjectKey,
+      taskId: task,
+      sourceScopeRef: `task:${organ.value}:${task.value}`,
+      relevanceReason: 'exact source',
+    },
+    'journal://project-b/1': {
+      memoryId: 'memory-project-b',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'project-b source',
+      sourceRefs: ['journal://project-b/1'],
+      sourceDigests: ['sha256:project-b'],
+      projectKey: 'project-b',
+      sourceScopeRef: 'task:organ-b:task-b',
+      relevanceReason: 'exact source',
+    },
+    'journal://global/1': {
+      memoryId: 'memory-global',
+      namespace: 'global' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'global source',
+      sourceRefs: ['journal://global/1'],
+      sourceDigests: ['sha256:global'],
+      sourceScopeRef: 'global',
+      relevanceReason: 'exact source',
+    },
+    'journal://task-a/other': {
+      memoryId: 'memory-other-task',
+      namespace: 'project' as const,
+      kind: 'semantic' as const,
+      state: 'approved' as const,
+      summary: 'other task source',
+      sourceRefs: ['journal://task-a/other'],
+      sourceDigests: ['sha256:other-task'],
+      projectKey: taskProjectKey,
+      taskId: otherTask,
+      sourceScopeRef: `task:${organ.value}:${otherTask.value}`,
+      relevanceReason: 'exact source',
+    },
+  } as const;
+  const { coordinator, ports } = setup({
+    ports: makePorts({
+      query: async (input) => ({
+        requestId: input.requestId,
+        status: 'ready' as const,
+        entries: [entries[input.query as keyof typeof entries]].filter((entry) => (
+          entry !== undefined
+          && entry.namespace === input.namespace
+          && (input.namespace === 'global' || ('projectKey' in entry && entry.projectKey === input.projectKey))
+          && (input.taskId === undefined || (
+            'taskId' in entry
+            && entry.taskId?.scope === input.taskId.scope
+            && entry.taskId.value === input.taskId.value
+          ))
+        )),
+        sourceFactRef: 'memory-query:test',
+        omitted: [],
+      }),
+    }),
+  });
+  const taskActor = {
+    actorId: 'interaction-task-source',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: taskProjectKey,
+  };
+  const taskInteraction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+  });
+
+  const own = await taskInteraction.resolveSource({
+    actor: taskActor,
+    projectKey: taskProjectKey,
+    sourceRef: 'journal://task-a/1',
+  });
+  assert.equal(own.sourceDigest, 'sha256:current');
+  await assert.rejects(
+    () => taskInteraction.resolveSource({
+      actor: taskActor,
+      projectKey: taskProjectKey,
+      sourceRef: 'journal://project-b/1',
+    }),
+    /memory source is not visible in the bound scope/,
+  );
+  await assert.rejects(
+    () => taskInteraction.resolveSource({
+      actor: taskActor,
+      projectKey: taskProjectKey,
+      sourceRef: 'journal://global/1',
+    }),
+    /memory source is not visible in the bound scope/,
+  );
+  await assert.rejects(
+    () => taskInteraction.resolveSource({
+      actor: taskActor,
+      projectKey: taskProjectKey,
+      sourceRef: 'journal://task-a/other',
+    }),
+    /memory source is not visible in the bound scope/,
+  );
+
+  const projectCoordinator = new MemoryCoordinator();
+  const interactionBinding = projectCoordinator.bindInteraction({
+    interactionScopeId: 'interaction-project-a',
+    projectKey: taskProjectKey,
+    backendRef: 'memory://fake',
+    operations: ports.operations,
+    injection: ports.injection,
+  });
+  const projectInteraction = createMemoryInteractionPort({
+    coordinator: projectCoordinator,
+    bindingFor: ({ projectKey, namespace }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, bindingRef: interactionBinding.bindingId }
+        : undefined
+    ),
+  });
+  const projectSource = await projectInteraction.resolveSource({
+    actor: { ...taskActor, actorId: 'interaction-project-source' },
+    projectKey: taskProjectKey,
+    sourceRef: 'journal://task-a/1',
+  });
+  assert.equal(projectSource.sourceDigest, 'sha256:current');
+  await assert.rejects(
+    () => projectInteraction.resolveSource({
+      actor: { ...taskActor, actorId: 'interaction-project-source-global' },
+      projectKey: taskProjectKey,
+      sourceRef: 'journal://global/1',
+    }),
+    /memory source is not visible in the bound scope/,
+  );
+});
+
+test('memory interaction inspect rejects a digest that does not match the authorized source', async () => {
+  const { coordinator } = setup({
+    ports: makePorts({
+      query: async (input) => ({
+        requestId: input.requestId,
+        status: 'ready' as const,
+        entries: [{
+          memoryId: 'memory-project-a',
+          namespace: 'project' as const,
+          kind: 'semantic' as const,
+          state: 'approved' as const,
+          summary: 'project-a source',
+          sourceRefs: ['journal://task-a/1'],
+          sourceDigests: ['sha256:current'],
+          projectKey: taskProjectKey,
+          taskId: task,
+          sourceScopeRef: `task:${organ.value}:${task.value}`,
+          relevanceReason: 'exact source',
+        }],
+        sourceFactRef: 'memory-query:test',
+        omitted: [],
+      }),
+    }),
+  });
+  const actor = {
+    actorId: 'interaction-digest-drift',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+  });
+  await assert.rejects(
+    () => interaction.inspect({
+      actor,
+      sourceRef: 'journal://task-a/1',
+      sourceDigest: 'sha256:wrong',
+    }),
+    /memory source is unavailable/,
+  );
+});
+
+test('memory interaction compare preserves coordinator denial instead of returning unknown', async () => {
+  const { coordinator } = setup();
+  const actor = {
+    actorId: 'interaction-denied-agent',
+    roleId: 'interaction' as const,
+    permissions: [] as const,
+    projectKey: taskProjectKey,
+  };
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace, taskId }) => (
+      projectKey === taskProjectKey && namespace === 'project'
+        ? { projectKey, namespace, ...(taskId === undefined ? {} : { taskId }), bindingRef: 'memory-binding:task-a' }
+        : undefined
+    ),
+  });
+
+  await assert.rejects(
+    () => interaction.compare({
+      actor,
+      leftRef: 'journal://task-a/1',
+      rightRef: 'journal://task-a/2',
+    }),
+    /memory-capability-denied/,
+  );
 });

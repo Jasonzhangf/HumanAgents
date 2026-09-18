@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   EvidenceRef,
   MemoryActorContext,
+  MemoryInteractionPort,
   MemoryProjectSourceSnapshot,
   MemoryScope,
   ProjectSourceUpdateProposal,
@@ -19,6 +20,7 @@ import {
 import {
   MemoryAgent,
   MemoryCoordinator,
+  createMemoryInteractionPort,
   createMemoryAnalysisEventHandler,
   memoryAgentIssue,
   type MemoryAnalysisAdmissionPort,
@@ -28,6 +30,7 @@ import {
   type MemoryProjectUpdateOwnerPort,
   type MemorySourceUpdateReceipt,
 } from '../../runtime/src/memory/index.js';
+import type { MemorySubmissionPort } from '../../runtime/src/explicit-brain/index.js';
 import type { EventConsumerHandler } from '../../runtime/src/events/index.js';
 import { AppLifecycleError } from './errors.js';
 
@@ -78,6 +81,9 @@ export interface MemoryCompositionInput {
 export interface MemoryComposition {
   readonly backend: DeterministicMemoryBackend;
   readonly coordinator: MemoryCoordinator;
+  readonly interaction: MemoryInteractionPort;
+  readonly submissions: MemorySubmissionPort;
+  readonly bindingRef: string;
   readonly persistence: MemoryPersistencePort;
   readonly sources: FilesystemMemorySourceAdapter;
   readonly agent: MemoryAgent;
@@ -119,6 +125,7 @@ export async function composeRuntimeMemory(
       projectKey,
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
+      interactionScopeId: `runtime:${projectKey}`,
       actor,
     },
   });
@@ -519,9 +526,21 @@ function bindCoordinator(
   coordinator: MemoryCoordinator,
   input: MemoryCompositionInput,
   backend: DeterministicMemoryBackend,
-): void {
+): { readonly interactionBindingRef?: string } {
   const taskId = input.binding.taskId;
   const hasRuntimeBinding = input.agentRuntimeId !== undefined || input.roleId !== undefined;
+  if (input.binding.interactionScopeId !== undefined && (
+    taskId !== undefined
+    || input.assignmentId !== undefined
+    || hasRuntimeBinding
+  )) {
+    throw new AppLifecycleError(
+      'memory-binding-invalid',
+      'interaction binding cannot also use a task binding',
+      'use exactly one memory binding kind',
+      OWNER,
+    );
+  }
   if (input.assignmentId !== undefined && taskId === undefined) {
     throw new AppLifecycleError(
       'memory-binding-incomplete',
@@ -545,6 +564,7 @@ function bindCoordinator(
   }
   if (taskId !== undefined && input.assignmentId !== undefined) {
     coordinator.bindTask({
+      bindingRef: input.binding.bindingRef,
       taskId,
       assignmentId: input.assignmentId,
       executionEpoch: input.binding.executionEpoch,
@@ -555,6 +575,17 @@ function bindCoordinator(
       operations: backend,
       injection: backend,
     });
+  }
+  if (input.binding.interactionScopeId !== undefined) {
+    const interaction = coordinator.bindInteraction({
+      interactionScopeId: input.binding.interactionScopeId,
+      projectKey: input.projectKey,
+      backendRef: 'memory://deterministic',
+      indexVersion: backend.indexVersion,
+      operations: backend,
+      injection: backend,
+    });
+    return { interactionBindingRef: interaction.bindingId };
   }
   if (hasRuntimeBinding) {
     const outcome = coordinator.bindRuntime({
@@ -573,6 +604,7 @@ function bindCoordinator(
       );
     }
   }
+  return {};
 }
 
 export async function composeMemory(input: MemoryCompositionInput): Promise<MemoryComposition> {
@@ -652,10 +684,45 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     admission,
   });
   const coordinator = new MemoryCoordinator();
-  bindCoordinator(coordinator, input, backend);
+  const coordinatorBindings = bindCoordinator(coordinator, input, backend);
+  const interaction = createMemoryInteractionPort({
+    coordinator,
+    bindingFor: ({ projectKey, namespace }) => {
+      if (projectKey !== input.projectKey) return undefined;
+      if (coordinatorBindings.interactionBindingRef !== undefined) {
+        return {
+          projectKey,
+          namespace,
+          bindingRef: coordinatorBindings.interactionBindingRef,
+        };
+      }
+      if (input.binding.taskId === undefined) return undefined;
+      return {
+        projectKey,
+        namespace,
+        taskId: input.binding.taskId,
+        bindingRef: input.binding.bindingRef,
+      };
+    },
+  });
+  const submissions: MemorySubmissionPort = {
+    async submitCandidate(submission) {
+      const outcome = await coordinator.submitCandidate(submission);
+      if (outcome.status === 'ready') return outcome.value;
+      throw new AppLifecycleError(
+        outcome.issue.code,
+        outcome.issue.message,
+        outcome.issue.nextAction.ref ?? 'memory-submission',
+        outcome.issue.ownerId,
+      );
+    },
+  };
   return {
     backend,
     coordinator,
+    interaction,
+    submissions,
+    bindingRef: coordinatorBindings.interactionBindingRef ?? input.binding.bindingRef,
     persistence,
     sources,
     agent,

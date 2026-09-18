@@ -94,6 +94,46 @@ test('runtime memory resolves declared local Skill and keeps undeclared source e
   assert.equal(source.content, '# Declared Skill\n');
 });
 
+test('runtime memory exposes the registered project interaction binding', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-runtime-memory-binding-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const composed = await composeRuntimeMemory({ paths, configuration });
+  const actor = {
+    actorId: 'runtime-memory-actor',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read', 'memory.propose'] as const,
+    projectKey: paths.projectKey,
+  };
+
+  const view = await composed.interaction.query({
+    actor,
+    projectKey: paths.projectKey,
+    namespace: 'project',
+    query: 'missing',
+    limit: 5,
+  });
+  assert.equal(view.entries.length, 0);
+
+  const receipt = await composed.submissions.submitCandidate({
+    submissionId: 'submission:runtime-memory-binding',
+    requestId: 'request:runtime-memory-binding',
+    operationId: id('operation', 'runtime-memory-binding'),
+    bindingRef: composed.bindingRef,
+    actor,
+    projectKey: paths.projectKey,
+    requestedKind: 'semantic',
+    contentRef: 'content:runtime-memory-binding',
+    contentDigest: 'sha256:runtime-memory-binding',
+    evidenceRefs: ['source:runtime-memory-binding'],
+    observation: 'default runtime memory binding submission',
+    desiredScope: 'project',
+    reason: 'regression coverage for composeRuntimeMemory',
+    inputDigest: 'sha256:runtime-memory-binding-input',
+  });
+  assert.equal(receipt.status, 'accepted');
+});
+
 async function waitFor(assertion: () => void | Promise<void>, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
@@ -125,6 +165,7 @@ async function composeMemoryFixture(input: {
   readonly assignmentId?: string;
   readonly agentRuntimeId?: string;
   readonly roleId?: string;
+  readonly interactionScopeId?: string;
 }) {
   const organId = id('organ', 'memory-composition-organ');
   const taskId = id('task', 'memory-composition-task');
@@ -142,6 +183,7 @@ async function composeMemoryFixture(input: {
     executionEpoch: 1,
     scope: memoryScope,
     taskId,
+    ...(input.interactionScopeId === undefined ? {} : { interactionScopeId: input.interactionScopeId }),
     actor,
   };
   const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
@@ -303,6 +345,30 @@ test('CLI config failures preserve structured owner and next action evidence', a
     assert.equal(parsed.error.code, 'config-invalid');
     assert.equal(parsed.error.ownerId, 'config-loader');
     assert.equal(typeof parsed.error.nextAction, 'string');
+    return true;
+  });
+});
+
+test('CLI rejects memory auto update before composing memory without a patch reader', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-memory-auto-'));
+  const controlRoot = join(root, 'control');
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await appendFile(join(controlRoot, 'config.toml'), '\n[memory.update]\nauto = true\n', 'utf8');
+  assert.throws(() => execFileSync(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'doctor',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+    const parsed = JSON.parse(error.stderr);
+    assert.equal(parsed.error.code, 'config-capability');
+    assert.equal(parsed.error.ownerId, 'config-loader');
+    assert.match(parsed.error.message, /memory\.update\.auto is unavailable/);
     return true;
   });
 });
@@ -506,8 +572,180 @@ test('memory composition binds task and runtime identity to the rooted backend',
   });
   assert.equal(recalled.status, 'ready');
   if (recalled.status !== 'ready') throw new Error('expected memory recall');
-  assert.equal(recalled.value.bindingId, `memory-binding:${taskId.value}`);
+  assert.equal(recalled.value.bindingId, binding.bindingRef);
   assert.deepEqual(scope.taskId, taskId);
+});
+
+test('memory composition uses the trusted task binding ref for explicit brain memory operations', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-task-tools-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const { composed, binding } = await composeMemoryFixture({
+    paths,
+    workspace,
+    assignmentId: 'assignment-memory-task-tools',
+    agentRuntimeId: 'runtime-memory-task-tools',
+    roleId: 'memory',
+  });
+
+  const view = await composed.interaction.query({
+    actor: binding.actor,
+    projectKey: binding.projectKey,
+    namespace: 'project',
+    query: 'missing',
+    limit: 5,
+  });
+  assert.equal(view.entries.length, 0);
+
+  const receipt = await composed.submissions.submitCandidate({
+    submissionId: 'submission:memory-task-tools',
+    requestId: 'request:memory-task-tools',
+    operationId: id('operation', 'memory-task-tools'),
+    bindingRef: binding.bindingRef,
+    actor: binding.actor,
+    projectKey: binding.projectKey,
+    taskId: binding.taskId,
+    requestedKind: 'semantic',
+    contentRef: 'content:memory-task-tools',
+    contentDigest: 'sha256:content-memory-task-tools',
+    evidenceRefs: ['source:memory-task-tools'],
+    observation: 'task-bound explicit brain memory submission',
+    desiredScope: 'project',
+    reason: 'regression coverage for the trusted task binding ref',
+    inputDigest: 'sha256:input-memory-task-tools',
+  });
+  assert.equal(receipt.status, 'accepted');
+  assert.equal(receipt.nextAction, 'wait-analysis');
+});
+
+test('memory composition registers interaction bindings for the interaction port', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-interaction-binding-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const interactionScopeId = 'interaction-memory-composition';
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'audit.md'), '# Memory audit\n', 'utf8');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Project rules\n', 'utf8');
+  await mkdir(join(workspace, 'project-memory'), { recursive: true });
+  await writeFile(join(workspace, 'project-memory', 'SKILL.md'), '# Project memory\n', 'utf8');
+  const actor = {
+    actorId: 'interaction-memory-composition-actor',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read'] as const,
+    projectKey: paths.projectKey,
+  };
+  const composed = await composeMemory({
+    paths,
+    projectKey: paths.projectKey,
+    workspaceCwd: workspace,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    auditPromptRoot,
+    auditPromptRef: 'audit',
+    autoUpdate: false,
+    binding: {
+      bindingRef: 'memory-binding:interaction-composition',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'memory-interaction-composition') },
+      interactionScopeId,
+      actor,
+    },
+  });
+
+  const handle = await composed.interaction.open({
+    actor,
+    projectKey: paths.projectKey,
+    namespace: 'project',
+  });
+  assert.equal(handle.readOnly, true);
+  const view = await composed.interaction.query({
+    actor,
+    projectKey: paths.projectKey,
+    namespace: 'project',
+    query: 'missing',
+    limit: 5,
+  });
+  assert.equal(view.entries.length, 0);
+});
+
+test('memory composition exposes candidate submission without hiding waiting or attention outcomes', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-submission-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const interactionScopeId = 'interaction-memory-submission';
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'audit.md'), '# Memory audit\n', 'utf8');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Project rules\n', 'utf8');
+  await mkdir(join(workspace, 'project-memory'), { recursive: true });
+  await writeFile(join(workspace, 'project-memory', 'SKILL.md'), '# Project memory\n', 'utf8');
+  const actor = {
+    actorId: 'interaction-memory-submission-actor',
+    roleId: 'interaction' as const,
+    permissions: ['memory.propose'] as const,
+    projectKey: paths.projectKey,
+  };
+  const composed = await composeMemory({
+    paths,
+    projectKey: paths.projectKey,
+    workspaceCwd: workspace,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    auditPromptRoot,
+    auditPromptRef: 'audit',
+    autoUpdate: false,
+    binding: {
+      bindingRef: 'memory-binding:interaction-submission',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'memory-interaction-submission') },
+      interactionScopeId,
+      actor,
+    },
+  });
+
+  const receipt = await composed.submissions.submitCandidate({
+    submissionId: 'submission:memory-composition',
+    requestId: 'request:memory-composition',
+    operationId: id('operation', 'memory-composition'),
+    bindingRef: 'memory-binding:interaction:interaction-memory-submission',
+    actor,
+    projectKey: paths.projectKey,
+    requestedKind: 'semantic',
+    contentRef: 'content:memory-composition',
+    contentDigest: 'sha256:content-memory-composition',
+    evidenceRefs: ['source:memory-composition'],
+    observation: 'composition submission',
+    desiredScope: 'project',
+    reason: 'test',
+    inputDigest: 'sha256:input-memory-composition',
+  });
+  assert.equal(receipt.status, 'accepted');
+  assert.equal(receipt.nextAction, 'wait-analysis');
+
+  await assert.rejects(
+    () => composed.submissions.submitCandidate({
+      submissionId: 'submission:memory-composition-denied',
+      requestId: 'request:memory-composition-denied',
+      operationId: id('operation', 'memory-composition-denied'),
+      bindingRef: 'memory-binding:missing',
+      actor,
+      projectKey: paths.projectKey,
+      requestedKind: 'semantic',
+      contentRef: 'content:memory-composition-denied',
+      contentDigest: 'sha256:content-memory-composition-denied',
+      evidenceRefs: ['source:memory-composition-denied'],
+      observation: 'composition submission denied',
+      desiredScope: 'project',
+      reason: 'test',
+      inputDigest: 'sha256:input-memory-composition-denied',
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-binding-missing',
+  );
 });
 
 test('memory composition rejects partial runtime bindings explicitly', async () => {
@@ -522,6 +760,22 @@ test('memory composition rejects partial runtime bindings explicitly', async () 
     }),
     (error: unknown) => error instanceof AppLifecycleError
       && error.code === 'memory-binding-incomplete'
+      && error.ownerId === 'humanagent.app.memory-composition',
+  );
+});
+
+test('memory composition rejects mixed task and interaction bindings before registering coordinator state', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-mixed-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await assert.rejects(
+    () => composeMemoryFixture({
+      paths,
+      workspace,
+      assignmentId: 'assignment-memory-mixed',
+      interactionScopeId: 'interaction-memory-mixed',
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-binding-invalid'
       && error.ownerId === 'humanagent.app.memory-composition',
   );
 });

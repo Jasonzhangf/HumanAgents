@@ -272,10 +272,11 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
       throw new MemorySourceError('memory-source-scope-denied', 'memory audit prompt belongs to another project');
     }
     const promptRef = nonEmpty(input.promptRef, 'memory audit prompt ref');
+    const name = requireSafeSegment(promptRef, 'memory audit prompt ref');
     const source = await readSourceFile({
       root: this.options.auditPromptRoot,
-      relativePath: `${promptRef}.md`,
-      canonicalRef: `prompt://${this.options.projectKey}/${promptRef}`,
+      relativePath: `${name}.md`,
+      canonicalRef: `prompt://${input.projectKey}/${name}`,
       now: this.now,
     });
     return { ...snapshot(source), promptRef, content: source.content };

@@ -1327,7 +1327,10 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
     const entries: MemoryQueryEntry[] = [];
     for (const record of this.canonicalRecords.values()) {
       if (!queryVisible(record, input)) continue;
-      if (!(record.summary.toLowerCase() === query || terms.every((term) => record.summary.toLowerCase().includes(term)))) continue;
+      if (
+        !record.sourceRefs.includes(input.query)
+        && !(record.summary.toLowerCase() === query || terms.every((term) => record.summary.toLowerCase().includes(term)))
+      ) continue;
       const cost = tokens(record.summary);
       if (cost > remaining) {
         omitted.push({ reason: 'token-budget', ref: record.memoryId });

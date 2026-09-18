@@ -434,11 +434,18 @@ function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']>
   rejectUnknownKeys(audit, ['prompt_ref'], 'memory.audit');
   const auto = update.auto === undefined ? false : update.auto;
   if (typeof auto !== 'boolean') fail('config-invalid', 'memory.update.auto must be boolean');
+  if (auto) {
+    fail(
+      'config-capability',
+      'memory.update.auto is unavailable until a typed project source patch reader is composed',
+      'keep memory.update.auto=false or compose a typed project source patch reader',
+    );
+  }
   const promptRef = audit.prompt_ref === undefined
     ? DEFAULT_MEMORY_AUDIT_PROMPT_REF
     : asString(audit.prompt_ref, 'memory.audit.prompt_ref');
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/.test(promptRef) || promptRef.split('/').includes('..')) {
-    fail('config-invalid', 'memory.audit.prompt_ref must be a typed source reference');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(promptRef)) {
+    fail('config-invalid', 'memory.audit.prompt_ref must be a safe audit prompt file name');
   }
   return { update: { auto }, audit: { promptRef } };
 }
