@@ -407,7 +407,7 @@ export class AgentRuntimePoolManager {
             cleanupIssue.conditionRef,
           )
         : startupIssue;
-      spawning.startupIssue = returnedIssue;
+      if (cleanupIssue) spawning.startupIssue = returnedIssue;
       return {
         status: 'blocked',
         issue: returnedIssue,
