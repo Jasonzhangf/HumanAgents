@@ -477,45 +477,49 @@ export class UiRuntimeService {
   }
 
   async healthProbe(): Promise<OrganHealthProjection> {
-    const readiness = await this.options.port.probe(this.options.binding);
-    const now = this.now().getTime();
-    const expiresAtTime = Date.parse(readiness.expiresAt);
-    const stale = !Number.isFinite(expiresAtTime) || expiresAtTime <= now;
-    const status = stale
-      ? 'unknown'
-      : readiness.state === 'ready'
-        ? 'healthy'
-        : readiness.state === 'degraded'
-          ? 'degraded'
-          : 'failed';
-    const dimensions: readonly OrganHealthDimensionProjection[] = [
-      {
-        dimension: 'readiness',
-        status,
-        evidenceRefs: readiness.evidenceRefs,
-        measurements: [
-          { name: 'providerState', value: readiness.state },
-          ...(readiness.version ? [{ name: 'providerVersion', value: readiness.version }] : []),
-        ],
-      },
-    ];
-    return {
-      surface: 'organ-health',
-      organId: this.options.organId,
-      lifecycleState: this.status().state,
-      healthState: stale
+    try {
+      const readiness = await this.options.port.probe(this.options.binding);
+      const now = this.now().getTime();
+      const expiresAtTime = Date.parse(readiness.expiresAt);
+      const stale = !Number.isFinite(expiresAtTime) || expiresAtTime <= now;
+      const status = stale
         ? 'unknown'
         : readiness.state === 'ready'
           ? 'healthy'
           : readiness.state === 'degraded'
             ? 'degraded'
-            : 'unhealthy',
-      checkedAt: readiness.checkedAt,
-      expiresAt: readiness.expiresAt,
-      stale,
-      dimensions,
-      evidenceRefs: readiness.evidenceRefs,
-    };
+            : 'failed';
+      const dimensions: readonly OrganHealthDimensionProjection[] = [
+        {
+          dimension: 'readiness',
+          status,
+          evidenceRefs: readiness.evidenceRefs,
+          measurements: [
+            { name: 'providerState', value: readiness.state },
+            ...(readiness.version ? [{ name: 'providerVersion', value: readiness.version }] : []),
+          ],
+        },
+      ];
+      return {
+        surface: 'organ-health',
+        organId: this.options.organId,
+        lifecycleState: this.status().state,
+        healthState: stale
+          ? 'unknown'
+          : readiness.state === 'ready'
+            ? 'healthy'
+            : readiness.state === 'degraded'
+              ? 'degraded'
+              : 'unhealthy',
+        checkedAt: readiness.checkedAt,
+        expiresAt: readiness.expiresAt,
+        stale,
+        dimensions,
+        evidenceRefs: readiness.evidenceRefs,
+      };
+    } catch (error) {
+      throw apiError(error);
+    }
   }
 
   async healthSnapshot(): Promise<OrganHealthProjection> {

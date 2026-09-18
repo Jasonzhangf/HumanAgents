@@ -49,6 +49,7 @@ import {
   buildFakeExecutionPort,
   startUiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 
 const organId = id('organ', 'organ-ui-test');
@@ -655,6 +656,83 @@ test('expired organ health evidence is reported as stale unknown without changin
     assert.equal(body.dimensions[0]?.status, 'unknown');
   } finally {
     await runtime.server.close();
+  }
+});
+
+test('organ health HTTP preserves provider failure ownership and recovery evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-error-'));
+  const readinessEvidence = evidence('provider-readiness-failure', { organId });
+  const failing: ExecutionRuntimePort = {
+    kind: 'humanagent.execution-runtime-port',
+    probe: async () => {
+      throw new ProviderAdapterError({
+        code: 'provider.readiness.unavailable',
+        category: 'provider',
+        phase: 'probe',
+        message: 'provider readiness probe failed',
+        retryable: 'retryable',
+        nextAction: { kind: 'recover', ref: 'rcc-v3.health' },
+        evidenceRefs: [readinessEvidence],
+      });
+    },
+    capabilities: async () => {
+      throw new Error('capabilities must not be called by health probe');
+    },
+    start: async () => {
+      throw new Error('start must not be called by health probe');
+    },
+    resume: async () => {
+      throw new Error('resume must not be called by health probe');
+    },
+    submit: async () => {
+      throw new Error('submit must not be called by health probe');
+    },
+    observe: () => {
+      throw new Error('observe must not be called by health probe');
+    },
+    requestStop: async () => {
+      throw new Error('requestStop must not be called by health probe');
+    },
+    settle: async () => {
+      throw new Error('settle must not be called by health probe');
+    },
+    close: async () => {
+      throw new Error('close must not be called by health probe');
+    },
+  };
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port: failing,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-organ-health-error'),
+  });
+  const server = await startUiRuntimeServer({
+    service,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  try {
+    const response = await fetch(`${server.url}/api/health/probe`);
+    assert.equal(response.status, 409);
+    const body = await response.json() as {
+      readonly error: {
+        readonly code: string;
+        readonly ownerId: string;
+        readonly nextAction: string;
+        readonly evidenceRefs: readonly { readonly evidenceId: { readonly value: string } }[];
+      };
+    };
+    assert.equal(body.error.code, 'provider.readiness.unavailable');
+    assert.equal(body.error.ownerId, 'humanagent.provider-adapter');
+    assert.match(body.error.nextAction, /rcc-v3\.health/);
+    assert.equal(body.error.evidenceRefs[0]?.evidenceId.value, readinessEvidence.evidenceId.value);
+  } finally {
+    await server.close();
   }
 });
 
