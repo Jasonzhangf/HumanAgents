@@ -247,7 +247,7 @@ test('memory interaction HTTP routes expose typed summary, query, inspect, compa
       coordinator,
       backend: memory,
       projectKey,
-      roleId: 'memory',
+      roleId: 'review',
     },
   });
   try {
@@ -413,6 +413,83 @@ test('memory interaction HTTP routes expose typed summary, query, inspect, compa
       inputDigest: 'sha256:ui-memory-promotion-check',
     });
     assert.deepEqual(promoted.entries, []);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('memory interaction HTTP review preserves configured non-review actor permissions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-review-denied-'));
+  const projectKey = 'project-ui-memory-review-denied';
+  const scope: MemoryScope = { kind: 'organ', organId };
+  const memory = new DeterministicMemoryBackend();
+  const coordinator = new MemoryCoordinator();
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator,
+      backend: memory,
+      projectKey,
+      roleId: 'execution',
+    },
+  });
+  try {
+    await memory.ingest({
+      scope,
+      sourceRef: 'journal://ui-memory-review-denied/one',
+      sourceDigest: 'sha256:ui-memory-review-denied-one',
+      text: 'memory review denied source',
+    });
+    const submitted = await coordinator.submitCandidate({
+      submissionId: 'submission-ui-memory-review-denied',
+      requestId: 'request-ui-memory-review-denied',
+      operationId: id('operation', 'memory-review-denied-submission'),
+      bindingRef: `memory-binding:interaction:runtime:${projectKey}`,
+      actor: {
+        actorId: 'memory-review-denied-submitter',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey,
+      },
+      projectKey,
+      requestedKind: 'semantic',
+      contentRef: 'journal://ui-memory-review-denied/one',
+      contentDigest: 'sha256:ui-memory-review-denied-one',
+      evidenceRefs: ['journal://ui-memory-review-denied/one'],
+      observation: 'memory review denied candidate',
+      desiredScope: 'project',
+      reason: 'HTTP review authorization test',
+      inputDigest: 'sha256:ui-memory-review-denied-submission',
+    });
+    assert.equal(submitted.status, 'ready');
+    const candidateId = submitted.status === 'ready' ? submitted.value.candidateId : undefined;
+    if (!candidateId) throw new Error('expected memory review denied candidate');
+
+    const review = await fetch(`${runtime.server.url}/api/memory/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        candidateId,
+        decision: 'approve',
+        decisionReason: 'must not bypass configured permissions',
+      }),
+    });
+    assert.equal(review.status, 409);
+    const reviewBody = await review.json() as { readonly error: { readonly code: string } };
+    assert.equal(reviewBody.error.code, 'memory-capability-denied');
+
+    const query = await fetch(`${runtime.server.url}/api/memory/query?query=${encodeURIComponent('memory review denied candidate')}`);
+    assert.equal(query.status, 200);
+    const queryBody = await query.json() as { readonly entries: readonly unknown[] };
+    assert.deepEqual(queryBody.entries, []);
   } finally {
     await runtime.server.close();
   }

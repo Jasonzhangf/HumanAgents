@@ -466,11 +466,7 @@ export class UiRuntimeService {
   }): Promise<MemoryReviewReceipt> {
     try {
       return await this.memoryInteraction.review({
-        actor: {
-          ...this.memoryActor(),
-          roleId: 'review',
-          permissions: ['memory.read', 'memory.review'],
-        },
+        actor: this.memoryActor(),
         candidateId: input.candidateId,
         decision: input.decision,
         decisionReason: input.decisionReason,
