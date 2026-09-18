@@ -25,6 +25,7 @@ export type EventPublisherKind = 'harness' | 'agent' | 'external';
 export interface EventEnvelope {
   readonly messageId: string;
   readonly streamId: string;
+  readonly kind?: string;
   readonly class: EventClass;
   readonly scope: ScopeRef;
   readonly occurredAt: string;
@@ -149,6 +150,14 @@ export interface EventDelivery {
   readonly event: EventRecord;
   readonly attempt: number;
   readonly retryKey?: string;
+}
+
+export function eventIdentityKey(
+  streamId: string,
+  consumerKey: string,
+  messageId: string,
+): string {
+  return `${streamId.length}:${streamId}${consumerKey.length}:${consumerKey}${messageId.length}:${messageId}`;
 }
 
 export type EventConsumerHandler = (

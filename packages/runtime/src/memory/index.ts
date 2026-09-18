@@ -23,6 +23,9 @@ import {
   type TaskId,
 } from '../../../contracts/src/index.js';
 
+export * from './agent.js';
+export * from './events.js';
+
 export const MEMORY_COORDINATOR_OWNER = 'memory-coordinator';
 
 export class MemoryCoordinatorError extends Error {
@@ -394,6 +397,16 @@ export class MemoryCoordinator {
         ownerId,
       );
     }
+    if (input.namespace === 'global' && !input.actor.crossProjectGrantRef) {
+      return this.failure(
+        'memory-capability-denied',
+        undefined,
+        'global memory query requires a cross-project grant',
+        'memory-permission',
+        'attention',
+        ownerId,
+      );
+    }
     try {
       return { status: 'ready', value: await operations.query(input) };
     } catch (error) {
@@ -653,20 +666,38 @@ export class MemoryCoordinator {
     }
     const existing = this.taskBindings.get(input.taskId.value);
     if (existing) {
-      if (
-        sameMemoryScope(existing.scope, input.scope)
-        && existing.assignmentId === assignmentId
-        && existing.executionEpoch === input.executionEpoch
+      const compatible = sameMemoryScope(existing.scope, input.scope)
+        && existing.projectKey === projectKey
         && existing.backendRef === backendRef
         && existing.indexVersion === input.indexVersion
         && existing.operations === input.operations
         && existing.injection === input.injection
         && existing.ownerId === ownerId
-        && existing.failurePolicy === failurePolicy
+        && existing.failurePolicy === failurePolicy;
+      if (!compatible) {
+        throw new MemoryCoordinatorError(`memory binding identity conflicts for task: ${input.taskId.value}`);
+      }
+      if (
+        existing.assignmentId === assignmentId
+        && existing.executionEpoch === input.executionEpoch
       ) {
         return this.taskReceipt(existing);
       }
-      throw new MemoryCoordinatorError(`memory binding already exists for task: ${input.taskId.value}`);
+      if (
+        existing.assignmentId === assignmentId
+        || existing.executionEpoch >= input.executionEpoch
+      ) {
+        throw new MemoryCoordinatorError(`memory binding advance must use a new assignment and execution epoch for task: ${input.taskId.value}`);
+      }
+      const advanced: MemoryTaskBinding = {
+        ...existing,
+        bindingId: `memory-binding:${input.taskId.value}:${assignmentId}`,
+        assignmentId,
+        executionEpoch: input.executionEpoch,
+      };
+      this.taskBindings.set(input.taskId.value, advanced);
+      this.invalidateTaskRuntimeBindings(input.taskId);
+      return this.taskReceipt(advanced);
     }
     const binding: MemoryTaskBinding = {
       bindingId: `memory-binding:${input.taskId.value}`,
@@ -983,6 +1014,15 @@ export class MemoryCoordinator {
       );
     }
     return { status: 'ready', value: { binding: runtimeBinding, taskBinding } };
+  }
+
+  private invalidateTaskRuntimeBindings(taskId: TaskId): void {
+    const invalidated = [...this.runtimeBindings.entries()]
+      .filter(([, binding]) => sameId(binding.taskId, taskId));
+    for (const [agentRuntimeId] of invalidated) {
+      this.runtimeBindings.delete(agentRuntimeId);
+      this.latestContexts.delete(agentRuntimeId);
+    }
   }
 
   private resolveMemoryBinding(bindingRef: string): MemoryOutcome<{

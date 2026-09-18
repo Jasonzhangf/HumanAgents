@@ -7,7 +7,8 @@
     "noEmitOnError": true
   },
   "include": [
-    "../../../packages/runtime/src/node-modules.d.ts",
-    "**/*.ts"
+    "../node-modules.d.ts",
+    "../../../packages/adapters/memory/src/**/*.ts",
+    "./**/*.ts"
   ]
 }

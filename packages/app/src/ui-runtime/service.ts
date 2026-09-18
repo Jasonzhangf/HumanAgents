@@ -1,11 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import {
   type Attention,
+  type AgentMemoryContext,
+  type AgentMemoryContextInjectionPort,
+  type AgentMemoryContextRequest,
+  type AgentCapabilities,
+  type AgentClosure,
+  type AgentDriver,
+  type AgentEvent,
+  type AgentHandle,
+  type AgentInput,
+  type AgentOutput,
+  type AgentResumeRequest,
+  type AgentStartRequest,
   type CycleId,
   type ExecutionRuntimePort,
+  type MemoryScope,
   type OperationId,
   type OrganId,
   type ProviderBinding,
+  type ProviderCloseResult,
+  type StopRequestReceipt,
   type TaskId,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
@@ -40,10 +55,19 @@ import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  type RuntimeExecutionDriver,
+  type RuntimeExecutionDriverInput,
   type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import {
+  MemoryCoordinator,
+  MemoryCoordinatorError,
+  type MemoryContextReceipt,
+  type MemoryIssue,
+} from '../../../runtime/src/memory/index.js';
+import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
   ProviderAgentDriver,
@@ -92,6 +116,14 @@ const LIFECYCLE_STATES = new Set([
 
 export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCommitPort {}
 
+export interface UiRuntimeMemoryComposition {
+  readonly coordinator: MemoryCoordinator;
+  readonly backend: DeterministicMemoryBackend;
+  readonly projectKey: string;
+  readonly roleId?: string;
+  readonly tokenBudget?: number;
+}
+
 export interface UiRuntimeServiceOptions {
   readonly mode: 'fake' | 'rcc';
   readonly organId: OrganId;
@@ -104,6 +136,8 @@ export interface UiRuntimeServiceOptions {
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
   readonly now?: () => Date;
+  readonly projectKey?: string;
+  readonly memory: UiRuntimeMemoryComposition;
 }
 
 export interface ExplicitBrainReceipt {
@@ -122,6 +156,11 @@ interface DispatchLedgerEntry {
   readonly taskId: TaskId;
   readonly operationId: OperationId;
   readonly executionEpoch: number;
+}
+
+interface BoundMemoryContext {
+  readonly executionEpoch: number;
+  readonly receipt: MemoryContextReceipt;
 }
 
 function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
@@ -178,10 +217,15 @@ export class UiRuntimeService {
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
   private readonly dispatchLedger = new Map<string, DispatchLedgerEntry>();
+  private readonly memory: UiRuntimeMemoryComposition;
+  private readonly memoryInjection: MemoryContextCapture;
+  private readonly memoryContexts = new Map<string, BoundMemoryContext>();
   private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
+    this.memory = options.memory;
+    this.memoryInjection = new MemoryContextCapture(this.memory.backend);
     this.requirementSubmissions = new RequirementSubmissionOwner(
       this.confirmationLedger,
       this.requirementInbox,
@@ -200,18 +244,49 @@ export class UiRuntimeService {
       hookRegistry: options.hookRegistry,
       taskIdPrefix: randomUUID(),
       now: options.now,
-      createDriver: (input) => new ProviderAgentDriver({
-        port: options.port,
-        binding: options.binding,
-        runtimeId: input.runtimeId,
-        taskId: input.taskId,
-        operationId: input.operationId,
-        executionEpoch: input.executionEpoch,
-        assignmentId: input.assignmentId,
-        scope: input.scope,
-        inputRefs: input.inputRefs,
-        ownerId: input.ownerId,
-      }),
+      createDriver: (input) => this.createMemoryBoundDriver(input),
+    });
+  }
+
+  memoryContextReceipt(operationId: OperationId): MemoryContextReceipt {
+    const context = this.memoryContexts.get(operationId.value);
+    if (!context) {
+      throw new UiRuntimeApiError(
+        'memory-binding-missing',
+        'memory-coordinator',
+        `memory context is missing for operation: ${operationId.value}`,
+        'start an execution before requesting memory context',
+        404,
+      );
+    }
+    const currentEpoch = this.coordinator.taskSnapshot(context.receipt.taskId).executionEpoch;
+    if (currentEpoch !== undefined && currentEpoch !== context.executionEpoch) {
+      throw new UiRuntimeApiError(
+        'memory-binding-mismatch',
+        'memory-coordinator',
+        `memory context execution epoch ${context.executionEpoch} is stale for task ${context.receipt.taskId.value}`,
+        'use the latest execution memory context',
+        409,
+      );
+    }
+    return structuredClone(context.receipt);
+  }
+
+  private createMemoryBoundDriver(input: RuntimeExecutionDriverInput): RuntimeExecutionDriver {
+    const driver = new ProviderAgentDriver({
+      port: this.options.port,
+      binding: this.options.binding,
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      assignmentId: input.assignmentId,
+      scope: input.scope,
+      inputRefs: input.inputRefs,
+      ownerId: input.ownerId,
+    });
+    return new MemoryBoundExecutionDriver(driver, input, this.memory, this.memoryInjection, (bound) => {
+      this.memoryContexts.set(input.operationId.value, bound);
     });
   }
 
@@ -676,4 +751,167 @@ export class UiRuntimeService {
       },
     });
   }
+}
+
+function memoryFailure(error: MemoryIssue): UiRuntimeApiError {
+  return new UiRuntimeApiError(
+    error.code,
+    error.ownerId,
+    error.message,
+    `${error.nextAction.kind}${error.nextAction.ref ? `:${error.nextAction.ref}` : ''}`,
+    error.code === 'memory-binding-missing' ? 404 : 409,
+  );
+}
+
+function memoryScope(input: RuntimeExecutionDriverInput): MemoryScope {
+  return { kind: 'task', organId: input.scope.organId, taskId: input.taskId };
+}
+
+class MemoryContextCapture implements AgentMemoryContextInjectionPort {
+  private readonly contexts = new Map<string, AgentMemoryContext>();
+
+  constructor(private readonly backend: DeterministicMemoryBackend) {}
+
+  async recall(input: AgentMemoryContextRequest): Promise<AgentMemoryContext> {
+    const context = await this.backend.recall(input);
+    this.contexts.set(`${input.agentRuntimeId}:${context.contextId}`, context);
+    return context;
+  }
+
+  async attach(input: { readonly agentRuntimeId: string; readonly context: AgentMemoryContext }): Promise<{ readonly contextId: string; readonly attached: boolean }> {
+    return this.backend.attach(input);
+  }
+
+  take(agentRuntimeId: string, contextId: string): AgentMemoryContext | undefined {
+    const key = `${agentRuntimeId}:${contextId}`;
+    const context = this.contexts.get(key);
+    if (context) this.contexts.delete(key);
+    return context;
+  }
+}
+
+class MemoryBoundExecutionDriver implements AgentDriver {
+  readonly kind: string;
+  private binding?: {
+    readonly context: AgentMemoryContext;
+    readonly receipt: MemoryContextReceipt;
+  };
+
+  constructor(
+    private readonly driver: ProviderAgentDriver,
+    private readonly input: RuntimeExecutionDriverInput,
+    private readonly composition: UiRuntimeMemoryComposition,
+    private readonly injection: MemoryContextCapture,
+    private readonly onBound: (bound: BoundMemoryContext) => void,
+  ) {
+    this.kind = driver.kind;
+  }
+
+  async capabilities(): Promise<AgentCapabilities> {
+    return this.driver.capabilities();
+  }
+
+  async start(input: AgentStartRequest): Promise<AgentHandle> {
+    if (!this.binding) {
+      const backendRef = `memory://${this.composition.projectKey}`;
+      const scope = memoryScope(this.input);
+      try {
+        this.composition.coordinator.bindTask({
+          taskId: this.input.taskId,
+          assignmentId: this.input.assignmentId,
+          executionEpoch: this.input.executionEpoch,
+          projectKey: this.composition.projectKey,
+          scope,
+          backendRef,
+          indexVersion: this.composition.backend.indexVersion,
+          operations: this.composition.backend,
+          injection: this.injection,
+          ownerId: APP_OWNER,
+        });
+      } catch (error) {
+        if (error instanceof MemoryCoordinatorError) {
+          throw new UiRuntimeApiError(
+            'memory-binding-mismatch',
+            'memory-coordinator',
+            error.message,
+            'start a new task or refresh memory binding',
+            409,
+          );
+        }
+        throw error;
+      }
+      const runtimeBinding = this.composition.coordinator.bindRuntime({
+        agentRuntimeId: this.input.runtimeId,
+        taskId: this.input.taskId,
+        assignmentId: this.input.assignmentId,
+        roleId: this.composition.roleId ?? 'execution',
+        executionEpoch: this.input.executionEpoch,
+      });
+      if (runtimeBinding.status !== 'ready') throw memoryFailure(runtimeBinding.issue);
+      const request: AgentMemoryContextRequest = {
+        agentRuntimeId: this.input.runtimeId,
+        roleId: this.composition.roleId ?? 'execution',
+        taskId: this.input.taskId,
+        scope,
+        layers: ['current'],
+        tokenBudget: this.composition.tokenBudget ?? 4096,
+        executionEpoch: this.input.executionEpoch,
+        evidenceRequired: true,
+      };
+      const recalled = await this.composition.coordinator.recall(request);
+      if (recalled.status !== 'ready') throw memoryFailure(recalled.issue);
+      const context = this.injection.take(this.input.runtimeId, recalled.value.contextId);
+      if (!context) {
+        throw new UiRuntimeApiError(
+          'memory-context-unavailable',
+          'memory-coordinator',
+          'memory context was not captured from the bound injection port',
+          'recall memory context before attaching it',
+          409,
+        );
+      }
+      const attached = await this.composition.coordinator.attach({
+        agentRuntimeId: this.input.runtimeId,
+        taskId: this.input.taskId,
+        scope,
+        executionEpoch: this.input.executionEpoch,
+        context,
+      });
+      if (attached.status !== 'ready') throw memoryFailure(attached.issue);
+      this.binding = {
+        context,
+        receipt: recalled.value,
+      };
+      this.onBound({
+        executionEpoch: recalled.value.executionEpoch,
+        receipt: recalled.value,
+      });
+    }
+    return this.driver.start(input);
+  }
+
+  resume(input: AgentResumeRequest): Promise<AgentHandle> {
+    return this.driver.resume(input);
+  }
+
+  submit(input: AgentInput): Promise<AgentOutput> {
+    return this.driver.submit(input);
+  }
+
+  observe(input: { readonly runtimeId: string }): AsyncIterable<AgentEvent> {
+    return this.driver.observe(input);
+  }
+
+  requestStop(input: { readonly runtimeId: string; readonly executionEpoch: number; readonly operationId: OperationId }): Promise<StopRequestReceipt> {
+    return this.driver.requestStop(input);
+  }
+
+  settle(input: { readonly runtimeId: string; readonly executionEpoch: number }): Promise<AgentClosure> {
+    return this.driver.settle(input);
+  }
+
+  close(): Promise<ProviderCloseResult> {
+    return this.driver.close();
+  }
+
 }

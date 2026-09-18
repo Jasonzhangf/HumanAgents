@@ -90,6 +90,7 @@ declare module 'node:fs/promises' {
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
   export function readFile(path: string): Promise<Uint8Array>;
   export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
+  export function lstat(path: string): Promise<{ isFile(): boolean; isSymbolicLink(): boolean }>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function truncate(path: string, length: number): Promise<void>;

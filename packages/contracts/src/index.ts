@@ -414,6 +414,57 @@ export interface AuditPromptSnapshot {
 
 export type ProjectAutoUpdateTarget = 'project-agents' | 'project-local-skill';
 
+export interface MemorySourceSnapshot {
+  readonly sourceRef: string;
+  readonly canonicalRef: string;
+  readonly revision: string;
+  readonly digest: string;
+  readonly loadedAt: string;
+}
+
+export interface MemorySessionEvidence extends MemorySourceSnapshot {
+  readonly projectKey: string;
+  readonly taskId: string;
+  readonly sessionRef: string;
+  readonly content: string;
+}
+
+export interface MemoryProjectSourceSnapshot extends MemorySourceSnapshot {
+  readonly projectKey: string;
+  readonly target: ProjectAutoUpdateTarget;
+  readonly content: string;
+}
+
+export interface MemoryAuditPromptSnapshotSource extends MemorySourceSnapshot {
+  readonly promptRef: string;
+  readonly content: string;
+}
+
+export interface MemorySessionEvidenceSourcePort {
+  readSession(input: {
+    readonly projectKey: string;
+    readonly taskId: string;
+    readonly sessionRef: string;
+  }): Promise<MemorySessionEvidence>;
+}
+
+export interface MemoryProjectSourcePort {
+  readProject(input: {
+    readonly projectKey: string;
+    readonly target: ProjectAutoUpdateTarget;
+  }): Promise<MemoryProjectSourceSnapshot>;
+  list(input: {
+    readonly projectKey: string;
+  }): Promise<readonly MemoryProjectSourceSnapshot[]>;
+}
+
+export interface MemoryAuditPromptSourcePort {
+  readPrompt(input: {
+    readonly projectKey: string;
+    readonly promptRef: string;
+  }): Promise<MemoryAuditPromptSnapshotSource>;
+}
+
 export interface ProjectSourceUpdateProposal {
   readonly target: ProjectAutoUpdateTarget;
   readonly sourceRef: string;

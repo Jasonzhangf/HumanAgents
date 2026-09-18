@@ -2,7 +2,7 @@
 import { ConfigurationError, ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../config/src/index.js';
 import { id, type ProviderBinding } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
-import { closeRuntime, configureBuiltinPromptRoot, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
+import { closeRuntime, composeRuntimeMemory, configureBuiltinPromptRoot, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
 import { join } from 'node:path';
@@ -164,7 +164,7 @@ export async function main(args: readonly string[]): Promise<void> {
     const action = args[1] ?? 'list';
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
-    await loadConfiguration(paths);
+    const configuration = await loadConfiguration(paths);
     const store = new SessionStore(paths);
     if (action === 'list') {
       const sessions = await store.list();
@@ -185,7 +185,7 @@ export async function main(args: readonly string[]): Promise<void> {
     }
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
-    await loadConfiguration(paths);
+    const configuration = await loadConfiguration(paths);
     const protocol = (option(args, '--protocol') ?? 'responses') as UiProviderProtocol;
     if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
       throw new Error('serve --protocol must be responses, openai, or anthropic');
@@ -195,6 +195,7 @@ export async function main(args: readonly string[]): Promise<void> {
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 0;
+    const memory = await composeRuntimeMemory({ paths, configuration });
     const port = mode === 'rcc'
       ? buildRccExecutionPort({
           binding,
@@ -211,10 +212,15 @@ export async function main(args: readonly string[]): Promise<void> {
       checkpointRoot,
       evidenceRoot,
       uiRoot,
+      memory: {
+        coordinator: memory.coordinator,
+        backend: memory.backend,
+        projectKey: paths.projectKey,
+      },
       host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
       portNumber,
     });
-    console.log(JSON.stringify({ command, mode, url: runtime.server.url, bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, uiRoot, checkpointRoot }, null, 2));
+    console.log(JSON.stringify({ command, mode, url: runtime.server.url, bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, uiRoot, checkpointRoot, memoryRoot: paths.memoryRoot }, null, 2));
     return;
   }
   throw new Error('usage: humanagent init|doctor|run|resume|session|serve --workspace <path> [--plan <name>] [--session <id>]');

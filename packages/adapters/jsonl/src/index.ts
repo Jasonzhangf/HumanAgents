@@ -1,7 +1,17 @@
 import { link, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
-import { assertCheckpointLink, assertEvidenceRef, assertSameScope, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
+import {
+  assertCheckpointLink,
+  assertEvidenceRef,
+  assertSameScope,
+  validateCanonicalMemoryScope,
+  validateEpisodicMemorySource,
+  type CanonicalMemoryScope,
+  type Checkpoint,
+  type EpisodicMemorySource,
+  type ScopeRef,
+} from '@humanagent/contracts';
 
 declare module 'node:fs/promises' {
   interface FileHandle {
@@ -18,6 +28,8 @@ export interface JournalRecord {
   readonly seq: number;
   readonly kind: JournalRecordKind;
   readonly scope: ScopeRef;
+  readonly memoryScope?: CanonicalMemoryScope;
+  readonly memorySource?: EpisodicMemorySource;
   readonly commitId?: string;
   readonly commitFactDigest?: string;
   readonly checkpoint?: Checkpoint;
@@ -30,6 +42,8 @@ export interface JournalAppendInput {
   readonly commitId?: string;
   readonly kind: JournalRecordKind;
   readonly scope: ScopeRef;
+  readonly memoryScope?: CanonicalMemoryScope;
+  readonly memorySource?: EpisodicMemorySource;
   readonly checkpoint?: Checkpoint;
   readonly payload?: Record<string, unknown>;
 }
@@ -81,13 +95,17 @@ function digestRecord(record: Omit<JournalRecord, 'recordDigest'>): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(record)).digest('hex')}`;
 }
 
-function digestCommitFact(input: Pick<JournalAppendInput, 'kind' | 'scope' | 'checkpoint' | 'payload'>): string {
-  return `sha256:${createHash('sha256').update(JSON.stringify({
+function digestCommitFact(input: Pick<JournalAppendInput, 'kind' | 'scope' | 'memoryScope' | 'memorySource' | 'checkpoint' | 'payload'>): string {
+  const fact: Record<string, unknown> = {
     kind: input.kind,
     scope: input.scope,
     checkpoint: input.checkpoint ?? null,
     payload: input.payload ?? null,
-  })).digest('hex')}`;
+  };
+  // Preserve the original v1 digest for records without a memory envelope.
+  if (input.memoryScope !== undefined) fact.memoryScope = input.memoryScope;
+  if (input.memorySource !== undefined) fact.memorySource = input.memorySource;
+  return `sha256:${createHash('sha256').update(JSON.stringify(fact)).digest('hex')}`;
 }
 
 function validateCommitId(commitId: string): void {
@@ -116,6 +134,7 @@ function validateRecord(record: JournalRecord, previous: JournalRecord | null, c
     if (record.commitFactDigest !== digestCommitFact(record)) throw new JournalIntegrityError('journal commit fact digest mismatch');
   }
   assertScopeRef(record.scope);
+  validateMemoryEnvelope(record);
   if (record.kind === 'checkpoint') {
     if (!record.checkpoint) throw new JournalIntegrityError('checkpoint record missing checkpoint');
     if (record.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
@@ -134,6 +153,52 @@ function validateRecord(record: JournalRecord, previous: JournalRecord | null, c
     });
   } else if (record.checkpoint) throw new JournalIntegrityError('event record cannot contain checkpoint');
   else if (record.payload === undefined) throw new JournalIntegrityError('event record missing payload');
+}
+
+function validateMemoryEnvelope(record: Pick<JournalRecord, 'scope' | 'memoryScope' | 'memorySource'>): void {
+  if ((record.memoryScope === undefined) !== (record.memorySource === undefined)) {
+    throw new JournalIntegrityError('journal memory scope and source must be present together');
+  }
+  if (record.memoryScope === undefined || record.memorySource === undefined) return;
+  assertJournalContract(() => validateCanonicalMemoryScope(record.memoryScope!));
+  assertJournalContract(() => validateEpisodicMemorySource(record.memorySource!));
+  const expectedSourceProjectKey = record.memoryScope.namespace === 'project'
+    ? record.memoryScope.projectKey
+    : record.memoryScope.sourceProjectKey;
+  if (expectedSourceProjectKey !== undefined && record.memorySource.projectKey !== expectedSourceProjectKey) {
+    throw new JournalIntegrityError('journal memory source project does not match memory scope');
+  }
+  if (record.memoryScope.namespace === 'global') {
+    if (record.memoryScope.sourceOrganId !== undefined
+      && (record.scope.organId.scope !== 'organ' || record.scope.organId.value !== record.memoryScope.sourceOrganId.value)) {
+      throw new JournalIntegrityError('journal memory source organ does not match record scope');
+    }
+  }
+  if (record.memorySource.taskId !== undefined && (
+    record.scope.taskId?.scope !== record.memorySource.taskId.scope
+    || record.scope.taskId.value !== record.memorySource.taskId.value
+  )) {
+    throw new JournalIntegrityError('journal memory source task does not match record scope');
+  }
+  if (record.memorySource.cycleId !== undefined && (
+    record.scope.cycleId?.scope !== record.memorySource.cycleId.scope
+    || record.scope.cycleId.value !== record.memorySource.cycleId.value
+  )) {
+    throw new JournalIntegrityError('journal memory source cycle does not match record scope');
+  }
+  if (record.memoryScope.namespace === 'project') {
+    if (record.scope.organId.scope !== 'organ' || record.scope.organId.value !== record.memoryScope.organId.value) {
+      throw new JournalIntegrityError('journal memory scope organ does not match record scope');
+    }
+    if (record.memoryScope.taskId !== undefined) {
+      if (
+        record.scope.taskId?.scope !== record.memoryScope.taskId.scope
+        || record.scope.taskId.value !== record.memoryScope.taskId.value
+      ) {
+        throw new JournalIntegrityError('journal memory scope task does not match record scope');
+      }
+    }
+  }
 }
 
 function assertScopeRef(scope: ScopeRef): void {
@@ -366,13 +431,16 @@ export class JsonlOrganJournal {
         }
       }
       const previous = verification.records.at(-1) ?? null;
-      const { kind, scope, checkpoint, payload } = input;
+      const { kind, scope, memoryScope, memorySource, checkpoint, payload } = input;
       assertScopeRef(scope);
+      validateMemoryEnvelope({ scope, memoryScope, memorySource });
       const recordWithoutDigest = {
         version: 1 as const,
         seq: (previous?.seq ?? 0) + 1,
         kind,
         scope,
+        memoryScope,
+        memorySource,
         commitId,
         commitFactDigest: commitId === undefined ? undefined : digestCommitFact(input),
         checkpoint,
@@ -413,4 +481,21 @@ export class JsonlOrganJournal {
 
   async latest(): Promise<JournalRecord | null> { const result = await this.verify(); if (!result.valid) throw new JournalIntegrityError(result.error ?? 'journal is invalid'); return result.records.at(-1) ?? null; }
   async replay(): Promise<readonly JournalRecord[]> { const result = await this.verify(); if (!result.valid) throw new JournalIntegrityError(result.error ?? 'journal is invalid'); return result.records; }
+
+  async replayMemory(scope?: CanonicalMemoryScope): Promise<readonly JournalRecord[]> {
+    const records = await this.replay();
+    const memoryRecords = records.filter((record) => record.memoryScope !== undefined && record.memorySource !== undefined);
+    if (scope === undefined) return memoryRecords;
+    return memoryRecords.filter((record) => sameCanonicalMemoryScope(record.memoryScope!, scope));
+  }
+}
+
+function sameCanonicalMemoryScope(left: CanonicalMemoryScope, right: CanonicalMemoryScope): boolean {
+  if (left.namespace !== right.namespace) return false;
+  if (left.namespace === 'global' && right.namespace === 'global') return left.globalId === right.globalId;
+  if (left.namespace !== 'project' || right.namespace !== 'project') return false;
+  return left.projectKey === right.projectKey
+    && left.organId.scope === right.organId.scope
+    && left.organId.value === right.organId.value
+    && left.taskId?.value === right.taskId?.value;
 }

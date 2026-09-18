@@ -22,7 +22,13 @@ import {
   type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
-import { AgentRuntime, bindAgentDriver, executeStopControl, type AttentionPort } from '../../packages/runtime/src/index.js';
+import {
+  AgentRuntime,
+  MemoryCoordinator,
+  bindAgentDriver,
+  executeStopControl,
+  type AttentionPort,
+} from '../../packages/runtime/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
 import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
@@ -38,6 +44,7 @@ import {
   buildFakeExecutionPort,
   startUiRuntime,
 } from '../../packages/app/src/ui-runtime/index.js';
+import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 
 const organId = id('organ', 'organ-ui-test');
 const binding: ProviderBinding = {
@@ -81,6 +88,15 @@ function attentionPort(): AttentionPort & { readonly published: Attention[]; rea
   };
 }
 
+function testMemory(projectKey: string) {
+  return {
+    coordinator: new MemoryCoordinator(),
+    backend: new DeterministicMemoryBackend(),
+    projectKey,
+    roleId: 'execution',
+  };
+}
+
 async function waitFor(assertion: () => void, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
@@ -115,10 +131,90 @@ function serviceFor(
     attentionPort: attentionPort(),
     providerState,
     journal: journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-test'),
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
   });
 }
+
+test('ui runtime binds memory to the real operation identity and exposes deterministic recall evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-binding-'));
+  const memory = new DeterministicMemoryBackend();
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: memory,
+      projectKey: 'project-ui-memory',
+      roleId: 'execution',
+    },
+  });
+  try {
+    const task = runtime.service.createTask({ title: 'memory binding' });
+    memory.addContextEntry({
+      scope: { kind: 'task', organId, taskId: task.taskId },
+      sourceRef: 'journal://ui-memory/current',
+      sourceDigest: 'sha256:ui-memory-current',
+      text: 'deterministic memory binding evidence',
+      layer: 'current',
+      summary: 'deterministic memory binding evidence',
+    });
+
+    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall memory' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const receipt = runtime.service.memoryContextReceipt(started.operationId);
+    assert.equal(receipt.executionEpoch, started.executionEpoch);
+    assert.equal(receipt.taskId.value, task.taskId.value);
+    assert.equal(receipt.entries[0]?.sourceRef, 'journal://ui-memory/current');
+    assert.equal(receipt.entries[0]?.sourceDigest, 'sha256:ui-memory-current');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('ui runtime rejects stale memory epoch recall after the task advances', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-stale-'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'project-ui-memory-stale',
+      roleId: 'execution',
+    },
+  });
+  const task = service.createTask({ title: 'stale memory epoch' });
+  const first = service.startExecution(task.taskId, { prompt: 'first epoch' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  const second = service.startExecution(task.taskId, { prompt: 'second epoch' });
+  assert.equal(second.executionEpoch, first.executionEpoch + 1);
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  assert.equal(service.taskDashboard(task.taskId).error, undefined);
+
+  assert.throws(
+    () => service.memoryContextReceipt(first.operationId),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'memory-binding-mismatch'
+      && error.httpStatus === 409,
+  );
+  assert.equal(service.memoryContextReceipt(second.operationId).executionEpoch, second.executionEpoch);
+});
 
 test('fake execution completes through Runtime projection with SSE, output, checkpoint, and read-only observation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-fake-'));
@@ -422,6 +518,7 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'packages/ui/static'),
+    memory: testMemory('project-ui-explicit-http'),
   });
   try {
     const inputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
@@ -1278,6 +1375,7 @@ test('ui runtime server refuses to bind the unauthenticated control API outside 
       providerState: 'ready',
       host: '0.0.0.0',
       portNumber: 0,
+      memory: testMemory('project-ui-host-guard'),
     });
   }, /loopback/);
 });
@@ -1295,6 +1393,7 @@ test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
     providerState: 'ready',
     host: '::1',
     portNumber: 0,
+    memory: testMemory('project-ui-ipv6'),
   });
   try {
     assert.match(runtime.server.url, /^http:\/\/\[::1\]:\d+$/);
@@ -1322,6 +1421,7 @@ test('ui runtime server rejects static files that resolve outside the UI root th
     uiRoot,
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-static-root'),
   });
   try {
     const response = await fetch(`${runtime.server.url}/leak.txt`);
@@ -1343,6 +1443,7 @@ test('unknown execution events return a typed JSON error without crashing the se
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-sse-error'),
   });
   try {
     const response = await fetch(`${runtime.server.url}/api/executions/unknown-operation/events`);
@@ -1370,6 +1471,7 @@ test('runtime API rejects a mode mismatch and exposes dsh as disabled', async ()
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-api'),
   });
   try {
     const status = await fetch(`${runtime.server.url}/api/runtime/status`);
@@ -1413,6 +1515,7 @@ test('runtime API task detail uses the task-detail projection surface', async ()
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-task-detail'),
   });
   try {
     const created = await fetch(`${runtime.server.url}/api/tasks`, {
@@ -1444,6 +1547,7 @@ test('runtime HTTP API reconstructs task state and SSE replay after a server res
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-http-restart-first'),
   });
   let taskId: string;
   let operationId: string;
@@ -1477,6 +1581,7 @@ test('runtime HTTP API reconstructs task state and SSE replay after a server res
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-http-restart-second'),
   });
   try {
     const tasks = await fetch(`${second.server.url}/api/tasks`);
@@ -1504,6 +1609,7 @@ test('HTTP SSE keeps the first connection open through settling, checkpoint, and
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-http-sse'),
   });
   try {
     const task = runtime.service.createTask({ title: 'http sse lifecycle' });
@@ -1563,6 +1669,7 @@ test('fake and rcc modes do not hydrate each other through a shared checkpoint r
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     providerState: 'ready',
     portNumber: 0,
+    memory: testMemory('project-ui-mode-fake'),
   });
   try {
     const created = await fetch(`${fake.server.url}/api/tasks`, {
@@ -1584,6 +1691,7 @@ test('fake and rcc modes do not hydrate each other through a shared checkpoint r
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     portNumber: 0,
+    memory: testMemory('project-ui-mode-rcc'),
   });
   try {
     const tasks = await fetch(`${rcc.server.url}/api/tasks`);
@@ -1629,6 +1737,7 @@ test('rcc startup projects provider readiness failure instead of claiming ready'
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     portNumber: 0,
+    memory: testMemory('project-ui-readiness'),
   });
   try {
     const status = await fetch(`${runtime.server.url}/api/runtime/status`);

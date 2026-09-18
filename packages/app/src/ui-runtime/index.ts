@@ -21,7 +21,11 @@ import {
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
 import { FakeReplayExecutionRuntimePort } from './fake-port.js';
-import { UiRuntimeService, type TaskCheckpointStore } from './service.js';
+import {
+  UiRuntimeService,
+  type TaskCheckpointStore,
+  type UiRuntimeMemoryComposition,
+} from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 
 export interface RccModeConfig {
@@ -42,6 +46,8 @@ export interface UiRuntimeLaunchOptions {
   readonly providerState?: string;
   readonly host?: string;
   readonly portNumber?: number;
+  readonly projectKey?: string;
+  readonly memory: UiRuntimeMemoryComposition;
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -131,6 +137,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     providerState,
     providerError,
     journal: new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl')),
+    ...(options.projectKey ? { projectKey: options.projectKey } : {}),
+    memory: options.memory,
   });
   await service.hydrate();
   const server = await startUiRuntimeServer({
@@ -144,7 +152,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
 
 export { UiRuntimeApiError } from './errors.js';
 export { UiRuntimeService } from './service.js';
-export type { TaskCheckpointStore } from './service.js';
+export type { TaskCheckpointStore, UiRuntimeMemoryComposition } from './service.js';
 export { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
 export { FakeReplayExecutionRuntimePort } from './fake-port.js';
 export type { UiRuntimeServer } from './server.js';

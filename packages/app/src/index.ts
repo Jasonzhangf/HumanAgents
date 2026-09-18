@@ -128,6 +128,19 @@ export type {
 } from './run-operation.js';
 export { readRunManifest, writeRunManifest } from './run-manifest.js';
 export type { RunManifest } from './run-manifest.js';
+export {
+  composeMemory,
+  composeRuntimeMemory,
+  createProjectSourceUpdateOwner,
+} from './memory-composition.js';
+export type {
+  MemoryComposition,
+  MemoryCompositionInput,
+  MemoryEvidenceSnapshot,
+  MemoryEvidenceSourcePort,
+  MemoryProjectPatchReader,
+  RuntimeMemoryCompositionInput,
+} from './memory-composition.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
 
@@ -138,4 +151,5 @@ export {
   UiRuntimeApiError,
   UiRuntimeService,
 } from './ui-runtime/index.js';
+export type { UiRuntimeMemoryComposition } from './ui-runtime/index.js';
 export type { RccModeConfig, UiRuntime, UiRuntimeLaunchOptions } from './ui-runtime/index.js';

@@ -3,6 +3,7 @@ import type {
   AgentClosure,
   AgentStartRequest,
   CheckpointId,
+  CycleId,
   EvidenceRef,
   MemoryActorContext,
   MemoryCurationResult,
@@ -340,6 +341,8 @@ export function validateEpisodicMemorySource(input: {
   readonly sourceRef: string;
   readonly sourceDigest: string;
   readonly projectKey: string;
+  readonly taskId?: TaskId;
+  readonly cycleId?: CycleId;
   readonly occurredAt: string;
   readonly payloadRef: string;
   readonly kind: string;
@@ -348,6 +351,12 @@ export function validateEpisodicMemorySource(input: {
   nonEmpty(input.sourceDigest, 'episodic sourceDigest');
   nonEmpty(input.projectKey, 'episodic projectKey');
   nonEmpty(input.payloadRef, 'episodic payloadRef');
+  if (input.taskId !== undefined && (input.taskId.scope !== 'task' || !input.taskId.value.trim())) {
+    throw new ContractError('episodic taskId must be a non-empty task scoped id');
+  }
+  if (input.cycleId !== undefined && (input.cycleId.scope !== 'cycle' || !input.cycleId.value.trim())) {
+    throw new ContractError('episodic cycleId must be a non-empty cycle scoped id');
+  }
   assertValidTime(input.occurredAt, 'episodic occurredAt');
   if (!['input', 'checkpoint', 'operation', 'tool', 'output', 'error', 'review'].includes(input.kind)) {
     throw new ContractError(`unknown episodic source kind: ${input.kind}`);
@@ -516,6 +525,7 @@ export function validateMemoryFollowUpRequest(input: MemoryFollowUpRequest): voi
   nonEmpty(input.inReplyTo, 'memory follow-up inReplyTo');
   nonEmpty(input.bindingRef, 'memory follow-up bindingRef');
   validateMemoryActor(input.actor);
+  if (!input.actor.permissions.includes('memory.propose')) throw new ContractError('memory follow-up actor lacks memory.propose permission');
   nonEmpty(input.projectKey, 'memory follow-up projectKey');
   if (input.actor.projectKey !== input.projectKey) throw new ContractError('memory follow-up actor project mismatch');
   if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid memory follow-up namespace');

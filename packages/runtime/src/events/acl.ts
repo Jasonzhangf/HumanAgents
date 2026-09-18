@@ -62,6 +62,7 @@ export function assertPublisherCanPublish(
 export function validateEventEnvelope(event: EventEnvelope): void {
   assertNonEmpty(event.messageId, 'event message id');
   assertNonEmpty(event.streamId, 'event stream id');
+  if (event.kind !== undefined) assertNonEmpty(event.kind, 'event kind');
   assertNonEmpty(event.summary, 'event summary');
   assertEventScope(event.scope);
   if (!Number.isFinite(Date.parse(event.occurredAt))) throw new EventPublisherError('event occurredAt is invalid');

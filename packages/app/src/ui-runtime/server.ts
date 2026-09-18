@@ -331,6 +331,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       streamEvents(request, response, service, operationId);
       return;
     }
+    const executionMemoryContext = /^\/api\/executions\/([^/]+)\/memory-context$/.exec(path);
+    if (executionMemoryContext && method === 'GET') {
+      const operationId = id('operation', decodeURIComponent(executionMemoryContext[1]!));
+      service.operationTask(operationId);
+      writeJson(response, 200, service.memoryContextReceipt(operationId));
+      return;
+    }
     if (path.startsWith('/api/')) {
       writeError(response, new UiRuntimeApiError('route.not-found', APP_OWNER, `no runtime route for ${method} ${path}`, 'use a documented runtime endpoint', 404));
       return;
