@@ -21,3 +21,4 @@ export * from './orchestration/index.js';
 export * from './review/index.js';
 export * from './ui-runtime/coordinator.js';
 export * from './explicit-brain/index.js';
+export * from './communication/index.js';
