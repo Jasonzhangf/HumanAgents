@@ -39,6 +39,7 @@ export interface MemoryAnalysisWakeBinding {
   readonly executionEpoch: number;
   readonly scope: MemoryScope;
   readonly taskId?: TaskId;
+  readonly interactionScopeId?: string;
   readonly actor: MemoryActorContext;
 }
 
@@ -153,6 +154,12 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
   }
   if (binding.scope.kind === 'task' && binding.scope.taskId === undefined) {
     return eventIssue('memory-agent-event-invalid', 'task memory analysis binding requires a task id', 'memory-binding');
+  }
+  if (binding.interactionScopeId !== undefined && !binding.interactionScopeId.trim()) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis interaction scope must be non-empty', 'memory-binding');
+  }
+  if (binding.interactionScopeId !== undefined && binding.taskId !== undefined) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding cannot mix task and interaction scopes', 'memory-binding');
   }
   return null;
 }

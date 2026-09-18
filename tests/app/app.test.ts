@@ -565,7 +565,6 @@ test('memory composition uses the trusted task binding ref for explicit brain me
     projectKey: binding.projectKey,
     taskId: binding.taskId,
     requestedKind: 'semantic',
-    candidateCategory: 'project-fact',
     contentRef: 'content:memory-task-tools',
     contentDigest: 'sha256:content-memory-task-tools',
     evidenceRefs: ['source:memory-task-tools'],
@@ -611,10 +610,8 @@ test('memory composition registers interaction bindings for the interaction port
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'memory-interaction-composition') },
       interactionScopeId,
-      mainAgentId: 'main-agent-interaction-composition',
       actor,
     },
-    mainAgentId: 'main-agent-interaction-composition',
   });
 
   const handle = await composed.interaction.open({
@@ -666,10 +663,8 @@ test('memory composition exposes candidate submission without hiding waiting or 
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'memory-interaction-submission') },
       interactionScopeId,
-      mainAgentId: 'main-agent-interaction-submission',
       actor,
     },
-    mainAgentId: 'main-agent-interaction-submission',
   });
 
   const receipt = await composed.submissions.submitCandidate({
@@ -680,7 +675,6 @@ test('memory composition exposes candidate submission without hiding waiting or 
     actor,
     projectKey: paths.projectKey,
     requestedKind: 'semantic',
-    candidateCategory: 'project-fact',
     contentRef: 'content:memory-composition',
     contentDigest: 'sha256:content-memory-composition',
     evidenceRefs: ['source:memory-composition'],
@@ -701,7 +695,6 @@ test('memory composition exposes candidate submission without hiding waiting or 
       actor,
       projectKey: paths.projectKey,
       requestedKind: 'semantic',
-      candidateCategory: 'project-fact',
       contentRef: 'content:memory-composition-denied',
       contentDigest: 'sha256:content-memory-composition-denied',
       evidenceRefs: ['source:memory-composition-denied'],

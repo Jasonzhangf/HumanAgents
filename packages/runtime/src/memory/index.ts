@@ -419,7 +419,9 @@ export function createMemoryInteractionPort(options: MemoryInteractionAdapterOpt
         reason: input.reason,
         impactScope: input.impactScope,
         approvalRef: input.approvalRef,
+        approvalDigest: input.approvalDigest,
         sourceRefs: [...input.sourceRefs],
+        sourceDigests: [...input.sourceDigests],
         promotedAt: now(),
       }));
     },
@@ -1027,18 +1029,16 @@ export class MemoryCoordinator {
     }
     const existing = this.taskBindings.get(input.taskId.value);
     if (existing) {
-      const compatible = sameMemoryScope(existing.scope, input.scope)
+      const sameIdentity = existing.bindingId === bindingId
+        && sameMemoryScope(existing.scope, input.scope)
         && existing.projectKey === projectKey
-        existing.bindingId === bindingId
-        && existing.assignmentId === assignmentId
-        && existing.executionEpoch === input.executionEpoch
         && existing.backendRef === backendRef
         && existing.indexVersion === input.indexVersion
         && existing.operations === input.operations
         && existing.injection === input.injection
         && existing.ownerId === ownerId
         && existing.failurePolicy === failurePolicy;
-      if (!compatible) {
+      if (!sameIdentity) {
         throw new MemoryCoordinatorError(`memory binding identity conflicts for task: ${input.taskId.value}`);
       }
       if (

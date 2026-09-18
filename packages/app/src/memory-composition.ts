@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   EvidenceRef,
   MemoryActorContext,
-  MemoryAgentStatePort,
   MemoryInteractionPort,
   MemoryProjectSourceSnapshot,
   MemoryScope,
