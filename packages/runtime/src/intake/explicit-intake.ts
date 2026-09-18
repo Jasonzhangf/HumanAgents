@@ -58,6 +58,7 @@ export interface ExplicitInteractionSnapshot {
   readonly interactionId: InteractionId;
   readonly state: ExplicitInteractionState;
   readonly sourceRef: string;
+  readonly rawInput: string;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
   readonly condition?: string;
@@ -106,6 +107,7 @@ interface ExplicitInteractionRecordState {
   readonly interactionId: InteractionId;
   readonly inputRevision: number;
   readonly sourceRef: string;
+  readonly rawInput: string;
   readonly state: ExplicitInteractionState;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
@@ -120,6 +122,7 @@ interface InteractionRecord {
   readonly interactionId: InteractionId;
   readonly inputRevision: number;
   readonly sourceRef: string;
+  readonly rawInput: string;
   state: ExplicitInteractionState;
   owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   nextAction: string;
@@ -199,6 +202,7 @@ export class ExplicitIntake {
       interactionId,
       inputRevision,
       sourceRef: input.sourceRef,
+      rawInput: input.rawInput,
       state: 'received',
       owner: 'explicit-intake',
       nextAction: 'start-matching',
@@ -214,6 +218,7 @@ export class ExplicitIntake {
       interactionId: interaction.interactionId,
       state: interaction.state,
       sourceRef: interaction.sourceRef,
+      rawInput: interaction.rawInput,
       owner: interaction.owner,
       nextAction: interaction.nextAction,
       condition: interaction.condition,

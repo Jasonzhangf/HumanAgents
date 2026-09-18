@@ -395,7 +395,9 @@ test('restart restores confirmed interaction and pending explicit inbox state', 
 
   const second = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   await second.hydrate();
-  assert.equal((await second.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+  const restored = await second.inspectExplicitInteraction(interactionId);
+  assert.equal(restored.state, 'confirmed');
+  assert.equal(restored.rawInput, 'survive restart');
   const dispatched = await second.dispatchNextExplicitRequirement();
   assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
   assert.equal(dispatched.requirement.fifoSeq, 1);
@@ -448,6 +450,21 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     const stale = await staleResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
     assert.equal(stale.error.code, 'ExplicitIntakeError');
     assert.equal(stale.error.ownerId, 'explicit-intake');
+
+    const controlResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:http',
+        rawInput: 'stop the current task',
+        channel: 'control',
+        controlCommand: 'stop',
+      }),
+    });
+    assert.equal(controlResponse.status, 501);
+    const control = await controlResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
+    assert.equal(control.error.code, 'explicit-brain.control.unsupported');
+    assert.equal(control.error.ownerId, 'humanagent.app');
   } finally {
     await runtime.server.close();
   }

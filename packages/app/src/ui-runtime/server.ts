@@ -186,17 +186,23 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     if (path === '/api/explicit/inputs' && method === 'POST') {
       const body = await readBody(request);
       const channel = requireString(body, 'channel');
-      if (channel !== 'business' && channel !== 'control') {
-        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field channel must be business or control', 'provide business or control');
+      if (channel === 'control') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.control.unsupported',
+          APP_OWNER,
+          'control commands require the formal control operation API',
+          'use the runtime control operation endpoint',
+          501,
+        );
+      }
+      if (channel !== 'business') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field channel must be business', 'provide business');
       }
       const inputRevision = body.inputRevision === undefined ? 1 : requirePositiveInteger(body, 'inputRevision');
       const interactionId = await service.receiveExplicitInput({
         sourceRef: requireString(body, 'sourceRef'),
         rawInput: requireString(body, 'rawInput'),
         channel,
-        ...(typeof body.controlCommand === 'string'
-          ? { controlCommand: body.controlCommand as 'steer' | 'stop' | 'revoke-permission' }
-          : {}),
       }, inputRevision);
       writeJson(response, 201, { interactionId });
       return;
