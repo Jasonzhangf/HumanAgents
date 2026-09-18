@@ -2,9 +2,9 @@
 
 状态：`CANDIDATE / PENDING REVIEW`
 日期：2026-09-18
-审计对象：`3454a23f8854b7c0f79f32d083bcae471ecea42d`
-审计树：`988cd08106cb6431b4bf2b389fd1a562d67e7e9a`
-基线：`5fb25ee0955a65ba77f90a6642921a5cf85524d5`
+审计源提交：`3332cca4d2acbcaaa71e69c1c1f68de45cfbe19d`
+审计源树：`1592a065bc87068ccd40837c07590acc9e4a0244`
+文档承载提交：`2048f3794b6f363363a2585c503a12a4e56d3e0e`
 
 ## 0. Scope and Method
 
@@ -13,6 +13,11 @@ audit the development lifecycle, review workflow, merge order, or release
 process. `Requirement`, `Design`, `Implementation`, `Verification`, and
 `Delivery` are therefore not treated as mandatory phases. Implementation and
 verification appear only as bindings on architecture nodes.
+
+The source claims are bound to the audited source commit and tree above. The
+document carrier commit adds only this file; its own hash is not an audit
+input because embedding that hash would be self-referential. The carrier
+commit's parent is the audited source commit.
 
 The As-Is graph is reconstructed from the current repository, not from a
 normal-project template. A node exists only when an implementation, contract,
@@ -132,8 +137,8 @@ architecture nodes, not implied capabilities of `run`.
 | node_id | type | purpose | inputs | outputs | dependencies | implementation_binding | verification_binding | evidence | status |
 |---|---|---|---|---|---|---|---|---|---|
 | `U-ENTRY-1` | Entry | Start the loopback UI runtime and choose fake or RCC provider mode. | CLI flags, config, rooted paths | Running HTTP runtime and binding | `A-CONFIG-1` | `packages/app/src/cli.ts:181-224`, `packages/app/src/ui-runtime/server.ts:130-158` | CLI/app and UI HTTP tests | `tests/app/app.test.ts:298-460`, `tests/app/ui-runtime.test.ts:1369-1510` | `LIVE` |
-| `U-MEMORY-1` | Memory composition | Open rooted project/global memory persistence and compose backend, coordinator, agent, sources, and admission. | Runtime paths and memory config | Memory backend, coordinator, agent, event handler | `A-CONFIG-1` | `packages/app/src/memory-composition.ts:570-648` | memory composition and rooted restart tests | `tests/app/app.test.ts:462-809`, `tests/app/ui-runtime.test.ts:145-223` | `LIVE` |
-| `U-MEMORY-2` | Memory analysis delivery | Consume analysis wake events and admit memory-agent processing after lifecycle boundaries. | Durable event and evidence refs | Admission receipt or attention | `U-MEMORY-1` | `packages/app/src/memory-composition.ts:634-647`, `packages/runtime/src/memory/events.ts` | memory event tests | `tests/runtime/memory/memory-events.test.ts` | `UNWIRED` |
+| `U-MEMORY-1` | Memory composition | Open rooted project/global memory persistence and compose backend, coordinator, agent, sources, and admission. | Runtime paths and memory config | Memory backend, coordinator, agent, event handler | `A-CONFIG-1` | `packages/app/src/memory-composition.ts:610-730` | memory composition and rooted restart tests | `tests/app/app.test.ts:462-809`, `tests/app/ui-runtime.test.ts:145-223` | `LIVE` |
+| `U-MEMORY-2` | Memory analysis delivery | Consume analysis wake events and admit memory-agent processing after lifecycle boundaries. | Durable event and evidence refs | Admission receipt or attention | `U-MEMORY-1` | `packages/app/src/memory-composition.ts:682-730`, `packages/runtime/src/memory/events.ts` | memory event tests | `tests/runtime/memory/memory-events.test.ts` | `UNWIRED` |
 | `U-BRAIN-1` | Explicit Brain | Receive, normalize, match, propose, confirm, and persist explicit interaction state. | Human business input | Confirmed requirement draft and interaction state | `U-ENTRY-1` | `packages/app/src/ui-runtime/service.ts:587-674`, `packages/runtime/src/intake/explicit-intake.ts` | explicit-brain and UI tests | `tests/app/ui-runtime.test.ts:291-583`, `tests/runtime/explicit-brain` | `LIVE` |
 | `U-INBOX-1` | Requirement admission | Hold confirmed requirements in FIFO order and expose exactly one consumable entry. | Confirmed requirement | FIFO envelope and acknowledgement | `U-BRAIN-1` | `packages/runtime/src/intake/requirement-inbox.ts`, `packages/app/src/ui-runtime/service.ts:676-740` | FIFO, idempotency, concurrency, and restart tests | `tests/app/ui-runtime.test.ts:291-515` | `LIVE` |
 | `U-DISPATCH-1` | Runtime dispatch | Consume the FIFO entry, create or correlate a task, and start exactly one execution. | Confirmed FIFO envelope | Task and operation identity | `U-INBOX-1`, `U-TASK-1` | `packages/app/src/ui-runtime/service.ts:676-740` | concurrent dispatch and idempotency tests | `tests/app/ui-runtime.test.ts:392-467` | `LIVE` |
@@ -148,7 +153,7 @@ architecture nodes, not implied capabilities of `run`.
 `U-MEMORY-2` is implemented and tested, but `serve` passes only
 `coordinator`, `backend`, and `projectKey` to `startUiRuntime`; the composed
 `eventHandler` is dropped. See `packages/app/src/cli.ts:198`, `215-219`, and
-`packages/app/src/memory-composition.ts:634-647`.
+`packages/app/src/memory-composition.ts:682-730`.
 
 `U-JOURNAL-1` is marked `PARTIAL`, not `LIVE`, because it stores more than a
 disposable projection: it restores explicit-brain state, inbox entries,
@@ -309,8 +314,8 @@ checkpoint that produced it.
 | `serve` does not acquire the implemented daemon lease. | `MISSING_EDGE` | `packages/app/src/cli.ts:181-224`; `packages/app/src/supervisor/supervisor.ts:365-491` |
 | `M3Assembly` and `OrchestrationManager` are not imported by `serve`. | `MISSING_EDGE` | `packages/app/src/m3-assembly.ts:133-173`; `packages/app/src/cli.ts:181-224` |
 | `HarnessNodeRuntime` is implemented and tested but not live. | `MISSING_EDGE` | `packages/runtime/src/nodes/node-runtime.ts:87-230`; no `serve` import |
-| EventBus is implemented and tested but reported unavailable in the UI runtime. | `MISSING_NODE`, `MISSING_EDGE` | `packages/runtime/src/events/coordinator.ts`; `packages/runtime/src/ui-runtime/coordinator.ts:433-437` |
-| The composed memory analysis event handler is dropped by `serve`. | `MISSING_EDGE` | `packages/app/src/memory-composition.ts:634-647`; `packages/app/src/cli.ts:198`, `215-219` |
+| EventBus is implemented and tested but reported unavailable in the UI runtime. | `UNWIRED`, `MISSING_EDGE` | `packages/runtime/src/events/coordinator.ts`; `packages/runtime/src/ui-runtime/coordinator.ts:433-437` |
+| The composed memory analysis event handler is dropped by `serve`. | `MISSING_EDGE` | `packages/app/src/memory-composition.ts:682-730`; `packages/app/src/cli.ts:198`, `215-219` |
 | UI recovery uses a second journal for explicit-brain, inbox, confirmation, and dispatch state. | `WRONG_DEPENDENCY`, `MISSING_BINDING` | `packages/app/src/ui-runtime/journal.ts:19-22`, `158-195`; `packages/app/src/ui-runtime/service.ts:569-585`, `742-753` |
 | Live execution memory uses legacy `task` scope while canonical design is `project|global`. | `MISSING_BINDING`, `MISSING_VERIFICATION` | `packages/contracts/src/index.ts:197-211`; `packages/app/src/ui-runtime/service.ts:766-768` |
 | DSH is live in headless but disabled in `serve`. | `WRONG_DEPENDENCY` for a claimed shared harness, not an invalid adapter boundary | `packages/app/src/cli.ts:181-184`, `289-340` |
@@ -505,7 +510,7 @@ checklist. The architecture is closed only when all of the following hold:
 10. The audit and its claims are bound to the exact repository SHA and tree
     under review.
 
-For the audited architecture at `3454a23f8854b7c0f79f32d083bcae471ecea42d`,
+For the audited architecture at `3332cca4d2acbcaaa71e69c1c1f68de45cfbe19d`,
 the path is not closed. The first blocking gaps are the unwired live
 EventBus/orchestration path, the dropped memory-analysis handler, and the
 `serve` process-ownership/durable-Attention gaps.
