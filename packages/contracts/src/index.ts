@@ -543,6 +543,11 @@ export interface MemoryInteractionPort {
     readonly query: string;
     readonly limit: number;
   }): Promise<MemoryView>;
+  resolveSource(input: {
+    readonly actor: MemoryActorContext;
+    readonly projectKey: string;
+    readonly sourceRef: string;
+  }): Promise<MemorySourceResolution>;
   inspect(input: {
     readonly actor: MemoryActorContext;
     readonly sourceRef: string;
@@ -572,6 +577,11 @@ export interface MemoryInteractionPort {
     readonly sourceDigests: readonly string[];
   }): Promise<MemoryPromotionReceipt>;
   planForgetting(input: MemoryForgettingRequest): Promise<MemoryForgettingPlan>;
+}
+
+export interface MemorySourceResolution {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
 }
 
 export interface MemoryViewHandle {

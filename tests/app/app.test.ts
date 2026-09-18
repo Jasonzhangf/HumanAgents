@@ -567,6 +567,88 @@ test('memory composition registers interaction bindings for the interaction port
   assert.equal(view.entries.length, 0);
 });
 
+test('memory composition exposes candidate submission without hiding waiting or attention outcomes', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-submission-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const interactionScopeId = 'interaction-memory-submission';
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'audit.md'), '# Memory audit\n', 'utf8');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Project rules\n', 'utf8');
+  await mkdir(join(workspace, 'project-memory'), { recursive: true });
+  await writeFile(join(workspace, 'project-memory', 'SKILL.md'), '# Project memory\n', 'utf8');
+  const actor = {
+    actorId: 'interaction-memory-submission-actor',
+    roleId: 'interaction' as const,
+    permissions: ['memory.propose'] as const,
+    projectKey: paths.projectKey,
+  };
+  const composed = await composeMemory({
+    paths,
+    projectKey: paths.projectKey,
+    workspaceCwd: workspace,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    localSkillRoot: workspace,
+    localSkillName: 'project-memory',
+    auditPromptRoot,
+    auditPromptRef: 'audit',
+    autoUpdate: false,
+    binding: {
+      bindingRef: 'memory-binding:interaction-submission',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'memory-interaction-submission') },
+      interactionScopeId,
+      mainAgentId: 'main-agent-interaction-submission',
+      actor,
+    },
+    mainAgentId: 'main-agent-interaction-submission',
+  });
+
+  const receipt = await composed.submissions.submitCandidate({
+    submissionId: 'submission:memory-composition',
+    requestId: 'request:memory-composition',
+    operationId: id('operation', 'memory-composition'),
+    bindingRef: 'memory-binding:interaction:interaction-memory-submission',
+    actor,
+    projectKey: paths.projectKey,
+    requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
+    contentRef: 'content:memory-composition',
+    contentDigest: 'sha256:content-memory-composition',
+    evidenceRefs: ['source:memory-composition'],
+    observation: 'composition submission',
+    desiredScope: 'project',
+    reason: 'test',
+    inputDigest: 'sha256:input-memory-composition',
+  });
+  assert.equal(receipt.status, 'accepted');
+  assert.equal(receipt.nextAction, 'wait-analysis');
+
+  await assert.rejects(
+    () => composed.submissions.submitCandidate({
+      submissionId: 'submission:memory-composition-denied',
+      requestId: 'request:memory-composition-denied',
+      operationId: id('operation', 'memory-composition-denied'),
+      bindingRef: 'memory-binding:missing',
+      actor,
+      projectKey: paths.projectKey,
+      requestedKind: 'semantic',
+      candidateCategory: 'project-fact',
+      contentRef: 'content:memory-composition-denied',
+      contentDigest: 'sha256:content-memory-composition-denied',
+      evidenceRefs: ['source:memory-composition-denied'],
+      observation: 'composition submission denied',
+      desiredScope: 'project',
+      reason: 'test',
+      inputDigest: 'sha256:input-memory-composition-denied',
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-binding-missing',
+  );
+});
+
 test('memory composition rejects partial runtime bindings explicitly', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-partial-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

@@ -31,6 +31,7 @@ import {
   type MemoryProjectUpdateOwnerPort,
   type MemorySourceUpdateReceipt,
 } from '../../runtime/src/memory/index.js';
+import type { MemorySubmissionPort } from '../../runtime/src/explicit-brain/index.js';
 import type { EventConsumerHandler } from '../../runtime/src/events/index.js';
 import { AppLifecycleError } from './errors.js';
 
@@ -82,6 +83,7 @@ export interface MemoryComposition {
   readonly backend: DeterministicMemoryBackend;
   readonly coordinator: MemoryCoordinator;
   readonly interaction: MemoryInteractionPort;
+  readonly submissions: MemorySubmissionPort;
   readonly persistence: MemoryPersistencePort;
   readonly sources: FilesystemMemorySourceAdapter;
   readonly agent: MemoryAgent;
@@ -701,10 +703,23 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       };
     },
   });
+  const submissions: MemorySubmissionPort = {
+    async submitCandidate(submission) {
+      const outcome = await coordinator.submitCandidate(submission);
+      if (outcome.status === 'ready') return outcome.value;
+      throw new AppLifecycleError(
+        outcome.issue.code,
+        outcome.issue.message,
+        outcome.issue.nextAction.ref ?? 'memory-submission',
+        outcome.issue.ownerId,
+      );
+    },
+  };
   return {
     backend,
     coordinator,
     interaction,
+    submissions,
     persistence,
     sources,
     agent,

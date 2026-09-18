@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ContractError,
   assertContextBudget,
@@ -22,6 +23,7 @@ import {
   type MemoryQueryResponse,
   type MemoryReviewReceipt,
   type MemoryScope,
+  type MemorySourceResolution,
   type MemorySubmission,
   type MemorySubmissionReceipt,
   type MemoryView,
@@ -291,6 +293,24 @@ export function createMemoryInteractionPort(options: MemoryInteractionAdapterOpt
         omitted: response.omitted.map((entry) => ({ ...entry })),
       };
     },
+    async resolveSource(input): Promise<MemorySourceResolution> {
+      assertMemoryActorProject(input.actor, input.projectKey);
+      const bindingRef = bindingFor({
+        actor: input.actor,
+        projectKey: input.projectKey,
+        namespace: 'project',
+      });
+      const source = requireReady(await options.coordinator.inspectSource({
+        bindingRef,
+        actor: input.actor,
+        projectKey: input.projectKey,
+        sourceRef: input.sourceRef,
+      }));
+      return {
+        sourceRef: source.sourceRef,
+        sourceDigest: source.sourceDigest,
+      };
+    },
     async inspect(input): Promise<MemoryDetailView> {
       assertMemoryActorProject(input.actor, input.actor.projectKey);
       const bindingRef = bindingFor({
@@ -298,24 +318,13 @@ export function createMemoryInteractionPort(options: MemoryInteractionAdapterOpt
         projectKey: input.actor.projectKey,
         namespace: 'project',
       });
-      const response = requireReady(await options.coordinator.query({
-        requestId: `memory-view-inspect:${input.actor.actorId}:${Date.now().toString(36)}`,
-        operationId: nextOperationId(),
+      const source = requireReady(await options.coordinator.inspectSource({
         bindingRef,
         actor: input.actor,
         projectKey: input.actor.projectKey,
-        namespace: 'project',
-        query: input.sourceRef,
-        kinds: ['episodic', 'semantic', 'procedural'],
-        states: ['approved', 'active', 'superseded', 'archived'],
-        limit: 1,
-        tokenBudget: Number.MAX_SAFE_INTEGER,
-        inputDigest: input.sourceDigest,
+        sourceRef: input.sourceRef,
       }));
-      const match = response.entries.find((entry) => entry.sourceRefs.some((sourceRef, index) => (
-        sourceRef === input.sourceRef && entry.sourceDigests[index] === input.sourceDigest
-      )));
-      if (!match) {
+      if (source.sourceRef !== input.sourceRef || source.sourceDigest !== input.sourceDigest) {
         throw new MemoryCoordinatorError(`memory source is unavailable: ${input.sourceRef}`);
       }
       return {
@@ -326,7 +335,7 @@ export function createMemoryInteractionPort(options: MemoryInteractionAdapterOpt
         }),
         sourceRef: input.sourceRef,
         sourceDigest: input.sourceDigest,
-        content: match.summary,
+        content: source.text,
       };
     },
     async compare(input): Promise<MemoryComparisonView> {
@@ -670,6 +679,99 @@ export class MemoryCoordinator {
         'memory-query-unavailable',
         undefined,
         'memory query operations are unavailable',
+        'memory-operations-ready',
+        undefined,
+        ownerId,
+      );
+    }
+  }
+
+  async inspectSource(input: {
+    readonly bindingRef: string;
+    readonly actor: MemoryActorContext;
+    readonly projectKey: string;
+    readonly sourceRef: string;
+  }): Promise<MemoryOutcome<{
+    readonly sourceRef: string;
+    readonly sourceDigest: string;
+    readonly text: string;
+  }>> {
+    const bindingResult = this.resolveMemoryBinding(input.bindingRef);
+    if (bindingResult.status !== 'ready') return bindingResult;
+    const { binding, operations, ownerId } = bindingResult.value;
+    if (input.projectKey !== binding.projectKey) {
+      return this.failure(
+        'memory-binding-mismatch',
+        undefined,
+        'memory source resolution project does not match the binding',
+        'memory-binding-refresh',
+        'attention',
+        ownerId,
+      );
+    }
+    if (!input.actor.permissions.includes('memory.read')) {
+      return this.failure(
+        'memory-capability-denied',
+        undefined,
+        'memory source resolution requires memory.read permission',
+        'memory-permission',
+        'attention',
+        ownerId,
+      );
+    }
+    const sourceOperationId = `memory-source-${createHash('sha256').update(input.sourceRef).digest('hex').slice(0, 24)}`;
+    const authorized = await this.query({
+      requestId: sourceOperationId,
+      operationId: { scope: 'operation', value: sourceOperationId },
+      bindingRef: input.bindingRef,
+      actor: input.actor,
+      projectKey: binding.projectKey,
+      namespace: 'project',
+      ...(binding.kind === 'task' ? { taskId: binding.taskId } : {}),
+      query: input.sourceRef,
+      kinds: ['episodic', 'semantic', 'procedural'],
+      states: ['approved', 'active', 'superseded', 'archived'],
+      limit: 1,
+      tokenBudget: Number.MAX_SAFE_INTEGER,
+      inputDigest: `sha256:${sourceOperationId}`,
+    });
+    if (authorized.status !== 'ready') return authorized;
+    const match = authorized.value.entries.find((entry) => entry.sourceRefs.some((sourceRef, index) => (
+      sourceRef === input.sourceRef && entry.sourceDigests[index] !== undefined
+    )));
+    if (!match) {
+      return this.failure(
+        'memory-query-unavailable',
+        undefined,
+        `memory source is not visible in the bound scope: ${input.sourceRef}`,
+        'memory-source-scope',
+        'attention',
+        ownerId,
+      );
+    }
+    const expectedDigest = match.sourceDigests[match.sourceRefs.indexOf(input.sourceRef)];
+    try {
+      const source = await operations.inspect({ sourceRef: input.sourceRef });
+      if (source.sourceRef !== input.sourceRef || source.sourceDigest !== expectedDigest) {
+        return this.failure(
+          'memory-query-unavailable',
+          undefined,
+          `memory source identity drifted: ${input.sourceRef}`,
+          'memory-source-integrity',
+          'attention',
+          ownerId,
+        );
+      }
+      return {
+        status: 'ready',
+        value: source,
+      };
+    } catch (error) {
+      if (error instanceof ContractError) throw error;
+      return this.failure(
+        'memory-query-unavailable',
+        undefined,
+        'memory source operations are unavailable',
         'memory-operations-ready',
         undefined,
         ownerId,
