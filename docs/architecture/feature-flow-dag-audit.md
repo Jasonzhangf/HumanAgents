@@ -316,7 +316,7 @@ checkpoint that produced it.
 | The composed memory analysis event handler is dropped by `serve`. | `MISSING_EDGE` | `packages/app/src/memory-composition.ts:682-730`; `packages/app/src/cli.ts:198`, `215-219` |
 | UI recovery uses a second journal for explicit-brain, inbox, confirmation, and dispatch state. | `WRONG_DEPENDENCY`, `MISSING_BINDING` | `packages/app/src/ui-runtime/journal.ts:19-22`, `158-195`; `packages/app/src/ui-runtime/service.ts:569-585`, `742-753` |
 | Live execution memory uses legacy `task` scope while canonical design is `project|global`. | `MISSING_BINDING`, `MISSING_VERIFICATION` | `packages/contracts/src/index.ts:197-211`; `packages/app/src/ui-runtime/service.ts:766-768` |
-| DSH is live in headless but disabled in `serve`. | `WRONG_DEPENDENCY` for a claimed shared harness, not an invalid adapter boundary | `packages/app/src/cli.ts:181-184`, `289-340` |
+| DSH is live in headless but disabled in `serve`. | `WRONG_DEPENDENCY` for a claimed shared harness, not an invalid adapter boundary | `packages/app/src/cli.ts:181-184`; `packages/app/src/agent-driver-composition.ts:289-340` |
 | Headless and UI paths duplicate execution composition instead of sharing one harness assembly. | `REDUNDANT_NODE` | `packages/app/src/agent-operation.ts:162-238`; `packages/runtime/src/ui-runtime/coordinator.ts:966-1044` |
 
 No `INVALID_CYCLE` was found in the reconstructed As-Is graph. The apparent
