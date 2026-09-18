@@ -35,7 +35,7 @@ import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
-import type { ConfirmationLedgerState } from '../explicit-brain/router.js';
+import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
 
 export type RuntimeTaskError = {
   readonly code: string;
@@ -182,6 +182,13 @@ export interface RuntimeExplicitBrainJournalState {
   readonly intake: ExplicitIntakeState;
   readonly inbox: RequirementInboxState;
   readonly confirmationLedger: ConfirmationLedgerState;
+  readonly dispatchLedger: readonly {
+    readonly draftId: string;
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+  }[];
+  readonly submittedSubmissions: readonly PersistedSubmittedReceipt[];
 }
 
 export type RuntimeTaskJournalRecord =

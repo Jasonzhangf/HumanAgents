@@ -31,6 +31,7 @@ import {
   type ConfirmationLedgerState,
   ConfirmationLedger,
   ExplicitBrainRouterError,
+  type PersistedSubmittedReceipt,
   RequirementSubmissionOwner,
   type RequirementSubmitReceipt,
 } from '../../../runtime/src/explicit-brain/router.js';
@@ -116,6 +117,13 @@ export interface ExplicitBrainDispatchReceipt {
   readonly executionEpoch: number;
 }
 
+interface DispatchLedgerEntry {
+  readonly draftId: string;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+}
+
 function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
   if (LIFECYCLE_STATES.has(state)) return state as RuntimeTaskSnapshot['state'];
   if (state === 'model' || state === 'output' || state === 'tool') return 'succeeded';
@@ -169,6 +177,7 @@ export class UiRuntimeService {
   private readonly explicitIntake = new ExplicitIntake();
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
+  private readonly dispatchLedger = new Map<string, DispatchLedgerEntry>();
   private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
 
@@ -179,6 +188,7 @@ export class UiRuntimeService {
       {
         submit: async (envelope) => ({ requirementId: envelope.requirementId }),
       },
+      () => this.persistExplicitBrainState(),
       () => this.persistExplicitBrainState(),
     );
     this.mode = options.mode;
@@ -492,6 +502,11 @@ export class UiRuntimeService {
     this.explicitIntake.restoreState(restored.intake);
     this.requirementInbox.restoreState(restored.inbox);
     this.confirmationLedger.restoreState(restored.confirmationLedger);
+    this.requirementSubmissions.restoreSubmittedReceipts(restored.submittedSubmissions ?? []);
+    this.dispatchLedger.clear();
+    for (const entry of restored.dispatchLedger ?? []) {
+      this.dispatchLedger.set(entry.draftId, structuredClone(entry));
+    }
   }
 
   async receiveExplicitInput(input: ExplicitInput, inputRevision = 1): Promise<string> {
@@ -599,6 +614,22 @@ export class UiRuntimeService {
           409,
         );
       }
+      const existingDispatch = this.dispatchLedger.get(consumed.draftId);
+      if (existingDispatch) {
+        const requirement = await this.requirementInbox.acknowledge({
+          consumerId: RUNTIME_OWNER,
+          requirementId: consumed.requirementId,
+        });
+        await this.explicitIntake.markDraftDispatched(consumed.draftId);
+        this.dispatchLedger.delete(consumed.draftId);
+        this.persistExplicitBrainState();
+        return {
+          requirement,
+          taskId: existingDispatch.taskId,
+          operationId: existingDispatch.operationId,
+          executionEpoch: existingDispatch.executionEpoch,
+        };
+      }
       const task = consumed.taskRef
         ? this.coordinator.taskSnapshot(consumed.taskRef)
         : this.coordinator.createTask({
@@ -606,11 +637,19 @@ export class UiRuntimeService {
             directive: consumed.normalizedInput,
           });
       const started = this.coordinator.startExecution(task.taskId, { prompt: consumed.payloadRef });
+      this.dispatchLedger.set(consumed.draftId, {
+        draftId: consumed.draftId,
+        taskId: task.taskId,
+        operationId: started.operationId,
+        executionEpoch: started.executionEpoch,
+      });
+      this.persistExplicitBrainState();
       const requirement = await this.requirementInbox.acknowledge({
         consumerId: RUNTIME_OWNER,
         requirementId: consumed.requirementId,
       });
       await this.explicitIntake.markDraftDispatched(consumed.draftId);
+      this.dispatchLedger.delete(consumed.draftId);
       this.persistExplicitBrainState();
       return {
         requirement,
@@ -632,6 +671,8 @@ export class UiRuntimeService {
         intake: this.explicitIntake.exportState(),
         inbox: this.requirementInbox.exportState(),
         confirmationLedger: this.confirmationLedger.exportState(),
+        dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
+        submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
       },
     });
   }

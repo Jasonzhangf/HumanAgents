@@ -82,6 +82,10 @@ export interface ConfirmationLedgerState {
   readonly confirmations: readonly ConfirmedRequirementRevision[];
 }
 
+export interface PersistedSubmittedReceipt extends RequirementSubmitReceipt {
+  readonly interactionId: string;
+}
+
 export class ChannelRouter {
   private readonly channels = new Map<string, ChannelBinding>();
   private readonly automaticOccurrences = new Map<string, AutomaticOccurrence>();
@@ -248,7 +252,7 @@ export interface RequirementSubmitPort {
 }
 
 export class RequirementSubmissionOwner {
-  private readonly submitted = new Map<string, RequirementSubmitReceipt>();
+  private readonly submitted = new Map<string, PersistedSubmittedReceipt>();
   private readonly pending = new Map<string, {
     readonly envelope: RequirementEnvelope;
     appended: boolean;
@@ -260,7 +264,20 @@ export class RequirementSubmissionOwner {
     private readonly inbox: Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>,
     private readonly port: RequirementSubmitPort,
     private readonly onEnvelopeAppended?: (envelope: RequirementEnvelope) => void,
+    private readonly onSubmitted?: (receipt: PersistedSubmittedReceipt) => void,
   ) {}
+
+  submittedReceipts(): readonly PersistedSubmittedReceipt[] {
+    return [...this.submitted.values()].map((receipt) => structuredClone(receipt));
+  }
+
+  restoreSubmittedReceipts(receipts: readonly PersistedSubmittedReceipt[]): void {
+    this.submitted.clear();
+    for (const receipt of receipts) {
+      const key = `${receipt.interactionId}:${receipt.draftId}:${receipt.inputRevision}`;
+      this.submitted.set(key, structuredClone(receipt));
+    }
+  }
 
   async submit(input: RequirementSubmitArguments): Promise<RequirementSubmitReceipt> {
     let release!: () => void;
@@ -323,8 +340,13 @@ export class RequirementSubmissionOwner {
       draftId: envelope.draftId,
       inputRevision: envelope.inputRevision,
     };
-    this.submitted.set(key, receipt);
+    const persistedReceipt: PersistedSubmittedReceipt = {
+      interactionId: input.interactionId,
+      ...receipt,
+    };
+    this.submitted.set(key, persistedReceipt);
     this.pending.delete(key);
+    this.onSubmitted?.(structuredClone(persistedReceipt));
     return receipt;
   }
 }

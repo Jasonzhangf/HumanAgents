@@ -41,6 +41,11 @@ No DSH adapter work. No production deployment or real external channel claim wit
   traces from later queries. The journal now hydrates persisted records into its in-memory
   collection before append/query, and a regression asserts history remains visible after a new
   append.
+- 2026-09-17: Independent review `explicit-brain-reviewfix-2bcdb20` returned FAIL with P1
+  findings on restart idempotency. Submitted receipts are now persisted/restored with
+  `RequirementSubmissionOwner`, and dispatch records a durable ledger entry with the started
+  task/operation before acknowledging the FIFO envelope so restart recovery reuses the existing
+  execution instead of starting another.
 - Verification: `pnpm exec tsc --noEmit`, `pnpm test:explicit-brain`, `pnpm test:app`,
   `pnpm test:agent-templates`, `pnpm test:release`, full `pnpm test`, and `git diff --check`
   all PASS after the review fixes.

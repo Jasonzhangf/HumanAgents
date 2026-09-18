@@ -13,6 +13,7 @@ import {
   type BugReportArguments,
   type EvidenceRef,
   type MemoryOperationRequestedEvent,
+  type RequirementEnvelope,
   type ToolIntent,
 } from '../../../packages/contracts/src/index.js';
 import {
@@ -49,6 +50,7 @@ import {
   type ExplicitBrainRuntimeBinding,
   type GitBugPort,
   type NotificationPort,
+  type RequirementSubmitReceipt,
 } from '../../../packages/runtime/src/explicit-brain/index.js';
 import { reportBug, type BugIntakeLedgerPort } from '../../../packages/runtime/src/explicit-brain/index.js';
 import {
@@ -1138,6 +1140,72 @@ test('requirement submission retry reuses the same envelope after append succeed
   assert.equal(receipt.status, 'submitted');
   assert.equal(envelopes.length, 1);
   assert.equal(downstreamAttempts, 2);
+});
+
+test('requirement submission restored receipts suppress downstream redelivery', async () => {
+  const ledger = new ConfirmationLedger();
+  ledger.registerDraft({
+    interactionId: 'interaction-restored-receipt',
+    draftId: 'draft-restored-receipt',
+    inputRevision: 1,
+    normalizedInput: 'normalized restored receipt',
+    intent: 'create',
+    payloadRef: 'asset://draft-restored-receipt',
+  });
+  ledger.confirm({
+    interactionId: 'interaction-restored-receipt',
+    draftId: 'draft-restored-receipt',
+    inputRevision: 1,
+    confirmationRef: 'confirm-restored-receipt',
+    confirmedBy: 'human',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+  });
+  const envelope: RequirementEnvelope = {
+    requirementId: 'requirement:draft-restored-receipt:1',
+    draftId: 'draft-restored-receipt',
+    inputRevision: 1,
+    intent: 'create',
+    normalizedInput: 'normalized restored receipt',
+    confirmedBy: 'human',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    fifoSeq: 1,
+    payloadRef: 'asset://draft-restored-receipt',
+  };
+  const inbox = {
+    get expectedNextFifoSeq() { return 1; },
+    markConfirmed() {},
+    find() { return envelope; },
+    async append() {
+      throw new Error('append must not run for restored receipt');
+    },
+  } as unknown as Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>;
+  const submitted: { readonly interactionId: string; readonly receipt: RequirementSubmitReceipt }[] = [];
+  let downstreamCalls = 0;
+  const first = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(input) {
+      downstreamCalls += 1;
+      return { requirementId: input.requirementId };
+    },
+  }, undefined, (receipt) => submitted.push({ interactionId: receipt.interactionId, receipt }));
+  const args = {
+    interactionId: 'interaction-restored-receipt',
+    draftId: 'draft-restored-receipt',
+    confirmationRef: 'confirm-restored-receipt',
+    inputRevision: 1,
+  };
+  assert.equal((await first.submit(args)).status, 'submitted');
+  assert.equal(downstreamCalls, 1);
+  assert.equal(submitted.length, 1);
+
+  const second = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit() {
+      downstreamCalls += 1;
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  second.restoreSubmittedReceipts([{ ...submitted[0]!.receipt, interactionId: submitted[0]!.interactionId }]);
+  assert.equal((await second.submit(args)).status, 'duplicate');
+  assert.equal(downstreamCalls, 1);
 });
 
 test('requirement submission serializes concurrent revisions and same-key retries', async () => {

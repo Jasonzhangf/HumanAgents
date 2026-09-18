@@ -398,6 +398,15 @@ test('restart restores confirmed interaction and pending explicit inbox state', 
   const restored = await second.inspectExplicitInteraction(interactionId);
   assert.equal(restored.state, 'confirmed');
   assert.equal(restored.rawInput, 'survive restart');
+  const duplicateConfirmation = await second.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:restart',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    payloadRef: 'asset://requirements/restart',
+  });
+  assert.equal(duplicateConfirmation.requirement.status, 'duplicate');
   const dispatched = await second.dispatchNextExplicitRequirement();
   assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
   assert.equal(dispatched.requirement.fifoSeq, 1);
