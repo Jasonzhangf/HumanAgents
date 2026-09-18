@@ -540,6 +540,36 @@ test('memory coordinator reuses a compatible project backend and rejects conflic
   assert.equal(retry.taskId.value, thirdTask.value);
 });
 
+test('memory coordinator keeps binding-local refs, owners, and injections out of project backend identity', () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const otherPorts = makePorts();
+  coordinator.bindInteraction({
+    interactionScopeId: 'interaction-local-binding',
+    projectKey: taskProjectKey,
+    backendRef: 'memory://interaction',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: ports.injection,
+    ownerId: 'interaction-owner',
+  });
+
+  const taskReceipt = coordinator.bindTask({
+    taskId: task,
+    assignmentId: taskAssignmentId,
+    executionEpoch: taskExecutionEpoch,
+    projectKey: taskProjectKey,
+    scope: taskScope,
+    backendRef: 'memory://task',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: otherPorts.injection,
+    ownerId: 'task-owner',
+  });
+
+  assert.equal(taskReceipt.taskId.value, task.value);
+});
+
 test('memory coordinator resolves candidate operations by canonical candidate identity, not insertion order', async () => {
   const coordinator = new MemoryCoordinator();
   const firstPorts = makePorts();

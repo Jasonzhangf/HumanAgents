@@ -83,6 +83,7 @@ export interface MemoryComposition {
   readonly coordinator: MemoryCoordinator;
   readonly interaction: MemoryInteractionPort;
   readonly submissions: MemorySubmissionPort;
+  readonly bindingRef: string;
   readonly persistence: MemoryPersistencePort;
   readonly sources: FilesystemMemorySourceAdapter;
   readonly agent: MemoryAgent;
@@ -124,6 +125,7 @@ export async function composeRuntimeMemory(
       projectKey,
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
+      interactionScopeId: `runtime:${projectKey}`,
       actor,
     },
   });
@@ -720,6 +722,7 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     coordinator,
     interaction,
     submissions,
+    bindingRef: coordinatorBindings.interactionBindingRef ?? input.binding.bindingRef,
     persistence,
     sources,
     agent,

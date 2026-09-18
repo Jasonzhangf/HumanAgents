@@ -94,6 +94,46 @@ test('runtime memory resolves declared local Skill and keeps undeclared source e
   assert.equal(source.content, '# Declared Skill\n');
 });
 
+test('runtime memory exposes the registered project interaction binding', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-runtime-memory-binding-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const composed = await composeRuntimeMemory({ paths, configuration });
+  const actor = {
+    actorId: 'runtime-memory-actor',
+    roleId: 'interaction' as const,
+    permissions: ['memory.read', 'memory.propose'] as const,
+    projectKey: paths.projectKey,
+  };
+
+  const view = await composed.interaction.query({
+    actor,
+    projectKey: paths.projectKey,
+    namespace: 'project',
+    query: 'missing',
+    limit: 5,
+  });
+  assert.equal(view.entries.length, 0);
+
+  const receipt = await composed.submissions.submitCandidate({
+    submissionId: 'submission:runtime-memory-binding',
+    requestId: 'request:runtime-memory-binding',
+    operationId: id('operation', 'runtime-memory-binding'),
+    bindingRef: composed.bindingRef,
+    actor,
+    projectKey: paths.projectKey,
+    requestedKind: 'semantic',
+    contentRef: 'content:runtime-memory-binding',
+    contentDigest: 'sha256:runtime-memory-binding',
+    evidenceRefs: ['source:runtime-memory-binding'],
+    observation: 'default runtime memory binding submission',
+    desiredScope: 'project',
+    reason: 'regression coverage for composeRuntimeMemory',
+    inputDigest: 'sha256:runtime-memory-binding-input',
+  });
+  assert.equal(receipt.status, 'accepted');
+});
+
 async function waitFor(assertion: () => void | Promise<void>, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;

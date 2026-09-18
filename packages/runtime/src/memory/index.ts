@@ -1465,11 +1465,8 @@ export class MemoryCoordinator {
     const existing = this.projectBindings.get(projectKey);
     if (existing) {
       if (
-        existing.backendRef !== binding.backendRef
-        || existing.indexVersion !== binding.indexVersion
+        existing.indexVersion !== binding.indexVersion
         || existing.operations !== binding.operations
-        || existing.injection !== binding.injection
-        || existing.ownerId !== binding.ownerId
       ) {
         throw new MemoryCoordinatorError(`memory backend binding conflicts for project: ${projectKey}`);
       }
