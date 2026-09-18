@@ -61,6 +61,10 @@ export interface MemoryAnalysisEventConsumerOptions {
   readonly retryOwnerRef?: string;
 }
 
+const TERMINAL_MEMORY_ADMISSION_ATTENTION_CODES = new Set([
+  'memory-agent-source-invalid',
+]);
+
 export interface MemoryAnalysisRequestedEventInput {
   readonly messageId: string;
   readonly streamId: string;
@@ -351,7 +355,10 @@ export function createMemoryAnalysisEventHandler(
     }
     const request = requestOutcome.value;
     const admissionOutcome = await options.admission.admit({ request, event });
-    if (admissionOutcome.status === 'attention' && admissionOutcome.issue.nextAction.kind === 'recover') {
+    if (
+      admissionOutcome.status === 'attention'
+      && TERMINAL_MEMORY_ADMISSION_ATTENTION_CODES.has(admissionOutcome.issue.code)
+    ) {
       return rejectedCommit(event, options.binding.bindingRef, admissionOutcome.issue.code);
     }
     if (admissionOutcome.status !== 'ready') {
