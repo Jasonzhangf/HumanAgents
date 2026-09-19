@@ -461,7 +461,7 @@ test('CLI config failures preserve structured owner and next action evidence', a
   });
 });
 
-test('CLI rejects memory auto update before composing memory without a patch reader', async () => {
+test('CLI accepts memory auto update configuration before composing memory', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-memory-auto-'));
   const controlRoot = join(root, 'control');
   const workspace = join(root, 'workspace');
@@ -469,20 +469,17 @@ test('CLI rejects memory auto update before composing memory without a patch rea
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   await appendFile(join(controlRoot, 'config.toml'), '\n[memory.update]\nauto = true\n', 'utf8');
-  assert.throws(() => execFileSync(process.execPath, [
+  const output = execFileSync(process.execPath, [
     join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
     'doctor',
     '--workspace',
     workspace,
     '--control-root',
     controlRoot,
-  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
-    const parsed = JSON.parse(error.stderr);
-    assert.equal(parsed.error.code, 'config-capability');
-    assert.equal(parsed.error.ownerId, 'config-loader');
-    assert.match(parsed.error.message, /memory\.update\.auto is unavailable/);
-    return true;
-  });
+  ], { encoding: 'utf8', stdio: 'pipe' });
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.command, 'doctor');
+  assert.equal(parsed.projectKey, paths.projectKey);
 });
 
 test('CLI host failures remain structured', async () => {
@@ -1054,12 +1051,146 @@ test('project source updates require a typed patch reader', async () => {
         expectedRevision: current.revision,
         expectedDigest: current.digest,
         patchRef: 'typed://patch',
+        patchDigest: 'sha256:patch',
         evidenceRefs: [],
         ownerRef: 'project-owner',
       },
     }),
     (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-unavailable',
   );
+});
+
+test('memory runtime applies immutable project patches and publishes a durable update fact', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-auto-update-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const original = '# Original project rules\n';
+  const next = '# Updated project rules\n';
+  await writeFile(join(workspace, 'AGENTS.md'), original, 'utf8');
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
+  const patchRef = 'project-agents-next';
+  const patchDigest = `sha256:${createHash('sha256').update(next).digest('hex')}`;
+  await writeFile(join(paths.artifactsRoot, patchRef), next, 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update') };
+  const runtime = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: true,
+    binding: {
+      bindingRef: 'memory-binding:auto-update',
+      projectKey: paths.projectKey,
+      executionEpoch: 3,
+      scope,
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'main-agent-a',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  const current = await runtime.composition.sources.readProject({
+    projectKey: paths.projectKey,
+    target: 'project-agents',
+  });
+  const applied = await runtime.composition.agent.applyProjectUpdate({
+    projectKey: paths.projectKey,
+    proposal: {
+      target: 'project-agents',
+      sourceRef: current.sourceRef,
+      expectedRevision: current.revision,
+      expectedDigest: current.digest,
+      patchRef,
+      patchDigest,
+      evidenceRefs: ['journal://project-a/evidence'],
+      ownerRef: 'project-rule-owner',
+    },
+  });
+  assert.equal(applied.status, 'ready');
+  if (applied.status !== 'ready') throw new Error('expected automatic source update');
+  assert.equal(applied.value.updated, true);
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), next);
+  const events = await runtime.journal.readEvents({
+    streamId: `memory-project-source-updates:${paths.projectKey}`,
+    afterSequence: 0,
+    limit: 10,
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.kind, 'memory.project-source.updated');
+  assert.equal(events[0]?.payload?.patchDigest, patchDigest);
+});
+
+test('memory runtime rejects missing or drifted immutable project patches', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-auto-update-invalid-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const original = '# Original project rules\n';
+  await writeFile(join(workspace, 'AGENTS.md'), original, 'utf8');
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const runtime = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: true,
+    binding: {
+      bindingRef: 'memory-binding:auto-update-invalid',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'memory-auto-update-invalid') },
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'main-agent-a',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  const current = await runtime.composition.sources.readProject({
+    projectKey: paths.projectKey,
+    target: 'project-agents',
+  });
+  const proposal = {
+    target: 'project-agents' as const,
+    sourceRef: current.sourceRef,
+    expectedRevision: current.revision,
+    expectedDigest: current.digest,
+    patchRef: 'missing-project-patch',
+    patchDigest: `sha256:${'c'.repeat(64)}`,
+    evidenceRefs: ['journal://project-a/evidence'],
+    ownerRef: 'project-rule-owner',
+  };
+  const missing = await runtime.composition.agent.applyProjectUpdate({
+    projectKey: paths.projectKey,
+    proposal,
+  });
+  assert.equal(missing.status, 'attention');
+  assert.equal(missing.status === 'attention' && missing.issue.code, 'memory-agent-update-validation-failed');
+
+  await writeFile(join(paths.artifactsRoot, proposal.patchRef), '# Different patch\n', 'utf8');
+  const drifted = await runtime.composition.agent.applyProjectUpdate({
+    projectKey: paths.projectKey,
+    proposal,
+  });
+  assert.equal(drifted.status, 'attention');
+  assert.equal(drifted.status === 'attention' && drifted.issue.code, 'memory-agent-update-validation-failed');
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), original);
 });
 
 test('project source updates reject source identity drift before writing', async () => {
@@ -1090,6 +1221,7 @@ test('project source updates reject source identity drift before writing', async
     expectedRevision: current.revision,
     expectedDigest: current.digest,
     patchRef: 'typed://patch',
+    patchDigest: 'sha256:patch',
     evidenceRefs: [],
     ownerRef: 'project-owner',
   };
@@ -1148,6 +1280,7 @@ test('project source updates recheck source digest before commit', async () => {
         expectedRevision: current.revision,
         expectedDigest: current.digest,
         patchRef: 'typed://patch',
+        patchDigest: 'sha256:patch',
         evidenceRefs: [],
         ownerRef: 'project-owner',
       },
@@ -1196,6 +1329,7 @@ test('project source updates reject symlinked source roots', async () => {
         expectedRevision: current.revision,
         expectedDigest: current.digest,
         patchRef: 'typed://patch',
+        patchDigest: 'sha256:patch',
         evidenceRefs: [],
         ownerRef: 'project-owner',
       },

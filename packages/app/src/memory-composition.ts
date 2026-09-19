@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { ImmutableAssetStore } from '../../adapters/filesystem/src/index.js';
 import type {
   EvidenceRef,
   MemoryActorContext,
@@ -8,6 +9,7 @@ import type {
   MemoryProjectSourceSnapshot,
   MemoryScope,
   ProjectSourceUpdateProposal,
+  ScopeRef,
 } from '../../contracts/src/index.js';
 import { id } from '../../contracts/src/index.js';
 import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
@@ -65,6 +67,33 @@ export interface MemoryProjectPatchReader {
   }): Promise<{ readonly content: string }>;
 }
 
+export interface MemoryProjectSourceUpdatePublisher {
+  publish(input: {
+    readonly receipt: MemorySourceUpdateReceipt;
+    readonly scope: ScopeRef;
+    readonly executionEpoch: number;
+  }): Promise<void>;
+}
+
+export function createTypedProjectPatchReader(artifactsRoot: string): MemoryProjectPatchReader {
+  const store = new ImmutableAssetStore(artifactsRoot);
+  return {
+    async read({ proposal }): Promise<{ readonly content: string }> {
+      try {
+        const content = new TextDecoder().decode(await store.readByDigest(proposal.patchRef, proposal.patchDigest));
+        return { content };
+      } catch (error) {
+        throw new AppLifecycleError(
+          'memory-update-validation-failed',
+          `project source patch artifact is unavailable or drifted: ${error instanceof Error ? error.message : String(error)}`,
+          'regenerate the typed project source patch artifact',
+          OWNER,
+        );
+      }
+    },
+  };
+}
+
 export interface MemoryCompositionInput {
   readonly paths: RuntimePaths;
   readonly projectKey: string;
@@ -83,6 +112,7 @@ export interface MemoryCompositionInput {
   readonly roleId?: string;
   readonly evidenceSource?: MemoryEvidenceSourcePort;
   readonly patchReader?: MemoryProjectPatchReader;
+  readonly projectSourceUpdatePublisher?: MemoryProjectSourceUpdatePublisher;
   readonly externalOperations?: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
   };
@@ -345,6 +375,9 @@ export function createProjectSourceUpdateOwner(input: {
   readonly projectKey: string;
   readonly locksRoot: string;
   readonly patchReader?: MemoryProjectPatchReader;
+  readonly projectSourceUpdatePublisher?: MemoryProjectSourceUpdatePublisher;
+  readonly sourceScope?: ScopeRef;
+  readonly executionEpoch?: number;
 }): MemoryProjectUpdateOwnerPort {
   return {
     async apply({ proposal, current, auto }): Promise<MemorySourceUpdateReceipt> {
@@ -430,16 +463,43 @@ export function createProjectSourceUpdateOwner(input: {
         if (committedDigest !== nextDigest) {
           throw new AppLifecycleError('memory-update-verification-failed', 'project source verification failed after commit', 'preserve the original source and inspect the update', OWNER);
         }
-        return {
+        const receipt: MemorySourceUpdateReceipt = {
           target: proposal.target,
           sourceRef: current.sourceRef,
           previousRevision: current.revision,
           previousDigest: current.digest,
           nextRevision: nextDigest,
           nextDigest,
+          patchRef: proposal.patchRef,
+          patchDigest: proposal.patchDigest,
           updated: true,
           evidenceRefs: [...proposal.evidenceRefs],
         };
+        if (input.projectSourceUpdatePublisher) {
+          if (!input.sourceScope || input.executionEpoch === undefined) {
+            throw new AppLifecycleError(
+              'memory-update-publication-unavailable',
+              'project source update publisher is missing its runtime scope or execution epoch',
+              'compose the project source owner from the runtime-bound memory composition',
+              OWNER,
+            );
+          }
+          try {
+            await input.projectSourceUpdatePublisher.publish({
+              receipt,
+              scope: input.sourceScope,
+              executionEpoch: input.executionEpoch,
+            });
+          } catch (error) {
+            throw new AppLifecycleError(
+              'memory-update-publication-failed',
+              `project source update committed but its durable event was not published: ${error instanceof Error ? error.message : String(error)}`,
+              'reconcile the committed source update and publish memory.project-source.updated',
+              OWNER,
+            );
+          }
+        }
+        return receipt;
       } finally {
         await releaseSourceUpdateLock(lock);
       }
@@ -633,12 +693,10 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     );
   }
   if (input.autoUpdate && !input.patchReader) {
-    throw new AppLifecycleError(
-      'memory-update-unavailable',
-      'memory auto update requires a typed project source patch reader',
-      'configure a typed patch reader before enabling memory auto update',
-      OWNER,
-    );
+    input = {
+      ...input,
+      patchReader: createTypedProjectPatchReader(input.paths.artifactsRoot),
+    };
   }
   try {
     await assertCompositionPathEquals(input.workspaceCwd, input.paths.workspaceCwd, 'memory workspace');
@@ -691,6 +749,11 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       projectKey: input.projectKey,
       locksRoot: input.paths.locksRoot,
       ...(input.patchReader === undefined ? {} : { patchReader: input.patchReader }),
+      ...(input.projectSourceUpdatePublisher === undefined ? {} : {
+        projectSourceUpdatePublisher: input.projectSourceUpdatePublisher,
+        sourceScope: input.binding.scope,
+        executionEpoch: input.binding.executionEpoch,
+      }),
     }),
     ...(input.state === undefined ? {} : { state: input.state }),
   });

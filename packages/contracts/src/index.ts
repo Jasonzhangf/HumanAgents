@@ -507,6 +507,7 @@ export interface ProjectSourceUpdateProposal {
   readonly expectedRevision: string;
   readonly expectedDigest: string;
   readonly patchRef: string;
+  readonly patchDigest: string;
   readonly evidenceRefs: readonly string[];
   readonly ownerRef: string;
 }

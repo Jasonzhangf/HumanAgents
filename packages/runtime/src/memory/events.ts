@@ -28,6 +28,7 @@ import {
 } from './agent.js';
 
 export const MEMORY_ANALYSIS_REQUESTED_KIND = 'memory.analysis.requested';
+export const MEMORY_PROJECT_SOURCE_UPDATED_KIND = 'memory.project-source.updated';
 
 export const MEMORY_ANALYSIS_TRIGGERS = [
   'blocked',
@@ -88,6 +89,7 @@ const MEMORY_ADMISSION_ATTENTION_DISPOSITION: Record<MemoryAgentIssue['code'], '
   'memory-agent-update-denied': 'reject',
   'memory-agent-update-conflict': 'reject',
   'memory-agent-update-validation-failed': 'reject',
+  'memory-agent-update-publication-failed': 'reject',
   'memory-agent-event-unsupported': 'reject',
   'memory-agent-event-invalid': 'reject',
   'memory-agent-event-scope-mismatch': 'reject',
@@ -106,7 +108,28 @@ export interface MemoryAnalysisRequestedEventInput {
   readonly requestedKind?: 'episodic' | 'semantic' | 'procedural';
   readonly candidateCategory: MemoryCandidateCategory;
   readonly sessionRef?: string;
+  readonly projectPatch?: {
+    readonly patchRef: string;
+    readonly patchDigest: string;
+  };
   readonly inputRevision?: number;
+}
+
+export interface MemoryProjectSourceUpdatedEventInput {
+  readonly messageId: string;
+  readonly streamId: string;
+  readonly scope: ScopeRef;
+  readonly occurredAt: string;
+  readonly executionEpoch: number;
+  readonly target: 'project-agents' | 'project-local-skill';
+  readonly sourceRef: string;
+  readonly previousRevision: string;
+  readonly previousDigest: string;
+  readonly nextRevision: string;
+  readonly nextDigest: string;
+  readonly patchRef: string;
+  readonly patchDigest: string;
+  readonly sourceEvidenceRefs: readonly string[];
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -222,6 +245,16 @@ function candidateCategory(value: unknown): MemoryAnalysisRequest['candidateCate
     : null;
 }
 
+function projectPatch(value: unknown): MemoryAnalysisRequest['projectPatch'] | null | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const patch = value as Record<string, unknown>;
+  if (Object.keys(patch).some((key) => key !== 'patchRef' && key !== 'patchDigest')) return null;
+  if (typeof patch.patchRef !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(patch.patchRef)) return null;
+  if (typeof patch.patchDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(patch.patchDigest)) return null;
+  return { patchRef: patch.patchRef, patchDigest: patch.patchDigest };
+}
+
 export function createMemoryAnalysisRequestedEvent(
   input: MemoryAnalysisRequestedEventInput,
 ): EventEnvelope {
@@ -242,11 +275,14 @@ export function createMemoryAnalysisRequestedEvent(
   }
   const category = candidateCategory(input.candidateCategory);
   if (category === null) throw new Error('memory analysis candidate category is invalid');
+  const patch = projectPatch(input.projectPatch);
+  if (patch === null) throw new Error('memory analysis project patch is invalid');
   const payload: BusinessPayload = {
     trigger: input.trigger,
     requestedKind: input.requestedKind ?? (input.trigger === 'rewind' ? 'procedural' : 'semantic'),
     candidateCategory: category,
     ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
+    ...(patch === undefined ? {} : { projectPatch: patch }),
   };
   return {
     messageId: input.messageId,
@@ -260,6 +296,50 @@ export function createMemoryAnalysisRequestedEvent(
     evidenceRefs: input.evidenceRefs.map((evidence) => ({ ...evidence })),
     executionEpoch: input.executionEpoch,
     ...(input.inputRevision === undefined ? {} : { inputRevision: input.inputRevision }),
+  };
+}
+
+export function createMemoryProjectSourceUpdatedEvent(
+  input: MemoryProjectSourceUpdatedEventInput,
+): EventEnvelope {
+  nonEmpty(input.messageId, 'memory project source update message id');
+  if (!safeOperationSegment(input.messageId)) throw new Error('memory project source update message id is invalid');
+  nonEmpty(input.streamId, 'memory project source update stream id');
+  if (!Number.isFinite(Date.parse(input.occurredAt))) throw new Error('memory project source update occurredAt is invalid');
+  if (!Number.isSafeInteger(input.executionEpoch) || input.executionEpoch < 1) {
+    throw new Error('memory project source update execution epoch must be positive');
+  }
+  const patch = projectPatch({ patchRef: input.patchRef, patchDigest: input.patchDigest });
+  if (patch === null || patch === undefined) throw new Error('memory project source update patch is invalid');
+  nonEmpty(input.sourceRef, 'memory project source update source ref');
+  nonEmpty(input.previousRevision, 'memory project source update previous revision');
+  nonEmpty(input.previousDigest, 'memory project source update previous digest');
+  nonEmpty(input.nextRevision, 'memory project source update next revision');
+  nonEmpty(input.nextDigest, 'memory project source update next digest');
+  if (input.sourceEvidenceRefs.some((ref) => !ref.trim())) {
+    throw new Error('memory project source update evidence refs are invalid');
+  }
+  return {
+    messageId: input.messageId,
+    streamId: input.streamId,
+    kind: MEMORY_PROJECT_SOURCE_UPDATED_KIND,
+    class: 'data',
+    scope: input.scope,
+    occurredAt: input.occurredAt,
+    summary: `${input.target} updated from ${input.previousDigest} to ${input.nextDigest}`,
+    payload: {
+      target: input.target,
+      sourceRef: input.sourceRef,
+      previousRevision: input.previousRevision,
+      previousDigest: input.previousDigest,
+      nextRevision: input.nextRevision,
+      nextDigest: input.nextDigest,
+      patchRef: patch.patchRef,
+      patchDigest: patch.patchDigest,
+      sourceEvidenceRefs: [...input.sourceEvidenceRefs],
+    },
+    evidenceRefs: [],
+    executionEpoch: input.executionEpoch,
   };
 }
 
@@ -298,7 +378,7 @@ export function memoryAnalysisRequestFromEvent(
     return eventIssue('memory-agent-event-evidence-missing', 'memory analysis event requires evidence locators and digests', 'memory-analysis-evidence');
   }
   const payload = payloadRecord(event.payload);
-  const allowed = new Set(['trigger', 'requestedKind', 'candidateCategory', 'sessionRef']);
+  const allowed = new Set(['trigger', 'requestedKind', 'candidateCategory', 'sessionRef', 'projectPatch']);
   const unknown = Object.keys(payload).find((key) => !allowed.has(key));
   if (unknown) {
     return eventIssue('memory-agent-event-invalid', `memory analysis event payload contains unsupported key: ${unknown}`, 'memory-analysis-event');
@@ -316,6 +396,10 @@ export function memoryAnalysisRequestFromEvent(
   const category = candidateCategory(payload.candidateCategory);
   if (category === null) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis candidate category is invalid', 'memory-analysis-event');
+  }
+  const patch = projectPatch(payload.projectPatch);
+  if (patch === null) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis project patch is invalid', 'memory-analysis-event');
   }
   return {
     status: 'ready',
@@ -337,6 +421,7 @@ export function memoryAnalysisRequestFromEvent(
       sourceRefs: [...sources.sourceRefs],
       sourceDigests: [...sources.sourceDigests],
       observation: event.summary,
+      ...(patch === undefined ? {} : { projectPatch: patch }),
       requestedKind: kind,
       candidateCategory: category,
       executionEpoch: event.executionEpoch,

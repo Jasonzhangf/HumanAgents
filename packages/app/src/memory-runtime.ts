@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import type { RuntimePaths, LoadedConfiguration } from '../../config/src/index.js';
 import type {
   EventConsumerBinding,
@@ -10,6 +11,7 @@ import { consumeEvents, publishEvent } from '../../runtime/src/events/index.js';
 import { id, type Checkpoint, type EvidenceRef, type ScopeRef } from '../../contracts/src/index.js';
 import {
   createMemoryAnalysisRequestedEvent,
+  createMemoryProjectSourceUpdatedEvent,
   type MemoryAnalysisTrigger,
   type MemoryAnalysisWakeBinding,
 } from '../../runtime/src/memory/index.js';
@@ -173,7 +175,7 @@ function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPubli
       ...(binding.taskId === undefined ? {} : { taskId: binding.taskId }),
     },
     allowedClasses: ['data'],
-    capabilities: ['memory.analysis.requested'],
+    capabilities: ['memory.analysis.requested', 'memory.project-source.updated'],
   };
 }
 
@@ -195,16 +197,6 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
   const journal = createJsonlEventJournal({
     filePath: join(input.paths.journalRoot, 'events.jsonl'),
   });
-  const composition = await composeMemory({
-    ...input,
-    paths: input.paths,
-    projectKey: input.paths.projectKey,
-    evidenceSource: input.evidenceSource ?? {
-      read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
-    },
-    externalOperations: journal,
-    state: journal,
-  });
   const publisher = publisherBinding(input.binding);
   const consumer = consumerBinding(input.binding);
   const registry = {
@@ -218,6 +210,51 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     externalOperations: journal,
     barrierIntents: journal,
   };
+  const projectSourceUpdatePublisher = {
+    publish: async (update: {
+      readonly receipt: import('../../runtime/src/memory/index.js').MemorySourceUpdateReceipt;
+      readonly scope: ScopeRef;
+      readonly executionEpoch: number;
+    }) => {
+      const identity = JSON.stringify({
+        projectKey: input.paths.projectKey,
+        target: update.receipt.target,
+        previousDigest: update.receipt.previousDigest,
+        nextDigest: update.receipt.nextDigest,
+        patchRef: update.receipt.patchRef,
+        patchDigest: update.receipt.patchDigest,
+      });
+      const messageId = `memory-project-source-update-${createHash('sha256').update(identity).digest('hex')}`;
+      const event = createMemoryProjectSourceUpdatedEvent({
+        messageId,
+        streamId: `memory-project-source-updates:${input.paths.projectKey}`,
+        scope: update.scope,
+        occurredAt: new Date().toISOString(),
+        executionEpoch: update.executionEpoch,
+        target: update.receipt.target,
+        sourceRef: update.receipt.sourceRef,
+        previousRevision: update.receipt.previousRevision,
+        previousDigest: update.receipt.previousDigest,
+        nextRevision: update.receipt.nextRevision,
+        nextDigest: update.receipt.nextDigest,
+        patchRef: update.receipt.patchRef,
+        patchDigest: update.receipt.patchDigest,
+        sourceEvidenceRefs: update.receipt.evidenceRefs,
+      });
+      await publishEvent(ports, { publisherId: PUBLISHER_ID, event });
+    },
+  };
+  const composition = await composeMemory({
+    ...input,
+    paths: input.paths,
+    projectKey: input.paths.projectKey,
+    evidenceSource: input.evidenceSource ?? {
+      read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
+    },
+    externalOperations: journal,
+    state: journal,
+    projectSourceUpdatePublisher,
+  });
   return {
     composition,
     journal,

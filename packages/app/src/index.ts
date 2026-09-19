@@ -150,6 +150,7 @@ export type {
   MemoryEvidenceSnapshot,
   MemoryEvidenceSourcePort,
   MemoryProjectPatchReader,
+  MemoryProjectSourceUpdatePublisher,
   RuntimeMemoryCompositionInput,
 } from './memory-composition.js';
 export { SessionStore } from './session-store.js';

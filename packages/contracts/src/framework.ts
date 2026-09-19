@@ -509,6 +509,7 @@ export function validateProjectSourceUpdateProposal(input: ProjectSourceUpdatePr
   nonEmpty(input.expectedRevision, 'project source update expectedRevision');
   nonEmpty(input.expectedDigest, 'project source update expectedDigest');
   nonEmpty(input.patchRef, 'project source update patchRef');
+  nonEmpty(input.patchDigest, 'project source update patchDigest');
   assertRefList(input.evidenceRefs, 'project source update evidenceRefs');
   nonEmpty(input.ownerRef, 'project source update ownerRef');
 }
