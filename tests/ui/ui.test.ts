@@ -708,6 +708,40 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('createRuntimeApi'), true);
 });
 
+test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {
+  const api = await readFile('docs/ui/runtime-api.js', 'utf8');
+  const interaction = await readFile('docs/ui/interaction.js', 'utf8');
+  const html = await readFile('docs/ui/interaction.html', 'utf8');
+  for (const method of [
+    'receiveExplicitInput',
+    'inspectExplicitInteraction',
+    'beginExplicitMatching',
+    'recordExplicitMatch',
+    'proposeExplicitRequirement',
+    'completeExplicitStatusQuery',
+    'confirmExplicitRequirement',
+    'dispatchNextExplicitRequirement',
+  ]) assert.equal(api.includes(`${method}:`), true);
+  assert.equal(api.includes("channel: 'business'"), true);
+  assert.equal(interaction.includes('api.receiveExplicitInput'), true);
+  assert.equal(interaction.includes('api.inspectExplicitInteraction'), true);
+  assert.equal(interaction.includes('api.beginExplicitMatching'), true);
+  assert.equal(interaction.includes('api.recordExplicitMatch'), true);
+  assert.equal(interaction.includes('api.proposeExplicitRequirement'), true);
+  assert.equal(interaction.includes('api.completeExplicitStatusQuery'), true);
+  assert.equal(interaction.includes('api.confirmExplicitRequirement'), true);
+  assert.equal(interaction.includes('api.dispatchNextExplicitRequirement'), true);
+  assert.equal(interaction.includes('api.stop'), true);
+  assert.equal(interaction.includes('api.startExecution'), true);
+  assert.equal(interaction.includes('channel: \'control\''), false);
+  assert.equal(interaction.includes('dataset.runtimeState'), false);
+  assert.equal(interaction.includes('data-task-status'), false);
+  assert.equal(html.includes('type="module" src="./interaction.js"'), true);
+  assert.equal(html.includes('data-explicit-input'), true);
+  assert.equal(html.includes('data-explicit-confirmation'), true);
+  assert.equal(html.includes('data-action="dispatch"'), true);
+});
+
 test('task detail UI consumes typed task-detail projection fields', async () => {
   const source = await readFile('docs/ui/task.js', 'utf8');
   assert.equal(source.includes('detail.taskTitle'), false);

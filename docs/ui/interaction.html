@@ -8,137 +8,121 @@
     <link rel="stylesheet" href="./interaction.css" />
   </head>
   <body>
-    <div class="wireframe" data-runtime-state="running">
+    <div class="wireframe">
       <header class="wireframe-header" data-region="global-navigation">
         <a href="#main-content">HumanAgent</a>
-        <span>交互定义 · 非视觉设计</span>
-        <button type="button" data-action="open-diagnostic">后台诊断入口</button>
+        <span>Explicit interaction</span>
+        <span class="state-label" data-runtime-mode>连接中…</span>
       </header>
 
       <main id="main-content" class="wireframe-main">
-        <nav class="region region--tasks" aria-label="任务导航" data-region="task-navigation">
-          <h1>任务导航</h1>
-          <button class="task-link is-selected" type="button" data-task="export-index" data-task-title="重建导出索引" data-task-status="运行中" data-task-phase="整理记录" data-task-target="整理最近 30 天导出记录，生成可查询索引。" data-task-impact="已有记录可读；最终写入等待权限确认。" data-task-latest="后台正在整理索引字段。" data-task-actions="steer continue inspect" data-task-attention="open" data-task-attention-title="导出目录权限发生变化" data-task-attention-copy="任务仍能整理已有记录，但写入最终目录前需要你的决定。" data-task-decision-action="允许继续写入" aria-current="page">
-            <span>重建导出索引</span>
-            <small data-task-state>运行中</small>
-          </button>
-          <button class="task-link" type="button" data-task="weekly-report" data-task-title="整理周报证据" data-task-status="等待确认" data-task-phase="等待人工确认" data-task-target="汇总本周已核验的工作证据，生成可审阅周报。" data-task-impact="已有证据可读；未确认前不发布周报。" data-task-latest="周报证据已整理完成，等待发布范围确认。" data-task-actions="steer inspect" data-task-attention="open" data-task-attention-title="周报发布范围需要确认" data-task-attention-copy="证据已整理完成，但发布范围仍需要你的决定。" data-task-decision-action="确认发布范围">
-            <span>整理周报证据</span>
-            <small>等待确认</small>
-          </button>
-          <button class="task-link" type="button" data-task="legacy-session" data-task-title="迁移旧会话" data-task-status="已停止" data-task-phase="已停止" data-task-target="保留旧会话证据，并迁移可恢复状态。" data-task-impact="迁移已停止；已有 checkpoint 仍可读取。" data-task-latest="迁移已停止；最近一次 checkpoint 可以恢复。" data-task-actions="inspect" data-task-attention="none" data-task-attention-title="" data-task-attention-copy="" data-task-decision-action="">
-            <span>迁移旧会话</span>
-            <small>已停止</small>
-          </button>
-        </nav>
-
         <section class="region region--current" aria-labelledby="current-title" data-region="current-task">
           <header class="region-heading">
             <div>
-              <span class="region-kicker">显式层 · 当前任务</span>
-              <h2 id="current-title" data-current-title>重建导出索引</h2>
+              <span class="region-kicker">HumanAgent Runtime</span>
+              <h1 id="current-title">显式输入</h1>
             </div>
-            <span class="state-label" data-visible-state>运行中</span>
+            <span class="state-label" data-visible-state>未开始</span>
           </header>
 
-          <section class="interaction-block" data-region="task-summary">
-            <h3>任务摘要</h3>
-            <dl>
-              <div><dt>目标</dt><dd data-task-target>整理最近 30 天导出记录，生成可查询索引。</dd></div>
-              <div><dt>当前阶段</dt><dd data-phase>整理记录</dd></div>
-              <div><dt>影响</dt><dd data-task-impact>已有记录可读；最终写入等待权限确认。</dd></div>
-            </dl>
+          <section class="interaction-block" data-region="input">
+            <h2>1. 输入</h2>
+            <form data-explicit-input>
+              <label>来源 <input name="sourceRef" value="ui:interaction" required /></label>
+              <label>输入修订 <input name="inputRevision" type="number" min="1" value="1" required /></label>
+              <label>业务输入 <textarea name="rawInput" required placeholder="描述要处理的需求，或询问当前状态"></textarea></label>
+              <div class="action-row"><button class="action-primary" type="submit">提交并检查</button><button type="button" data-action="status-only" disabled>只查询状态</button></div>
+            </form>
           </section>
 
-          <section class="interaction-block" data-region="human-decision">
-            <h3>需要你决定</h3>
-            <div class="decision-state" data-attention-state="open">
-              <p data-decision-message><strong>导出目录权限发生变化。</strong> 允许继续写入最终目录吗？</p>
+          <section class="interaction-block" data-region="inspection">
+            <h2>2. Inspection</h2>
+            <p data-interaction-id>尚未创建 interaction。</p>
+            <dl data-inspection></dl>
+          </section>
+
+          <section class="interaction-block" data-region="matching">
+            <h2>3. Matching / match result</h2>
+            <form data-explicit-match>
+              <label>规范化输入 <input name="normalizedInput" required /></label>
+              <label>已知事实（每行一项） <textarea name="knownFacts" placeholder="可选"></textarea></label>
+              <label>匹配任务（JSON 数组） <textarea name="matchedTasks" placeholder="例如：[]"></textarea></label>
+              <div class="action-row"><button type="submit" disabled>执行 matching 并记录 match</button><button type="button" data-action="status-only" disabled>只查询状态</button></div>
+            </form>
+          </section>
+
+          <section class="interaction-block" data-region="proposal">
+            <h2>4. Proposal</h2>
+            <form data-explicit-proposal>
+              <label>意图 <select name="proposedIntent"><option value="create">create</option><option value="append">append</option><option value="change">change</option></select></label>
+              <label>建议 <textarea name="proposal" required placeholder="说明确认后要提交的需求"></textarea></label>
+              <label>决策引用（每行一项） <textarea name="decisionRefs" placeholder="可选"></textarea></label>
+              <button type="submit" disabled>提交 proposal</button>
+            </form>
+          </section>
+
+          <section class="interaction-block" data-region="confirmation">
+            <h2>5. Confirmation</h2>
+            <p>确认前不会创建 FIFO item，也不会 dispatch。</p>
+            <form data-explicit-confirmation>
+              <label>draft ID <input name="draftId" required /></label>
+              <label>输入修订 <input name="inputRevision" type="number" min="1" value="1" required /></label>
+              <label>confirmation ref <input name="confirmationRef" placeholder="confirmation:ui" required /></label>
+              <label>确认人 <input name="confirmedBy" placeholder="human:operator" required /></label>
+              <label>确认时间 <input name="confirmedAt" type="datetime-local" required /></label>
+              <label>payload ref <input name="payloadRef" placeholder="asset://requirements/ui" required /></label>
+              <button class="action-primary" type="submit" disabled>确认当前 proposal</button>
+            </form>
+          </section>
+
+          <section class="interaction-block" data-region="dispatch">
+            <h2>6. Dispatch</h2>
+            <button class="action-primary" type="button" data-action="dispatch" disabled>dispatch confirmed requirement</button>
+            <p>Dispatch 只消费已确认的 FIFO item。</p>
+          </section>
+
+          <section class="interaction-block" data-region="control">
+            <h2>正式控制操作</h2>
+            <p>steer / stop / continue 不进入业务输入；以下按钮直接调用 Runtime control/execution routes。</p>
+            <form data-control-form>
+              <label>Task ID <input name="taskId" placeholder="ui-task-1" required /></label>
+              <label>Continue prompt <textarea name="prompt" required placeholder="继续执行时的 prompt"></textarea></label>
               <div class="action-row">
-                <button type="button" data-action="approve-write">允许继续写入</button>
-                <button type="button" data-action="open-cause">查看原因</button>
+                <button type="button" data-action="steer">steer / stop</button>
+                <button type="button" data-action="continue">continue</button>
               </div>
-            </div>
-            <p class="empty-decision" data-empty-decision hidden>当前没有需要你决定的事项。</p>
+            </form>
           </section>
 
-          <section class="interaction-block" data-region="human-actions">
-            <h3>当前可执行动作</h3>
-            <div class="action-row">
-              <button class="action-primary" type="button" data-action="steer">停止并收拢</button>
-              <button type="button" data-action="continue">继续下一轮</button>
-              <button type="button" data-action="inspect-checkpoint">查看 checkpoint</button>
-            </div>
-            <p class="action-feedback" role="status" aria-live="polite" data-action-feedback>动作结果会在这里出现。</p>
-          </section>
-
-          <section class="interaction-block" data-region="human-timeline">
-            <h3>与你有关的最近变化</h3>
-            <ol class="timeline">
-              <li><time>现在</time><span data-task-latest>后台正在整理索引字段。</span></li>
-              <li><time>2 分钟前</time><span>已读取 1,284 条记录，没有发现重复。</span></li>
-              <li><time>14 分钟前</time><span>checkpoint 已保存，可以安全恢复。</span></li>
-            </ol>
-          </section>
+          <p class="action-feedback" role="status" aria-live="polite" data-action-feedback>等待输入。</p>
         </section>
 
         <aside class="region region--attention" aria-labelledby="attention-title" data-region="attention">
           <header class="region-heading">
             <div>
-              <span class="region-kicker">显式层 · 只在需要时打扰</span>
-              <h2 id="attention-title">需要处理 <span data-attention-count>1</span></h2>
+              <span class="region-kicker">Server projection</span>
+              <h2 id="attention-title">Interaction evidence</h2>
             </div>
           </header>
-          <article class="attention-item" data-attention-item>
-            <p class="attention-kind">需要确认</p>
-            <h3 data-attention-title>导出目录权限发生变化</h3>
-            <p data-attention-copy>任务仍能整理已有记录，但写入最终目录前需要你的决定。</p>
-            <button type="button" data-action="focus-decision">回到这个决定</button>
-          </article>
-          <p class="human-rule">规则：后台可以继续工作；只有影响目标、权限或结果时，才进入这里。</p>
+          <pre data-server-result>服务端 inspection 会显示在这里。</pre>
+          <p>页面不从 Journal、DSH Session 或 RCC raw response 重建状态。</p>
         </aside>
 
-        <section class="region region--implicit" aria-labelledby="implicit-title" data-region="implicit-entry">
+        <section class="region region--implicit" aria-labelledby="diagnostic-title" data-region="diagnostic-entry">
           <details>
-            <summary id="implicit-title">隐式层：后台详情（特殊入口）</summary>
-            <div class="implicit-body">
-              <p><strong>默认不和人交互。</strong> 这里只用于解释异常、核对证据和诊断恢复，不是正常工作区。</p>
-              <dl>
-                <div><dt>器官</dt><dd>organ.export-index</dd></div>
-                <div><dt>监督状态</dt><dd>steady / healthy</dd></div>
-                <div><dt>执行代次</dt><dd>12</dd></div>
-                <div><dt>retry budget</dt><dd>2 / 3</dd></div>
-              </dl>
-              <div class="action-row">
-                <button type="button" data-action="open-diagnostic">打开只读诊断</button>
-                <button type="button" data-action="open-raw-events">查看原始事件</button>
-                <a class="link-button" href="./observation.html">打开潜意识观测链</a>
-              </div>
-            </div>
+            <summary id="diagnostic-title">只读诊断入口</summary>
+            <p>诊断只用于查看当前 API 错误和服务端返回，不产生需求、不修改队列。</p>
+            <pre data-diagnostic-output>暂无诊断信息。</pre>
           </details>
         </section>
       </main>
 
-      <nav class="mobile-navigation" aria-label="手机版导航" data-region="mobile-navigation">
-        <button class="is-selected" type="button" data-mobile-view="task" aria-pressed="true">任务</button>
-        <button type="button" data-mobile-view="attention" aria-pressed="false">待处理</button>
-        <button type="button" data-mobile-view="history" aria-pressed="false">历史</button>
-        <button type="button" data-action="open-diagnostic">诊断</button>
+      <nav class="mobile-navigation" aria-label="页面导航">
+        <a href="./dashboard.html">Dashboard</a>
+        <a href="./tasks.html">Tasks</a>
+        <a href="./interaction.html" aria-current="page">Interaction</a>
       </nav>
-
-      <dialog data-dialog="diagnostic" aria-labelledby="diagnostic-title">
-        <form method="dialog">
-          <header class="region-heading">
-            <div><span class="region-kicker">隐式层 · 只读</span><h2 id="diagnostic-title">后台诊断</h2></div>
-            <button type="submit" aria-label="关闭">关闭</button>
-          </header>
-          <p>诊断信息只用于解释后台执行，不产生正常的人类操作任务。</p>
-          <pre data-diagnostic-output>12:42:18  checkpoint committed  cycle-18
-12:43:02  operation started      index.rebuild
-12:44:11  attention raised       permission.changed</pre>
-        </form>
-      </dialog>
     </div>
-    <script src="./interaction.js"></script>
+    <script type="module" src="./interaction.js"></script>
   </body>
 </html>
