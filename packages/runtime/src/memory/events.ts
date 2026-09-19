@@ -25,6 +25,8 @@ import {
   type MemoryAgentIssue,
   type MemoryAgentOutcome,
   type MemoryAnalysisRequest,
+  type MemoryAnalysisInputs,
+  validateMemoryAnalysisInputs,
 } from './agent.js';
 
 export const MEMORY_ANALYSIS_REQUESTED_KIND = 'memory.analysis.requested';
@@ -112,6 +114,7 @@ export interface MemoryAnalysisRequestedEventInput {
     readonly patchRef: string;
     readonly patchDigest: string;
   };
+  readonly analysisInputs?: MemoryAnalysisInputs;
   readonly inputRevision?: number;
 }
 
@@ -255,6 +258,69 @@ function projectPatch(value: unknown): MemoryAnalysisRequest['projectPatch'] | n
   return { patchRef: patch.patchRef, patchDigest: patch.patchDigest };
 }
 
+function cloneMemoryAnalysisInputs(input: MemoryAnalysisInputs): MemoryAnalysisInputs {
+  return {
+    corrections: input.corrections.map((entry) => ({
+      sourceRef: entry.sourceRef,
+      sourceDigest: entry.sourceDigest,
+      fingerprint: entry.fingerprint,
+    })),
+    errors: input.errors.map((entry) => ({
+      sourceRef: entry.sourceRef,
+      sourceDigest: entry.sourceDigest,
+      fingerprint: entry.fingerprint,
+    })),
+    rewindChains: input.rewindChains.map((chain) => ({
+      failedBranchRef: chain.failedBranchRef,
+      rewindCheckpointRef: chain.rewindCheckpointRef,
+      recoveryCheckpointRef: chain.recoveryCheckpointRef,
+      ...(chain.reentryFactRef === undefined ? {} : { reentryFactRef: chain.reentryFactRef }),
+      successfulBranchRefs: [...chain.successfulBranchRefs],
+      successEvidenceRefs: [...chain.successEvidenceRefs],
+      absoluteJournalRefs: [...chain.absoluteJournalRefs],
+    })),
+    actualPathRefs: [...input.actualPathRefs],
+    declaredPathRefs: [...input.declaredPathRefs],
+  };
+}
+
+function memoryAnalysisInputsPayload(input: MemoryAnalysisInputs): BusinessPayload {
+  const cloned = cloneMemoryAnalysisInputs(input);
+  return {
+    corrections: cloned.corrections.map((entry) => ({
+      sourceRef: entry.sourceRef,
+      sourceDigest: entry.sourceDigest,
+      fingerprint: entry.fingerprint,
+    })),
+    errors: cloned.errors.map((entry) => ({
+      sourceRef: entry.sourceRef,
+      sourceDigest: entry.sourceDigest,
+      fingerprint: entry.fingerprint,
+    })),
+    rewindChains: cloned.rewindChains.map((chain) => ({
+      failedBranchRef: chain.failedBranchRef,
+      rewindCheckpointRef: chain.rewindCheckpointRef,
+      recoveryCheckpointRef: chain.recoveryCheckpointRef,
+      ...(chain.reentryFactRef === undefined ? {} : { reentryFactRef: chain.reentryFactRef }),
+      successfulBranchRefs: [...chain.successfulBranchRefs],
+      successEvidenceRefs: [...chain.successEvidenceRefs],
+      absoluteJournalRefs: [...chain.absoluteJournalRefs],
+    })),
+    actualPathRefs: [...cloned.actualPathRefs],
+    declaredPathRefs: [...cloned.declaredPathRefs],
+  };
+}
+
+function eventAnalysisInputs(value: unknown): MemoryAnalysisInputs | null | undefined {
+  if (value === undefined) return undefined;
+  try {
+    validateMemoryAnalysisInputs(value);
+    return cloneMemoryAnalysisInputs(value);
+  } catch {
+    return null;
+  }
+}
+
 export function createMemoryAnalysisRequestedEvent(
   input: MemoryAnalysisRequestedEventInput,
 ): EventEnvelope {
@@ -277,12 +343,18 @@ export function createMemoryAnalysisRequestedEvent(
   if (category === null) throw new Error('memory analysis candidate category is invalid');
   const patch = projectPatch(input.projectPatch);
   if (patch === null) throw new Error('memory analysis project patch is invalid');
+  if (input.analysisInputs !== undefined) {
+    validateMemoryAnalysisInputs(input.analysisInputs);
+  }
   const payload: BusinessPayload = {
     trigger: input.trigger,
     requestedKind: input.requestedKind ?? (input.trigger === 'rewind' ? 'procedural' : 'semantic'),
     candidateCategory: category,
     ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
     ...(patch === undefined ? {} : { projectPatch: patch }),
+    ...(input.analysisInputs === undefined
+      ? {}
+      : { analysisInputs: memoryAnalysisInputsPayload(input.analysisInputs) }),
   };
   return {
     messageId: input.messageId,
@@ -378,7 +450,7 @@ export function memoryAnalysisRequestFromEvent(
     return eventIssue('memory-agent-event-evidence-missing', 'memory analysis event requires evidence locators and digests', 'memory-analysis-evidence');
   }
   const payload = payloadRecord(event.payload);
-  const allowed = new Set(['trigger', 'requestedKind', 'candidateCategory', 'sessionRef', 'projectPatch']);
+  const allowed = new Set(['trigger', 'requestedKind', 'candidateCategory', 'sessionRef', 'projectPatch', 'analysisInputs']);
   const unknown = Object.keys(payload).find((key) => !allowed.has(key));
   if (unknown) {
     return eventIssue('memory-agent-event-invalid', `memory analysis event payload contains unsupported key: ${unknown}`, 'memory-analysis-event');
@@ -401,6 +473,10 @@ export function memoryAnalysisRequestFromEvent(
   if (patch === null) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis project patch is invalid', 'memory-analysis-event');
   }
+  const analysisInputs = eventAnalysisInputs(payload.analysisInputs);
+  if (analysisInputs === null) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis inputs are invalid', 'memory-analysis-event');
+  }
   return {
     status: 'ready',
     value: {
@@ -422,6 +498,7 @@ export function memoryAnalysisRequestFromEvent(
       sourceDigests: [...sources.sourceDigests],
       observation: event.summary,
       ...(patch === undefined ? {} : { projectPatch: patch }),
+      ...(analysisInputs === undefined ? {} : { analysisInputs }),
       requestedKind: kind,
       candidateCategory: category,
       executionEpoch: event.executionEpoch,

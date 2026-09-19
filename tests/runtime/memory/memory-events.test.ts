@@ -33,6 +33,7 @@ import {
   createMemoryProjectSourceUpdatedEvent,
   MEMORY_ANALYSIS_REQUESTED_KIND,
   MEMORY_PROJECT_SOURCE_UPDATED_KIND,
+  memoryAnalysisRequestFromEvent,
   memoryAnalysisBarrierDriver,
   type MemoryAnalysisAdmissionPort,
   type MemoryAnalysisWakeBinding,
@@ -993,6 +994,182 @@ test('memory analysis event kind is stable and data-only', () => {
     trigger: 'completion',
     candidateCategory: 'invalid-category' as never,
   }), /candidate category is invalid/);
+});
+
+test('memory analysis event round-trips typed analysis inputs', () => {
+  const analysisInputs = {
+    corrections: [{
+      sourceRef: 'journal://project-a/correction',
+      sourceDigest: 'sha256:correction',
+      fingerprint: 'correction-fingerprint',
+    }],
+    errors: [{
+      sourceRef: 'journal://project-a/error',
+      sourceDigest: 'sha256:error',
+      fingerprint: 'error-fingerprint',
+    }],
+    rewindChains: [{
+      failedBranchRef: 'journal://project-a/failed',
+      rewindCheckpointRef: 'journal://project-a/rewind',
+      recoveryCheckpointRef: 'journal://project-a/recovery',
+      reentryFactRef: 'journal://project-a/reentry',
+      successfulBranchRefs: ['journal://project-a/success'],
+      successEvidenceRefs: ['journal://project-a/success-evidence'],
+      absoluteJournalRefs: ['journal://project-a/journal'],
+    }],
+    actualPathRefs: ['journal://project-a/actual-path'],
+    declaredPathRefs: ['project://project-a/AGENTS.md'],
+  };
+  const envelope = createMemoryAnalysisRequestedEvent({
+    messageId: 'message-with-analysis-inputs',
+    streamId,
+    scope,
+    occurredAt,
+    summary: 'rewind with typed evidence',
+    evidenceRefs: [
+      evidence('failed'),
+      evidence('rewind'),
+      evidence('recovery'),
+      evidence('reentry'),
+      evidence('success'),
+      evidence('success-evidence'),
+      evidence('journal'),
+      evidence('actual-path'),
+      evidence('declared-path'),
+    ],
+    executionEpoch: 2,
+    trigger: 'rewind',
+    candidateCategory: 'project-experience',
+    analysisInputs,
+  });
+  assert.deepEqual(envelope.payload?.analysisInputs, analysisInputs);
+
+  const record: EventRecord = {
+    ...envelope,
+    publisherId: publisher.publisherId,
+    sequence: 1,
+    committedAt: occurredAt,
+  };
+  const request = memoryAnalysisRequestFromEvent(record, binding);
+  assert.equal(request.status, 'ready');
+  if (request.status !== 'ready') throw new Error(request.issue.message);
+  assert.deepEqual(request.value.analysisInputs, analysisInputs);
+
+  assert.throws(() => createMemoryAnalysisRequestedEvent({
+    messageId: 'message-with-invalid-analysis-inputs',
+    streamId,
+    scope,
+    occurredAt,
+    summary: 'invalid analysis inputs',
+    evidenceRefs: [evidence('invalid')],
+    executionEpoch: 2,
+    trigger: 'rewind',
+    candidateCategory: 'project-experience',
+    analysisInputs: {
+      ...analysisInputs,
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: ['project://project-a/AGENTS.md'],
+    },
+  }), /actualPathRefs are required/);
+
+  const invalidRecord: EventRecord = {
+    ...record,
+    payload: {
+      ...record.payload,
+      analysisInputs: {
+        ...analysisInputs,
+        rewindChains: [],
+        actualPathRefs: [],
+        declaredPathRefs: ['project://project-a/AGENTS.md'],
+      },
+    } as unknown as EventRecord['payload'],
+  };
+  const rejected = memoryAnalysisRequestFromEvent(invalidRecord, binding);
+  assert.equal(rejected.status, 'attention');
+  if (rejected.status !== 'attention') throw new Error('expected invalid analysis inputs');
+  assert.equal(rejected.issue.code, 'memory-agent-event-invalid');
+});
+
+test('memory analysis inputs reject unknown fields at every object boundary', () => {
+  const analysisInputs = {
+    corrections: [{
+      sourceRef: 'journal://project-a/correction',
+      sourceDigest: 'sha256:correction',
+      fingerprint: 'correction-fingerprint',
+    }],
+    errors: [{
+      sourceRef: 'journal://project-a/error',
+      sourceDigest: 'sha256:error',
+      fingerprint: 'error-fingerprint',
+    }],
+    rewindChains: [{
+      failedBranchRef: 'journal://project-a/failed',
+      rewindCheckpointRef: 'journal://project-a/rewind',
+      recoveryCheckpointRef: 'journal://project-a/recovery',
+      reentryFactRef: 'journal://project-a/reentry',
+      successfulBranchRefs: ['journal://project-a/success'],
+      successEvidenceRefs: ['journal://project-a/success-evidence'],
+      absoluteJournalRefs: ['journal://project-a/journal'],
+    }],
+    actualPathRefs: ['journal://project-a/actual-path'],
+    declaredPathRefs: ['project://project-a/AGENTS.md'],
+  };
+  const invalidInputs = [
+    { ...analysisInputs, forgedControlField: true },
+    {
+      ...analysisInputs,
+      corrections: [{ ...analysisInputs.corrections[0], forgedControlField: true }],
+    },
+    {
+      ...analysisInputs,
+      errors: [{ ...analysisInputs.errors[0], forgedControlField: true }],
+    },
+    {
+      ...analysisInputs,
+      rewindChains: [{ ...analysisInputs.rewindChains[0], forgedControlField: true }],
+    },
+  ];
+
+  for (const invalidInputsEntry of invalidInputs) {
+    assert.throws(() => createMemoryAnalysisRequestedEvent({
+      messageId: 'message-with-unknown-analysis-field',
+      streamId,
+      scope,
+      occurredAt,
+      summary: 'unknown analysis field',
+      evidenceRefs: [evidence('checkpoint-a')],
+      executionEpoch: 2,
+      trigger: 'rewind',
+      candidateCategory: 'project-experience',
+      analysisInputs: invalidInputsEntry,
+    }), /unsupported key/);
+
+    const record: EventRecord = {
+      messageId: 'message-with-unknown-analysis-field',
+      streamId,
+      kind: MEMORY_ANALYSIS_REQUESTED_KIND,
+      class: 'data',
+      scope,
+      occurredAt,
+      summary: 'unknown analysis field',
+      payload: {
+        trigger: 'rewind',
+        requestedKind: 'procedural',
+        candidateCategory: 'project-experience',
+        analysisInputs: invalidInputsEntry,
+      } as unknown as EventRecord['payload'],
+      evidenceRefs: [evidence('checkpoint-a')],
+      executionEpoch: 2,
+      publisherId: publisher.publisherId,
+      sequence: 1,
+      committedAt: occurredAt,
+    };
+    const rejected = memoryAnalysisRequestFromEvent(record, binding);
+    assert.equal(rejected.status, 'attention');
+    if (rejected.status !== 'attention') throw new Error('expected unknown analysis field rejection');
+    assert.equal(rejected.issue.code, 'memory-agent-event-invalid');
+  }
 });
 
 test('project source update facts use a dedicated data event contract', () => {
