@@ -737,6 +737,36 @@ test('checkpoint submission rejects a committed closure that does not match the 
   assert.equal(input.journal.appended.length, 0);
 });
 
+test('checkpoint submission rejects a canonical closure whose stored identity does not match its key', async () => {
+  const input = submissionInput();
+  const canonicalId = `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`;
+  input.journal.latest = { checkpoint: input.checkpoint, previous: null };
+  input.closurePort.records.set(canonicalId, {
+    closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
+    closureId: 'checkpoint-closure:wrong-identity',
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'wrong stored identity' },
+  });
+
+  let failure: unknown;
+  try {
+    await submitCheckpoint(input);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure instanceof CheckpointSubmissionError, true);
+  assert.equal((failure as Error).message, 'checkpoint closure identity does not match its canonical key');
+  assert.equal(input.journal.appended.length, 0);
+  assert.equal(input.closurePort.committed.length, 0);
+  assert.equal(input.closurePort.records.has(canonicalId), true);
+});
+
 test('unknown-operation reconcile rejects unresolved evidence gaps and out-of-scope operations before journal append', async () => {
   const missingEvidence = submissionInput({
     unknownOperations: [operation],

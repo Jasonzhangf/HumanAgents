@@ -119,6 +119,9 @@ async function readCheckpointClosure(
   const scoped = await port.read(checkpointClosureId(checkpoint));
   if (scoped) {
     if ('closureKind' in scoped && scoped.closureKind === 'checkpoint') {
+      if (scoped.closureId !== checkpointClosureId(checkpoint)) {
+        throw new CheckpointSubmissionError('checkpoint closure identity does not match its canonical key');
+      }
       assertStoredCheckpointClosureVersion(scoped, CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
     }
     return scoped;
