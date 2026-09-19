@@ -168,7 +168,14 @@
       "module_id": "app",
       "stage": "source_implemented",
       "owned_paths": [
-        "packages/app/**"
+        "packages/app/**",
+        "packages/config/**",
+        "packages/contracts/**",
+        "packages/agent-templates/**",
+        "packages/adapters/**",
+        "packages/core/**",
+        "packages/runtime/**",
+        "packages/ui/**"
       ],
       "source_owner": "app",
       "active_artifact": "active/lib/app/**",
@@ -176,8 +183,23 @@
         "generated/modules/app/**"
       ],
       "contract_paths": [
+        "package.json",
+        "pnpm-lock.yaml",
+        "tsconfig.json",
         "packages/app/package.json",
-        "packages/app/tsconfig.json"
+        "packages/app/tsconfig.json",
+        "packages/config/package.json",
+        "packages/config/tsconfig.json",
+        "packages/contracts/package.json",
+        "packages/contracts/tsconfig.json",
+        "packages/agent-templates/tsconfig.json",
+        "packages/adapters/dsh/tsconfig.json",
+        "packages/adapters/filesystem/tsconfig.json",
+        "packages/adapters/jsonl/tsconfig.json",
+        "packages/core/tsconfig.json",
+        "packages/runtime/tsconfig.json",
+        "packages/ui/tsconfig.json",
+        "scripts/copy-template-assets.mjs"
       ],
       "dependency_modules": [],
       "build": {
@@ -204,7 +226,20 @@
           "working_directory": "."
         },
         "input_paths": [
+          ".appsdk/**",
+          "contracts/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "tsconfig.json",
           "packages/app/**",
+          "packages/config/**",
+          "packages/contracts/**",
+          "packages/agent-templates/**",
+          "packages/adapters/**",
+          "packages/core/**",
+          "packages/runtime/**",
+          "packages/ui/**",
+          "scripts/copy-template-assets.mjs",
           "tests/app/**"
         ],
         "minimum_test_count": 1,

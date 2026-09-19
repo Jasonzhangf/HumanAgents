@@ -30,7 +30,14 @@
       "status": "active",
       "owner": "app",
       "owned_paths": [
-        "packages/app/**"
+        "packages/app/**",
+        "packages/config/**",
+        "packages/contracts/**",
+        "packages/agent-templates/**",
+        "packages/adapters/**",
+        "packages/core/**",
+        "packages/runtime/**",
+        "packages/ui/**"
       ],
       "forbidden_paths": [
         ".appsdk/**",
