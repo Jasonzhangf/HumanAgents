@@ -163,6 +163,89 @@
       },
       "source_owner": "humanagent-governance",
       "stage": "source_implemented"
+    },
+    {
+      "module_id": "app",
+      "stage": "source_implemented",
+      "owned_paths": [
+        "packages/app/**"
+      ],
+      "source_owner": "app",
+      "active_artifact": "active/lib/app/**",
+      "generated_outputs": [
+        "generated/modules/app/**"
+      ],
+      "contract_paths": [
+        "package.json",
+        "pnpm-lock.yaml",
+        "tsconfig.json",
+        "packages/app/package.json",
+        "packages/app/tsconfig.json",
+        "packages/config/package.json",
+        "packages/config/tsconfig.json",
+        "packages/contracts/package.json",
+        "packages/contracts/tsconfig.json",
+        "packages/agent-templates/tsconfig.json",
+        "packages/adapters/dsh/tsconfig.json",
+        "packages/adapters/filesystem/tsconfig.json",
+        "packages/adapters/jsonl/tsconfig.json",
+        "packages/core/tsconfig.json",
+        "packages/runtime/tsconfig.json",
+        "packages/ui/tsconfig.json",
+        "scripts/copy-template-assets.mjs"
+      ],
+      "dependency_modules": [],
+      "build": {
+        "program": "sh",
+        "args": [
+          "-c",
+          "pnpm run build:app && mkdir -p generated/modules/app/lib && cp dist/app/app/src/index.js dist/app/app/src/index.d.ts generated/modules/app/lib/"
+        ],
+        "working_directory": "."
+      },
+      "artifact_paths": [
+        "index.js",
+        "index.d.ts"
+      ],
+      "regression": {
+        "required_before_freeze": true,
+        "suite_id": "humanagent-app-regression",
+        "command": {
+          "program": "pnpm",
+          "args": [
+            "run",
+            "test:app"
+          ],
+          "working_directory": "."
+        },
+        "input_paths": [
+          ".appsdk/**",
+          "contracts/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "tsconfig.json",
+          "packages/app/**",
+          "packages/config/**",
+          "packages/contracts/**",
+          "packages/agent-templates/**",
+          "packages/adapters/**",
+          "packages/core/**",
+          "packages/runtime/**",
+          "packages/ui/**",
+          "scripts/copy-template-assets.mjs",
+          "tests/app/**"
+        ],
+        "minimum_test_count": 1,
+        "allow_skipped": false,
+        "ordinary_mode_after_freeze": "disabled",
+        "reenable_on": [
+          "source_change",
+          "contract_change",
+          "public_api_change",
+          "artifact_change",
+          "dependency_change"
+        ]
+      }
     }
   ],
   "project_id": "humanagent",
