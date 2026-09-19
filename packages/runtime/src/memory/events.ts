@@ -270,6 +270,18 @@ function cloneMemoryAnalysisInputs(input: MemoryAnalysisInputs): MemoryAnalysisI
       sourceDigest: entry.sourceDigest,
       fingerprint: entry.fingerprint,
     })),
+    ...(input.proceduralEvidence === undefined
+      ? {}
+      : {
+          proceduralEvidence: input.proceduralEvidence.map((entry) => ({
+            sourceRef: entry.sourceRef,
+            sourceDigest: entry.sourceDigest,
+            success: entry.success,
+            preconditionFingerprint: entry.preconditionFingerprint,
+            stepFingerprint: entry.stepFingerprint,
+            failureBoundaryFingerprint: entry.failureBoundaryFingerprint,
+          })),
+        }),
     rewindChains: input.rewindChains.map((chain) => ({
       failedBranchRef: chain.failedBranchRef,
       rewindCheckpointRef: chain.rewindCheckpointRef,
@@ -297,6 +309,18 @@ function memoryAnalysisInputsPayload(input: MemoryAnalysisInputs): BusinessPaylo
       sourceDigest: entry.sourceDigest,
       fingerprint: entry.fingerprint,
     })),
+    ...(cloned.proceduralEvidence === undefined
+      ? {}
+      : {
+          proceduralEvidence: cloned.proceduralEvidence.map((entry) => ({
+            sourceRef: entry.sourceRef,
+            sourceDigest: entry.sourceDigest,
+            success: entry.success,
+            preconditionFingerprint: entry.preconditionFingerprint,
+            stepFingerprint: entry.stepFingerprint,
+            failureBoundaryFingerprint: entry.failureBoundaryFingerprint,
+          })),
+        }),
     rewindChains: cloned.rewindChains.map((chain) => ({
       failedBranchRef: chain.failedBranchRef,
       rewindCheckpointRef: chain.rewindCheckpointRef,

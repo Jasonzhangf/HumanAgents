@@ -93,6 +93,7 @@ async function composeTaskMemory(input: {
   readonly sessionId: string;
   readonly bindingRef: string;
   readonly executionEpoch: number;
+  readonly driver?: import('../../contracts/src/index.js').AgentDriver;
 }) {
   const localSkill = input.configuration.projectSourceManifest.sources?.localSkill;
   const mainAgentId = input.configuration.effective.project?.defaultAgent
@@ -129,6 +130,7 @@ async function composeTaskMemory(input: {
       },
     },
     mainAgentId,
+    ...(input.driver === undefined ? {} : { driver: input.driver }),
   });
 }
 
