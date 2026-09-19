@@ -708,6 +708,298 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('createRuntimeApi'), true);
 });
 
+test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {
+  const api = await readFile('docs/ui/runtime-api.js', 'utf8');
+  const interaction = await readFile('docs/ui/interaction.js', 'utf8');
+  const html = await readFile('docs/ui/interaction.html', 'utf8');
+  for (const method of [
+    'receiveExplicitInput',
+    'inspectExplicitInteraction',
+    'beginExplicitMatching',
+    'recordExplicitMatch',
+    'proposeExplicitRequirement',
+    'completeExplicitStatusQuery',
+    'confirmExplicitRequirement',
+    'dispatchNextExplicitRequirement',
+  ]) assert.equal(api.includes(`${method}:`), true);
+  assert.equal(api.includes("channel: 'business'"), true);
+  assert.equal(interaction.includes('api.receiveExplicitInput'), true);
+  assert.equal(interaction.includes('api.inspectExplicitInteraction'), true);
+  assert.equal(interaction.includes('api.beginExplicitMatching'), true);
+  assert.equal(interaction.includes('api.recordExplicitMatch'), true);
+  assert.equal(interaction.includes('api.proposeExplicitRequirement'), true);
+  assert.equal(interaction.includes('api.completeExplicitStatusQuery'), true);
+  assert.equal(interaction.includes('api.confirmExplicitRequirement'), true);
+  assert.equal(interaction.includes('api.dispatchNextExplicitRequirement'), true);
+  assert.equal(interaction.includes('api.stop'), true);
+  assert.equal(interaction.includes('api.startExecution'), true);
+  assert.equal(interaction.includes('channel: \'control\''), false);
+  assert.equal(interaction.includes('dataset.runtimeState'), false);
+  assert.equal(interaction.includes('data-task-status'), false);
+  assert.equal(html.includes('type="module" src="./interaction.js"'), true);
+  assert.equal(html.includes('data-explicit-input'), true);
+  assert.equal(html.includes('data-explicit-confirmation'), true);
+  assert.equal(html.includes('data-action="dispatch"'), true);
+});
+
+test('explicit interaction UI executes route order and confirmation gate', async () => {
+  type EventListener = (event: { preventDefault(): void }) => void;
+  class FakeElement {
+    textContent = '';
+    className = '';
+    value = '';
+    disabled = false;
+    firstChild: FakeElement | null = null;
+    readonly children: FakeElement[] = [];
+    readonly listeners = new Map<string, EventListener[]>();
+    readonly fields = new Map<string, FakeElement>();
+    readonly elements = { namedItem: (name: string): FakeElement => this.fields.get(name)! };
+
+    append(...nodes: FakeElement[]): void {
+      this.children.push(...nodes);
+      this.firstChild ??= nodes[0] ?? null;
+    }
+
+    removeChild(child: FakeElement): void {
+      const index = this.children.indexOf(child);
+      if (index >= 0) this.children.splice(index, 1);
+      this.firstChild = this.children[0] ?? null;
+    }
+
+    addEventListener(type: string, listener: EventListener): void {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+
+    dispatch(type: string): void {
+      for (const listener of this.listeners.get(type) ?? []) listener({ preventDefault() {} });
+    }
+
+    click(): void {
+      if (!this.disabled) this.dispatch('click');
+    }
+
+    querySelector(selector: string): FakeElement {
+      if (selector === 'button[type="submit"]') return this.fields.get('submit')!;
+      throw new Error(`unexpected element selector: ${selector}`);
+    }
+  }
+
+  class FakeForm extends FakeElement {
+    readonly fields = new Map<string, FakeElement>();
+    addField(name: string, initial = ''): FakeElement {
+      const control = new FakeElement();
+      control.value = initial;
+      this.fields.set(name, control);
+      return control;
+    }
+  }
+
+  const feedback = new FakeElement();
+  const diagnostic = new FakeElement();
+  const serverResult = new FakeElement();
+  const runtimeMode = new FakeElement();
+  const visibleState = new FakeElement();
+  const interactionIdLabel = new FakeElement();
+  const inspection = new FakeElement();
+  const inputForm = new FakeForm();
+  inputForm.addField('sourceRef', 'ui:test');
+  inputForm.addField('rawInput', 'create an evidence task');
+  inputForm.addField('inputRevision', '1');
+  const matchingForm = new FakeForm();
+  matchingForm.addField('normalizedInput', 'create an evidence task');
+  matchingForm.addField('knownFacts', 'fact-1');
+  matchingForm.addField('matchedTasks', '[]');
+  const proposalForm = new FakeForm();
+  proposalForm.addField('proposedIntent', 'create');
+  proposalForm.addField('proposal', 'create the evidence task');
+  proposalForm.addField('decisionRefs', '');
+  const confirmationForm = new FakeForm();
+  confirmationForm.addField('draftId');
+  confirmationForm.addField('inputRevision', '1');
+  confirmationForm.addField('confirmationRef', 'confirmation:test');
+  confirmationForm.addField('confirmedBy', 'human:test');
+  confirmationForm.addField('confirmedAt', '2026-09-19T01:00');
+  confirmationForm.addField('payloadRef', 'asset://requirements/test');
+  const controlForm = new FakeForm();
+  controlForm.addField('taskId', 'task-control');
+  controlForm.addField('prompt', 'continue the task');
+  const matchButton = new FakeElement();
+  const proposalButton = new FakeElement();
+  const confirmationButton = new FakeElement();
+  const dispatchButton = new FakeElement();
+  const statusInputButton = new FakeElement();
+  const statusMatchButton = new FakeElement();
+  matchingForm.fields.set('submit', matchButton);
+  proposalForm.fields.set('submit', proposalButton);
+  confirmationForm.fields.set('submit', confirmationButton);
+
+  const elements = new Map<string, FakeElement>([
+    ['[data-action-feedback]', feedback],
+    ['[data-diagnostic-output]', diagnostic],
+    ['[data-server-result]', serverResult],
+    ['[data-runtime-mode]', runtimeMode],
+    ['[data-visible-state]', visibleState],
+    ['[data-interaction-id]', interactionIdLabel],
+    ['[data-inspection]', inspection],
+    ['[data-explicit-input]', inputForm],
+    ['[data-explicit-match]', matchingForm],
+    ['[data-explicit-proposal]', proposalForm],
+    ['[data-explicit-confirmation]', confirmationForm],
+    ['[data-control-form]', controlForm],
+    ['[data-action="dispatch"]', dispatchButton],
+    ['[data-action="steer"]', new FakeElement()],
+    ['[data-action="continue"]', new FakeElement()],
+  ]);
+  const steerButton = elements.get('[data-action="steer"]')!;
+  const continueButton = elements.get('[data-action="continue"]')!;
+  const documentDouble = {
+    querySelector: (selector: string): FakeElement => elements.get(selector) ?? (() => { throw new Error(`unexpected selector: ${selector}`); })(),
+    querySelectorAll: (selector: string): FakeElement[] => selector === '[data-action="status-only"]' ? [statusInputButton, statusMatchButton] : [],
+    createElement: (_tag: string): FakeElement => new FakeElement(),
+  };
+
+  interface RequestRecord { path: string; method: string; body?: Record<string, unknown> }
+  const requests: RequestRecord[] = [];
+  let interactionSeq = 0;
+  let state = 'received';
+  let activeInteraction = '';
+  let draftId = '';
+  const response = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+  const fetchDouble = async (input: string | URL, init: { method?: string; body?: string } = {}) => {
+    const url = new URL(String(input), 'http://ui.test');
+    const method = init.method ?? 'GET';
+    const body = init.body === undefined ? undefined : JSON.parse(init.body) as Record<string, unknown>;
+    requests.push({ path: url.pathname, method, ...(body === undefined ? {} : { body }) });
+    if (url.pathname === '/api/runtime/status') return response(200, { mode: 'fake' });
+    if (url.pathname === '/api/explicit/inputs') {
+      assert.equal(method, 'POST');
+      assert.equal(body?.channel, 'business');
+      activeInteraction = `interaction-${++interactionSeq}`;
+      state = 'received';
+      return response(201, { interactionId: activeInteraction });
+    }
+    if (url.pathname === `/api/explicit/interactions/${activeInteraction}`) {
+      return response(200, {
+        interactionId: activeInteraction,
+        state,
+        sourceRef: 'ui:test',
+        rawInput: 'create an evidence task',
+        owner: 'explicit-intake',
+        nextAction: state === 'received' ? 'start-matching' : 'present-status',
+        ...(draftId ? { draft: { draftId, inputRevision: 1, normalizedInput: 'create an evidence task', matchedTasks: [], knownFacts: ['fact-1'], proposedIntent: 'create', proposal: 'create the evidence task', decisionRefs: [], state } } : {}),
+        history: [state],
+      });
+    }
+    if (url.pathname.endsWith('/matching')) {
+      assert.equal(method, 'POST');
+      state = 'matching';
+      return response(202, { interactionId: activeInteraction });
+    }
+    if (url.pathname.endsWith('/match')) {
+      assert.equal(method, 'POST');
+      assert.deepEqual(body, { normalizedInput: 'create an evidence task', matchedTasks: [], knownFacts: ['fact-1'] });
+      state = 'awaiting-intent';
+      draftId = 'draft-1';
+      return response(202, { interactionId: activeInteraction });
+    }
+    if (url.pathname.endsWith('/proposal')) {
+      assert.equal(method, 'POST');
+      assert.deepEqual(body, { proposedIntent: 'create', proposal: 'create the evidence task', decisionRefs: [] });
+      state = 'awaiting-confirmation';
+      return response(202, { interactionId: activeInteraction });
+    }
+    if (url.pathname.endsWith('/status-only')) {
+      assert.equal(method, 'POST');
+      state = 'status-only';
+      return response(200, { kind: 'status-only', interactionId: activeInteraction, owner: 'explicit-intake', nextAction: 'present-status' });
+    }
+    if (url.pathname.endsWith('/confirmation')) {
+      assert.equal(method, 'POST');
+      assert.equal(body?.draftId, 'draft-1');
+      assert.equal(body?.confirmedBy, 'human:test');
+      state = 'confirmed';
+      return response(200, { requirement: { status: 'submitted', requirementId: 'requirement:draft-1:1' } });
+    }
+    if (url.pathname === '/api/explicit/dispatch-next') {
+      assert.equal(method, 'POST');
+      assert.equal(state, 'confirmed');
+      state = 'dispatched';
+      return response(202, { requirement: { fifoSeq: 1 }, taskId: { value: 'ui-task-1' }, operationId: { value: 'operation-1' } });
+    }
+    if (url.pathname === '/api/tasks/task-control/stop') {
+      assert.equal(method, 'POST');
+      assert.equal(body, undefined);
+      return response(202, { state: 'stopped', operationId: 'operation-stop' });
+    }
+    if (url.pathname === '/api/tasks/task-control/executions') {
+      assert.equal(method, 'POST');
+      assert.deepEqual(body, { mode: 'fake', prompt: 'continue the task' });
+      return response(202, { operationId: 'operation-continue', executionEpoch: 2 });
+    }
+    throw new Error(`unexpected request ${method} ${url.pathname}`);
+  };
+
+  const host = globalThis as unknown as { document?: unknown; fetch: typeof globalThis.fetch };
+  const previousDocument = host.document;
+  const previousFetch = host.fetch;
+  host.document = documentDouble;
+  host.fetch = fetchDouble as typeof globalThis.fetch;
+  try {
+    await import(`${new URL(`file://${join(process.cwd(), 'docs/ui/interaction.js')}`).href}?executable-ui-test`);
+    const settle = async (): Promise<void> => { for (let index = 0; index < 4; index += 1) await new Promise<void>((resolve) => setTimeout(resolve, 0)); };
+
+    inputForm.dispatch('submit');
+    await settle();
+    assert.equal(visibleState.textContent, 'received');
+    assert.equal(matchButton.disabled, false);
+
+    const dispatchBeforeConfirmation = requests.filter((request) => request.path === '/api/explicit/dispatch-next').length;
+    matchingForm.dispatch('submit');
+    await settle();
+    assert.equal(proposalButton.disabled, false);
+    proposalForm.dispatch('submit');
+    await settle();
+    assert.equal(confirmationButton.disabled, false);
+    dispatchButton.click();
+    await settle();
+    assert.equal(requests.filter((request) => request.path === '/api/explicit/dispatch-next').length, dispatchBeforeConfirmation);
+
+    confirmationForm.dispatch('submit');
+    await settle();
+    assert.equal(dispatchButton.disabled, false);
+    dispatchButton.click();
+    await settle();
+    assert.equal(requests.filter((request) => request.path === '/api/explicit/dispatch-next').length, dispatchBeforeConfirmation + 1);
+    const routeIndex = (path: string): number => requests.findIndex((request) => request.path === path || request.path.endsWith(path));
+    assert.ok(routeIndex('/api/explicit/inputs') < routeIndex('/matching'));
+    assert.ok(routeIndex('/matching') < routeIndex('/match'));
+    assert.ok(routeIndex('/match') < routeIndex('/proposal'));
+    assert.ok(routeIndex('/proposal') < routeIndex('/confirmation'));
+    assert.ok(routeIndex('/confirmation') < routeIndex('/api/explicit/dispatch-next'));
+
+    const taskCallsBeforeStatus = requests.filter((request) => request.path.startsWith('/api/tasks')).length;
+    inputForm.dispatch('submit');
+    await settle();
+    statusInputButton.click();
+    await settle();
+    assert.equal(requests.some((request) => request.path.endsWith('/status-only')), true);
+    assert.equal(requests.filter((request) => request.path === '/api/explicit/dispatch-next').length, dispatchBeforeConfirmation + 1);
+    assert.equal(requests.filter((request) => request.path.startsWith('/api/tasks')).length, taskCallsBeforeStatus);
+
+    steerButton.click();
+    await settle();
+    continueButton.click();
+    await settle();
+    assert.equal(requests.some((request) => request.path === '/api/tasks/task-control/stop'), true);
+    assert.equal(requests.some((request) => request.path === '/api/tasks/task-control/executions'), true);
+    assert.equal(requests.some((request) => request.path === '/api/explicit/inputs' && request.body?.channel === 'control'), false);
+    assert.equal(runtimeMode.textContent, 'mode=fake');
+  } finally {
+    host.document = previousDocument;
+    host.fetch = previousFetch;
+  }
+});
+
 test('task detail UI consumes typed task-detail projection fields', async () => {
   const source = await readFile('docs/ui/task.js', 'utf8');
   assert.equal(source.includes('detail.taskTitle'), false);

@@ -1,125 +1,186 @@
-const root = document.querySelector('.wireframe')
-const feedback = document.querySelector('[data-action-feedback]')
-const visibleState = document.querySelector('[data-visible-state]')
-const currentTitle = document.querySelector('[data-current-title]')
-const phase = document.querySelector('[data-phase]')
-const decision = document.querySelector('[data-attention-state]')
-const emptyDecision = document.querySelector('.empty-decision')
-const attentionItem = document.querySelector('[data-attention-item]')
-const attentionCount = document.querySelector('[data-attention-count]')
-const attentionTitle = document.querySelector('[data-attention-title]')
-const attentionCopy = document.querySelector('[data-attention-copy]')
-const decisionMessage = document.querySelector('[data-decision-message]')
-const decisionAction = document.querySelector('[data-action="approve-write"]')
-const steerAction = document.querySelector('[data-action="steer"]')
-const continueAction = document.querySelector('[data-action="continue"]')
-const inspectAction = document.querySelector('[data-action="inspect-checkpoint"]')
-const latestChange = document.querySelector('[data-region="human-timeline"] [data-task-latest]')
-const diagnostic = document.querySelector('[data-dialog="diagnostic"]')
+import { createRuntimeApi, clearNode, element } from './runtime-api.js'
 
-function announce(message) {
+const api = createRuntimeApi()
+const feedback = document.querySelector('[data-action-feedback]')
+const diagnostic = document.querySelector('[data-diagnostic-output]')
+const serverResult = document.querySelector('[data-server-result]')
+const runtimeMode = document.querySelector('[data-runtime-mode]')
+const visibleState = document.querySelector('[data-visible-state]')
+const interactionIdLabel = document.querySelector('[data-interaction-id]')
+const inspection = document.querySelector('[data-inspection]')
+const inputForm = document.querySelector('[data-explicit-input]')
+const matchingForm = document.querySelector('[data-explicit-match]')
+const proposalForm = document.querySelector('[data-explicit-proposal]')
+const confirmationForm = document.querySelector('[data-explicit-confirmation]')
+const controlForm = document.querySelector('[data-control-form]')
+const matchButton = matchingForm.querySelector('button[type="submit"]')
+const proposalButton = proposalForm.querySelector('button[type="submit"]')
+const confirmationButton = confirmationForm.querySelector('button[type="submit"]')
+const dispatchButton = document.querySelector('[data-action="dispatch"]')
+const statusButtons = document.querySelectorAll('[data-action="status-only"]')
+
+let interactionId
+let currentInspection
+
+function field(form, name) {
+  return form.elements.namedItem(name)
+}
+
+function value(form, name) {
+  return field(form, name).value.trim()
+}
+
+function readable(input, placeholder = '暂无信息') {
+  if (input === undefined || input === null || input === '') return placeholder
+  if (Array.isArray(input)) return input.length ? input.map((item) => readable(item)).join('；') : placeholder
+  if (typeof input === 'object') return JSON.stringify(input)
+  return String(input)
+}
+
+function setFeedback(message) {
   feedback.textContent = message
 }
 
-for (const button of document.querySelectorAll('[data-action="open-diagnostic"]')) {
-  button.addEventListener('click', () => diagnostic.showModal())
+function showServerResult(result) {
+  serverResult.textContent = JSON.stringify(result, null, 2)
 }
 
-for (const button of document.querySelectorAll('[data-action="open-cause"], [data-action="open-raw-events"]')) {
-  button.addEventListener('click', () => {
-    diagnostic.showModal()
-    announce('已打开隐式层诊断入口。')
-  })
+function showError(error) {
+  const message = `${readable(error.message, 'Runtime API request failed')} · owner=${readable(error.ownerId, 'unknown')} · next=${readable(error.nextAction, 'inspect runtime error')}`
+  setFeedback(message)
+  diagnostic.textContent = message
+  showServerResult({ error: message, code: readable(error.code, 'runtime.request.failed') })
 }
 
-document.querySelector('[data-action="approve-write"]').addEventListener('click', () => {
-  document.querySelector('[data-task].is-selected').dataset.taskAttention = 'acknowledged'
-  decision.hidden = true
-  emptyDecision.hidden = false
-  attentionItem.hidden = true
-  attentionCount.textContent = '0'
-  announce('已确认当前决定。页面只演示显式决定完成后的状态。')
-})
-
-document.querySelector('[data-action="steer"]').addEventListener('click', () => {
-  const selectedTask = document.querySelector('[data-task].is-selected')
-  root.dataset.runtimeState = 'stopping'
-  visibleState.textContent = '停止中 · 收拢 operation'
-  selectedTask.dataset.taskStatus = '停止中 · 收拢 operation'
-  selectedTask.querySelector('small').textContent = '正在收拢'
-  phase.textContent = 'checkpoint completion'
-  announce('已请求停止。下一步必须完成收拢并写入 stopped checkpoint。')
-})
-
-document.querySelector('[data-action="continue"]').addEventListener('click', () => {
-  const selectedTask = document.querySelector('[data-task].is-selected')
-  root.dataset.runtimeState = 'running'
-  visibleState.textContent = '运行中'
-  selectedTask.dataset.taskStatus = '运行中'
-  selectedTask.querySelector('small').textContent = '运行中'
-  phase.textContent = '下一轮执行'
-  announce('已选择继续。页面只演示 command 到 projection 的交互路径。')
-})
-
-document.querySelector('[data-action="inspect-checkpoint"]').addEventListener('click', () => {
-  document.querySelector('[data-region="implicit-entry"] details').open = true
-  announce('已展开 checkpoint/后台详情入口。')
-})
-
-document.querySelector('[data-action="focus-decision"]').addEventListener('click', () => {
-  document.querySelector('[data-region="human-decision"]').scrollIntoView({ behavior: 'smooth', block: 'start' })
-  document.querySelector('[data-action="approve-write"]').focus()
-})
-
-for (const button of document.querySelectorAll('[data-task]')) {
-  button.addEventListener('click', () => {
-    for (const candidate of document.querySelectorAll('[data-task]')) {
-      candidate.classList.toggle('is-selected', candidate === button)
-      if (candidate === button) candidate.setAttribute('aria-current', 'page')
-      else candidate.removeAttribute('aria-current')
-    }
-
-    currentTitle.textContent = button.dataset.taskTitle
-    visibleState.textContent = button.dataset.taskStatus
-    phase.textContent = button.dataset.taskPhase
-    document.querySelector('[data-region="task-summary"] [data-task-target]').textContent = button.dataset.taskTarget
-    document.querySelector('[data-region="task-summary"] [data-task-impact]').textContent = button.dataset.taskImpact
-    latestChange.textContent = button.dataset.taskLatest
-
-    const availableActions = button.dataset.taskActions.split(' ')
-    steerAction.hidden = !availableActions.includes('steer')
-    continueAction.hidden = !availableActions.includes('continue')
-    inspectAction.hidden = !availableActions.includes('inspect')
-
-    const hasAttention = button.dataset.taskAttention === 'open'
-    decision.hidden = !hasAttention
-    emptyDecision.hidden = hasAttention
-    attentionItem.hidden = !hasAttention
-    attentionCount.textContent = hasAttention ? '1' : '0'
-    if (hasAttention) {
-      attentionTitle.textContent = button.dataset.taskAttentionTitle
-      attentionCopy.textContent = button.dataset.taskAttentionCopy
-      decisionAction.textContent = button.dataset.taskDecisionAction
-      decisionMessage.textContent = `${button.dataset.taskAttentionTitle}。现在要处理这个决定吗？`
-    }
-    announce(`已切换到任务：${button.querySelector('span').textContent}。`)
-  })
+function renderInspection(snapshot) {
+  currentInspection = snapshot
+  visibleState.textContent = readable(snapshot.state)
+  interactionIdLabel.textContent = `interaction=${readable(snapshot.interactionId)}`
+  clearNode(inspection)
+  for (const [label, content] of [
+    ['state', snapshot.state],
+    ['owner', snapshot.owner],
+    ['next action', snapshot.nextAction],
+    ['condition', snapshot.condition],
+    ['input', snapshot.rawInput],
+    ['draft', snapshot.draft],
+    ['confirmation', snapshot.confirmation],
+    ['history', snapshot.history],
+  ]) {
+    const row = element('div')
+    row.append(element('dt', label), element('dd', readable(content)))
+    inspection.append(row)
+  }
+  showServerResult(snapshot)
+  if (snapshot.draft) {
+    field(confirmationForm, 'draftId').value = snapshot.draft.draftId
+    field(confirmationForm, 'inputRevision').value = String(snapshot.draft.inputRevision)
+    field(matchingForm, 'normalizedInput').value = snapshot.draft.normalizedInput
+  }
+  const state = snapshot.state
+  matchButton.disabled = !(interactionId && state === 'received')
+  for (const button of statusButtons) button.disabled = !(interactionId && ['received', 'matching', 'awaiting-intent'].includes(state))
+  proposalButton.disabled = !(interactionId && ['awaiting-intent', 'awaiting-confirmation'].includes(state))
+  confirmationButton.disabled = !(interactionId && state === 'awaiting-confirmation' && snapshot.draft)
+  dispatchButton.disabled = !(interactionId && state === 'confirmed')
 }
 
-for (const button of document.querySelectorAll('[data-mobile-view]')) {
-  button.addEventListener('click', () => {
-    for (const candidate of document.querySelectorAll('[data-mobile-view]')) {
-      const selected = candidate === button
-      candidate.classList.toggle('is-selected', selected)
-      candidate.setAttribute('aria-pressed', String(selected))
-    }
-
-    const target = button.dataset.mobileView === 'task'
-      ? document.querySelector('[data-region="current-task"]')
-      : button.dataset.mobileView === 'attention'
-        ? document.querySelector('[data-region="attention"]')
-        : document.querySelector('[data-region="human-timeline"]')
-    target.scrollIntoView({ behavior: 'auto', block: 'start' })
-    announce(`已切换到手机版视图：${button.textContent}。`)
-  })
+async function refreshInspection() {
+  if (!interactionId) return
+  const snapshot = await api.inspectExplicitInteraction(interactionId)
+  renderInspection(snapshot)
+  return snapshot
 }
+
+async function run(action, successMessage) {
+  try {
+    const result = await action()
+    if (interactionId) await refreshInspection()
+    if (result !== undefined) showServerResult(result)
+    if (successMessage) setFeedback(successMessage)
+    return result
+  } catch (error) {
+    showError(error)
+    return undefined
+  }
+}
+
+inputForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  void run(async () => {
+    const result = await api.receiveExplicitInput({
+      sourceRef: value(inputForm, 'sourceRef'),
+      rawInput: value(inputForm, 'rawInput'),
+      inputRevision: Number(value(inputForm, 'inputRevision')),
+    })
+    interactionId = result.interactionId
+    await refreshInspection()
+    field(matchingForm, 'normalizedInput').value = value(inputForm, 'rawInput')
+    return result
+  }, '输入已接收；当前状态来自服务端 inspection。')
+})
+
+matchingForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  void run(async () => {
+    if (currentInspection?.state === 'received') await api.beginExplicitMatching(interactionId)
+    const matchedTasksText = value(matchingForm, 'matchedTasks') || '[]'
+    const matchedTasks = JSON.parse(matchedTasksText)
+    if (!Array.isArray(matchedTasks)) throw new Error('matchedTasks must be a JSON array')
+    await api.recordExplicitMatch(interactionId, {
+      normalizedInput: value(matchingForm, 'normalizedInput'),
+      matchedTasks,
+      knownFacts: value(matchingForm, 'knownFacts').split('\n').map((item) => item.trim()).filter(Boolean),
+    })
+  }, 'match result 已由服务端记录。')
+})
+
+proposalForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  void run(() => api.proposeExplicitRequirement(interactionId, {
+    proposedIntent: value(proposalForm, 'proposedIntent'),
+    proposal: value(proposalForm, 'proposal'),
+    decisionRefs: value(proposalForm, 'decisionRefs').split('\n').map((item) => item.trim()).filter(Boolean),
+  }), 'proposal 已提交；确认前不会进入 FIFO。')
+})
+
+confirmationForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  void run(() => api.confirmExplicitRequirement(interactionId, {
+    draftId: value(confirmationForm, 'draftId'),
+    inputRevision: Number(value(confirmationForm, 'inputRevision')),
+    confirmationRef: value(confirmationForm, 'confirmationRef'),
+    confirmedBy: value(confirmationForm, 'confirmedBy'),
+    confirmedAt: new Date(value(confirmationForm, 'confirmedAt')).toISOString(),
+    payloadRef: value(confirmationForm, 'payloadRef'),
+  }), 'confirmation receipt 已返回；现在才允许 dispatch。')
+})
+
+for (const button of statusButtons) {
+  button.addEventListener('click', () => void run(async () => {
+    if (currentInspection?.state === 'received') await api.beginExplicitMatching(interactionId)
+    return api.completeExplicitStatusQuery(interactionId)
+  }, 'status-only receipt 已返回；未创建 FIFO 或 Task。'))
+}
+
+dispatchButton.addEventListener('click', () => void run(
+  () => api.dispatchNextExplicitRequirement(),
+  'dispatch receipt 已返回；Task 状态请继续从 Runtime projection 查询。',
+))
+
+document.querySelector('[data-action="steer"]').addEventListener('click', () => void run(
+  () => api.stop(value(controlForm, 'taskId')),
+  'steer/stop 已通过正式 stop operation route 请求。',
+))
+
+document.querySelector('[data-action="continue"]').addEventListener('click', () => void run(
+  async () => {
+    const status = await api.status()
+    return api.startExecution(value(controlForm, 'taskId'), { mode: status.mode, prompt: value(controlForm, 'prompt') })
+  },
+  'continue 已通过正式 execution route 请求。',
+))
+
+void api.status().then((status) => {
+  runtimeMode.textContent = `mode=${readable(status.mode)}`
+}).catch(showError)

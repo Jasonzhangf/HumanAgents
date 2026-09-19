@@ -41,6 +41,26 @@ export function createRuntimeApi(options = {}) {
     dashboard: () => request('/api/dashboard'),
     listTasks: () => request('/api/tasks'),
     createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
+    receiveExplicitInput: (input) => request('/api/explicit/inputs', {
+      method: 'POST',
+      body: JSON.stringify({ ...input, channel: 'business' }),
+    }),
+    inspectExplicitInteraction: (interactionId) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}`),
+    beginExplicitMatching: (interactionId) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/matching`, { method: 'POST' }),
+    recordExplicitMatch: (interactionId, result) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/match`, {
+      method: 'POST',
+      body: JSON.stringify(result),
+    }),
+    proposeExplicitRequirement: (interactionId, proposal) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/proposal`, {
+      method: 'POST',
+      body: JSON.stringify(proposal),
+    }),
+    completeExplicitStatusQuery: (interactionId) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/status-only`, { method: 'POST' }),
+    confirmExplicitRequirement: (interactionId, confirmation) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/confirmation`, {
+      method: 'POST',
+      body: JSON.stringify(confirmation),
+    }),
+    dispatchNextExplicitRequirement: () => request('/api/explicit/dispatch-next', { method: 'POST' }),
     taskDetail: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     taskDashboard: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`),
     observation: (taskId, scopeRef, selectedNodeId) => {
