@@ -17,6 +17,7 @@ import type {
   MemoryReviewReceipt,
   MemorySubmission,
   ProceduralMemoryCandidate,
+  ProjectSourcePatchArtifact,
   ProjectSourceUpdateProposal,
   SemanticMemoryCandidate,
   CanonicalMemoryScope,
@@ -509,8 +510,32 @@ export function validateProjectSourceUpdateProposal(input: ProjectSourceUpdatePr
   nonEmpty(input.expectedRevision, 'project source update expectedRevision');
   nonEmpty(input.expectedDigest, 'project source update expectedDigest');
   nonEmpty(input.patchRef, 'project source update patchRef');
+  nonEmpty(input.patchDigest, 'project source update patchDigest');
   assertRefList(input.evidenceRefs, 'project source update evidenceRefs');
   nonEmpty(input.ownerRef, 'project source update ownerRef');
+}
+
+export function validateProjectSourcePatchArtifact(input: ProjectSourcePatchArtifact): void {
+  if (input.schemaVersion !== 1) throw new ContractError('invalid project source patch schema version');
+  if (!['project-fact', 'project-experience', 'local-skill-update'].includes(input.kind)) {
+    throw new ContractError('invalid project source patch kind');
+  }
+  if (!MEMORY_UPDATE_TARGETS.includes(input.target)) throw new ContractError('invalid project source patch target');
+  assertRefList(input.evidenceRefs, 'project source patch evidenceRefs');
+  if (input.kind === 'local-skill-update' && input.target !== 'project-local-skill') {
+    throw new ContractError('local skill patch must target the project local Skill');
+  }
+  if (input.kind !== 'local-skill-update' && input.target !== 'project-agents') {
+    throw new ContractError('project fact or experience patch must target project AGENTS.md');
+  }
+  if (typeof input.payload !== 'object' || input.payload === null || Array.isArray(input.payload)) {
+    throw new ContractError('invalid project source patch payload');
+  }
+  if (input.payload.type === 'replacement') {
+    nonEmpty(input.payload.content, 'project source patch replacement content');
+  } else if (input.payload.type !== 'memory-entry') {
+    throw new ContractError('invalid project source patch payload type');
+  }
 }
 
 export function validateMemoryCurationResult(input: MemoryCurationResult): void {

@@ -338,6 +338,7 @@ test('memory agent auto=false returns proposal-only; auto=true delegates a CAS u
     expectedRevision: projectSource().revision,
     expectedDigest: projectSource().digest,
     patchRef: 'patch://project-a/agents',
+    patchDigest: 'sha256:patch-digest',
     evidenceRefs: ['journal://project-a/evidence'],
     ownerRef: 'project-rule-owner',
   };
@@ -352,6 +353,8 @@ test('memory agent auto=false returns proposal-only; auto=true delegates a CAS u
         previousDigest: projectSource().digest,
         nextRevision: 'sha256:next-revision',
         nextDigest: 'sha256:next-digest',
+        patchRef: input.patchRef,
+        patchDigest: input.patchDigest,
         updated: true,
         evidenceRefs: [...input.evidenceRefs],
       };
@@ -381,6 +384,86 @@ test('memory agent auto=false returns proposal-only; auto=true delegates a CAS u
   assert.deepEqual(calls, ['apply']);
 });
 
+test('memory agent analysis applies a typed project patch only when auto update is enabled', async () => {
+  const calls: ProjectSourceUpdateProposal[] = [];
+  const make = (autoUpdate: boolean) => bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: {
+      apply: async ({ proposal, current }) => {
+        calls.push(proposal);
+        return {
+          target: proposal.target,
+          sourceRef: current.sourceRef,
+          previousRevision: current.revision,
+          previousDigest: current.digest,
+          nextRevision: 'sha256:next-revision',
+          nextDigest: 'sha256:next-digest',
+          patchRef: proposal.patchRef,
+          patchDigest: proposal.patchDigest,
+          updated: true,
+          evidenceRefs: [...proposal.evidenceRefs],
+        };
+      },
+    },
+  }), makeOperations().operations);
+  const request = analysis({
+    candidateCategory: 'project-experience',
+    projectPatch: {
+      patchRef: 'project-agents-next',
+      patchDigest: `sha256:${'a'.repeat(64)}`,
+    },
+  });
+
+  const proposalOnly = await make(false).analyze(request);
+  assert.equal(proposalOnly.status, 'ready');
+  if (proposalOnly.status !== 'ready') throw new Error('expected proposal-only analysis');
+  assert.equal(proposalOnly.value.proposal?.patchRef, 'project-agents-next');
+  assert.equal(proposalOnly.value.projectUpdate, undefined);
+  assert.equal(calls.length, 0);
+
+  const applied = await make(true).analyze(request);
+  assert.equal(applied.status, 'ready');
+  if (applied.status !== 'ready') throw new Error('expected automatic project update');
+  assert.equal(applied.value.projectUpdate?.updated, true);
+  assert.equal(applied.value.projectUpdate?.patchDigest, `sha256:${'a'.repeat(64)}`);
+  assert.equal(calls.length, 1);
+});
+
+test('memory agent reports durable update publication failures as attention', async () => {
+  const failure = Object.assign(new Error('event journal unavailable'), {
+    code: 'memory-update-publication-failed',
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: true,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw failure; } },
+  }), makeOperations().operations);
+  const result = await agent.applyProjectUpdate({
+    projectKey: 'project-a',
+    proposal: {
+      target: 'project-agents',
+      sourceRef: projectSource().sourceRef,
+      expectedRevision: projectSource().revision,
+      expectedDigest: projectSource().digest,
+      patchRef: 'project-agents-next',
+      patchDigest: `sha256:${'b'.repeat(64)}`,
+      evidenceRefs: ['journal://project-a/evidence'],
+      ownerRef: 'project-rule-owner',
+    },
+  });
+  assert.equal(result.status, 'attention');
+  assert.equal(result.status === 'attention' && result.issue.code, 'memory-agent-update-publication-failed');
+});
+
 test('memory agent rejects auto update when the project source digest drifted', async () => {
   const staleProposal: ProjectSourceUpdateProposal = {
     target: 'project-agents',
@@ -388,6 +471,7 @@ test('memory agent rejects auto update when the project source digest drifted', 
     expectedRevision: 'sha256:old',
     expectedDigest: 'sha256:old',
     patchRef: 'patch://project-a/agents',
+    patchDigest: 'sha256:patch-digest',
     evidenceRefs: ['journal://project-a/evidence'],
     ownerRef: 'project-rule-owner',
   };
@@ -412,6 +496,7 @@ test('memory agent surfaces an unavailable local Skill as attention with manifes
     expectedRevision: 'sha256:old',
     expectedDigest: 'sha256:old',
     patchRef: 'patch://project-a/skill',
+    patchDigest: 'sha256:patch-digest',
     evidenceRefs: ['journal://project-a/evidence'],
     ownerRef: 'project-skill-owner',
   };

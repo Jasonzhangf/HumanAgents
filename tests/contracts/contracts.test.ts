@@ -1045,6 +1045,7 @@ test('memory curation, follow-up, audit prompt, recall policy, and source propos
     expectedRevision: 'r1',
     expectedDigest: 'sha256:agents-r1',
     patchRef: 'patch://project-a/r2',
+    patchDigest: 'sha256:patch-r2',
     evidenceRefs: ['journal://project-a/1'],
     ownerRef: 'project-rule-owner',
   };

@@ -507,8 +507,23 @@ export interface ProjectSourceUpdateProposal {
   readonly expectedRevision: string;
   readonly expectedDigest: string;
   readonly patchRef: string;
+  readonly patchDigest: string;
   readonly evidenceRefs: readonly string[];
   readonly ownerRef: string;
+}
+
+export type ProjectSourcePatchKind = 'project-fact' | 'project-experience' | 'local-skill-update';
+
+export type ProjectSourcePatchPayload =
+  | { readonly type: 'memory-entry' }
+  | { readonly type: 'replacement'; readonly content: string };
+
+export interface ProjectSourcePatchArtifact {
+  readonly schemaVersion: 1;
+  readonly kind: ProjectSourcePatchKind;
+  readonly target: ProjectAutoUpdateTarget;
+  readonly payload: ProjectSourcePatchPayload;
+  readonly evidenceRefs: readonly string[];
 }
 
 export interface MemoryActorContext {
