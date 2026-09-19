@@ -123,10 +123,10 @@ inputForm.addEventListener('submit', (event) => {
 matchingForm.addEventListener('submit', (event) => {
   event.preventDefault()
   void run(async () => {
-    if (currentInspection?.state === 'received') await api.beginExplicitMatching(interactionId)
     const matchedTasksText = value(matchingForm, 'matchedTasks') || '[]'
     const matchedTasks = JSON.parse(matchedTasksText)
     if (!Array.isArray(matchedTasks)) throw new Error('matchedTasks must be a JSON array')
+    if (currentInspection?.state === 'received') await api.beginExplicitMatching(interactionId)
     await api.recordExplicitMatch(interactionId, {
       normalizedInput: value(matchingForm, 'normalizedInput'),
       matchedTasks,
