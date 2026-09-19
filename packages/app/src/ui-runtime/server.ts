@@ -299,6 +299,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));
       return;
     }
+    const explicitRejection = /^\/api\/explicit\/interactions\/([^/]+)\/reject$/.exec(path);
+    if (explicitRejection && method === 'POST') {
+      const body = await readBody(request);
+      writeJson(response, 200, await service.rejectExplicitInteraction(
+        decodeURIComponent(explicitRejection[1]!),
+        requireString(body, 'reason'),
+      ));
+      return;
+    }
     const explicitMatching = /^\/api\/explicit\/interactions\/([^/]+)\/matching$/.exec(path);
     if (explicitMatching && method === 'POST') {
       await service.beginExplicitMatching(decodeURIComponent(explicitMatching[1]!));

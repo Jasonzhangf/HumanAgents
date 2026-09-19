@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   assertNotExpired,
+  id,
   type Attention,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
@@ -35,6 +36,8 @@ import {
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
+import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
+import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
 import {
   ExplicitIntake,
   type ConfirmRequirementDraft,
@@ -156,6 +159,7 @@ export interface UiRuntimeServiceOptions {
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
+  readonly closurePort: CheckpointClosurePort;
   readonly now?: () => Date;
   readonly projectKey?: string;
   readonly memory: UiRuntimeMemoryComposition;
@@ -944,6 +948,32 @@ export class UiRuntimeService {
   async inspectExplicitInteraction(interactionId: string): Promise<ExplicitInteractionSnapshot> {
     try {
       return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async rejectExplicitInteraction(interactionId: string, reason: string): Promise<SubmittedInteractionClosure> {
+    try {
+      await this.explicitIntake.reject(interactionId, reason);
+      const scope = { organId: id('organ', this.options.organId.value) };
+      const submitted = await submitInteractionClosure({
+        ownerId: 'humanagent.runtime.explicit-intake',
+        closureId: `interaction-closure-${interactionId}`,
+        scope,
+        reason,
+        evidenceRefs: [{
+          evidenceId: id('evidence', `interaction-rejection-${interactionId}`),
+          kind: 'operation',
+          source: 'humanagent.runtime.explicit-intake',
+          locator: `interaction/${interactionId}/rejection`,
+          scope,
+        }],
+        closurePort: this.options.closurePort,
+        next: { kind: 'wait', ref: 'rejected-interaction-closed' },
+      });
+      this.persistExplicitBrainState();
+      return submitted;
     } catch (error) {
       throw apiError(error);
     }

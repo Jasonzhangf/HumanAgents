@@ -11,6 +11,8 @@ import type {
   CheckpointJournalPort,
   LatestCheckpointRecord,
 } from '../../../runtime/src/checkpoints/ports.js';
+import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
+import type { ClosureRecord, InteractionClosureRecord } from '../../../runtime/src/checkpoints/closure.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
@@ -162,10 +164,21 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     requireRecordObject(state, 'confirmationLedger', filePath, line);
     return record as unknown as UiRuntimeJournalRecord;
   }
+  if (kind === 'interaction.closure') {
+    const closure = requireRecordObject(record, 'closure', filePath, line);
+    if (closure.closureKind !== 'interaction') {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: closure kind must be interaction`);
+    }
+    requireRecordString(closure, 'closureId', filePath, line);
+    requireRecordObject(closure, 'scope', filePath, line);
+    requireRecordString(closure, 'reason', filePath, line);
+    validateEvidenceRefs(closure.evidenceRefs, filePath, line);
+    return record as unknown as UiRuntimeJournalRecord;
+  }
   throw new Error(`corrupt UI runtime journal ${filePath}:${line}: unsupported record kind ${kind}`);
 }
 
-export class UiRuntimeJournal implements RuntimeTaskJournalPort {
+export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosurePort {
   constructor(private readonly filePath: string) {}
 
   append(record: UiRuntimeJournalRecord): void {
@@ -191,6 +204,19 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort {
       }
     }
     return records;
+  }
+
+  async commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {
+    if (!('closureKind' in input) || input.closureKind !== 'interaction') {
+      throw new Error('UI runtime journal only owns interaction closures');
+    }
+    this.append({ kind: 'interaction.closure', closure: input });
+    return { closureId: input.closureId, committed: true };
+  }
+
+  async read(closureId: string): Promise<ClosureRecord | null> {
+    const record = [...this.replay()].reverse().find((candidate) => candidate.kind === 'interaction.closure' && candidate.closure.closureId === closureId);
+    return record?.kind === 'interaction.closure' ? structuredClone(record.closure) as InteractionClosureRecord : null;
   }
 }
 
