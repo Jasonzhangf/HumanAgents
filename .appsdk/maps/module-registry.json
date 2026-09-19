@@ -24,6 +24,24 @@
         "fix_lifecycle_graph",
         "mainline_merge_identity"
       ]
+    },
+    {
+      "module_id": "app",
+      "status": "active",
+      "owner": "app",
+      "owned_paths": [
+        "packages/app/**"
+      ],
+      "forbidden_paths": [
+        ".appsdk/**",
+        "contracts/**"
+      ],
+      "verification_gates": [
+        "contract_valid",
+        "module_dependency_freshness",
+        "pre_review_validation",
+        "fix_lifecycle_graph"
+      ]
     }
   ]
 }
