@@ -30,7 +30,9 @@ import {
 import {
   createMemoryAnalysisEventHandler,
   createMemoryAnalysisRequestedEvent,
+  createMemoryProjectSourceUpdatedEvent,
   MEMORY_ANALYSIS_REQUESTED_KIND,
+  MEMORY_PROJECT_SOURCE_UPDATED_KIND,
   memoryAnalysisBarrierDriver,
   type MemoryAnalysisAdmissionPort,
   type MemoryAnalysisWakeBinding,
@@ -991,6 +993,30 @@ test('memory analysis event kind is stable and data-only', () => {
     trigger: 'completion',
     candidateCategory: 'invalid-category' as never,
   }), /candidate category is invalid/);
+});
+
+test('project source update facts use a dedicated data event contract', () => {
+  const envelope = createMemoryProjectSourceUpdatedEvent({
+    messageId: 'project-source-update-a',
+    streamId: 'memory-project-source-updates:project-a',
+    scope,
+    occurredAt,
+    executionEpoch: 2,
+    target: 'project-agents',
+    sourceRef: 'project://project-a/AGENTS.md',
+    previousRevision: 'sha256:previous-revision',
+    previousDigest: 'sha256:previous-digest',
+    nextRevision: 'sha256:next-revision',
+    nextDigest: 'sha256:next-digest',
+    patchRef: 'project-agents-next',
+    patchDigest: `sha256:${'a'.repeat(64)}`,
+    sourceEvidenceRefs: ['journal://project-a/evidence'],
+  });
+  assert.equal(envelope.kind, MEMORY_PROJECT_SOURCE_UPDATED_KIND);
+  assert.equal(envelope.class, 'data');
+  assert.equal(envelope.streamId, 'memory-project-source-updates:project-a');
+  assert.deepEqual(envelope.evidenceRefs, []);
+  assert.deepEqual(envelope.payload?.sourceEvidenceRefs, ['journal://project-a/evidence']);
 });
 
 test('consumer errors remain explicit for an unregistered memory consumer', async () => {

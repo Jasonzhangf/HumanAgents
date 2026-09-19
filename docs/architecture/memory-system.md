@@ -112,10 +112,33 @@ auto = true
   → 记录 old digest、patch digest、new digest 和 evidence
 ```
 
-当前 CLI 运行时尚未接入能够从分析 proposal 生成 typed project patch 的 `MemoryProjectPatchReader`，因此
-`memory.update.auto=true` 必须在配置加载阶段以 `config-capability` 明确拒绝，不能接受配置后在
-`composeMemory` 阶段才以 `memory-update-unavailable` 失败。接入该 reader 后，配置解析才可重新开放
-`auto=true`；本节其余 target、owner、compare-and-commit 和审计规则不变。
+当前运行时通过 `MemoryProjectPatchReader` 从 `artifactsRoot` 的 immutable patch artifact 读取并校验
+`patchRef + patchDigest`。artifact 是带证据绑定的 typed envelope，不接受裸文本。Memory Agent
+边界 producer 只能生成 `memory-entry` payload；project source owner 的 patch reader 是自动应用
+准入的唯一权威，只接受这种无外部替换正文的 typed artifact，并按已校验的 kind/evidence 生成固定
+的 memory entry。`replacement` payload 仅表示 proposal/review 内容，不能自动写入 project source：
+
+```ts
+interface ProjectSourcePatchArtifact {
+  readonly schemaVersion: 1;
+  readonly kind: 'project-fact' | 'project-experience' | 'local-skill-update';
+  readonly target: 'project-agents' | 'project-local-skill';
+  readonly payload:
+    | { readonly type: 'memory-entry' }
+    | { readonly type: 'replacement'; readonly content: string };
+  readonly evidenceRefs: readonly string[];
+}
+```
+
+`kind` 与 target 必须匹配，artifact evidence refs 必须等于 proposal evidence refs；未知 kind 或
+`replacement` payload（包括其中携带的控制、安全、权限、发布、生命周期或所有权文字）直接进入
+`attention`，不使用自然语言关键词或内容 denylist 判断。再由 project source owner 执行
+compare-and-commit；该 owner 在 pending-state/source mutation 前完成上述 typed admission。
+`memory.update.auto=true`
+因此可以通过配置校验；缺失或 digest 漂移仍在 owner 阶段以 `attention` 显式失败。自动更新只允许
+由绑定 Event Journal publisher 的 runtime composition 启用；owner 在替换源码前持久化 pending update，
+发布失败或进程中断后按源码 digest 恢复并幂等补发 `memory.project-source.updated`，不允许留下无恢复记录的
+源码修改。
 
 这个开关只控制当前 project 的：
 
@@ -139,6 +162,7 @@ interface ProjectSourceUpdateProposal {
   readonly expectedRevision: string;
   readonly expectedDigest: string;
   readonly patchRef: string;
+  readonly patchDigest: string;
   readonly evidenceRefs: readonly string[];
   readonly ownerRef: string;
 }
@@ -1010,7 +1034,7 @@ contracts: namespace/source/candidate/state types
 8. forgetting fixture 完成：新批准记录 supersede 旧记录；derived Index 可重建；仍被 checkpoint/approved record 引用的 Journal 来源不可删除。
 9. boundary fixture 覆盖 blocked、checkpoint rewind 和 task completion：主 Agent 的 live context 不被 Memory Agent 修改；Memory Agent 能从 committed source 生成 project fact、project experience、profile、global 和 Skill update candidates。
 10. local Skill update fixture 证明重复且成功的 procedural evidence 才能形成带 source ref/revision/diff/evidence 的唯一 cwd-named Skill update proposal；没有 local Skill owner review 不能生效。
-11. auto update fixture 覆盖 `auto=false` proposal-only、`auto=true` project `AGENTS.md`/唯一 local Skill patch、digest conflict、验证失败和 global/external/prompt target 拒绝；当前 CLI 尚未接入 typed patch reader 时，配置必须在加载阶段拒绝 `auto=true`，自动更新不能越过对应 owner。
+11. auto update fixture 覆盖 `auto=false` proposal-only、`auto=true` project `AGENTS.md`/唯一 local Skill patch、typed artifact 缺失或 digest conflict、source digest conflict、验证失败和 global/external/prompt target 拒绝；自动更新不能越过对应 owner。
 12. audit prompt fixture 证明 prompt source 可独立替换；每个 operation 固定 prompt ref/revision/digest，下一次 operation 使用新版本，且 prompt 不能改变 control fact 或自动更新范围。
 13. interaction binding fixture 证明无 Task 的 Agent 可通过可信 `bindingRef` recall 和提交 candidate；task binding 仍校验 `taskId + assignmentId + executionEpoch`，Memory 层不创建伪 Task 或拥有 epoch。
 

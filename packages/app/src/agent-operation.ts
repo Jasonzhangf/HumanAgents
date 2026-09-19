@@ -73,6 +73,10 @@ export interface MemoryBoundaryPublishInput {
 }
 
 export interface MemoryBoundaryPublisher {
+  prepareProjectPatch?(input: {
+    readonly event: ReturnType<typeof createMemoryAnalysisRequestedEvent>;
+    readonly checkpoint: Checkpoint;
+  }): Promise<ReturnType<typeof createMemoryAnalysisRequestedEvent>>;
   publish(input: MemoryBoundaryPublishInput): Promise<void>;
 }
 
@@ -543,9 +547,12 @@ export class AgentOperationController {
           executionEpoch: this.prepared.executionEpoch,
           trigger,
           requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
-          candidateCategory: trigger === 'rewind' ? 'project-experience' : 'project-fact',
+          candidateCategory: trigger === 'rewind' || trigger === 'completion' ? 'project-experience' : 'project-fact',
           sessionRef: this.prepared.sessionId,
         });
+        const preparedEvent = this.prepared.memoryBoundaryPublisher.prepareProjectPatch
+          ? await this.prepared.memoryBoundaryPublisher.prepareProjectPatch({ event, checkpoint: completed.checkpoint })
+          : event;
         const recordDigest = completed.receipt.recordDigest;
         if (!recordDigest) {
           throw new AppLifecycleError(
@@ -556,7 +563,7 @@ export class AgentOperationController {
           );
         }
         await this.prepared.memoryBoundaryPublisher.publish({
-          event,
+          event: preparedEvent,
           checkpoint: completed.checkpoint,
           recordDigest,
         });

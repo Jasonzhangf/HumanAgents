@@ -535,10 +535,8 @@ test('parses memory update and audit config with safe defaults', () => {
   assert.equal(namedPrompt.memory?.audit.promptRef, 'project-audit-v2');
 
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { update: { auto: 'yes' } } }), /memory.update.auto must be boolean/);
-  assert.throws(
-    () => validateUserConfig({ schemaVersion: 1, agents, memory: { update: { auto: true } } }),
-    /memory.update.auto is unavailable/,
-  );
+  const enabled = validateUserConfig({ schemaVersion: 1, agents, memory: { update: { auto: true } } });
+  assert.equal(enabled.memory?.update.auto, true);
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt: 'embedded text' } } }), /memory.audit contains unsupported key: prompt/);
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '' } } }), /memory.audit.prompt_ref must be a non-empty string/);
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: '../prompt' } } }), /memory.audit.prompt_ref must be a safe audit prompt file name/);

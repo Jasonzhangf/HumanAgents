@@ -1,15 +1,20 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { ImmutableAssetStore } from '../../adapters/filesystem/src/index.js';
 import type {
   EvidenceRef,
+  MemoryCandidateCategory,
   MemoryActorContext,
   MemoryInteractionPort,
+  MemoryProjectSourcePort,
   MemoryProjectSourceSnapshot,
   MemoryScope,
+  ProjectSourcePatchArtifact,
   ProjectSourceUpdateProposal,
+  ScopeRef,
 } from '../../contracts/src/index.js';
-import { id } from '../../contracts/src/index.js';
+import { id, validateProjectSourcePatchArtifact } from '../../contracts/src/index.js';
 import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
 import {
   DeterministicMemoryBackend,
@@ -65,6 +70,86 @@ export interface MemoryProjectPatchReader {
   }): Promise<{ readonly content: string }>;
 }
 
+export interface MemoryProjectSourceUpdatePublisher {
+  publish(input: {
+    readonly receipt: MemorySourceUpdateReceipt;
+    readonly scope: ScopeRef;
+    readonly executionEpoch: number;
+    readonly occurredAt: string;
+  }): Promise<void>;
+}
+
+export function createTypedProjectPatchReader(artifactsRoot: string): MemoryProjectPatchReader {
+  const store = new ImmutableAssetStore(artifactsRoot);
+  return {
+    async read({ proposal, current }): Promise<{ readonly content: string }> {
+      try {
+        const bytes = await store.readByDigest(proposal.patchRef, proposal.patchDigest);
+        const envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)) as ProjectSourcePatchArtifact;
+        validateProjectSourcePatchArtifact(envelope);
+        if (envelope.target !== proposal.target) throw new Error('project source patch target does not match proposal');
+        if (envelope.evidenceRefs.length !== proposal.evidenceRefs.length
+          || envelope.evidenceRefs.some((ref, index) => ref !== proposal.evidenceRefs[index])) {
+          throw new Error('project source patch evidence does not match proposal');
+        }
+        if (envelope.payload.type !== 'memory-entry') {
+          throw new Error('project source patch payload is not auto-applicable');
+        }
+        const entry = `\n\n## Memory Agent ${envelope.kind}\n\n- Evidence: ${envelope.evidenceRefs.join(', ')}\n`;
+        return {
+          content: current.content.endsWith('\n') ? `${current.content}${entry.slice(1)}` : `${current.content}${entry}`,
+        };
+      } catch (error) {
+        throw new AppLifecycleError(
+          'memory-update-validation-failed',
+          `project source patch artifact is unavailable or drifted: ${error instanceof Error ? error.message : String(error)}`,
+          'regenerate the typed project source patch artifact',
+          OWNER,
+        );
+      }
+    },
+  };
+}
+
+export interface MemoryBoundaryPatchReference {
+  readonly patchRef: string;
+  readonly patchDigest: string;
+}
+
+export function createMemoryBoundaryPatchProducer(input: {
+  readonly autoUpdate: boolean;
+  readonly artifactsRoot: string;
+  readonly projectKey: string;
+  readonly sources: MemoryProjectSourcePort;
+}): (input: {
+  readonly messageId: string;
+  readonly summary: string;
+  readonly candidateCategory: MemoryCandidateCategory;
+  readonly evidenceRefs: readonly string[];
+}) => Promise<MemoryBoundaryPatchReference | undefined> {
+  const store = new ImmutableAssetStore(input.artifactsRoot);
+  return async ({ messageId, candidateCategory, evidenceRefs }) => {
+    if (!input.autoUpdate) return undefined;
+    const target = candidateCategory === 'local-skill-update' ? 'project-local-skill' :
+      candidateCategory === 'project-experience' ? 'project-agents' : undefined;
+    if (!target) return undefined;
+    await input.sources.readProject({ projectKey: input.projectKey, target });
+    const kind: ProjectSourcePatchArtifact['kind'] = candidateCategory === 'local-skill-update'
+      ? 'local-skill-update'
+      : 'project-experience';
+    const artifact: ProjectSourcePatchArtifact = {
+      schemaVersion: 1,
+      kind,
+      target,
+      payload: { type: 'memory-entry' },
+      evidenceRefs: [...evidenceRefs],
+    };
+    const bytes = new TextEncoder().encode(JSON.stringify(artifact));
+    const reference = await store.write(`memory-project-patch-${createHash('sha256').update(messageId).digest('hex')}`, bytes);
+    return { patchRef: reference.assetId, patchDigest: reference.digest };
+  };
+}
+
 export interface MemoryCompositionInput {
   readonly paths: RuntimePaths;
   readonly projectKey: string;
@@ -83,10 +168,148 @@ export interface MemoryCompositionInput {
   readonly roleId?: string;
   readonly evidenceSource?: MemoryEvidenceSourcePort;
   readonly patchReader?: MemoryProjectPatchReader;
+  readonly projectSourceUpdatePublisher?: MemoryProjectSourceUpdatePublisher;
   readonly externalOperations?: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
   };
   readonly state?: import('../../contracts/src/index.js').MemoryAgentStatePort;
+}
+
+interface PendingProjectSourceUpdate {
+  readonly schemaVersion: 1;
+  readonly receipt: MemorySourceUpdateReceipt;
+  readonly scope: ScopeRef;
+  readonly executionEpoch: number;
+  readonly occurredAt: string;
+}
+
+const PROJECT_SOURCE_UPDATE_PENDING = 'memory-project-source-update.pending.json';
+
+function pendingProjectSourceUpdatePath(locksRoot: string): string {
+  return join(locksRoot, PROJECT_SOURCE_UPDATE_PENDING);
+}
+
+function validatePendingProjectSourceUpdate(value: unknown): PendingProjectSourceUpdate {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new AppLifecycleError(
+      'memory-update-recovery-invalid',
+      'pending project source update is invalid',
+      'preserve the pending update and inspect its durable record',
+      OWNER,
+    );
+  }
+  const pending = value as Partial<PendingProjectSourceUpdate>;
+  const receipt = pending.receipt;
+  const scope = pending.scope;
+  const validScopeId = (candidate: unknown, kind: string): boolean => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return false;
+    const scoped = candidate as { readonly scope?: unknown; readonly value?: unknown };
+    return scoped.scope === kind && typeof scoped.value === 'string' && scoped.value.trim().length > 0;
+  };
+  const validScope = typeof scope === 'object'
+    && scope !== null
+    && !Array.isArray(scope)
+    && validScopeId((scope as ScopeRef).organId, 'organ')
+    && ((scope as ScopeRef).taskId === undefined || validScopeId((scope as ScopeRef).taskId, 'task'))
+    && ((scope as ScopeRef).cycleId === undefined || validScopeId((scope as ScopeRef).cycleId, 'cycle'))
+    && ((scope as ScopeRef).operationId === undefined || validScopeId((scope as ScopeRef).operationId, 'operation'));
+  const validReceipt = typeof receipt === 'object'
+    && receipt !== null
+    && !Array.isArray(receipt)
+    && ((receipt as MemorySourceUpdateReceipt).target === 'project-agents'
+      || (receipt as MemorySourceUpdateReceipt).target === 'project-local-skill')
+    && typeof (receipt as MemorySourceUpdateReceipt).sourceRef === 'string'
+    && (receipt as MemorySourceUpdateReceipt).sourceRef.trim().length > 0
+    && typeof (receipt as MemorySourceUpdateReceipt).previousRevision === 'string'
+    && (receipt as MemorySourceUpdateReceipt).previousRevision.trim().length > 0
+    && typeof (receipt as MemorySourceUpdateReceipt).previousDigest === 'string'
+    && (receipt as MemorySourceUpdateReceipt).previousDigest.trim().length > 0
+    && typeof (receipt as MemorySourceUpdateReceipt).nextRevision === 'string'
+    && (receipt as MemorySourceUpdateReceipt).nextRevision.trim().length > 0
+    && typeof (receipt as MemorySourceUpdateReceipt).nextDigest === 'string'
+    && (receipt as MemorySourceUpdateReceipt).nextDigest.trim().length > 0
+    && typeof (receipt as MemorySourceUpdateReceipt).patchRef === 'string'
+    && (receipt as MemorySourceUpdateReceipt).patchRef.trim().length > 0
+    && typeof (receipt as MemorySourceUpdateReceipt).patchDigest === 'string'
+    && (receipt as MemorySourceUpdateReceipt).patchDigest.trim().length > 0
+    && Array.isArray((receipt as MemorySourceUpdateReceipt).evidenceRefs)
+    && (receipt as MemorySourceUpdateReceipt).evidenceRefs.every(
+      (ref) => typeof ref === 'string' && ref.trim().length > 0,
+    );
+  if (
+    pending.schemaVersion !== 1
+    || !validReceipt
+    || (receipt as MemorySourceUpdateReceipt).updated !== true
+    || !validScope
+    || !Number.isSafeInteger(pending.executionEpoch)
+    || pending.executionEpoch! < 1
+    || typeof pending.occurredAt !== 'string'
+    || !Number.isFinite(Date.parse(pending.occurredAt))
+  ) {
+    throw new AppLifecycleError(
+      'memory-update-recovery-invalid',
+      'pending project source update is incomplete',
+      'preserve the pending update and inspect its durable record',
+      OWNER,
+    );
+  }
+  return pending as PendingProjectSourceUpdate;
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, 'r');
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+async function persistPendingProjectSourceUpdate(
+  locksRoot: string,
+  pending: PendingProjectSourceUpdate,
+): Promise<void> {
+  await mkdir(locksRoot, { recursive: true });
+  const path = pendingProjectSourceUpdatePath(locksRoot);
+  const temp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  const handle = await open(temp, 'wx');
+  try {
+    await handle.writeFile(`${JSON.stringify(pending)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(temp, path);
+    await syncDirectory(locksRoot);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function clearPendingProjectSourceUpdate(locksRoot: string): Promise<void> {
+  await rm(pendingProjectSourceUpdatePath(locksRoot));
+  await syncDirectory(locksRoot);
+}
+
+async function readPendingProjectSourceUpdate(
+  locksRoot: string,
+): Promise<PendingProjectSourceUpdate | undefined> {
+  try {
+    return validatePendingProjectSourceUpdate(
+      JSON.parse(await readFile(pendingProjectSourceUpdatePath(locksRoot), 'utf8')),
+    );
+  } catch (error) {
+    if ((error as { readonly code?: string }).code === 'ENOENT') return undefined;
+    if (error instanceof AppLifecycleError) throw error;
+    throw new AppLifecycleError(
+      'memory-update-recovery-invalid',
+      `pending project source update cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      'preserve the pending update and inspect its durable record',
+      OWNER,
+    );
+  }
 }
 
 export interface MemoryComposition {
@@ -144,7 +367,7 @@ export async function composeRuntimeMemory(
   });
 }
 
-function digest(value: string): string {
+function digest(value: string | Uint8Array): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
@@ -338,6 +561,80 @@ async function assertCompositionPathEquals(actual: string, expected: string, lab
   }
 }
 
+async function projectSourcePath(input: {
+  readonly target: ProjectSourceUpdateProposal['target'];
+  readonly workspaceCwd: string;
+  readonly localSkillRoot?: string;
+  readonly localSkillName?: string;
+}): Promise<string> {
+  const targetRoot = input.target === 'project-agents' ? input.workspaceCwd : input.localSkillRoot;
+  if (!targetRoot || (input.target === 'project-local-skill' && !input.localSkillName)) {
+    throw new AppLifecycleError(
+      'memory-update-unavailable',
+      'project local Skill source is not declared in project.json',
+      '补全 project.json sources.localSkill 后重试',
+      OWNER,
+    );
+  }
+  return resolveProjectSourcePath(
+    targetRoot,
+    input.target === 'project-agents' ? 'AGENTS.md' : join(input.localSkillName!, 'SKILL.md'),
+    'project source update',
+  );
+}
+
+async function reconcilePendingProjectSourceUpdate(input: {
+  readonly workspaceCwd: string;
+  readonly localSkillRoot?: string;
+  readonly localSkillName?: string;
+  readonly locksRoot: string;
+  readonly publisher: MemoryProjectSourceUpdatePublisher;
+}): Promise<void> {
+  const pending = await readPendingProjectSourceUpdate(input.locksRoot);
+  if (!pending) return;
+  const path = await projectSourcePath({
+    target: pending.receipt.target,
+    workspaceCwd: input.workspaceCwd,
+    localSkillRoot: input.localSkillRoot,
+    localSkillName: input.localSkillName,
+  });
+  const currentDigest = digest(await readFile(path, 'utf8'));
+  if (currentDigest === pending.receipt.previousDigest) {
+    await clearPendingProjectSourceUpdate(input.locksRoot);
+    return;
+  }
+  if (currentDigest !== pending.receipt.nextDigest) {
+    throw new AppLifecycleError(
+      'memory-update-recovery-conflict',
+      'project source changed while a durable update fact was pending',
+      'preserve the pending update and reconcile the project source before retrying',
+      OWNER,
+    );
+  }
+  await input.publisher.publish({
+    receipt: pending.receipt,
+    scope: pending.scope,
+    executionEpoch: pending.executionEpoch,
+    occurredAt: pending.occurredAt,
+  });
+  await clearPendingProjectSourceUpdate(input.locksRoot);
+}
+
+async function recoverPendingProjectSourceUpdate(input: {
+  readonly workspaceCwd: string;
+  readonly localSkillRoot?: string;
+  readonly localSkillName?: string;
+  readonly locksRoot: string;
+  readonly publisher: MemoryProjectSourceUpdatePublisher;
+}): Promise<void> {
+  const lock = await acquireSourceUpdateLock(input.locksRoot, 'project source update recovery');
+  try {
+    await reconcilePendingProjectSourceUpdate(input);
+  } finally {
+    await releaseSourceUpdateLock(lock);
+  }
+}
+
 export function createProjectSourceUpdateOwner(input: {
   readonly workspaceCwd: string;
   readonly localSkillRoot?: string;
@@ -345,6 +642,9 @@ export function createProjectSourceUpdateOwner(input: {
   readonly projectKey: string;
   readonly locksRoot: string;
   readonly patchReader?: MemoryProjectPatchReader;
+  readonly projectSourceUpdatePublisher?: MemoryProjectSourceUpdatePublisher;
+  readonly sourceScope?: ScopeRef;
+  readonly executionEpoch?: number;
 }): MemoryProjectUpdateOwnerPort {
   return {
     async apply({ proposal, current, auto }): Promise<MemorySourceUpdateReceipt> {
@@ -378,11 +678,21 @@ export function createProjectSourceUpdateOwner(input: {
       }
       const lock = await acquireSourceUpdateLock(input.locksRoot, 'project source update');
       try {
-        const targetRoot = proposal.target === 'project-agents' ? input.workspaceCwd : input.localSkillRoot!;
-        const relativePath = proposal.target === 'project-agents'
-          ? 'AGENTS.md'
-          : join(input.localSkillName!, 'SKILL.md');
-        const path = await resolveProjectSourcePath(targetRoot, relativePath, 'project source update');
+        if (input.projectSourceUpdatePublisher) {
+          await reconcilePendingProjectSourceUpdate({
+            workspaceCwd: input.workspaceCwd,
+            localSkillRoot: input.localSkillRoot,
+            localSkillName: input.localSkillName,
+            locksRoot: input.locksRoot,
+            publisher: input.projectSourceUpdatePublisher,
+          });
+        }
+        const path = await projectSourcePath({
+          target: proposal.target,
+          workspaceCwd: input.workspaceCwd,
+          localSkillRoot: input.localSkillRoot,
+          localSkillName: input.localSkillName,
+        });
         const before = await readFile(path, 'utf8');
         if (digest(before) !== current.digest) {
           throw new AppLifecycleError('memory-update-conflict', 'project source digest changed before compare-and-commit', 'refresh the proposal before retrying', OWNER);
@@ -392,12 +702,46 @@ export function createProjectSourceUpdateOwner(input: {
           throw new AppLifecycleError('memory-update-invalid', 'project source patch reader returned empty content', 'produce a non-empty source update', OWNER);
         }
         const nextDigest = digest(patch.content);
+        if (!input.projectSourceUpdatePublisher || !input.sourceScope || input.executionEpoch === undefined) {
+          throw new AppLifecycleError(
+            'memory-update-publication-unavailable',
+            'project source auto update requires a durable update publisher',
+            'compose the project source owner from the runtime-bound memory composition',
+            OWNER,
+          );
+        }
+        const receipt: MemorySourceUpdateReceipt = {
+          target: proposal.target,
+          sourceRef: current.sourceRef,
+          previousRevision: current.revision,
+          previousDigest: current.digest,
+          nextRevision: nextDigest,
+          nextDigest,
+          patchRef: proposal.patchRef,
+          patchDigest: proposal.patchDigest,
+          updated: true,
+          evidenceRefs: [...proposal.evidenceRefs],
+        };
+        const pending: PendingProjectSourceUpdate = {
+          schemaVersion: 1,
+          receipt,
+          scope: input.sourceScope,
+          executionEpoch: input.executionEpoch,
+          occurredAt: new Date().toISOString(),
+        };
+        await persistPendingProjectSourceUpdate(input.locksRoot, pending);
         await mkdir(dirname(path), { recursive: true });
-        const verifiedPath = await resolveProjectSourcePath(targetRoot, relativePath, 'project source update');
+        const verifiedPath = await projectSourcePath({
+          target: proposal.target,
+          workspaceCwd: input.workspaceCwd,
+          localSkillRoot: input.localSkillRoot,
+          localSkillName: input.localSkillName,
+        });
         if (verifiedPath !== path) {
           throw new AppLifecycleError('memory-update-conflict', 'project source path changed before compare-and-commit', 'refresh the proposal before retrying', OWNER);
         }
         const temp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+        let renameCommitted = false;
         try {
           const handle = await open(temp, 'wx');
           try {
@@ -406,7 +750,12 @@ export function createProjectSourceUpdateOwner(input: {
           } finally {
             await handle.close();
           }
-          const committedPath = await resolveProjectSourcePath(targetRoot, relativePath, 'project source update');
+          const committedPath = await projectSourcePath({
+            target: proposal.target,
+            workspaceCwd: input.workspaceCwd,
+            localSkillRoot: input.localSkillRoot,
+            localSkillName: input.localSkillName,
+          });
           if (committedPath !== path) {
             throw new AppLifecycleError('memory-update-conflict', 'project source path changed before commit', 'refresh the proposal before retrying', OWNER);
           }
@@ -415,14 +764,13 @@ export function createProjectSourceUpdateOwner(input: {
             throw new AppLifecycleError('memory-update-conflict', 'project source changed before commit', 'refresh the proposal before retrying', OWNER);
           }
           await rename(temp, path);
-          const directory = await open(dirname(path), 'r');
-          try {
-            await directory.sync();
-          } finally {
-            await directory.close();
-          }
+          renameCommitted = true;
+          await syncDirectory(dirname(path));
         } catch (error) {
           await rm(temp, { force: true }).catch(() => undefined);
+          if (!renameCommitted) {
+            await clearPendingProjectSourceUpdate(input.locksRoot).catch(() => undefined);
+          }
           throw error;
         }
         const committed = await readFile(path, 'utf8');
@@ -430,16 +778,23 @@ export function createProjectSourceUpdateOwner(input: {
         if (committedDigest !== nextDigest) {
           throw new AppLifecycleError('memory-update-verification-failed', 'project source verification failed after commit', 'preserve the original source and inspect the update', OWNER);
         }
-        return {
-          target: proposal.target,
-          sourceRef: current.sourceRef,
-          previousRevision: current.revision,
-          previousDigest: current.digest,
-          nextRevision: nextDigest,
-          nextDigest,
-          updated: true,
-          evidenceRefs: [...proposal.evidenceRefs],
-        };
+        try {
+          await input.projectSourceUpdatePublisher.publish({
+            receipt,
+            scope: input.sourceScope,
+            executionEpoch: input.executionEpoch,
+            occurredAt: pending.occurredAt,
+          });
+          await clearPendingProjectSourceUpdate(input.locksRoot);
+        } catch (error) {
+          throw new AppLifecycleError(
+            'memory-update-publication-failed',
+            `project source update committed with a durable recovery record, but its event was not published: ${error instanceof Error ? error.message : String(error)}`,
+            'restart the runtime to reconcile memory.project-source.updated',
+            OWNER,
+          );
+        }
+        return receipt;
       } finally {
         await releaseSourceUpdateLock(lock);
       }
@@ -633,10 +988,16 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     );
   }
   if (input.autoUpdate && !input.patchReader) {
+    input = {
+      ...input,
+      patchReader: createTypedProjectPatchReader(input.paths.artifactsRoot),
+    };
+  }
+  if (input.autoUpdate && !input.projectSourceUpdatePublisher) {
     throw new AppLifecycleError(
-      'memory-update-unavailable',
-      'memory auto update requires a typed project source patch reader',
-      'configure a typed patch reader before enabling memory auto update',
+      'memory-update-publication-unavailable',
+      'memory auto update requires a durable project source update publisher',
+      'compose memory through the runtime Event Journal owner',
       OWNER,
     );
   }
@@ -662,6 +1023,15 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       'resolve the configured project roots before composing memory',
       OWNER,
     );
+  }
+  if (input.projectSourceUpdatePublisher) {
+    await recoverPendingProjectSourceUpdate({
+      workspaceCwd: input.workspaceCwd,
+      localSkillRoot: input.localSkillRoot,
+      localSkillName: input.localSkillName,
+      locksRoot: input.paths.locksRoot,
+      publisher: input.projectSourceUpdatePublisher,
+    });
   }
   const persistence = new RootedMemoryPersistence({
     project: join(input.paths.memoryRoot, 'project'),
@@ -691,6 +1061,11 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       projectKey: input.projectKey,
       locksRoot: input.paths.locksRoot,
       ...(input.patchReader === undefined ? {} : { patchReader: input.patchReader }),
+      ...(input.projectSourceUpdatePublisher === undefined ? {} : {
+        projectSourceUpdatePublisher: input.projectSourceUpdatePublisher,
+        sourceScope: input.binding.scope,
+        executionEpoch: input.binding.executionEpoch,
+      }),
     }),
     ...(input.state === undefined ? {} : { state: input.state }),
   });

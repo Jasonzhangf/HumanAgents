@@ -117,6 +117,13 @@ export class ImmutableAssetStore {
     return new Uint8Array(data);
   }
 
+  async readByDigest(assetId: string, expectedDigest: string): Promise<Uint8Array> {
+    validateId(assetId);
+    const data = await readFile(join(this.root, assetId));
+    if (digest(data) !== expectedDigest) throw new AssetIntegrityError('asset digest mismatch');
+    return new Uint8Array(data);
+  }
+
   async readEvidence(evidence: EvidenceRef): Promise<Uint8Array> {
     if (!evidence.digest || !evidence.locator) throw new AssetIntegrityError('invalid evidence reference');
     const assetId = evidence.evidenceId.value;

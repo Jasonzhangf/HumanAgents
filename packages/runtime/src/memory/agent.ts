@@ -45,6 +45,7 @@ export interface MemoryAgentIssue {
     | 'memory-agent-update-denied'
     | 'memory-agent-update-conflict'
     | 'memory-agent-update-validation-failed'
+    | 'memory-agent-update-publication-failed'
     | 'memory-agent-event-unsupported'
     | 'memory-agent-event-invalid'
     | 'memory-agent-event-scope-mismatch'
@@ -71,6 +72,10 @@ export interface MemoryAnalysisRequest {
   readonly sourceRefs: readonly string[];
   readonly sourceDigests: readonly string[];
   readonly observation: string;
+  readonly projectPatch?: {
+    readonly patchRef: string;
+    readonly patchDigest: string;
+  };
   readonly requestedKind: 'episodic' | 'semantic' | 'procedural';
   readonly candidateCategory: MemoryCandidateCategory;
   readonly executionEpoch: number;
@@ -103,6 +108,8 @@ export interface MemorySourceUpdateReceipt {
   readonly previousDigest: string;
   readonly nextRevision: string;
   readonly nextDigest: string;
+  readonly patchRef: string;
+  readonly patchDigest: string;
   readonly updated: boolean;
   readonly evidenceRefs: readonly string[];
 }
@@ -120,6 +127,7 @@ export interface MemoryAnalysisResult {
   readonly submission?: MemorySubmissionReceipt;
   readonly projectSources: readonly MemoryProjectSourceSnapshot[];
   readonly proposal?: ProjectSourceUpdateProposal;
+  readonly projectUpdate?: MemorySourceUpdateReceipt;
   readonly liveContextMutated: false;
   readonly promptSnapshot: AuditPromptSnapshot;
 }
@@ -222,6 +230,11 @@ function validatePersistedAnalysisRequest(value: unknown): asserts value is Memo
   }
   if (value.sessionRef !== undefined) {
     assertPersisted(typeof value.sessionRef === 'string' && value.sessionRef.trim().length > 0);
+  }
+  if (value.projectPatch !== undefined) {
+    assertPersisted(isRecord(value.projectPatch));
+    assertPersisted(typeof value.projectPatch.patchRef === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.projectPatch.patchRef));
+    assertPersisted(typeof value.projectPatch.patchDigest === 'string' && /^sha256:[a-f0-9]{64}$/.test(value.projectPatch.patchDigest));
   }
   validatePersistedStringArray(value.sourceRefs);
   validatePersistedStringArray(value.sourceDigests);
@@ -740,7 +753,12 @@ export class MemoryAgent {
       };
       validateMemoryCurationResult(outcome);
       this.analyses.set(input.operationId.value, {
-        request: { ...input, sourceRefs: [...input.sourceRefs], sourceDigests: [...input.sourceDigests] },
+        request: {
+          ...input,
+          sourceRefs: [...input.sourceRefs],
+          sourceDigests: [...input.sourceDigests],
+          ...(input.projectPatch === undefined ? {} : { projectPatch: { ...input.projectPatch } }),
+        },
         acceptedAt: this.now(),
       });
       await this.persistState();
@@ -759,6 +777,15 @@ export class MemoryAgent {
         }
         proposal = this.projectUpdateProposal(input, projectSources, updateTarget);
       }
+      let projectUpdate: MemorySourceUpdateReceipt | undefined;
+      if (proposal !== undefined && this.options.autoUpdate) {
+        const update = await this.applyProjectUpdate({
+          proposal,
+          projectKey: input.projectKey,
+        });
+        if (update.status !== 'ready') return update;
+        projectUpdate = update.value;
+      }
       return {
         status: 'ready',
         value: {
@@ -766,6 +793,7 @@ export class MemoryAgent {
           submission,
           projectSources,
           ...(proposal === undefined ? {} : { proposal }),
+          ...(projectUpdate === undefined ? {} : { projectUpdate }),
           liveContextMutated: false,
           promptSnapshot,
         },
@@ -773,7 +801,12 @@ export class MemoryAgent {
     }
     validateMemoryCurationResult(outcome);
     this.analyses.set(input.operationId.value, {
-      request: { ...input, sourceRefs: [...input.sourceRefs], sourceDigests: [...input.sourceDigests] },
+      request: {
+        ...input,
+        sourceRefs: [...input.sourceRefs],
+        sourceDigests: [...input.sourceDigests],
+        ...(input.projectPatch === undefined ? {} : { projectPatch: { ...input.projectPatch } }),
+      },
       acceptedAt: this.now(),
     });
     await this.persistState();
@@ -903,13 +936,14 @@ export class MemoryAgent {
     target: ProjectSourceUpdateProposal['target'],
   ): ProjectSourceUpdateProposal | undefined {
     const source = projectSources.find((candidate) => candidate.target === target);
-    if (!source) return undefined;
+    if (!source || !input.projectPatch) return undefined;
     return {
       target,
       sourceRef: source.sourceRef,
       expectedRevision: source.revision,
       expectedDigest: source.digest,
-      patchRef: `memory-analysis-patch:${input.operationId.value}`,
+      patchRef: input.projectPatch.patchRef,
+      patchDigest: input.projectPatch.patchDigest,
       evidenceRefs: [...input.sourceRefs],
       ownerRef: target === 'project-agents' ? 'project-rule-owner' : 'local-skill-owner',
     };
@@ -962,6 +996,8 @@ export class MemoryAgent {
           previousDigest: current.digest,
           nextRevision: current.revision,
           nextDigest: current.digest,
+          patchRef: input.proposal.patchRef,
+          patchDigest: input.proposal.patchDigest,
           updated: false,
           evidenceRefs: [...input.proposal.evidenceRefs],
         },
@@ -977,6 +1013,8 @@ export class MemoryAgent {
         updated.sourceRef !== current.sourceRef
         || updated.previousRevision !== current.revision
         || updated.previousDigest !== current.digest
+        || updated.patchRef !== input.proposal.patchRef
+        || updated.patchDigest !== input.proposal.patchDigest
       ) {
         return {
           status: 'attention',
@@ -985,6 +1023,13 @@ export class MemoryAgent {
       }
       return { status: 'ready', value: updated };
     } catch (error) {
+      const code = (error as { readonly code?: string }).code;
+      if (code === 'memory-update-publication-failed') {
+        return {
+          status: 'attention',
+          issue: issue('memory-agent-update-publication-failed', 'attention', error instanceof Error ? error.message : 'memory project source update publication failed', 'memory-update-publication'),
+        };
+      }
       return {
         status: 'attention',
         issue: issue('memory-agent-update-validation-failed', 'attention', error instanceof Error ? error.message : 'memory project update failed validation', 'memory-update-owner'),
