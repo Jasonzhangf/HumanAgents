@@ -83,10 +83,11 @@ function assertStoredCheckpointClosureVersion(
   closure: CheckpointClosureRecord,
   expectedVersion: CheckpointClosureCompatibilityVersion,
 ): void {
-  assertSupportedCheckpointClosureCompatibilityVersion(closure.compatibilityVersion);
-  if (closure.compatibilityVersion !== expectedVersion) {
+  const storedVersion = closure.compatibilityVersion ?? expectedVersion;
+  assertSupportedCheckpointClosureCompatibilityVersion(storedVersion);
+  if (storedVersion !== expectedVersion) {
     throw new CheckpointSubmissionError(
-      `checkpoint closure compatibility version ${String(closure.compatibilityVersion)} does not match expected version ${String(expectedVersion)}`,
+      `checkpoint closure compatibility version ${String(storedVersion)} does not match expected version ${String(expectedVersion)}`,
     );
   }
 }
