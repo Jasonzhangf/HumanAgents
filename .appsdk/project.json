@@ -168,14 +168,7 @@
       "module_id": "app",
       "stage": "source_implemented",
       "owned_paths": [
-        "packages/app/**",
-        "packages/config/**",
-        "packages/contracts/**",
-        "packages/agent-templates/**",
-        "packages/adapters/**",
-        "packages/core/**",
-        "packages/runtime/**",
-        "packages/ui/**"
+        "packages/app/**"
       ],
       "source_owner": "app",
       "active_artifact": "active/lib/app/**",
