@@ -131,6 +131,7 @@ test('task detail projection exposes only required user decisions', () => {
     observationRef: 'task://task-a/observation',
   });
   assert.deepEqual(projection.surface, 'task-detail');
+  assert.deepEqual(projection.title, '整理周报证据');
   assert.deepEqual(projection.requiredDecisions.length, 3);
   assert.deepEqual(projection.requiredDecisions[0].label, '按建议执行');
   assert.deepEqual(projection.observationRef, 'task://task-a/observation');
@@ -711,10 +712,11 @@ test('task detail UI consumes typed task-detail projection fields', async () => 
   const source = await readFile('docs/ui/task.js', 'utf8');
   assert.equal(source.includes('detail.taskTitle'), false);
   assert.equal(source.includes('detail.stateLabel'), false);
-  assert.equal(source.includes('detail.output?.summary'), false);
+  assert.equal(source.includes('detail.data.label'), false);
+  assert.equal(source.includes('detail.output?.summary'), true);
   assert.equal(source.includes('detail.artifacts'), false);
   assert.equal(/detail\.observation\b/.test(source), false);
-  assert.equal(source.includes('detail.data.label'), true);
+  assert.equal(source.includes('detail.title'), true);
   assert.equal(source.includes('detail.currentState'), true);
   assert.equal(source.includes('detail.priorInput'), true);
   assert.equal(source.includes('detail.investigation'), true);

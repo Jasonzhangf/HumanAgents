@@ -112,6 +112,7 @@ export interface MemorySummaryProjection {
 export interface TaskDetailProjection {
   readonly surface: 'task-detail';
   readonly taskId: TaskId;
+  readonly title: string;
   readonly state: UiSurfaceState;
   readonly data: UiDataSource;
   readonly currentState: string;

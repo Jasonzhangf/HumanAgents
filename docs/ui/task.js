@@ -72,7 +72,7 @@ function renderTask() {
   clearNode(main)
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
-  copy.append(element('p', 'Task Detail', 'eyebrow'), element('h1', readable(detail.data.label)))
+  copy.append(element('p', 'Task Detail', 'eyebrow'), element('h1', readable(detail.title)))
   const chip = element('span', readable(detail.currentState), 'state-chip')
   chip.dataset.tone = stateTone(detail.state)
   copy.append(chip)
@@ -85,7 +85,7 @@ function renderTask() {
     ['调查结果', detail.investigation],
     ['建议', detail.proposal],
     ['需要你决定', detail.requiredDecisions],
-    ['输出', detail.output ? '已有任务输出' : undefined],
+    ['输出', detail.output?.summary],
     ['artifact', detail.output?.artifacts],
     ['任务观测', detail.observationRef],
     ['最近下一步', detail.nextAction],

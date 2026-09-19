@@ -489,6 +489,7 @@ export function projectTaskDetail(input: TaskDetailProjectionInput): TaskDetailP
   return {
     surface: 'task-detail',
     taskId: input.task.id,
+    title: input.task.title,
     state: input.source.state,
     data: input.source,
     currentState: input.currentState,

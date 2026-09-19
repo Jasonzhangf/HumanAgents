@@ -722,6 +722,18 @@ export class UiRuntimeService {
         nextAction: task.nextStep,
         requiredDecisions: [],
         customInputAllowed: false,
+        output: task.output
+          ? {
+            taskId: task.taskId,
+            state: task.state === 'succeeded' || task.state === 'failed' || task.state === 'waiting'
+              ? task.state
+              : 'partial',
+            summary: task.output,
+            result: {},
+            artifactRefs: [],
+            evidenceRefs: task.events.flatMap((event) => event.evidenceRefs),
+          }
+          : undefined,
         observationRef: `task://${task.taskId.value}/observation`,
       });
     } catch (error) {

@@ -2459,9 +2459,22 @@ test('runtime API task detail uses the task-detail projection surface', async ()
     const task = await created.json() as { readonly taskId: { readonly value: string } };
     const detail = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
     assert.equal(detail.status, 200);
-    const body = await detail.json() as { readonly surface: string; readonly taskId: { readonly value: string } };
+    const taskId = id('task', task.taskId.value);
+    runtime.service.startExecution(taskId, { prompt: 'typed task detail output' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded'));
+    const completedDetail = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
+    assert.equal(completedDetail.status, 200);
+    const body = await completedDetail.json() as {
+      readonly surface: string;
+      readonly taskId: { readonly value: string };
+      readonly title: string;
+      readonly output?: { readonly summary: string; readonly artifacts: readonly string[] };
+    };
     assert.equal(body.surface, 'task-detail');
     assert.equal(body.taskId.value, task.taskId.value);
+    assert.equal(body.title, 'task detail surface');
+    assert.match(body.output?.summary ?? '', /fake replay:/);
+    assert.deepEqual(body.output?.artifacts, []);
   } finally {
     await runtime.server.close();
   }
