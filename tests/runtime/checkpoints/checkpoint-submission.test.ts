@@ -26,6 +26,8 @@ import type {
 import {
   commitDeadEnd,
   commitReentry,
+  CHECKPOINT_CLOSURE_COMPATIBILITY,
+  assertSupportedCheckpointClosureCompatibilityVersion,
   submitCheckpoint,
   submitInteractionClosure,
   type SubmitCheckpointInput,
@@ -598,11 +600,14 @@ test('same checkpoint value in different scopes keeps commit and closure identit
   assert.equal(journal.appended.length, 2);
   assert.equal(closurePort.committed.length, 2);
   const closureIds = closurePort.committed.map((record) => 'closureId' in record ? record.closureId : record.deadEndRef);
+  assert.equal(closureIds[0], `checkpoint-closure:${checkpointCommitId(first)}`);
   assert.equal(closureIds[0] === closureIds[1], false);
 });
 
 test('legacy checkpoint closure ids remain readable for submission retries and reentry', async () => {
   const input = submissionInput();
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version, 1);
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.scope, 'checkpoint-id');
   await input.journal.append({
     ownerId: 'task-owner',
     commitId: checkpointCommitId(input.checkpoint),
@@ -637,6 +642,50 @@ test('legacy checkpoint closure ids remain readable for submission retries and r
   });
   assert.equal(reentry.state, 'committed');
   assert.equal(input.closurePort.committed.length, 1);
+});
+
+test('legacy checkpoint closure mismatches fail explicitly without canonical fallback', async () => {
+  const input = submissionInput();
+  const legacyId = `checkpoint-closure:${input.checkpoint.id.value}`;
+  input.closurePort.records.set(legacyId, {
+    closureKind: 'checkpoint',
+    closureId: legacyId,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: 'different legacy summary',
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'mismatched legacy closure' },
+  });
+
+  await assert.rejects(async () => {
+    try {
+      await submitCheckpoint(input);
+    } catch (error) {
+      assert.equal((error as Error).message, 'legacy checkpoint closure v1 does not match the checkpoint');
+      throw error;
+    }
+  });
+  assert.equal(input.journal.appended.length, 0);
+  assert.equal(input.closurePort.committed.length, 0);
+});
+
+test('checkpoint closure compatibility declares the sunset boundary and rejects unsupported versions', () => {
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.current.version, 2);
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.current.scope, 'checkpoint-commit-id');
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.sunsetCondition.includes('remove after'), true);
+  assert.throws(
+    () => {
+      try {
+        assertSupportedCheckpointClosureCompatibilityVersion(3);
+      } catch (error) {
+        assert.equal((error as Error).message, 'unsupported checkpoint closure compatibility version: 3');
+        throw error;
+      }
+    },
+    CheckpointSubmissionError,
+  );
 });
 
 test('checkpoint submission rejects a committed closure that does not match the checkpoint', async () => {

@@ -251,3 +251,18 @@ One shell wrapper attempt used zsh's read-only variable name `status` and failed
 ## Acceptance boundary and next action
 
 Candidate acceptance: **INCOMPLETE**. The report proves Gate 18 FAIL, Gate 25 UNVERIFIED, and Gate 28 UNVERIFIED on current source and actual entries. Minimal next step: assign the three gate owners above to repair or explicitly narrow each live contract, then rerun this exact audit from the resulting candidate SHA. No product code, tests, maps, lockfiles, root `main`, merge, push, reset, or release was changed.
+
+## Follow-up candidate: checkpoint compatibility owner
+
+At candidate base `1434cda9b5d341c2754f99270541279961056c70`, the checkpoint
+owner follow-up declares one compatibility boundary in
+`packages/runtime/src/checkpoints/submission.ts`: v2
+`checkpoint-commit-id` is the current scoped identity and v1
+`checkpoint-id` is a read-only legacy exception. Legacy content mismatches now
+fail before Journal append or canonical fallback; unsupported compatibility
+versions fail explicitly. The v1 reader has a removal condition: all supported
+closure stores must contain no legacy checkpoint-id records. Focused positive,
+negative, and unsupported-version tests bind this contract. This follow-up
+does not change the Gate 18/25 actual-entry composition or provider behavior;
+the candidate still requires the normal independent review and integration
+gates before changing the prior Gate 28 audit verdict.

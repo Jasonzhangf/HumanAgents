@@ -37,6 +37,39 @@ import type {
 
 const CHECKPOINT_SOURCES: readonly CheckpointSubmissionSource[] = ['agent-tool', 'harness-control', 'recovery'];
 
+/**
+ * Checkpoint closure identity is owned by the Checkpoint/Control Owner.
+ *
+ * v2 is the current scope-safe identity. v1 is a read-only compatibility
+ * exception for records written before commit identities included scope. The
+ * v1 branch is removable once every supported closure store has no
+ * `checkpoint-closure:<checkpoint-id>` records left.
+ */
+export const CHECKPOINT_CLOSURE_COMPATIBILITY = {
+  current: {
+    version: 2,
+    scope: 'checkpoint-commit-id',
+  },
+  legacy: {
+    version: 1,
+    scope: 'checkpoint-id',
+    sunsetCondition: 'remove after all supported closure stores contain no legacy checkpoint-id records',
+  },
+} as const;
+
+export type CheckpointClosureCompatibilityVersion =
+  | typeof CHECKPOINT_CLOSURE_COMPATIBILITY.current.version
+  | typeof CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version;
+
+export function assertSupportedCheckpointClosureCompatibilityVersion(
+  version: number,
+): asserts version is CheckpointClosureCompatibilityVersion {
+  if (version !== CHECKPOINT_CLOSURE_COMPATIBILITY.current.version
+    && version !== CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version) {
+    throw new CheckpointSubmissionError(`unsupported checkpoint closure compatibility version: ${String(version)}`);
+  }
+}
+
 function checkpointClosureId(checkpoint: Pick<Checkpoint, 'id' | 'scope'>): string {
   return `checkpoint-closure:${checkpointCommitId(checkpoint)}`;
 }
@@ -73,16 +106,22 @@ async function readCheckpointClosure(
   port: CheckpointClosurePort,
   checkpoint: Checkpoint,
 ): Promise<ClosureRecord | null> {
+  assertSupportedCheckpointClosureCompatibilityVersion(CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
   const scoped = await port.read(checkpointClosureId(checkpoint));
   if (scoped) return scoped;
+
+  assertSupportedCheckpointClosureCompatibilityVersion(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version);
   const legacy = await port.read(legacyCheckpointClosureId(checkpoint));
+  if (!legacy) return null;
   if (
-    !legacy
-    || !('closureKind' in legacy)
+    !('closureKind' in legacy)
     || legacy.closureKind !== 'checkpoint'
+    || legacy.closureId !== legacyCheckpointClosureId(checkpoint)
     || !closureMatchesCheckpoint(legacy, checkpoint)
   ) {
-    return null;
+    throw new CheckpointSubmissionError(
+      `legacy checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version} does not match the checkpoint`,
+    );
   }
   return legacy;
 }

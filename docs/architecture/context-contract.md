@@ -113,6 +113,18 @@ validate scope + permission + source epoch
 
 Checkpoint 只记录恢复入口和事实引用；Task/interaction 的最终状态仍由各自 lifecycle owner 按 closure 证据提交。`close` transport、Provider EOF 或模型文本本身都不能代替上述 closure。
 
+Checkpoint/Control Owner also owns closure identity compatibility. The current
+v2 identity is `checkpoint-closure:<checkpointCommitId>` with
+`checkpoint-commit-id` scope. A read-only v1 compatibility exception may read
+`checkpoint-closure:<checkpointId>` with `checkpoint-id` scope for records
+written before scoped commit identities existed; it must validate the
+checkpoint, outcome, next action, evidence scope and evidence membership before
+reuse. A v1 record with mismatched content or an unsupported compatibility
+version is an explicit error and cannot fall through to a new canonical
+commit. Remove the v1 reader after every supported closure store contains no
+legacy checkpoint-id records; until then, this is the sole declared
+compatibility boundary and not a second submission owner.
+
 Agent-to-Agent 的发布者证明、消息类别、scope/ACL、durable cursor、consumer receipt、ACK、重试和离线恢复以 [`agent-communication-and-feedback.md`](agent-communication-and-feedback.md) 为唯一真源；Context 只消费已经通过通信 owner 提交的事实和 projection，不自行确认消息或推进 Agent 状态。
 
 ## 2. 紧凑结构
