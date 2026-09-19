@@ -14,6 +14,7 @@ import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
 import { JsonlOrganJournal, JournalCommitConflictError } from '../../packages/adapters/jsonl/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import { readCommittedCheckpoint } from '../../packages/app/src/checkpoint-journal.js';
 import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
 
 const providerBinding: ProviderBinding = {
@@ -326,7 +327,16 @@ test('committed checkpoint memory boundary emits a typed patch only for auto upd
         sessionId,
         plan: 'default',
         prompt: 'record a project memory boundary',
-        memoryBoundaryPublisher: memory.publisher,
+      });
+      const committed = await readCommittedCheckpoint({
+        filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+        scope: result.checkpoint.scope,
+        checkpointId: result.checkpoint.id,
+      });
+      await memory.boundaryPublisher.publish({
+        checkpoint: committed.checkpoint,
+        recordDigest: committed.recordDigest,
+        trigger: 'completion',
       });
       const consumed = await memory.consume();
       assert.equal(consumed.committed.length, 1);

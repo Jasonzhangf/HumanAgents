@@ -333,7 +333,7 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
           executionEpoch: committed.checkpoint.executionEpoch,
           trigger,
           requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
-          candidateCategory: trigger === 'rewind' ? 'project-experience' : 'project-fact',
+          candidateCategory: trigger === 'completion' || trigger === 'rewind' ? 'project-experience' : 'project-fact',
           ...(trigger !== 'rewind'
             && input.binding.interactionScopeId === undefined
             && committed.checkpoint.scope.taskId
