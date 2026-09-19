@@ -33,6 +33,8 @@ import {
   type AttentionPort,
 } from '../../packages/runtime/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import type { CheckpointClosurePort } from '../../packages/runtime/src/checkpoints/ports.js';
+import type { ClosureRecord } from '../../packages/runtime/src/checkpoints/closure.js';
 import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
   RuntimeTaskControlError,
@@ -146,7 +148,9 @@ function serviceFor(
   journal?: UiRuntimeJournal,
   now?: () => Date,
   hookRegistry?: AgentHookRegistry,
+  closurePort?: CheckpointClosurePort,
 ): UiRuntimeService {
+  const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
     mode,
     organId,
@@ -155,11 +159,34 @@ function serviceFor(
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState,
-    journal: journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    journal: runtimeJournal,
+    closurePort: closurePort ?? runtimeJournal,
     memory: testMemory('project-ui-test'),
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
   });
+}
+
+class FailingInteractionClosurePort implements CheckpointClosurePort {
+  async commit(_input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {
+    throw new Error('closure store unavailable');
+  }
+
+  async read(): Promise<ClosureRecord | null> {
+    return null;
+  }
+}
+
+class FailOnceProjectionJournal extends UiRuntimeJournal {
+  failNextExplicitState = false;
+
+  override append(record: Parameters<UiRuntimeJournal['append']>[0]): void {
+    if (this.failNextExplicitState && record.kind === 'explicit-brain.state') {
+      this.failNextExplicitState = false;
+      throw new Error('projection journal unavailable');
+    }
+    super.append(record);
+  }
 }
 
 test('ui runtime binds memory to the real operation identity and exposes deterministic recall evidence', async () => {
@@ -208,6 +235,7 @@ test('ui runtime binds memory to the real operation identity and exposes determi
 
 test('ui runtime rejects stale memory epoch recall after the task advances', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-stale-'));
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   const service = new UiRuntimeService({
     mode: 'fake',
     organId,
@@ -216,7 +244,8 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
-    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
     memory: {
       coordinator: new MemoryCoordinator(),
       backend: new DeterministicMemoryBackend(),
@@ -952,6 +981,7 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
       throw new Error('close must not be called by health probe');
     },
   };
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   const service = new UiRuntimeService({
     mode: 'rcc',
     organId,
@@ -960,7 +990,8 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
-    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
     memory: testMemory('project-ui-organ-health-error'),
   });
   const server = await startUiRuntimeServer({
@@ -1477,6 +1508,33 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     assert.equal(inspected.state, 'received');
     assert.equal(inspected.draft, undefined);
 
+    const rejectedInputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:http',
+        rawInput: 'reject through HTTP',
+        channel: 'business',
+      }),
+    });
+    assert.equal(rejectedInputResponse.status, 201);
+    const rejectedInput = await rejectedInputResponse.json() as { readonly interactionId: string };
+    const rejectionResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(rejectedInput.interactionId)}/reject`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'not in the current task scope' }),
+    });
+    assert.equal(rejectionResponse.status, 200);
+    const closure = await rejectionResponse.json() as { readonly state: string; readonly closure: { readonly closureKind: string; readonly closureId: string } };
+    assert.equal(closure.state, 'closed');
+    assert.equal(closure.closure.closureKind, 'interaction');
+    assert.equal(closure.closure.closureId, `interaction-closure-${rejectedInput.interactionId}`);
+    const rejectedInspection = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(rejectedInput.interactionId)}`);
+    assert.equal(rejectedInspection.status, 200);
+    assert.equal((await rejectedInspection.json() as { readonly state: string; readonly reason?: string }).state, 'rejected');
+    const journalLines = (await readFile(join(root, 'checkpoints', 'fake', 'ui-runtime-journal.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { readonly kind: string });
+    assert.equal(journalLines.some((line) => line.kind === 'interaction.closure'), true);
+
     const staleResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/confirmation`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1511,6 +1569,55 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
   } finally {
     await runtime.server.close();
   }
+});
+
+test('rejected interaction rolls back when closure persistence fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-rejection-closure-failure-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    new FailingInteractionClosurePort(),
+  );
+  const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:failure', rawInput: 'closure failure', channel: 'business' });
+  await assert.rejects(
+    () => service.rejectExplicitInteraction(interactionId, 'closure unavailable'),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'interaction-closure.persistence-failed'
+      && error.httpStatus === 503,
+  );
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'received');
+
+  const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  await restarted.hydrate();
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'received');
+});
+
+test('rejected interaction recovers projection failure after restart without duplicating its closure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-rejection-projection-failure-'));
+  const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:projection-failure', rawInput: 'projection failure', channel: 'business' });
+  journal.failNextExplicitState = true;
+  await assert.rejects(
+    () => service.rejectExplicitInteraction(interactionId, 'projection unavailable'),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'interaction-closure.persistence-failed'
+      && error.httpStatus === 503,
+  );
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'received');
+  assert.equal(journal.replay().filter((record) => record.kind === 'interaction.closure').length, 1);
+
+  const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  await restarted.hydrate();
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'received');
+  await restarted.rejectExplicitInteraction(interactionId, 'projection unavailable');
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'rejected');
+  assert.equal(journal.replay().filter((record) => record.kind === 'interaction.closure').length, 1);
 });
 
 test('runtime output concatenates repeated provider deltas without suffix dedupe', async () => {
@@ -3022,6 +3129,7 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
       published.push(structuredClone(input));
     },
   };
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   const service = new UiRuntimeService({
     mode: 'fake',
     organId,
@@ -3030,7 +3138,8 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
-    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
     memory: {
       ...testMemory('project-ui-boundary-success'),
       checkpointBoundary: boundary,
@@ -3054,6 +3163,7 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
 
 test('UI checkpoint boundary failure leaves the committed checkpoint explicitly blocked for recovery', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-boundary-failure-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   const service = new UiRuntimeService({
     mode: 'fake',
     organId,
@@ -3062,7 +3172,8 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
-    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    journal,
+    closurePort: journal,
     memory: {
       ...testMemory('project-ui-boundary-failure'),
       checkpointBoundary: {

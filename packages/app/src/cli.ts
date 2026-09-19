@@ -26,6 +26,8 @@ import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
 import { FakeProviderAgentDriver, fakeExecutionBinding } from './fake-execution.js';
 import { entryCompositionInventory } from './entry-composition.js';
+import { createCordisHost } from './cordis-host.js';
+import { runSupervisorStartup } from './supervisor/supervisor.js';
 import { join } from 'node:path';
 
 function option(args: readonly string[], name: string): string | undefined {
@@ -409,40 +411,74 @@ export async function main(args: readonly string[]): Promise<void> {
           maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
         }, evidenceRoot)
       : buildFakeExecutionPort(binding, option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined);
-    const runtime = await startUiRuntime({
-      mode,
-      organId: id('organ', 'humanagent-ui'),
-      binding,
-      port,
-      checkpointRoot,
-      evidenceRoot,
-      uiRoot,
-      memory: {
-        coordinator: memoryRuntime.composition.coordinator,
-        backend: memoryRuntime.composition.backend,
-        projectKey: paths.projectKey,
-        interaction: memoryRuntime.composition.interaction,
-        bindingRef: memoryRuntime.composition.bindingRef,
-        checkpointBoundary: {
-          publish: async ({ checkpoint, recordDigest }) => {
-            const trigger = memoryTrigger(checkpoint.outcome);
-            if (!trigger) return;
-            if (!recordDigest) {
-              throw new AppLifecycleError(
-                'memory-boundary-digest-missing',
-                `checkpoint ${checkpoint.id.value} is committed without a journal record digest`,
-                'recover the committed checkpoint record before publishing the memory boundary',
-                'humanagent.cli',
-              );
-            }
-            await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
-            await memoryRuntime.consume();
-          },
+    const cordisHost = createCordisHost([]);
+    let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+    const supervisor = await runSupervisorStartup(paths, [
+      {
+        name: 'cordis-host',
+        ownerId: 'humanagent.app.cordis-host',
+        nextAction: 'repair Cordis host startup before retrying serve',
+        start: async () => { await cordisHost.start(); },
+        dispose: async () => { await cordisHost.dispose(); },
+      },
+      {
+        name: 'ui-runtime',
+        ownerId: 'humanagent.runtime.ui',
+        nextAction: 'repair UI runtime startup before retrying serve',
+        start: async () => {
+          runtime = await startUiRuntime({
+            mode,
+            organId: id('organ', 'humanagent-ui'),
+            binding,
+            port,
+            checkpointRoot,
+            evidenceRoot,
+            uiRoot,
+            memory: {
+              coordinator: memoryRuntime.composition.coordinator,
+              backend: memoryRuntime.composition.backend,
+              projectKey: paths.projectKey,
+              interaction: memoryRuntime.composition.interaction,
+              bindingRef: memoryRuntime.composition.bindingRef,
+              checkpointBoundary: {
+                publish: async ({ checkpoint, recordDigest }) => {
+                  const trigger = memoryTrigger(checkpoint.outcome);
+                  if (!trigger) return;
+                  if (!recordDigest) {
+                    throw new AppLifecycleError(
+                      'memory-boundary-digest-missing',
+                      `checkpoint ${checkpoint.id.value} is committed without a journal record digest`,
+                      'recover the committed checkpoint record before publishing the memory boundary',
+                      'humanagent.cli',
+                    );
+                  }
+                  await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+                  await memoryRuntime.consume();
+                },
+              },
+            },
+            host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
+            portNumber,
+          });
+        },
+        dispose: async () => {
+          if (runtime) await runtime.server.close();
         },
       },
-      host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
-      portNumber,
-    });
+    ], { lease: { ownerId: 'humanagent.app.serve' } });
+    if (!runtime) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
+    let shuttingDown = false;
+    const shutdown = (): void => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      void supervisor.dispose().catch((error: unknown) => {
+        console.error(formatCliError(error));
+        process.exitCode = 1;
+      });
+    };
+    const signalProcess = process as unknown as { once(signal: string, listener: () => void): void };
+    signalProcess.once('SIGTERM', shutdown);
+    signalProcess.once('SIGINT', shutdown);
     console.log(JSON.stringify({
       command,
       mode,
@@ -454,6 +490,11 @@ export async function main(args: readonly string[]): Promise<void> {
       checkpointRoot,
       memoryRoot,
       eventJournal: join(paths.journalRoot, 'events.jsonl'),
+      supervisor: {
+        leasePath: join(paths.projectRoot, 'daemon', 'lease.json'),
+        readyAt: supervisor.readyAt,
+        stages: supervisor.stages,
+      },
       composition: entryCompositionInventory(),
     }, null, 2));
     return;

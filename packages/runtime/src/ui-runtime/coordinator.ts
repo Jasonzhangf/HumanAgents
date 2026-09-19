@@ -21,6 +21,7 @@ import {
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
+import type { InteractionClosureRecord } from '../checkpoints/closure.js';
 import type { AttentionPort } from '../control/attention.js';
 import type { RequestStopCommand } from '../control/control-command.js';
 import { executeStopControl } from '../control/runtime-stop.js';
@@ -224,6 +225,10 @@ export type RuntimeTaskJournalRecord =
   | {
       readonly kind: 'explicit-brain.state';
       readonly state: RuntimeExplicitBrainJournalState;
+    }
+  | {
+      readonly kind: 'interaction.closure';
+      readonly closure: InteractionClosureRecord;
     };
 
 export class RuntimeTaskControlError extends Error {

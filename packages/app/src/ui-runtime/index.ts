@@ -126,6 +126,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const providerError = readiness ? providerErrorFromReadiness(readiness) : undefined;
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
+  const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
   const checkpointStoreFor = (taskId: TaskId, cycleId: CycleId): TaskCheckpointStore => new FileCheckpointStore(join(modeRoot, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`));
   const service = new UiRuntimeService({
     mode: options.mode,
@@ -136,7 +137,8 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     attentionPort,
     providerState,
     providerError,
-    journal: new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl')),
+    journal,
+    closurePort: journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     memory: options.memory,
   });

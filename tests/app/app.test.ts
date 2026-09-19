@@ -809,6 +809,29 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
   const first = await serve();
   let taskId: string;
   try {
+    const duplicate = spawn(process.execPath, [
+      cli,
+      'serve',
+      '--workspace',
+      workspace,
+      '--control-root',
+      controlRoot,
+      '--mode',
+      'fake',
+      '--port',
+      '0',
+    ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let duplicateStderr = '';
+    duplicate.stderr.on('data', (chunk: Uint8Array) => { duplicateStderr += String(chunk); });
+    const duplicateExit = await new Promise<number | null>((resolve, reject) => {
+      duplicate.once('error', reject);
+      duplicate.once('exit', resolve);
+    });
+    assert.equal(duplicateExit, 1);
+    const duplicateFailure = JSON.parse(duplicateStderr.trim()) as { readonly error?: { readonly code?: string; readonly ownerId?: string } };
+    assert.equal(duplicateFailure.error?.code, 'daemon-lease-owned');
+    assert.equal(duplicateFailure.error?.ownerId, 'humanagent.app.serve');
+
     const created = await fetch(`${first.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

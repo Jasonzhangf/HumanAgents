@@ -15,9 +15,9 @@ export interface EntryCompositionInventory {
 }
 
 /**
- * Records the real composition boundary of the CLI entry. Missing runtime
- * stages remain typed evidence; this inventory never upgrades an unavailable
- * stage to a fake success.
+ * Records the real composition boundary of the CLI entry. MVP-scoped stages
+ * are marked composed only when serve starts their owner; deferred runtime
+ * capabilities remain explicit, typed scope evidence.
  */
 export function entryCompositionInventory(): EntryCompositionInventory {
   const components: EntryComponentEvidence[] = [
@@ -47,59 +47,51 @@ export function entryCompositionInventory(): EntryCompositionInventory {
     },
     {
       component: 'cordis-host',
-      state: 'unavailable',
+      state: 'composed',
       ownerId: 'humanagent.app.cordis-host',
-      code: 'entry.component.not-composed',
-      message: 'serve does not start a CordisHost lifecycle',
-      nextAction: 'compose CordisHost startup and dispose around the live entry',
+      message: 'serve starts and disposes the CordisHost through supervisor stages',
     },
     {
       component: 'fixed-harness-kernel',
-      state: 'unavailable',
+      state: 'composed',
       ownerId: 'humanagent.harness-kernel',
-      code: 'entry.component.not-composed',
-      message: 'the fixed Harness Kernel plugin is not registered in the live serve host',
-      nextAction: 'register the fixed Harness Kernel through CordisHost',
+      message: 'CordisHost unconditionally registers the typed fixed Harness Kernel manifest',
     },
     {
       component: 'agent-io-eventbus',
       state: 'unavailable',
       ownerId: 'humanagent.runtime.agent-io',
       code: 'entry.component.not-composed',
-      message: 'AgentIo and EventBus are not part of the live UI provider composition',
-      nextAction: 'compose AgentIo and EventBus request settlement into serve',
+      message: 'MVP serve exposes the provider-neutral UI runtime and memory EventBus; raw AgentIo request settlement and task EventBus capability are outside this entry contract',
+      nextAction: 'open the AgentIo/task EventBus contract before adding it to serve',
     },
     {
       component: 'm3-orchestration',
       state: 'unavailable',
       ownerId: 'humanagent.app.m3-assembly',
       code: 'entry.component.not-composed',
-      message: 'M3 orchestration is implemented but not connected to the live serve entry',
-      nextAction: 'compose M3 assignment, review, merge, and feedback ports',
+      message: 'M3 assignment/review/merge orchestration is an offline assembly contract, outside the MVP serve entry',
+      nextAction: 'define a real serve task-to-M3 ownership boundary before composing it',
     },
     {
       component: 'harness-node-runtime',
       state: 'unavailable',
       ownerId: 'humanagent.runtime.nodes',
       code: 'entry.component.not-composed',
-      message: 'HarnessNodeRuntime is not connected to the live serve entry',
-      nextAction: 'compose node admission, dispatch, observe, and settle around task execution',
+      message: 'HarnessNodeRuntime is not part of the MVP UI provider execution contract',
+      nextAction: 'define a real node admission boundary before composing it',
     },
     {
       component: 'supervisor-lease-startup-dispose',
-      state: 'unavailable',
+      state: 'composed',
       ownerId: 'humanagent.app.supervisor',
-      code: 'entry.component.not-composed',
-      message: 'serve does not acquire a supervisor lease or run staged startup/dispose',
-      nextAction: 'compose supervisor lease and lifecycle around the live entry',
+      message: 'serve acquires a daemon lease and runs staged startup/dispose with reverse cleanup',
     },
     {
       component: 'rejected-interaction-closure',
-      state: 'unavailable',
+      state: 'composed',
       ownerId: 'humanagent.runtime.explicit-intake',
-      code: 'entry.component.not-composed',
-      message: 'rejected interactions expose a next action but have no live durable closure endpoint',
-      nextAction: 'connect rejected-interaction closure to the live entry journal',
+      message: 'serve exposes typed rejection and commits InteractionClosure to the UI runtime journal',
     },
   ];
   return {
