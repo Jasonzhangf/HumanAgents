@@ -569,6 +569,51 @@ async function reconcilePendingProjectSourceUpdate(input: {
   await clearPendingProjectSourceUpdate(input.locksRoot);
 }
 
+function changedProjectPatchLines(current: string, next: string): readonly string[] {
+  const unmatched = new Map<string, number>();
+  for (const line of current.split(/\r?\n/)) {
+    unmatched.set(line, (unmatched.get(line) ?? 0) + 1);
+  }
+  const changed: string[] = [];
+  for (const line of next.split(/\r?\n/)) {
+    const count = unmatched.get(line) ?? 0;
+    if (count > 0) {
+      if (count === 1) unmatched.delete(line);
+      else unmatched.set(line, count - 1);
+    } else {
+      changed.push(line);
+    }
+  }
+  for (const [line, count] of unmatched) {
+    for (let index = 0; index < count; index += 1) changed.push(line);
+  }
+  return changed;
+}
+
+function assertProjectPatchAdmitted(current: string, next: string): void {
+  const controlTerm = /\b(?:permissions?|authorization|access control|provider|release|security|lifecycle)\b|权限|授权|安全|发布|生命周期|提供方|供应商/i;
+  const controlAssignment = /^\s*(?:[-*+]\s*)?(?:permissions?|provider|release|security|lifecycle)[\w-]*(?:\s+[a-z][\w -]*)?\s*[:=]/i;
+  const controlHeading = /^\s*#{1,6}\s*(?:permissions?|provider|release|security|lifecycle)[\w-]*(?:\s+[a-z][\w -]*)?\s*$/i;
+  const localizedControlAssignment = /^\s*(?:[-*+]\s*)?(?:权限|授权|安全|发布|生命周期|提供方|供应商)[^:：=\n]*[:：=]/;
+  const controlAction = /\b(?:allow|deny|grant|revoke|enable|disable|bypass|skip|override|permit|prohibit)\b|允许|禁止|授予|撤销|启用|禁用|绕过|跳过|覆盖|限制/i;
+  const controlDirective = /^\s*(?:[-*+]\s*)?(?:allow|deny|grant|revoke|enable|disable|bypass|skip|override|permit|prohibit)\b|^\s*(?:[-*+]\s*)?(?:允许|禁止|授予|撤销|启用|禁用|绕过|跳过|覆盖|限制)/i;
+  const denied = changedProjectPatchLines(current, next).some((line) => (
+    controlAssignment.test(line)
+    || controlHeading.test(line)
+    || localizedControlAssignment.test(line)
+    || (controlTerm.test(line) && controlAction.test(line))
+    || controlDirective.test(line)
+  ));
+  if (denied) {
+    throw new AppLifecycleError(
+      'memory-update-admission-denied',
+      'project source patch changes control, security, permission, provider, release, or lifecycle semantics',
+      'keep the patch as a proposal and request explicit owner review',
+      OWNER,
+    );
+  }
+}
+
 async function recoverPendingProjectSourceUpdate(input: {
   readonly workspaceCwd: string;
   readonly localSkillRoot?: string;
@@ -650,6 +695,7 @@ export function createProjectSourceUpdateOwner(input: {
         if (!patch.content.trim()) {
           throw new AppLifecycleError('memory-update-invalid', 'project source patch reader returned empty content', 'produce a non-empty source update', OWNER);
         }
+        assertProjectPatchAdmitted(before, patch.content);
         const nextDigest = digest(patch.content);
         if (!input.projectSourceUpdatePublisher || !input.sourceScope || input.executionEpoch === undefined) {
           throw new AppLifecycleError(

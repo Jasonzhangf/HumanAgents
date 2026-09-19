@@ -1341,6 +1341,102 @@ test('memory runtime rejects missing or drifted immutable project patches', asyn
   assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), original);
 });
 
+test('memory runtime rejects control and security semantics before persisting a project patch', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-auto-update-control-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const original = '# Original project rules\n';
+  const deniedPatches = [
+    '# Updated project rules\n\nPermissions: allow release.\n',
+    '# Updated project rules\n\nprovider = "rcc"\n',
+    '# Updated project rules\n\nRelease: enable production deploys.\n',
+    '# Updated project rules\n\nSecurity: allow unsigned plugins.\n',
+    '# Updated project rules\n\nLifecycle: skip owner review.\n',
+  ];
+  await writeFile(join(workspace, 'AGENTS.md'), original, 'utf8');
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const runtime = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: true,
+    binding: {
+      bindingRef: 'memory-binding:auto-update-control',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'organ', organId: id('organ', 'memory-auto-update-control') },
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'main-agent-a',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  const current = await runtime.composition.sources.readProject({
+    projectKey: paths.projectKey,
+    target: 'project-agents',
+  });
+  const lowRiskNext = '# Updated project rules\n\nUse pnpm for project commands.\n';
+  const lowRiskRef = 'project-agents-low-risk-next';
+  const lowRiskDigest = `sha256:${createHash('sha256').update(lowRiskNext).digest('hex')}`;
+  await writeFile(join(paths.artifactsRoot, lowRiskRef), lowRiskNext, 'utf8');
+  const lowRisk = await runtime.composition.agent.applyProjectUpdate({
+    projectKey: paths.projectKey,
+    proposal: {
+      target: 'project-agents',
+      sourceRef: current.sourceRef,
+      expectedRevision: current.revision,
+      expectedDigest: current.digest,
+      patchRef: lowRiskRef,
+      patchDigest: lowRiskDigest,
+      evidenceRefs: ['journal://project-a/evidence'],
+      ownerRef: 'project-rule-owner',
+    },
+  });
+  assert.equal(lowRisk.status, 'ready');
+  assert.equal(lowRisk.status === 'ready' && lowRisk.value.updated, true);
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), lowRiskNext);
+
+  const reset = await runtime.composition.sources.readProject({
+    projectKey: paths.projectKey,
+    target: 'project-agents',
+  });
+  for (const [index, next] of deniedPatches.entries()) {
+    const patchRef = `project-agents-control-next-${index}`;
+    const patchDigest = `sha256:${createHash('sha256').update(next).digest('hex')}`;
+    await writeFile(join(paths.artifactsRoot, patchRef), next, 'utf8');
+    const rejected = await runtime.composition.agent.applyProjectUpdate({
+      projectKey: paths.projectKey,
+      proposal: {
+        target: 'project-agents',
+        sourceRef: reset.sourceRef,
+        expectedRevision: reset.revision,
+        expectedDigest: reset.digest,
+        patchRef,
+        patchDigest,
+        evidenceRefs: ['journal://project-a/evidence'],
+        ownerRef: 'project-rule-owner',
+      },
+    });
+    assert.equal(rejected.status, 'attention');
+    assert.equal(rejected.status === 'attention' && rejected.issue.code, 'memory-agent-update-validation-failed');
+    assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), lowRiskNext);
+    await assert.rejects(
+      () => readFile(join(paths.locksRoot, 'memory-project-source-update.pending.json'), 'utf8'),
+      (error: unknown) => (error as { readonly code?: string }).code === 'ENOENT',
+    );
+  }
+});
+
 test('project source updates reject source identity drift before writing', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-patch-identity-');
   const current = {
