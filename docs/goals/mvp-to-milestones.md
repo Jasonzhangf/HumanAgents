@@ -126,7 +126,7 @@ MVP 只保留满足恢复和审计的字段：
 - [ ] 四种意图可区分：追加、变更、新建、只查询；只查询状态不创建后台需求。
 - [ ] 隐式 Brain 的分类、运行任务更新和资源准入有独立测试；资源不足进入明确等待条件，不创建半成品 pipeline。
 - [ ] Journal 是唯一高层状态真源；runtime 不以内存快照作为恢复依据。
-- [ ] Checkpoint/Control Owner 是唯一 closure identity owner：v2 使用 scoped checkpoint commit identity；v1 legacy read 仅在声明的 checkpoint-id compatibility boundary 内生效，mismatch/unsupported version 显式失败，并在 legacy stores 清空后移除。
+- [ ] Checkpoint/Control Owner 是唯一 closure identity owner：持久化 `CheckpointClosureRecord.compatibilityVersion`；v2 使用 scoped checkpoint commit identity；v1 legacy read 仅在声明的 checkpoint-id compatibility boundary 内生效，mismatch/unsupported version 显式失败，并在 legacy stores 清空后移除。
 - [ ] 重启后读取最新 checkpoint，能继续或进入明确 waiting/stopped/blocked 状态。
 - [ ] steer 完成证据包含 stop operation、资源结果和 stopped checkpoint。
 - [ ] 旧 epoch 迟到事件不会推进新 cycle。

@@ -258,9 +258,11 @@ At candidate base `1434cda9b5d341c2754f99270541279961056c70`, the checkpoint
 owner follow-up declares one compatibility boundary in
 `packages/runtime/src/checkpoints/submission.ts`: v2
 `checkpoint-commit-id` is the current scoped identity and v1
-`checkpoint-id` is a read-only legacy exception. Legacy content mismatches now
-fail before Journal append or canonical fallback; unsupported compatibility
-versions fail explicitly. The v1 reader has a removal condition: all supported
+`checkpoint-id` is a read-only legacy exception. Persisted
+`CheckpointClosureRecord.compatibilityVersion` is validated on the real
+closure read path. Legacy content mismatches now fail before Journal append or
+canonical fallback; unsupported persisted compatibility versions fail
+explicitly. The v1 reader has a removal condition: all supported
 closure stores must contain no legacy checkpoint-id records. Focused positive,
 negative, and unsupported-version tests bind this contract. This follow-up
 does not change the Gate 18/25 actual-entry composition or provider behavior;

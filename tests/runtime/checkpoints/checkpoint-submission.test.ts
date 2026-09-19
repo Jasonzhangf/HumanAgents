@@ -615,6 +615,7 @@ test('legacy checkpoint closure ids remain readable for submission retries and r
   });
   input.closurePort.records.set(`checkpoint-closure:${input.checkpoint.id.value}`, {
     closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version,
     closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',
@@ -649,6 +650,7 @@ test('legacy checkpoint closure mismatches fail explicitly without canonical fal
   const legacyId = `checkpoint-closure:${input.checkpoint.id.value}`;
   input.closurePort.records.set(legacyId, {
     closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version,
     closureId: legacyId,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',
@@ -664,6 +666,34 @@ test('legacy checkpoint closure mismatches fail explicitly without canonical fal
       await submitCheckpoint(input);
     } catch (error) {
       assert.equal((error as Error).message, 'legacy checkpoint closure v1 does not match the checkpoint');
+      throw error;
+    }
+  });
+  assert.equal(input.journal.appended.length, 0);
+  assert.equal(input.closurePort.committed.length, 0);
+});
+
+test('unsupported persisted checkpoint closure versions fail before Journal append or commit', async () => {
+  const input = submissionInput();
+  const legacyId = `checkpoint-closure:${input.checkpoint.id.value}`;
+  input.closurePort.records.set(legacyId, {
+    closureKind: 'checkpoint',
+    compatibilityVersion: 3 as never,
+    closureId: legacyId,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'unsupported persisted version' },
+  });
+
+  await assert.rejects(async () => {
+    try {
+      await submitCheckpoint(input);
+    } catch (error) {
+      assert.equal((error as Error).message, 'unsupported checkpoint closure compatibility version: 3');
       throw error;
     }
   });
@@ -692,6 +722,7 @@ test('checkpoint submission rejects a committed closure that does not match the 
   const input = submissionInput();
   input.closurePort.records.set(`checkpoint-closure:${checkpointCommitId(input.checkpoint)}`, {
     closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
     closureId: `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',

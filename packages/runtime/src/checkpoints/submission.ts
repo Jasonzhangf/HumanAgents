@@ -19,6 +19,7 @@ import {
   sameOperationId,
   sameReentryRecord,
   type CheckpointClosureRecord,
+  type CheckpointClosureCompatibilityVersion,
   type ClosureRecord,
   type DeadEndRecord,
   type InteractionClosureRecord,
@@ -57,10 +58,6 @@ export const CHECKPOINT_CLOSURE_COMPATIBILITY = {
   },
 } as const;
 
-export type CheckpointClosureCompatibilityVersion =
-  | typeof CHECKPOINT_CLOSURE_COMPATIBILITY.current.version
-  | typeof CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version;
-
 export function assertSupportedCheckpointClosureCompatibilityVersion(
   version: number,
 ): asserts version is CheckpointClosureCompatibilityVersion {
@@ -80,6 +77,18 @@ function legacyCheckpointClosureId(checkpoint: Pick<Checkpoint, 'id'>): string {
 
 function sameCheckpointClosureContent(left: CheckpointClosureRecord, right: CheckpointClosureRecord): boolean {
   return sameCheckpointClosureRecord({ ...left, closureId: right.closureId }, right);
+}
+
+function assertStoredCheckpointClosureVersion(
+  closure: CheckpointClosureRecord,
+  expectedVersion: CheckpointClosureCompatibilityVersion,
+): void {
+  assertSupportedCheckpointClosureCompatibilityVersion(closure.compatibilityVersion);
+  if (closure.compatibilityVersion !== expectedVersion) {
+    throw new CheckpointSubmissionError(
+      `checkpoint closure compatibility version ${String(closure.compatibilityVersion)} does not match expected version ${String(expectedVersion)}`,
+    );
+  }
 }
 
 function closureMatchesCheckpoint(closure: CheckpointClosureRecord, checkpoint: Checkpoint): boolean {
@@ -108,7 +117,12 @@ async function readCheckpointClosure(
 ): Promise<ClosureRecord | null> {
   assertSupportedCheckpointClosureCompatibilityVersion(CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
   const scoped = await port.read(checkpointClosureId(checkpoint));
-  if (scoped) return scoped;
+  if (scoped) {
+    if ('closureKind' in scoped && scoped.closureKind === 'checkpoint') {
+      assertStoredCheckpointClosureVersion(scoped, CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
+    }
+    return scoped;
+  }
 
   assertSupportedCheckpointClosureCompatibilityVersion(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version);
   const legacy = await port.read(legacyCheckpointClosureId(checkpoint));
@@ -117,8 +131,13 @@ async function readCheckpointClosure(
     !('closureKind' in legacy)
     || legacy.closureKind !== 'checkpoint'
     || legacy.closureId !== legacyCheckpointClosureId(checkpoint)
-    || !closureMatchesCheckpoint(legacy, checkpoint)
   ) {
+    throw new CheckpointSubmissionError(
+      `legacy checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version} does not match the checkpoint`,
+    );
+  }
+  assertStoredCheckpointClosureVersion(legacy, CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version);
+  if (!closureMatchesCheckpoint(legacy, checkpoint)) {
     throw new CheckpointSubmissionError(
       `legacy checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version} does not match the checkpoint`,
     );
@@ -257,6 +276,7 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
     const evidenceRefs = reconciledOperations.flatMap((result) => result.evidenceRef ? [result.evidenceRef] : []);
     const closure: CheckpointClosureRecord = {
       closureKind: 'checkpoint',
+      compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
       closureId: checkpointClosureId(input.checkpoint),
       checkpointId: input.checkpoint.id,
       source: input.source,

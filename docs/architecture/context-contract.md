@@ -117,7 +117,8 @@ Checkpoint/Control Owner also owns closure identity compatibility. The current
 v2 identity is `checkpoint-closure:<checkpointCommitId>` with
 `checkpoint-commit-id` scope. A read-only v1 compatibility exception may read
 `checkpoint-closure:<checkpointId>` with `checkpoint-id` scope for records
-written before scoped commit identities existed; it must validate the
+written before scoped commit identities existed. Every persisted
+`CheckpointClosureRecord` carries its compatibility version; the reader must validate the
 checkpoint, outcome, next action, evidence scope and evidence membership before
 reuse. A v1 record with mismatched content or an unsupported compatibility
 version is an explicit error and cannot fall through to a new canonical
