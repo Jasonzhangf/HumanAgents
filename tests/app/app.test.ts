@@ -1877,6 +1877,69 @@ test('standalone app stop preserves explicit provider close failure after stoppe
   assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
 });
 
+test('standalone app stop closes the provider when manifest persistence fails after stopped checkpoint commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-manifest-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(false, { 'session-stop-manifest-failure-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-manifest-failure',
+    plan: 'default',
+    prompt: 'stop with manifest failure',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+  await rm(paths.runNotesRoot, { recursive: true, force: true });
+  await writeFile(paths.runNotesRoot, 'manifest path is blocked', 'utf8');
+
+  await assert.rejects(
+    () => controller.stop(),
+    (error: unknown) => (error as { code?: string }).code === 'EEXIST',
+  );
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(controller.snapshot().state, 'stopped');
+  assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
+});
+
+test('standalone app stop preserves manifest and provider close failures after stopped checkpoint commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-finalization-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(true, { 'session-stop-finalization-failure-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-finalization-failure',
+    plan: 'default',
+    prompt: 'stop with manifest and provider close failure',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+  await rm(paths.runNotesRoot, { recursive: true, force: true });
+  await writeFile(paths.runNotesRoot, 'manifest path is blocked', 'utf8');
+
+  await assert.rejects(
+    () => controller.stop(),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'agent-operation-stop-finalization-failed'
+      && error.cause instanceof AggregateError
+      && error.cause.errors.length === 2
+      && /manifest=EEXIST/.test(error.message)
+      && /provider close=provider close failed/.test(error.message),
+  );
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(controller.snapshot().state, 'stopped');
+  assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
+});
+
 test('app stop does not commit stopped when settle fails', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-settle-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

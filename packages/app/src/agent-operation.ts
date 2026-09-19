@@ -411,8 +411,29 @@ export class AgentOperationController {
     if (result.state === 'stopped') {
       this.stoppedCheckpoint = result.checkpoint;
       this.settled = true;
-      await this.writeManifest();
-      await this.closeExecution();
+      let manifestFailure: unknown;
+      let closeFailure: unknown;
+      try {
+        await this.writeManifest();
+      } catch (error) {
+        manifestFailure = error;
+      }
+      try {
+        await this.closeExecution();
+      } catch (error) {
+        closeFailure = error;
+      }
+      if (manifestFailure !== undefined && closeFailure !== undefined) {
+        throw new AppLifecycleError(
+          'agent-operation-stop-finalization-failed',
+          `stop finalization failed after the stopped checkpoint commit: manifest=${messageOf(manifestFailure)}; provider close=${messageOf(closeFailure)}`,
+          'reconcile the committed stopped checkpoint, manifest, and provider resource before retrying',
+          OWNER,
+          new AggregateError([manifestFailure, closeFailure], 'stop finalization failed'),
+        );
+      }
+      if (manifestFailure !== undefined) throw manifestFailure;
+      if (closeFailure !== undefined) throw closeFailure;
     }
     return result;
   }
@@ -610,6 +631,10 @@ function outputForDriver(driver: AgentDriver, output: AgentOutput): AgentOutput 
       output: (driver as TraceableAgentDriver).output(),
     },
   };
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function memoryTrigger(outcome: Checkpoint['outcome']): MemoryAnalysisTrigger | null {
