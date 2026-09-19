@@ -1004,6 +1004,7 @@ test('memory curation, follow-up, audit prompt, recall policy, and source propos
     actor: memoryActor(),
     projectKey: 'project-a',
     namespace: 'project',
+    taskId: task,
     evidenceRefs: ['journal://project-a/1'],
     evidenceDigests: ['sha256:source-a'],
     sourceRefs: ['journal://project-a/1'],
