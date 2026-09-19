@@ -954,6 +954,16 @@ test('explicit interaction UI executes route order and confirmation gate', async
     assert.equal(matchButton.disabled, false);
 
     const dispatchBeforeConfirmation = requests.filter((request) => request.path === '/api/explicit/dispatch-next').length;
+    for (const invalidMatchedTasks of ['{', '{}']) {
+      matchingForm.fields.get('matchedTasks')!.value = invalidMatchedTasks;
+      const matchingCallsBeforeInvalid = requests.filter((request) => request.path.endsWith('/matching')).length;
+      matchingForm.dispatch('submit');
+      await settle();
+      assert.equal(requests.filter((request) => request.path.endsWith('/matching')).length, matchingCallsBeforeInvalid);
+      assert.equal(state, 'received');
+      assert.equal(visibleState.textContent, 'received');
+    }
+    matchingForm.fields.get('matchedTasks')!.value = '[]';
     matchingForm.dispatch('submit');
     await settle();
     assert.equal(proposalButton.disabled, false);
