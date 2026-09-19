@@ -244,6 +244,12 @@ test('memory agent rejects stale follow-ups, mismatched evidence, and scope drif
   };
   const analyzed = await agent.analyze(analysis());
   assert.equal(analyzed.status, 'ready');
+  const staleEpoch = await agent.analyze(analysis({
+    operationId: id('operation', 'analysis-stale-epoch'),
+    executionEpoch: 3,
+  }));
+  assert.equal(staleEpoch.status, 'attention');
+  assert.equal(staleEpoch.status === 'attention' && staleEpoch.issue.code, 'memory-agent-binding-mismatch');
   const accepted = await agent.followUp(followUp);
   assert.equal(accepted.status, 'ready');
   if (accepted.status !== 'ready') throw new Error('expected follow-up acceptance');
@@ -267,6 +273,62 @@ test('memory agent rejects stale follow-ups, mismatched evidence, and scope drif
   const scoped = await agent.followUp({ ...followUp, operationId: id('operation', 'follow-up-d'), correlationId: 'correlation-d', projectKey: 'project-b' });
   assert.equal(scoped.status, 'attention');
   assert.equal(scoped.status === 'attention' && scoped.issue.code, 'memory-agent-follow-up-conflict');
+});
+
+test('memory agent accepts interaction follow-ups when analysis and binding epochs differ', async () => {
+  const ports = makeOperations();
+  const agent = new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  });
+  const interactionScopeId = 'interaction-follow-up';
+  agent.bind({
+    bindingRef: 'binding-interaction',
+    projectKey: 'project-a',
+    scope: { kind: 'organ', organId: organ },
+    interactionScopeId,
+    mainAgentId: 'main-agent-interaction',
+    executionEpoch: 2,
+    ownerId: 'memory-agent',
+    operations: ports.operations,
+  });
+
+  const analyzed = await agent.analyze(analysis({
+    operationId: id('operation', 'interaction-analysis'),
+    bindingRef: 'binding-interaction',
+    scope: { kind: 'organ', organId: organ },
+    taskId: undefined,
+    interactionScopeId,
+    sessionRef: undefined,
+    executionEpoch: 3,
+  }));
+  assert.equal(analyzed.status, 'ready');
+
+  const followUp = {
+    requestId: 'interaction-follow-up-request',
+    operationId: id('operation', 'interaction-follow-up-operation'),
+    correlationId: 'interaction-follow-up-correlation',
+    inReplyTo: 'interaction-analysis',
+    bindingRef: 'binding-interaction',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project' as const,
+    taskId: undefined,
+    interactionScopeId,
+    evidenceRefs: ['journal://project-a/interaction-evidence'],
+    evidenceDigests: ['sha256:interaction-evidence'],
+    sourceRefs: ['journal://project-a/interaction-source'],
+    inputDigest: 'sha256:interaction-evidence',
+  };
+  const accepted = await agent.followUp(followUp);
+  assert.equal(accepted.status, 'ready');
+  if (accepted.status !== 'ready') throw new Error('expected interaction follow-up acceptance');
+  assert.equal(accepted.value.inReplyTo, 'interaction-analysis');
 });
 
 test('memory agent auto=false returns proposal-only; auto=true delegates a CAS update to the owner', async () => {

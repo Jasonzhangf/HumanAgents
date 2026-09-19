@@ -710,7 +710,11 @@ export class MemoryAgent {
       || scopeKey(analysis.request.scope) !== scopeKey(bound.scope)
       || !sameTask(analysis.request.taskId, input.taskId)
       || analysis.request.interactionScopeId !== input.interactionScopeId
-      || analysis.request.executionEpoch !== bound.executionEpoch
+      || (
+        analysis.request.interactionScopeId === undefined
+        && bound.interactionScopeId === undefined
+        && analysis.request.executionEpoch !== bound.executionEpoch
+      )
     ) {
       return {
         status: 'attention',
