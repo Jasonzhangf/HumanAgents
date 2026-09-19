@@ -33,6 +33,8 @@ import {
   type AttentionPort,
 } from '../../packages/runtime/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import type { CheckpointClosurePort } from '../../packages/runtime/src/checkpoints/ports.js';
+import type { ClosureRecord } from '../../packages/runtime/src/checkpoints/closure.js';
 import { createHookRegistry, type AgentHookRegistry } from '../../packages/runtime/src/hooks/index.js';
 import {
   RuntimeTaskControlError,
@@ -146,6 +148,7 @@ function serviceFor(
   journal?: UiRuntimeJournal,
   now?: () => Date,
   hookRegistry?: AgentHookRegistry,
+  closurePort?: CheckpointClosurePort,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -157,11 +160,33 @@ function serviceFor(
     attentionPort: attentionPort(),
     providerState,
     journal: runtimeJournal,
-    closurePort: runtimeJournal,
+    closurePort: closurePort ?? runtimeJournal,
     memory: testMemory('project-ui-test'),
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
   });
+}
+
+class FailingInteractionClosurePort implements CheckpointClosurePort {
+  async commit(_input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {
+    throw new Error('closure store unavailable');
+  }
+
+  async read(): Promise<ClosureRecord | null> {
+    return null;
+  }
+}
+
+class FailOnceProjectionJournal extends UiRuntimeJournal {
+  failNextExplicitState = false;
+
+  override append(record: Parameters<UiRuntimeJournal['append']>[0]): void {
+    if (this.failNextExplicitState && record.kind === 'explicit-brain.state') {
+      this.failNextExplicitState = false;
+      throw new Error('projection journal unavailable');
+    }
+    super.append(record);
+  }
 }
 
 test('ui runtime binds memory to the real operation identity and exposes deterministic recall evidence', async () => {
@@ -1544,6 +1569,55 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
   } finally {
     await runtime.server.close();
   }
+});
+
+test('rejected interaction rolls back when closure persistence fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-rejection-closure-failure-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    new FailingInteractionClosurePort(),
+  );
+  const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:failure', rawInput: 'closure failure', channel: 'business' });
+  await assert.rejects(
+    () => service.rejectExplicitInteraction(interactionId, 'closure unavailable'),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'interaction-closure.persistence-failed'
+      && error.httpStatus === 503,
+  );
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'received');
+
+  const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  await restarted.hydrate();
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'received');
+});
+
+test('rejected interaction recovers projection failure after restart without duplicating its closure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-rejection-projection-failure-'));
+  const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:projection-failure', rawInput: 'projection failure', channel: 'business' });
+  journal.failNextExplicitState = true;
+  await assert.rejects(
+    () => service.rejectExplicitInteraction(interactionId, 'projection unavailable'),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'interaction-closure.persistence-failed'
+      && error.httpStatus === 503,
+  );
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'received');
+  assert.equal(journal.replay().filter((record) => record.kind === 'interaction.closure').length, 1);
+
+  const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  await restarted.hydrate();
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'received');
+  await restarted.rejectExplicitInteraction(interactionId, 'projection unavailable');
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'rejected');
+  assert.equal(journal.replay().filter((record) => record.kind === 'interaction.closure').length, 1);
 });
 
 test('runtime output concatenates repeated provider deltas without suffix dedupe', async () => {

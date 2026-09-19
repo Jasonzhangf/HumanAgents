@@ -272,6 +272,16 @@ function apiError(error: unknown): UiRuntimeApiError {
   );
 }
 
+function interactionClosurePersistenceError(error: unknown): UiRuntimeApiError {
+  return new UiRuntimeApiError(
+    'interaction-closure.persistence-failed',
+    'humanagent.runtime.explicit-intake',
+    `rejected interaction was not durably projected: ${error instanceof Error ? error.message : String(error)}`,
+    'confirm the runtime journal is writable, then retry the rejection',
+    503,
+  );
+}
+
 export class UiRuntimeService {
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
@@ -954,8 +964,11 @@ export class UiRuntimeService {
   }
 
   async rejectExplicitInteraction(interactionId: string, reason: string): Promise<SubmittedInteractionClosure> {
+    const previousState = this.explicitIntake.exportState();
+    let intakeTransitioned = false;
     try {
       await this.explicitIntake.reject(interactionId, reason);
+      intakeTransitioned = true;
       const scope = { organId: id('organ', this.options.organId.value) };
       const submitted = await submitInteractionClosure({
         ownerId: 'humanagent.runtime.explicit-intake',
@@ -975,6 +988,10 @@ export class UiRuntimeService {
       this.persistExplicitBrainState();
       return submitted;
     } catch (error) {
+      if (intakeTransitioned) {
+        this.explicitIntake.restoreState(previousState);
+        throw interactionClosurePersistenceError(error);
+      }
       throw apiError(error);
     }
   }

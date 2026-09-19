@@ -210,6 +210,15 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
     if (!('closureKind' in input) || input.closureKind !== 'interaction') {
       throw new Error('UI runtime journal only owns interaction closures');
     }
+    const existing = [...this.replay()].reverse().find((record) => (
+      record.kind === 'interaction.closure' && record.closure.closureId === input.closureId
+    ));
+    if (existing?.kind === 'interaction.closure') {
+      if (JSON.stringify(existing.closure) !== JSON.stringify(input)) {
+        throw new Error(`interaction closure conflict: ${input.closureId}`);
+      }
+      return { closureId: input.closureId, committed: true };
+    }
     this.append({ kind: 'interaction.closure', closure: input });
     return { closureId: input.closureId, committed: true };
   }
