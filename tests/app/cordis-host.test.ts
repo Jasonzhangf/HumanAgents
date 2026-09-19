@@ -70,6 +70,12 @@ test('Cordis host orders manifests deterministically and rejects duplicate owner
     () => new CordisHost([plugin({ id: 'undeclared', register: (context) => context.registerCapability('not-declared') })]),
     (error: unknown) => error instanceof CordisHostError && error.code === 'plugin-capability-undeclared',
   );
+  assert.throws(
+    () => new CordisHost([plugin({ id: 'humanagent.harness-kernel' })]),
+    (error: unknown) => error instanceof CordisHostError
+      && error.code === 'plugin-reserved-owner'
+      && error.ownerId === 'humanagent.harness-kernel',
+  );
 });
 
 test('Cordis host registers before start and disposes started plugins in reverse order after start failure', async () => {

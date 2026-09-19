@@ -307,8 +307,10 @@ export class CordisHost {
   private lifecycleTail: Promise<void> = Promise.resolve();
 
   constructor(extensionPlugins: readonly CordisExtensionPlugin[]) {
-    const includesKernel = extensionPlugins.some((plugin) => plugin.manifest.pluginId === FIXED_HARNESS_KERNEL_PLUGIN_ID);
-    this.plugins = orderPlugins(includesKernel ? extensionPlugins : [fixedHarnessKernelPlugin(), ...extensionPlugins]);
+    if (extensionPlugins.some((plugin) => plugin.manifest.pluginId === FIXED_HARNESS_KERNEL_PLUGIN_ID)) {
+      throw fail('plugin-reserved-owner', `plugin owner is reserved: ${FIXED_HARNESS_KERNEL_PLUGIN_ID}`, FIXED_HARNESS_KERNEL_PLUGIN_ID, 'manifest', 'remove-reserved-plugin-owner');
+    }
+    this.plugins = orderPlugins([fixedHarnessKernelPlugin(), ...extensionPlugins]);
     this.registry = new HarnessPluginRegistry(this.plugins);
     for (const plugin of this.plugins) {
       try {
