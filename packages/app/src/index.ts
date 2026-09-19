@@ -145,6 +145,27 @@ export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
 
 export {
+  CordisHost,
+  CordisHostError,
+  FIXED_HARNESS_KERNEL_PLUGIN_ID,
+  HarnessPluginRegistry,
+  assertHarnessPluginManifest,
+  assertPluginManifestMatches,
+  createCordisHost,
+  fixedHarnessKernelPlugin,
+  loadCordisHost,
+  readCordisHostManifest,
+} from './cordis-host.js';
+export type {
+  CordisExtensionPlugin,
+  CordisHostManifest,
+  CordisHostPhase,
+  CordisHostSnapshot,
+  CordisHostState,
+  CordisReadinessReport,
+} from './cordis-host.js';
+
+export {
   buildFakeExecutionPort,
   buildRccExecutionPort,
   startUiRuntime,
