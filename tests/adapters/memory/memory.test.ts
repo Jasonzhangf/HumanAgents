@@ -27,6 +27,7 @@ import {
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const taskScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const globalScope: MemoryScope = { kind: 'approved-global', organId: id('organ', 'global') };
 const actor: MemoryActorContext = {
   actorId: 'actor-a',
   roleId: 'memory',
@@ -124,6 +125,92 @@ test('memory backend rebuilds a deleted index from journal records and immutable
   assert.deepEqual(await memory.compare({ leftRef: sourceRef, rightRef: sourceRef }), {
     relation: 'same',
   });
+});
+
+test('memory backend rebuilds an approved-global index with source provenance', async () => {
+  const sourceRef = 'journal://global/rebuild-source';
+  const assetRef = 'asset://memory/global-rebuild-source';
+  const assetText = 'rebuilt global source content';
+  const sourceDigest = `sha256:${createHash('sha256').update(assetText).digest('hex')}`;
+  const rebuilt = await new DeterministicMemoryBackend().rebuild({
+    scope: globalScope,
+    journal: [{
+      seq: 4,
+      scope: { organId: organ },
+      memoryScope: {
+        namespace: 'global',
+        globalId: 'global',
+        sourceProjectKey: 'project-a',
+        sourceOrganId: organ,
+      },
+      memorySource: {
+        sourceRef,
+        sourceDigest,
+        projectKey: 'project-a',
+        occurredAt: '2026-09-18T00:00:00Z',
+        kind: 'checkpoint',
+        payloadRef: assetRef,
+      },
+    }],
+    sources: [{ sourceRef: assetRef, sourceDigest, text: assetText }],
+  });
+
+  assert.deepEqual(rebuilt, {
+    scope: globalScope,
+    rebuilt: 1,
+    sourceRefs: [sourceRef],
+    seqs: [4],
+    digests: [sourceDigest],
+  });
+});
+
+test('memory rebuild rejects global source provenance mismatches', async () => {
+  const sourceRef = 'journal://global/rebuild-mismatch';
+  const assetRef = 'asset://memory/global-rebuild-mismatch';
+  const assetText = 'global mismatch source';
+  const sourceDigest = `sha256:${createHash('sha256').update(assetText).digest('hex')}`;
+  const journal = {
+    seq: 5,
+    scope: { organId: organ },
+    memoryScope: {
+      namespace: 'global' as const,
+      globalId: 'global' as const,
+      sourceProjectKey: 'project-a',
+      sourceOrganId: organ,
+    },
+    memorySource: {
+      sourceRef,
+      sourceDigest,
+      projectKey: 'project-a',
+      occurredAt: '2026-09-18T00:00:00Z',
+      kind: 'checkpoint' as const,
+      payloadRef: assetRef,
+    },
+  };
+  const sources = [{ sourceRef: assetRef, sourceDigest, text: assetText }];
+
+  await assert.rejects(
+    new DeterministicMemoryBackend().rebuild({
+      scope: globalScope,
+      journal: [{
+        ...journal,
+        memorySource: { ...journal.memorySource, projectKey: 'project-b' },
+      }],
+      sources,
+    }),
+    ContractError,
+  );
+  await assert.rejects(
+    new DeterministicMemoryBackend().rebuild({
+      scope: globalScope,
+      journal: [{
+        ...journal,
+        scope: { organId: id('organ', 'organ-b') },
+      }],
+      sources,
+    }),
+    ContractError,
+  );
 });
 
 test('memory rebuild rejects a source ref that belongs to another scope without changing persisted state', async () => {

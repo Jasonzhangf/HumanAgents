@@ -34,6 +34,7 @@ import {
   type MemoryScope,
   type MemorySubmission,
   type MemorySubmissionReceipt,
+  type ScopeRef,
   type TaskId,
   type NoveltyRequest,
   type NoveltyResult,
@@ -102,6 +103,7 @@ export interface MemoryPersistencePort {
 
 export interface MemoryRebuildJournalRecord {
   readonly seq: number;
+  readonly scope?: ScopeRef;
   readonly memoryScope?: CanonicalMemoryScope;
   readonly memorySource?: EpisodicMemorySource;
 }
@@ -1340,24 +1342,36 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
               ...(memoryScope.taskId === undefined ? {} : { taskId: memoryScope.taskId }),
             }
           : { kind: 'approved-global' as const, organId: { scope: 'organ' as const, value: 'global' } };
-        if (
-          input.scope.kind !== expectedKind
-          || memoryScope.namespace !== 'project'
-          || scopeKey(canonicalScope) !== scopeKey(input.scope)
-        ) {
+        if (input.scope.kind !== expectedKind || scopeKey(canonicalScope) !== scopeKey(input.scope)) {
           throw new ContractError(`memory rebuild journal scope does not match the requested scope: ${journalRecord.seq}`);
         }
-        if (memorySource.projectKey !== memoryScope.projectKey) {
-          throw new ContractError(`memory rebuild journal source project does not match its scope: ${journalRecord.seq}`);
-        }
-        if (
-          memoryScope.taskId !== undefined
-          && (memorySource.taskId?.scope !== memoryScope.taskId.scope || memorySource.taskId.value !== memoryScope.taskId.value)
-        ) {
-          throw new ContractError(`memory rebuild journal source task does not match its scope: ${journalRecord.seq}`);
-        }
-        if (memoryScope.taskId === undefined && memorySource.taskId !== undefined) {
-          throw new ContractError(`memory rebuild journal source task is not allowed for organ scope: ${journalRecord.seq}`);
+        if (memoryScope.namespace === 'global') {
+          if (memoryScope.sourceProjectKey !== undefined && memorySource.projectKey !== memoryScope.sourceProjectKey) {
+            throw new ContractError(`memory rebuild global source project does not match its scope: ${journalRecord.seq}`);
+          }
+          if (memoryScope.sourceOrganId !== undefined) {
+            const journalScope = journalRecord.scope;
+            if (
+              journalScope === undefined
+              || journalScope.organId.scope !== memoryScope.sourceOrganId.scope
+              || journalScope.organId.value !== memoryScope.sourceOrganId.value
+            ) {
+              throw new ContractError(`memory rebuild global source organ does not match its journal scope: ${journalRecord.seq}`);
+            }
+          }
+        } else {
+          if (memorySource.projectKey !== memoryScope.projectKey) {
+            throw new ContractError(`memory rebuild journal source project does not match its scope: ${journalRecord.seq}`);
+          }
+          if (
+            memoryScope.taskId !== undefined
+            && (memorySource.taskId?.scope !== memoryScope.taskId.scope || memorySource.taskId.value !== memoryScope.taskId.value)
+          ) {
+            throw new ContractError(`memory rebuild journal source task does not match its scope: ${journalRecord.seq}`);
+          }
+          if (memoryScope.taskId === undefined && memorySource.taskId !== undefined) {
+            throw new ContractError(`memory rebuild journal source task is not allowed for organ scope: ${journalRecord.seq}`);
+          }
         }
 
         nonEmpty(memorySource.sourceRef, 'memory rebuild journal source ref');
