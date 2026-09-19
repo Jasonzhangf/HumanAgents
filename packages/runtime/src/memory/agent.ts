@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   ContractError,
+  validateAuditPromptSnapshot,
   validateMemoryActor,
   validateMemoryCurationResult,
   validateMemoryFollowUpRequest,
@@ -88,11 +89,10 @@ export interface MemoryAnalysisBinding {
   readonly operations: MemoryOperationsPort;
 }
 
-export interface MemoryFollowUpReceipt {
+export interface MemoryFollowUpResult extends MemoryAnalysisResult {
   readonly requestId: string;
   readonly correlationId: string;
   readonly inReplyTo: string;
-  readonly accepted: true;
   readonly operationId: OperationId;
 }
 
@@ -144,6 +144,7 @@ interface BoundAnalysis {
 interface FollowUpRecord {
   readonly request: MemoryFollowUpRequest;
   readonly acceptedAt: string;
+  readonly result?: MemoryFollowUpResult;
 }
 
 interface AcceptedAnalysis {
@@ -261,6 +262,64 @@ function validatePersistedFollowUpRequest(value: unknown): asserts value is Memo
   }
 }
 
+function validatePersistedSourceSnapshot(value: unknown): asserts value is MemoryProjectSourceSnapshot {
+  assertPersisted(isRecord(value));
+  assertPersisted(typeof value.sourceRef === 'string' && value.sourceRef.trim().length > 0);
+  assertPersisted(typeof value.canonicalRef === 'string' && value.canonicalRef.trim().length > 0);
+  assertPersisted(typeof value.revision === 'string' && value.revision.trim().length > 0);
+  assertPersisted(typeof value.digest === 'string' && value.digest.trim().length > 0);
+  validatePersistedTimestamp(value.loadedAt);
+  assertPersisted(typeof value.projectKey === 'string' && value.projectKey.trim().length > 0);
+  assertPersisted(
+    value.target === 'project-architecture'
+    || value.target === 'project-agents'
+    || value.target === 'project-local-skill',
+  );
+  assertPersisted(typeof value.content === 'string');
+}
+
+function validatePersistedSubmissionReceipt(value: unknown): asserts value is MemorySubmissionReceipt {
+  assertPersisted(isRecord(value));
+  assertPersisted(typeof value.submissionId === 'string' && value.submissionId.trim().length > 0);
+  assertPersisted(
+    value.status === 'accepted'
+    || value.status === 'duplicate'
+    || value.status === 'queued'
+    || value.status === 'rejected',
+  );
+  for (const field of ['candidateId', 'sourceRef', 'sourceFactRef'] as const) {
+    if (value[field] !== undefined) assertPersisted(typeof value[field] === 'string' && value[field].trim().length > 0);
+  }
+  if (value.operationId !== undefined) validatePersistedId(value.operationId, 'operation');
+  assertPersisted(
+    value.nextAction === 'none'
+    || value.nextAction === 'wait-analysis'
+    || value.nextAction === 'review-required'
+    || value.nextAction === 'attention',
+  );
+}
+
+function validatePersistedFollowUpResult(value: unknown): asserts value is MemoryFollowUpResult {
+  assertPersisted(isRecord(value));
+  assertPersisted(typeof value.requestId === 'string' && value.requestId.trim().length > 0);
+  assertPersisted(typeof value.correlationId === 'string' && value.correlationId.trim().length > 0);
+  assertPersisted(typeof value.inReplyTo === 'string' && value.inReplyTo.trim().length > 0);
+  validatePersistedId(value.operationId, 'operation');
+  assertPersisted(value.liveContextMutated === false);
+  try {
+    validateMemoryCurationResult(value.curation as MemoryCurationResult);
+    if (value.submission !== undefined) validatePersistedSubmissionReceipt(value.submission);
+    assertPersisted(Array.isArray(value.projectSources));
+    for (const source of value.projectSources) validatePersistedSourceSnapshot(source);
+    if (value.proposal !== undefined) {
+      validateProjectSourceUpdateProposal(value.proposal as ProjectSourceUpdateProposal);
+    }
+    validateAuditPromptSnapshot(value.promptSnapshot as AuditPromptSnapshot);
+  } catch {
+    invalidPersistedState();
+  }
+}
+
 function restoreState(input: unknown): PersistedMemoryAgentState | undefined {
   if (input === undefined) return undefined;
   if (!isRecord(input) || input.version !== 1 || !Array.isArray(input.analyses) || !Array.isArray(input.followUps)) {
@@ -275,6 +334,7 @@ function restoreState(input: unknown): PersistedMemoryAgentState | undefined {
     assertPersisted(isRecord(followUp));
     validatePersistedFollowUpRequest(followUp.request);
     validatePersistedTimestamp(followUp.acceptedAt);
+    if (followUp.result !== undefined) validatePersistedFollowUpResult(followUp.result);
   }
   return input as unknown as PersistedMemoryAgentState;
 }
@@ -334,6 +394,32 @@ function sameFollowUpRequest(left: MemoryFollowUpRequest, right: MemoryFollowUpR
     && sameStrings(left.evidenceDigests, right.evidenceDigests)
     && sameStrings(left.sourceRefs, right.sourceRefs)
     && left.inputDigest === right.inputDigest;
+}
+
+function followUpAnalysisRequest(input: MemoryFollowUpRequest, prior: MemoryAnalysisRequest): MemoryAnalysisRequest {
+  return {
+    operationId: input.operationId,
+    bindingRef: input.bindingRef,
+    actor: {
+      ...input.actor,
+      permissions: [...input.actor.permissions],
+    },
+    projectKey: input.projectKey,
+    scope: {
+      ...prior.scope,
+      ...(prior.scope.taskId === undefined ? {} : { taskId: { ...prior.scope.taskId } }),
+    },
+    ...(input.taskId === undefined ? {} : { taskId: { ...input.taskId } }),
+    ...(input.interactionScopeId === undefined ? {} : { interactionScopeId: input.interactionScopeId }),
+    ...(prior.sessionRef === undefined ? {} : { sessionRef: prior.sessionRef }),
+    sourceRefs: [...input.evidenceRefs],
+    sourceDigests: [...input.evidenceDigests],
+    observation: prior.observation,
+    requestedKind: prior.requestedKind,
+    candidateCategory: prior.candidateCategory,
+    executionEpoch: prior.executionEpoch,
+    trigger: prior.trigger,
+  };
 }
 
 function sourceErrorOutcome(error: unknown): MemoryAgentOutcome<never> {
@@ -401,6 +487,29 @@ export class MemoryAgent {
             sourceRefs: [...followUp.request.sourceRefs],
           },
           acceptedAt: followUp.acceptedAt,
+          ...(followUp.result === undefined ? {} : {
+            result: {
+              ...followUp.result,
+              curation: {
+                ...followUp.result.curation,
+                auditPrompt: { ...followUp.result.curation.auditPrompt },
+                sourceRefs: [...followUp.result.curation.sourceRefs],
+                matchedMemoryIds: [...followUp.result.curation.matchedMemoryIds],
+                conflictRefs: [...followUp.result.curation.conflictRefs],
+              },
+              ...(followUp.result.submission === undefined ? {} : {
+                submission: { ...followUp.result.submission },
+              }),
+              projectSources: followUp.result.projectSources.map((source) => ({ ...source })),
+              ...(followUp.result.proposal === undefined ? {} : {
+                proposal: {
+                  ...followUp.result.proposal,
+                  evidenceRefs: [...followUp.result.proposal.evidenceRefs],
+                },
+              }),
+              promptSnapshot: { ...followUp.result.promptSnapshot },
+            },
+          }),
         });
       }
       this.restored = true;
@@ -668,7 +777,7 @@ export class MemoryAgent {
     };
   }
 
-  async followUp(input: MemoryFollowUpRequest): Promise<MemoryAgentOutcome<MemoryFollowUpReceipt>> {
+  async followUp(input: MemoryFollowUpRequest): Promise<MemoryAgentOutcome<MemoryFollowUpResult>> {
     await this.restore();
     try {
       validateMemoryFollowUpRequest(input);
@@ -724,16 +833,23 @@ export class MemoryAgent {
     const prior = this.followUps.get(input.correlationId);
     if (prior) {
       if (sameFollowUpRequest(prior.request, input)) {
-        return {
-          status: 'ready',
-          value: {
-            requestId: prior.request.requestId,
-            correlationId: prior.request.correlationId,
-            inReplyTo: prior.request.inReplyTo,
-            accepted: true,
-            operationId: prior.request.operationId,
-          },
+        if (prior.result) return { status: 'ready', value: prior.result };
+        const recovered = await this.analyze(followUpAnalysisRequest(input, analysis.request));
+        if (recovered.status !== 'ready') return recovered;
+        const result: MemoryFollowUpResult = {
+          requestId: input.requestId,
+          correlationId: input.correlationId,
+          inReplyTo: input.inReplyTo,
+          operationId: input.operationId,
+          ...recovered.value,
         };
+        this.followUps.set(input.correlationId, {
+          request: prior.request,
+          acceptedAt: prior.acceptedAt,
+          result,
+        });
+        await this.persistState();
+        return { status: 'ready', value: result };
       }
       return {
         status: 'attention',
@@ -746,27 +862,28 @@ export class MemoryAgent {
         issue: issue('memory-agent-follow-up-stale', 'attention', 'memory follow-up cannot reply to itself', 'memory-follow-up'),
       };
     }
-    const record: FollowUpRecord = {
-      request: {
-        ...input,
-        evidenceRefs: [...input.evidenceRefs],
-        evidenceDigests: [...input.evidenceDigests],
-        sourceRefs: [...input.sourceRefs],
-      },
+    const request = {
+      ...input,
+      evidenceRefs: [...input.evidenceRefs],
+      evidenceDigests: [...input.evidenceDigests],
+      sourceRefs: [...input.sourceRefs],
+    };
+    const analyzed = await this.analyze(followUpAnalysisRequest(request, analysis.request));
+    if (analyzed.status !== 'ready') return analyzed;
+    const result: MemoryFollowUpResult = {
+      requestId: input.requestId,
+      correlationId: input.correlationId,
+      inReplyTo: input.inReplyTo,
+      operationId: input.operationId,
+      ...analyzed.value,
+    };
+    this.followUps.set(input.correlationId, {
+      request,
       acceptedAt: this.now(),
-    };
-    this.followUps.set(input.correlationId, record);
+      result,
+    });
     await this.persistState();
-    return {
-      status: 'ready',
-      value: {
-        requestId: input.requestId,
-        correlationId: input.correlationId,
-        inReplyTo: input.inReplyTo,
-        accepted: true,
-        operationId: input.operationId,
-      },
-    };
+    return { status: 'ready', value: result };
   }
 
   private projectUpdateProposal(

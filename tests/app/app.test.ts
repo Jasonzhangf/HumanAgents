@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -204,6 +204,7 @@ test('memory runtime publishes a committed checkpoint boundary and consumes it i
       afterSequence: 0,
       limit: 10,
     }))[0]!;
+    const evidenceDigest = checkpointEvidenceDigest(result.checkpoint);
     const followUp = {
       requestId: 'follow-up-memory-runtime-boundary',
       operationId: id('operation', 'follow-up-memory-runtime-boundary'),
@@ -222,9 +223,9 @@ test('memory runtime publishes a committed checkpoint boundary and consumes it i
       namespace: 'project' as const,
       taskId: result.taskId,
       evidenceRefs: ['humanagent://checkpoint/' + result.checkpoint.id.value],
-      evidenceDigests: ['sha256:follow-up'],
+      evidenceDigests: [evidenceDigest],
       sourceRefs: ['humanagent://checkpoint/' + result.checkpoint.id.value],
-      inputDigest: 'sha256:follow-up',
+      inputDigest: evidenceDigest,
     };
     assert.equal((await memory.composition.agent.followUp(followUp)).status, 'ready');
     const restarted = await compose();

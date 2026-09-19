@@ -85,7 +85,13 @@ function makeOperations(overrides: {
     search: async () => [],
     inspect: async (input) => ({
       sourceRef: input.sourceRef,
-      sourceDigest: input.sourceRef === 'journal://project-a/checkpoint' ? 'sha256:checkpoint' : 'sha256:source',
+      sourceDigest: input.sourceRef === 'journal://project-a/checkpoint'
+        ? 'sha256:checkpoint'
+        : input.sourceRef === 'journal://project-a/evidence'
+          ? 'sha256:evidence'
+          : input.sourceRef === 'journal://project-a/interaction-evidence'
+            ? 'sha256:interaction-evidence'
+          : 'sha256:source',
       text: 'source',
     }),
     compare: async () => ({ relation: 'different' }),
@@ -251,14 +257,14 @@ test('memory agent rejects stale follow-ups, mismatched evidence, and scope drif
   assert.equal(staleEpoch.status, 'attention');
   assert.equal(staleEpoch.status === 'attention' && staleEpoch.issue.code, 'memory-agent-binding-mismatch');
   const accepted = await agent.followUp(followUp);
-  assert.equal(accepted.status, 'ready');
+  assert.equal(accepted.status, 'ready', accepted.status === 'attention' ? accepted.issue.message : undefined);
   if (accepted.status !== 'ready') throw new Error('expected follow-up acceptance');
   assert.equal(accepted.value.correlationId, 'correlation-a');
   const repeated = await agent.followUp(followUp);
   assert.equal(repeated.status, 'ready');
   assert.equal(repeated.status === 'ready' && repeated.value.operationId.value, 'follow-up-operation');
 
-  const stale = await agent.followUp({ ...followUp, operationId: id('operation', 'follow-up-b'), correlationId: 'correlation-b', inReplyTo: 'follow-up-operation' });
+  const stale = await agent.followUp({ ...followUp, operationId: id('operation', 'follow-up-b'), correlationId: 'correlation-b', inReplyTo: 'analysis-missing' });
   assert.equal(stale.status, 'attention');
   assert.equal(stale.status === 'attention' && stale.issue.code, 'memory-agent-follow-up-stale');
 
@@ -273,6 +279,195 @@ test('memory agent rejects stale follow-ups, mismatched evidence, and scope drif
   const scoped = await agent.followUp({ ...followUp, operationId: id('operation', 'follow-up-d'), correlationId: 'correlation-d', projectKey: 'project-b' });
   assert.equal(scoped.status, 'attention');
   assert.equal(scoped.status === 'attention' && scoped.issue.code, 'memory-agent-follow-up-conflict');
+});
+
+test('memory agent re-analyzes a correlated follow-up and replays the persisted result', async () => {
+  const ports = makeOperations({ candidateId: 'candidate-follow-up' });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+    now: () => '2026-09-17T00:00:00.000Z',
+  }), ports.operations);
+  const analyzed = await agent.analyze(analysis());
+  assert.equal(analyzed.status, 'ready');
+  const followUp = {
+    requestId: 'follow-up-a',
+    operationId: id('operation', 'follow-up-operation'),
+    correlationId: 'correlation-a',
+    inReplyTo: 'analysis-a',
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project' as const,
+    taskId: task,
+    evidenceRefs: ['journal://project-a/evidence'],
+    evidenceDigests: ['sha256:evidence'],
+    sourceRefs: ['journal://project-a/source'],
+    inputDigest: 'sha256:evidence',
+  };
+
+  const first = await agent.followUp(followUp);
+  assert.equal(first.status, 'ready');
+  if (first.status !== 'ready') throw new Error('expected follow-up analysis');
+  assert.equal(first.value.requestId, followUp.requestId);
+  assert.equal(first.value.correlationId, followUp.correlationId);
+  assert.equal(first.value.inReplyTo, followUp.inReplyTo);
+  assert.equal(first.value.operationId.value, followUp.operationId.value);
+  assert.equal(first.value.curation.operationId.value, followUp.operationId.value);
+  assert.equal(first.value.curation.candidateId, 'candidate-follow-up');
+  assert.equal(first.value.liveContextMutated, false);
+  assert.equal(ports.submissions.length, 2);
+  assert.equal(ports.submissions[1]?.contentRef, 'journal://project-a/evidence');
+  assert.equal(ports.submissions[1]?.contentDigest, 'sha256:evidence');
+
+  const replay = await agent.followUp(followUp);
+  assert.equal(replay.status, 'ready');
+  if (replay.status !== 'ready') throw new Error('expected persisted follow-up replay');
+  assert.deepEqual(replay.value, first.value);
+  assert.equal(ports.submissions.length, 2);
+});
+
+test('memory agent persists follow-up results across restart and rejects drifted evidence', async () => {
+  const state = {
+    value: undefined as unknown,
+    async readMemoryAgentState() {
+      return this.value;
+    },
+    async appendMemoryAgentState(input: { readonly state: unknown }) {
+      this.value = input.state;
+    },
+  };
+  const ports = makeOperations({ candidateId: 'candidate-persisted-follow-up' });
+  const makeAgent = () => bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+    state,
+  }), ports.operations);
+  const followUp = {
+    requestId: 'follow-up-persisted',
+    operationId: id('operation', 'follow-up-persisted-operation'),
+    correlationId: 'follow-up-persisted-correlation',
+    inReplyTo: 'analysis-a',
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project' as const,
+    taskId: task,
+    evidenceRefs: ['journal://project-a/evidence'],
+    evidenceDigests: ['sha256:evidence'],
+    sourceRefs: ['journal://project-a/evidence'],
+    inputDigest: 'sha256:evidence',
+  };
+
+  const firstAgent = makeAgent();
+  assert.equal((await firstAgent.analyze(analysis())).status, 'ready');
+  const first = await firstAgent.followUp(followUp);
+  assert.equal(first.status, 'ready');
+  assert.equal(ports.submissions.length, 2);
+
+  const restarted = makeAgent();
+  const replay = await restarted.followUp(followUp);
+  assert.equal(replay.status, 'ready');
+  if (replay.status !== 'ready' || first.status !== 'ready') throw new Error('expected persisted follow-up replay');
+  assert.deepEqual(replay.value, first.value);
+  assert.equal(ports.submissions.length, 2);
+
+  const drift = await restarted.followUp({
+    ...followUp,
+    operationId: id('operation', 'follow-up-drifted-operation'),
+    correlationId: 'follow-up-drifted-correlation',
+    evidenceDigests: ['sha256:wrong'],
+  });
+  assert.equal(drift.status, 'attention');
+  assert.equal(drift.status === 'attention' && drift.issue.code, 'memory-agent-follow-up-conflict');
+  assert.equal(ports.submissions.length, 2);
+});
+
+test('memory agent rejects a corrupted persisted follow-up result', async () => {
+  const state = {
+    value: undefined as unknown,
+    async readMemoryAgentState() {
+      return this.value;
+    },
+    async appendMemoryAgentState(input: { readonly state: unknown }) {
+      this.value = input.state;
+    },
+  };
+  const ports = makeOperations({ candidateId: 'candidate-corrupt-state' });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+    state,
+  }), ports.operations);
+  assert.equal((await agent.analyze(analysis())).status, 'ready');
+  assert.equal((await agent.followUp({
+    requestId: 'follow-up-corrupt-state',
+    operationId: id('operation', 'follow-up-corrupt-state-operation'),
+    correlationId: 'follow-up-corrupt-state-correlation',
+    inReplyTo: 'analysis-a',
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project',
+    taskId: task,
+    evidenceRefs: ['journal://project-a/evidence'],
+    evidenceDigests: ['sha256:evidence'],
+    sourceRefs: ['journal://project-a/evidence'],
+    inputDigest: 'sha256:evidence',
+  })).status, 'ready');
+
+  const persisted = state.value as {
+    readonly followUps: readonly {
+      readonly result: {
+        readonly promptSnapshot: Record<string, unknown>;
+      };
+    }[];
+  };
+  delete persisted.followUps[0]!.result.promptSnapshot.loadedAt;
+
+  const restarted = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+    state,
+  }), ports.operations);
+  await assert.rejects(
+    () => restarted.followUp({
+      requestId: 'follow-up-corrupt-state',
+      operationId: id('operation', 'follow-up-corrupt-state-operation'),
+      correlationId: 'follow-up-corrupt-state-correlation',
+      inReplyTo: 'analysis-a',
+      bindingRef: 'binding-a',
+      actor,
+      projectKey: 'project-a',
+      namespace: 'project',
+      taskId: task,
+      evidenceRefs: ['journal://project-a/evidence'],
+      evidenceDigests: ['sha256:evidence'],
+      sourceRefs: ['journal://project-a/evidence'],
+      inputDigest: 'sha256:evidence',
+    }),
+    /persisted memory agent state is invalid/,
+  );
 });
 
 test('memory agent accepts interaction follow-ups when analysis and binding epochs differ', async () => {
