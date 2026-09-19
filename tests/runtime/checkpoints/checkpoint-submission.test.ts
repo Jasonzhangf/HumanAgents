@@ -26,6 +26,8 @@ import type {
 import {
   commitDeadEnd,
   commitReentry,
+  CHECKPOINT_CLOSURE_COMPATIBILITY,
+  assertSupportedCheckpointClosureCompatibilityVersion,
   submitCheckpoint,
   submitInteractionClosure,
   type SubmitCheckpointInput,
@@ -598,11 +600,14 @@ test('same checkpoint value in different scopes keeps commit and closure identit
   assert.equal(journal.appended.length, 2);
   assert.equal(closurePort.committed.length, 2);
   const closureIds = closurePort.committed.map((record) => 'closureId' in record ? record.closureId : record.deadEndRef);
+  assert.equal(closureIds[0], `checkpoint-closure:${checkpointCommitId(first)}`);
   assert.equal(closureIds[0] === closureIds[1], false);
 });
 
 test('legacy checkpoint closure ids remain readable for submission retries and reentry', async () => {
   const input = submissionInput();
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version, 1);
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.scope, 'checkpoint-id');
   await input.journal.append({
     ownerId: 'task-owner',
     commitId: checkpointCommitId(input.checkpoint),
@@ -610,6 +615,7 @@ test('legacy checkpoint closure ids remain readable for submission retries and r
   });
   input.closurePort.records.set(`checkpoint-closure:${input.checkpoint.id.value}`, {
     closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version,
     closureId: `checkpoint-closure:${input.checkpoint.id.value}`,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',
@@ -639,10 +645,122 @@ test('legacy checkpoint closure ids remain readable for submission retries and r
   assert.equal(input.closurePort.committed.length, 1);
 });
 
+test('pre-version legacy checkpoint closures infer v1 for retry and reentry', async () => {
+  const input = submissionInput();
+  const legacyId = `checkpoint-closure:${input.checkpoint.id.value}`;
+  await input.journal.append({
+    ownerId: 'task-owner',
+    commitId: checkpointCommitId(input.checkpoint),
+    checkpoint: input.checkpoint,
+  });
+  input.closurePort.records.set(legacyId, {
+    closureKind: 'checkpoint',
+    closureId: legacyId,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'waiting checkpoint can be reentered from its recovery condition' },
+  } as CheckpointClosureRecord);
+
+  const retried = await submitCheckpoint(input);
+  assert.equal(retried.state, 'committed');
+  assert.equal(retried.closure.compatibilityVersion, undefined);
+
+  const reentry = await commitReentry({
+    ownerId: 'task-owner',
+    closureId: 'reentry-from-pre-version-legacy-closure',
+    checkpoint: input.checkpoint,
+    previousExecutionEpoch: input.checkpoint.executionEpoch,
+    newExecutionEpoch: input.checkpoint.executionEpoch + 1,
+    nextAction: { kind: 'continue', ref: 'after-pre-version-legacy-reentry' },
+    journal: input.journal,
+    closurePort: input.closurePort,
+    admissionPort: new FakeAdmissionPort(),
+  });
+  assert.equal(reentry.state, 'committed');
+});
+
+test('legacy checkpoint closure mismatches fail explicitly without canonical fallback', async () => {
+  const input = submissionInput();
+  const legacyId = `checkpoint-closure:${input.checkpoint.id.value}`;
+  input.closurePort.records.set(legacyId, {
+    closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version,
+    closureId: legacyId,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: 'different legacy summary',
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'mismatched legacy closure' },
+  });
+
+  await assert.rejects(async () => {
+    try {
+      await submitCheckpoint(input);
+    } catch (error) {
+      assert.equal((error as Error).message, 'legacy checkpoint closure v1 does not match the checkpoint');
+      throw error;
+    }
+  });
+  assert.equal(input.journal.appended.length, 0);
+  assert.equal(input.closurePort.committed.length, 0);
+});
+
+test('unsupported persisted checkpoint closure versions fail before Journal append or commit', async () => {
+  const input = submissionInput();
+  const legacyId = `checkpoint-closure:${input.checkpoint.id.value}`;
+  input.closurePort.records.set(legacyId, {
+    closureKind: 'checkpoint',
+    compatibilityVersion: 3 as never,
+    closureId: legacyId,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'unsupported persisted version' },
+  });
+
+  await assert.rejects(async () => {
+    try {
+      await submitCheckpoint(input);
+    } catch (error) {
+      assert.equal((error as Error).message, 'unsupported checkpoint closure compatibility version: 3');
+      throw error;
+    }
+  });
+  assert.equal(input.journal.appended.length, 0);
+  assert.equal(input.closurePort.committed.length, 0);
+});
+
+test('checkpoint closure compatibility declares the sunset boundary and rejects unsupported versions', () => {
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.current.version, 2);
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.current.scope, 'checkpoint-commit-id');
+  assert.equal(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.sunsetCondition.includes('remove after'), true);
+  assert.throws(
+    () => {
+      try {
+        assertSupportedCheckpointClosureCompatibilityVersion(3);
+      } catch (error) {
+        assert.equal((error as Error).message, 'unsupported checkpoint closure compatibility version: 3');
+        throw error;
+      }
+    },
+    CheckpointSubmissionError,
+  );
+});
+
 test('checkpoint submission rejects a committed closure that does not match the checkpoint', async () => {
   const input = submissionInput();
   input.closurePort.records.set(`checkpoint-closure:${checkpointCommitId(input.checkpoint)}`, {
     closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
     closureId: `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`,
     checkpointId: input.checkpoint.id,
     source: 'agent-tool',
@@ -655,6 +773,74 @@ test('checkpoint submission rejects a committed closure that does not match the 
 
   await assert.rejects(() => submitCheckpoint(input), CheckpointSubmissionError);
   assert.equal(input.journal.appended.length, 0);
+});
+
+test('pre-version canonical checkpoint closures infer v2 for retry and reentry', async () => {
+  const input = submissionInput();
+  const canonicalId = `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`;
+  await input.journal.append({
+    ownerId: 'task-owner',
+    commitId: checkpointCommitId(input.checkpoint),
+    checkpoint: input.checkpoint,
+  });
+  input.closurePort.records.set(canonicalId, {
+    closureKind: 'checkpoint',
+    closureId: canonicalId,
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'waiting checkpoint can be reentered from its recovery condition' },
+  } as CheckpointClosureRecord);
+
+  const retried = await submitCheckpoint(input);
+  assert.equal(retried.state, 'committed');
+  assert.equal(retried.closure.compatibilityVersion, undefined);
+
+  const reentry = await commitReentry({
+    ownerId: 'task-owner',
+    closureId: 'reentry-from-pre-version-canonical-closure',
+    checkpoint: input.checkpoint,
+    previousExecutionEpoch: input.checkpoint.executionEpoch,
+    newExecutionEpoch: input.checkpoint.executionEpoch + 1,
+    nextAction: { kind: 'continue', ref: 'after-pre-version-canonical-reentry' },
+    journal: input.journal,
+    closurePort: input.closurePort,
+    admissionPort: new FakeAdmissionPort(),
+  });
+  assert.equal(reentry.state, 'committed');
+});
+
+test('checkpoint submission rejects a canonical closure whose stored identity does not match its key', async () => {
+  const input = submissionInput();
+  const canonicalId = `checkpoint-closure:${checkpointCommitId(input.checkpoint)}`;
+  input.journal.latest = { checkpoint: input.checkpoint, previous: null };
+  input.closurePort.records.set(canonicalId, {
+    closureKind: 'checkpoint',
+    compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
+    closureId: 'checkpoint-closure:wrong-identity',
+    checkpointId: input.checkpoint.id,
+    source: 'agent-tool',
+    outcome: input.checkpoint.outcome,
+    summary: input.checkpoint.summary,
+    next: input.checkpoint.next,
+    evidenceRefs: input.checkpoint.evidenceRefs,
+    reentry: { allowed: true, reason: 'wrong stored identity' },
+  });
+
+  let failure: unknown;
+  try {
+    await submitCheckpoint(input);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure instanceof CheckpointSubmissionError, true);
+  assert.equal((failure as Error).message, 'checkpoint closure identity does not match its canonical key');
+  assert.equal(input.journal.appended.length, 0);
+  assert.equal(input.closurePort.committed.length, 0);
+  assert.equal(input.closurePort.records.has(canonicalId), true);
 });
 
 test('unknown-operation reconcile rejects unresolved evidence gaps and out-of-scope operations before journal append', async () => {
@@ -860,6 +1046,47 @@ test('reentry rejects missing committed closure, wrong checkpoint identity, stal
     }),
     CheckpointSubmissionError,
   );
+  assert.equal(closurePort.committed.length, 1);
+});
+
+test('reentry rejects a canonical closure that mismatches the committed checkpoint before admission', async () => {
+  const committedCheckpoint = checkpoint(1, null);
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
+  const canonicalId = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const committedClosure = closurePort.records.get(canonicalId);
+  if (!committedClosure || !('closureKind' in committedClosure) || committedClosure.closureKind !== 'checkpoint') {
+    throw new Error('expected a committed checkpoint closure');
+  }
+  closurePort.records.set(canonicalId, {
+    ...committedClosure,
+    summary: 'tampered canonical summary',
+  });
+  const admissionPort = new FakeAdmissionPort();
+
+  await assert.rejects(
+    () => commitReentry({
+      ownerId: 'task-owner',
+      closureId: 'reentry-canonical-mismatch',
+      checkpoint: committedCheckpoint,
+      previousExecutionEpoch: committedCheckpoint.executionEpoch,
+      newExecutionEpoch: committedCheckpoint.executionEpoch + 1,
+      nextAction: { kind: 'continue', ref: 'after-canonical-mismatch' },
+      journal,
+      closurePort,
+      admissionPort,
+    }),
+    CheckpointSubmissionError,
+  );
+  assert.equal(admissionPort.calls.length, 0);
   assert.equal(closurePort.committed.length, 1);
 });
 

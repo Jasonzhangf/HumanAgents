@@ -24,6 +24,8 @@ import {
 } from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
+import { FakeProviderAgentDriver, fakeExecutionBinding } from './fake-execution.js';
+import { entryCompositionInventory } from './entry-composition.js';
 import { join } from 'node:path';
 
 function option(args: readonly string[], name: string): string | undefined {
@@ -33,6 +35,18 @@ function option(args: readonly string[], name: string): string | undefined {
 
 function required(value: string | undefined, name: string): string {
   if (!value) throw new Error('missing ' + name);
+  return value;
+}
+
+function requiredPrompt(value: string | undefined): string {
+  if (!value || !value.trim()) {
+    throw new AppLifecycleError(
+      'execution.input.required',
+      'request field prompt is required',
+      'provide a non-empty prompt',
+      'humanagent.app',
+    );
+  }
   return value;
 }
 
@@ -155,7 +169,7 @@ export async function main(args: readonly string[]): Promise<void> {
   }
   if (command === 'run') {
     const plan = required(option(args, '--plan'), '--plan');
-    const prompt = required(option(args, '--prompt'), '--prompt');
+    const prompt = requiredPrompt(option(args, '--prompt'));
     const sessionId = option(args, '--session') ?? 'session-' + Date.now();
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
     try {
@@ -170,6 +184,32 @@ export async function main(args: readonly string[]): Promise<void> {
             executionEpoch: 1,
           });
       const running = await new SessionStore(runtime.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+      const configuredAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
+      const configuredAgent = runtime.configuration.agentRoster.find((agent) => agent.agentId === configuredAgentId);
+      const runtimeId = `runtime-${sessionId}`;
+      const taskId = id('task', sessionId);
+      const operationId = id('operation', `runtime-${runtimeId}-epoch-1`);
+      const cycleId = id('cycle', `${sessionId}-cycle-1`);
+      const composed = configuredAgent?.driverRef === 'fake'
+        ? {
+            driver: new FakeProviderAgentDriver({
+              binding: fakeExecutionBinding(),
+              runtimeId,
+              taskId,
+              operationId,
+              executionEpoch: 1,
+              assignmentId: `${sessionId}-assignment`,
+              scope: {
+                organId: id('organ', `agent-${configuredAgent.agentId}`),
+                taskId,
+                cycleId,
+                operationId,
+              },
+              inputRefs: [`humanagent://session/${sessionId}/input/1`],
+              ...(option(args, '--fake-step-delay-ms') === undefined ? {} : { stepDelayMs: Number(option(args, '--fake-step-delay-ms')) }),
+            }),
+          }
+        : undefined;
       const result = await runAgentOperation({
         paths: runtime.paths,
         configuration: runtime.configuration,
@@ -177,6 +217,7 @@ export async function main(args: readonly string[]): Promise<void> {
         sessionId,
         plan,
         prompt,
+        ...(composed === undefined ? {} : { composed }),
         ...(memory === undefined ? {} : { memoryBoundaryPublisher: memory.publisher }),
       });
       const memoryResult = memory === undefined ? undefined : await memory.consume();
@@ -195,6 +236,9 @@ export async function main(args: readonly string[]): Promise<void> {
         outcome: result.checkpoint.outcome,
         checkpointId: result.checkpoint.id.value,
         observedKinds: result.receipt.observedKinds,
+        observedEvents: result.receipt.observedEvents,
+        output: result.receipt.output.payload,
+        providerClose: result.receipt.providerClose,
         memoryAnalysis: memoryResult?.committed.length ?? 0,
       }, null, 2));
       void running;
@@ -312,7 +356,10 @@ export async function main(args: readonly string[]): Promise<void> {
     throw new Error('usage: humanagent session list|inspect --session <id> --workspace <path>');
   }
   if (command === 'serve') {
-    const mode = option(args, '--mode') ?? 'fake';
+    const mode = option(args, '--mode');
+    if (mode === undefined) {
+      throw new AppLifecycleError('execution.mode.required', 'serve requires an explicit --mode', 'choose --mode fake or --mode rcc', 'humanagent.app');
+    }
     if (mode !== 'fake' && mode !== 'rcc') {
       throw new Error('serve --mode must be fake or rcc (dsh is not open in this phase)');
     }
@@ -407,6 +454,7 @@ export async function main(args: readonly string[]): Promise<void> {
       checkpointRoot,
       memoryRoot,
       eventJournal: join(paths.journalRoot, 'events.jsonl'),
+      composition: entryCompositionInventory(),
     }, null, 2));
     return;
   }

@@ -20,7 +20,7 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
-import { FakeReplayExecutionRuntimePort } from './fake-port.js';
+import { createFakeExecutionPort } from '../fake-execution.js';
 import {
   UiRuntimeService,
   type TaskCheckpointStore,
@@ -97,7 +97,7 @@ export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: strin
 }
 
 export function buildFakeExecutionPort(binding: ProviderBinding, stepDelayMs?: number): ExecutionRuntimePort {
-  return new FakeReplayExecutionRuntimePort({ binding, stepDelayMs });
+  return createFakeExecutionPort(binding, stepDelayMs);
 }
 
 class InMemoryAttentionPort implements AttentionPort {

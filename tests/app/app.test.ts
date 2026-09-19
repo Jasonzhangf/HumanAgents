@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
-import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { id, type AgentClosure, type AgentEvent, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -365,6 +365,46 @@ class PromptCaptureDriver extends FakeAgentDriver {
   }
 }
 
+class ObserveErrorCloseDriver extends FakeAgentDriver {
+  closeCalls = 0;
+
+  constructor(private readonly closeFails: boolean) { super(); }
+
+  override async *observe(_input: { readonly runtimeId: string }): AsyncIterable<AgentEvent> {
+    throw new Error('provider observe failed');
+  }
+
+  async close(): Promise<ProviderCloseResult> {
+    this.closeCalls += 1;
+    if (this.closeFails) throw new Error('provider close transport failed');
+    return {
+      bindingId: providerBinding.bindingId,
+      providerId: providerBinding.providerId,
+      protocol: providerBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [],
+    };
+  }
+}
+
+class StopCloseDriver extends FakeAgentDriver {
+  closeCalls = 0;
+
+  constructor(private readonly closeFails: boolean, outcomes: Readonly<Record<string, 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped'>>) { super(outcomes); }
+
+  async close(): Promise<ProviderCloseResult> {
+    this.closeCalls += 1;
+    if (this.closeFails) throw new Error('provider stop close failed');
+    return {
+      bindingId: providerBinding.bindingId,
+      providerId: providerBinding.providerId,
+      protocol: providerBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [],
+    };
+  }
+}
+
 test('HumanAgent operation identity is stable across driver and provider bindings', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stable-identity-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -495,6 +535,49 @@ test('CLI host failures remain structured', async () => {
     assert.equal(parsed.error.code, 'host-error');
     assert.equal(parsed.error.ownerId, 'host');
     assert.equal(typeof parsed.error.nextAction, 'string');
+    return true;
+  });
+});
+
+test('CLI entry rejects implicit fake mode and uses one typed invalid-prompt error', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-errors-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  assert.throws(() => execFileSync(process.execPath, [
+    cli,
+    'run',
+    '--plan',
+    'default',
+    '--prompt',
+    '',
+    '--session',
+    'entry-invalid-prompt',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+    const parsed = JSON.parse(error.stderr);
+    assert.deepEqual(parsed.error, {
+      code: 'execution.input.required',
+      ownerId: 'humanagent.app',
+      nextAction: 'provide a non-empty prompt',
+      message: 'request field prompt is required',
+    });
+    return true;
+  });
+  assert.throws(() => execFileSync(process.execPath, [
+    cli,
+    'serve',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--port',
+    '0',
+  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+    const parsed = JSON.parse(error.stderr);
+    assert.equal(parsed.error.code, 'execution.mode.required');
+    assert.equal(parsed.error.ownerId, 'humanagent.app');
     return true;
   });
 });
@@ -1437,6 +1520,55 @@ test('run creates a HumanAgent task, operation, checkpoint, and run manifest', a
   assert.match(await readFile(checkpointFile, 'utf8'), /"outcome":"succeeded"/);
 });
 
+test('standalone fake entry shares provider replay output, events, checkpoint evidence, and close with serve fake contract', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-equivalence-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const sessionId = 'entry-equivalence';
+  const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId });
+  const runtimeId = `runtime-${sessionId}`;
+  const taskId = id('task', sessionId);
+  const operationId = id('operation', `runtime-${runtimeId}-epoch-1`);
+  const cycleId = id('cycle', `${sessionId}-cycle-1`);
+  const result = await runAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId,
+    plan: 'default',
+    prompt: 'same fake replay input',
+    composed: {
+      driver: new FakeProviderAgentDriver({
+        binding: fakeExecutionBinding(),
+        runtimeId,
+        taskId,
+        operationId,
+        executionEpoch: 1,
+        assignmentId: `${sessionId}-assignment`,
+        scope: { organId: id('organ', 'agent-interaction-default'), taskId, cycleId, operationId },
+        inputRefs: [`humanagent://session/${sessionId}/input/1`],
+        stepDelayMs: 0,
+      }),
+    },
+  });
+  assert.deepEqual(result.receipt.observedKinds, [
+    'provider.model',
+    'provider.output',
+    'provider.tool',
+    'provider.output',
+    'provider.terminal',
+  ]);
+  assert.equal(result.receipt.output.payload.output, 'fake replay: draft output chunk 1fake replay: final output chunk 2');
+  assert.equal(result.receipt.providerClose?.state, 'closed');
+  assert.equal(result.checkpoint.outcome, 'succeeded');
+  assert.equal(result.receipt.providerClose?.evidenceRefs.some((ref) => ref.locator === 'fake/close'), true);
+  assert.equal(result.receipt.observedEvents.at(-1)?.kind, 'provider.terminal');
+  const inventory = entryCompositionInventory();
+  assert.equal(inventory.complete, false);
+  assert.equal(inventory.components.find((component) => component.component === 'm3-orchestration')?.code, 'entry.component.not-composed');
+  await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+});
+
 test('real JSONL checkpoint journal deduplicates retries by stable commit identity and rejects conflicts', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-checkpoint-commit-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -1691,6 +1823,124 @@ test('app stop writes a stopped checkpoint only after real settle evidence', asy
   assert.match((completionError as Error | undefined)?.message ?? '', /agent operation was stopped/);
 });
 
+test('standalone app stop closes a close-capable provider exactly once', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-close-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(false, { 'session-stop-close-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-close',
+    plan: 'default',
+    prompt: 'stop with provider close',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+
+  const stopped = await controller.stop();
+  assert.equal(stopped.state, 'stopped');
+  assert.equal(driver.closeCalls, 1);
+  assert.equal((await controller.closeExecution())?.state, 'closed');
+  assert.equal(driver.closeCalls, 1);
+});
+
+test('standalone app stop preserves explicit provider close failure after stopped checkpoint commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-close-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(true, { 'session-stop-close-failure-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-close-failure',
+    plan: 'default',
+    prompt: 'stop with provider close failure',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+
+  await assert.rejects(
+    () => controller.stop(),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'provider-close-failed'
+      && error.cause instanceof Error
+      && error.cause.message === 'provider stop close failed',
+  );
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(controller.snapshot().state, 'stopped');
+  assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
+});
+
+test('standalone app stop closes the provider when manifest persistence fails after stopped checkpoint commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-manifest-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(false, { 'session-stop-manifest-failure-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-manifest-failure',
+    plan: 'default',
+    prompt: 'stop with manifest failure',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+  await rm(paths.runNotesRoot, { recursive: true, force: true });
+  await writeFile(paths.runNotesRoot, 'manifest path is blocked', 'utf8');
+
+  await assert.rejects(
+    () => controller.stop(),
+    (error: unknown) => (error as { code?: string }).code === 'EEXIST',
+  );
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(controller.snapshot().state, 'stopped');
+  assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
+});
+
+test('standalone app stop preserves manifest and provider close failures after stopped checkpoint commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-finalization-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(true, { 'session-stop-finalization-failure-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-finalization-failure',
+    plan: 'default',
+    prompt: 'stop with manifest and provider close failure',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+  await rm(paths.runNotesRoot, { recursive: true, force: true });
+  await writeFile(paths.runNotesRoot, 'manifest path is blocked', 'utf8');
+
+  await assert.rejects(
+    () => controller.stop(),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'agent-operation-stop-finalization-failed'
+      && error.cause instanceof AggregateError
+      && error.cause.errors.length === 2
+      && /manifest=EEXIST/.test(error.message)
+      && /provider close=provider close failed/.test(error.message),
+  );
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(controller.snapshot().state, 'stopped');
+  assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
+});
+
 test('app stop does not commit stopped when settle fails', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-settle-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -1712,6 +1962,53 @@ test('app stop does not commit stopped when settle fails', async () => {
   const checkpointFile = join(paths.journalRoot, 'checkpoints.jsonl');
   const content = await readFile(checkpointFile, 'utf8').catch(() => '');
   assert.equal(content.includes('"outcome":"stopped"'), false);
+});
+
+test('provider execution errors still settle then retain successful close evidence', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-provider-error-close-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const driver = new ObserveErrorCloseDriver(false);
+  const result = await runAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-provider-error-close',
+    plan: 'default',
+    prompt: 'provider observe failure',
+    composed: { driver },
+  });
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(result.checkpoint.outcome, 'failed');
+  assert.equal(result.receipt.providerClose?.state, 'closed');
+  assert.match(result.checkpoint.evidenceRefs[0]?.locator ?? '', /provider%20observe%20failed/);
+});
+
+test('provider close failure remains explicit recovery-required after preserving execution failure', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-provider-close-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const driver = new ObserveErrorCloseDriver(true);
+  await assert.rejects(
+    () => runAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-provider-close-failure',
+      plan: 'default',
+      prompt: 'provider observe failure',
+      composed: { driver },
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'agent-operation-recovery-required'
+      && (error.cause as { readonly originalError?: unknown } | undefined)?.originalError instanceof Error
+      && ((error.cause as { readonly originalError: Error }).originalError).message === 'provider observe failed'
+      && (error.cause as { readonly closeFailure?: unknown } | undefined)?.closeFailure instanceof AppLifecycleError
+      && ((error.cause as { readonly closeFailure: AppLifecycleError }).closeFailure).code === 'provider-close-failed',
+  );
+  assert.equal(driver.closeCalls, 1);
+  const checkpointFile = join(paths.journalRoot, 'checkpoints.jsonl');
+  assert.match(await readFile(checkpointFile, 'utf8'), /provider%20observe%20failed/);
 });
 
 test('resume from a failed checkpoint starts a new HumanAgent epoch', async () => {

@@ -17,8 +17,11 @@ export interface CheckpointReentryDecision {
   readonly blockedBy?: readonly string[];
 }
 
+export type CheckpointClosureCompatibilityVersion = 1 | 2;
+
 export interface CheckpointClosureRecord {
   readonly closureKind: 'checkpoint';
+  readonly compatibilityVersion: CheckpointClosureCompatibilityVersion;
   readonly closureId: string;
   readonly checkpointId: Checkpoint['id'];
   readonly source: CheckpointSubmissionSource;
