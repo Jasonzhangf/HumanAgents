@@ -253,6 +253,57 @@ test('approved and promoted records preserve per-reference provenance digests', 
   assert.deepEqual(promoted.entries[0]?.sourceDigests, ['sha256:candidate-a', 'sha256:evidence-a', 'sha256:approval-a', 'sha256:promotion-a']);
 });
 
+test('approved global candidates persist in the global namespace while project candidates stay project-scoped', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-global-candidate-'));
+  const roots = { project: join(root, 'project'), global: join(root, 'global') };
+  const memory = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence(roots));
+  const contentRef = 'asset://memory/global-candidate';
+  const evidenceRef = 'journal://project-a/global-candidate-evidence';
+  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:global-candidate', text: 'global candidate content' });
+  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:global-candidate-evidence', text: 'global candidate evidence' });
+  const submitted = await memory.submitCandidate({
+    submissionId: 'submission-global-candidate',
+    requestId: 'request-global-candidate',
+    operationId: id('operation', 'submission-global-candidate'),
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    taskId: task,
+    requestedKind: 'semantic',
+    contentRef,
+    contentDigest: 'sha256:global-candidate',
+    evidenceRefs: [evidenceRef],
+    observation: 'global candidate content',
+    desiredScope: 'global',
+    reason: 'approved global candidate regression',
+    inputDigest: 'sha256:submission-global-candidate',
+  });
+  await memory.reviewCandidate({
+    candidateId: submitted.candidateId!,
+    decision: 'approve',
+    actor: { ...actor, roleId: 'review' },
+    decisionReason: 'global evidence is complete',
+    decidedAt: '2026-09-17T00:00:00Z',
+    evidenceRefs: [evidenceRef],
+  });
+
+  const projectSnapshot = JSON.parse(await readFile(join(roots.project, 'snapshot.json'), 'utf8')) as MemoryPersistenceSnapshot;
+  const globalSnapshot = JSON.parse(await readFile(join(roots.global, 'snapshot.json'), 'utf8')) as MemoryPersistenceSnapshot;
+  assert.equal(projectSnapshot.candidates.length, 1);
+  assert.equal(projectSnapshot.canonicalRecords.length, 0);
+  assert.deepEqual(globalSnapshot.canonicalRecords.map((record) => ({ namespace: record.namespace, projectKey: record.projectKey })), [{ namespace: 'global', projectKey: undefined }]);
+  const reloaded = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence(roots));
+  const global = await reloaded.query(memoryQuery({
+    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
+    namespace: 'global',
+    taskId: undefined,
+    states: ['approved'],
+    query: 'global candidate content',
+  }));
+  assert.deepEqual(global.entries.map((entry) => entry.namespace), ['global']);
+  await rm(root, { recursive: true, force: true });
+});
+
 test('approval rejects evidence without a resolvable digest', async () => {
   const memory = new DeterministicMemoryBackend();
   const submitted = await memory.submitCandidate({

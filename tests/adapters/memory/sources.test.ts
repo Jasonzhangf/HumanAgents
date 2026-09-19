@@ -167,6 +167,19 @@ test('undeclared local Skill returns a typed unavailable source with manifest ne
   assert.equal(agents.target, 'project-agents');
 });
 
+test('project source list keeps project experience available without an optional local Skill', async () => {
+  const fixtureValue = await fixture();
+  const adapter = new FilesystemMemorySourceAdapter({
+    workspaceCwd: fixtureValue.workspace,
+    sessionsRoot: fixtureValue.sessions,
+    runNotesRoot: fixtureValue.runNotes,
+    projectKey: 'project-a',
+    auditPromptRoot: fixtureValue.promptRoot,
+  });
+  const sources = await adapter.list({ projectKey: 'project-a' });
+  assert.deepEqual(sources.map((source) => source.target), ['project-agents']);
+});
+
 test('malformed run manifests fail as invalid sources instead of leaking runtime errors', async () => {
   const { adapter, runNotes } = await fixture();
   await writeFile(join(runNotes, 'session-a.manifest.json'), 'null\n', 'utf8');
