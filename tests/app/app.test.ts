@@ -76,7 +76,29 @@ async function writeProjectPatchArtifact(
   replacementContent: string,
   kind: 'project-fact' | 'project-experience' | 'local-skill-update' = target === 'project-local-skill' ? 'local-skill-update' : 'project-fact',
 ): Promise<string> {
-  const bytes = JSON.stringify({ schemaVersion: 1, kind, target, replacementContent, evidenceRefs: ['journal://project-a/evidence'] });
+  const bytes = JSON.stringify({
+    schemaVersion: 1,
+    kind,
+    target,
+    payload: { type: 'replacement', content: replacementContent },
+    evidenceRefs: ['journal://project-a/evidence'],
+  });
+  await writeFile(join(artifactsRoot, patchRef), bytes, 'utf8');
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function memoryEntryContent(current: string, kind: 'project-fact' | 'project-experience' | 'local-skill-update'): string {
+  const entry = `\n\n## Memory Agent ${kind}\n\n- Evidence: journal://project-a/evidence\n`;
+  return current.endsWith('\n') ? `${current}${entry.slice(1)}` : `${current}${entry}`;
+}
+
+async function writeMemoryEntryPatchArtifact(
+  artifactsRoot: string,
+  patchRef: string,
+  target: 'project-agents' | 'project-local-skill',
+  kind: 'project-fact' | 'project-experience' | 'local-skill-update' = target === 'project-local-skill' ? 'local-skill-update' : 'project-fact',
+): Promise<string> {
+  const bytes = JSON.stringify({ schemaVersion: 1, kind, target, payload: { type: 'memory-entry' }, evidenceRefs: ['journal://project-a/evidence'] });
   await writeFile(join(artifactsRoot, patchRef), bytes, 'utf8');
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
@@ -1196,13 +1218,13 @@ test('memory runtime applies immutable project patches and publishes a durable u
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-auto-update-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   const original = '# Original project rules\n';
-  const next = '# Updated project rules\n';
+  const next = memoryEntryContent(original, 'project-fact');
   await writeFile(join(workspace, 'AGENTS.md'), original, 'utf8');
   const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
   await mkdir(auditPromptRoot, { recursive: true });
   await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
   const patchRef = 'project-agents-next';
-  const patchDigest = await writeProjectPatchArtifact(paths.artifactsRoot, patchRef, 'project-agents', next);
+  const patchDigest = await writeMemoryEntryPatchArtifact(paths.artifactsRoot, patchRef, 'project-agents');
   const configuration = await loadConfiguration(paths);
   const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update') };
   const runtime = await composeMemoryRuntime({
@@ -1478,9 +1500,9 @@ test('memory runtime rejects control and security semantics before persisting a 
     projectKey: paths.projectKey,
     target: 'project-agents',
   });
-  const lowRiskNext = '# Updated project rules\n\nUse pnpm for project commands.\n';
+  const lowRiskNext = memoryEntryContent(original, 'project-fact');
   const lowRiskRef = 'project-agents-low-risk-next';
-  const lowRiskDigest = await writeProjectPatchArtifact(paths.artifactsRoot, lowRiskRef, 'project-agents', lowRiskNext);
+  const lowRiskDigest = await writeMemoryEntryPatchArtifact(paths.artifactsRoot, lowRiskRef, 'project-agents');
   const lowRisk = await runtime.composition.agent.applyProjectUpdate({
     projectKey: paths.projectKey,
     proposal: {
@@ -1534,7 +1556,7 @@ test('memory runtime rejects control and security semantics before persisting a 
 
   for (const [index, next] of deniedPatches.entries()) {
     const patchRef = `project-agents-control-next-${index}`;
-    const artifact = JSON.stringify({ schemaVersion: 1, kind: 'control', target: 'project-agents', replacementContent: next, evidenceRefs: ['journal://project-a/evidence'] });
+    const artifact = JSON.stringify({ schemaVersion: 1, kind: 'control', target: 'project-agents', payload: { type: 'replacement', content: next }, evidenceRefs: ['journal://project-a/evidence'] });
     const patchDigest = `sha256:${createHash('sha256').update(artifact).digest('hex')}`;
     await writeFile(join(paths.artifactsRoot, patchRef), artifact, 'utf8');
     const rejected = await runtime.composition.agent.applyProjectUpdate({

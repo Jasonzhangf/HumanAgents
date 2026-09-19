@@ -82,7 +82,7 @@ export interface MemoryProjectSourceUpdatePublisher {
 export function createTypedProjectPatchReader(artifactsRoot: string): MemoryProjectPatchReader {
   const store = new ImmutableAssetStore(artifactsRoot);
   return {
-    async read({ proposal }): Promise<{ readonly content: string }> {
+    async read({ proposal, current }): Promise<{ readonly content: string }> {
       try {
         const bytes = await store.readByDigest(proposal.patchRef, proposal.patchDigest);
         const envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)) as ProjectSourcePatchArtifact;
@@ -92,7 +92,13 @@ export function createTypedProjectPatchReader(artifactsRoot: string): MemoryProj
           || envelope.evidenceRefs.some((ref, index) => ref !== proposal.evidenceRefs[index])) {
           throw new Error('project source patch evidence does not match proposal');
         }
-        return { content: envelope.replacementContent };
+        if (envelope.payload.type !== 'memory-entry') {
+          throw new Error('project source patch payload is not auto-applicable');
+        }
+        const entry = `\n\n## Memory Agent ${envelope.kind}\n\n- Evidence: ${envelope.evidenceRefs.join(', ')}\n`;
+        return {
+          content: current.content.endsWith('\n') ? `${current.content}${entry.slice(1)}` : `${current.content}${entry}`,
+        };
       } catch (error) {
         throw new AppLifecycleError(
           'memory-update-validation-failed',
@@ -122,13 +128,12 @@ export function createMemoryBoundaryPatchProducer(input: {
   readonly evidenceRefs: readonly string[];
 }) => Promise<MemoryBoundaryPatchReference | undefined> {
   const store = new ImmutableAssetStore(input.artifactsRoot);
-  return async ({ messageId, summary, candidateCategory, evidenceRefs }) => {
+  return async ({ messageId, candidateCategory, evidenceRefs }) => {
     if (!input.autoUpdate) return undefined;
     const target = candidateCategory === 'local-skill-update' ? 'project-local-skill' :
       candidateCategory === 'project-experience' ? 'project-agents' : undefined;
     if (!target) return undefined;
-    const current = await input.sources.readProject({ projectKey: input.projectKey, target });
-    const entry = `\n\n## Memory Agent ${candidateCategory}\n\n- ${summary}\n`;
+    await input.sources.readProject({ projectKey: input.projectKey, target });
     const kind: ProjectSourcePatchArtifact['kind'] = candidateCategory === 'local-skill-update'
       ? 'local-skill-update'
       : 'project-experience';
@@ -136,8 +141,8 @@ export function createMemoryBoundaryPatchProducer(input: {
       schemaVersion: 1,
       kind,
       target,
+      payload: { type: 'memory-entry' },
       evidenceRefs: [...evidenceRefs],
-      replacementContent: current.content.endsWith('\n') ? `${current.content}${entry.slice(1)}` : `${current.content}${entry}`,
     };
     const bytes = new TextEncoder().encode(JSON.stringify(artifact));
     const reference = await store.write(`memory-project-patch-${createHash('sha256').update(messageId).digest('hex')}`, bytes);
@@ -615,51 +620,6 @@ async function reconcilePendingProjectSourceUpdate(input: {
   await clearPendingProjectSourceUpdate(input.locksRoot);
 }
 
-function changedProjectPatchLines(current: string, next: string): readonly string[] {
-  const unmatched = new Map<string, number>();
-  for (const line of current.split(/\r?\n/)) {
-    unmatched.set(line, (unmatched.get(line) ?? 0) + 1);
-  }
-  const changed: string[] = [];
-  for (const line of next.split(/\r?\n/)) {
-    const count = unmatched.get(line) ?? 0;
-    if (count > 0) {
-      if (count === 1) unmatched.delete(line);
-      else unmatched.set(line, count - 1);
-    } else {
-      changed.push(line);
-    }
-  }
-  for (const [line, count] of unmatched) {
-    for (let index = 0; index < count; index += 1) changed.push(line);
-  }
-  return changed;
-}
-
-function assertProjectPatchAdmitted(current: string, next: string): void {
-  const controlTerm = /\b(?:permissions?|authorization|access control|provider|release|security|lifecycle|ownership?|merge|main)\b|权限|授权|安全|发布|生命周期|提供方|供应商/i;
-  const controlAssignment = /^\s*(?:[-*+]\s*)?(?:permissions?|provider|release|security|lifecycle)[\w-]*(?:\s+[a-z][\w -]*)?\s*[:=]/i;
-  const controlHeading = /^\s*#{1,6}\s*(?:permissions?|provider|release|security|lifecycle)[\w-]*(?:\s+[a-z][\w -]*)?\s*$/i;
-  const localizedControlAssignment = /^\s*(?:[-*+]\s*)?(?:权限|授权|安全|发布|生命周期|提供方|供应商)[^:：=\n]*[:：=]/;
-  const controlAction = /\b(?:allow|deny|grant|revoke|enable|disable|bypass|skip|override|permit|prohibit|merge)\b|允许|禁止|授予|撤销|启用|禁用|绕过|跳过|覆盖|限制/i;
-  const controlDirective = /^\s*(?:[-*+]\s*)?(?:allow|deny|grant|revoke|enable|disable|bypass|skip|override|permit|prohibit)\b|^\s*(?:[-*+]\s*)?(?:允许|禁止|授予|撤销|启用|禁用|绕过|跳过|覆盖|限制)/i;
-  const denied = changedProjectPatchLines(current, next).some((line) => (
-    controlAssignment.test(line)
-    || controlHeading.test(line)
-    || localizedControlAssignment.test(line)
-    || (controlTerm.test(line) && controlAction.test(line))
-    || controlDirective.test(line)
-  ));
-  if (denied) {
-    throw new AppLifecycleError(
-      'memory-update-admission-denied',
-      'project source patch changes control, security, permission, provider, release, lifecycle, ownership, or merge semantics',
-      'keep the patch as a proposal and request explicit owner review',
-      OWNER,
-    );
-  }
-}
-
 async function recoverPendingProjectSourceUpdate(input: {
   readonly workspaceCwd: string;
   readonly localSkillRoot?: string;
@@ -741,7 +701,6 @@ export function createProjectSourceUpdateOwner(input: {
         if (!patch.content.trim()) {
           throw new AppLifecycleError('memory-update-invalid', 'project source patch reader returned empty content', 'produce a non-empty source update', OWNER);
         }
-        assertProjectPatchAdmitted(before, patch.content);
         const nextDigest = digest(patch.content);
         if (!input.projectSourceUpdatePublisher || !input.sourceScope || input.executionEpoch === undefined) {
           throw new AppLifecycleError(

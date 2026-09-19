@@ -113,19 +113,28 @@ auto = true
 ```
 
 当前运行时通过 `MemoryProjectPatchReader` 从 `artifactsRoot` 的 immutable patch artifact 读取并校验
-`patchRef + patchDigest`。artifact 是带证据绑定的 typed envelope，不接受裸文本：
+`patchRef + patchDigest`。artifact 是带证据绑定的 typed envelope，不接受裸文本。Memory Agent
+边界 producer 只能生成 `memory-entry` payload；project source owner 的 patch reader 是自动应用
+准入的唯一权威，只接受这种无外部替换正文的 typed artifact，并按已校验的 kind/evidence 生成固定
+的 memory entry。`replacement` payload 仅表示 proposal/review 内容，不能自动写入 project source：
 
 ```ts
 interface ProjectSourcePatchArtifact {
   readonly schemaVersion: 1;
   readonly kind: 'project-fact' | 'project-experience' | 'local-skill-update';
   readonly target: 'project-agents' | 'project-local-skill';
-  readonly replacementContent: string;
+  readonly payload:
+    | { readonly type: 'memory-entry' }
+    | { readonly type: 'replacement'; readonly content: string };
   readonly evidenceRefs: readonly string[];
 }
 ```
 
-`kind` 与 target 必须匹配，artifact evidence refs 必须等于 proposal evidence refs；未知 kind（包括控制、所有权或权限语义）直接进入 `attention`，不依靠自然语言关键词判断。再由 project source owner 执行 compare-and-commit。`memory.update.auto=true`
+`kind` 与 target 必须匹配，artifact evidence refs 必须等于 proposal evidence refs；未知 kind 或
+`replacement` payload（包括其中携带的控制、安全、权限、发布、生命周期或所有权文字）直接进入
+`attention`，不使用自然语言关键词或内容 denylist 判断。再由 project source owner 执行
+compare-and-commit；该 owner 在 pending-state/source mutation 前完成上述 typed admission。
+`memory.update.auto=true`
 因此可以通过配置校验；缺失或 digest 漂移仍在 owner 阶段以 `attention` 显式失败。自动更新只允许
 由绑定 Event Journal publisher 的 runtime composition 启用；owner 在替换源码前持久化 pending update，
 发布失败或进程中断后按源码 digest 恢复并幂等补发 `memory.project-source.updated`，不允许留下无恢复记录的

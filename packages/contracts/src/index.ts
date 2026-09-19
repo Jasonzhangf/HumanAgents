@@ -514,11 +514,15 @@ export interface ProjectSourceUpdateProposal {
 
 export type ProjectSourcePatchKind = 'project-fact' | 'project-experience' | 'local-skill-update';
 
+export type ProjectSourcePatchPayload =
+  | { readonly type: 'memory-entry' }
+  | { readonly type: 'replacement'; readonly content: string };
+
 export interface ProjectSourcePatchArtifact {
   readonly schemaVersion: 1;
   readonly kind: ProjectSourcePatchKind;
   readonly target: ProjectAutoUpdateTarget;
-  readonly replacementContent: string;
+  readonly payload: ProjectSourcePatchPayload;
   readonly evidenceRefs: readonly string[];
 }
 
