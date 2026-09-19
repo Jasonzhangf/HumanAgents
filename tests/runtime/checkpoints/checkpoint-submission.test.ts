@@ -1049,6 +1049,47 @@ test('reentry rejects missing committed closure, wrong checkpoint identity, stal
   assert.equal(closurePort.committed.length, 1);
 });
 
+test('reentry rejects a canonical closure that mismatches the committed checkpoint before admission', async () => {
+  const committedCheckpoint = checkpoint(1, null);
+  const journal = new FakeJournal();
+  const closurePort = new FakeClosurePort();
+  await submitCheckpoint({
+    source: 'agent-tool',
+    ownerId: 'task-owner',
+    checkpoint: committedCheckpoint,
+    previous: null,
+    journal,
+    closurePort,
+  });
+  const canonicalId = `checkpoint-closure:${checkpointCommitId(committedCheckpoint)}`;
+  const committedClosure = closurePort.records.get(canonicalId);
+  if (!committedClosure || !('closureKind' in committedClosure) || committedClosure.closureKind !== 'checkpoint') {
+    throw new Error('expected a committed checkpoint closure');
+  }
+  closurePort.records.set(canonicalId, {
+    ...committedClosure,
+    summary: 'tampered canonical summary',
+  });
+  const admissionPort = new FakeAdmissionPort();
+
+  await assert.rejects(
+    () => commitReentry({
+      ownerId: 'task-owner',
+      closureId: 'reentry-canonical-mismatch',
+      checkpoint: committedCheckpoint,
+      previousExecutionEpoch: committedCheckpoint.executionEpoch,
+      newExecutionEpoch: committedCheckpoint.executionEpoch + 1,
+      nextAction: { kind: 'continue', ref: 'after-canonical-mismatch' },
+      journal,
+      closurePort,
+      admissionPort,
+    }),
+    CheckpointSubmissionError,
+  );
+  assert.equal(admissionPort.calls.length, 0);
+  assert.equal(closurePort.committed.length, 1);
+});
+
 test('reentry rejects a corrupt journal before admission or closure commit', async () => {
   const committedCheckpoint = checkpoint(1, null);
   const journal = new FakeJournal();

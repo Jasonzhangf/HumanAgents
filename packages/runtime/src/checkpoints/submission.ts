@@ -16,6 +16,7 @@ import {
   computeReentryDecision,
   sameEvidenceRef,
   sameCheckpointClosureRecord,
+  sameReentryDecision,
   sameOperationId,
   sameReentryRecord,
   type CheckpointClosureRecord,
@@ -124,6 +125,11 @@ async function readCheckpointClosure(
         throw new CheckpointSubmissionError('checkpoint closure identity does not match its canonical key');
       }
       assertStoredCheckpointClosureVersion(scoped, CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
+      if (!closureMatchesCheckpoint(scoped, checkpoint)) {
+        throw new CheckpointSubmissionError(
+          `canonical checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.current.version} does not match the checkpoint`,
+        );
+      }
     }
     return scoped;
   }
@@ -470,6 +476,9 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
     }
     if (closure.checkpointId.scope !== latest.checkpoint.id.scope || closure.checkpointId.value !== latest.checkpoint.id.value) {
       throw new CheckpointSubmissionError('committed closure does not match reentry checkpoint');
+    }
+    if (!closure.reentry.allowed || !sameReentryDecision(closure.reentry, computeReentryDecision({ outcome: latest.checkpoint.outcome }))) {
+      throw new CheckpointSubmissionError('committed checkpoint closure does not allow reentry');
     }
     const admission = await input.admissionPort.admit({
       ownerId: input.ownerId,

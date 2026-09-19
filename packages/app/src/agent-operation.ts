@@ -412,6 +412,7 @@ export class AgentOperationController {
       this.stoppedCheckpoint = result.checkpoint;
       this.settled = true;
       await this.writeManifest();
+      await this.closeExecution();
     }
     return result;
   }

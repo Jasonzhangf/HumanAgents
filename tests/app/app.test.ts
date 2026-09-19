@@ -386,6 +386,24 @@ class ObserveErrorCloseDriver extends FakeAgentDriver {
   }
 }
 
+class StopCloseDriver extends FakeAgentDriver {
+  closeCalls = 0;
+
+  constructor(private readonly closeFails: boolean, outcomes: Readonly<Record<string, 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped'>>) { super(outcomes); }
+
+  async close(): Promise<ProviderCloseResult> {
+    this.closeCalls += 1;
+    if (this.closeFails) throw new Error('provider stop close failed');
+    return {
+      bindingId: providerBinding.bindingId,
+      providerId: providerBinding.providerId,
+      protocol: providerBinding.protocol,
+      state: 'closed',
+      evidenceRefs: [],
+    };
+  }
+}
+
 test('HumanAgent operation identity is stable across driver and provider bindings', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stable-identity-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -1802,6 +1820,61 @@ test('app stop writes a stopped checkpoint only after real settle evidence', asy
     completionError = error;
   }
   assert.match((completionError as Error | undefined)?.message ?? '', /agent operation was stopped/);
+});
+
+test('standalone app stop closes a close-capable provider exactly once', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-close-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(false, { 'session-stop-close-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-close',
+    plan: 'default',
+    prompt: 'stop with provider close',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+
+  const stopped = await controller.stop();
+  assert.equal(stopped.state, 'stopped');
+  assert.equal(driver.closeCalls, 1);
+  assert.equal((await controller.closeExecution())?.state, 'closed');
+  assert.equal(driver.closeCalls, 1);
+});
+
+test('standalone app stop preserves explicit provider close failure after stopped checkpoint commit', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-close-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new StopCloseDriver(true, { 'session-stop-close-failure-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-close-failure',
+    plan: 'default',
+    prompt: 'stop with provider close failure',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+
+  await assert.rejects(
+    () => controller.stop(),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'provider-close-failed'
+      && error.cause instanceof Error
+      && error.cause.message === 'provider stop close failed',
+  );
+  assert.equal(driver.closeCalls, 1);
+  assert.equal(controller.snapshot().state, 'stopped');
+  assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
 });
 
 test('app stop does not commit stopped when settle fails', async () => {
