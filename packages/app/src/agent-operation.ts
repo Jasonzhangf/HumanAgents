@@ -264,6 +264,8 @@ export class AgentOperationController {
   private committedCheckpoint?: Checkpoint;
   private lastOutput?: AgentOutput;
   private stoppedCheckpoint?: Checkpoint;
+  private providerClose?: ProviderCloseResult;
+  private providerCloseFailure?: unknown;
 
   constructor(private readonly prepared: PreparedOperation) {}
 
@@ -334,7 +336,7 @@ export class AgentOperationController {
       if (event.kind === 'terminal') break;
     }
     const closure = await this.prepared.execution.settle();
-    const providerClose = await closeExecutionDriver(this.prepared.driver);
+    const providerClose = await this.closeExecution();
     this.settled = true;
     const output = outputForDriver(this.prepared.driver, this.lastOutput);
     return {
@@ -351,6 +353,18 @@ export class AgentOperationController {
       observedEvents,
       ...(providerClose === undefined ? {} : { providerClose }),
     };
+  }
+
+  async closeExecution(): Promise<ProviderCloseResult | undefined> {
+    if (this.providerClose !== undefined) return this.providerClose;
+    if (this.providerCloseFailure !== undefined) throw this.providerCloseFailure;
+    try {
+      this.providerClose = await closeExecutionDriver(this.prepared.driver);
+      return this.providerClose;
+    } catch (error) {
+      this.providerCloseFailure = error;
+      throw error;
+    }
   }
 
   async stop(reason = 'humanagent stop'): Promise<StopControlResult> {
@@ -450,6 +464,7 @@ export class AgentOperationController {
       observedKinds: [],
       outputRefs: [],
       observedEvents: [],
+      ...(this.providerClose === undefined ? {} : { providerClose: this.providerClose }),
     };
     const checkpoint = await this.commitOutcome(receipt, 'failed');
     return this.result(checkpoint, receipt);
@@ -562,7 +577,18 @@ type TraceableAgentDriver = AgentDriver & { output(): string };
 
 async function closeExecutionDriver(driver: AgentDriver): Promise<ProviderCloseResult | undefined> {
   if (!('close' in driver) || typeof (driver as Partial<CloseableAgentDriver>).close !== 'function') return undefined;
-  const result = await (driver as CloseableAgentDriver).close();
+  let result: ProviderCloseResult;
+  try {
+    result = await (driver as CloseableAgentDriver).close();
+  } catch (cause) {
+    throw new AppLifecycleError(
+      'provider-close-failed',
+      `provider close failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      'reconcile provider close before treating the operation as complete',
+      OWNER,
+      cause,
+    );
+  }
   if (result.state !== 'closed') {
     throw new AppLifecycleError(
       'provider-close-failed',
