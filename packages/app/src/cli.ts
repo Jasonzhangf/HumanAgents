@@ -1,8 +1,27 @@
 #!/usr/bin/env node
-import { ConfigurationError, ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../config/src/index.js';
-import { id, type ProviderBinding } from '../../contracts/src/index.js';
+import {
+  ConfigurationError,
+  ensureControlLayout,
+  loadConfiguration,
+  resolveRuntimePaths,
+  type LoadedConfiguration,
+  type RuntimePaths,
+} from '../../config/src/index.js';
+import { id, type Checkpoint, type EvidenceRef, type ProviderBinding } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
-import { closeRuntime, composeMemoryRuntime, composeRuntimeMemory, configureBuiltinPromptRoot, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
+import {
+  closeRuntime,
+  composeMemoryRuntime,
+  configureBuiltinPromptRoot,
+  openRuntime,
+  readCheckpointEvidence,
+  readCommittedCheckpoint,
+  readRunManifest,
+  resumeAgentOperation,
+  resumeRuntime,
+  runAgentOperation,
+  settleSessionOutcome,
+} from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
 import { join } from 'node:path';
@@ -22,6 +41,81 @@ function loopbackHost(value: string): string {
     throw new Error('serve --host must be a loopback address (127.0.0.1 or ::1) until the control API has authentication');
   }
   return value;
+}
+
+function memoryTrigger(outcome: Checkpoint['outcome']): 'completion' | 'blocked' | 'rewind' | null {
+  if (outcome === 'succeeded') return 'completion';
+  if (outcome === 'failed' || outcome === 'waiting' || outcome === 'blocked' || outcome === 'unknown') return 'blocked';
+  return null;
+}
+
+function uiMemoryEvidence(checkpointRoot: string, mode: 'fake' | 'rcc') {
+  const filePathFor = (scope: Checkpoint['scope']) => join(
+    checkpointRoot,
+    mode,
+    `task-${scope.taskId!.value}-cycle-${scope.cycleId!.value}.jsonl`,
+  );
+  return {
+    async readCommitted({ checkpoint }: { readonly checkpoint: Checkpoint }) {
+      return readCommittedCheckpoint({
+        filePath: filePathFor(checkpoint.scope),
+        scope: checkpoint.scope,
+        checkpointId: checkpoint.id,
+      });
+    },
+    async readEvidence({ evidence }: { readonly evidence: EvidenceRef }) {
+      return readCheckpointEvidence({
+        filePath: filePathFor(evidence.scope),
+        scope: evidence.scope,
+        evidence,
+      });
+    },
+  };
+}
+
+async function composeTaskMemory(input: {
+  readonly paths: RuntimePaths;
+  readonly configuration: LoadedConfiguration;
+  readonly sessionId: string;
+  readonly bindingRef: string;
+  readonly executionEpoch: number;
+}) {
+  const localSkill = input.configuration.projectSourceManifest.sources?.localSkill;
+  const mainAgentId = input.configuration.effective.project?.defaultAgent
+    ?? input.configuration.agentRoster[0]!.agentId;
+  return composeMemoryRuntime({
+    paths: input.paths,
+    configuration: input.configuration,
+    workspaceCwd: input.paths.workspaceCwd,
+    sessionsRoot: input.paths.sessionsRoot,
+    runNotesRoot: input.paths.runNotesRoot,
+    ...(localSkill === undefined ? {} : {
+      localSkillRoot: localSkill.root,
+      localSkillName: localSkill.name,
+    }),
+    auditPromptRoot: join(input.paths.controlRoot, 'memory-audit'),
+    auditPromptRef: input.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+    autoUpdate: input.configuration.effective.memory?.update.auto ?? false,
+    binding: {
+      bindingRef: input.bindingRef,
+      projectKey: input.paths.projectKey,
+      executionEpoch: input.executionEpoch,
+      scope: {
+        kind: 'task',
+        organId: id('organ', `agent-${mainAgentId}`),
+        taskId: id('task', input.sessionId),
+      },
+      taskId: id('task', input.sessionId),
+      mainAgentId,
+      actor: {
+        actorId: `memory:${input.paths.projectKey}`,
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: input.paths.projectKey,
+      },
+    },
+    mainAgentId,
+  });
 }
 
 type UiProviderProtocol = 'responses' | 'openai' | 'anthropic';
@@ -66,42 +160,14 @@ export async function main(args: readonly string[]): Promise<void> {
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
     try {
       const memoryRef = option(args, '--memory');
-      const localSkill = runtime.configuration.projectSourceManifest.sources?.localSkill;
-      const mainAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
       const memory = memoryRef === undefined
         ? undefined
-        : await composeMemoryRuntime({
+        : await composeTaskMemory({
             paths: runtime.paths,
             configuration: runtime.configuration,
-            workspaceCwd: runtime.paths.workspaceCwd,
-            sessionsRoot: runtime.paths.sessionsRoot,
-            runNotesRoot: runtime.paths.runNotesRoot,
-            ...(localSkill === undefined ? {} : {
-              localSkillRoot: localSkill.root,
-              localSkillName: localSkill.name,
-            }),
-            auditPromptRoot: join(runtime.paths.controlRoot, 'memory-audit'),
-            auditPromptRef: runtime.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
-            autoUpdate: runtime.configuration.effective.memory?.update.auto ?? false,
-            binding: {
-              bindingRef: memoryRef,
-              projectKey: runtime.paths.projectKey,
-              executionEpoch: 1,
-              scope: {
-                kind: 'task',
-                organId: id('organ', `agent-${mainAgentId}`),
-                taskId: id('task', sessionId),
-              },
-              taskId: id('task', sessionId),
-              mainAgentId,
-              actor: {
-                actorId: `memory:${runtime.paths.projectKey}`,
-                roleId: 'memory',
-                permissions: ['memory.read', 'memory.propose'],
-                projectKey: runtime.paths.projectKey,
-              },
-            },
-            mainAgentId,
+            sessionId,
+            bindingRef: memoryRef,
+            executionEpoch: 1,
           });
       const running = await new SessionStore(runtime.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
       const result = await runAgentOperation({
@@ -151,6 +217,16 @@ export async function main(args: readonly string[]): Promise<void> {
       const running = runtime.session.state === 'running'
         ? runtime.session
         : await store.append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+      const memoryRef = option(args, '--memory');
+      const memory = memoryRef === undefined
+        ? undefined
+        : await composeTaskMemory({
+            paths: runtime.paths,
+            configuration: runtime.configuration,
+            sessionId,
+            bindingRef: memoryRef,
+            executionEpoch: manifest.executionEpoch,
+          });
       const recovered = await resumeAgentOperation({
         paths: runtime.paths,
         configuration: runtime.configuration,
@@ -166,6 +242,21 @@ export async function main(args: readonly string[]): Promise<void> {
         agentId: manifest.agentId,
         driverRef: manifest.driverRef,
       });
+      let memoryResult: Awaited<ReturnType<NonNullable<typeof memory>['consume']>> | undefined;
+      if (memory && recovered.recovered && recovered.execution) {
+        const committed = await readCommittedCheckpoint({
+          filePath: join(runtime.paths.journalRoot, 'checkpoints.jsonl'),
+          scope: recovered.recovered.checkpoint.scope,
+          checkpointId: recovered.recovered.checkpoint.id,
+        });
+        await memory.boundaryPublisher.publish({
+          checkpoint: committed.checkpoint,
+          recordDigest: committed.recordDigest,
+          trigger: 'rewind',
+          relatedCheckpoints: [recovered.execution.checkpoint],
+        });
+        memoryResult = await memory.consume();
+      }
       let state: string;
       if (!recovered.execution) {
         state = (await store.append(sessionId, { type: 'session.state', state: 'ready' }, runtime.lock)).state;
@@ -193,6 +284,7 @@ export async function main(args: readonly string[]): Promise<void> {
         waitingReason: recovered.waitingReason,
         resumedExecutionEpoch: recovered.execution?.executionEpoch,
         resumedOutcome: recovered.execution?.checkpoint.outcome,
+        rewindMemoryAnalysis: memoryResult?.committed.length ?? 0,
       }, null, 2));
       void running;
     } catch (error) {
@@ -236,7 +328,32 @@ export async function main(args: readonly string[]): Promise<void> {
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 0;
-    const memory = await composeRuntimeMemory({ paths, configuration });
+    const memoryRoot = paths.memoryRoot;
+    const memoryRuntime = await composeMemoryRuntime({
+      paths,
+      configuration,
+      workspaceCwd: paths.workspaceCwd,
+      sessionsRoot: paths.sessionsRoot,
+      runNotesRoot: paths.runNotesRoot,
+      auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+      auditPromptRef: configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+      autoUpdate: false,
+      binding: {
+        bindingRef: `memory-ui:${paths.projectKey}`,
+        projectKey: paths.projectKey,
+        executionEpoch: 1,
+        scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
+        interactionScopeId: `runtime:${paths.projectKey}`,
+        mainAgentId: 'humanagent-ui',
+        actor: {
+          actorId: 'memory-agent',
+          roleId: 'memory',
+          permissions: ['memory.read', 'memory.propose'],
+          projectKey: paths.projectKey,
+        },
+      },
+      checkpointEvidence: uiMemoryEvidence(checkpointRoot, mode),
+    });
     const port = mode === 'rcc'
       ? buildRccExecutionPort({
           binding,
@@ -254,14 +371,43 @@ export async function main(args: readonly string[]): Promise<void> {
       evidenceRoot,
       uiRoot,
       memory: {
-        coordinator: memory.coordinator,
-        backend: memory.backend,
+        coordinator: memoryRuntime.composition.coordinator,
+        backend: memoryRuntime.composition.backend,
         projectKey: paths.projectKey,
+        interaction: memoryRuntime.composition.interaction,
+        bindingRef: memoryRuntime.composition.bindingRef,
+        checkpointBoundary: {
+          publish: async ({ checkpoint, recordDigest }) => {
+            const trigger = memoryTrigger(checkpoint.outcome);
+            if (!trigger) return;
+            if (!recordDigest) {
+              throw new AppLifecycleError(
+                'memory-boundary-digest-missing',
+                `checkpoint ${checkpoint.id.value} is committed without a journal record digest`,
+                'recover the committed checkpoint record before publishing the memory boundary',
+                'humanagent.cli',
+              );
+            }
+            await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+            await memoryRuntime.consume();
+          },
+        },
       },
       host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
       portNumber,
     });
-    console.log(JSON.stringify({ command, mode, url: runtime.server.url, bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, uiRoot, checkpointRoot, memoryRoot: paths.memoryRoot }, null, 2));
+    console.log(JSON.stringify({
+      command,
+      mode,
+      url: runtime.server.url,
+      bindingId: binding.bindingId,
+      providerId: binding.providerId,
+      protocol: binding.protocol,
+      uiRoot,
+      checkpointRoot,
+      memoryRoot,
+      eventJournal: join(paths.journalRoot, 'events.jsonl'),
+    }, null, 2));
     return;
   }
   throw new Error('usage: humanagent init|doctor|run|resume|session|serve --workspace <path> [--plan <name>] [--session <id>]');

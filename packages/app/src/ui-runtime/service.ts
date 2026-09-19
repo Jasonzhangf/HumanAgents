@@ -64,6 +64,7 @@ import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  type RuntimeCheckpointBoundaryPort,
   type RuntimeExecutionDriver,
   type RuntimeExecutionDriverInput,
   type RuntimeExplicitBrainJournalState,
@@ -141,6 +142,7 @@ export interface UiRuntimeMemoryComposition {
   readonly tokenBudget?: number;
   readonly interaction?: MemoryInteractionPort;
   readonly bindingRef?: string;
+  readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
 }
 
 export interface UiRuntimeServiceOptions {
@@ -336,6 +338,7 @@ export class UiRuntimeService {
       taskIdPrefix: randomUUID(),
       now: options.now,
       createDriver: (input) => this.createMemoryBoundDriver(input),
+      ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
     });
   }
 

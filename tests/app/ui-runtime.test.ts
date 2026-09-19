@@ -37,6 +37,8 @@ import { createHookRegistry, type AgentHookRegistry } from '../../packages/runti
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  type RuntimeCheckpointBoundary,
+  type RuntimeCheckpointBoundaryPort,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import {
   FileCheckpointStore,
@@ -3010,6 +3012,86 @@ test('post-commit context hook failure preserves checkpoint identity and recover
   assert.equal(recovered.error?.ownerId, 'ui-context-commit-gate');
   assert.equal(recovered.error?.nextAction, 'reconcile committed checkpoint');
   assert.equal(rebuilt.eventsSince(started.operationId).some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded' && event.terminalPhase === 'final'), false);
+});
+
+test('UI checkpoint boundary publishes the committed journal digest and consumes one durable memory event', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-boundary-success-'));
+  const published: RuntimeCheckpointBoundary[] = [];
+  const boundary: RuntimeCheckpointBoundaryPort = {
+    publish: async (input) => {
+      published.push(structuredClone(input));
+    },
+  };
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: {
+      ...testMemory('project-ui-boundary-success'),
+      checkpointBoundary: boundary,
+    },
+  });
+  const task = service.createTask({ title: 'durable memory boundary' });
+  service.startExecution(task.taskId, { prompt: 'complete once' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  assert.equal(published.length, 1);
+  assert.equal(published[0]?.checkpoint.outcome, 'succeeded');
+  assert.equal(typeof published[0]?.recordDigest, 'string');
+  assert.equal(published[0]?.recordDigest?.startsWith('sha256:'), true);
+  const journal = await readFile(
+    join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
+    'utf8',
+  );
+  const record = JSON.parse(journal.trim()) as { readonly recordDigest: string };
+  assert.equal(published[0]?.recordDigest, record.recordDigest);
+});
+
+test('UI checkpoint boundary failure leaves the committed checkpoint explicitly blocked for recovery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-boundary-failure-'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: {
+      ...testMemory('project-ui-boundary-failure'),
+      checkpointBoundary: {
+        publish: async () => {
+          throw new Error('memory boundary publication failed');
+        },
+      },
+    },
+  });
+  const task = service.createTask({ title: 'memory boundary recovery' });
+  const started = service.startExecution(task.taskId, { prompt: 'commit once' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  assert.equal(dashboard.checkpoint?.outcome, 'succeeded');
+  assert.equal(dashboard.error?.message, 'memory boundary publication failed');
+  assert.equal(dashboard.allowedActions.length, 0);
+  assert.equal(
+    service.eventsSince(started.operationId).some((event) =>
+      event.kind === 'execution.terminal'
+      && event.state === 'blocked'
+      && event.terminalPhase === 'final'),
+    true,
+  );
+  const checkpointJournal = await readFile(
+    join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
+    'utf8',
+  );
+  assert.equal(checkpointJournal.trim().split('\n').length, 1);
 });
 
 test('post-commit context hook failure keeps non-succeeded checkpoints blocked after coordinator rebuild', async () => {

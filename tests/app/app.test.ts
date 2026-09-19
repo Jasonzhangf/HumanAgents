@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -229,6 +229,11 @@ test('memory runtime publishes a committed checkpoint boundary and consumes it i
     assert.equal((await memory.composition.agent.followUp(followUp)).status, 'ready');
     const restarted = await compose();
     assert.equal((await restarted.composition.agent.followUp(followUp)).status, 'ready');
+    assert.equal((await restarted.consume()).committed.length, 0);
+    assert.equal((await restarted.journal.readCursor({
+      streamId: `memory-boundaries:${result.taskId.value}`,
+      consumerKey: 'memory-runtime-boundary',
+    }))?.lastHandledSequence, 1);
     await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
   } finally {
     try {
@@ -549,7 +554,7 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
       child.once('error', reject);
       child.once('exit', (code) => {
         clearTimeout(timeout);
-        reject(new Error(`serve exited before startup (${String(code)}): ${output}`));
+        reject(new Error(`serve exited before startup (${String(code)}): stdout=${output}; stderr=${stderr}`));
       });
     });
     return { process: child, stderrText: () => stderr, ...launched };
@@ -1789,6 +1794,72 @@ test('CLI resume closes the session with the checkpoint from the recovered execu
   assert.equal(session.state, 'stopped');
   assert.equal(session.records.at(-1)?.type, 'session.closed');
   assert.equal(session.records.at(-1)?.checkpointRef, resumed.checkpointId);
+});
+
+test('CLI resume publishes exactly one durable rewind after actual checkpoint reentry', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-resume-memory-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(workspace, 'AGENTS.md'), '# HumanAgent test project\n', 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
+  const sessionId = 'session-cli-resume-memory';
+  const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId });
+  await new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+  await runtime.lock.release();
+  const failed = await runAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId,
+    plan: 'default',
+    prompt: 'fail before rewind',
+    composed: { driver: new FakeAgentDriver({ [`${sessionId}-assignment`]: 'failed' }) },
+  });
+  assert.equal(failed.checkpoint.outcome, 'failed');
+
+  const resumed = JSON.parse(execFileSync(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'resume',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--session',
+    sessionId,
+    '--prompt',
+    'continue after rewind',
+    '--memory',
+    'memory-cli-resume',
+  ], { encoding: 'utf8', stdio: 'pipe' })) as {
+    readonly state: string;
+    readonly checkpointId: string;
+    readonly recoveredCheckpointId: string;
+    readonly resumedOutcome: string;
+    readonly rewindMemoryAnalysis: number;
+  };
+  assert.equal(resumed.state, 'stopped');
+  assert.equal(resumed.resumedOutcome, 'succeeded');
+  assert.equal(resumed.recoveredCheckpointId, failed.checkpoint.id.value);
+  assert.equal(resumed.rewindMemoryAnalysis, 1);
+
+  const journal = createJsonlEventJournal({ filePath: join(paths.journalRoot, 'events.jsonl') });
+  const events = await journal.readEvents({
+    streamId: `memory-boundaries:${sessionId}`,
+    afterSequence: 0,
+    limit: 10,
+  });
+  assert.equal(events.length, 1);
+  assert.equal((events[0]?.payload as { readonly trigger?: string } | undefined)?.trigger, 'rewind');
+  assert.equal(events[0]?.evidenceRefs.length, 2);
+  assert.equal(events[0]?.evidenceRefs[0]?.locator, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
+  assert.equal(events[0]?.evidenceRefs[1]?.locator, `humanagent://checkpoint/${resumed.checkpointId}`);
+  assert.equal((await journal.readCursor({
+    streamId: `memory-boundaries:${sessionId}`,
+    consumerKey: 'memory-cli-resume',
+  }))?.lastHandledSequence, 1);
 });
 
 test('session outcome settlement commits failed checkpoints without marking them recoverable', async () => {

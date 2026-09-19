@@ -253,16 +253,31 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
       scope: input.checkpoint.scope,
       checkpoint: input.checkpoint,
     });
-    return { checkpointId: input.checkpoint.id, seq: record.seq };
+    return {
+      checkpointId: input.checkpoint.id,
+      seq: record.seq,
+      recordDigest: record.recordDigest,
+    };
   }
 
-  async commit(checkpoint: Checkpoint): Promise<{ readonly checkpointId: Checkpoint['id']; readonly committed: true }> {
-    await this.append({
+  async commit(checkpoint: Checkpoint): Promise<{
+    readonly checkpointId: Checkpoint['id'];
+    readonly committed: true;
+    readonly recordDigest: string;
+  }> {
+    const receipt = await this.append({
       ownerId: 'humanagent.app',
       commitId: checkpointCommitId(checkpoint),
       checkpoint,
     });
-    return { checkpointId: checkpoint.id, committed: true };
+    if (!receipt.recordDigest) {
+      throw new Error(`checkpoint commit ${checkpoint.id.value} did not return a journal record digest`);
+    }
+    return {
+      checkpointId: checkpoint.id,
+      committed: true,
+      recordDigest: receipt.recordDigest,
+    };
   }
 
   private journal(): JsonlOrganJournal {

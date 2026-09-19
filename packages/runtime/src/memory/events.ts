@@ -182,7 +182,7 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
 
 function scopeMatchesEvent(scope: MemoryScope, eventScope: ScopeRef): boolean {
   if (!sameId(scope.organId, eventScope.organId)) return false;
-  if (scope.taskId === undefined) return eventScope.taskId === undefined;
+  if (scope.taskId === undefined) return true;
   return sameId(scope.taskId, eventScope.taskId);
 }
 
@@ -276,13 +276,15 @@ export function memoryAnalysisRequestFromEvent(
   if (event.executionEpoch === undefined) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis event requires an execution epoch', 'memory-analysis-event');
   }
-  if (event.executionEpoch !== binding.executionEpoch) {
+  if (binding.interactionScopeId === undefined && event.executionEpoch !== binding.executionEpoch) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis event execution epoch does not match the wake binding', 'memory-analysis-event');
   }
   if (!scopeMatchesEvent(binding.scope, event.scope)) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis event scope does not match the wake binding', 'memory-analysis-scope');
   }
-  const taskId = binding.taskId ?? event.scope.taskId;
+  const taskId = binding.interactionScopeId === undefined
+    ? binding.taskId ?? event.scope.taskId
+    : undefined;
   if (binding.scope.kind === 'task' && !sameId(binding.scope.taskId, taskId)) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis event task does not match the wake binding', 'memory-analysis-scope');
   }

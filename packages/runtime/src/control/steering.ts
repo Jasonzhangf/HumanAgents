@@ -91,6 +91,7 @@ export interface CheckpointCommitPort {
   commit(input: Checkpoint): Promise<{
     readonly checkpointId: Checkpoint['id'];
     readonly committed: true;
+    readonly recordDigest?: string;
     readonly recovery?: StopSettlementRecovery;
   }>;
 }

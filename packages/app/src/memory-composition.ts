@@ -479,9 +479,12 @@ function createAdmission(
         }
         let source: MemoryEvidenceSnapshot;
         try {
+          const evidenceScope: MemoryScope = evidence.scope.taskId
+            ? { kind: 'task', organId: evidence.scope.organId, taskId: evidence.scope.taskId }
+            : { kind: 'organ', organId: evidence.scope.organId };
           source = await evidenceSource.read({
             projectKey: request.projectKey,
-            scope: request.scope,
+            scope: evidenceScope,
             evidence,
           });
         } catch (error) {

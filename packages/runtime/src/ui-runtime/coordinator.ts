@@ -149,7 +149,7 @@ export interface RuntimeExecutionCapabilities {
     readonly ownerId: 'humanagent.runtime.control';
   };
   readonly eventBus: {
-    readonly state: 'unavailable';
+    readonly state: 'available' | 'unavailable';
     readonly ownerId: 'humanagent.runtime.events';
     readonly reason: string;
   };
@@ -159,6 +159,7 @@ export interface RuntimeContextCommitResult {
   readonly checkpoint: Checkpoint;
   readonly context: PublishedContext<Checkpoint>;
   readonly reentry: CheckpointReentryDecision;
+  readonly recordDigest?: string;
 }
 
 export interface RuntimeExecutionComposition {
@@ -250,6 +251,17 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly hookRegistry?: AgentHookRegistry;
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
+  readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
+}
+
+export interface RuntimeCheckpointBoundary {
+  readonly checkpoint: Checkpoint;
+  readonly previous: Checkpoint | null;
+  readonly recordDigest?: string;
+}
+
+export interface RuntimeCheckpointBoundaryPort {
+  publish(input: RuntimeCheckpointBoundary): Promise<void>;
 }
 
 interface TaskRecord {
@@ -441,6 +453,7 @@ class ContextCheckpointBoundary {
   constructor(private readonly checkpointStore: TaskCheckpointStore) {}
 
   async commit(checkpoint: Checkpoint, previous: Checkpoint | null): Promise<RuntimeContextCommitResult> {
+    let recordDigest: string | undefined;
     const committer = new ContextCommitter<Checkpoint>({
       commit: async (prepared) => {
         const completed = await completeCheckpoint(this.checkpointStore, {
@@ -465,6 +478,7 @@ class ContextCheckpointBoundary {
             'inspect the checkpoint journal and retry the operation',
           );
         }
+        recordDigest = completed.receipt.recordDigest;
       },
     });
     const prepared = committer.prepare({
@@ -478,6 +492,7 @@ class ContextCheckpointBoundary {
       checkpoint: published.value,
       context: published,
       reentry: computeReentryDecision({ outcome: checkpoint.outcome }),
+      ...(recordDigest === undefined ? {} : { recordDigest }),
     };
   }
 }
@@ -576,14 +591,19 @@ class HarnessExecutionComposition implements RuntimeExecutionComposition {
     return {
       commit: async (checkpoint) => {
         try {
-          await this.commitCheckpoint(checkpoint, previous);
-          return { checkpointId: checkpoint.id, committed: true };
+          const committed = await this.commitCheckpoint(checkpoint, previous);
+          return {
+            checkpointId: checkpoint.id,
+            committed: true,
+            ...(committed.recordDigest === undefined ? {} : { recordDigest: committed.recordDigest }),
+          };
         } catch (error) {
           if (error instanceof RuntimeContextCommitError) {
             const recovery = errorFromUnknown(error);
             return {
               checkpointId: error.committed.checkpoint.id,
               committed: true,
+              ...(error.committed.recordDigest === undefined ? {} : { recordDigest: error.committed.recordDigest }),
               recovery: {
                 code: 'execution.context-commit-hook.blocked',
                 ownerId: recovery.ownerId,
@@ -641,7 +661,15 @@ export class RuntimeTaskCoordinator {
   }
 
   executionCapabilities(): RuntimeExecutionCapabilities {
-    return EXECUTION_CAPABILITIES;
+    if (!this.options.checkpointBoundary) return EXECUTION_CAPABILITIES;
+    return {
+      ...EXECUTION_CAPABILITIES,
+      eventBus: {
+        state: 'available',
+        ownerId: 'humanagent.runtime.events',
+        reason: 'durable memory EventBus boundary is connected to the UI checkpoint owner',
+      },
+    };
   }
 
   createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
@@ -1315,7 +1343,19 @@ export class RuntimeTaskCoordinator {
       }
       throw error;
     }
+    const previousCheckpoint = record.checkpoint ?? null;
     this.recordCommittedCheckpoint(record, committed, checkpointOutcome);
+    if (this.options.checkpointBoundary) {
+      try {
+        await this.options.checkpointBoundary.publish({
+          checkpoint: committed.checkpoint,
+          previous: previousCheckpoint,
+          ...(committed.recordDigest === undefined ? {} : { recordDigest: committed.recordDigest }),
+        });
+      } catch (error) {
+        throw new RuntimeContextCommitError(committed, error);
+      }
+    }
   }
 
   private recordCommittedCheckpoint(

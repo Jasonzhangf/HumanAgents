@@ -464,7 +464,9 @@ export class MemoryAgent {
     const bound = this.resolve(input);
     if (bound.status !== 'ready') return bound;
     if (
-      input.executionEpoch !== bound.value.binding.executionEpoch
+      (input.interactionScopeId === undefined
+        && bound.value.binding.interactionScopeId === undefined
+        && input.executionEpoch !== bound.value.binding.executionEpoch)
       || input.projectKey !== bound.value.binding.projectKey
       || scopeKey(input.scope) !== scopeKey(bound.value.binding.scope)
       || !sameTask(input.taskId, bound.value.binding.taskId)
