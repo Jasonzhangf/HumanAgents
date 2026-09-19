@@ -193,6 +193,40 @@ test('jsonl event journal serializes consumer cursor commits without regression'
   }
 });
 
+test('jsonl event journal keeps consumer commit receipt and cursor on the same stream', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-event-journal-stream-identity-'));
+  try {
+    const journal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
+    const commit = (streamId: string): ConsumerCommitRequest => ({
+      receipt: {
+        consumerKey: consumer.consumerKey,
+        messageId: 'shared-message',
+        streamId,
+        handledSequence: 1,
+        disposition: 'applied',
+        effectRefs: [],
+      },
+      cursor: {
+        streamId,
+        consumerKey: consumer.consumerKey,
+        lastHandledSequence: 1,
+        updatedAt: occurredAt,
+      },
+      completionMode: 'journal-atomic',
+      internalEffectFacts: [],
+      externalOperationRefs: [],
+    });
+
+    await journal.commitConsumerCommit(commit('stream-a'));
+    const streamB = await journal.commitConsumerCommit(commit('stream-b'));
+
+    assert.equal(streamB.receipt.streamId, 'stream-b');
+    assert.equal(streamB.cursor.streamId, 'stream-b');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('jsonl event journal keeps stream sequence independent from control records', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-event-journal-sequence-'));
   try {

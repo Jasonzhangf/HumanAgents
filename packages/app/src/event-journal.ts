@@ -311,6 +311,7 @@ export function createJsonlEventJournal(input: { readonly filePath: string }): J
             if (persisted.type !== 'consumer-commit' || persisted.result === undefined) continue;
             if (
               existingReceipt === null
+              && persisted.result.receipt.streamId === input.receipt.streamId
               && persisted.result.receipt.consumerKey === input.receipt.consumerKey
               && persisted.result.receipt.messageId === input.receipt.messageId
             ) {
@@ -338,8 +339,8 @@ export function createJsonlEventJournal(input: { readonly filePath: string }): J
             },
             append: true,
             identity: existingReceipt === null
-              ? `${input.receipt.consumerKey}:${input.receipt.messageId}`
-              : `${input.receipt.consumerKey}:${input.receipt.messageId}:${input.cursor.lastHandledSequence}`,
+              ? `${input.receipt.streamId}:${input.receipt.consumerKey}:${input.receipt.messageId}`
+              : `${input.receipt.streamId}:${input.receipt.consumerKey}:${input.receipt.messageId}:${input.cursor.lastHandledSequence}`,
           };
         }, async (plan, append) => {
           if (!plan.append) return plan.result;
