@@ -3,234 +3,48 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light" />
-    <meta name="description" content="HumanAgent Runtime Operator Console" />
-    <title>HumanAgent · Runtime Console</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta name="description" content="HumanAgent UI entry" />
+    <title>HumanAgent · UI Entry</title>
+    <link rel="stylesheet" href="./runtime.css" />
   </head>
   <body>
-    <div class="app-shell" data-mode="running">
-      <header class="topbar">
-        <a class="brand" href="#top" aria-label="HumanAgent 首页">
-          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span>HumanAgent</span>
-        </a>
-
-        <div class="topbar-context">
-          <span class="prototype-chip">静态原型</span>
-          <span class="sync-state"><span class="status-dot status-dot--ok"></span>本地状态已同步</span>
-        </div>
-
-        <button class="icon-button" type="button" aria-label="打开设置" title="设置">
-          <span aria-hidden="true">•••</span>
-        </button>
-      </header>
-
-      <main id="top" class="workspace">
-        <aside class="sidebar panel-surface" aria-label="任务导航">
-          <div class="sidebar-heading">
-            <div>
-              <p class="eyebrow">我的任务</p>
-              <h1>正在负责</h1>
-            </div>
-            <span class="count-badge">3</span>
-          </div>
-
-          <nav class="task-list" aria-label="任务列表">
-            <a class="task-item task-item--active" href="#current-task" aria-current="page">
-              <span class="task-item-status status-dot status-dot--live"></span>
-              <span class="task-item-copy">
-                <strong>重建导出索引</strong>
-                <small>运行中 · 12 分钟</small>
-              </span>
-              <span class="task-item-arrow" aria-hidden="true">›</span>
-            </a>
-            <a class="task-item" href="#activity">
-              <span class="task-item-status status-dot status-dot--wait"></span>
-              <span class="task-item-copy">
-                <strong>整理周报证据</strong>
-                <small>等待你的确认</small>
-              </span>
-              <span class="task-item-arrow" aria-hidden="true">›</span>
-            </a>
-            <a class="task-item" href="#history">
-              <span class="task-item-status status-dot status-dot--muted"></span>
-              <span class="task-item-copy">
-                <strong>迁移旧会话</strong>
-                <small>已停止 · 昨天</small>
-              </span>
-              <span class="task-item-arrow" aria-hidden="true">›</span>
-            </a>
-          </nav>
-
-          <div class="sidebar-divider"></div>
-
-          <button class="quiet-button quiet-button--full" type="button">
-            <span class="quiet-button-plus" aria-hidden="true">+</span>
-            新建任务
-          </button>
-
-          <div class="sidebar-footer">
-            <div class="person-chip">
-              <span class="avatar">F</span>
-              <span><strong>Fanzhang</strong><small>显意识</small></span>
-            </div>
-            <span class="connection-label"><span class="status-dot status-dot--ok"></span>在线</span>
-          </div>
-        </aside>
-
-        <section class="main-column" aria-label="当前任务">
-          <div class="mobile-page-title">
-            <p class="eyebrow">当前任务</p>
-            <span class="prototype-chip">静态原型</span>
-          </div>
-
-          <article id="current-task" class="hero-card surface-card">
-            <div class="hero-card-topline">
-              <span class="status-pill status-pill--live"><span class="status-dot status-dot--live"></span>正在运行</span>
-              <span class="updated-label">刚刚更新</span>
-            </div>
-
-            <div class="hero-heading">
-              <div>
-                <p class="eyebrow">任务 · 导出质量</p>
-                <h2>重建导出索引</h2>
-                <p class="hero-description">把最近 30 天的导出记录整理成可查询的索引，完成后交给你复核。</p>
-              </div>
-              <div class="progress-orb" aria-label="当前进度 68%"><span>68</span><small>%</small></div>
-            </div>
-
-            <div class="task-facts" aria-label="任务概况">
-              <div><span>当前阶段</span><strong>整理记录</strong></div>
-              <div><span>已完成</span><strong>1,284 条</strong></div>
-              <div><span>预计还需</span><strong>约 8 分钟</strong></div>
-            </div>
-
-            <div class="progress-track" role="progressbar" aria-label="重建导出索引进度" aria-valuenow="68" aria-valuemin="0" aria-valuemax="100"><span style="width: 68%"></span></div>
-
-            <div class="hero-actions">
-              <button id="steerButton" class="button button--primary" type="button">停止运行</button>
-              <button class="button button--secondary" type="button" data-open-diagnostic>查看证据</button>
-              <button class="button button--text" type="button">更多</button>
-            </div>
-
-            <div id="settledMessage" class="settled-message" role="status" aria-live="polite" hidden>
-              状态已收拢。可以查看 checkpoint，或继续下一步。
-            </div>
-          </article>
-
-          <div class="mobile-tabs" role="tablist" aria-label="任务视图">
-            <button class="mobile-tab is-active" type="button" role="tab" aria-selected="true" data-tab="overview">概览</button>
-            <button class="mobile-tab" type="button" role="tab" aria-selected="false" data-tab="activity">动态</button>
-            <button class="mobile-tab" type="button" role="tab" aria-selected="false" data-tab="history">历史</button>
-          </div>
-
-          <section class="visible-section tab-panel" id="overview" data-panel="overview" aria-labelledby="overview-title">
-            <div class="section-heading">
-              <div>
-                <p class="eyebrow">你需要知道的</p>
-                <h2 id="overview-title">最近发生了什么</h2>
-              </div>
-              <span class="section-meta">只显示影响任务的变化</span>
-            </div>
-
-            <div class="activity-card surface-card">
-              <div class="activity-row">
-                <span class="activity-icon activity-icon--done" aria-hidden="true">✓</span>
-                <div><strong>已读取 1,284 条记录</strong><p>来源完整，没有发现重复记录。</p></div>
-                <time datetime="PT2M">2 分钟前</time>
-              </div>
-              <div class="activity-row">
-                <span class="activity-icon activity-icon--work" aria-hidden="true">↗</span>
-                <div><strong>正在整理索引字段</strong><p>当前没有需要你处理的问题。</p></div>
-                <time datetime="PT12M">进行中</time>
-              </div>
-              <div class="activity-row activity-row--muted">
-                <span class="activity-icon activity-icon--quiet" aria-hidden="true">·</span>
-                <div><strong>上一次 checkpoint 已保存</strong><p>可以从这里安全恢复。</p></div>
-                <time datetime="PT14M">14 分钟前</time>
-              </div>
-            </div>
-          </section>
-
-          <section class="hidden-mobile-panel tab-panel" id="activity" data-panel="activity" aria-labelledby="activity-title">
-            <div class="section-heading"><div><p class="eyebrow">活动</p><h2 id="activity-title">任务时间线</h2></div></div>
-            <div class="activity-card surface-card activity-card--compact">
-              <div class="timeline-line"></div>
-              <div class="timeline-item"><span class="timeline-node timeline-node--ok"></span><div><strong>checkpoint completion</strong><p>cycle-18 · 可恢复</p></div><time>14 分钟前</time></div>
-              <div class="timeline-item"><span class="timeline-node timeline-node--live"></span><div><strong>cycle-19 开始</strong><p>进入“整理记录”阶段</p></div><time>12 分钟前</time></div>
-              <div class="timeline-item"><span class="timeline-node timeline-node--live"></span><div><strong>导出索引重建中</strong><p>当前 operation 仍在执行</p></div><time>现在</time></div>
-            </div>
-          </section>
-
-          <section class="hidden-mobile-panel tab-panel" id="history" data-panel="history" aria-labelledby="history-title">
-            <div class="section-heading"><div><p class="eyebrow">历史</p><h2 id="history-title">可恢复节点</h2></div></div>
-            <div class="history-card surface-card">
-              <div><strong>cycle-18</strong><span>完成 · 14 分钟前</span></div><button class="link-button" type="button">查看</button>
-              <div><strong>cycle-17</strong><span>完成 · 27 分钟前</span></div><button class="link-button" type="button">查看</button>
-              <div><strong>cycle-16</strong><span>部分完成 · 42 分钟前</span></div><button class="link-button" type="button">查看</button>
-            </div>
-          </section>
-
-          <details class="implicit-entry">
-            <summary><span><span class="details-glyph" aria-hidden="true">+</span>后台详情</span><small>高级入口 · 默认隐藏</small></summary>
-            <div class="implicit-content">
-              <div class="implicit-note"><strong>这里不是正常操作区</strong><p>仅用于诊断器官执行、监督恢复和原始证据。后台状态不会要求你逐项交互。</p></div>
-              <dl class="diagnostic-grid">
-                <div><dt>器官</dt><dd>organ.export-index</dd></div>
-                <div><dt>supervisor</dt><dd>steady / healthy</dd></div>
-                <div><dt>execution epoch</dt><dd>12</dd></div>
-                <div><dt>retry budget</dt><dd>2 / 3</dd></div>
-              </dl>
-              <button class="button button--secondary" type="button" data-open-diagnostic>打开诊断面板</button>
-            </div>
-          </details>
-        </section>
-
-        <aside class="decision-column" aria-label="需要你处理">
-          <div class="decision-heading">
-            <div><p class="eyebrow">需要你处理</p><h2>人的决定</h2></div>
-            <span class="attention-count">1</span>
-          </div>
-
-          <article class="attention-card">
-            <div class="attention-card-header"><span class="attention-label"><span class="attention-mark">!</span>需要确认</span><span class="attention-time">刚刚</span></div>
-            <h3>导出目录权限发生变化</h3>
-            <p>任务仍可继续整理已有记录，但写入最终目录前需要你的确认。</p>
-            <div class="attention-impact"><span>影响</span><strong>最终写入会等待</strong></div>
-            <div class="attention-actions"><button id="ackButton" class="button button--attention" type="button">允许继续写入</button><button class="button button--quiet" type="button" data-open-diagnostic>查看原因</button></div>
-          </article>
-
-          <div class="decision-divider"></div>
-
-          <div class="human-rule">
-            <span class="human-rule-mark" aria-hidden="true">◌</span>
-            <div><strong>后台会继续工作</strong><p>只有影响你的决定、权限或结果时，才会打扰你。</p></div>
-          </div>
-
-          <button class="diagnostic-link" type="button" data-open-diagnostic>
-            <span class="diagnostic-link-icon" aria-hidden="true">⌘</span>
-            <span><strong>后台诊断</strong><small>器官、监督器、原始事件</small></span>
-            <span aria-hidden="true">›</span>
-          </button>
-        </aside>
-      </main>
-
-      <nav class="mobile-bottom-nav" aria-label="主导航">
-        <a class="mobile-nav-item is-active" href="#current-task"><span aria-hidden="true">◉</span><small>任务</small></a>
-        <a class="mobile-nav-item" href="#activity"><span aria-hidden="true">↗</span><small>动态</small></a>
-        <a class="mobile-nav-item" href="#history"><span aria-hidden="true">⌁</span><small>历史</small></a>
-        <button class="mobile-nav-item" type="button" data-open-diagnostic><span aria-hidden="true">⌘</span><small>诊断</small></button>
+    <header class="topbar">
+      <a class="brand" href="./dashboard.html">HumanAgent</a>
+      <nav class="topnav" aria-label="主导航">
+        <a href="./dashboard.html">Runtime Dashboard</a>
+        <a href="./tasks.html">Task List</a>
       </nav>
-    </div>
+    </header>
 
-    <dialog id="diagnosticDialog" class="diagnostic-dialog" aria-labelledby="diagnostic-title">
-      <div class="dialog-header"><div><p class="eyebrow">特殊入口</p><h2 id="diagnostic-title">后台诊断</h2></div><button class="icon-button" type="button" aria-label="关闭诊断面板" data-close-diagnostic>×</button></div>
-      <p class="dialog-intro">这里呈现后台执行事实，不是正常的人类交互路径。只在需要解释异常或核对证据时打开。</p>
-      <div class="diagnostic-tabs"><button class="diagnostic-tab is-active" type="button">执行</button><button class="diagnostic-tab" type="button">监督</button><button class="diagnostic-tab" type="button">原始证据</button></div>
-      <div class="diagnostic-log" aria-label="诊断事件列表"><div><time>12:42:18</time><span class="log-badge log-badge--ok">OK</span><p>checkpoint committed · cycle-18</p></div><div><time>12:43:02</time><span class="log-badge log-badge--info">RUN</span><p>operation started · index.rebuild</p></div><div><time>12:44:11</time><span class="log-badge log-badge--warn">WAIT</span><p>permission attention raised</p></div></div>
-      <div class="dialog-footer"><span>只读诊断 · 不改变任务状态</span><button class="button button--secondary" type="button" data-close-diagnostic>关闭</button></div>
-    </dialog>
+    <main class="page">
+      <section class="page-heading" aria-labelledby="entry-title">
+        <div>
+          <p class="eyebrow">UI Entry</p>
+          <h1 id="entry-title">当前产品入口已迁移</h1>
+          <p class="lede">
+            这里是保留的历史视觉原型入口，不呈现真实任务状态，也不会伪造 Runtime 成功结果。
+          </p>
+        </div>
+        <span class="state-chip" data-tone="warning">非产品入口</span>
+      </section>
+
+      <section class="panel" aria-labelledby="current-entry-title">
+        <h2 id="current-entry-title">进入 Runtime-connected UI</h2>
+        <p>
+          当前产品从 Dashboard 开始。页面状态、任务列表和执行操作都通过 HumanAgent Runtime API
+          获取；Runtime 未连接时会显示明确错误。
+        </p>
+        <a class="button button--primary" href="./dashboard.html">打开 Runtime Dashboard</a>
+      </section>
+
+      <section class="panel" aria-labelledby="prototype-title">
+        <h2 id="prototype-title">历史视觉原型</h2>
+        <p>
+          以下页面只用于保留早期视觉和交互定义，不是当前产品入口，也不代表真实运行状态。
+        </p>
+        <a class="button" href="./interaction.html">查看 Interaction 原型</a>
+      </section>
+    </main>
 
     <script type="module">
       location.replace('./dashboard.html')
