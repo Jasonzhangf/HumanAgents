@@ -6,12 +6,13 @@
 任务详情与输入决策：[task.html](task.html)  
 运行任务看板：[task-dashboard.html](task-dashboard.html)  
 后台观测：[observation.html](observation.html)  
-历史视觉原型（非主入口）：[index.html](index.html)、[interaction.html](interaction.html)
+兼容入口说明页（非产品入口）：[index.html](index.html)；历史视觉原型（非产品入口）：
+[interaction.html](interaction.html)
 
 当前主入口是 `dashboard.html`、`tasks.html`、`task.html`、`task-dashboard.html` 和
-`observation.html`。所有页面通过 `runtime-api.js` 消费 HumanAgent Runtime API，
-不读取 Journal、DSH Session、RCC raw frame 或 debug log。`index.html` 只重定向到
-Dashboard。
+`observation.html`。这些页面通过 `runtime-api.js` 消费 HumanAgent Runtime API，不读取
+Journal、DSH Session、RCC raw frame 或 debug log。`index.html` 只说明历史原型并明确重定向
+到 `dashboard.html`，不呈现静态运行状态。
 
 ## UI brief
 

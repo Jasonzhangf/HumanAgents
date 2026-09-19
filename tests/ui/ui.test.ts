@@ -708,6 +708,21 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('createRuntimeApi'), true);
 });
 
+test('UI index is an explicit historical handoff, not a fake runtime console', async () => {
+  const html = await readFile('docs/ui/index.html', 'utf8');
+  const readme = await readFile('docs/ui/README.md', 'utf8');
+  assert.equal(html.includes("location.replace('./dashboard.html')"), true);
+  assert.equal(html.includes('打开 Runtime Dashboard'), true);
+  assert.equal(html.includes('历史视觉原型'), true);
+  assert.equal(html.includes('不会伪造 Runtime 成功结果'), true);
+  assert.equal(html.includes('data-mode="running"'), false);
+  assert.equal(html.includes('本地状态已同步'), false);
+  assert.equal(html.includes('正在运行'), false);
+  assert.equal(html.includes('checkpoint committed'), false);
+  assert.equal(readme.includes('明确重定向'), true);
+  assert.equal(readme.includes('不呈现静态运行状态'), true);
+});
+
 test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {
   const api = await readFile('docs/ui/runtime-api.js', 'utf8');
   const interaction = await readFile('docs/ui/interaction.js', 'utf8');
