@@ -1502,6 +1502,36 @@ test('memory runtime rejects control and security semantics before persisting a 
     projectKey: paths.projectKey,
     target: 'project-agents',
   });
+  const ownershipNext = '# Project rules\n\nOnly the designated owner may merge to main.\n';
+  const ownershipRef = 'project-agents-ownership-next';
+  const ownershipDigest = await writeProjectPatchArtifact(
+    paths.artifactsRoot,
+    ownershipRef,
+    'project-agents',
+    ownershipNext,
+    'project-experience',
+  );
+  const ownershipRejected = await runtime.composition.agent.applyProjectUpdate({
+    projectKey: paths.projectKey,
+    proposal: {
+      target: 'project-agents',
+      sourceRef: reset.sourceRef,
+      expectedRevision: reset.revision,
+      expectedDigest: reset.digest,
+      patchRef: ownershipRef,
+      patchDigest: ownershipDigest,
+      evidenceRefs: ['journal://project-a/evidence'],
+      ownerRef: 'project-rule-owner',
+    },
+  });
+  assert.equal(ownershipRejected.status, 'attention');
+  assert.equal(ownershipRejected.status === 'attention' && ownershipRejected.issue.code, 'memory-agent-update-validation-failed');
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), lowRiskNext);
+  await assert.rejects(
+    () => readFile(join(paths.locksRoot, 'memory-project-source-update.pending.json'), 'utf8'),
+    (error: unknown) => (error as { readonly code?: string }).code === 'ENOENT',
+  );
+
   for (const [index, next] of deniedPatches.entries()) {
     const patchRef = `project-agents-control-next-${index}`;
     const artifact = JSON.stringify({ schemaVersion: 1, kind: 'control', target: 'project-agents', replacementContent: next, evidenceRefs: ['journal://project-a/evidence'] });
