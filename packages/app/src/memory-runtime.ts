@@ -215,6 +215,7 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
       readonly receipt: import('../../runtime/src/memory/index.js').MemorySourceUpdateReceipt;
       readonly scope: ScopeRef;
       readonly executionEpoch: number;
+      readonly occurredAt: string;
     }) => {
       const identity = JSON.stringify({
         projectKey: input.paths.projectKey,
@@ -229,7 +230,7 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
         messageId,
         streamId: `memory-project-source-updates:${input.paths.projectKey}`,
         scope: update.scope,
-        occurredAt: new Date().toISOString(),
+        occurredAt: update.occurredAt,
         executionEpoch: update.executionEpoch,
         target: update.receipt.target,
         sourceRef: update.receipt.sourceRef,

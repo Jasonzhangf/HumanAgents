@@ -1060,6 +1060,43 @@ test('project source updates require a typed patch reader', async () => {
   );
 });
 
+test('project source auto updates require a durable publisher', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-publisher-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await writeFile(join(workspace, 'AGENTS.md'), '# Project\n', 'utf8');
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
+  const configuration = await loadConfiguration(paths);
+  await assert.rejects(
+    () => composeMemory({
+      paths,
+      projectKey: paths.projectKey,
+      workspaceCwd: paths.workspaceCwd,
+      sessionsRoot: paths.sessionsRoot,
+      runNotesRoot: paths.runNotesRoot,
+      auditPromptRoot,
+      auditPromptRef: 'project-memory-audit',
+      autoUpdate: true,
+      binding: {
+        bindingRef: 'memory-binding:publisher-required',
+        projectKey: paths.projectKey,
+        executionEpoch: 1,
+        scope: { kind: 'organ', organId: id('organ', 'memory-publisher-required') },
+        interactionScopeId: `runtime:${paths.projectKey}`,
+        mainAgentId: 'main-agent-a',
+        actor: {
+          actorId: 'memory-agent',
+          roleId: 'memory',
+          permissions: ['memory.read', 'memory.propose'],
+          projectKey: paths.projectKey,
+        },
+      },
+    }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-publication-unavailable',
+  );
+});
+
 test('memory runtime applies immutable project patches and publishes a durable update fact', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-auto-update-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -1127,6 +1164,96 @@ test('memory runtime applies immutable project patches and publishes a durable u
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'memory.project-source.updated');
   assert.equal(events[0]?.payload?.patchDigest, patchDigest);
+});
+
+test('memory runtime recovers a committed source update when its durable fact was not published', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-auto-update-recovery-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const original = '# Original project rules\n';
+  const next = '# Updated project rules\n';
+  await writeFile(join(workspace, 'AGENTS.md'), original, 'utf8');
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
+  const patchRef = 'project-agents-recovery';
+  const patchDigest = `sha256:${createHash('sha256').update(next).digest('hex')}`;
+  await writeFile(join(paths.artifactsRoot, patchRef), next, 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update-recovery') };
+  const owner = createProjectSourceUpdateOwner({
+    workspaceCwd: paths.workspaceCwd,
+    projectKey: paths.projectKey,
+    locksRoot: paths.locksRoot,
+    patchReader: {
+      read: async () => ({ content: next }),
+    },
+    projectSourceUpdatePublisher: {
+      publish: async () => { throw new Error('journal unavailable'); },
+    },
+    sourceScope: scope,
+    executionEpoch: 1,
+  });
+  const current = {
+    projectKey: paths.projectKey,
+    target: 'project-agents' as const,
+    content: original,
+    sourceRef: `project://${paths.projectKey}/AGENTS.md`,
+    canonicalRef: `project://${paths.projectKey}/AGENTS.md`,
+    revision: `sha256:${createHash('sha256').update(original).digest('hex')}`,
+    digest: `sha256:${createHash('sha256').update(original).digest('hex')}`,
+    loadedAt: '2026-09-19T00:00:00.000Z',
+  };
+  const proposal = {
+    target: 'project-agents' as const,
+    sourceRef: current.sourceRef,
+    expectedRevision: current.revision,
+    expectedDigest: current.digest,
+    patchRef,
+    patchDigest,
+    evidenceRefs: ['journal://project-a/evidence'],
+    ownerRef: 'project-rule-owner',
+  };
+  await assert.rejects(
+    () => owner.apply({ current, proposal, auto: true }),
+    (error: unknown) => error instanceof AppLifecycleError && error.code === 'memory-update-publication-failed',
+  );
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), next);
+
+  const runtime = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: true,
+    binding: {
+      bindingRef: 'memory-binding:auto-update-recovery',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope,
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'main-agent-a',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  const events = await runtime.journal.readEvents({
+    streamId: `memory-project-source-updates:${paths.projectKey}`,
+    afterSequence: 0,
+    limit: 10,
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.payload?.patchDigest, patchDigest);
+  await assert.rejects(
+    () => readFile(join(paths.locksRoot, 'memory-project-source-update.pending.json'), 'utf8'),
+    (error: unknown) => (error as { readonly code?: string }).code === 'ENOENT',
+  );
 });
 
 test('memory runtime rejects missing or drifted immutable project patches', async () => {
@@ -1269,6 +1396,11 @@ test('project source updates recheck source digest before commit', async () => {
         return { content: 'next' };
       },
     },
+    projectSourceUpdatePublisher: {
+      publish: async () => undefined,
+    },
+    sourceScope: { organId: id('organ', 'memory-patch-conflict') },
+    executionEpoch: 1,
   });
   await assert.rejects(
     () => owner.apply({
@@ -1318,6 +1450,11 @@ test('project source updates reject symlinked source roots', async () => {
     patchReader: {
       read: async () => ({ content: 'next' }),
     },
+    projectSourceUpdatePublisher: {
+      publish: async () => undefined,
+    },
+    sourceScope: { organId: id('organ', 'memory-patch-symlink') },
+    executionEpoch: 1,
   });
   await assert.rejects(
     () => owner.apply({

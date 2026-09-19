@@ -114,7 +114,10 @@ auto = true
 
 当前运行时通过 `MemoryProjectPatchReader` 从 `artifactsRoot` 的 immutable patch artifact 读取并校验
 `patchRef + patchDigest`，再由 project source owner 执行 compare-and-commit。`memory.update.auto=true`
-因此可以通过配置校验；缺失或 digest 漂移仍在 owner 阶段以 `attention` 显式失败。
+因此可以通过配置校验；缺失或 digest 漂移仍在 owner 阶段以 `attention` 显式失败。自动更新只允许
+由绑定 Event Journal publisher 的 runtime composition 启用；owner 在替换源码前持久化 pending update，
+发布失败或进程中断后按源码 digest 恢复并幂等补发 `memory.project-source.updated`，不允许留下无恢复记录的
+源码修改。
 
 这个开关只控制当前 project 的：
 
