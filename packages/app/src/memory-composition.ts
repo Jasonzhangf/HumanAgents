@@ -81,7 +81,11 @@ export function createTypedProjectPatchReader(artifactsRoot: string): MemoryProj
   return {
     async read({ proposal }): Promise<{ readonly content: string }> {
       try {
-        const content = new TextDecoder().decode(await store.readByDigest(proposal.patchRef, proposal.patchDigest));
+        const bytes = await store.readByDigest(proposal.patchRef, proposal.patchDigest);
+        const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+        if (digest(new TextEncoder().encode(content)) !== proposal.patchDigest) {
+          throw new Error('decoded project source patch does not preserve artifact bytes');
+        }
         return { content };
       } catch (error) {
         throw new AppLifecycleError(
@@ -312,7 +316,7 @@ export async function composeRuntimeMemory(
   });
 }
 
-function digest(value: string): string {
+function digest(value: string | Uint8Array): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1317,6 +1317,27 @@ test('memory runtime rejects missing or drifted immutable project patches', asyn
   });
   assert.equal(drifted.status, 'attention');
   assert.equal(drifted.status === 'attention' && drifted.issue.code, 'memory-agent-update-validation-failed');
+  assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), original);
+
+  const invalidUtf8 = new Uint8Array([0xc3, 0x28]);
+  const invalidUtf8Ref = 'invalid-utf8-project-patch';
+  const invalidUtf8Digest = `sha256:${createHash('sha256').update(invalidUtf8).digest('hex')}`;
+  const invalidUtf8File = await open(join(paths.artifactsRoot, invalidUtf8Ref), 'w');
+  try {
+    await invalidUtf8File.writeFile(invalidUtf8);
+  } finally {
+    await invalidUtf8File.close();
+  }
+  const invalid = await runtime.composition.agent.applyProjectUpdate({
+    projectKey: paths.projectKey,
+    proposal: {
+      ...proposal,
+      patchRef: invalidUtf8Ref,
+      patchDigest: invalidUtf8Digest,
+    },
+  });
+  assert.equal(invalid.status, 'attention');
+  assert.equal(invalid.status === 'attention' && invalid.issue.code, 'memory-agent-update-validation-failed');
   assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), original);
 });
 
