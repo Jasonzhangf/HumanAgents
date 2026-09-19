@@ -78,6 +78,14 @@ function requireString(body: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function requirePrompt(body: Record<string, unknown>): string {
+  const value = body.prompt;
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new UiRuntimeApiError('execution.input.required', APP_OWNER, 'request field prompt is required', 'provide a non-empty prompt', 400);
+  }
+  return value;
+}
+
 function requirePositiveInteger(body: Record<string, unknown>, key: string): number {
   const value = body[key];
   if (!Number.isSafeInteger(value) || Number(value) < 1) {
@@ -382,7 +390,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       if (mode !== service.status().mode) {
         throw new UiRuntimeApiError('execution.mode.mismatch', APP_OWNER, `runtime is running in ${service.status().mode} mode`, `restart the runtime in ${mode} mode`);
       }
-      const started = service.startExecution(id('task', decodeURIComponent(taskExecutions[1]!)), { prompt: requireString(body, 'prompt') });
+      const started = service.startExecution(id('task', decodeURIComponent(taskExecutions[1]!)), { prompt: requirePrompt(body) });
       writeJson(response, 202, { operationId: started.operationId.value, executionEpoch: started.executionEpoch });
       return;
     }

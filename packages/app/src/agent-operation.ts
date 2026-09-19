@@ -20,6 +20,7 @@ import {
   type EvidenceRef,
   type OperationId,
   type OrganId,
+  type ProviderCloseResult,
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
@@ -323,26 +324,32 @@ export class AgentOperationController {
     }
     const observedKinds: string[] = [];
     const outputRefs: string[] = [];
+    const observedEvents: AgentEvent[] = [];
     for await (const event of this.prepared.execution.observe()) {
       observedKinds.push(event.kind);
+      observedEvents.push(structuredClone(event));
       for (const ref of event.evidenceRefs) {
         if (ref.kind === 'tool') outputRefs.push(ref.locator);
       }
       if (event.kind === 'terminal') break;
     }
     const closure = await this.prepared.execution.settle();
+    const providerClose = await closeExecutionDriver(this.prepared.driver);
     this.settled = true;
+    const output = outputForDriver(this.prepared.driver, this.lastOutput);
     return {
       runtimeId: this.prepared.runtimeId,
       taskId: this.prepared.taskId,
       operationId: this.prepared.operationId,
       executionEpoch: this.prepared.executionEpoch,
-      output: this.lastOutput,
+      output,
       scope: this.prepared.execution.scope,
-      evidenceRefs: closure.evidenceRefs.length > 0 ? closure.evidenceRefs : this.lastOutput.evidenceRefs,
+      evidenceRefs: closure.evidenceRefs.length > 0 ? closure.evidenceRefs : output.evidenceRefs,
       closure,
       observedKinds,
       outputRefs,
+      observedEvents,
+      ...(providerClose === undefined ? {} : { providerClose }),
     };
   }
 
@@ -442,6 +449,7 @@ export class AgentOperationController {
       closure: { state: 'failed', evidenceRefs: [failureRef], ownerRef: OWNER },
       observedKinds: [],
       outputRefs: [],
+      observedEvents: [],
     };
     const checkpoint = await this.commitOutcome(receipt, 'failed');
     return this.result(checkpoint, receipt);
@@ -547,6 +555,34 @@ export class AgentOperationController {
       receipt,
     };
   }
+}
+
+type CloseableAgentDriver = AgentDriver & { close(): Promise<ProviderCloseResult> };
+type TraceableAgentDriver = AgentDriver & { output(): string };
+
+async function closeExecutionDriver(driver: AgentDriver): Promise<ProviderCloseResult | undefined> {
+  if (!('close' in driver) || typeof (driver as Partial<CloseableAgentDriver>).close !== 'function') return undefined;
+  const result = await (driver as CloseableAgentDriver).close();
+  if (result.state !== 'closed') {
+    throw new AppLifecycleError(
+      'provider-close-failed',
+      `provider close is ${result.state}`,
+      'reconcile provider close before treating the operation as complete',
+      OWNER,
+    );
+  }
+  return result;
+}
+
+function outputForDriver(driver: AgentDriver, output: AgentOutput): AgentOutput {
+  if (!('output' in driver) || typeof (driver as Partial<TraceableAgentDriver>).output !== 'function') return output;
+  return {
+    ...output,
+    payload: {
+      ...output.payload,
+      output: (driver as TraceableAgentDriver).output(),
+    },
+  };
 }
 
 function memoryTrigger(outcome: Checkpoint['outcome']): MemoryAnalysisTrigger | null {
