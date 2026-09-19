@@ -24,6 +24,17 @@ const { main, status } = makePageShell(
 let taskId = requestedTask
 let detail
 
+function readable(value, placeholder = '暂无信息') {
+  if (value === undefined || value === null || value === '') return placeholder
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => item && typeof item === 'object' ? item.label : item)
+      .filter((item) => item !== undefined && item !== null && item !== '')
+    return items.length ? items.join('、') : placeholder
+  }
+  return String(value)
+}
+
 function renderCreate() {
   const panel = element('section', undefined, 'panel')
   const form = element('form', undefined, 'form-grid')
@@ -61,8 +72,8 @@ function renderTask() {
   clearNode(main)
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
-  copy.append(element('p', 'Task Detail', 'eyebrow'), element('h1', detail.taskTitle))
-  const chip = element('span', detail.stateLabel, 'state-chip')
+  copy.append(element('p', 'Task Detail', 'eyebrow'), element('h1', readable(detail.data.label)))
+  const chip = element('span', readable(detail.currentState), 'state-chip')
   chip.dataset.tone = stateTone(detail.state)
   copy.append(chip)
   heading.append(copy)
@@ -70,15 +81,18 @@ function renderTask() {
 
   const facts = element('dl', undefined, 'detail-grid')
   for (const [label, value] of [
-    ['当前状态', detail.currentState],
-    ['输入', detail.priorInput || '尚未输入'],
-    ['输出', detail.output?.summary || '尚无输出'],
-    ['最近下一步', detail.nextAction],
+    ['输入', detail.priorInput],
+    ['调查结果', detail.investigation],
     ['建议', detail.proposal],
-    ['最近更新', detail.data.updatedAt ? formatTime(detail.data.updatedAt) : '尚未更新'],
+    ['需要你决定', detail.requiredDecisions],
+    ['输出', detail.output ? '已有任务输出' : undefined],
+    ['artifact', detail.output?.artifacts],
+    ['任务观测', detail.observationRef],
+    ['最近下一步', detail.nextAction],
+    ['最近更新', detail.data.updatedAt ? formatTime(detail.data.updatedAt) : undefined],
   ]) {
     const cell = element('div', undefined, 'detail-cell')
-    cell.append(element('dt', label), element('dd', value))
+    cell.append(element('dt', label), element('dd', readable(value)))
     facts.append(cell)
   }
   main.append(facts)

@@ -706,3 +706,21 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('/api/runtime/status'), true);
   assert.equal(source.includes('createRuntimeApi'), true);
 });
+
+test('task detail UI consumes typed task-detail projection fields', async () => {
+  const source = await readFile('docs/ui/task.js', 'utf8');
+  assert.equal(source.includes('detail.taskTitle'), false);
+  assert.equal(source.includes('detail.stateLabel'), false);
+  assert.equal(source.includes('detail.output?.summary'), false);
+  assert.equal(source.includes('detail.artifacts'), false);
+  assert.equal(/detail\.observation\b/.test(source), false);
+  assert.equal(source.includes('detail.data.label'), true);
+  assert.equal(source.includes('detail.currentState'), true);
+  assert.equal(source.includes('detail.priorInput'), true);
+  assert.equal(source.includes('detail.investigation'), true);
+  assert.equal(source.includes('detail.proposal'), true);
+  assert.equal(source.includes('detail.requiredDecisions'), true);
+  assert.equal(source.includes('detail.output'), true);
+  assert.equal(source.includes('detail.output?.artifacts'), true);
+  assert.equal(source.includes('detail.observationRef'), true);
+});
