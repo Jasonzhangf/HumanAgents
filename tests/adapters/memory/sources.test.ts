@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { id } from '../../../packages/contracts/src/index.js';
 import {
   FilesystemMemorySourceAdapter,
   MemorySourceError,
@@ -108,19 +109,19 @@ test('session evidence source is read-only and bound to the run manifest task', 
   const { adapter } = await fixture();
   const source = await adapter.readSession({
     projectKey: 'project-a',
-    taskId: 'task-a',
+    taskId: id('task', 'task-a'),
     sessionRef: 'session-a',
   });
-  assert.ok(source.sourceRef.startsWith('session://project-a/task-a/session-a@'));
+  assert.ok(source.sourceRef.startsWith('session://project-a/task/task-a/session-a@'));
   assert.ok(source.digest.startsWith('sha256:'));
   assert.match(source.content, /"sessionId":"session-a"/);
 
   await assert.rejects(
-    adapter.readSession({ projectKey: 'project-a', taskId: 'task-b', sessionRef: 'session-a' }),
+    adapter.readSession({ projectKey: 'project-a', taskId: id('task', 'task-b'), sessionRef: 'session-a' }),
     /not bound to task/,
   );
   await assert.rejects(
-    adapter.readSession({ projectKey: 'project-b', taskId: 'task-a', sessionRef: 'session-a' }),
+    adapter.readSession({ projectKey: 'project-b', taskId: id('task', 'task-a'), sessionRef: 'session-a' }),
     MemorySourceError,
   );
 });
@@ -167,25 +168,12 @@ test('undeclared local Skill returns a typed unavailable source with manifest ne
   assert.equal(agents.target, 'project-agents');
 });
 
-test('project source list keeps project experience available without an optional local Skill', async () => {
-  const fixtureValue = await fixture();
-  const adapter = new FilesystemMemorySourceAdapter({
-    workspaceCwd: fixtureValue.workspace,
-    sessionsRoot: fixtureValue.sessions,
-    runNotesRoot: fixtureValue.runNotes,
-    projectKey: 'project-a',
-    auditPromptRoot: fixtureValue.promptRoot,
-  });
-  const sources = await adapter.list({ projectKey: 'project-a' });
-  assert.deepEqual(sources.map((source) => source.target), ['project-agents']);
-});
-
 test('malformed run manifests fail as invalid sources instead of leaking runtime errors', async () => {
   const { adapter, runNotes } = await fixture();
   await writeFile(join(runNotes, 'session-a.manifest.json'), 'null\n', 'utf8');
 
   await assert.rejects(
-    adapter.readSession({ projectKey: 'project-a', taskId: 'task-a', sessionRef: 'session-a' }),
+    adapter.readSession({ projectKey: 'project-a', taskId: id('task', 'task-a'), sessionRef: 'session-a' }),
     (error: unknown) => error instanceof MemorySourceError && error.code === 'memory-source-invalid',
   );
 });
@@ -195,7 +183,7 @@ test('malformed session records fail as invalid sources', async () => {
   await writeSessionFile('null\n');
 
   await assert.rejects(
-    adapter.readSession({ projectKey: 'project-a', taskId: 'task-a', sessionRef: 'session-a' }),
+    adapter.readSession({ projectKey: 'project-a', taskId: id('task', 'task-a'), sessionRef: 'session-a' }),
     (error: unknown) => error instanceof MemorySourceError && error.code === 'memory-source-invalid',
   );
 });

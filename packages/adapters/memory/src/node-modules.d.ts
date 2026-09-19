@@ -8,7 +8,13 @@ declare module 'node:fs/promises' {
     isFile(): boolean;
     isSymbolicLink(): boolean;
   }
+  interface Dirent {
+    readonly name: string;
+    isDirectory(): boolean;
+    isFile(): boolean;
+  }
   function readFile(path: string | URL, encoding: 'utf8'): Promise<string>;
+  function readdir(path: string | URL, options: { withFileTypes: true }): Promise<Dirent[]>;
   function realpath(path: string | URL): Promise<string>;
   function mkdir(path: string | URL, options?: { recursive?: boolean }): Promise<string | undefined>;
   function open(path: string | URL, flags?: string): Promise<FileHandle>;

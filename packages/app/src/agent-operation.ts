@@ -27,9 +27,14 @@ import type { AgentConfig, LoadedConfiguration, RuntimePaths } from '../../confi
 import { composeAgentDriver, ensureDshSettings, resolveDshHome, type ComposedAgentDriver } from './agent-driver-composition.js';
 import { openAgentExecution, type AgentExecutionSession, type AgentExecutionReceipt } from './agent-execution.js';
 import { createJsonlAttentionPort } from './attention-journal.js';
-import { createJsonlCheckpointJournal } from './checkpoint-journal.js';
+import {
+  checkpointEvidenceDigest,
+  checkpointEvidenceLocator,
+  createJsonlCheckpointJournal,
+} from './checkpoint-journal.js';
 import { AppLifecycleError } from './errors.js';
 import { writeRunManifest } from './run-manifest.js';
+import { createMemoryAnalysisRequestedEvent, type MemoryAnalysisTrigger } from '../../runtime/src/memory/index.js';
 
 const OWNER = 'humanagent.app.run-operation';
 
@@ -57,6 +62,17 @@ export interface OpenAgentOperationInput {
    * not the same chain, so it must not claim a predecessor link.
    */
   readonly newChain?: boolean;
+  readonly memoryBoundaryPublisher?: MemoryBoundaryPublisher;
+}
+
+export interface MemoryBoundaryPublishInput {
+  readonly event: ReturnType<typeof createMemoryAnalysisRequestedEvent>;
+  readonly checkpoint: Checkpoint;
+  readonly recordDigest: string;
+}
+
+export interface MemoryBoundaryPublisher {
+  publish(input: MemoryBoundaryPublishInput): Promise<void>;
 }
 
 export interface RunAgentOperationResult {
@@ -99,6 +115,7 @@ interface PreparedOperation {
   readonly execution: AgentExecutionSession;
   readonly driver: AgentDriver;
   readonly attentionPort: AttentionPort;
+  readonly memoryBoundaryPublisher?: MemoryBoundaryPublisher;
 }
 
 function assemblePrompt(input: OpenAgentOperationInput, agent: AgentConfig): { prompt: string; promptRef?: string } {
@@ -235,6 +252,7 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
     execution,
     driver: composed.driver,
     attentionPort: createJsonlAttentionPort({ paths: input.paths }),
+    ...(input.memoryBoundaryPublisher === undefined ? {} : { memoryBoundaryPublisher: input.memoryBoundaryPublisher }),
   };
 }
 
@@ -242,6 +260,7 @@ export class AgentOperationController {
   private started = false;
   private submitted = false;
   private settled = false;
+  private committedCheckpoint?: Checkpoint;
   private lastOutput?: AgentOutput;
   private stoppedCheckpoint?: Checkpoint;
 
@@ -386,6 +405,15 @@ export class AgentOperationController {
   }
 
   async fail(error: unknown): Promise<RunAgentOperationResult> {
+    if (this.committedCheckpoint) {
+      throw new AppLifecycleError(
+        'agent-operation-post-commit-recovery-required',
+        `checkpoint ${this.committedCheckpoint.id.value} is committed; failure occurred after checkpoint commit`,
+        'recover the committed checkpoint and reconcile the memory boundary before retrying',
+        OWNER,
+        error,
+      );
+    }
     if (this.settled) throw new AppLifecycleError('agent-operation-settled', 'agent operation already settled', 'read the committed checkpoint instead', OWNER);
     this.settled = true;
     const message = error instanceof Error ? error.message : String(error);
@@ -448,7 +476,47 @@ export class AgentOperationController {
       previous: this.prepared.previous?.checkpoint ?? null,
       checkpoint,
     });
+    this.committedCheckpoint = completed.checkpoint;
     await this.writeManifest();
+    if (this.prepared.memoryBoundaryPublisher) {
+      const trigger = memoryTrigger(outcome);
+      if (trigger) {
+        const event = createMemoryAnalysisRequestedEvent({
+          messageId: `checkpoint-${completed.checkpoint.id.value}`,
+          streamId: `memory-boundaries:${this.prepared.taskId.value}`,
+          scope: this.prepared.scope,
+          occurredAt: new Date().toISOString(),
+          summary: `checkpoint ${outcome} for task ${this.prepared.taskId.value}`,
+          evidenceRefs: [{
+            evidenceId: id('evidence', `checkpoint-${completed.checkpoint.id.value}`),
+            kind: 'operation',
+            source: OWNER,
+            locator: checkpointEvidenceLocator(completed.checkpoint),
+            digest: checkpointEvidenceDigest(completed.checkpoint),
+            scope: this.prepared.scope,
+          }],
+          executionEpoch: this.prepared.executionEpoch,
+          trigger,
+          requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
+          candidateCategory: trigger === 'rewind' ? 'project-experience' : 'project-fact',
+          sessionRef: this.prepared.sessionId,
+        });
+        const recordDigest = completed.receipt.recordDigest;
+        if (!recordDigest) {
+          throw new AppLifecycleError(
+            'agent-operation-post-commit-recovery-required',
+            `checkpoint ${completed.checkpoint.id.value} is committed without a journal record digest`,
+            'reconcile the committed checkpoint record before publishing the memory boundary',
+            OWNER,
+          );
+        }
+        await this.prepared.memoryBoundaryPublisher.publish({
+          event,
+          checkpoint: completed.checkpoint,
+          recordDigest,
+        });
+      }
+    }
     return completed.checkpoint;
   }
 
@@ -479,6 +547,12 @@ export class AgentOperationController {
       receipt,
     };
   }
+}
+
+function memoryTrigger(outcome: Checkpoint['outcome']): MemoryAnalysisTrigger | null {
+  if (outcome === 'succeeded') return 'completion';
+  if (outcome === 'failed' || outcome === 'waiting' || outcome === 'blocked' || outcome === 'unknown') return 'blocked';
+  return null;
 }
 
 export async function openAgentOperation(input: OpenAgentOperationInput): Promise<AgentOperationController> {

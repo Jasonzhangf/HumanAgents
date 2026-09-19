@@ -8,6 +8,7 @@ export type CheckpointChainVerification =
 export interface LatestCheckpointRecord {
   readonly checkpoint: Checkpoint;
   readonly previous: Checkpoint | null;
+  readonly recordDigest?: string;
 }
 
 export interface CheckpointAppendRequest {
@@ -19,6 +20,7 @@ export interface CheckpointAppendRequest {
 export interface CheckpointAppendReceipt {
   readonly checkpointId: Checkpoint['id'];
   readonly seq: number;
+  readonly recordDigest?: string;
 }
 
 export interface CheckpointJournalPort {

@@ -115,8 +115,19 @@ export {
 } from './agent-driver-composition.js';
 export type { ComposedAgentDriver, DshCompositionInput } from './agent-driver-composition.js';
 export { openAgentOperation, prepareAgentOperation, AgentOperationController } from './agent-operation.js';
-export type { AgentOperationSnapshot, OpenAgentOperationInput } from './agent-operation.js';
-export { createJsonlCheckpointJournal } from './checkpoint-journal.js';
+export type { AgentOperationSnapshot, MemoryBoundaryPublishInput, MemoryBoundaryPublisher, OpenAgentOperationInput } from './agent-operation.js';
+export {
+  checkpointEvidenceDigest,
+  checkpointEvidenceLocator,
+  checkpointEvidenceText,
+  createJsonlCheckpointJournal,
+  readCommittedCheckpoint,
+  readCheckpointEvidence,
+} from './checkpoint-journal.js';
+export { createJsonlEventJournal } from './event-journal.js';
+export type { JsonlEventJournal } from './event-journal.js';
+export { composeMemoryRuntime } from './memory-runtime.js';
+export type { MemoryRuntime, MemoryRuntimeInput } from './memory-runtime.js';
 export { createM3Assembly } from './m3-assembly.js';
 export type { M3Assembly, M3AssemblyOptions } from './m3-assembly.js';
 export { checkpointIdFor, resumeAgentOperation, runAgentOperation } from './run-operation.js';

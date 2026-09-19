@@ -218,19 +218,27 @@ async function prepareBarrier(
     event,
     prepared as EventHandlerCommitIntent & { readonly completionMode: 'operation-barrier' },
   );
-  await driver.execute(delivery, persisted);
-  return persisted;
+  const executed = await driver.execute(delivery, persisted);
+  if (executed === undefined) return persisted;
+  if (!isRetryIntent(executed) && executed.completionMode === 'operation-barrier') {
+    throw new EventConsumerError('barrier execution cannot replace its persisted operation intent');
+  }
+  return executed;
 }
 
 async function recoverBarrier(
   driver: EventOperationBarrierDriver,
   delivery: Parameters<EventConsumerHandler>[0],
   intent: EventOperationBarrierIntent,
-): Promise<void> {
+): Promise<EventHandlerCommit | void> {
   if (!driver.recover) {
     throw new EventConsumerError('persisted barrier requires a recover-capable driver');
   }
-  await driver.recover(delivery, intent);
+  const recovered = await driver.recover(delivery, intent);
+  if (recovered !== undefined && !isRetryIntent(recovered) && recovered.completionMode === 'operation-barrier') {
+    throw new EventConsumerError('barrier recovery cannot replace its persisted operation intent');
+  }
+  return recovered;
 }
 
 async function assertCommitIntent(
@@ -665,14 +673,52 @@ async function processEvent(
     messageId: event.messageId,
   });
   if (persistedBarrier) {
+    const obligation = await ports.journal.readRetryObligation({
+      streamId: event.streamId,
+      consumerKey,
+      messageId: event.messageId,
+    });
+    if (obligation?.state === 'exhausted') {
+      const current = await authorizeEvent(ports, consumerKey, event);
+      if (!current.decision.deliver) return {};
+      return commitExhaustedReceipt(ports, current.consumer, event, obligation, updatedAt);
+    }
+    if (obligation?.state === 'cancelled') {
+      const current = await authorizeEvent(ports, consumerKey, event);
+      if (!current.decision.deliver) return {};
+      return {
+        receipt: await commitTerminalReceipt(
+          ports,
+          consumerKey,
+          event,
+          'rejected',
+          updatedAt,
+          obligation.failureRef,
+        ),
+      };
+    }
+    if (obligation && Date.parse(obligation.nextAttemptAt) > Date.parse(updatedAt)) {
+      return { retry: obligation };
+    }
+    const attempt = (obligation?.attempt ?? 0) + 1;
+    let recovered: EventHandlerCommit | void = undefined;
     if (barrierDriver) {
-      await recoverBarrier(
+      recovered = await recoverBarrier(
         barrierDriver,
-        { event, attempt: 1 },
+        { event, attempt, ...(obligation === null ? {} : { retryKey: obligation.retryKey }) },
         persistedBarrier.intent,
       );
     }
     const recoveryAuthorization = await authorizeEvent(ports, consumerKey, event);
+    if (recovered !== undefined) {
+      if (isRetryIntent(recovered)) {
+        assertRetryIntent(recoveryAuthorization.consumer, event, recovered, attempt);
+        return commitRetry(ports, recoveryAuthorization.consumer, event, recovered, updatedAt);
+      }
+      return {
+        receipt: await commitHandlerIntent(ports, consumerKey, event, recovered, updatedAt),
+      };
+    }
     const blocked = await assertCommitIntent(
       ports,
       recoveryAuthorization.consumer,

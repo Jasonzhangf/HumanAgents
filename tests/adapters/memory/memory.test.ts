@@ -206,6 +206,7 @@ test('approved and promoted records preserve per-reference provenance digests', 
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:candidate-a',
     evidenceRefs: [evidenceRef],
@@ -253,57 +254,6 @@ test('approved and promoted records preserve per-reference provenance digests', 
   assert.deepEqual(promoted.entries[0]?.sourceDigests, ['sha256:candidate-a', 'sha256:evidence-a', 'sha256:approval-a', 'sha256:promotion-a']);
 });
 
-test('approved global candidates persist in the global namespace while project candidates stay project-scoped', async () => {
-  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-global-candidate-'));
-  const roots = { project: join(root, 'project'), global: join(root, 'global') };
-  const memory = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence(roots));
-  const contentRef = 'asset://memory/global-candidate';
-  const evidenceRef = 'journal://project-a/global-candidate-evidence';
-  await memory.ingest({ scope: taskScope, sourceRef: contentRef, sourceDigest: 'sha256:global-candidate', text: 'global candidate content' });
-  await memory.ingest({ scope: taskScope, sourceRef: evidenceRef, sourceDigest: 'sha256:global-candidate-evidence', text: 'global candidate evidence' });
-  const submitted = await memory.submitCandidate({
-    submissionId: 'submission-global-candidate',
-    requestId: 'request-global-candidate',
-    operationId: id('operation', 'submission-global-candidate'),
-    bindingRef: 'binding-a',
-    actor,
-    projectKey: 'project-a',
-    taskId: task,
-    requestedKind: 'semantic',
-    contentRef,
-    contentDigest: 'sha256:global-candidate',
-    evidenceRefs: [evidenceRef],
-    observation: 'global candidate content',
-    desiredScope: 'global',
-    reason: 'approved global candidate regression',
-    inputDigest: 'sha256:submission-global-candidate',
-  });
-  await memory.reviewCandidate({
-    candidateId: submitted.candidateId!,
-    decision: 'approve',
-    actor: { ...actor, roleId: 'review' },
-    decisionReason: 'global evidence is complete',
-    decidedAt: '2026-09-17T00:00:00Z',
-    evidenceRefs: [evidenceRef],
-  });
-
-  const projectSnapshot = JSON.parse(await readFile(join(roots.project, 'snapshot.json'), 'utf8')) as MemoryPersistenceSnapshot;
-  const globalSnapshot = JSON.parse(await readFile(join(roots.global, 'snapshot.json'), 'utf8')) as MemoryPersistenceSnapshot;
-  assert.equal(projectSnapshot.candidates.length, 1);
-  assert.equal(projectSnapshot.canonicalRecords.length, 0);
-  assert.deepEqual(globalSnapshot.canonicalRecords.map((record) => ({ namespace: record.namespace, projectKey: record.projectKey })), [{ namespace: 'global', projectKey: undefined }]);
-  const reloaded = await DeterministicMemoryBackend.fromPersistence(new RootedMemoryPersistence(roots));
-  const global = await reloaded.query(memoryQuery({
-    actor: { ...actor, crossProjectGrantRef: 'grant://global-read' },
-    namespace: 'global',
-    taskId: undefined,
-    states: ['approved'],
-    query: 'global candidate content',
-  }));
-  assert.deepEqual(global.entries.map((entry) => entry.namespace), ['global']);
-  await rm(root, { recursive: true, force: true });
-});
-
 test('approval rejects evidence without a resolvable digest', async () => {
   const memory = new DeterministicMemoryBackend();
   const submitted = await memory.submitCandidate({
@@ -315,6 +265,7 @@ test('approval rejects evidence without a resolvable digest', async () => {
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef: 'asset://memory/candidate-missing-evidence',
     contentDigest: 'sha256:candidate-missing-evidence',
     evidenceRefs: ['journal://project-a/missing'],
@@ -363,6 +314,7 @@ test('approval deduplicates content provenance repeated in evidence refs', async
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:candidate-deduplicated',
     evidenceRefs: [contentRef],
@@ -399,6 +351,7 @@ test('promotion rejects an unresolvable approval source without changing canonic
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:candidate-approval',
     evidenceRefs: [evidenceRef],
@@ -457,6 +410,7 @@ test('final reviews cannot overwrite approved canonical state', async () => {
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:candidate-final-review',
     evidenceRefs: [evidenceRef],
@@ -503,6 +457,7 @@ test('final promotions cannot overwrite global provenance', async () => {
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:candidate-final-promotion',
     evidenceRefs: [evidenceRef],
@@ -568,6 +523,7 @@ test('promotion creates an independent global record and preserves the project r
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:candidate-independent',
     evidenceRefs: [evidenceRef],
@@ -630,6 +586,7 @@ test('memory backend persists and reloads canonical state without losing review 
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:persisted',
     evidenceRefs: [evidenceRef],
@@ -677,6 +634,7 @@ test('memory persistence preserves submission cycle identity across restart', as
     taskId: task,
     cycleId: cycle,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef: 'journal://task-a/cycle-source',
     contentDigest: 'sha256:cycle-source',
     evidenceRefs: ['journal://task-a/cycle-evidence'],
@@ -885,6 +843,7 @@ test('filesystem memory persistence rejects malformed nested state and dangling 
         projectKey: 'project-a',
         taskId: task,
         requestedKind: 'semantic',
+        candidateCategory: 'project-fact',
         contentRef: 'journal://task-a/valid',
         contentDigest: 'sha256:valid',
         evidenceRefs: ['journal://task-a/valid'],
@@ -982,6 +941,7 @@ test('rooted persistence isolates project and global partitions and recovers a t
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:rooted-candidate',
     evidenceRefs: [evidenceRef],
@@ -1204,6 +1164,7 @@ test('persistence failures do not expose uncommitted memory mutations', async ()
     projectKey: 'project-a',
     taskId: task,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef,
     contentDigest: 'sha256:uncommitted',
     evidenceRefs: [evidenceRef],

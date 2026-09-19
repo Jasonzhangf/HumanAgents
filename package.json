@@ -22,7 +22,7 @@
     "test:contracts": "pnpm build:contracts && node --test dist/tests/tests/contracts/contracts.test.js",
     "test:agent-templates": "pnpm exec tsc -p tests/agent-templates/tsconfig.json && node --test dist/tests/tests/agent-templates/template.test.js",
     "test:config": "pnpm build:config && tsc -p tests/config/tsconfig.json && node --test dist/tests/tests/config/config.test.js",
-    "test:app": "pnpm build:app && tsc -p tests/app/tsconfig.json && node --test dist/tests/tests/app/app.test.js dist/tests/tests/app/ui-runtime.test.js dist/tests/tests/app/supervisor/supervisor.test.js",
+    "test:app": "pnpm build:app && tsc -p tests/app/tsconfig.json && node --test dist/tests/tests/app/app.test.js dist/tests/tests/app/event-journal.test.js dist/tests/tests/app/ui-runtime.test.js dist/tests/tests/app/supervisor/supervisor.test.js",
     "test:provider": "pnpm build:app && tsc -p tests/adapters/provider/tsconfig.json && node --test dist/tests-provider/tests/adapters/provider/provider-adapter.test.js dist/tests-provider/tests/adapters/provider/provider-agent-driver.test.js dist/tests-provider/tests/adapters/provider/provider-replay.test.js dist/tests-provider/tests/adapters/provider/rcc-v3-transport.test.js",
     "test:ui": "pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js",
     "proof:ui-provider-loop": "node tests/app/real-ui-provider-loop.mjs",

@@ -1,6 +1,6 @@
 /// <reference path="./node-modules.d.ts" />
 import { createHash } from 'node:crypto';
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   AuditPromptSnapshot,
@@ -14,6 +14,7 @@ import type {
 } from '../../../contracts/src/index.js';
 
 export const MEMORY_SOURCE_ADAPTER_OWNER = 'memory-source-adapter';
+const ARCHITECTURE_RELATIVE_ROOT = 'docs/architecture';
 
 export type MemorySourceErrorCode =
   | 'memory-source-invalid'
@@ -83,6 +84,21 @@ function requireSafeSegment(value: string, label: string): string {
   return segment;
 }
 
+function requireSafeRelativePath(value: string, label: string): string {
+  const pathValue = nonEmpty(value, label);
+  if (isAbsolute(pathValue) || pathValue.includes('\\')) {
+    throw new MemorySourceError('memory-source-invalid', `${label} must be a relative Markdown path`);
+  }
+  const segments = pathValue.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new MemorySourceError('memory-source-invalid', `${label} contains an invalid path segment`);
+  }
+  if (!pathValue.endsWith('.md')) {
+    throw new MemorySourceError('memory-source-invalid', `${label} must reference a Markdown file`);
+  }
+  return pathValue;
+}
+
 async function readSourceFile(input: {
   readonly root: string;
   readonly relativePath: string;
@@ -128,6 +144,25 @@ function snapshot(source: SourceFile): MemorySourceSnapshot {
   };
 }
 
+async function listMarkdownFiles(root: string, relativeDir = ''): Promise<string[]> {
+  const files: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(join(root, relativeDir), { withFileTypes: true });
+  } catch (error) {
+    if ((error as { readonly code?: string }).code === 'ENOENT') return files;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      files.push(...await listMarkdownFiles(root, join(relativeDir, entry.name)));
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      files.push(join(relativeDir, entry.name));
+    }
+  }
+  return files.sort();
+}
+
 export class FilesystemMemorySourceAdapter
 implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAuditPromptSourcePort {
   private readonly now: () => string;
@@ -137,24 +172,39 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
     nonEmpty(options.sessionsRoot, 'memory sessions root');
     nonEmpty(options.runNotesRoot, 'memory run notes root');
     nonEmpty(options.projectKey, 'memory project key');
-    if ((options.localSkillRoot === undefined) !== (options.localSkillName === undefined)) {
-      throw new MemorySourceError('memory-source-invalid', 'memory local skill source root and name must be declared together');
-    }
     if (options.localSkillRoot !== undefined) nonEmpty(options.localSkillRoot, 'memory local skill root');
     if (options.localSkillName !== undefined) requireSafeSegment(options.localSkillName, 'memory local skill name');
+    if ((options.localSkillRoot === undefined) !== (options.localSkillName === undefined)) {
+      throw new MemorySourceError('memory-source-invalid', 'memory local skill root and name must be configured together');
+    }
     nonEmpty(options.auditPromptRoot, 'memory audit prompt root');
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
   async readSession(input: {
     readonly projectKey: string;
-    readonly taskId: string;
+    readonly taskId?: { readonly scope?: string; readonly value?: string };
+    readonly interactionScopeId?: string;
     readonly sessionRef: string;
   }): Promise<MemorySessionEvidence> {
     if (input.projectKey !== this.options.projectKey) {
       throw new MemorySourceError('memory-source-scope-denied', 'memory session source belongs to another project');
     }
-    const taskId = requireSafeSegment(input.taskId, 'memory session task id');
+    const taskId = input.taskId === undefined
+      ? undefined
+      : {
+          scope: 'task' as const,
+          value: requireSafeSegment(input.taskId.value ?? '', 'memory session task id'),
+        };
+    if (taskId !== undefined && input.taskId?.scope !== 'task') {
+      throw new MemorySourceError('memory-source-invalid', 'memory session task scope is invalid');
+    }
+    const interactionScopeId = input.interactionScopeId === undefined
+      ? undefined
+      : requireSafeSegment(input.interactionScopeId, 'memory interaction scope id');
+    if ((taskId === undefined) === (interactionScopeId === undefined)) {
+      throw new MemorySourceError('memory-source-invalid', 'memory session source requires exactly one task or interaction scope');
+    }
     const sessionRef = requireSafeSegment(input.sessionRef, 'memory session ref');
     const manifestSource = await readSourceFile({
       root: this.options.runNotesRoot,
@@ -174,20 +224,42 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
     const manifest = parsedManifest as {
       readonly sessionId?: string;
       readonly taskId?: { readonly scope?: string; readonly value?: string };
+      readonly interactionScopeId?: string;
     };
+    const manifestHasTaskScope = manifest.taskId !== undefined;
+    const manifestHasInteractionScope = manifest.interactionScopeId !== undefined;
     if (
       manifest.sessionId !== sessionRef
-      || typeof manifest.taskId !== 'object'
-      || manifest.taskId === null
-      || manifest.taskId.scope !== 'task'
-      || manifest.taskId.value !== taskId
+      || (
+        taskId !== undefined
+        && (
+          manifestHasInteractionScope
+          || typeof manifest.taskId !== 'object'
+          || manifest.taskId === null
+          || manifest.taskId.scope !== 'task'
+          || manifest.taskId.value !== taskId.value
+        )
+      )
+      || (
+        interactionScopeId !== undefined
+        && (
+          manifestHasTaskScope
+          || manifest.interactionScopeId !== interactionScopeId
+        )
+      )
     ) {
-      throw new MemorySourceError('memory-source-scope-denied', `memory session source is not bound to task ${taskId}`);
+      throw new MemorySourceError(
+        'memory-source-scope-denied',
+        `memory session source is not bound to ${taskId === undefined ? `interaction ${interactionScopeId}` : `task ${taskId.value}`}`,
+      );
     }
+    const sourceScope = taskId === undefined
+      ? `interaction/${interactionScopeId}`
+      : `task/${taskId.value}`;
     const source = await readSourceFile({
       root: this.options.sessionsRoot,
       relativePath: `${sessionRef}.jsonl`,
-      canonicalRef: `session://${this.options.projectKey}/${taskId}/${sessionRef}`,
+      canonicalRef: `session://${this.options.projectKey}/${sourceScope}/${sessionRef}`,
       now: this.now,
     });
     const records = source.content.split('\n').filter(Boolean).map((line, index) => {
@@ -212,7 +284,8 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
     return {
       ...snapshot(source),
       projectKey: this.options.projectKey,
-      taskId,
+      ...(taskId === undefined ? {} : { taskId }),
+      ...(interactionScopeId === undefined ? {} : { interactionScopeId }),
       sessionRef,
       content: source.content,
     };
@@ -220,7 +293,8 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
 
   async readProject(input: {
     readonly projectKey: string;
-    readonly target: 'project-agents' | 'project-local-skill';
+    readonly target: 'project-architecture' | 'project-agents' | 'project-local-skill';
+    readonly pathRef?: string;
   }): Promise<MemoryProjectSourceSnapshot> {
     if (input.projectKey !== this.options.projectKey) {
       throw new MemorySourceError('memory-source-scope-denied', 'memory project source belongs to another project');
@@ -234,18 +308,28 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
       });
       return { ...snapshot(source), projectKey: this.options.projectKey, target: input.target, content: source.content };
     }
-    if (this.options.localSkillRoot === undefined || this.options.localSkillName === undefined) {
-      throw new MemorySourceError(
-        'memory-source-unavailable',
-        'project local Skill source is not declared in project.json',
-        MEMORY_SOURCE_ADAPTER_OWNER,
-        'project.json#sources.localSkill',
-      );
+    if (input.target === 'project-local-skill') {
+      if (this.options.localSkillRoot === undefined || this.options.localSkillName === undefined) {
+        throw new MemorySourceError(
+          'memory-source-unavailable',
+          'project local Skill source is not declared in project.json',
+          MEMORY_SOURCE_ADAPTER_OWNER,
+          'project.json#sources.localSkill',
+        );
+      }
+      const source = await readSourceFile({
+        root: this.options.localSkillRoot,
+        relativePath: join(this.options.localSkillName, 'SKILL.md'),
+        canonicalRef: `skill://project/${this.options.projectKey}/${this.options.localSkillName}/SKILL.md`,
+        now: this.now,
+      });
+      return { ...snapshot(source), projectKey: this.options.projectKey, target: input.target, content: source.content };
     }
+    const pathRef = requireSafeRelativePath(input.pathRef ?? '', 'memory project architecture ref');
     const source = await readSourceFile({
-      root: this.options.localSkillRoot,
-      relativePath: join(this.options.localSkillName, 'SKILL.md'),
-      canonicalRef: `skill://project/${this.options.projectKey}/${this.options.localSkillName}/SKILL.md`,
+      root: this.options.workspaceCwd,
+      relativePath: join(ARCHITECTURE_RELATIVE_ROOT, pathRef),
+      canonicalRef: `project://${this.options.projectKey}/${ARCHITECTURE_RELATIVE_ROOT}/${pathRef}`,
       now: this.now,
     });
     return { ...snapshot(source), projectKey: this.options.projectKey, target: input.target, content: source.content };
@@ -257,7 +341,16 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
     if (input.projectKey !== this.options.projectKey) {
       throw new MemorySourceError('memory-source-scope-denied', 'memory project source belongs to another project');
     }
-    const sources = [this.readProject({ projectKey: input.projectKey, target: 'project-agents' })];
+    const architecture = (await listMarkdownFiles(join(this.options.workspaceCwd, ARCHITECTURE_RELATIVE_ROOT)))
+      .map((pathRef) => this.readProject({
+        projectKey: input.projectKey,
+        target: 'project-architecture',
+        pathRef,
+      }));
+    const sources = [
+      this.readProject({ projectKey: input.projectKey, target: 'project-agents' }),
+      ...architecture,
+    ];
     if (this.options.localSkillRoot !== undefined && this.options.localSkillName !== undefined) {
       sources.push(this.readProject({ projectKey: input.projectKey, target: 'project-local-skill' }));
     }

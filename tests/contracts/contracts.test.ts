@@ -84,6 +84,7 @@ const memorySubmission = (overrides: Partial<MemorySubmission> = {}): MemorySubm
   taskId: task,
   cycleId: id('cycle', 'cycle-a'),
   requestedKind: 'semantic',
+  candidateCategory: 'project-fact',
   contentRef: 'asset://memory/candidate-a',
   contentDigest: 'sha256:candidate-a',
   evidenceRefs: ['journal://project-a/1'],

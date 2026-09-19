@@ -1,11 +1,15 @@
+import { createHash } from 'node:crypto';
 import {
   ContractError,
+  validateMemoryActor,
   validateMemoryCurationResult,
   validateMemoryFollowUpRequest,
   validateProjectSourceUpdateProposal,
   type AuditPromptSnapshot,
   type MemoryActorContext,
+  type MemoryAgentStatePort,
   type MemoryAuditPromptSourcePort,
+  type MemoryCandidateCategory,
   type MemoryCurationResult,
   type MemoryFollowUpRequest,
   type MemoryOperationsPort,
@@ -18,6 +22,7 @@ import {
   type MemorySubmissionReceipt,
   type OperationId,
   type ProjectSourceUpdateProposal,
+  type ScopedId,
   type TaskId,
 } from '../../../contracts/src/index.js';
 
@@ -60,11 +65,13 @@ export interface MemoryAnalysisRequest {
   readonly projectKey: string;
   readonly scope: MemoryScope;
   readonly taskId?: TaskId;
+  readonly interactionScopeId?: string;
   readonly sessionRef?: string;
   readonly sourceRefs: readonly string[];
   readonly sourceDigests: readonly string[];
   readonly observation: string;
   readonly requestedKind: 'episodic' | 'semantic' | 'procedural';
+  readonly candidateCategory: MemoryCandidateCategory;
   readonly executionEpoch: number;
   readonly trigger: 'blocked' | 'rewind' | 'completion' | 'explicit-submission';
 }
@@ -74,6 +81,8 @@ export interface MemoryAnalysisBinding {
   readonly projectKey: string;
   readonly scope: MemoryScope;
   readonly taskId?: TaskId;
+  readonly interactionScopeId?: string;
+  readonly mainAgentId: string;
   readonly executionEpoch: number;
   readonly ownerId: string;
   readonly operations: MemoryOperationsPort;
@@ -109,6 +118,8 @@ export interface MemoryProjectUpdateOwnerPort {
 export interface MemoryAnalysisResult {
   readonly curation: MemoryCurationResult;
   readonly submission?: MemorySubmissionReceipt;
+  readonly projectSources: readonly MemoryProjectSourceSnapshot[];
+  readonly proposal?: ProjectSourceUpdateProposal;
   readonly liveContextMutated: false;
   readonly promptSnapshot: AuditPromptSnapshot;
 }
@@ -121,6 +132,7 @@ export interface MemoryAgentOptions {
   readonly projectSources: MemoryProjectSourcePort;
   readonly auditPrompts: MemoryAuditPromptSourcePort;
   readonly projectUpdateOwner: MemoryProjectUpdateOwnerPort;
+  readonly state?: MemoryAgentStatePort;
   readonly now?: () => string;
 }
 
@@ -137,6 +149,134 @@ interface FollowUpRecord {
 interface AcceptedAnalysis {
   readonly request: MemoryAnalysisRequest;
   readonly acceptedAt: string;
+}
+
+interface PersistedMemoryAgentState {
+  readonly version: 1;
+  readonly analyses: readonly AcceptedAnalysis[];
+  readonly followUps: readonly FollowUpRecord[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function invalidPersistedState(): never {
+  throw new ContractError('persisted memory agent state is invalid');
+}
+
+function assertPersisted(condition: unknown): asserts condition {
+  if (!condition) invalidPersistedState();
+}
+
+function validatePersistedId(
+  value: unknown,
+  expectedScope: 'operation' | 'organ' | 'task',
+): asserts value is ScopedId {
+  assertPersisted(isRecord(value));
+  assertPersisted(value.scope === expectedScope);
+  assertPersisted(typeof value.value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.value));
+}
+
+function validatePersistedMemoryScope(value: unknown): asserts value is MemoryScope {
+  assertPersisted(isRecord(value));
+  assertPersisted(value.kind === 'task' || value.kind === 'organ' || value.kind === 'approved-global');
+  validatePersistedId(value.organId, 'organ');
+  if (value.kind === 'task') {
+    validatePersistedId(value.taskId, 'task');
+  } else {
+    assertPersisted(value.taskId === undefined);
+  }
+}
+
+function validatePersistedTimestamp(value: unknown): void {
+  assertPersisted(typeof value === 'string' && value.trim().length > 0 && Number.isFinite(Date.parse(value)));
+}
+
+function validatePersistedStringArray(value: unknown): asserts value is readonly string[] {
+  assertPersisted(Array.isArray(value) && value.length > 0);
+  for (const entry of value) {
+    assertPersisted(typeof entry === 'string' && entry.trim().length > 0);
+  }
+}
+
+function validatePersistedAnalysisRequest(value: unknown): asserts value is MemoryAnalysisRequest {
+  assertPersisted(isRecord(value));
+  validatePersistedId(value.operationId, 'operation');
+  assertPersisted(typeof value.bindingRef === 'string' && value.bindingRef.trim().length > 0);
+  assertPersisted(typeof value.projectKey === 'string' && value.projectKey.trim().length > 0);
+  validatePersistedMemoryScope(value.scope);
+  assertPersisted((value.taskId === undefined) !== (value.interactionScopeId === undefined));
+  if (value.taskId !== undefined) {
+    validatePersistedId(value.taskId, 'task');
+    assertPersisted(value.scope.kind === 'task');
+    assertPersisted(
+      (value.scope as MemoryScope).taskId?.scope === 'task'
+      && (value.scope as MemoryScope).taskId?.value === value.taskId.value,
+    );
+  }
+  if (value.interactionScopeId !== undefined) {
+    assertPersisted(typeof value.interactionScopeId === 'string' && value.interactionScopeId.trim().length > 0);
+    assertPersisted(value.scope.kind !== 'task');
+  }
+  if (value.sessionRef !== undefined) {
+    assertPersisted(typeof value.sessionRef === 'string' && value.sessionRef.trim().length > 0);
+  }
+  validatePersistedStringArray(value.sourceRefs);
+  validatePersistedStringArray(value.sourceDigests);
+  assertPersisted(value.sourceRefs.length === value.sourceDigests.length);
+  assertPersisted(typeof value.observation === 'string' && value.observation.trim().length > 0);
+  assertPersisted(value.requestedKind === 'episodic' || value.requestedKind === 'semantic' || value.requestedKind === 'procedural');
+  assertPersisted(
+    value.candidateCategory === 'project-fact'
+    || value.candidateCategory === 'project-experience'
+    || value.candidateCategory === 'global'
+    || value.candidateCategory === 'user-profile'
+    || value.candidateCategory === 'local-skill-update',
+  );
+  assertPersisted(typeof value.executionEpoch === 'number' && Number.isSafeInteger(value.executionEpoch) && value.executionEpoch >= 1);
+  assertPersisted(
+    value.trigger === 'blocked'
+    || value.trigger === 'rewind'
+    || value.trigger === 'completion'
+    || value.trigger === 'explicit-submission',
+  );
+  try {
+    validateMemoryActor(value.actor as MemoryActorContext);
+  } catch {
+    invalidPersistedState();
+  }
+  const actor = value.actor as MemoryActorContext;
+  assertPersisted(actor.projectKey === value.projectKey);
+  assertPersisted(actor.permissions.includes('memory.propose'));
+}
+
+function validatePersistedFollowUpRequest(value: unknown): asserts value is MemoryFollowUpRequest {
+  assertPersisted(isRecord(value));
+  validatePersistedId(value.operationId, 'operation');
+  try {
+    validateMemoryFollowUpRequest(value as unknown as MemoryFollowUpRequest);
+  } catch {
+    invalidPersistedState();
+  }
+}
+
+function restoreState(input: unknown): PersistedMemoryAgentState | undefined {
+  if (input === undefined) return undefined;
+  if (!isRecord(input) || input.version !== 1 || !Array.isArray(input.analyses) || !Array.isArray(input.followUps)) {
+    invalidPersistedState();
+  }
+  for (const analysis of input.analyses) {
+    assertPersisted(isRecord(analysis));
+    validatePersistedAnalysisRequest(analysis.request);
+    validatePersistedTimestamp(analysis.acceptedAt);
+  }
+  for (const followUp of input.followUps) {
+    assertPersisted(isRecord(followUp));
+    validatePersistedFollowUpRequest(followUp.request);
+    validatePersistedTimestamp(followUp.acceptedAt);
+  }
+  return input as unknown as PersistedMemoryAgentState;
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -184,6 +324,7 @@ function sameFollowUpRequest(left: MemoryFollowUpRequest, right: MemoryFollowUpR
     && left.projectKey === right.projectKey
     && left.namespace === right.namespace
     && sameTask(left.taskId, right.taskId)
+    && left.interactionScopeId === right.interactionScopeId
     && left.actor.actorId === right.actor.actorId
     && left.actor.roleId === right.actor.roleId
     && left.actor.projectKey === right.actor.projectKey
@@ -220,6 +361,8 @@ export class MemoryAgent {
   private readonly analyses = new Map<string, AcceptedAnalysis>();
   private readonly followUps = new Map<string, FollowUpRecord>();
   private readonly now: () => string;
+  private restored = false;
+  private restorePromise?: Promise<void>;
 
   constructor(private readonly options: MemoryAgentOptions) {
     nonEmpty(options.projectKey, 'memory agent project key');
@@ -227,10 +370,67 @@ export class MemoryAgent {
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
+  private async restore(): Promise<void> {
+    if (this.restored) return;
+    if (!this.options.state) {
+      this.restored = true;
+      return;
+    }
+    this.restorePromise ??= (async () => {
+      const persisted = restoreState(await this.options.state!.readMemoryAgentState());
+      if (!persisted) {
+        this.restored = true;
+        return;
+      }
+      for (const analysis of persisted.analyses) {
+        this.analyses.set(analysis.request.operationId.value, {
+          request: {
+            ...analysis.request,
+            sourceRefs: [...analysis.request.sourceRefs],
+            sourceDigests: [...analysis.request.sourceDigests],
+          },
+          acceptedAt: analysis.acceptedAt,
+        });
+      }
+      for (const followUp of persisted.followUps) {
+        this.followUps.set(followUp.request.correlationId, {
+          request: {
+            ...followUp.request,
+            evidenceRefs: [...followUp.request.evidenceRefs],
+            evidenceDigests: [...followUp.request.evidenceDigests],
+            sourceRefs: [...followUp.request.sourceRefs],
+          },
+          acceptedAt: followUp.acceptedAt,
+        });
+      }
+      this.restored = true;
+    })();
+    try {
+      await this.restorePromise;
+    } catch (error) {
+      this.restorePromise = undefined;
+      throw error;
+    }
+  }
+
+  private async persistState(): Promise<void> {
+    if (!this.options.state) return;
+    const state: PersistedMemoryAgentState = {
+      version: 1,
+      analyses: [...this.analyses.values()],
+      followUps: [...this.followUps.values()],
+    };
+    await this.options.state.appendMemoryAgentState({
+      commitId: `memory-agent-state:${createHash('sha256').update(JSON.stringify(state)).digest('hex')}`,
+      state,
+    });
+  }
+
   bind(input: MemoryAnalysisBinding): MemoryAnalysisBinding {
     nonEmpty(input.bindingRef, 'memory binding ref');
     nonEmpty(input.projectKey, 'memory binding project key');
     nonEmpty(input.ownerId, 'memory binding owner');
+    nonEmpty(input.mainAgentId, 'memory binding main agent id');
     if (input.projectKey !== this.options.projectKey) throw new ContractError('memory binding project does not match memory agent');
     if (!Number.isSafeInteger(input.executionEpoch) || input.executionEpoch < 1) throw new ContractError('memory binding execution epoch must be positive');
     const existing = this.bindings.get(input.bindingRef);
@@ -240,11 +440,19 @@ export class MemoryAgent {
         || existing.executionEpoch !== input.executionEpoch
         || scopeKey(existing.scope) !== scopeKey(input.scope)
         || !sameTask(existing.taskId, input.taskId)
+        || existing.interactionScopeId !== input.interactionScopeId
+        || existing.mainAgentId !== input.mainAgentId
         || existing.operations !== input.operations
       ) {
         throw new ContractError('memory binding conflicts with an existing binding');
       }
       return existing;
+    }
+    const existingMainAgent = [...this.bindings.values()].find(
+      (candidate) => candidate.mainAgentId === input.mainAgentId,
+    );
+    if (existingMainAgent) {
+      throw new ContractError(`memory binding already exists for main agent: ${input.mainAgentId}`);
     }
     const binding = { ...input };
     this.bindings.set(binding.bindingRef, binding);
@@ -252,6 +460,7 @@ export class MemoryAgent {
   }
 
   async analyze(input: MemoryAnalysisRequest): Promise<MemoryAgentOutcome<MemoryAnalysisResult>> {
+    await this.restore();
     const bound = this.resolve(input);
     if (bound.status !== 'ready') return bound;
     if (
@@ -259,6 +468,7 @@ export class MemoryAgent {
       || input.projectKey !== bound.value.binding.projectKey
       || scopeKey(input.scope) !== scopeKey(bound.value.binding.scope)
       || !sameTask(input.taskId, bound.value.binding.taskId)
+      || input.interactionScopeId !== bound.value.binding.interactionScopeId
     ) {
       return {
         status: 'attention',
@@ -306,7 +516,8 @@ export class MemoryAgent {
       try {
         sessionEvidence = await this.options.sessions.readSession({
           projectKey: input.projectKey,
-          taskId: input.taskId?.value ?? '',
+          ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+          ...(input.interactionScopeId === undefined ? {} : { interactionScopeId: input.interactionScopeId }),
           sessionRef: input.sessionRef,
         });
       } catch (error) {
@@ -385,11 +596,12 @@ export class MemoryAgent {
         projectKey: input.projectKey,
         ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
         requestedKind: input.requestedKind,
+        candidateCategory: input.candidateCategory,
         contentRef: input.sourceRefs[0],
         contentDigest: input.sourceDigests[0],
         evidenceRefs: [...input.sourceRefs],
         observation: input.observation,
-        desiredScope: 'project',
+        desiredScope: input.candidateCategory === 'global' ? 'global' : 'project',
         reason: `${input.trigger}:${sessionEvidence?.sourceRef ?? prompt.canonicalRef}`,
         inputDigest: prompt.digest,
       });
@@ -401,7 +613,7 @@ export class MemoryAgent {
         ...(submission.candidateId === undefined ? {} : { candidateId: submission.candidateId }),
         matchedMemoryIds: [],
         conflictRefs: [],
-        explanation: 'memory analysis produced a project candidate for review',
+        explanation: `memory analysis produced a ${input.candidateCategory} candidate for review`,
         nextAction: 'review',
       };
       validateMemoryCurationResult(outcome);
@@ -409,11 +621,29 @@ export class MemoryAgent {
         request: { ...input, sourceRefs: [...input.sourceRefs], sourceDigests: [...input.sourceDigests] },
         acceptedAt: this.now(),
       });
+      await this.persistState();
+      const updateTarget = input.candidateCategory === 'local-skill-update'
+        ? 'project-local-skill'
+        : input.candidateCategory === 'project-experience'
+          ? 'project-agents'
+          : undefined;
+      let projectSources: readonly MemoryProjectSourceSnapshot[] = [];
+      let proposal: ProjectSourceUpdateProposal | undefined;
+      if (updateTarget !== undefined) {
+        try {
+          projectSources = await this.options.projectSources.list({ projectKey: input.projectKey });
+        } catch (error) {
+          return sourceErrorOutcome(error);
+        }
+        proposal = this.projectUpdateProposal(input, projectSources, updateTarget);
+      }
       return {
         status: 'ready',
         value: {
           curation: outcome,
           submission,
+          projectSources,
+          ...(proposal === undefined ? {} : { proposal }),
           liveContextMutated: false,
           promptSnapshot,
         },
@@ -424,10 +654,12 @@ export class MemoryAgent {
       request: { ...input, sourceRefs: [...input.sourceRefs], sourceDigests: [...input.sourceDigests] },
       acceptedAt: this.now(),
     });
+    await this.persistState();
     return {
       status: 'ready',
       value: {
         curation: outcome,
+        projectSources: [],
         liveContextMutated: false,
         promptSnapshot,
       },
@@ -435,6 +667,7 @@ export class MemoryAgent {
   }
 
   async followUp(input: MemoryFollowUpRequest): Promise<MemoryAgentOutcome<MemoryFollowUpReceipt>> {
+    await this.restore();
     try {
       validateMemoryFollowUpRequest(input);
     } catch (error) {
@@ -453,6 +686,7 @@ export class MemoryAgent {
     if (
       input.projectKey !== bound.projectKey
       || !sameTask(input.taskId, bound.taskId)
+      || input.interactionScopeId !== bound.interactionScopeId
       || input.actor.projectKey !== bound.projectKey
     ) {
       return {
@@ -473,6 +707,7 @@ export class MemoryAgent {
       || analysis.request.projectKey !== input.projectKey
       || scopeKey(analysis.request.scope) !== scopeKey(bound.scope)
       || !sameTask(analysis.request.taskId, input.taskId)
+      || analysis.request.interactionScopeId !== input.interactionScopeId
       || analysis.request.executionEpoch !== bound.executionEpoch
     ) {
       return {
@@ -515,6 +750,7 @@ export class MemoryAgent {
       acceptedAt: this.now(),
     };
     this.followUps.set(input.correlationId, record);
+    await this.persistState();
     return {
       status: 'ready',
       value: {
@@ -524,6 +760,24 @@ export class MemoryAgent {
         accepted: true,
         operationId: input.operationId,
       },
+    };
+  }
+
+  private projectUpdateProposal(
+    input: MemoryAnalysisRequest,
+    projectSources: readonly MemoryProjectSourceSnapshot[],
+    target: ProjectSourceUpdateProposal['target'],
+  ): ProjectSourceUpdateProposal | undefined {
+    const source = projectSources.find((candidate) => candidate.target === target);
+    if (!source) return undefined;
+    return {
+      target,
+      sourceRef: source.sourceRef,
+      expectedRevision: source.revision,
+      expectedDigest: source.digest,
+      patchRef: `memory-analysis-patch:${input.operationId.value}`,
+      evidenceRefs: [...input.sourceRefs],
+      ownerRef: target === 'project-agents' ? 'project-rule-owner' : 'local-skill-owner',
     };
   }
 

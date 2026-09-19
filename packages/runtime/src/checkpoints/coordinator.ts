@@ -185,7 +185,11 @@ export async function completeCheckpoint(
       }
       return {
         checkpoint: latest.checkpoint,
-        receipt: { checkpointId: latest.checkpoint.id, seq: latest.checkpoint.seq },
+        receipt: {
+          checkpointId: latest.checkpoint.id,
+          seq: latest.checkpoint.seq,
+          ...(latest.recordDigest === undefined ? {} : { recordDigest: latest.recordDigest }),
+        },
         windows: assembleCheckpointWindows(latest.checkpoint, input.windowLimits),
       };
     }

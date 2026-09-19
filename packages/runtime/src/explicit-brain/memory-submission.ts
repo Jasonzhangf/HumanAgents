@@ -50,6 +50,7 @@ export function enrichMemorySaveCandidate(input: {
     taskId: input.context.taskId,
     cycleId: input.context.cycleId,
     requestedKind: input.intentArguments.requestedKind,
+    candidateCategory: input.intentArguments.candidateCategory,
     contentRef: input.intentArguments.contentRef,
     contentDigest: input.context.contentDigest,
     evidenceRefs: [...input.intentArguments.evidenceRefs],

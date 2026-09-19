@@ -31,6 +31,7 @@ import {
   createMemoryAnalysisEventHandler,
   createMemoryAnalysisRequestedEvent,
   MEMORY_ANALYSIS_REQUESTED_KIND,
+  memoryAnalysisBarrierDriver,
   type MemoryAnalysisAdmissionPort,
   type MemoryAnalysisWakeBinding,
 } from '../../../packages/runtime/src/memory/index.js';
@@ -51,6 +52,7 @@ const binding: MemoryAnalysisWakeBinding = {
   executionEpoch: 2,
   scope: memoryScope,
   taskId: task,
+  mainAgentId: 'main-agent-a',
   actor,
 };
 const streamId = 'memory-boundaries';
@@ -98,6 +100,7 @@ function event(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
     evidenceRefs: [evidence('checkpoint-a')],
     executionEpoch: 2,
     trigger: 'completion',
+    candidateCategory: 'project-fact',
     ...overrides,
   });
 }
@@ -116,6 +119,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
     intent: Extract<EventHandlerCommit, { completionMode: 'operation-barrier' }>;
   }>();
   failAfterCommit = false;
+  externalOperations = new Map<string, EventExternalOperation>();
 
   async appendEvent(input: AppendEventRequest): Promise<EventRecord> {
     const sequence = this.events.filter((candidate) => candidate.streamId === input.event.streamId).length + 1;
@@ -237,12 +241,15 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
     readonly consumerKey: string;
     readonly messageId: string;
   }): Promise<EventExternalOperation | null> {
-    return {
-      operationRef: input.operationRef,
-      consumerKey: input.consumerKey,
-      messageId: input.messageId,
-      state: 'settled',
-    };
+    const operation = this.externalOperations.get(input.operationRef);
+    return operation?.consumerKey === input.consumerKey && operation.messageId === input.messageId
+      ? operation
+      : null;
+  }
+
+  async commitExternalOperation(operation: EventExternalOperation): Promise<EventExternalOperation> {
+    this.externalOperations.set(operation.operationRef, operation);
+    return operation;
   }
 
   async commitBarrierIntent(input: {
@@ -736,6 +743,148 @@ test('memory analysis consumer retries unavailable prompt attention without term
   assert.equal(journal.receipts.size, 0);
 });
 
+test('memory analysis barrier recovers a persisted pending operation after interrupted execution', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  const bus = ports(journal, registry);
+  await publishEvent(bus, { publisherId: publisher.publisherId, event: event() });
+  let admissions = 0;
+  const driver = memoryAnalysisBarrierDriver({
+    binding,
+    admission: {
+      admit: async () => {
+        admissions += 1;
+        return { status: 'ready', value: { admissionRef: 'memory-admission:message-a' } };
+      },
+    },
+    externalOperations: journal,
+    now: () => occurredAt,
+  });
+  await assert.rejects(
+    consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: { admit: async () => { throw new Error('unused'); } },
+      }),
+      {
+        ...driver,
+        execute: async () => { throw new Error('interrupted after barrier intent'); },
+      },
+    ),
+    /interrupted after barrier intent/,
+  );
+  assert.equal(admissions, 0);
+  assert.equal(journal.barrierIntents.size, 1);
+  assert.equal([...journal.externalOperations.values()][0]?.state, 'pending');
+
+  const recovered = await consumeEvents(
+    bus,
+    { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+    createMemoryAnalysisEventHandler({
+      binding,
+      admission: { admit: async () => { throw new Error('unused'); } },
+    }),
+    driver,
+  );
+  assert.equal(admissions, 1);
+  assert.equal(recovered.committed.length, 1);
+  assert.equal(recovered.committed[0]?.disposition, 'applied');
+  assert.equal([...journal.externalOperations.values()][0]?.state, 'reconciled');
+});
+
+test('memory analysis barrier preserves transient retry and terminal rejection policy', async () => {
+  for (const admission of [
+    {
+      expected: 'retry',
+      outcome: {
+        status: 'attention',
+        issue: {
+          code: 'memory-agent-source-unavailable',
+          state: 'attention',
+          ownerId: 'memory-agent',
+          message: 'source unavailable',
+          nextAction: { kind: 'wait', ref: 'memory-source-ready' },
+        },
+      },
+    },
+    {
+      expected: 'reject',
+      outcome: {
+        status: 'attention',
+        issue: {
+          code: 'memory-agent-source-invalid',
+          state: 'attention',
+          ownerId: 'memory-agent',
+          message: 'source invalid',
+          nextAction: { kind: 'recover', ref: 'memory-source-integrity' },
+        },
+      },
+    },
+  ] as const) {
+    const journal = new FakeJournal();
+    const registry = new FakeRegistry();
+    const bus = ports(journal, registry);
+    await publishEvent(bus, { publisherId: publisher.publisherId, event: event() });
+    const result = await consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: { admit: async () => { throw new Error('unused'); } },
+      }),
+      memoryAnalysisBarrierDriver({
+        binding,
+        admission: { admit: async () => admission.outcome },
+        externalOperations: journal,
+        now: () => occurredAt,
+      }),
+    );
+    if (admission.expected === 'retry') {
+      assert.equal(result.retries.length, 1);
+      assert.equal(result.committed.length, 0);
+      assert.equal([...journal.externalOperations.values()][0]?.state, 'pending');
+    } else {
+      assert.equal(result.retries.length, 0);
+      assert.equal(result.committed[0]?.disposition, 'rejected');
+      assert.equal(result.committed[0]?.failureRef, 'memory-agent-source-invalid');
+      assert.equal([...journal.externalOperations.values()][0]?.state, 'failed');
+    }
+  }
+});
+
+test('memory analysis barrier fails explicitly when the external operation owner is read-only', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  const bus = ports(journal, registry);
+  await publishEvent(bus, { publisherId: publisher.publisherId, event: event() });
+
+  const driver = memoryAnalysisBarrierDriver({
+    binding,
+    admission: {
+      admit: async () => ({ status: 'ready', value: { admissionRef: 'memory-admission:read-only' } }),
+    },
+    externalOperations: {
+      readExternalOperation: async () => null,
+    },
+    now: () => occurredAt,
+  });
+
+  await assert.rejects(
+    consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: { admit: async () => { throw new Error('unused'); } },
+      }),
+      driver,
+    ),
+    /memory analysis external operation owner is not writable/,
+  );
+});
+
 test('memory analysis consumer rejects a binding mismatch before admission', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
@@ -777,6 +926,7 @@ test('memory analysis event kind is stable and data-only', () => {
     evidenceRefs: [evidence('checkpoint-a')],
     executionEpoch: 2,
     trigger: 'completion',
+    candidateCategory: 'project-fact',
   }), /cannot form a stable operation id/);
   assert.throws(() => createMemoryAnalysisRequestedEvent({
     messageId: 'missing-evidence',
@@ -787,6 +937,7 @@ test('memory analysis event kind is stable and data-only', () => {
     evidenceRefs: [],
     executionEpoch: 2,
     trigger: 'completion',
+    candidateCategory: 'project-fact',
   }), /requires evidence refs/);
   assert.throws(() => createMemoryAnalysisRequestedEvent({
     messageId: 'missing-digest',
@@ -797,6 +948,7 @@ test('memory analysis event kind is stable and data-only', () => {
     evidenceRefs: [{ ...evidence('checkpoint-a'), digest: undefined }],
     executionEpoch: 2,
     trigger: 'completion',
+    candidateCategory: 'project-fact',
   }), /require locators and digests/);
 });
 

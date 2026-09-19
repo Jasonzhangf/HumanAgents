@@ -2,7 +2,7 @@
 import { ConfigurationError, ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../config/src/index.js';
 import { id, type ProviderBinding } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
-import { closeRuntime, composeRuntimeMemory, configureBuiltinPromptRoot, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
+import { closeRuntime, composeMemoryRuntime, composeRuntimeMemory, configureBuiltinPromptRoot, openRuntime, readRunManifest, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome } from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
 import { join } from 'node:path';
@@ -65,6 +65,44 @@ export async function main(args: readonly string[]): Promise<void> {
     const sessionId = option(args, '--session') ?? 'session-' + Date.now();
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
     try {
+      const memoryRef = option(args, '--memory');
+      const localSkill = runtime.configuration.projectSourceManifest.sources?.localSkill;
+      const mainAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
+      const memory = memoryRef === undefined
+        ? undefined
+        : await composeMemoryRuntime({
+            paths: runtime.paths,
+            configuration: runtime.configuration,
+            workspaceCwd: runtime.paths.workspaceCwd,
+            sessionsRoot: runtime.paths.sessionsRoot,
+            runNotesRoot: runtime.paths.runNotesRoot,
+            ...(localSkill === undefined ? {} : {
+              localSkillRoot: localSkill.root,
+              localSkillName: localSkill.name,
+            }),
+            auditPromptRoot: join(runtime.paths.controlRoot, 'memory-audit'),
+            auditPromptRef: runtime.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+            autoUpdate: runtime.configuration.effective.memory?.update.auto ?? false,
+            binding: {
+              bindingRef: memoryRef,
+              projectKey: runtime.paths.projectKey,
+              executionEpoch: 1,
+              scope: {
+                kind: 'task',
+                organId: id('organ', `agent-${mainAgentId}`),
+                taskId: id('task', sessionId),
+              },
+              taskId: id('task', sessionId),
+              mainAgentId,
+              actor: {
+                actorId: `memory:${runtime.paths.projectKey}`,
+                roleId: 'memory',
+                permissions: ['memory.read', 'memory.propose'],
+                projectKey: runtime.paths.projectKey,
+              },
+            },
+            mainAgentId,
+          });
       const running = await new SessionStore(runtime.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
       const result = await runAgentOperation({
         paths: runtime.paths,
@@ -73,7 +111,9 @@ export async function main(args: readonly string[]): Promise<void> {
         sessionId,
         plan,
         prompt,
+        ...(memory === undefined ? {} : { memoryBoundaryPublisher: memory.publisher }),
       });
+      const memoryResult = memory === undefined ? undefined : await memory.consume();
       const settled = await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
       console.log(JSON.stringify({
         command,
@@ -89,6 +129,7 @@ export async function main(args: readonly string[]): Promise<void> {
         outcome: result.checkpoint.outcome,
         checkpointId: result.checkpoint.id.value,
         observedKinds: result.receipt.observedKinds,
+        memoryAnalysis: memoryResult?.committed.length ?? 0,
       }, null, 2));
       void running;
     } catch (error) {
@@ -164,7 +205,7 @@ export async function main(args: readonly string[]): Promise<void> {
     const action = args[1] ?? 'list';
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
-    const configuration = await loadConfiguration(paths);
+    await loadConfiguration(paths);
     const store = new SessionStore(paths);
     if (action === 'list') {
       const sessions = await store.list();

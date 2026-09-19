@@ -1,5 +1,6 @@
 import type {
   EvidenceRef,
+  MemoryCandidateCategory,
   MemoryKind,
   MemoryNamespace,
   OperationId,
@@ -337,6 +338,7 @@ export interface MemoryOperationRequestedEvent {
 export interface MemorySaveCandidateArguments {
   readonly submissionId: string;
   readonly requestedKind: MemoryKind;
+  readonly candidateCategory: MemoryCandidateCategory;
   readonly contentRef: string;
   readonly evidenceRefs: readonly string[];
   readonly desiredScope: MemoryNamespace;
@@ -571,6 +573,13 @@ export function validateSubscriptionRequest(input: SubscriptionRequestArguments)
 export function validateMemorySaveCandidateArguments(input: MemorySaveCandidateArguments): void {
   nonEmpty(input.submissionId, 'memory submissionId');
   if (!MEMORY_KINDS.includes(input.requestedKind)) throw new ContractError('invalid memory submission kind');
+  includesValue([
+    'project-fact',
+    'project-experience',
+    'global',
+    'user-profile',
+    'local-skill-update',
+  ] as const, input.candidateCategory, 'memory submission candidateCategory');
   nonEmpty(input.contentRef, 'memory submission contentRef');
   if (input.evidenceRefs.length === 0) throw new ContractError('memory submission evidenceRefs cannot be empty');
   if (input.evidenceRefs.some((ref) => !ref.trim())) throw new ContractError('memory submission evidenceRefs cannot be empty');

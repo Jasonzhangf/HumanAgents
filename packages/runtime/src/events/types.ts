@@ -113,6 +113,7 @@ export interface EventExternalOperation {
   readonly consumerKey: string;
   readonly messageId: string;
   readonly state: ExternalOperationState;
+  readonly failureRef?: string;
 }
 
 export interface EventOperationBlocked {
@@ -185,11 +186,11 @@ export interface EventOperationBarrierDriver {
   execute(
     delivery: EventDelivery,
     intent: EventOperationBarrierIntent,
-  ): Promise<void>;
+  ): Promise<EventHandlerCommit | void>;
   recover?(
     delivery: EventDelivery,
     intent: EventOperationBarrierIntent,
-  ): Promise<void>;
+  ): Promise<EventHandlerCommit | void>;
 }
 
 export interface ConsumeEventsInput {

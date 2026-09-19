@@ -348,6 +348,7 @@ export interface MemorySubmission {
   readonly taskId?: TaskId;
   readonly cycleId?: CycleId;
   readonly requestedKind: MemoryKind;
+  readonly candidateCategory: MemoryCandidateCategory;
   readonly contentRef: string;
   readonly contentDigest: string;
   readonly evidenceRefs: readonly string[];
@@ -415,6 +416,17 @@ export interface AuditPromptSnapshot {
 }
 
 export type ProjectAutoUpdateTarget = 'project-agents' | 'project-local-skill';
+export type ProjectReadonlySourceTarget =
+  | 'project-architecture'
+  | 'project-agents'
+  | 'project-local-skill';
+
+export type MemoryCandidateCategory =
+  | 'project-fact'
+  | 'project-experience'
+  | 'global'
+  | 'user-profile'
+  | 'local-skill-update';
 
 export interface MemorySourceSnapshot {
   readonly sourceRef: string;
@@ -426,14 +438,15 @@ export interface MemorySourceSnapshot {
 
 export interface MemorySessionEvidence extends MemorySourceSnapshot {
   readonly projectKey: string;
-  readonly taskId: string;
+  readonly taskId?: TaskId;
+  readonly interactionScopeId?: string;
   readonly sessionRef: string;
   readonly content: string;
 }
 
 export interface MemoryProjectSourceSnapshot extends MemorySourceSnapshot {
   readonly projectKey: string;
-  readonly target: ProjectAutoUpdateTarget;
+  readonly target: ProjectReadonlySourceTarget;
   readonly content: string;
 }
 
@@ -445,7 +458,8 @@ export interface MemoryAuditPromptSnapshotSource extends MemorySourceSnapshot {
 export interface MemorySessionEvidenceSourcePort {
   readSession(input: {
     readonly projectKey: string;
-    readonly taskId: string;
+    readonly taskId?: TaskId;
+    readonly interactionScopeId?: string;
     readonly sessionRef: string;
   }): Promise<MemorySessionEvidence>;
 }
@@ -453,11 +467,31 @@ export interface MemorySessionEvidenceSourcePort {
 export interface MemoryProjectSourcePort {
   readProject(input: {
     readonly projectKey: string;
-    readonly target: ProjectAutoUpdateTarget;
+    readonly target: ProjectReadonlySourceTarget;
+    readonly pathRef?: string;
   }): Promise<MemoryProjectSourceSnapshot>;
   list(input: {
     readonly projectKey: string;
   }): Promise<readonly MemoryProjectSourceSnapshot[]>;
+}
+
+export interface MemoryProjectReadRequest {
+  readonly projectKey: string;
+  readonly taskId?: TaskId;
+  readonly affectedPathRefs: readonly string[];
+}
+
+export interface MemoryProjectSourceProvenance {
+  readonly sourceRef: string;
+  readonly canonicalRef: string;
+  readonly revision: string;
+  readonly digest: string;
+  readonly loadedAt: string;
+  readonly target: ProjectReadonlySourceTarget;
+}
+
+export interface MemoryProjectReadResult {
+  readonly sources: readonly MemoryProjectSourceProvenance[];
 }
 
 export interface MemoryAuditPromptSourcePort {
@@ -507,10 +541,19 @@ export interface MemoryFollowUpRequest {
   readonly projectKey: string;
   readonly namespace: MemoryNamespace;
   readonly taskId?: TaskId;
+  readonly interactionScopeId?: string;
   readonly evidenceRefs: readonly string[];
   readonly evidenceDigests: readonly string[];
   readonly sourceRefs: readonly string[];
   readonly inputDigest: string;
+}
+
+export interface MemoryAgentStatePort {
+  readMemoryAgentState(): Promise<unknown | undefined>;
+  appendMemoryAgentState(input: {
+    readonly commitId: string;
+    readonly state: unknown;
+  }): Promise<void>;
 }
 
 export interface MemoryContextPolicy {

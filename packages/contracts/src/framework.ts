@@ -404,6 +404,15 @@ export function validateMemorySubmission(input: MemorySubmission): void {
   if (input.actor.projectKey !== input.projectKey) throw new ContractError('memory submission actor project mismatch');
   if (input.taskId !== undefined) assertScopedTask(input.taskId, 'memory submission taskId');
   if (!MEMORY_KINDS.includes(input.requestedKind)) throw new ContractError('invalid memory submission kind');
+  if (![
+    'project-fact',
+    'project-experience',
+    'global',
+    'user-profile',
+    'local-skill-update',
+  ].includes(input.candidateCategory)) {
+    throw new ContractError('invalid memory submission candidateCategory');
+  }
   nonEmpty(input.contentRef, 'memory submission contentRef');
   nonEmpty(input.contentDigest, 'memory submission contentDigest');
   assertNonEmptyRefList(input.evidenceRefs, 'memory submission evidenceRefs');
@@ -534,6 +543,10 @@ export function validateMemoryFollowUpRequest(input: MemoryFollowUpRequest): voi
   if (!MEMORY_NAMESPACES.includes(input.namespace)) throw new ContractError('invalid memory follow-up namespace');
   if (input.namespace === 'global' && !input.actor.crossProjectGrantRef) throw new ContractError('global memory follow-up requires a cross-project grant');
   if (input.taskId !== undefined) assertScopedTask(input.taskId, 'memory follow-up taskId');
+  if (input.interactionScopeId !== undefined) nonEmpty(input.interactionScopeId, 'memory follow-up interactionScopeId');
+  if ((input.taskId === undefined) === (input.interactionScopeId === undefined)) {
+    throw new ContractError('memory follow-up requires exactly one task or interaction scope');
+  }
   assertRefList(input.evidenceRefs, 'memory follow-up evidenceRefs');
   assertRefList(input.evidenceDigests, 'memory follow-up evidenceDigests');
   if (input.evidenceRefs.length !== input.evidenceDigests.length) throw new ContractError('memory follow-up evidence refs and digests must match');

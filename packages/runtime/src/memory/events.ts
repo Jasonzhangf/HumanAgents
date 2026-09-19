@@ -4,6 +4,7 @@ import {
   type BusinessPayload,
   type EvidenceRef,
   type MemoryActorContext,
+  type MemoryCandidateCategory,
   type MemoryScope,
   type ScopeRef,
   type TaskId,
@@ -11,6 +12,9 @@ import {
 import {
   eventIdentityKey,
   type EventConsumerHandler,
+  type EventExternalOperation,
+  type EventExternalOperationPort,
+  type EventOperationBarrierDriver,
   type EventEnvelope,
   type EventHandlerCommit,
   type EventRecord,
@@ -40,12 +44,20 @@ export interface MemoryAnalysisWakeBinding {
   readonly scope: MemoryScope;
   readonly taskId?: TaskId;
   readonly interactionScopeId?: string;
+  readonly mainAgentId: string;
   readonly actor: MemoryActorContext;
 }
 
 export interface MemoryAnalysisAdmissionReceipt {
   readonly admissionRef: string;
+  readonly externalOperationRef?: string;
   readonly effectRefs?: readonly string[];
+}
+
+export interface MemoryAnalysisBarrierDriverOptions extends MemoryAnalysisEventConsumerOptions {
+  readonly externalOperations: EventExternalOperationPort & {
+    commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
+  };
 }
 
 export interface MemoryAnalysisAdmissionPort {
@@ -92,6 +104,7 @@ export interface MemoryAnalysisRequestedEventInput {
   readonly executionEpoch: number;
   readonly trigger: MemoryAnalysisTrigger;
   readonly requestedKind?: 'episodic' | 'semantic' | 'procedural';
+  readonly candidateCategory: MemoryCandidateCategory;
   readonly sessionRef?: string;
   readonly inputRevision?: number;
 }
@@ -146,6 +159,9 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
   if (!Number.isSafeInteger(binding.executionEpoch) || binding.executionEpoch < 1) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis binding execution epoch must be positive', 'memory-binding');
   }
+  if (!binding.mainAgentId.trim()) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding main agent id is required', 'memory-binding');
+  }
   if (binding.actor.projectKey !== binding.projectKey) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis actor belongs to another project', 'memory-permission');
   }
@@ -155,19 +171,19 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
   if (binding.scope.kind === 'task' && binding.scope.taskId === undefined) {
     return eventIssue('memory-agent-event-invalid', 'task memory analysis binding requires a task id', 'memory-binding');
   }
-  if (binding.interactionScopeId !== undefined && !binding.interactionScopeId.trim()) {
-    return eventIssue('memory-agent-event-invalid', 'memory analysis interaction scope must be non-empty', 'memory-binding');
+  if ((binding.taskId === undefined) === (binding.interactionScopeId === undefined)) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding requires exactly one task or interaction scope', 'memory-binding');
   }
-  if (binding.interactionScopeId !== undefined && binding.taskId !== undefined) {
-    return eventIssue('memory-agent-event-invalid', 'memory analysis binding cannot mix task and interaction scopes', 'memory-binding');
+  if (binding.taskId !== undefined && !sameId(binding.taskId, binding.scope.taskId)) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis task binding does not match its memory scope', 'memory-binding');
   }
   return null;
 }
 
 function scopeMatchesEvent(scope: MemoryScope, eventScope: ScopeRef): boolean {
   if (!sameId(scope.organId, eventScope.organId)) return false;
-  if (scope.taskId !== undefined && !sameId(scope.taskId, eventScope.taskId)) return false;
-  return true;
+  if (scope.taskId === undefined) return eventScope.taskId === undefined;
+  return sameId(scope.taskId, eventScope.taskId);
 }
 
 function evidenceSources(event: EventRecord): {
@@ -193,6 +209,16 @@ function requestedKind(payload: Record<string, unknown>, trigger: MemoryAnalysis
   return 'semantic';
 }
 
+function candidateCategory(value: unknown): MemoryAnalysisRequest['candidateCategory'] | null {
+  return value === 'project-fact'
+    || value === 'project-experience'
+    || value === 'global'
+    || value === 'user-profile'
+    || value === 'local-skill-update'
+    ? value
+    : null;
+}
+
 export function createMemoryAnalysisRequestedEvent(
   input: MemoryAnalysisRequestedEventInput,
 ): EventEnvelope {
@@ -214,6 +240,7 @@ export function createMemoryAnalysisRequestedEvent(
   const payload: BusinessPayload = {
     trigger: input.trigger,
     requestedKind: input.requestedKind ?? (input.trigger === 'rewind' ? 'procedural' : 'semantic'),
+    candidateCategory: input.candidateCategory,
     ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
   };
   return {
@@ -264,7 +291,7 @@ export function memoryAnalysisRequestFromEvent(
     return eventIssue('memory-agent-event-evidence-missing', 'memory analysis event requires evidence locators and digests', 'memory-analysis-evidence');
   }
   const payload = payloadRecord(event.payload);
-  const allowed = new Set(['trigger', 'requestedKind', 'sessionRef']);
+  const allowed = new Set(['trigger', 'requestedKind', 'candidateCategory', 'sessionRef']);
   const unknown = Object.keys(payload).find((key) => !allowed.has(key));
   if (unknown) {
     return eventIssue('memory-agent-event-invalid', `memory analysis event payload contains unsupported key: ${unknown}`, 'memory-analysis-event');
@@ -278,6 +305,10 @@ export function memoryAnalysisRequestFromEvent(
   const kind = requestedKind(payload, payload.trigger);
   if (payload.requestedKind !== undefined && payload.requestedKind !== kind) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis requested kind is invalid', 'memory-analysis-event');
+  }
+  const category = candidateCategory(payload.candidateCategory);
+  if (category === null) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis candidate category is invalid', 'memory-analysis-event');
   }
   return {
     status: 'ready',
@@ -294,11 +325,13 @@ export function memoryAnalysisRequestFromEvent(
         ...(binding.scope.taskId === undefined ? {} : { taskId: { ...binding.scope.taskId } }),
       },
       ...(taskId === undefined ? {} : { taskId: { ...taskId } }),
+      ...(binding.interactionScopeId === undefined ? {} : { interactionScopeId: binding.interactionScopeId }),
       ...(typeof payload.sessionRef === 'string' ? { sessionRef: payload.sessionRef } : {}),
       sourceRefs: [...sources.sourceRefs],
       sourceDigests: [...sources.sourceDigests],
       observation: event.summary,
       requestedKind: kind,
+      candidateCategory: category,
       executionEpoch: event.executionEpoch,
       trigger: payload.trigger,
     },
@@ -407,5 +440,169 @@ export function createMemoryAnalysisEventHandler(
       ],
       externalOperationRefs: [],
     };
+  };
+}
+
+export function memoryAnalysisBarrierDriver(
+  options: MemoryAnalysisBarrierDriverOptions,
+): EventOperationBarrierDriver {
+  const now = options.now ?? (() => new Date().toISOString());
+  const retryDelayMs = options.retryDelayMs ?? 1_000;
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 1) {
+    throw new Error('memory analysis retry delay must be a positive safe integer');
+  }
+  const retryOwnerRef = options.retryOwnerRef ?? MEMORY_AGENT_OWNER;
+  if (!retryOwnerRef.trim()) throw new Error('memory analysis retry owner is required');
+  const commitExternalOperation = async (operation: EventExternalOperation): Promise<void> => {
+    const commit = options.externalOperations.commitExternalOperation;
+    if (!commit) throw new Error('memory analysis external operation owner is not writable');
+    await commit.call(options.externalOperations, operation);
+  };
+
+  const externalOperation = (event: EventRecord, operationRef: string): EventExternalOperation => ({
+    operationRef,
+    consumerKey: options.binding.bindingRef,
+    messageId: event.messageId,
+    state: 'pending',
+  });
+
+  const admit = async (
+    delivery: Parameters<EventConsumerHandler>[0],
+    intent: Parameters<NonNullable<EventOperationBarrierDriver['recover']>>[1],
+    recovery: boolean,
+  ): Promise<EventHandlerCommit | void> => {
+    const operationRef = intent.externalOperationRefs[0];
+    if (!operationRef) throw new Error('memory analysis barrier intent is missing its external operation ref');
+    const requestOutcome = memoryAnalysisRequestFromEvent(delivery.event, options.binding);
+    if (requestOutcome.status === 'attention') {
+      await commitExternalOperation({
+        ...externalOperation(delivery.event, operationRef),
+        state: 'failed',
+        failureRef: requestOutcome.issue.code,
+      });
+      return rejectedCommit(delivery.event, options.binding.bindingRef, requestOutcome.issue.code);
+    }
+    if (requestOutcome.status !== 'ready') {
+      return retryCommit(
+        delivery.event,
+        options.binding.bindingRef,
+        delivery.attempt,
+        now(),
+        retryDelayMs,
+        retryOwnerRef,
+        requestOutcome.issue.code,
+      );
+    }
+    const admissionOutcome = await options.admission.admit({ request: requestOutcome.value, event: delivery.event });
+    if (
+      admissionOutcome.status === 'attention'
+      && MEMORY_ADMISSION_ATTENTION_DISPOSITION[admissionOutcome.issue.code] === 'reject'
+    ) {
+      await commitExternalOperation({
+        ...externalOperation(delivery.event, operationRef),
+        state: 'failed',
+        failureRef: admissionOutcome.issue.code,
+      });
+      return rejectedCommit(delivery.event, options.binding.bindingRef, admissionOutcome.issue.code);
+    }
+    if (admissionOutcome.status !== 'ready') {
+      return retryCommit(
+        delivery.event,
+        options.binding.bindingRef,
+        delivery.attempt,
+        now(),
+        retryDelayMs,
+        retryOwnerRef,
+        admissionOutcome.issue.code,
+      );
+    }
+    const expectedRef = admissionOutcome.value.externalOperationRef ?? operationRef;
+    if (expectedRef !== operationRef) {
+      throw new Error('memory analysis admission returned a different external operation ref');
+    }
+    await commitExternalOperation({
+      ...externalOperation(delivery.event, operationRef),
+      state: 'settled',
+    });
+    if (recovery) {
+      await commitExternalOperation({
+        ...externalOperation(delivery.event, operationRef),
+        state: 'reconciled',
+      });
+    }
+  };
+
+  return {
+    async prepare({ event }) {
+      const requestOutcome = memoryAnalysisRequestFromEvent(event, options.binding);
+      if (requestOutcome.status === 'attention') {
+        return rejectedCommit(event, options.binding.bindingRef, requestOutcome.issue.code);
+      }
+      if (requestOutcome.status !== 'ready') {
+        return retryCommit(
+          event,
+          options.binding.bindingRef,
+          1,
+          now(),
+          retryDelayMs,
+          retryOwnerRef,
+          requestOutcome.issue.code,
+        );
+      }
+      const externalOperationRef = `memory-analysis:${options.binding.bindingRef}:${event.messageId}`;
+      await commitExternalOperation({
+        ...externalOperation(event, externalOperationRef),
+        state: 'pending',
+      });
+      return {
+        consumerKey: options.binding.bindingRef,
+        messageId: event.messageId,
+        disposition: 'applied',
+        completionMode: 'operation-barrier',
+        internalEffectFacts: [`memory-analysis-request:${requestOutcome.value.operationId.value}`],
+        externalOperationRefs: [externalOperationRef],
+      };
+    },
+
+    async execute(delivery, intent) {
+      return admit(delivery, intent, false);
+    },
+
+    async recover(delivery, intent) {
+      const { event } = delivery;
+      const operationRef = intent.externalOperationRefs[0];
+      if (!operationRef) throw new Error('memory analysis barrier intent is missing its external operation ref');
+      let existing = await options.externalOperations.readExternalOperation({
+        operationRef,
+        consumerKey: options.binding.bindingRef,
+        messageId: event.messageId,
+      });
+      if (!existing) {
+        await commitExternalOperation({
+          ...externalOperation(event, operationRef),
+          state: 'pending',
+        });
+        existing = await options.externalOperations.readExternalOperation({
+          operationRef,
+          consumerKey: options.binding.bindingRef,
+          messageId: event.messageId,
+        });
+      }
+      if (!existing) throw new Error(`memory analysis external operation is missing after intent recovery: ${operationRef}`);
+      if (existing.state === 'pending') return admit(delivery, intent, true);
+      if (existing.state === 'failed') {
+        return rejectedCommit(
+          event,
+          options.binding.bindingRef,
+          existing.failureRef ?? 'memory-agent-analysis-failed',
+        );
+      }
+      if (existing.state === 'settled') {
+        await commitExternalOperation({
+          ...existing,
+          state: 'reconciled',
+        });
+      }
+    },
   };
 }

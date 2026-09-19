@@ -48,6 +48,10 @@ export interface JournalAppendInput {
   readonly payload?: Record<string, unknown>;
 }
 
+export interface JournalTransactionContext {
+  readonly records: readonly JournalRecord[];
+}
+
 export interface JournalVerification {
   readonly valid: boolean;
   readonly records: readonly JournalRecord[];
@@ -415,68 +419,82 @@ export class JsonlOrganJournal {
   }
 
   async append(input: JournalAppendInput): Promise<JournalRecord> {
-    const commitId = input.commitId;
-    if (commitId !== undefined) validateCommitId(commitId);
-    if (input.kind === 'checkpoint' && input.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
-    if (input.kind === 'event' && input.checkpoint !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint');
+    return this.transaction(() => input, async (transactionInput, append) => append(transactionInput));
+  }
+
+  async transaction<T, R>(
+    read: (context: JournalTransactionContext) => T | Promise<T>,
+    apply: (input: T, append: (input: JournalAppendInput) => Promise<JournalRecord>) => Promise<R>,
+  ): Promise<R> {
     const lock = await acquireLock(this.filePath);
     try {
       const verification = await readVerifiedJournal(this.filePath);
       if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
-      if (commitId !== undefined) {
-        const existing = verification.records.find((record) => record.commitId === commitId);
-        if (existing) {
-          if (existing.commitFactDigest === digestCommitFact(input)) return existing;
-          throw new JournalCommitConflictError(commitId, existing);
-        }
-      }
-      const previous = verification.records.at(-1) ?? null;
-      const { kind, scope, memoryScope, memorySource, checkpoint, payload } = input;
-      assertScopeRef(scope);
-      validateMemoryEnvelope({ scope, memoryScope, memorySource });
-      const recordWithoutDigest = {
-        version: 1 as const,
-        seq: (previous?.seq ?? 0) + 1,
-        kind,
-        scope,
-        memoryScope,
-        memorySource,
-        commitId,
-        commitFactDigest: commitId === undefined ? undefined : digestCommitFact(input),
-        checkpoint,
-        payload,
-        previousRecordDigest: previous?.recordDigest ?? null,
-      };
-      const checkpoints = new Map<string, Checkpoint>();
-      for (const record of verification.records) {
-        if (record.kind === 'checkpoint' && record.checkpoint) checkpoints.set(checkpointKey(record.checkpoint), record.checkpoint);
-      }
-      if (input.kind === 'checkpoint') {
-        if (!input.checkpoint) throw new JournalIntegrityError('checkpoint record missing checkpoint');
-        assertJournalContract(() => {
-          assertEvidenceRef(input.checkpoint!.recoveryStateRef);
-          assertSameScope(input.checkpoint!.scope, input.checkpoint!.recoveryStateRef.scope);
-          for (const evidenceRef of input.checkpoint!.evidenceRefs) {
-            assertEvidenceRef(evidenceRef);
-            assertSameScope(input.checkpoint!.scope, evidenceRef.scope);
-          }
-          assertCheckpointLink(input.checkpoint!, resolveCheckpointPredecessor(input.checkpoint!, checkpoints));
-        });
-      }
-      const record = { ...recordWithoutDigest, recordDigest: digestRecord(recordWithoutDigest) };
-      validateRecord(record, previous, checkpoints);
-      await mkdir(dirname(this.filePath), { recursive: true });
-      const handle = await open(this.filePath, 'a');
-      try {
-        await handle.writeFile(`${JSON.stringify(record)}\n`);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      return record;
+      const input = await read({ records: verification.records });
+      return await apply(input, (next) => this.appendLocked(next));
     } finally {
       await releaseLock(lock);
     }
+  }
+
+  private async appendLocked(input: JournalAppendInput): Promise<JournalRecord> {
+    const commitId = input.commitId;
+    if (commitId !== undefined) validateCommitId(commitId);
+    if (input.kind === 'checkpoint' && input.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
+    if (input.kind === 'event' && input.checkpoint !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint');
+    const verification = await readVerifiedJournal(this.filePath);
+    if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
+    if (commitId !== undefined) {
+      const existing = verification.records.find((record) => record.commitId === commitId);
+      if (existing) {
+        if (existing.commitFactDigest === digestCommitFact(input)) return existing;
+        throw new JournalCommitConflictError(commitId, existing);
+      }
+    }
+    const previous = verification.records.at(-1) ?? null;
+    const { kind, scope, memoryScope, memorySource, checkpoint, payload } = input;
+    assertScopeRef(scope);
+    validateMemoryEnvelope({ scope, memoryScope, memorySource });
+    const recordWithoutDigest = {
+      version: 1 as const,
+      seq: (previous?.seq ?? 0) + 1,
+      kind,
+      scope,
+      memoryScope,
+      memorySource,
+      commitId,
+      commitFactDigest: commitId === undefined ? undefined : digestCommitFact(input),
+      checkpoint,
+      payload,
+      previousRecordDigest: previous?.recordDigest ?? null,
+    };
+    const checkpoints = new Map<string, Checkpoint>();
+    for (const record of verification.records) {
+      if (record.kind === 'checkpoint' && record.checkpoint) checkpoints.set(checkpointKey(record.checkpoint), record.checkpoint);
+    }
+    if (input.kind === 'checkpoint') {
+      if (!input.checkpoint) throw new JournalIntegrityError('checkpoint record missing checkpoint');
+      assertJournalContract(() => {
+        assertEvidenceRef(input.checkpoint!.recoveryStateRef);
+        assertSameScope(input.checkpoint!.scope, input.checkpoint!.recoveryStateRef.scope);
+        for (const evidenceRef of input.checkpoint!.evidenceRefs) {
+          assertEvidenceRef(evidenceRef);
+          assertSameScope(input.checkpoint!.scope, evidenceRef.scope);
+        }
+        assertCheckpointLink(input.checkpoint!, resolveCheckpointPredecessor(input.checkpoint!, checkpoints));
+      });
+    }
+    const record = { ...recordWithoutDigest, recordDigest: digestRecord(recordWithoutDigest) };
+    validateRecord(record, previous, checkpoints);
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const handle = await open(this.filePath, 'a');
+    try {
+      await handle.writeFile(`${JSON.stringify(record)}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    return record;
   }
 
   async latest(): Promise<JournalRecord | null> { const result = await this.verify(); if (!result.valid) throw new JournalIntegrityError(result.error ?? 'journal is invalid'); return result.records.at(-1) ?? null; }

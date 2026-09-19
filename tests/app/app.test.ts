@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeRuntimeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createProjectSourceUpdateOwner, ensureDshSettings, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -123,6 +123,7 @@ test('runtime memory exposes the registered project interaction binding', async 
     actor,
     projectKey: paths.projectKey,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef: 'content:runtime-memory-binding',
     contentDigest: 'sha256:runtime-memory-binding',
     evidenceRefs: ['source:runtime-memory-binding'],
@@ -132,6 +133,111 @@ test('runtime memory exposes the registered project interaction binding', async 
     inputDigest: 'sha256:runtime-memory-binding-input',
   });
   assert.equal(receipt.status, 'accepted');
+});
+
+test('memory runtime publishes a committed checkpoint boundary and consumes it idempotently', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-runtime-boundary-');
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-memory-runtime-boundary',
+  });
+  const { paths, configuration } = runtime;
+  const mainAgentId = configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId;
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
+  const compose = () => composeMemoryRuntime({
+      paths,
+      configuration,
+      workspaceCwd: paths.workspaceCwd,
+      sessionsRoot: paths.sessionsRoot,
+      runNotesRoot: paths.runNotesRoot,
+      auditPromptRoot,
+      auditPromptRef: 'project-memory-audit',
+      autoUpdate: false,
+      binding: {
+        bindingRef: 'memory-runtime-boundary',
+        projectKey: paths.projectKey,
+        executionEpoch: 1,
+        scope: {
+          kind: 'task',
+          organId: id('organ', `agent-${mainAgentId}`),
+          taskId: id('task', 'session-memory-runtime-boundary'),
+        },
+        taskId: id('task', 'session-memory-runtime-boundary'),
+        mainAgentId,
+        actor: {
+          actorId: 'memory-runtime-boundary',
+          roleId: 'memory',
+          permissions: ['memory.read', 'memory.propose'],
+          projectKey: paths.projectKey,
+        },
+      },
+    });
+  const memory = await compose();
+
+  try {
+    await new SessionStore(paths).append(
+      'session-memory-runtime-boundary',
+      { type: 'session.state', state: 'running' },
+      runtime.lock,
+    );
+    const result = await runAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-memory-runtime-boundary',
+      plan: 'default',
+      prompt: 'publish a memory boundary',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    const first = await memory.consume();
+    assert.equal(first.committed.length, 1);
+    assert.equal(first.committed[0]?.disposition, 'applied');
+    const second = await memory.consume();
+    assert.equal(second.committed.length, 0);
+
+    const event = (await memory.journal.readEvents({
+      streamId: `memory-boundaries:${result.taskId.value}`,
+      afterSequence: 0,
+      limit: 10,
+    }))[0]!;
+    const followUp = {
+      requestId: 'follow-up-memory-runtime-boundary',
+      operationId: id('operation', 'follow-up-memory-runtime-boundary'),
+      correlationId: 'correlation-memory-runtime-boundary',
+      inReplyTo: `memory-analysis-${createHash('sha256')
+        .update(`${event.streamId.length}:${event.streamId}${event.messageId.length}:${event.messageId}`)
+        .digest('hex')}`,
+      bindingRef: 'memory-runtime-boundary',
+      actor: {
+        actorId: 'memory-runtime-boundary',
+        roleId: 'memory' as const,
+        permissions: ['memory.read', 'memory.propose'] as const,
+        projectKey: paths.projectKey,
+      },
+      projectKey: paths.projectKey,
+      namespace: 'project' as const,
+      taskId: result.taskId,
+      evidenceRefs: ['humanagent://checkpoint/' + result.checkpoint.id.value],
+      evidenceDigests: ['sha256:follow-up'],
+      sourceRefs: ['humanagent://checkpoint/' + result.checkpoint.id.value],
+      inputDigest: 'sha256:follow-up',
+    };
+    assert.equal((await memory.composition.agent.followUp(followUp)).status, 'ready');
+    const restarted = await compose();
+    assert.equal((await restarted.composition.agent.followUp(followUp)).status, 'ready');
+    await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+  } finally {
+    try {
+      await runtime.lock.release();
+    } catch {
+      // The successful settlement path already releases the session lock.
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 async function waitFor(assertion: () => void | Promise<void>, timeoutMs = 3_000): Promise<void> {
@@ -184,6 +290,7 @@ async function composeMemoryFixture(input: {
     scope: memoryScope,
     taskId,
     ...(input.interactionScopeId === undefined ? {} : { interactionScopeId: input.interactionScopeId }),
+    mainAgentId: 'main-agent-a',
     actor,
   };
   const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
@@ -605,6 +712,7 @@ test('memory composition uses the trusted task binding ref for explicit brain me
     projectKey: binding.projectKey,
     taskId: binding.taskId,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef: 'content:memory-task-tools',
     contentDigest: 'sha256:content-memory-task-tools',
     evidenceRefs: ['source:memory-task-tools'],
@@ -650,6 +758,7 @@ test('memory composition registers interaction bindings for the interaction port
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'memory-interaction-composition') },
       interactionScopeId,
+      mainAgentId: 'main-agent-a',
       actor,
     },
   });
@@ -703,6 +812,7 @@ test('memory composition exposes candidate submission without hiding waiting or 
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'memory-interaction-submission') },
       interactionScopeId,
+      mainAgentId: 'main-agent-a',
       actor,
     },
   });
@@ -715,6 +825,7 @@ test('memory composition exposes candidate submission without hiding waiting or 
     actor,
     projectKey: paths.projectKey,
     requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
     contentRef: 'content:memory-composition',
     contentDigest: 'sha256:content-memory-composition',
     evidenceRefs: ['source:memory-composition'],
@@ -735,6 +846,7 @@ test('memory composition exposes candidate submission without hiding waiting or 
       actor,
       projectKey: paths.projectKey,
       requestedKind: 'semantic',
+      candidateCategory: 'project-fact',
       contentRef: 'content:memory-composition-denied',
       contentDigest: 'sha256:content-memory-composition-denied',
       evidenceRefs: ['source:memory-composition-denied'],
@@ -828,6 +940,7 @@ test('memory composition ingests typed evidence before admitting analysis', asyn
       evidenceRefs: [evidence],
       executionEpoch: 1,
       trigger: 'completion',
+      candidateCategory: 'project-fact',
     }),
     publisherId: 'memory-composition-publisher',
     sequence: 1,
@@ -863,6 +976,7 @@ test('memory composition returns attention when evidence is missing or drifted',
       evidenceRefs: [evidence],
       executionEpoch: 1,
       trigger: 'completion',
+      candidateCategory: 'project-fact',
     }),
     publisherId: 'memory-composition-publisher',
     sequence: 1,

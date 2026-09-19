@@ -38,7 +38,10 @@ export async function runAgentOperation(input: RunAgentOperationInput): Promise<
     }
     try {
       return await controller.fail(error);
-    } catch {
+    } catch (failure) {
+      if (failure instanceof AppLifecycleError && failure.code === 'agent-operation-post-commit-recovery-required') {
+        throw failure;
+      }
       throw error;
     }
   }

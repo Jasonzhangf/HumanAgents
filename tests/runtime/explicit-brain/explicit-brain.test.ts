@@ -366,6 +366,7 @@ test('tool admission requires one-to-one registry, capability, permission, epoch
     intent: intent('memory.save_candidate', {
       submissionId: 'submission:memory-a',
       requestedKind: 'semantic',
+      candidateCategory: 'project-fact',
       contentRef: 'content:memory-a',
       evidenceRefs: ['source:memory-a'],
       desiredScope: 'project',
@@ -383,6 +384,7 @@ test('tool admission requires one-to-one registry, capability, permission, epoch
       intent: intent('memory.save_candidate', {
         submissionId: 'submission:memory-b',
         requestedKind: 'semantic',
+        candidateCategory: 'project-fact',
         contentRef: 'content:memory-b',
         evidenceRefs: [],
         desiredScope: 'project',
@@ -406,6 +408,7 @@ test('tool admission requires one-to-one registry, capability, permission, epoch
     ['memory.operation.status', {}],
     ['memory.save_candidate', {
       submissionId: 'submission:a',
+      candidateCategory: 'project-fact',
       contentRef: 'content:a',
     }],
     ['resource.request', {
@@ -1622,6 +1625,7 @@ test('memory save candidate enriches runtime-only identity instead of accepting 
   const intentArguments = {
     submissionId: 'submission:memory-a',
     requestedKind: 'semantic' as const,
+    candidateCategory: 'project-fact' as const,
     contentRef: 'content:memory-a',
     evidenceRefs: ['source:memory-a'],
     desiredScope: 'project' as const,

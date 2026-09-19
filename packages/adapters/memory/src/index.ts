@@ -235,6 +235,7 @@ function normalizeSubmission(value: unknown, label: string): MemorySubmission {
     taskId: input.taskId === undefined ? undefined : normalizeScopedId(input.taskId, `${label}.taskId`, 'task') as MemorySubmission['taskId'],
     cycleId: input.cycleId === undefined ? undefined : normalizeScopedId(input.cycleId, `${label}.cycleId`, 'cycle') as MemorySubmission['cycleId'],
     requestedKind: enumValue(input.requestedKind, ['episodic', 'semantic', 'procedural'] as const, `${label}.requestedKind`),
+    candidateCategory: enumValue(input.candidateCategory, ['project-fact', 'project-experience', 'global', 'user-profile', 'local-skill-update'] as const, `${label}.candidateCategory`),
     contentRef: requiredString(input.contentRef, `${label}.contentRef`),
     contentDigest: requiredString(input.contentDigest, `${label}.contentDigest`),
     evidenceRefs: stringArray(input.evidenceRefs, `${label}.evidenceRefs`),
@@ -450,36 +451,20 @@ function assertSnapshot(value: unknown): MemoryPersistenceSnapshot {
     const candidateId = candidate.candidateId!;
     const projectRecord = canonicalById.get(candidateRecordId(candidateId));
     const globalRecord = canonicalById.get(`global:${candidateRecordId(candidateId)}`);
-    const expectedRecord = candidate.submission.desiredScope === 'global' ? globalRecord : projectRecord;
     if (candidate.state === 'approved') {
-      if (!expectedRecord) {
-        if (candidate.submission.desiredScope !== 'global' || partition !== 'project') {
-          invalidSnapshot(`approved candidate has no canonical record: ${candidateId}`);
-        }
-        if (projectRecord !== undefined) invalidSnapshot(`approved global candidate has a project canonical record: ${candidateId}`);
-      } else {
-        if (expectedRecord.namespace !== candidate.submission.desiredScope) invalidSnapshot(`approved candidate canonical namespace mismatch: ${candidateId}`);
-        if (candidate.submission.desiredScope === 'project' && expectedRecord.projectKey !== candidate.submission.projectKey) {
-          invalidSnapshot(`approved candidate canonical project mismatch: ${candidateId}`);
-        }
-        if (candidate.submission.desiredScope === 'global' && expectedRecord.projectKey !== undefined) {
-          invalidSnapshot(`approved global candidate canonical record cannot retain projectKey: ${candidateId}`);
-        }
-        if (!['approved', 'active', 'superseded', 'expired', 'archived'].includes(expectedRecord.state)) invalidSnapshot(`approved candidate canonical state mismatch: ${candidateId}`);
-        if (expectedRecord.kind !== candidate.submission.requestedKind) invalidSnapshot(`approved candidate canonical kind mismatch: ${candidateId}`);
-        if (expectedRecord.summary !== candidate.submission.observation) invalidSnapshot(`approved candidate canonical summary mismatch: ${candidateId}`);
-      }
-    } else if (projectRecord || globalRecord) {
+      if (!projectRecord) invalidSnapshot(`approved candidate has no canonical record: ${candidateId}`);
+      if (projectRecord.namespace !== 'project') invalidSnapshot(`approved candidate canonical record must be project-scoped: ${candidateId}`);
+      if (projectRecord.projectKey !== candidate.submission.projectKey) invalidSnapshot(`approved candidate canonical project mismatch: ${candidateId}`);
+      if (!['approved', 'superseded', 'expired', 'archived'].includes(projectRecord.state)) invalidSnapshot(`approved candidate canonical state mismatch: ${candidateId}`);
+      if (projectRecord.kind !== candidate.submission.requestedKind) invalidSnapshot(`approved candidate canonical kind mismatch: ${candidateId}`);
+      if (projectRecord.summary !== candidate.submission.observation) invalidSnapshot(`approved candidate canonical summary mismatch: ${candidateId}`);
+    } else if (projectRecord) {
       invalidSnapshot(`non-approved candidate has an approved canonical record: ${candidateId}`);
     }
-    if (candidate.submission.desiredScope === 'global' && candidate.promotion !== undefined) {
-      invalidSnapshot(`global candidate cannot be promoted: ${candidateId}`);
-    }
     if (candidate.promotion === undefined) {
-      if (candidate.submission.desiredScope === 'project' && globalRecord) invalidSnapshot(`candidate has a global canonical record without promotion: ${candidateId}`);
+      if (globalRecord) invalidSnapshot(`candidate has a global canonical record without promotion: ${candidateId}`);
       continue;
     }
-    if (candidate.submission.desiredScope !== 'project') invalidSnapshot(`only project candidates can be promoted: ${candidateId}`);
     if (!globalRecord) {
       if (partition === 'project') continue;
       invalidSnapshot(`promoted candidate has no global canonical record: ${candidateId}`);
@@ -1430,16 +1415,18 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
       }
       if (input.decision === 'approve') {
         const submission = candidate.submission;
+        if (submission.candidateCategory === 'user-profile' || submission.candidateCategory === 'local-skill-update') {
+          throw new ContractError(`memory candidate category requires its dedicated owner: ${submission.candidateCategory}`);
+        }
         const contentDigest = this.sourceDigest(submission.contentRef);
         if (contentDigest !== submission.contentDigest) {
           throw new ContractError('memory submission content digest does not match the ingested source');
         }
         const sources = this.mergeSourceRefs([submission.contentRef], [contentDigest], submission.evidenceRefs);
-        const namespace = submission.desiredScope;
         const canonicalRecord: CanonicalRecord = {
-          memoryId: namespace === 'global' ? `global:${candidateRecordId(input.candidateId)}` : candidateRecordId(input.candidateId),
-          namespace,
-          ...(namespace === 'project' ? { projectKey: submission.projectKey } : {}),
+          memoryId: candidateRecordId(input.candidateId),
+          namespace: 'project',
+          projectKey: submission.projectKey,
           kind: submission.requestedKind,
           state: 'approved',
           summary: submission.observation,
@@ -1473,7 +1460,6 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
       if (input.actor.projectKey !== candidate.submission.projectKey) throw new ContractError('memory promotion actor project mismatch');
       if (candidate.state !== 'approved') throw new ContractError('memory promotion requires an approved candidate');
       if (candidate.promotion !== undefined) throw new ContractError('memory candidate promotion is already final');
-      if (candidate.submission.desiredScope !== 'project') throw new ContractError('memory promotion requires a project candidate');
       const approved = this.canonicalRecords.get(candidateRecordId(input.candidateId));
       if (!approved) throw new ContractError('approved memory record is unavailable');
       const sources = this.mergeSourceRefsWithDigests(

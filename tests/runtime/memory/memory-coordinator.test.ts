@@ -602,6 +602,7 @@ test('memory coordinator resolves candidate operations by canonical candidate id
     actor,
     projectKey: 'project-a',
     requestedKind: 'semantic' as const,
+    candidateCategory: 'project-fact' as const,
     contentRef: 'asset://memory/candidate-a',
     contentDigest: 'sha256:candidate-a',
     evidenceRefs: ['journal://project-a/1'],

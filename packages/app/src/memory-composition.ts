@@ -22,6 +22,7 @@ import {
   MemoryCoordinator,
   createMemoryInteractionPort,
   createMemoryAnalysisEventHandler,
+  memoryAnalysisBarrierDriver,
   memoryAgentIssue,
   type MemoryAnalysisAdmissionPort,
   type MemoryAnalysisAdmissionReceipt,
@@ -31,7 +32,12 @@ import {
   type MemorySourceUpdateReceipt,
 } from '../../runtime/src/memory/index.js';
 import type { MemorySubmissionPort } from '../../runtime/src/explicit-brain/index.js';
-import type { EventConsumerHandler } from '../../runtime/src/events/index.js';
+import type {
+  EventConsumerHandler,
+  EventExternalOperation,
+  EventExternalOperationPort,
+  EventOperationBarrierDriver,
+} from '../../runtime/src/events/index.js';
 import { AppLifecycleError } from './errors.js';
 
 const OWNER = 'humanagent.app.memory-composition';
@@ -71,11 +77,16 @@ export interface MemoryCompositionInput {
   readonly auditPromptRef: string;
   readonly autoUpdate: boolean;
   readonly binding: MemoryAnalysisWakeBinding;
+  readonly mainAgentId?: string;
   readonly assignmentId?: string;
   readonly agentRuntimeId?: string;
   readonly roleId?: string;
   readonly evidenceSource?: MemoryEvidenceSourcePort;
   readonly patchReader?: MemoryProjectPatchReader;
+  readonly externalOperations?: EventExternalOperationPort & {
+    commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
+  };
+  readonly state?: import('../../contracts/src/index.js').MemoryAgentStatePort;
 }
 
 export interface MemoryComposition {
@@ -89,6 +100,7 @@ export interface MemoryComposition {
   readonly agent: MemoryAgent;
   readonly admission: MemoryAnalysisAdmissionPort;
   readonly eventHandler: EventConsumerHandler;
+  readonly barrierDriver: EventOperationBarrierDriver;
 }
 
 export interface RuntimeMemoryCompositionInput {
@@ -126,6 +138,7 @@ export async function composeRuntimeMemory(
       executionEpoch: 1,
       scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
       interactionScopeId: `runtime:${projectKey}`,
+      mainAgentId: 'humanagent-ui',
       actor,
     },
   });
@@ -616,6 +629,14 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       OWNER,
     );
   }
+  if (input.autoUpdate && !input.patchReader) {
+    throw new AppLifecycleError(
+      'memory-update-unavailable',
+      'memory auto update requires a typed project source patch reader',
+      'configure a typed patch reader before enabling memory auto update',
+      OWNER,
+    );
+  }
   try {
     await assertCompositionPathEquals(input.workspaceCwd, input.paths.workspaceCwd, 'memory workspace');
     await assertCompositionPathEquals(input.sessionsRoot, input.paths.sessionsRoot, 'memory sessions root');
@@ -668,12 +689,15 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       locksRoot: input.paths.locksRoot,
       ...(input.patchReader === undefined ? {} : { patchReader: input.patchReader }),
     }),
+    ...(input.state === undefined ? {} : { state: input.state }),
   });
   agent.bind({
     bindingRef: input.binding.bindingRef,
     projectKey: input.binding.projectKey,
     scope: input.binding.scope,
     ...(input.binding.taskId === undefined ? {} : { taskId: input.binding.taskId }),
+    ...(input.binding.interactionScopeId === undefined ? {} : { interactionScopeId: input.binding.interactionScopeId }),
+    mainAgentId: input.mainAgentId ?? input.binding.mainAgentId,
     executionEpoch: input.binding.executionEpoch,
     ownerId: 'memory-agent',
     operations: backend,
@@ -682,6 +706,28 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
   const eventHandler = createMemoryAnalysisEventHandler({
     binding: input.binding,
     admission,
+  });
+  const barrierDriver = memoryAnalysisBarrierDriver({
+    binding: input.binding,
+    admission,
+    externalOperations: input.externalOperations ?? {
+      readExternalOperation: async () => {
+        throw new AppLifecycleError(
+          'memory-external-operation-owner-missing',
+          'memory analysis external operation owner is not configured',
+          'compose memory with the durable EventBus external operation port',
+          OWNER,
+        );
+      },
+      commitExternalOperation: async () => {
+        throw new AppLifecycleError(
+          'memory-external-operation-owner-missing',
+          'memory analysis external operation owner is not configured',
+          'compose memory with the durable EventBus external operation port',
+          OWNER,
+        );
+      },
+    },
   });
   const coordinator = new MemoryCoordinator();
   const coordinatorBindings = bindCoordinator(coordinator, input, backend);
@@ -728,5 +774,6 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     agent,
     admission,
     eventHandler,
+    barrierDriver,
   };
 }
