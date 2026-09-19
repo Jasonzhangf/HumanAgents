@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,11 +11,15 @@ import {
   type MemoryScope,
   type MemorySubmission,
 } from '../../../packages/contracts/src/index.js';
+import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/index.js';
+import { JsonlOrganJournal } from '../../../packages/adapters/jsonl/src/index.js';
 import {
   DeterministicMemoryBackend,
   FilesystemMemoryPersistence,
   MemoryPersistenceError,
   RootedMemoryPersistence,
+  type MemoryRebuildJournalRecord,
+  type MemoryRebuildSource,
   type MemoryPersistencePort,
   type MemoryPersistenceSnapshot,
 } from '../../../packages/adapters/memory/src/index.js';
@@ -59,6 +64,403 @@ test('memory backend performs exact/full-text search, inspect, and compare', asy
   assert.deepEqual(await memory.compare({ leftRef: 'journal://task-a/1', rightRef: 'journal://task-a/1' }), { relation: 'same' });
   assert.deepEqual(await memory.compare({ leftRef: 'journal://task-a/1', rightRef: 'journal://task-a/2' }), { relation: 'different' });
   assert.deepEqual(await memory.compare({ leftRef: 'journal://task-a/1', rightRef: 'missing' }), { relation: 'unknown' });
+});
+
+test('memory backend rebuilds a deleted index from journal records and immutable assets', async () => {
+  const sourceRef = 'journal://task-a/rebuild-source';
+  const assetRef = 'asset://memory/rebuild-source';
+  const assetText = 'rebuilt source content';
+  const sourceDigest = `sha256:${createHash('sha256').update(assetText).digest('hex')}`;
+  const journal: MemoryRebuildJournalRecord[] = [
+    {
+      seq: 1,
+      memoryScope: {
+        namespace: 'project',
+        projectKey: 'project-a',
+        organId: organ,
+        taskId: task,
+      },
+      memorySource: {
+        sourceRef,
+        sourceDigest,
+        projectKey: 'project-a',
+        taskId: task,
+        occurredAt: '2026-09-18T00:00:00Z',
+        kind: 'checkpoint',
+        payloadRef: assetRef,
+      },
+    },
+  ];
+  const sources: MemoryRebuildSource[] = [
+    {
+      sourceRef: assetRef,
+      sourceDigest,
+      text: assetText,
+    },
+  ];
+
+  const memory = new DeterministicMemoryBackend();
+  const rebuilt = await memory.rebuild({
+    scope: taskScope,
+    journal,
+    sources,
+  });
+
+  assert.deepEqual(rebuilt, {
+    scope: taskScope,
+    rebuilt: 1,
+    sourceRefs: [sourceRef],
+    seqs: [1],
+    digests: [sourceDigest],
+  });
+  assert.deepEqual(await memory.search({ scope: taskScope, query: 'rebuilt source', limit: 10 }), [
+    { sourceRef, summary: assetText },
+  ]);
+  assert.deepEqual(await memory.inspect({ sourceRef }), {
+    sourceRef,
+    sourceDigest,
+    text: assetText,
+  });
+  assert.deepEqual(await memory.compare({ leftRef: sourceRef, rightRef: sourceRef }), {
+    relation: 'same',
+  });
+});
+
+test('memory rebuild rejects a source ref that belongs to another scope without changing persisted state', async () => {
+  const otherTask = id('task', 'task-b');
+  const otherScope: MemoryScope = { kind: 'task', organId: organ, taskId: otherTask };
+  const sourceRef = 'journal://shared/source';
+  const existingText = 'scope a source';
+  const existingDigest = `sha256:${createHash('sha256').update(existingText).digest('hex')}`;
+  const rebuildText = 'scope b source';
+  const rebuildDigest = `sha256:${createHash('sha256').update(rebuildText).digest('hex')}`;
+  const snapshots: MemoryPersistenceSnapshot[] = [];
+  const persistence: MemoryPersistencePort = {
+    async load() {
+      return undefined;
+    },
+    async save(snapshot) {
+      snapshots.push(snapshot);
+    },
+  };
+  const memory = new DeterministicMemoryBackend(persistence);
+  await memory.ingest({
+    scope: taskScope,
+    sourceRef,
+    sourceDigest: existingDigest,
+    text: existingText,
+  });
+  const before = snapshots.at(-1);
+  assert.equal(snapshots.length, 1);
+  assert.deepEqual(before?.records, [{
+    scope: taskScope,
+    sourceRef,
+    sourceDigest: existingDigest,
+    text: existingText,
+  }]);
+  assert.deepEqual(before?.sourceLocks, [{
+    sourceRef,
+    sourceDigest: existingDigest,
+    scope: taskScope,
+  }]);
+
+  await assert.rejects(
+    memory.rebuild({
+      scope: otherScope,
+      journal: [{
+        seq: 1,
+        memoryScope: {
+          namespace: 'project',
+          projectKey: 'project-a',
+          organId: organ,
+          taskId: otherTask,
+        },
+        memorySource: {
+          sourceRef,
+          sourceDigest: rebuildDigest,
+          projectKey: 'project-a',
+          taskId: otherTask,
+          occurredAt: '2026-09-18T00:00:00Z',
+          kind: 'checkpoint',
+          payloadRef: 'asset://memory/shared-source',
+        },
+      }],
+      sources: [{
+        sourceRef: 'asset://memory/shared-source',
+        sourceDigest: rebuildDigest,
+        text: rebuildText,
+      }],
+    }),
+    ContractError,
+  );
+
+  assert.equal(snapshots.length, 1);
+  assert.deepEqual(snapshots[0], before);
+  assert.deepEqual(await memory.inspect({ sourceRef }), {
+    sourceRef,
+    sourceDigest: existingDigest,
+    text: existingText,
+  });
+  assert.deepEqual(await memory.search({ scope: taskScope, query: 'scope a', limit: 10 }), [{
+    sourceRef,
+    summary: existingText,
+  }]);
+  assert.deepEqual(await memory.search({ scope: otherScope, query: 'scope b', limit: 10 }), []);
+});
+
+test('memory rebuild rejects journal and asset drift explicitly', async () => {
+  const sourceRef = 'journal://task-a/rebuild-drift';
+  const assetRef = 'asset://memory/rebuild-drift';
+  const assetText = 'drifted';
+  const sourceDigest = `sha256:${createHash('sha256').update(assetText).digest('hex')}`;
+  const memory = new DeterministicMemoryBackend();
+
+  await assert.rejects(
+    memory.rebuild({
+      scope: taskScope,
+      journal: [{
+        seq: 1,
+        memoryScope: {
+          namespace: 'project',
+          projectKey: 'project-a',
+          organId: organ,
+          taskId: task,
+        },
+        memorySource: {
+          sourceRef,
+          sourceDigest,
+          projectKey: 'project-a',
+          taskId: task,
+          occurredAt: '2026-09-18T00:00:00Z',
+          kind: 'checkpoint',
+          payloadRef: assetRef,
+        },
+      }],
+      sources: [{
+        sourceRef: assetRef,
+        sourceDigest: 'sha256:different',
+        text: 'drifted',
+      }],
+    }),
+    ContractError,
+  );
+
+  await assert.rejects(
+    memory.rebuild({
+      scope: taskScope,
+      journal: [{
+        seq: 2,
+        memoryScope: {
+          namespace: 'project',
+          projectKey: 'project-a',
+          organId: organ,
+          taskId: task,
+        },
+        memorySource: {
+          sourceRef,
+          sourceDigest,
+          projectKey: 'project-a',
+          taskId: task,
+          occurredAt: '2026-09-18T00:00:00Z',
+          kind: 'checkpoint',
+          payloadRef: assetRef,
+        },
+      }],
+      sources: [],
+    }),
+    ContractError,
+  );
+});
+
+test('memory rebuild reconstructs a deleted persisted index from real journal and immutable asset files', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-rebuild-'));
+  const journalFile = join(root, 'journal', 'memory.jsonl');
+  const assetRoot = join(root, 'assets');
+  const snapshotFile = join(root, 'memory', 'snapshot.json');
+  const assetText = 'journal backed rebuild content';
+  const assetRef = 'asset://memory/journal-backed';
+  const sourceRef = 'journal://task-a/journal-backed';
+  const sourceDigest = `sha256:${createHash('sha256').update(assetText).digest('hex')}`;
+
+  const assets = new ImmutableAssetStore(assetRoot);
+  const asset = await assets.write('journal-backed', new TextEncoder().encode(assetText));
+  const journal = new JsonlOrganJournal(journalFile);
+  const record = await journal.append({
+    kind: 'event',
+    scope: { organId: organ, taskId: task },
+    memoryScope: {
+      namespace: 'project',
+      projectKey: 'project-a',
+      organId: organ,
+      taskId: task,
+    },
+    memorySource: {
+      sourceRef,
+      sourceDigest,
+      projectKey: 'project-a',
+      taskId: task,
+      occurredAt: '2026-09-18T00:00:00Z',
+      kind: 'checkpoint',
+      payloadRef: assetRef,
+    },
+    payload: { observed: true },
+  });
+  const journalBefore = await readFile(journalFile, 'utf8');
+  const assetBefore = await readFile(asset.locator);
+
+  const persistence = new FilesystemMemoryPersistence(snapshotFile);
+  const first = new DeterministicMemoryBackend(persistence);
+  await first.rebuild({
+    scope: taskScope,
+    journal: await journal.replayMemory({
+      namespace: 'project',
+      projectKey: 'project-a',
+      organId: organ,
+      taskId: task,
+    }),
+    sources: [{
+      sourceRef: assetRef,
+      sourceDigest,
+      text: new TextDecoder().decode(await assets.read({
+        assetId: asset.assetId,
+        digest: asset.digest,
+        locator: asset.locator,
+        size: asset.size,
+      })),
+    }],
+  });
+  assert.deepEqual(await first.inspect({ sourceRef }), {
+    sourceRef,
+    sourceDigest,
+    text: assetText,
+  });
+
+  await rm(snapshotFile, { force: true });
+  const restarted = await DeterministicMemoryBackend.fromPersistence(persistence);
+  assert.deepEqual(await restarted.search({ scope: taskScope, query: 'journal backed', limit: 10 }), []);
+
+  const rebuilt = await restarted.rebuild({
+    scope: taskScope,
+    journal: await journal.replayMemory({
+      namespace: 'project',
+      projectKey: 'project-a',
+      organId: organ,
+      taskId: task,
+    }),
+    sources: [{
+      sourceRef: assetRef,
+      sourceDigest,
+      text: new TextDecoder().decode(await assets.read({
+        assetId: asset.assetId,
+        digest: asset.digest,
+        locator: asset.locator,
+        size: asset.size,
+      })),
+    }],
+  });
+  assert.deepEqual(rebuilt, {
+    scope: taskScope,
+    rebuilt: 1,
+    sourceRefs: [sourceRef],
+    seqs: [record.seq],
+    digests: [sourceDigest],
+  });
+  assert.deepEqual(await restarted.search({ scope: taskScope, query: 'journal backed', limit: 10 }), [{
+    sourceRef,
+    summary: assetText,
+  }]);
+  assert.deepEqual(await restarted.inspect({ sourceRef }), {
+    sourceRef,
+    sourceDigest,
+    text: assetText,
+  });
+  assert.equal(await readFile(journalFile, 'utf8'), journalBefore);
+  assert.deepEqual(await readFile(asset.locator), assetBefore);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('memory rebuild persistence failure leaves the existing index unchanged', async () => {
+  const sourceText = 'existing source';
+  const sourceDigest = `sha256:${createHash('sha256').update(sourceText).digest('hex')}`;
+  const memory = new DeterministicMemoryBackend();
+  await memory.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/existing',
+    sourceDigest,
+    text: sourceText,
+  });
+
+  let failSave = true;
+  const persistence: MemoryPersistencePort = {
+    async load() {
+      return undefined;
+    },
+    async save() {
+      if (failSave) throw new MemoryPersistenceError(
+        'memory-persistence-io-failure',
+        'injected rebuild save failure',
+        { kind: 'recover', ref: 'memory-persistence-adapter' },
+      );
+    },
+  };
+  const failing = new DeterministicMemoryBackend(persistence);
+  await failing.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/existing',
+    sourceDigest,
+    text: sourceText,
+  }).catch(() => undefined);
+  await failing.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/existing',
+    sourceDigest,
+    text: sourceText,
+  }).catch(() => undefined);
+  failSave = false;
+  await failing.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/existing',
+    sourceDigest,
+    text: sourceText,
+  });
+  failSave = true;
+
+  const rebuildText = 'rebuild replacement';
+  const rebuildDigest = `sha256:${createHash('sha256').update(rebuildText).digest('hex')}`;
+  await assert.rejects(
+    failing.rebuild({
+      scope: taskScope,
+      journal: [{
+        seq: 1,
+        memoryScope: {
+          namespace: 'project',
+          projectKey: 'project-a',
+          organId: organ,
+          taskId: task,
+        },
+        memorySource: {
+          sourceRef: 'journal://task-a/replacement',
+          sourceDigest: rebuildDigest,
+          projectKey: 'project-a',
+          taskId: task,
+          occurredAt: '2026-09-18T00:00:00Z',
+          kind: 'checkpoint',
+          payloadRef: 'asset://memory/replacement',
+        },
+      }],
+      sources: [{
+        sourceRef: 'asset://memory/replacement',
+        sourceDigest: rebuildDigest,
+        text: rebuildText,
+      }],
+    }),
+    MemoryPersistenceError,
+  );
+  assert.deepEqual(await failing.search({ scope: taskScope, query: 'existing', limit: 10 }), [{
+    sourceRef: 'journal://task-a/existing',
+    summary: sourceText,
+  }]);
+  await assert.rejects(failing.inspect({ sourceRef: 'journal://task-a/replacement' }), ContractError);
 });
 
 test('memory query can resolve a canonical record by exact source ref', async () => {
@@ -678,6 +1080,42 @@ test('source locks reject drift after restart and persistence snapshots round-tr
   assert.equal(raw.version, 1);
   assert.equal(raw.records[0]?.sourceRef, 'journal://task-a/locked');
   assert.equal(raw.sourceLocks[0]?.sourceDigest, 'sha256:locked');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('memory persistence loads legacy records without rebuild seq metadata', async () => {
+  const root = await mkdtemp(join('/private/tmp', 'humanagent-memory-legacy-snapshot-'));
+  const file = join(root, 'memory.json');
+  const legacy = {
+    version: 1,
+    revision: 1,
+    records: [{
+      scope: taskScope,
+      sourceRef: 'journal://task-a/legacy',
+      sourceDigest: 'sha256:legacy',
+      text: 'legacy source',
+    }],
+    canonicalRecords: [],
+    candidates: [],
+    candidateIds: [],
+    forgettingPlans: [],
+    sourceLocks: [{
+      sourceRef: 'journal://task-a/legacy',
+      sourceDigest: 'sha256:legacy',
+      scope: taskScope,
+    }],
+    attachedEpochs: [],
+    attachedContextIds: [],
+  };
+  await writeFile(file, `${JSON.stringify(legacy)}\n`, 'utf8');
+
+  const persistence = new FilesystemMemoryPersistence(file);
+  const memory = await DeterministicMemoryBackend.fromPersistence(persistence);
+  assert.deepEqual(await memory.search({ scope: taskScope, query: 'legacy source', limit: 10 }), [{
+    sourceRef: 'journal://task-a/legacy',
+    summary: 'legacy source',
+  }]);
+  assert.equal((await persistence.load())?.records[0]?.seq, undefined);
   await rm(root, { recursive: true, force: true });
 });
 

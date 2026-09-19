@@ -1,5 +1,6 @@
 /// <reference path="./node-modules.d.ts" />
 export * from './sources.js';
+import { createHash } from 'node:crypto';
 import { link, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { kill, pid } from 'node:process';
@@ -12,10 +13,14 @@ import {
   validateMemoryQueryRequest,
   validateMemoryReviewReceipt,
   validateMemorySubmission,
+  validateCanonicalMemoryScope,
+  validateEpisodicMemorySource,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
   type AgentMemoryContextRequest,
+  type CanonicalMemoryScope,
   type ContextLayer,
+  type EpisodicMemorySource,
   type MemoryForgettingPlan,
   type MemoryForgettingRequest,
   type MemoryKind,
@@ -36,7 +41,15 @@ import {
   type RecurrenceResult,
 } from '../../../contracts/src/index.js';
 
-type RecordEntry = { readonly scope: MemoryScope; readonly sourceRef: string; readonly sourceDigest: string; readonly text: string; readonly layer?: ContextLayer; readonly summary?: string; };
+type RecordEntry = {
+  readonly scope: MemoryScope;
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly text: string;
+  readonly seq?: number;
+  readonly layer?: ContextLayer;
+  readonly summary?: string;
+};
 
 interface SourceLock {
   readonly sourceRef: string;
@@ -85,6 +98,32 @@ export interface MemoryPersistenceSnapshot {
 export interface MemoryPersistencePort {
   load(): Promise<MemoryPersistenceSnapshot | undefined>;
   save(snapshot: MemoryPersistenceSnapshot): Promise<void>;
+}
+
+export interface MemoryRebuildJournalRecord {
+  readonly seq: number;
+  readonly memoryScope?: CanonicalMemoryScope;
+  readonly memorySource?: EpisodicMemorySource;
+}
+
+export interface MemoryRebuildSource {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly text: string;
+}
+
+export interface MemoryRebuildResult {
+  readonly scope: MemoryScope;
+  readonly rebuilt: number;
+  readonly sourceRefs: readonly string[];
+  readonly seqs: readonly number[];
+  readonly digests: readonly string[];
+}
+
+export interface MemoryRebuildInput {
+  readonly scope: MemoryScope;
+  readonly journal: readonly MemoryRebuildJournalRecord[];
+  readonly sources: readonly MemoryRebuildSource[];
 }
 
 export type MemoryPersistenceErrorCode =
@@ -176,6 +215,7 @@ function normalizeMemoryScope(value: unknown, label: string): MemoryScope {
 
 function normalizeRecordEntry(value: unknown, label: string): RecordEntry {
   const input = assertObject(value, label);
+  const seq = input.seq === undefined ? undefined : positiveSafeInteger(input.seq, `${label}.seq`);
   const layer = input.layer === undefined
     ? undefined
     : enumValue(input.layer, ['current', 'task-recent', 'related', 'approved-long-term', 'raw'] as const, `${label}.layer`);
@@ -185,6 +225,7 @@ function normalizeRecordEntry(value: unknown, label: string): RecordEntry {
     sourceRef: requiredString(input.sourceRef, `${label}.sourceRef`),
     sourceDigest: requiredString(input.sourceDigest, `${label}.sourceDigest`),
     text: requiredString(input.text, `${label}.text`),
+    ...(seq === undefined ? {} : { seq }),
     ...(layer === undefined ? {} : { layer }),
     ...(summary === undefined ? {} : { summary }),
   };
@@ -1063,6 +1104,19 @@ function visible(record: RecordEntry, scope: MemoryScope): boolean { return scop
 function tokens(text: string): number { return text.trim() ? text.trim().split(/\s+/u).length : 0; }
 function stable(value: string): string { let hash = 0; for (const char of value) hash = Math.imul(hash ^ char.charCodeAt(0), 31); return `memory:${(hash >>> 0).toString(16).padStart(8, '0')}`; }
 function nonEmpty(value: string, label: string): string { if (!value.trim()) throw new ContractError(`${label} must be non-empty`); return value; }
+function scopeFromCanonical(scope: CanonicalMemoryScope): MemoryScope {
+  if (scope.namespace === 'project') {
+    return {
+      kind: scope.taskId === undefined ? 'organ' : 'task',
+      organId: scope.organId,
+      ...(scope.taskId === undefined ? {} : { taskId: scope.taskId }),
+    };
+  }
+  return { kind: 'approved-global', organId: { scope: 'organ', value: 'global' } };
+}
+function digestText(text: string): string {
+  return `sha256:${createHash('sha256').update(text).digest('hex')}`;
+}
 function candidateRecordId(candidateId: string): string { return `memory-candidate:${candidateId}`; }
 function queryVisible(record: CanonicalRecord, request: MemoryQueryRequest): boolean {
   return record.namespace === request.namespace
@@ -1234,6 +1288,150 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
         scope: input.scope,
       });
       await this.persist(before);
+    });
+  }
+
+  async rebuild(input: MemoryRebuildInput): Promise<MemoryRebuildResult> {
+    return this.runMutation(async () => {
+      const sourceByRef = new Map<string, MemoryRebuildSource>();
+      for (const source of input.sources) {
+        nonEmpty(source.sourceRef, 'memory rebuild source ref');
+        nonEmpty(source.sourceDigest, 'memory rebuild source digest');
+        nonEmpty(source.text, 'memory rebuild source text');
+        if (sourceByRef.has(source.sourceRef)) {
+          throw new ContractError(`memory rebuild source is duplicated: ${source.sourceRef}`);
+        }
+        sourceByRef.set(source.sourceRef, source);
+      }
+
+      const rebuiltRecords: RecordEntry[] = [];
+      const rebuiltLocks: SourceLock[] = [];
+      const sourceRefs = new Set<string>();
+      let previousSeq = 0;
+      for (const journalRecord of input.journal) {
+        if (!Number.isSafeInteger(journalRecord.seq) || journalRecord.seq < 1) {
+          throw new ContractError('memory rebuild journal seq must be a positive safe integer');
+        }
+        if (journalRecord.seq <= previousSeq) {
+          throw new ContractError('memory rebuild journal records must be in strictly increasing seq order');
+        }
+        previousSeq = journalRecord.seq;
+
+        const memoryScope = journalRecord.memoryScope;
+        const memorySource = journalRecord.memorySource;
+        if (memoryScope === undefined || memorySource === undefined) {
+          throw new ContractError(`memory rebuild journal record is missing its memory envelope: ${journalRecord.seq}`);
+        }
+        try {
+          validateCanonicalMemoryScope(memoryScope);
+          validateEpisodicMemorySource(memorySource);
+        } catch (error) {
+          throw new ContractError(
+            `memory rebuild journal envelope is invalid: ${journalRecord.seq}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        const expectedKind = memoryScope.namespace === 'project'
+          ? memoryScope.taskId === undefined ? 'organ' : 'task'
+          : 'approved-global';
+        const canonicalScope = memoryScope.namespace === 'project'
+          ? {
+              kind: memoryScope.taskId === undefined ? 'organ' as const : 'task' as const,
+              organId: memoryScope.organId,
+              ...(memoryScope.taskId === undefined ? {} : { taskId: memoryScope.taskId }),
+            }
+          : { kind: 'approved-global' as const, organId: { scope: 'organ' as const, value: 'global' } };
+        if (
+          input.scope.kind !== expectedKind
+          || memoryScope.namespace !== 'project'
+          || scopeKey(canonicalScope) !== scopeKey(input.scope)
+        ) {
+          throw new ContractError(`memory rebuild journal scope does not match the requested scope: ${journalRecord.seq}`);
+        }
+        if (memorySource.projectKey !== memoryScope.projectKey) {
+          throw new ContractError(`memory rebuild journal source project does not match its scope: ${journalRecord.seq}`);
+        }
+        if (
+          memoryScope.taskId !== undefined
+          && (memorySource.taskId?.scope !== memoryScope.taskId.scope || memorySource.taskId.value !== memoryScope.taskId.value)
+        ) {
+          throw new ContractError(`memory rebuild journal source task does not match its scope: ${journalRecord.seq}`);
+        }
+        if (memoryScope.taskId === undefined && memorySource.taskId !== undefined) {
+          throw new ContractError(`memory rebuild journal source task is not allowed for organ scope: ${journalRecord.seq}`);
+        }
+
+        nonEmpty(memorySource.sourceRef, 'memory rebuild journal source ref');
+        nonEmpty(memorySource.sourceDigest, 'memory rebuild journal source digest');
+        nonEmpty(memorySource.payloadRef, 'memory rebuild journal payload ref');
+        if (sourceRefs.has(memorySource.sourceRef)) {
+          throw new ContractError(`memory rebuild journal source ref is duplicated: ${memorySource.sourceRef}`);
+        }
+        sourceRefs.add(memorySource.sourceRef);
+
+        const source = sourceByRef.get(memorySource.payloadRef);
+        if (!source) {
+          throw new ContractError(`memory rebuild asset is missing: ${memorySource.payloadRef}`);
+        }
+        if (source.sourceRef !== memorySource.payloadRef) {
+          throw new ContractError(`memory rebuild asset ref mismatch: ${memorySource.payloadRef}`);
+        }
+        if (source.sourceDigest !== memorySource.sourceDigest) {
+          throw new ContractError(`memory rebuild asset digest mismatch: ${memorySource.payloadRef}`);
+        }
+        if (digestText(source.text) !== source.sourceDigest) {
+          throw new ContractError(`memory rebuild asset content digest mismatch: ${memorySource.payloadRef}`);
+        }
+
+        const record: RecordEntry = {
+          scope: scopeFromCanonical(memoryScope),
+          sourceRef: memorySource.sourceRef,
+          sourceDigest: memorySource.sourceDigest,
+          text: source.text,
+          seq: journalRecord.seq,
+        };
+        rebuiltRecords.push(record);
+        rebuiltLocks.push({
+          sourceRef: record.sourceRef,
+          sourceDigest: record.sourceDigest,
+          scope: record.scope,
+        });
+      }
+
+      const targetScopeKey = scopeKey(input.scope);
+      for (const record of rebuiltRecords) {
+        const existingRecord = this.records.get(record.sourceRef);
+        if (existingRecord && scopeKey(existingRecord.scope) !== targetScopeKey) {
+          throw new ContractError(`memory rebuild source ref belongs to another scope: ${record.sourceRef}`);
+        }
+        const existingLock = this.sourceLocks.get(record.sourceRef);
+        if (existingLock && scopeKey(existingLock.scope) !== targetScopeKey) {
+          throw new ContractError(`memory rebuild source lock belongs to another scope: ${record.sourceRef}`);
+        }
+      }
+
+      const before = this.snapshot();
+      const nextRecords = new Map(this.records);
+      const nextSourceLocks = new Map(this.sourceLocks);
+      for (const [sourceRef, record] of nextRecords) {
+        if (scopeKey(record.scope) === targetScopeKey) nextRecords.delete(sourceRef);
+      }
+      for (const [sourceRef, lock] of nextSourceLocks) {
+        if (scopeKey(lock.scope) === targetScopeKey) nextSourceLocks.delete(sourceRef);
+      }
+      for (const record of rebuiltRecords) nextRecords.set(record.sourceRef, record);
+      for (const lock of rebuiltLocks) nextSourceLocks.set(lock.sourceRef, lock);
+      this.records.clear();
+      for (const [sourceRef, record] of nextRecords) this.records.set(sourceRef, record);
+      this.sourceLocks.clear();
+      for (const [sourceRef, lock] of nextSourceLocks) this.sourceLocks.set(sourceRef, lock);
+      await this.persist(before);
+      return {
+        scope: input.scope,
+        rebuilt: rebuiltRecords.length,
+        sourceRefs: rebuiltRecords.map((record) => record.sourceRef),
+        seqs: rebuiltRecords.map((record) => record.seq!),
+        digests: rebuiltRecords.map((record) => record.sourceDigest),
+      };
     });
   }
 
