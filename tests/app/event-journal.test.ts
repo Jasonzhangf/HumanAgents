@@ -427,6 +427,32 @@ test('jsonl event journal serializes conflicting external operation outcomes', a
   }
 });
 
+test('jsonl event journal reads external operations by complete consumer identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-event-journal-external-operation-identity-'));
+  try {
+    const journal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
+    const operation = {
+      operationRef: 'external:identity',
+      consumerKey: consumer.consumerKey,
+      messageId: 'message-a',
+      state: 'settled' as const,
+    };
+    await journal.commitExternalOperation(operation);
+
+    assert.deepEqual(await journal.readExternalOperation(operation), operation);
+    assert.equal(await journal.readExternalOperation({
+      ...operation,
+      consumerKey: 'memory-binding:task-b',
+    }), null);
+    assert.equal(await journal.readExternalOperation({
+      ...operation,
+      messageId: 'message-b',
+    }), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('jsonl event journal rejects corrupt memory agent state history', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-event-journal-memory-state-corrupt-'));
   try {

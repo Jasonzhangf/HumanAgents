@@ -455,7 +455,13 @@ export function createJsonlEventJournal(input: { readonly filePath: string }): J
         if (record.kind !== 'event') continue;
         const persisted = payloadRecord(record);
         if (persisted.type !== 'external-operation' || persisted.externalOperation === undefined) continue;
-        if (persisted.externalOperation.operationRef === input.operationRef) return persisted.externalOperation;
+        if (
+          persisted.externalOperation.operationRef === input.operationRef
+          && persisted.externalOperation.consumerKey === input.consumerKey
+          && persisted.externalOperation.messageId === input.messageId
+        ) {
+          return persisted.externalOperation;
+        }
       }
       return null;
     },
