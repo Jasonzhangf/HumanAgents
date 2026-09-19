@@ -14,8 +14,11 @@ import {
   type MemorySubmission,
   type ProjectSourceUpdateProposal,
 } from '../../../packages/contracts/src/index.js';
+import type { EventRecord } from '../../../packages/runtime/src/events/index.js';
 import {
   MemoryAgent,
+  createMemoryAnalysisRequestedEvent,
+  memoryAnalysisRequestFromEvent,
   type MemoryProjectUpdateOwnerPort,
 } from '../../../packages/runtime/src/memory/index.js';
 
@@ -70,13 +73,20 @@ function makeOperations(overrides: {
   readonly novelty?: 'novel' | 'known' | 'unknown';
   readonly candidateId?: string;
   readonly failNovelty?: boolean;
+  readonly recurrence?: Awaited<ReturnType<MemoryOperationsPort['detectRecurrence']>>;
+  readonly comparisons?: Readonly<Record<string, 'same' | 'different' | 'unknown'>>;
+  readonly sourceDigests?: Readonly<Record<string, string>>;
 } = {}): {
   readonly operations: MemoryOperationsPort;
   readonly submissions: MemorySubmission[];
   readonly ingest: string[];
+  readonly recurrenceRequests: Parameters<MemoryOperationsPort['detectRecurrence']>[0][];
+  readonly comparisons: { readonly leftRef: string; readonly rightRef: string }[];
 } {
   const submissions: MemorySubmission[] = [];
   const ingest: string[] = [];
+  const recurrenceRequests: Parameters<MemoryOperationsPort['detectRecurrence']>[0][] = [];
+  const comparisons: { readonly leftRef: string; readonly rightRef: string }[] = [];
   const operations: MemoryOperationsPort = {
     ingest: async (input) => {
       ingest.push(input.sourceRef);
@@ -85,16 +95,22 @@ function makeOperations(overrides: {
     search: async () => [],
     inspect: async (input) => ({
       sourceRef: input.sourceRef,
-      sourceDigest: input.sourceRef === 'journal://project-a/checkpoint'
+      sourceDigest: overrides.sourceDigests?.[input.sourceRef]
+        ?? (input.sourceRef === 'journal://project-a/checkpoint'
         ? 'sha256:checkpoint'
         : input.sourceRef === 'journal://project-a/evidence'
           ? 'sha256:evidence'
           : input.sourceRef === 'journal://project-a/interaction-evidence'
             ? 'sha256:interaction-evidence'
-          : 'sha256:source',
+          : 'sha256:source'),
       text: 'source',
     }),
-    compare: async () => ({ relation: 'different' }),
+    compare: async (input) => {
+      comparisons.push(input);
+      return {
+        relation: overrides.comparisons?.[`${input.leftRef}\u0000${input.rightRef}`] ?? 'different',
+      };
+    },
     detectNovelty: async (input) => {
       if (overrides.failNovelty) throw new Error('analysis backend down');
       return {
@@ -103,7 +119,10 @@ function makeOperations(overrides: {
         reason: overrides.novelty === 'known' ? 'source digest already exists' : 'source digest is new',
       };
     },
-    detectRecurrence: async () => ({ classification: 'one-off', occurrences: [], reason: 'not recurring' }),
+    detectRecurrence: async (input) => {
+      recurrenceRequests.push(input);
+      return overrides.recurrence ?? { classification: 'one-off', occurrences: [], reason: 'not recurring' };
+    },
     query: async (input) => ({
       requestId: input.requestId,
       status: 'ready',
@@ -125,7 +144,7 @@ function makeOperations(overrides: {
     promoteCandidate: async (input) => input,
     planForgetting: async (input) => input.plan,
   };
-  return { operations, submissions, ingest };
+  return { operations, submissions, ingest, recurrenceRequests, comparisons };
 }
 
 function bind(agent: MemoryAgent, operations: MemoryOperationsPort): MemoryAgent {
@@ -752,4 +771,325 @@ test('memory agent surfaces an unavailable local Skill as attention with manifes
   if (result.status !== 'attention') throw new Error('expected source attention');
   assert.equal(result.issue.code, 'memory-agent-source-unavailable');
   assert.equal(result.issue.nextAction.ref, 'project.json#sources.localSkill');
+});
+
+test('memory agent analyzes recurring corrections and errors with independent evidence refs', async () => {
+  const ports = makeOperations({
+    recurrence: {
+      classification: 'recurring',
+      occurrences: [
+        { ref: 'session://project-a/task-a/correction-1', digest: 'sha256:correction-1' },
+        { ref: 'session://project-a/task-a/correction-2', digest: 'sha256:correction-2' },
+      ],
+      reason: 'same correction repeated twice',
+    },
+    sourceDigests: {
+      'session://project-a/task-a/correction-1': 'sha256:correction-1',
+      'session://project-a/task-a/correction-2': 'sha256:correction-2',
+      'journal://project-a/error-1': 'sha256:error-1',
+      'journal://project-a/error-2': 'sha256:error-2',
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis({
+    sourceRefs: [
+      'journal://project-a/checkpoint',
+      'session://project-a/task-a/correction-1',
+      'session://project-a/task-a/correction-2',
+      'journal://project-a/error-1',
+      'journal://project-a/error-2',
+    ],
+    sourceDigests: [
+      'sha256:checkpoint',
+      'sha256:correction-1',
+      'sha256:correction-2',
+      'sha256:error-1',
+      'sha256:error-2',
+    ],
+    analysisInputs: {
+      corrections: [
+        { sourceRef: 'session://project-a/task-a/correction-1', sourceDigest: 'sha256:correction-1', fingerprint: 'do-not-guess' },
+        { sourceRef: 'session://project-a/task-a/correction-2', sourceDigest: 'sha256:correction-2', fingerprint: 'do-not-guess' },
+      ],
+      errors: [
+        { sourceRef: 'journal://project-a/error-1', sourceDigest: 'sha256:error-1', fingerprint: 'checkpoint-timeout' },
+        { sourceRef: 'journal://project-a/error-2', sourceDigest: 'sha256:error-2', fingerprint: 'checkpoint-timeout' },
+      ],
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error('expected recurring analysis');
+  assert.equal(result.value.curation.outcome, 'candidate');
+  assert.equal(ports.recurrenceRequests.length, 2);
+  assert.deepEqual(ports.recurrenceRequests.map((request) => request.patternRef), ['do-not-guess', 'checkpoint-timeout']);
+  assert.equal(ports.submissions.length, 1);
+  assert.deepEqual(ports.submissions[0]?.evidenceRefs, [
+    'journal://project-a/checkpoint',
+    'session://project-a/task-a/correction-1',
+    'session://project-a/task-a/correction-2',
+    'journal://project-a/error-1',
+    'journal://project-a/error-2',
+  ]);
+});
+
+test('memory agent requires a complete matching rewind chain before emitting a procedural candidate', async () => {
+  const complete = {
+    failedBranchRef: 'journal://project-a/failed-branch',
+    rewindCheckpointRef: 'journal://project-a/rewind-checkpoint',
+    recoveryCheckpointRef: 'journal://project-a/recovery-checkpoint',
+    reentryFactRef: 'journal://project-a/reentry-fact',
+    successfulBranchRefs: ['journal://project-a/success-branch'],
+    successEvidenceRefs: ['journal://project-a/success-evidence'],
+    absoluteJournalRefs: ['journal://project-a/journal'],
+  };
+  const ports = makeOperations({
+    comparisons: {
+      'journal://project-a/failed-branch\u0000journal://project-a/rewind-checkpoint': 'different',
+      'journal://project-a/rewind-checkpoint\u0000journal://project-a/recovery-checkpoint': 'different',
+      'journal://project-a/recovery-checkpoint\u0000journal://project-a/reentry-fact': 'different',
+      'journal://project-a/reentry-fact\u0000journal://project-a/success-branch': 'same',
+    },
+    sourceDigests: {
+      [complete.failedBranchRef]: 'sha256:failed-branch',
+      [complete.rewindCheckpointRef]: 'sha256:rewind-checkpoint',
+      [complete.recoveryCheckpointRef]: 'sha256:recovery-checkpoint',
+      [complete.reentryFactRef]: 'sha256:reentry-fact',
+      [complete.successfulBranchRefs[0]!]: 'sha256:success-branch',
+      [complete.successEvidenceRefs[0]!]: 'sha256:success-evidence',
+      [complete.absoluteJournalRefs[0]!]: 'sha256:journal',
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const completeResult = await agent.analyze(analysis({
+    trigger: 'rewind',
+    requestedKind: 'procedural',
+    candidateCategory: 'project-experience',
+    sourceRefs: [
+      complete.failedBranchRef,
+      complete.rewindCheckpointRef,
+      complete.recoveryCheckpointRef,
+      complete.reentryFactRef,
+      ...complete.successfulBranchRefs,
+      ...complete.successEvidenceRefs,
+      ...complete.absoluteJournalRefs,
+    ],
+    sourceDigests: [
+      'sha256:failed-branch',
+      'sha256:rewind-checkpoint',
+      'sha256:recovery-checkpoint',
+      'sha256:reentry-fact',
+      'sha256:success-branch',
+      'sha256:success-evidence',
+      'sha256:journal',
+    ],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      rewindChains: [complete],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+  if (completeResult.status !== 'ready') {
+    throw new Error(`expected complete rewind analysis: ${completeResult.issue.code}: ${completeResult.issue.message}`);
+  }
+  assert.equal(completeResult.value.curation.outcome, 'candidate');
+  assert.equal(ports.submissions.length, 1);
+  assert.deepEqual(ports.submissions[0]?.evidenceRefs, [
+    complete.failedBranchRef,
+    complete.rewindCheckpointRef,
+    complete.recoveryCheckpointRef,
+    complete.reentryFactRef,
+    ...complete.successfulBranchRefs,
+    ...complete.successEvidenceRefs,
+    ...complete.absoluteJournalRefs,
+  ]);
+
+  const incompletePorts = makeOperations({
+    sourceDigests: {
+      [complete.failedBranchRef]: 'sha256:failed-branch',
+      [complete.rewindCheckpointRef]: 'sha256:rewind-checkpoint',
+      [complete.recoveryCheckpointRef]: 'sha256:recovery-checkpoint',
+    },
+  });
+  const incompleteAgent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), incompletePorts.operations);
+  const incompleteResult = await incompleteAgent.analyze(analysis({
+    trigger: 'rewind',
+    requestedKind: 'procedural',
+    candidateCategory: 'project-experience',
+    sourceRefs: [complete.failedBranchRef, complete.rewindCheckpointRef, complete.recoveryCheckpointRef],
+    sourceDigests: ['sha256:failed-branch', 'sha256:rewind-checkpoint', 'sha256:recovery-checkpoint'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      rewindChains: [{
+        ...complete,
+        reentryFactRef: undefined,
+        successfulBranchRefs: [],
+        successEvidenceRefs: [],
+        absoluteJournalRefs: [],
+      }],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+  if (incompleteResult.status !== 'ready') {
+    throw new Error(`expected attention curation: ${incompleteResult.issue.code}: ${incompleteResult.issue.message}`);
+  }
+  assert.equal(incompleteResult.value.curation.outcome, 'attention');
+  assert.deepEqual(incompletePorts.comparisons, []);
+  assert.equal(incompletePorts.submissions.length, 0);
+});
+
+test('memory agent fails closed when a rewind analysis has no evidence chain', async () => {
+  const ports = makeOperations();
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis({
+    trigger: 'rewind',
+    requestedKind: 'procedural',
+    candidateCategory: 'project-experience',
+  }));
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error('expected attention curation');
+  assert.equal(result.value.curation.outcome, 'attention');
+  assert.equal(result.value.curation.explanation, 'rewind evidence chain is missing');
+  assert.equal(ports.submissions.length, 0);
+});
+
+test('memory agent fails closed when a parsed rewind event omits the evidence chain', async () => {
+  const envelope = createMemoryAnalysisRequestedEvent({
+    messageId: 'rewind-without-chain',
+    streamId: 'memory-boundaries',
+    scope,
+    occurredAt: '2026-09-17T00:00:00.000Z',
+    summary: 'rewind without a typed evidence chain',
+    evidenceRefs: [{
+      evidenceId: id('evidence', 'rewind-source'),
+      kind: 'operation',
+      source: 'test',
+      locator: 'journal://project-a/checkpoint',
+      digest: 'sha256:checkpoint',
+      scope,
+    }],
+    executionEpoch: 2,
+    trigger: 'rewind',
+    requestedKind: 'procedural',
+    candidateCategory: 'project-experience',
+  });
+  const record: EventRecord = {
+    ...envelope,
+    publisherId: 'publisher-harness',
+    sequence: 1,
+    committedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const request = memoryAnalysisRequestFromEvent(record, {
+    bindingRef: 'binding-a',
+    projectKey: 'project-a',
+    executionEpoch: 2,
+    scope,
+    taskId: task,
+    mainAgentId: 'main-agent-a',
+    actor,
+  });
+  assert.equal(request.status, 'ready');
+  if (request.status !== 'ready') throw new Error(request.issue.message);
+
+  const ports = makeOperations();
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(request.value);
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error('expected attention curation');
+  assert.equal(result.value.curation.outcome, 'attention');
+  assert.equal(result.value.curation.explanation, 'rewind evidence chain is missing');
+  assert.equal(ports.submissions.length, 0);
+});
+
+test('memory agent compares actual and declared paths before proposing an efficiency update', async () => {
+  const actualRef = 'journal://project-a/actual-path';
+  const declaredRef = 'project://project-a/AGENTS.md';
+  const ports = makeOperations({
+    comparisons: {
+      [`${actualRef}\u0000${declaredRef}`]: 'different',
+    },
+    sourceDigests: {
+      [actualRef]: 'sha256:actual-path',
+      [declaredRef]: 'sha256:declared-path',
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis({
+    candidateCategory: 'project-experience',
+    sourceRefs: [actualRef, declaredRef],
+    sourceDigests: ['sha256:actual-path', 'sha256:declared-path'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      rewindChains: [],
+      actualPathRefs: [actualRef],
+      declaredPathRefs: [declaredRef],
+    },
+  }));
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error('expected efficiency analysis');
+  assert.deepEqual(ports.comparisons, [{ leftRef: actualRef, rightRef: declaredRef }]);
+  assert.equal(result.value.curation.outcome, 'candidate');
 });

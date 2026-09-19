@@ -80,6 +80,37 @@ export interface MemoryAnalysisRequest {
   readonly candidateCategory: MemoryCandidateCategory;
   readonly executionEpoch: number;
   readonly trigger: 'blocked' | 'rewind' | 'completion' | 'explicit-submission';
+  readonly analysisInputs?: MemoryAnalysisInputs;
+}
+
+export interface MemoryAnalysisCorrection {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly fingerprint: string;
+}
+
+export interface MemoryAnalysisError {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly fingerprint: string;
+}
+
+export interface MemoryRewindChain {
+  readonly failedBranchRef: string;
+  readonly rewindCheckpointRef: string;
+  readonly recoveryCheckpointRef: string;
+  readonly reentryFactRef?: string;
+  readonly successfulBranchRefs: readonly string[];
+  readonly successEvidenceRefs: readonly string[];
+  readonly absoluteJournalRefs: readonly string[];
+}
+
+export interface MemoryAnalysisInputs {
+  readonly corrections: readonly MemoryAnalysisCorrection[];
+  readonly errors: readonly MemoryAnalysisError[];
+  readonly rewindChains: readonly MemoryRewindChain[];
+  readonly actualPathRefs: readonly string[];
+  readonly declaredPathRefs: readonly string[];
 }
 
 export interface MemoryAnalysisBinding {
@@ -255,6 +286,7 @@ function validatePersistedAnalysisRequest(value: unknown): asserts value is Memo
     || value.trigger === 'completion'
     || value.trigger === 'explicit-submission',
   );
+  if (value.analysisInputs !== undefined) validateMemoryAnalysisInputs(value.analysisInputs);
   try {
     validateMemoryActor(value.actor as MemoryActorContext);
   } catch {
@@ -263,6 +295,50 @@ function validatePersistedAnalysisRequest(value: unknown): asserts value is Memo
   const actor = value.actor as MemoryActorContext;
   assertPersisted(actor.projectKey === value.projectKey);
   assertPersisted(actor.permissions.includes('memory.propose'));
+}
+
+function validateStringArray(value: unknown, label: string): asserts value is readonly string[] {
+  if (!Array.isArray(value)) throw new ContractError(`${label} must be an array`);
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim() === '') throw new ContractError(`${label} entries must be non-empty strings`);
+  }
+}
+
+function validateFingerprintInputs(value: unknown, label: string): void {
+  if (!Array.isArray(value)) throw new ContractError(`${label} must be an array`);
+  for (const entry of value) {
+    if (!isRecord(entry)) throw new ContractError(`${label} entries must be objects`);
+    if (typeof entry.sourceRef !== 'string' || entry.sourceRef.trim() === '') throw new ContractError(`${label} sourceRef is required`);
+    if (typeof entry.sourceDigest !== 'string' || entry.sourceDigest.trim() === '') throw new ContractError(`${label} sourceDigest is required`);
+    if (typeof entry.fingerprint !== 'string' || entry.fingerprint.trim() === '') throw new ContractError(`${label} fingerprint is required`);
+  }
+}
+
+export function validateMemoryAnalysisInputs(value: unknown): asserts value is MemoryAnalysisInputs {
+  if (!isRecord(value)) throw new ContractError('memory analysis inputs must be an object');
+  validateFingerprintInputs(value.corrections, 'memory analysis corrections');
+  validateFingerprintInputs(value.errors, 'memory analysis errors');
+  validateStringArray(value.actualPathRefs, 'memory analysis actualPathRefs');
+  validateStringArray(value.declaredPathRefs, 'memory analysis declaredPathRefs');
+  if (!Array.isArray(value.rewindChains)) throw new ContractError('memory analysis rewindChains must be an array');
+  for (const chain of value.rewindChains) {
+    if (!isRecord(chain)) throw new ContractError('memory analysis rewind chain must be an object');
+    for (const field of ['failedBranchRef', 'rewindCheckpointRef', 'recoveryCheckpointRef'] as const) {
+      if (typeof chain[field] !== 'string' || chain[field].trim() === '') throw new ContractError(`memory analysis rewind ${field} is required`);
+    }
+    if (chain.reentryFactRef !== undefined && (typeof chain.reentryFactRef !== 'string' || chain.reentryFactRef.trim() === '')) {
+      throw new ContractError('memory analysis rewind reentryFactRef must be a non-empty string when provided');
+    }
+    validateStringArray(chain.successfulBranchRefs, 'memory analysis rewind successfulBranchRefs');
+    validateStringArray(chain.successEvidenceRefs, 'memory analysis rewind successEvidenceRefs');
+    validateStringArray(chain.absoluteJournalRefs, 'memory analysis rewind absoluteJournalRefs');
+  }
+  if (value.actualPathRefs.length > 0 && value.declaredPathRefs.length === 0) {
+    throw new ContractError('memory analysis declaredPathRefs are required when actualPathRefs are provided');
+  }
+  if (value.declaredPathRefs.length > 0 && value.actualPathRefs.length === 0) {
+    throw new ContractError('memory analysis actualPathRefs are required when declaredPathRefs are provided');
+  }
 }
 
 function validatePersistedFollowUpRequest(value: unknown): asserts value is MemoryFollowUpRequest {
@@ -646,6 +722,41 @@ export class MemoryAgent {
       }
     }
 
+    if (input.analysisInputs !== undefined) {
+      try {
+        validateMemoryAnalysisInputs(input.analysisInputs);
+      } catch (error) {
+        return {
+          status: 'attention',
+          issue: issue('memory-agent-source-invalid', 'attention', error instanceof Error ? error.message : 'memory analysis inputs are invalid', 'memory-analysis-inputs'),
+        };
+      }
+      const knownSources = new Map(input.sourceRefs.map((sourceRef, index) => [sourceRef, input.sourceDigests[index]!]));
+      const analysisSources = [
+        ...input.analysisInputs.corrections.map((entry) => ({ sourceRef: entry.sourceRef, expectedDigest: entry.sourceDigest })),
+        ...input.analysisInputs.errors.map((entry) => ({ sourceRef: entry.sourceRef, expectedDigest: entry.sourceDigest })),
+        ...input.analysisInputs.rewindChains.flatMap((chain) => [
+          { sourceRef: chain.failedBranchRef, expectedDigest: knownSources.get(chain.failedBranchRef) },
+          { sourceRef: chain.rewindCheckpointRef, expectedDigest: knownSources.get(chain.rewindCheckpointRef) },
+          { sourceRef: chain.recoveryCheckpointRef, expectedDigest: knownSources.get(chain.recoveryCheckpointRef) },
+          ...(chain.reentryFactRef === undefined ? [] : [{ sourceRef: chain.reentryFactRef, expectedDigest: knownSources.get(chain.reentryFactRef) }]),
+          ...chain.successfulBranchRefs.map((sourceRef) => ({ sourceRef, expectedDigest: knownSources.get(sourceRef) })),
+          ...chain.successEvidenceRefs.map((sourceRef) => ({ sourceRef, expectedDigest: knownSources.get(sourceRef) })),
+          ...chain.absoluteJournalRefs.map((sourceRef) => ({ sourceRef, expectedDigest: knownSources.get(sourceRef) })),
+        ]),
+        ...input.analysisInputs.actualPathRefs.map((sourceRef) => ({ sourceRef, expectedDigest: knownSources.get(sourceRef) })),
+        ...input.analysisInputs.declaredPathRefs.map((sourceRef) => ({ sourceRef, expectedDigest: knownSources.get(sourceRef) })),
+      ];
+      for (const source of analysisSources) {
+        if (!knownSources.has(source.sourceRef) || source.expectedDigest !== knownSources.get(source.sourceRef)) {
+          return {
+            status: 'attention',
+            issue: issue('memory-agent-source-invalid', 'attention', `memory analysis input source or digest does not match source refs: ${source.sourceRef}`, 'memory-analysis-inputs'),
+          };
+        }
+      }
+    }
+
     let sessionEvidence: MemorySessionEvidence | undefined;
     if (input.sessionRef !== undefined) {
       try {
@@ -681,16 +792,52 @@ export class MemoryAgent {
       loadedAt: prompt.loadedAt,
     };
 
+    let analysisAttention: MemoryCurationResult | undefined;
+    if (input.trigger === 'rewind' && (input.analysisInputs?.rewindChains.length ?? 0) === 0) {
+      analysisAttention = {
+        operationId: input.operationId,
+        auditPrompt: promptSnapshot,
+        sourceRefs: [...input.sourceRefs],
+        outcome: 'attention',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'rewind evidence chain is missing',
+        nextAction: 'attention',
+      };
+    } else if (input.analysisInputs !== undefined) {
+      const incompleteRewind = input.analysisInputs.rewindChains.find((chain) =>
+        chain.reentryFactRef === undefined
+        || chain.successfulBranchRefs.length === 0
+        || chain.successEvidenceRefs.length === 0
+        || chain.absoluteJournalRefs.length === 0);
+      if (incompleteRewind !== undefined) {
+        analysisAttention = {
+          operationId: input.operationId,
+          auditPrompt: promptSnapshot,
+          sourceRefs: [...input.sourceRefs],
+          outcome: 'attention',
+          matchedMemoryIds: [],
+          conflictRefs: [],
+          explanation: 'rewind evidence chain is incomplete',
+          nextAction: 'attention',
+        };
+      }
+    }
+
     let novelty;
     try {
-      novelty = await bound.value.binding.operations.detectNovelty({
-        scope: input.scope,
-        sourceRef: input.sourceRefs[0],
-        sourceDigest: input.sourceDigests[0],
-        candidateRef: input.sourceRefs[0],
-        comparisonRefs: input.sourceRefs.slice(1),
-        limit: input.sourceRefs.length,
-      });
+      if (analysisAttention !== undefined) {
+        novelty = undefined;
+      } else {
+        novelty = await bound.value.binding.operations.detectNovelty({
+          scope: input.scope,
+          sourceRef: input.sourceRefs[0],
+          sourceDigest: input.sourceDigests[0],
+          candidateRef: input.sourceRefs[0],
+          comparisonRefs: input.sourceRefs.slice(1),
+          limit: input.sourceRefs.length,
+        });
+      }
     } catch (error) {
       return {
         status: 'waiting',
@@ -698,8 +845,148 @@ export class MemoryAgent {
       };
     }
 
+    if (input.analysisInputs !== undefined && analysisAttention === undefined) {
+      const patterns = [
+        ...[...new Set(input.analysisInputs.corrections.map((entry) => entry.fingerprint))].map((fingerprint) => ({
+          patternRef: fingerprint,
+          windowRefs: input.analysisInputs!.corrections
+            .filter((candidate) => candidate.fingerprint === fingerprint)
+            .map((candidate) => candidate.sourceRef),
+        })),
+        ...[...new Set(input.analysisInputs.errors.map((entry) => entry.fingerprint))].map((fingerprint) => ({
+          patternRef: fingerprint,
+          windowRefs: input.analysisInputs!.errors
+            .filter((candidate) => candidate.fingerprint === fingerprint)
+            .map((candidate) => candidate.sourceRef),
+        })),
+      ];
+      for (const pattern of patterns) {
+        try {
+          const recurrence = await bound.value.binding.operations.detectRecurrence({
+            scope: input.scope,
+            patternRef: pattern.patternRef,
+            windowRefs: pattern.windowRefs,
+            limit: pattern.windowRefs.length,
+          });
+          if (recurrence.classification === 'unknown') {
+            analysisAttention = {
+              operationId: input.operationId,
+              auditPrompt: promptSnapshot,
+              sourceRefs: [...input.sourceRefs],
+              outcome: 'attention',
+              matchedMemoryIds: [],
+              conflictRefs: [],
+              explanation: recurrence.reason,
+              nextAction: 'attention',
+            };
+            break;
+          }
+        } catch (error) {
+          return {
+            status: 'waiting',
+            issue: issue('memory-agent-analysis-unavailable', 'waiting', error instanceof Error ? error.message : 'memory recurrence backend is unavailable', 'memory-operations-ready'),
+          };
+        }
+      }
+      if (analysisAttention === undefined) {
+        for (const chain of input.analysisInputs.rewindChains) {
+          if (chain.reentryFactRef === undefined) {
+            analysisAttention = {
+              operationId: input.operationId,
+              auditPrompt: promptSnapshot,
+              sourceRefs: [...input.sourceRefs],
+              outcome: 'attention',
+              matchedMemoryIds: [],
+              conflictRefs: [],
+              explanation: 'rewind evidence chain is missing the committed reentry fact',
+              nextAction: 'attention',
+            };
+            break;
+          }
+          if (
+            chain.successfulBranchRefs.length === 0
+            || chain.successEvidenceRefs.length === 0
+            || chain.absoluteJournalRefs.length === 0
+          ) {
+            analysisAttention = {
+              operationId: input.operationId,
+              auditPrompt: promptSnapshot,
+              sourceRefs: [...input.sourceRefs],
+              outcome: 'attention',
+              matchedMemoryIds: [],
+              conflictRefs: [],
+              explanation: 'rewind evidence chain is missing a successful branch, success evidence, or Absolute Journal source',
+              nextAction: 'attention',
+            };
+            break;
+          }
+          const reentryFactRef = chain.reentryFactRef;
+          try {
+            const relations = await Promise.all([
+              bound.value.binding.operations.compare({ leftRef: chain.failedBranchRef, rightRef: chain.rewindCheckpointRef }),
+              bound.value.binding.operations.compare({ leftRef: chain.rewindCheckpointRef, rightRef: chain.recoveryCheckpointRef }),
+              bound.value.binding.operations.compare({ leftRef: chain.recoveryCheckpointRef, rightRef: reentryFactRef }),
+            ]);
+            const successRelations = await Promise.all(chain.successfulBranchRefs.map((successRef) =>
+              bound.value.binding.operations.compare({ leftRef: reentryFactRef, rightRef: successRef })));
+            if (
+              relations.some((relation) => relation.relation === 'unknown')
+              || successRelations.some((relation) => relation.relation === 'unknown')
+              || relations.some((relation) => relation.relation === 'same')
+              || successRelations.some((relation) => relation.relation !== 'same')
+            ) {
+              analysisAttention = {
+                operationId: input.operationId,
+                auditPrompt: promptSnapshot,
+                sourceRefs: [...input.sourceRefs],
+                outcome: 'attention',
+                matchedMemoryIds: [],
+                conflictRefs: [],
+                explanation: 'rewind evidence chain is incomplete or does not bind the failed branch to the committed reentry and successful branch',
+                nextAction: 'attention',
+              };
+              break;
+            }
+          } catch (error) {
+            return {
+              status: 'waiting',
+              issue: issue('memory-agent-analysis-unavailable', 'waiting', error instanceof Error ? error.message : 'memory rewind comparison backend is unavailable', 'memory-operations-ready'),
+            };
+          }
+        }
+      }
+      if (analysisAttention === undefined && input.analysisInputs.actualPathRefs.length > 0) {
+        try {
+          const pathComparisons = await Promise.all(
+            input.analysisInputs.actualPathRefs.map(async (actualRef) =>
+              Promise.all(input.analysisInputs!.declaredPathRefs.map((declaredRef) =>
+                bound.value.binding.operations.compare({ leftRef: actualRef, rightRef: declaredRef })))),
+          );
+          if (pathComparisons.some((relations) => relations.some((relation) => relation.relation === 'unknown'))) {
+            analysisAttention = {
+              operationId: input.operationId,
+              auditPrompt: promptSnapshot,
+              sourceRefs: [...input.sourceRefs],
+              outcome: 'attention',
+              matchedMemoryIds: [],
+              conflictRefs: [],
+              explanation: 'actual and declared path comparison is incomplete',
+              nextAction: 'attention',
+            };
+          }
+        } catch (error) {
+          return {
+            status: 'waiting',
+            issue: issue('memory-agent-analysis-unavailable', 'waiting', error instanceof Error ? error.message : 'memory path comparison backend is unavailable', 'memory-operations-ready'),
+          };
+        }
+      }
+    }
+
     let outcome: MemoryCurationResult;
-    if (novelty.classification === 'unknown') {
+    if (analysisAttention !== undefined) {
+      outcome = analysisAttention;
+    } else if (novelty!.classification === 'unknown') {
       outcome = {
         operationId: input.operationId,
         auditPrompt: promptSnapshot,
@@ -707,18 +994,18 @@ export class MemoryAgent {
         outcome: 'attention',
         matchedMemoryIds: [],
         conflictRefs: [],
-        explanation: novelty.reason,
+        explanation: novelty!.reason,
         nextAction: 'attention',
       };
-    } else if (novelty.classification === 'known') {
+    } else if (novelty!.classification === 'known') {
       outcome = {
         operationId: input.operationId,
         auditPrompt: promptSnapshot,
         sourceRefs: [...input.sourceRefs],
         outcome: 'duplicate',
-        matchedMemoryIds: [...novelty.matchedRefs],
+        matchedMemoryIds: [...novelty!.matchedRefs],
         conflictRefs: [],
-        explanation: novelty.reason,
+        explanation: novelty!.reason,
         nextAction: 'none',
       };
     } else {
