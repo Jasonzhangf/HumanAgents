@@ -257,11 +257,11 @@ implements MemorySessionEvidenceSourcePort, MemoryProjectSourcePort, MemoryAudit
     if (input.projectKey !== this.options.projectKey) {
       throw new MemorySourceError('memory-source-scope-denied', 'memory project source belongs to another project');
     }
-    const sources = await Promise.all([
-      this.readProject({ projectKey: input.projectKey, target: 'project-agents' }),
-      this.readProject({ projectKey: input.projectKey, target: 'project-local-skill' }),
-    ]);
-    return sources;
+    const sources = [this.readProject({ projectKey: input.projectKey, target: 'project-agents' })];
+    if (this.options.localSkillRoot !== undefined && this.options.localSkillName !== undefined) {
+      sources.push(this.readProject({ projectKey: input.projectKey, target: 'project-local-skill' }));
+    }
+    return Promise.all(sources);
   }
 
   async readPrompt(input: {
