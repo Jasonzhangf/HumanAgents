@@ -130,6 +130,10 @@ export { composeMemoryRuntime } from './memory-runtime.js';
 export type { MemoryRuntime, MemoryRuntimeInput } from './memory-runtime.js';
 export { createM3Assembly } from './m3-assembly.js';
 export type { M3Assembly, M3AssemblyOptions } from './m3-assembly.js';
+export { entryCompositionInventory } from './entry-composition.js';
+export type { EntryComponentEvidence, EntryComponentState, EntryCompositionInventory } from './entry-composition.js';
+export { createFakeExecutionPort, fakeExecutionBinding, FakeProviderAgentDriver } from './fake-execution.js';
+export type { FakeAgentDriverOptions, FakeExecutionBindingOptions } from './fake-execution.js';
 export { checkpointIdFor, resumeAgentOperation, runAgentOperation } from './run-operation.js';
 export type {
   ResumeAgentOperationInput,

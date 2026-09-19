@@ -20,6 +20,7 @@ import {
   type EvidenceRef,
   type OperationId,
   type OrganId,
+  type ProviderCloseResult,
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
@@ -263,6 +264,8 @@ export class AgentOperationController {
   private committedCheckpoint?: Checkpoint;
   private lastOutput?: AgentOutput;
   private stoppedCheckpoint?: Checkpoint;
+  private providerClose?: ProviderCloseResult;
+  private providerCloseFailure?: unknown;
 
   constructor(private readonly prepared: PreparedOperation) {}
 
@@ -323,27 +326,45 @@ export class AgentOperationController {
     }
     const observedKinds: string[] = [];
     const outputRefs: string[] = [];
+    const observedEvents: AgentEvent[] = [];
     for await (const event of this.prepared.execution.observe()) {
       observedKinds.push(event.kind);
+      observedEvents.push(structuredClone(event));
       for (const ref of event.evidenceRefs) {
         if (ref.kind === 'tool') outputRefs.push(ref.locator);
       }
       if (event.kind === 'terminal') break;
     }
     const closure = await this.prepared.execution.settle();
+    const providerClose = await this.closeExecution();
     this.settled = true;
+    const output = outputForDriver(this.prepared.driver, this.lastOutput);
     return {
       runtimeId: this.prepared.runtimeId,
       taskId: this.prepared.taskId,
       operationId: this.prepared.operationId,
       executionEpoch: this.prepared.executionEpoch,
-      output: this.lastOutput,
+      output,
       scope: this.prepared.execution.scope,
-      evidenceRefs: closure.evidenceRefs.length > 0 ? closure.evidenceRefs : this.lastOutput.evidenceRefs,
+      evidenceRefs: closure.evidenceRefs.length > 0 ? closure.evidenceRefs : output.evidenceRefs,
       closure,
       observedKinds,
       outputRefs,
+      observedEvents,
+      ...(providerClose === undefined ? {} : { providerClose }),
     };
+  }
+
+  async closeExecution(): Promise<ProviderCloseResult | undefined> {
+    if (this.providerClose !== undefined) return this.providerClose;
+    if (this.providerCloseFailure !== undefined) throw this.providerCloseFailure;
+    try {
+      this.providerClose = await closeExecutionDriver(this.prepared.driver);
+      return this.providerClose;
+    } catch (error) {
+      this.providerCloseFailure = error;
+      throw error;
+    }
   }
 
   async stop(reason = 'humanagent stop'): Promise<StopControlResult> {
@@ -390,7 +411,29 @@ export class AgentOperationController {
     if (result.state === 'stopped') {
       this.stoppedCheckpoint = result.checkpoint;
       this.settled = true;
-      await this.writeManifest();
+      let manifestFailure: unknown;
+      let closeFailure: unknown;
+      try {
+        await this.writeManifest();
+      } catch (error) {
+        manifestFailure = error;
+      }
+      try {
+        await this.closeExecution();
+      } catch (error) {
+        closeFailure = error;
+      }
+      if (manifestFailure !== undefined && closeFailure !== undefined) {
+        throw new AppLifecycleError(
+          'agent-operation-stop-finalization-failed',
+          `stop finalization failed after the stopped checkpoint commit: manifest=${messageOf(manifestFailure)}; provider close=${messageOf(closeFailure)}`,
+          'reconcile the committed stopped checkpoint, manifest, and provider resource before retrying',
+          OWNER,
+          new AggregateError([manifestFailure, closeFailure], 'stop finalization failed'),
+        );
+      }
+      if (manifestFailure !== undefined) throw manifestFailure;
+      if (closeFailure !== undefined) throw closeFailure;
     }
     return result;
   }
@@ -442,6 +485,8 @@ export class AgentOperationController {
       closure: { state: 'failed', evidenceRefs: [failureRef], ownerRef: OWNER },
       observedKinds: [],
       outputRefs: [],
+      observedEvents: [],
+      ...(this.providerClose === undefined ? {} : { providerClose: this.providerClose }),
     };
     const checkpoint = await this.commitOutcome(receipt, 'failed');
     return this.result(checkpoint, receipt);
@@ -547,6 +592,49 @@ export class AgentOperationController {
       receipt,
     };
   }
+}
+
+type CloseableAgentDriver = AgentDriver & { close(): Promise<ProviderCloseResult> };
+type TraceableAgentDriver = AgentDriver & { output(): string };
+
+async function closeExecutionDriver(driver: AgentDriver): Promise<ProviderCloseResult | undefined> {
+  if (!('close' in driver) || typeof (driver as Partial<CloseableAgentDriver>).close !== 'function') return undefined;
+  let result: ProviderCloseResult;
+  try {
+    result = await (driver as CloseableAgentDriver).close();
+  } catch (cause) {
+    throw new AppLifecycleError(
+      'provider-close-failed',
+      `provider close failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      'reconcile provider close before treating the operation as complete',
+      OWNER,
+      cause,
+    );
+  }
+  if (result.state !== 'closed') {
+    throw new AppLifecycleError(
+      'provider-close-failed',
+      `provider close is ${result.state}`,
+      'reconcile provider close before treating the operation as complete',
+      OWNER,
+    );
+  }
+  return result;
+}
+
+function outputForDriver(driver: AgentDriver, output: AgentOutput): AgentOutput {
+  if (!('output' in driver) || typeof (driver as Partial<TraceableAgentDriver>).output !== 'function') return output;
+  return {
+    ...output,
+    payload: {
+      ...output.payload,
+      output: (driver as TraceableAgentDriver).output(),
+    },
+  };
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function memoryTrigger(outcome: Checkpoint['outcome']): MemoryAnalysisTrigger | null {

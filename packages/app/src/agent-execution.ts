@@ -8,6 +8,7 @@ import {
   type EvidenceRef,
   type OperationId,
   type OrganId,
+  type ProviderCloseResult,
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
@@ -40,6 +41,8 @@ export interface AgentExecutionReceipt {
   readonly closure: AgentRuntimeClosure;
   readonly observedKinds: readonly string[];
   readonly outputRefs: readonly string[];
+  readonly observedEvents: readonly AgentEvent[];
+  readonly providerClose?: ProviderCloseResult;
 }
 
 export interface AgentExecutionSession {
@@ -124,8 +127,10 @@ export async function executeAgentOperation(input: {
   const output = await execution.submit(input.request.input);
   const observedKinds: string[] = [];
   const outputRefs: string[] = [];
+  const observedEvents: AgentEvent[] = [];
   for await (const event of execution.observe()) {
     observedKinds.push(event.kind);
+    observedEvents.push(structuredClone(event));
     for (const ref of event.evidenceRefs) {
       if (ref.kind === 'tool') outputRefs.push(ref.locator);
     }
@@ -144,5 +149,6 @@ export async function executeAgentOperation(input: {
     closure,
     observedKinds,
     outputRefs,
+    observedEvents,
   };
 }

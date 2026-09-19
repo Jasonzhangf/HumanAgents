@@ -30,6 +30,7 @@ export async function runAgentOperation(input: RunAgentOperationInput): Promise<
     await controller.submit();
     return await controller.complete();
   } catch (error) {
+    let closeFailure: unknown;
     try {
       await controller.releaseExecution();
     } catch {
@@ -37,9 +38,27 @@ export async function runAgentOperation(input: RunAgentOperationInput): Promise<
       // cleanup best-effort and must never mask why the operation failed.
     }
     try {
-      return await controller.fail(error);
+      await controller.closeExecution();
+    } catch (failure) {
+      closeFailure = failure;
+    }
+    try {
+      const result = await controller.fail(error);
+      if (closeFailure !== undefined) {
+        throw new AppLifecycleError(
+          'agent-operation-recovery-required',
+          `${error instanceof Error ? error.message : String(error)}; provider close failed: ${closeFailure instanceof Error ? closeFailure.message : String(closeFailure)}`,
+          'reconcile provider close before retrying the failed operation',
+          OWNER,
+          { originalError: error, closeFailure, result },
+        );
+      }
+      return result;
     } catch (failure) {
       if (failure instanceof AppLifecycleError && failure.code === 'agent-operation-post-commit-recovery-required') {
+        throw failure;
+      }
+      if (failure instanceof AppLifecycleError && failure.code === 'agent-operation-recovery-required') {
         throw failure;
       }
       throw error;

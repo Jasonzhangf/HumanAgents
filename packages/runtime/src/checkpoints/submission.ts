@@ -16,9 +16,11 @@ import {
   computeReentryDecision,
   sameEvidenceRef,
   sameCheckpointClosureRecord,
+  sameReentryDecision,
   sameOperationId,
   sameReentryRecord,
   type CheckpointClosureRecord,
+  type CheckpointClosureCompatibilityVersion,
   type ClosureRecord,
   type DeadEndRecord,
   type InteractionClosureRecord,
@@ -37,6 +39,35 @@ import type {
 
 const CHECKPOINT_SOURCES: readonly CheckpointSubmissionSource[] = ['agent-tool', 'harness-control', 'recovery'];
 
+/**
+ * Checkpoint closure identity is owned by the Checkpoint/Control Owner.
+ *
+ * v2 is the current scope-safe identity. v1 is a read-only compatibility
+ * exception for records written before commit identities included scope. The
+ * v1 branch is removable once every supported closure store has no
+ * `checkpoint-closure:<checkpoint-id>` records left.
+ */
+export const CHECKPOINT_CLOSURE_COMPATIBILITY = {
+  current: {
+    version: 2,
+    scope: 'checkpoint-commit-id',
+  },
+  legacy: {
+    version: 1,
+    scope: 'checkpoint-id',
+    sunsetCondition: 'remove after all supported closure stores contain no legacy checkpoint-id records',
+  },
+} as const;
+
+export function assertSupportedCheckpointClosureCompatibilityVersion(
+  version: number,
+): asserts version is CheckpointClosureCompatibilityVersion {
+  if (version !== CHECKPOINT_CLOSURE_COMPATIBILITY.current.version
+    && version !== CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version) {
+    throw new CheckpointSubmissionError(`unsupported checkpoint closure compatibility version: ${String(version)}`);
+  }
+}
+
 function checkpointClosureId(checkpoint: Pick<Checkpoint, 'id' | 'scope'>): string {
   return `checkpoint-closure:${checkpointCommitId(checkpoint)}`;
 }
@@ -47,6 +78,19 @@ function legacyCheckpointClosureId(checkpoint: Pick<Checkpoint, 'id'>): string {
 
 function sameCheckpointClosureContent(left: CheckpointClosureRecord, right: CheckpointClosureRecord): boolean {
   return sameCheckpointClosureRecord({ ...left, closureId: right.closureId }, right);
+}
+
+function assertStoredCheckpointClosureVersion(
+  closure: CheckpointClosureRecord,
+  expectedVersion: CheckpointClosureCompatibilityVersion,
+): void {
+  const storedVersion = closure.compatibilityVersion ?? expectedVersion;
+  assertSupportedCheckpointClosureCompatibilityVersion(storedVersion);
+  if (storedVersion !== expectedVersion) {
+    throw new CheckpointSubmissionError(
+      `checkpoint closure compatibility version ${String(storedVersion)} does not match expected version ${String(expectedVersion)}`,
+    );
+  }
 }
 
 function closureMatchesCheckpoint(closure: CheckpointClosureRecord, checkpoint: Checkpoint): boolean {
@@ -73,16 +117,40 @@ async function readCheckpointClosure(
   port: CheckpointClosurePort,
   checkpoint: Checkpoint,
 ): Promise<ClosureRecord | null> {
+  assertSupportedCheckpointClosureCompatibilityVersion(CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
   const scoped = await port.read(checkpointClosureId(checkpoint));
-  if (scoped) return scoped;
+  if (scoped) {
+    if ('closureKind' in scoped && scoped.closureKind === 'checkpoint') {
+      if (scoped.closureId !== checkpointClosureId(checkpoint)) {
+        throw new CheckpointSubmissionError('checkpoint closure identity does not match its canonical key');
+      }
+      assertStoredCheckpointClosureVersion(scoped, CHECKPOINT_CLOSURE_COMPATIBILITY.current.version);
+      if (!closureMatchesCheckpoint(scoped, checkpoint)) {
+        throw new CheckpointSubmissionError(
+          `canonical checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.current.version} does not match the checkpoint`,
+        );
+      }
+    }
+    return scoped;
+  }
+
+  assertSupportedCheckpointClosureCompatibilityVersion(CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version);
   const legacy = await port.read(legacyCheckpointClosureId(checkpoint));
+  if (!legacy) return null;
   if (
-    !legacy
-    || !('closureKind' in legacy)
+    !('closureKind' in legacy)
     || legacy.closureKind !== 'checkpoint'
-    || !closureMatchesCheckpoint(legacy, checkpoint)
+    || legacy.closureId !== legacyCheckpointClosureId(checkpoint)
   ) {
-    return null;
+    throw new CheckpointSubmissionError(
+      `legacy checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version} does not match the checkpoint`,
+    );
+  }
+  assertStoredCheckpointClosureVersion(legacy, CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version);
+  if (!closureMatchesCheckpoint(legacy, checkpoint)) {
+    throw new CheckpointSubmissionError(
+      `legacy checkpoint closure v${CHECKPOINT_CLOSURE_COMPATIBILITY.legacy.version} does not match the checkpoint`,
+    );
   }
   return legacy;
 }
@@ -218,6 +286,7 @@ export async function submitCheckpoint(input: SubmitCheckpointInput): Promise<Su
     const evidenceRefs = reconciledOperations.flatMap((result) => result.evidenceRef ? [result.evidenceRef] : []);
     const closure: CheckpointClosureRecord = {
       closureKind: 'checkpoint',
+      compatibilityVersion: CHECKPOINT_CLOSURE_COMPATIBILITY.current.version,
       closureId: checkpointClosureId(input.checkpoint),
       checkpointId: input.checkpoint.id,
       source: input.source,
@@ -407,6 +476,9 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
     }
     if (closure.checkpointId.scope !== latest.checkpoint.id.scope || closure.checkpointId.value !== latest.checkpoint.id.value) {
       throw new CheckpointSubmissionError('committed closure does not match reentry checkpoint');
+    }
+    if (!closure.reentry.allowed || !sameReentryDecision(closure.reentry, computeReentryDecision({ outcome: latest.checkpoint.outcome }))) {
+      throw new CheckpointSubmissionError('committed checkpoint closure does not allow reentry');
     }
     const admission = await input.admissionPort.admit({
       ownerId: input.ownerId,
