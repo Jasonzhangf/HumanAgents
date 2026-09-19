@@ -913,6 +913,36 @@ test('memory analysis consumer rejects a binding mismatch before admission', asy
   assert.equal(result.committed[0]?.failureRef, 'memory-agent-event-scope-mismatch');
 });
 
+test('memory analysis consumer rejects an empty interaction scope before admission', async () => {
+  const record: EventRecord = {
+    ...event(),
+    publisherId: publisher.publisherId,
+    sequence: 1,
+    committedAt: occurredAt,
+  };
+  let admissions = 0;
+  const handler = createMemoryAnalysisEventHandler({
+    binding: {
+      ...binding,
+      scope: { kind: 'organ', organId: organ },
+      taskId: undefined,
+      interactionScopeId: '',
+    },
+    admission: {
+      admit: async () => {
+        admissions += 1;
+        return { status: 'ready', value: { admissionRef: 'must-not-admit' } };
+      },
+    },
+  });
+  const commit = await handler({ event: record, attempt: 1 });
+  assert.equal(admissions, 0);
+  assert.equal('retryObligation' in commit, false);
+  if ('retryObligation' in commit) throw new Error('expected rejection');
+  assert.equal(commit.disposition, 'rejected');
+  assert.equal(commit.failureRef, 'memory-agent-event-invalid');
+});
+
 test('memory analysis event kind is stable and data-only', () => {
   const envelope = event();
   assert.equal(envelope.kind, MEMORY_ANALYSIS_REQUESTED_KIND);
@@ -950,6 +980,17 @@ test('memory analysis event kind is stable and data-only', () => {
     trigger: 'completion',
     candidateCategory: 'project-fact',
   }), /require locators and digests/);
+  assert.throws(() => createMemoryAnalysisRequestedEvent({
+    messageId: 'invalid-category',
+    streamId,
+    scope,
+    occurredAt,
+    summary: 'invalid',
+    evidenceRefs: [evidence('checkpoint-a')],
+    executionEpoch: 2,
+    trigger: 'completion',
+    candidateCategory: 'invalid-category' as never,
+  }), /candidate category is invalid/);
 });
 
 test('consumer errors remain explicit for an unregistered memory consumer', async () => {

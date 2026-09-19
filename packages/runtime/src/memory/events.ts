@@ -174,6 +174,9 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
   if ((binding.taskId === undefined) === (binding.interactionScopeId === undefined)) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis binding requires exactly one task or interaction scope', 'memory-binding');
   }
+  if (binding.interactionScopeId !== undefined && !binding.interactionScopeId.trim()) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis interaction scope id is required', 'memory-binding');
+  }
   if (binding.taskId !== undefined && !sameId(binding.taskId, binding.scope.taskId)) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis task binding does not match its memory scope', 'memory-binding');
   }
@@ -237,10 +240,12 @@ export function createMemoryAnalysisRequestedEvent(
   if (input.evidenceRefs.some((evidence) => !evidence.locator.trim() || !evidence.digest?.trim())) {
     throw new Error('memory analysis evidence refs require locators and digests');
   }
+  const category = candidateCategory(input.candidateCategory);
+  if (category === null) throw new Error('memory analysis candidate category is invalid');
   const payload: BusinessPayload = {
     trigger: input.trigger,
     requestedKind: input.requestedKind ?? (input.trigger === 'rewind' ? 'procedural' : 'semantic'),
-    candidateCategory: input.candidateCategory,
+    candidateCategory: category,
     ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
   };
   return {
