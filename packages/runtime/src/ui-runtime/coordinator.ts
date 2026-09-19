@@ -149,7 +149,7 @@ export interface RuntimeExecutionCapabilities {
     readonly ownerId: 'humanagent.runtime.control';
   };
   readonly eventBus: {
-    readonly state: 'available' | 'unavailable';
+    readonly state: 'unavailable';
     readonly ownerId: 'humanagent.runtime.events';
     readonly reason: string;
   };
@@ -661,15 +661,7 @@ export class RuntimeTaskCoordinator {
   }
 
   executionCapabilities(): RuntimeExecutionCapabilities {
-    if (!this.options.checkpointBoundary) return EXECUTION_CAPABILITIES;
-    return {
-      ...EXECUTION_CAPABILITIES,
-      eventBus: {
-        state: 'available',
-        ownerId: 'humanagent.runtime.events',
-        reason: 'durable memory EventBus boundary is connected to the UI checkpoint owner',
-      },
-    };
+    return EXECUTION_CAPABILITIES;
   }
 
   createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
