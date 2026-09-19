@@ -17,6 +17,7 @@ import type {
   MemoryReviewReceipt,
   MemorySubmission,
   ProceduralMemoryCandidate,
+  ProjectSourcePatchArtifact,
   ProjectSourceUpdateProposal,
   SemanticMemoryCandidate,
   CanonicalMemoryScope,
@@ -512,6 +513,22 @@ export function validateProjectSourceUpdateProposal(input: ProjectSourceUpdatePr
   nonEmpty(input.patchDigest, 'project source update patchDigest');
   assertRefList(input.evidenceRefs, 'project source update evidenceRefs');
   nonEmpty(input.ownerRef, 'project source update ownerRef');
+}
+
+export function validateProjectSourcePatchArtifact(input: ProjectSourcePatchArtifact): void {
+  if (input.schemaVersion !== 1) throw new ContractError('invalid project source patch schema version');
+  if (!['project-fact', 'project-experience', 'local-skill-update'].includes(input.kind)) {
+    throw new ContractError('invalid project source patch kind');
+  }
+  if (!MEMORY_UPDATE_TARGETS.includes(input.target)) throw new ContractError('invalid project source patch target');
+  nonEmpty(input.replacementContent, 'project source patch replacementContent');
+  assertRefList(input.evidenceRefs, 'project source patch evidenceRefs');
+  if (input.kind === 'local-skill-update' && input.target !== 'project-local-skill') {
+    throw new ContractError('local skill patch must target the project local Skill');
+  }
+  if (input.kind !== 'local-skill-update' && input.target !== 'project-agents') {
+    throw new ContractError('project fact or experience patch must target project AGENTS.md');
+  }
 }
 
 export function validateMemoryCurationResult(input: MemoryCurationResult): void {

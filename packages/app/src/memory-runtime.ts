@@ -22,7 +22,12 @@ import {
   readCheckpointEvidence,
   readCommittedCheckpoint,
 } from './checkpoint-journal.js';
-import { composeMemory, type MemoryComposition, type MemoryCompositionInput } from './memory-composition.js';
+import {
+  composeMemory,
+  createMemoryBoundaryPatchProducer,
+  type MemoryComposition,
+  type MemoryCompositionInput,
+} from './memory-composition.js';
 import { AppLifecycleError } from './errors.js';
 
 const OWNER = 'humanagent.app.memory-runtime';
@@ -61,6 +66,10 @@ export interface MemoryRuntime {
   readonly journal: JsonlEventJournal;
   readonly ports: EventBusPorts;
   readonly publisher: {
+    prepareProjectPatch(input: {
+      readonly event: ReturnType<typeof createMemoryAnalysisRequestedEvent>;
+      readonly checkpoint: Checkpoint;
+    }): Promise<ReturnType<typeof createMemoryAnalysisRequestedEvent>>;
     publish(input: {
       readonly event: ReturnType<typeof createMemoryAnalysisRequestedEvent>;
       readonly checkpoint: Checkpoint;
@@ -256,11 +265,47 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     state: journal,
     projectSourceUpdatePublisher,
   });
+  const produceBoundaryPatch = createMemoryBoundaryPatchProducer({
+    autoUpdate: input.autoUpdate,
+    artifactsRoot: input.paths.artifactsRoot,
+    projectKey: input.paths.projectKey,
+    sources: composition.sources,
+  });
+  const prepareBoundaryEvent = async (event: ReturnType<typeof createMemoryAnalysisRequestedEvent>) => {
+    const payload = event.payload as {
+      readonly trigger: MemoryAnalysisTrigger;
+      readonly requestedKind?: 'episodic' | 'semantic' | 'procedural';
+      readonly candidateCategory: import('../../contracts/src/index.js').MemoryCandidateCategory;
+      readonly sessionRef?: string;
+    };
+    const patch = await produceBoundaryPatch({
+      messageId: event.messageId,
+      summary: event.summary,
+      candidateCategory: payload.candidateCategory,
+      evidenceRefs: event.evidenceRefs.map((evidence) => evidence.locator),
+    });
+    if (!patch) return event;
+    return createMemoryAnalysisRequestedEvent({
+      messageId: event.messageId,
+      streamId: event.streamId,
+      scope: event.scope,
+      occurredAt: event.occurredAt,
+      summary: event.summary,
+      evidenceRefs: event.evidenceRefs,
+      executionEpoch: event.executionEpoch!,
+      trigger: payload.trigger,
+      requestedKind: payload.requestedKind,
+      candidateCategory: payload.candidateCategory,
+      ...(payload.sessionRef === undefined ? {} : { sessionRef: payload.sessionRef }),
+      projectPatch: patch,
+    });
+  };
   return {
     composition,
     journal,
     ports,
     publisher: {
+      prepareProjectPatch: async ({ event }) => prepareBoundaryEvent(event),
       publish: async ({ event, checkpoint, recordDigest }) => {
         const committed = await checkpointEvidence.readCommitted({ checkpoint });
         validateMemoryBoundary({ event, recordDigest, committed });
@@ -295,12 +340,13 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
             ? { sessionRef: committed.checkpoint.scope.taskId.value }
             : {}),
         });
+        const preparedEvent = await prepareBoundaryEvent(event);
         validateMemoryBoundary({
-          event: { ...event, evidenceRefs: [primaryEvidence] },
+          event: { ...preparedEvent, evidenceRefs: [primaryEvidence] },
           recordDigest,
           committed,
         });
-        await publishEvent(ports, { publisherId: PUBLISHER_ID, event });
+        await publishEvent(ports, { publisherId: PUBLISHER_ID, event: preparedEvent });
       },
     },
     consume: async (consumeInput = {}) => consumeEvents(

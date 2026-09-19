@@ -69,6 +69,18 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   return { root, controlRoot, workspace };
 }
 
+async function writeProjectPatchArtifact(
+  artifactsRoot: string,
+  patchRef: string,
+  target: 'project-agents' | 'project-local-skill',
+  replacementContent: string,
+  kind: 'project-fact' | 'project-experience' | 'local-skill-update' = target === 'project-local-skill' ? 'local-skill-update' : 'project-fact',
+): Promise<string> {
+  const bytes = JSON.stringify({ schemaVersion: 1, kind, target, replacementContent, evidenceRefs: ['journal://project-a/evidence'] });
+  await writeFile(join(artifactsRoot, patchRef), bytes, 'utf8');
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
 test('runtime memory resolves declared local Skill and keeps undeclared source explicit', async () => {
   const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-project-source-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -137,6 +149,7 @@ test('runtime memory exposes the registered project interaction binding', async 
 
 test('memory runtime publishes a committed checkpoint boundary and consumes it idempotently', async () => {
   const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-runtime-boundary-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Memory boundary\n', 'utf8');
   const runtime = await openRuntime({
     controlRoot,
     workspace,
@@ -243,6 +256,88 @@ test('memory runtime publishes a committed checkpoint boundary and consumes it i
     }
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('committed checkpoint memory boundary emits a typed patch only for auto update', async () => {
+  const runCase = async (autoUpdate: boolean) => {
+    const { root, controlRoot, workspace } = await createConfiguredWorkspace(`humanagent-app-memory-boundary-auto-${autoUpdate ? 'on' : 'off'}-`);
+    await writeFile(join(workspace, 'AGENTS.md'), '# Project\n', 'utf8');
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+    await mkdir(auditPromptRoot, { recursive: true });
+    await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
+    const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId: `memory-boundary-auto-${autoUpdate ? 'on' : 'off'}` });
+    const { configuration } = runtime;
+    const mainAgentId = configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId;
+    const sessionId = `memory-boundary-auto-${autoUpdate ? 'on' : 'off'}`;
+    const taskId = id('task', sessionId);
+    const memory = await composeMemoryRuntime({
+      paths,
+      configuration,
+      workspaceCwd: paths.workspaceCwd,
+      sessionsRoot: paths.sessionsRoot,
+      runNotesRoot: paths.runNotesRoot,
+      auditPromptRoot,
+      auditPromptRef: 'project-memory-audit',
+      autoUpdate,
+      binding: {
+        bindingRef: `memory-boundary-auto-${autoUpdate ? 'on' : 'off'}`,
+        projectKey: paths.projectKey,
+        executionEpoch: 1,
+        scope: { kind: 'task', organId: id('organ', `agent-${mainAgentId}`), taskId },
+        taskId,
+        mainAgentId,
+        actor: {
+          actorId: 'memory-agent',
+          roleId: 'memory',
+          permissions: ['memory.read', 'memory.propose'],
+          projectKey: paths.projectKey,
+        },
+      },
+    });
+    try {
+      await new SessionStore(paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
+      const result = await runAgentOperation({
+        paths,
+        configuration,
+        workspace,
+        sessionId,
+        plan: 'default',
+        prompt: 'record a project memory boundary',
+        memoryBoundaryPublisher: memory.publisher,
+      });
+      const consumed = await memory.consume();
+      assert.equal(consumed.committed.length, 1);
+      assert.equal(consumed.committed[0]?.disposition, 'applied');
+      const boundaryEvents = await memory.journal.readEvents({
+        streamId: `memory-boundaries:${result.taskId.value}`,
+        afterSequence: 0,
+        limit: 10,
+      });
+      const patch = (boundaryEvents[0]?.payload as { readonly projectPatch?: { readonly patchRef: string; readonly patchDigest: string } } | undefined)?.projectPatch;
+      assert.equal(patch !== undefined, autoUpdate);
+      const source = await readFile(join(workspace, 'AGENTS.md'), 'utf8');
+      const artifacts = await readdir(paths.artifactsRoot);
+      assert.equal(source.includes('Memory Agent project-experience'), autoUpdate);
+      assert.equal(artifacts.some((name) => name.startsWith('memory-project-patch-')), autoUpdate);
+      await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+      return { source, artifacts };
+    } finally {
+      try {
+        await runtime.lock.release();
+      } catch {
+        // The successful settlement path already releases the session lock.
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  const proposalOnly = await runCase(false);
+  assert.equal(proposalOnly.source, '# Project\n');
+  assert.equal(proposalOnly.artifacts.some((name) => name.startsWith('memory-project-patch-')), false);
+  const applied = await runCase(true);
+  assert.match(applied.source, /Memory Agent project-experience/);
+  assert.equal(applied.artifacts.filter((name) => name.startsWith('memory-project-patch-')).length, 1);
 });
 
 async function waitFor(assertion: () => void | Promise<void>, timeoutMs = 3_000): Promise<void> {
@@ -1107,8 +1202,7 @@ test('memory runtime applies immutable project patches and publishes a durable u
   await mkdir(auditPromptRoot, { recursive: true });
   await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
   const patchRef = 'project-agents-next';
-  const patchDigest = `sha256:${createHash('sha256').update(next).digest('hex')}`;
-  await writeFile(join(paths.artifactsRoot, patchRef), next, 'utf8');
+  const patchDigest = await writeProjectPatchArtifact(paths.artifactsRoot, patchRef, 'project-agents', next);
   const configuration = await loadConfiguration(paths);
   const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update') };
   const runtime = await composeMemoryRuntime({
@@ -1176,8 +1270,7 @@ test('memory runtime recovers a committed source update when its durable fact wa
   await mkdir(auditPromptRoot, { recursive: true });
   await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Audit\n', 'utf8');
   const patchRef = 'project-agents-recovery';
-  const patchDigest = `sha256:${createHash('sha256').update(next).digest('hex')}`;
-  await writeFile(join(paths.artifactsRoot, patchRef), next, 'utf8');
+  const patchDigest = await writeProjectPatchArtifact(paths.artifactsRoot, patchRef, 'project-agents', next);
   const configuration = await loadConfiguration(paths);
   const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update-recovery') };
   const owner = createProjectSourceUpdateOwner({
@@ -1310,7 +1403,7 @@ test('memory runtime rejects missing or drifted immutable project patches', asyn
   assert.equal(missing.status, 'attention');
   assert.equal(missing.status === 'attention' && missing.issue.code, 'memory-agent-update-validation-failed');
 
-  await writeFile(join(paths.artifactsRoot, proposal.patchRef), '# Different patch\n', 'utf8');
+  await writeProjectPatchArtifact(paths.artifactsRoot, proposal.patchRef, 'project-agents', '# Different patch\n');
   const drifted = await runtime.composition.agent.applyProjectUpdate({
     projectKey: paths.projectKey,
     proposal,
@@ -1387,8 +1480,7 @@ test('memory runtime rejects control and security semantics before persisting a 
   });
   const lowRiskNext = '# Updated project rules\n\nUse pnpm for project commands.\n';
   const lowRiskRef = 'project-agents-low-risk-next';
-  const lowRiskDigest = `sha256:${createHash('sha256').update(lowRiskNext).digest('hex')}`;
-  await writeFile(join(paths.artifactsRoot, lowRiskRef), lowRiskNext, 'utf8');
+  const lowRiskDigest = await writeProjectPatchArtifact(paths.artifactsRoot, lowRiskRef, 'project-agents', lowRiskNext);
   const lowRisk = await runtime.composition.agent.applyProjectUpdate({
     projectKey: paths.projectKey,
     proposal: {
@@ -1412,8 +1504,9 @@ test('memory runtime rejects control and security semantics before persisting a 
   });
   for (const [index, next] of deniedPatches.entries()) {
     const patchRef = `project-agents-control-next-${index}`;
-    const patchDigest = `sha256:${createHash('sha256').update(next).digest('hex')}`;
-    await writeFile(join(paths.artifactsRoot, patchRef), next, 'utf8');
+    const artifact = JSON.stringify({ schemaVersion: 1, kind: 'control', target: 'project-agents', replacementContent: next, evidenceRefs: ['journal://project-a/evidence'] });
+    const patchDigest = `sha256:${createHash('sha256').update(artifact).digest('hex')}`;
+    await writeFile(join(paths.artifactsRoot, patchRef), artifact, 'utf8');
     const rejected = await runtime.composition.agent.applyProjectUpdate({
       projectKey: paths.projectKey,
       proposal: {

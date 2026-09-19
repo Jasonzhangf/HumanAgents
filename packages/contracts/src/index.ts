@@ -512,6 +512,16 @@ export interface ProjectSourceUpdateProposal {
   readonly ownerRef: string;
 }
 
+export type ProjectSourcePatchKind = 'project-fact' | 'project-experience' | 'local-skill-update';
+
+export interface ProjectSourcePatchArtifact {
+  readonly schemaVersion: 1;
+  readonly kind: ProjectSourcePatchKind;
+  readonly target: ProjectAutoUpdateTarget;
+  readonly replacementContent: string;
+  readonly evidenceRefs: readonly string[];
+}
+
 export interface MemoryActorContext {
   readonly actorId: string;
   readonly roleId: 'interaction' | 'orchestration' | 'review' | 'memory' | 'system';
