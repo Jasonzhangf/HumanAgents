@@ -336,10 +336,10 @@ test('memory agent persists follow-up results across restart and rejects drifted
   const state = {
     value: undefined as unknown,
     async readMemoryAgentState() {
-      return this.value;
+      return structuredClone(this.value);
     },
     async appendMemoryAgentState(input: { readonly state: unknown }) {
-      this.value = input.state;
+      this.value = structuredClone(input.state);
     },
   };
   const ports = makeOperations({ candidateId: 'candidate-persisted-follow-up' });
@@ -397,10 +397,10 @@ test('memory agent rejects a corrupted persisted follow-up result', async () => 
   const state = {
     value: undefined as unknown,
     async readMemoryAgentState() {
-      return this.value;
+      return structuredClone(this.value);
     },
     async appendMemoryAgentState(input: { readonly state: unknown }) {
-      this.value = input.state;
+      this.value = structuredClone(input.state);
     },
   };
   const ports = makeOperations({ candidateId: 'candidate-corrupt-state' });
@@ -434,11 +434,13 @@ test('memory agent rejects a corrupted persisted follow-up result', async () => 
   const persisted = state.value as {
     readonly followUps: readonly {
       readonly result: {
-        readonly promptSnapshot: Record<string, unknown>;
+        operationId: { scope: string; value: string };
+        curation: { operationId: { scope: string; value: string } };
       };
     }[];
   };
-  delete persisted.followUps[0]!.result.promptSnapshot.loadedAt;
+  persisted.followUps[0]!.result.operationId.value = 'different-operation';
+  persisted.followUps[0]!.result.curation.operationId.value = 'different-operation';
 
   const restarted = bind(new MemoryAgent({
     projectKey: 'project-a',
@@ -450,24 +452,23 @@ test('memory agent rejects a corrupted persisted follow-up result', async () => 
     projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
     state,
   }), ports.operations);
-  await assert.rejects(
-    () => restarted.followUp({
-      requestId: 'follow-up-corrupt-state',
-      operationId: id('operation', 'follow-up-corrupt-state-operation'),
-      correlationId: 'follow-up-corrupt-state-correlation',
-      inReplyTo: 'analysis-a',
-      bindingRef: 'binding-a',
-      actor,
-      projectKey: 'project-a',
-      namespace: 'project',
-      taskId: task,
-      evidenceRefs: ['journal://project-a/evidence'],
-      evidenceDigests: ['sha256:evidence'],
-      sourceRefs: ['journal://project-a/evidence'],
-      inputDigest: 'sha256:evidence',
-    }),
-    /persisted memory agent state is invalid/,
-  );
+  const replay = await restarted.followUp({
+    requestId: 'follow-up-corrupt-state',
+    operationId: id('operation', 'follow-up-corrupt-state-operation'),
+    correlationId: 'follow-up-corrupt-state-correlation',
+    inReplyTo: 'analysis-a',
+    bindingRef: 'binding-a',
+    actor,
+    projectKey: 'project-a',
+    namespace: 'project',
+    taskId: task,
+    evidenceRefs: ['journal://project-a/evidence'],
+    evidenceDigests: ['sha256:evidence'],
+    sourceRefs: ['journal://project-a/evidence'],
+    inputDigest: 'sha256:evidence',
+  });
+  assert.equal(replay.status, 'attention');
+  assert.equal(replay.status === 'attention' && replay.issue.code, 'memory-agent-follow-up-conflict');
 });
 
 test('memory agent accepts interaction follow-ups when analysis and binding epochs differ', async () => {

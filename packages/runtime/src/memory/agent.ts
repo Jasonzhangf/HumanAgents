@@ -299,15 +299,26 @@ function validatePersistedSubmissionReceipt(value: unknown): asserts value is Me
   );
 }
 
-function validatePersistedFollowUpResult(value: unknown): asserts value is MemoryFollowUpResult {
+function validatePersistedFollowUpResult(
+  value: unknown,
+  request: MemoryFollowUpRequest,
+): asserts value is MemoryFollowUpResult {
   assertPersisted(isRecord(value));
   assertPersisted(typeof value.requestId === 'string' && value.requestId.trim().length > 0);
   assertPersisted(typeof value.correlationId === 'string' && value.correlationId.trim().length > 0);
   assertPersisted(typeof value.inReplyTo === 'string' && value.inReplyTo.trim().length > 0);
   validatePersistedId(value.operationId, 'operation');
+  assertPersisted(value.requestId === request.requestId);
+  assertPersisted(value.correlationId === request.correlationId);
+  assertPersisted(value.inReplyTo === request.inReplyTo);
+  assertPersisted(value.operationId.scope === request.operationId.scope);
+  assertPersisted(value.operationId.value === request.operationId.value);
   assertPersisted(value.liveContextMutated === false);
   try {
-    validateMemoryCurationResult(value.curation as MemoryCurationResult);
+    const curation = value.curation as MemoryCurationResult;
+    validateMemoryCurationResult(curation);
+    assertPersisted(curation.operationId.scope === request.operationId.scope);
+    assertPersisted(curation.operationId.value === request.operationId.value);
     if (value.submission !== undefined) validatePersistedSubmissionReceipt(value.submission);
     assertPersisted(Array.isArray(value.projectSources));
     for (const source of value.projectSources) validatePersistedSourceSnapshot(source);
@@ -334,7 +345,7 @@ function restoreState(input: unknown): PersistedMemoryAgentState | undefined {
     assertPersisted(isRecord(followUp));
     validatePersistedFollowUpRequest(followUp.request);
     validatePersistedTimestamp(followUp.acceptedAt);
-    if (followUp.result !== undefined) validatePersistedFollowUpResult(followUp.result);
+    if (followUp.result !== undefined) validatePersistedFollowUpResult(followUp.result, followUp.request);
   }
   return input as unknown as PersistedMemoryAgentState;
 }
