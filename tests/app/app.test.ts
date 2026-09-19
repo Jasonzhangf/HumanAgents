@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
-import { id, type AgentClosure, type AgentEvent, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -529,6 +529,87 @@ class StopCloseDriver extends FakeAgentDriver {
       state: 'closed',
       evidenceRefs: [],
     };
+  }
+}
+
+class MemoryAnalysisDriver implements AgentDriver {
+  readonly kind = 'memory-analysis-composition-test';
+  readonly events: string[] = [];
+  private readonly submissions = new Map<string, AgentInput>();
+
+  async capabilities() {
+    return {
+      driverKind: this.kind,
+      capabilities: ['analysis'],
+      version: '1',
+    };
+  }
+
+  async start(input: import('../../packages/contracts/src/index.js').AgentStartRequest) {
+    this.events.push(`start:${input.assignmentId}`);
+    return { runtimeId: input.runtimeId, executionEpoch: input.executionEpoch };
+  }
+
+  async resume(): Promise<never> {
+    throw new Error('unused');
+  }
+
+  async submit(input: AgentInput): Promise<AgentOutput> {
+    this.events.push(`submit:${input.assignmentId}`);
+    this.submissions.set(input.assignmentId, structuredClone(input));
+    return {
+      taskId: input.taskId,
+      executionEpoch: input.executionEpoch,
+      assignmentId: input.assignmentId,
+      payload: { status: 'accepted' },
+      outputRefs: [],
+      evidenceRefs: [],
+    };
+  }
+
+  async *observe(input: { readonly runtimeId: string }): AsyncIterable<AgentEvent> {
+    const submission = this.submissions.get(input.runtimeId);
+    if (!submission) throw new Error('unknown memory analysis runtime');
+    this.events.push(`observe:${input.runtimeId}`);
+    const payload = submission.payload as unknown as {
+      readonly operationId: string;
+      readonly prompt: unknown;
+      readonly sourceRefs: readonly string[];
+    };
+    const curation = {
+      operationId: { scope: 'operation', value: payload.operationId },
+      auditPrompt: payload.prompt,
+      sourceRefs: payload.sourceRefs,
+      outcome: 'candidate',
+      candidateId: 'composition-memory-candidate',
+      matchedMemoryIds: [],
+      conflictRefs: [],
+      explanation: 'composition memory analysis',
+      nextAction: 'review',
+    };
+    yield {
+      taskId: submission.taskId,
+      executionEpoch: submission.executionEpoch,
+      kind: 'provider.output',
+      evidenceRefs: [],
+      summary: JSON.stringify(curation),
+    };
+    yield {
+      taskId: submission.taskId,
+      executionEpoch: submission.executionEpoch,
+      kind: 'provider.terminal',
+      evidenceRefs: [],
+      terminalState: 'succeeded' as const,
+    };
+  }
+
+  async requestStop() {
+    return { requested: true, operationId: id('operation', 'memory-stop') };
+  }
+
+  async settle(input: { readonly runtimeId: string; readonly executionEpoch: number }) {
+    this.events.push(`settle:${input.runtimeId}`);
+    return { state: 'succeeded' as const, evidenceRefs: [] };
   }
 }
 
@@ -2701,6 +2782,163 @@ test('CLI resume publishes exactly one durable rewind after actual checkpoint re
     streamId: `memory-boundaries:${sessionId}`,
     consumerKey: 'memory-cli-resume',
   }))?.lastHandledSequence, 1);
+});
+
+test('CLI memory driver factory selects the configured memory-role agent and drives start submit observe settle', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-driver-factory-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await appendFile(join(controlRoot, 'config.toml'), [
+    '',
+    '[[agents]]',
+    'agentId = "memory-default"',
+    'roleId = "memory"',
+    'templateRef = "builtin/memory@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["history-search", "novelty-review", "recurrence-review"]',
+    'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+    'permissions = ["memory.read", "memory.propose"]',
+    'memoryScopes = ["task", "organ", "approved-global"]',
+    'resourceClass = "background"',
+    '',
+  ].join('\n'), 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const factory = memoryDriverFactory({ paths, configuration, workspace });
+  assert.ok(factory, 'a configured memory-role agent must yield a driver factory');
+
+  const driver = factory!({
+    taskId: id('task', 'memory-driver-factory-task'),
+    operationId: id('operation', 'memory-driver-factory-operation'),
+    executionEpoch: 3,
+    assignmentId: 'memory-analysis:memory-driver-factory-operation',
+  });
+  const events: string[] = [];
+  const wrapped: typeof driver = {
+    ...driver,
+    start: async (request) => {
+      events.push('start');
+      return await driver.start(request);
+    },
+    submit: async (request) => {
+      events.push('submit');
+      return await driver.submit(request);
+    },
+    observe: (request) => (async function* () {
+      events.push('observe');
+      yield* driver.observe(request);
+    })(),
+    settle: async (request) => {
+      events.push('settle');
+      return await driver.settle(request);
+    },
+  };
+  const taskId = id('task', 'memory-driver-factory-task');
+  await wrapped.start({
+    runtimeId: 'memory-analysis:memory-driver-factory-operation',
+    taskId,
+    executionEpoch: 3,
+    assignmentId: 'memory-analysis:memory-driver-factory-operation',
+    organId: id('organ', 'memory-driver-factory-organ'),
+    operationId: id('operation', 'memory-driver-factory-operation'),
+  });
+  await wrapped.submit({
+    taskId,
+    executionEpoch: 3,
+    assignmentId: 'memory-analysis:memory-driver-factory-operation',
+    payload: { prompt: 'audit' },
+  });
+  for await (const _event of wrapped.observe({ runtimeId: 'memory-analysis:memory-driver-factory-operation' })) {
+    // Drain the observation stream so the driver reaches its terminal event.
+  }
+  await wrapped.settle({ runtimeId: 'memory-analysis:memory-driver-factory-operation', executionEpoch: 3 });
+  assert.deepEqual(events, ['start', 'submit', 'observe', 'settle']);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('memory driver factory stays absent when no memory-role agent is configured', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-driver-absent-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  assert.equal(memoryDriverFactory({ paths, configuration, workspace }), undefined);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('memory composition connects an injected memory driver to checkpoint analysis', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-composition-driver-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Composition project\n', 'utf8');
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-memory-composition-driver',
+  });
+  const { paths, configuration } = runtime;
+  const taskId = id('task', 'session-memory-composition-driver');
+  const driver = new MemoryAnalysisDriver();
+  const memory = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor: ({ assignmentId }) => {
+      assert.match(assignmentId, /^memory-analysis:/);
+      return driver;
+    },
+    binding: {
+      bindingRef: 'memory-binding:composition-driver',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: { kind: 'task', organId: id('organ', `agent-${configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId}`), taskId },
+      taskId,
+      mainAgentId: 'composition-driver-main',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  try {
+    await mkdir(join(paths.controlRoot, 'memory-audit'), { recursive: true });
+    await writeFile(join(paths.controlRoot, 'memory-audit', 'project-memory-audit.md'), '# Audit\n', 'utf8');
+    await new SessionStore(paths).append(
+      'session-memory-composition-driver',
+      { type: 'session.state', state: 'running' },
+      runtime.lock,
+    );
+    const result = await runAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-memory-composition-driver',
+      plan: 'default',
+      prompt: 'complete composition analysis',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    const consumed = await memory.consume();
+    assert.equal(consumed.committed.length, 1);
+    assert.equal(consumed.committed[0]?.disposition, 'applied');
+    assert.deepEqual(driver.events.map((event) => event.split(':')[0]), [
+      'start',
+      'submit',
+      'observe',
+      'settle',
+    ]);
+    await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+  } finally {
+    try {
+      await runtime.lock.release();
+    } catch {
+      // The successful settlement path already released the session lock.
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('session outcome settlement commits failed checkpoints without marking them recoverable', async () => {

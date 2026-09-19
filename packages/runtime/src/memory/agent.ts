@@ -7,6 +7,7 @@ import {
   validateMemoryFollowUpRequest,
   validateProjectSourceUpdateProposal,
   type AgentDriver,
+  type AgentEvent,
   type AgentInput,
   type AgentOutput,
   type AuditPromptSnapshot,
@@ -614,7 +615,18 @@ function sameFollowUpRequest(left: MemoryFollowUpRequest, right: MemoryFollowUpR
     && left.inputDigest === right.inputDigest;
 }
 
-function memoryAnalysisInput(input: MemoryAnalysisRequest, prompt: AuditPromptSnapshot): AgentInput {
+interface InspectedMemorySource {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly text: string;
+}
+
+function memoryAnalysisInput(
+  input: MemoryAnalysisRequest,
+  prompt: AuditPromptSnapshot,
+  promptContent: string,
+  inspectedSources: readonly InspectedMemorySource[],
+): AgentInput {
   if (input.taskId === undefined) {
     throw new ContractError('memory analysis provider requires a task-bound request');
   }
@@ -643,7 +655,13 @@ function memoryAnalysisInput(input: MemoryAnalysisRequest, prompt: AuditPromptSn
         revision: prompt.revision,
         digest: prompt.digest,
         loadedAt: prompt.loadedAt,
+        content: promptContent,
       },
+      sources: inspectedSources.map((source) => ({
+        sourceRef: source.sourceRef,
+        sourceDigest: source.sourceDigest,
+        text: source.text,
+      })),
       ...(input.analysisInputs === undefined
         ? {}
         : {
@@ -669,9 +687,7 @@ function memoryAnalysisInput(input: MemoryAnalysisRequest, prompt: AuditPromptSn
   };
 }
 
-function providerCuration(output: AgentOutput, input: MemoryAnalysisRequest, prompt: AuditPromptSnapshot): MemoryCurationResult {
-  const payload = output.payload as Record<string, unknown>;
-  const curation = payload.curation;
+function providerCuration(curation: unknown, input: MemoryAnalysisRequest, prompt: AuditPromptSnapshot): MemoryCurationResult {
   if (!isRecord(curation)) throw new ContractError('memory provider output is missing curation');
   const result = curation as unknown as MemoryCurationResult;
   validateMemoryCurationResult(result);
@@ -698,12 +714,61 @@ function providerCuration(output: AgentOutput, input: MemoryAnalysisRequest, pro
   };
 }
 
+function parseProviderCuration(text: string): unknown {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) throw new ContractError('memory provider produced no curation output');
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
+  const candidate = fenced?.[1]?.trim() ?? trimmed;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const start = candidate.indexOf('{');
+    const end = candidate.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(candidate.slice(start, end + 1));
+      } catch {
+        // fall through to the explicit malformed-output error below
+      }
+    }
+    throw new ContractError('memory provider produced malformed curation JSON');
+  }
+}
+
+function isTerminalEvent(event: AgentEvent): boolean {
+  return event.kind === 'terminal' || event.kind.endsWith('.terminal');
+}
+
+async function observeCuration(driver: AgentDriver, request: AgentInput): Promise<unknown> {
+  let terminalState: string | undefined;
+  let observed = '';
+  for await (const event of driver.observe({ runtimeId: request.assignmentId })) {
+    if (event.taskId.value !== request.taskId.value || event.executionEpoch !== request.executionEpoch) {
+      throw new ContractError('memory provider event is not bound to the admitted operation');
+    }
+    if (isTerminalEvent(event)) {
+      terminalState = event.terminalState;
+      break;
+    }
+    if (event.summary !== undefined && event.summary.length > 0) observed += event.summary;
+  }
+  if (terminalState === undefined) {
+    throw new ContractError('memory provider observe ended without a terminal event');
+  }
+  if (terminalState !== 'succeeded') {
+    throw new ContractError(`memory provider terminal state was ${terminalState}`);
+  }
+  return parseProviderCuration(observed);
+}
+
 async function providerOutcome(
   options: Pick<MemoryAgentOptions, 'driver' | 'driverFor'>,
   input: MemoryAnalysisRequest,
   prompt: AuditPromptSnapshot,
+  promptContent: string,
+  inspectedSources: readonly InspectedMemorySource[],
 ): Promise<MemoryCurationResult> {
-  const request = memoryAnalysisInput(input, prompt);
+  const request = memoryAnalysisInput(input, prompt, promptContent, inspectedSources);
   const driver = options.driver ?? options.driverFor?.({
     taskId: request.taskId,
     operationId: input.operationId,
@@ -716,6 +781,8 @@ async function providerOutcome(
     taskId: request.taskId,
     executionEpoch: request.executionEpoch,
     assignmentId: request.assignmentId,
+    organId: input.scope.organId,
+    operationId: input.operationId,
   });
   if (handle.runtimeId !== request.assignmentId || handle.executionEpoch !== request.executionEpoch) {
     throw new ContractError('memory provider returned a handle for another runtime or epoch');
@@ -730,7 +797,12 @@ async function providerOutcome(
     ) {
       throw new ContractError('memory provider output is not bound to the admitted operation');
     }
-    return providerCuration(output, input, prompt);
+    const payload = output.payload as Record<string, unknown>;
+    if (payload.curation !== undefined) {
+      return providerCuration(payload.curation, input, prompt);
+    }
+    const observed = await observeCuration(driver, request);
+    return providerCuration(observed, input, prompt);
   } catch (error) {
     firstError = error;
     throw error;
@@ -958,6 +1030,7 @@ export class MemoryAgent {
         issue: issue('memory-agent-source-invalid', 'attention', 'memory analysis sources and digests must be non-empty and aligned', 'memory-source-integrity'),
       };
     }
+    const inspectedSources: InspectedMemorySource[] = [];
     for (const [index, sourceRef] of input.sourceRefs.entries()) {
       let inspected;
       try {
@@ -974,6 +1047,11 @@ export class MemoryAgent {
           issue: issue('memory-agent-source-invalid', 'attention', `memory source digest drifted: ${sourceRef}`, 'memory-source-integrity'),
         };
       }
+      inspectedSources.push({
+        sourceRef: inspected.sourceRef,
+        sourceDigest: inspected.sourceDigest,
+        text: inspected.text,
+      });
     }
 
     if (input.analysisInputs !== undefined) {
@@ -1271,7 +1349,13 @@ export class MemoryAgent {
     } else {
       if (this.options.driver !== undefined || this.options.driverFor !== undefined) {
         try {
-          outcome = await providerOutcome(this.options, input, promptSnapshot);
+          outcome = await providerOutcome(
+            this.options,
+            input,
+            promptSnapshot,
+            prompt.content,
+            inspectedSources,
+          );
         } catch (error) {
           return {
             status: 'waiting',

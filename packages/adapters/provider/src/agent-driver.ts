@@ -143,6 +143,7 @@ export class ProviderAgentDriver implements AgentDriver {
         kind: `provider.${providerEvent.kind}`,
         evidenceRefs: providerEvent.evidenceRefs,
         summary: providerEvent.summary,
+        ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
         providerEvent,
       };
     }

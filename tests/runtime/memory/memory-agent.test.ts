@@ -213,6 +213,172 @@ function providerDriver(input: {
   };
 }
 
+function streamingProviderDriver(input: {
+  readonly events: string[];
+  readonly terminalState?: 'succeeded' | 'failed';
+  readonly summary?: string;
+  readonly capture?: (payload: Record<string, unknown>) => void;
+}): AgentDriver {
+  return {
+    kind: 'memory-streaming-test',
+    capabilities: async () => ({ driverKind: 'memory-streaming-test', capabilities: ['analysis'], version: '1' }),
+    start: async (request) => {
+      input.events.push(`start:${request.taskId.value}:${request.executionEpoch}`);
+      return { runtimeId: request.runtimeId, executionEpoch: request.executionEpoch };
+    },
+    resume: async () => { throw new Error('unused'); },
+    submit: async (request) => {
+      input.events.push(`submit:${request.taskId.value}:${request.executionEpoch}`);
+      input.capture?.(request.payload as Record<string, unknown>);
+      return {
+        taskId: request.taskId,
+        executionEpoch: request.executionEpoch,
+        assignmentId: request.assignmentId,
+        payload: { mode: 'provider', status: 'accepted' },
+        outputRefs: [],
+        evidenceRefs: [],
+      };
+    },
+    async *observe(request) {
+      input.events.push(`observe:${request.runtimeId}`);
+      const payload = input.summary ?? JSON.stringify({
+        operationId: { scope: 'operation', value: 'analysis-a' },
+        auditPrompt: {
+          promptRef: 'project-memory-audit',
+          canonicalRef: 'prompt://project-a/project-memory-audit',
+          revision: 'sha256:prompt-revision',
+          digest: 'sha256:prompt-digest',
+          loadedAt: '2026-09-17T00:00:00.000Z',
+        },
+        sourceRefs: ['journal://project-a/checkpoint'],
+        outcome: 'candidate',
+        candidateId: 'streaming-candidate',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'streaming provider analysis',
+        nextAction: 'review',
+      });
+      yield { taskId: task, executionEpoch: 2, kind: 'provider.output', evidenceRefs: [], summary: payload };
+      yield {
+        taskId: task,
+        executionEpoch: 2,
+        kind: 'provider.terminal',
+        evidenceRefs: [],
+        terminalState: input.terminalState ?? 'succeeded',
+      };
+    },
+    requestStop: async () => ({ requested: true, operationId: id('operation', 'stop') }),
+    settle: async () => {
+      input.events.push('settle');
+      return { state: 'succeeded', evidenceRefs: [] };
+    },
+  };
+}
+
+test('memory agent drives observe to a terminal event and parses streaming curation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = streamingProviderDriver({ events });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  assert.equal(result.value.curation.outcome, 'candidate');
+  assert.equal(result.value.curation.explanation, 'streaming provider analysis');
+  assert.equal(ports.submissions.length, 1);
+  assert.deepEqual(events, [
+    `start:${task.value}:2`,
+    `submit:${task.value}:2`,
+    `observe:memory-analysis:analysis-a`,
+    'settle',
+  ]);
+});
+
+test('memory agent sends the audit prompt body and inspected source text to the provider', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  let captured: Record<string, unknown> | undefined;
+  const driver = streamingProviderDriver({
+    events,
+    capture: (payload) => { captured = payload; },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource('# Audit\n') },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  assert.equal((captured!.prompt as { readonly content: string }).content, '# Audit\n');
+  const sources = captured!.sources as readonly { readonly sourceRef: string; readonly text: string }[];
+  assert.equal(sources[0]!.sourceRef, 'journal://project-a/checkpoint');
+  assert.equal(sources[0]!.text, 'source');
+});
+
+test('memory agent fails closed when streaming provider emits no terminal event', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = streamingProviderDriver({ events });
+  driver.observe = async function* () {
+    yield { taskId: task, executionEpoch: 2, kind: 'provider.output', evidenceRefs: [], summary: '{}' };
+  };
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.ok(/without a terminal event/.test(result.status === 'waiting' ? result.issue.message : ''));
+});
+
+test('memory agent rejects a non-succeeded terminal event before parsing curation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = streamingProviderDriver({ events, terminalState: 'failed' });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.ok(/terminal state was failed/.test(result.status === 'waiting' ? result.issue.message : ''));
+  assert.equal(ports.submissions.length, 0);
+});
+
 function analysis(overrides: Record<string, unknown> = {}) {
   return {
     operationId: id('operation', 'analysis-a'),

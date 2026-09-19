@@ -160,7 +160,14 @@ export interface AgentOutput {
   readonly evidenceRefs: readonly EvidenceRef[];
 }
 export interface AgentHandle { readonly runtimeId: string; readonly executionEpoch: number; }
-export interface AgentEvent { readonly taskId: TaskId; readonly executionEpoch: number; readonly kind: string; readonly evidenceRefs: readonly EvidenceRef[]; }
+export interface AgentEvent {
+  readonly taskId: TaskId;
+  readonly executionEpoch: number;
+  readonly kind: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly summary?: string;
+  readonly terminalState?: ProviderTerminalState;
+}
 export interface StopRequestReceipt { readonly requested: boolean; readonly operationId: OperationId; }
 export interface AgentClosure { readonly state: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown'; readonly evidenceRefs: readonly EvidenceRef[]; }
 export interface AgentDriver {

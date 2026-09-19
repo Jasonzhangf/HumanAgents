@@ -11,6 +11,7 @@ import { id, type Checkpoint, type EvidenceRef, type ProviderBinding } from '../
 import { AppLifecycleError } from './errors.js';
 import {
   closeRuntime,
+  composeAgentDriver,
   composeMemoryRuntime,
   configureBuiltinPromptRoot,
   openRuntime,
@@ -93,7 +94,12 @@ async function composeTaskMemory(input: {
   readonly sessionId: string;
   readonly bindingRef: string;
   readonly executionEpoch: number;
-  readonly driver?: import('../../contracts/src/index.js').AgentDriver;
+  readonly driverFor?: (input: {
+    readonly taskId: import('../../contracts/src/index.js').TaskId;
+    readonly operationId: import('../../contracts/src/index.js').OperationId;
+    readonly executionEpoch: number;
+    readonly assignmentId: string;
+  }) => import('../../contracts/src/index.js').AgentDriver;
 }) {
   const localSkill = input.configuration.projectSourceManifest.sources?.localSkill;
   const mainAgentId = input.configuration.effective.project?.defaultAgent
@@ -130,8 +136,40 @@ async function composeTaskMemory(input: {
       },
     },
     mainAgentId,
-    ...(input.driver === undefined ? {} : { driver: input.driver }),
+    ...(input.driverFor === undefined ? {} : { driverFor: input.driverFor }),
   });
+}
+
+/**
+ * Provider-backed memory analysis must use an explicitly configured
+ * `roleId === 'memory'` agent, never the main operation driver. A fresh driver
+ * is composed for each admitted memory operation so its runtime/operation
+ * identity cannot leak into the main task execution.
+ */
+export function memoryDriverFactory(input: {
+  readonly paths: RuntimePaths;
+  readonly configuration: LoadedConfiguration;
+  readonly workspace: string;
+}): ((request: {
+  readonly taskId: import('../../contracts/src/index.js').TaskId;
+  readonly operationId: import('../../contracts/src/index.js').OperationId;
+  readonly executionEpoch: number;
+  readonly assignmentId: string;
+}) => import('../../contracts/src/index.js').AgentDriver) | undefined {
+  const memoryAgent = input.configuration.agentRoster.find((agent) => agent.roleId === 'memory');
+  if (memoryAgent === undefined) return undefined;
+  return ({ assignmentId }) => {
+    const composed = composeAgentDriver({
+      agent: memoryAgent,
+      paths: input.paths,
+      ...(input.configuration.effective.execution?.dsh === undefined
+        ? {}
+        : { dsh: input.configuration.effective.execution.dsh }),
+      runtimeId: assignmentId,
+      workspace: input.workspace,
+    });
+    return composed.driver;
+  };
 }
 
 type UiProviderProtocol = 'responses' | 'openai' | 'anthropic';
@@ -176,6 +214,11 @@ export async function main(args: readonly string[]): Promise<void> {
     const runtime = await openRuntime({ workspace, controlRoot, plan, sessionId });
     try {
       const memoryRef = option(args, '--memory');
+      const memoryDriverFor = memoryDriverFactory({
+        paths: runtime.paths,
+        configuration: runtime.configuration,
+        workspace: runtime.paths.workspaceCwd,
+      });
       const memory = memoryRef === undefined
         ? undefined
         : await composeTaskMemory({
@@ -184,6 +227,7 @@ export async function main(args: readonly string[]): Promise<void> {
             sessionId,
             bindingRef: memoryRef,
             executionEpoch: 1,
+            ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
           });
       const running = await new SessionStore(runtime.paths).append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
       const configuredAgentId = runtime.configuration.effective.project?.defaultAgent ?? runtime.configuration.agentRoster[0]!.agentId;
@@ -264,6 +308,11 @@ export async function main(args: readonly string[]): Promise<void> {
         ? runtime.session
         : await store.append(sessionId, { type: 'session.state', state: 'running' }, runtime.lock);
       const memoryRef = option(args, '--memory');
+      const memoryDriverFor = memoryDriverFactory({
+        paths: runtime.paths,
+        configuration: runtime.configuration,
+        workspace: runtime.paths.workspaceCwd,
+      });
       const memory = memoryRef === undefined
         ? undefined
         : await composeTaskMemory({
@@ -272,6 +321,7 @@ export async function main(args: readonly string[]): Promise<void> {
             sessionId,
             bindingRef: memoryRef,
             executionEpoch: manifest.executionEpoch,
+            ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
           });
       const recovered = await resumeAgentOperation({
         paths: runtime.paths,
