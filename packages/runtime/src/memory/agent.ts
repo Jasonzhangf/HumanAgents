@@ -304,10 +304,20 @@ function validateStringArray(value: unknown, label: string): asserts value is re
   }
 }
 
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+  label: string,
+): void {
+  const unknown = Object.keys(value).find((key) => !allowedKeys.includes(key));
+  if (unknown !== undefined) throw new ContractError(`${label} contains unsupported key: ${unknown}`);
+}
+
 function validateFingerprintInputs(value: unknown, label: string): void {
   if (!Array.isArray(value)) throw new ContractError(`${label} must be an array`);
   for (const entry of value) {
     if (!isRecord(entry)) throw new ContractError(`${label} entries must be objects`);
+    assertOnlyKeys(entry, ['sourceRef', 'sourceDigest', 'fingerprint'], label);
     if (typeof entry.sourceRef !== 'string' || entry.sourceRef.trim() === '') throw new ContractError(`${label} sourceRef is required`);
     if (typeof entry.sourceDigest !== 'string' || entry.sourceDigest.trim() === '') throw new ContractError(`${label} sourceDigest is required`);
     if (typeof entry.fingerprint !== 'string' || entry.fingerprint.trim() === '') throw new ContractError(`${label} fingerprint is required`);
@@ -316,6 +326,11 @@ function validateFingerprintInputs(value: unknown, label: string): void {
 
 export function validateMemoryAnalysisInputs(value: unknown): asserts value is MemoryAnalysisInputs {
   if (!isRecord(value)) throw new ContractError('memory analysis inputs must be an object');
+  assertOnlyKeys(
+    value,
+    ['corrections', 'errors', 'rewindChains', 'actualPathRefs', 'declaredPathRefs'],
+    'memory analysis inputs',
+  );
   validateFingerprintInputs(value.corrections, 'memory analysis corrections');
   validateFingerprintInputs(value.errors, 'memory analysis errors');
   validateStringArray(value.actualPathRefs, 'memory analysis actualPathRefs');
@@ -323,6 +338,19 @@ export function validateMemoryAnalysisInputs(value: unknown): asserts value is M
   if (!Array.isArray(value.rewindChains)) throw new ContractError('memory analysis rewindChains must be an array');
   for (const chain of value.rewindChains) {
     if (!isRecord(chain)) throw new ContractError('memory analysis rewind chain must be an object');
+    assertOnlyKeys(
+      chain,
+      [
+        'failedBranchRef',
+        'rewindCheckpointRef',
+        'recoveryCheckpointRef',
+        'reentryFactRef',
+        'successfulBranchRefs',
+        'successEvidenceRefs',
+        'absoluteJournalRefs',
+      ],
+      'memory analysis rewind chain',
+    );
     for (const field of ['failedBranchRef', 'rewindCheckpointRef', 'recoveryCheckpointRef'] as const) {
       if (typeof chain[field] !== 'string' || chain[field].trim() === '') throw new ContractError(`memory analysis rewind ${field} is required`);
     }
