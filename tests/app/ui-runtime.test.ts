@@ -1691,6 +1691,49 @@ test('operation-scoped hydration restores an operation-less business checkpoint 
   await waitFor(() => assert.equal(third.taskDashboard(firstTask.taskId).state, 'succeeded'));
 });
 
+test('memory context receipt is process-local across serve restart and fresh operation rebinds memory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-receipt-restart-'));
+  const launch = () => startUiRuntime({
+    mode: 'fake' as const,
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: testMemory('project-ui-memory-receipt-restart'),
+  });
+
+  const first = await launch();
+  const task = first.service.createTask({ title: 'memory receipt restart' });
+  const firstStarted = first.service.startExecution(task.taskId, { prompt: 'first memory receipt' });
+  try {
+    await waitFor(() => assert.equal(first.service.taskDashboard(task.taskId).state, 'succeeded'));
+    assert.equal(first.service.memoryContextReceipt(firstStarted.operationId).executionEpoch, firstStarted.executionEpoch);
+  } finally {
+    await first.server.close();
+  }
+
+  const second = await launch();
+  try {
+    assert.throws(
+      () => second.service.memoryContextReceipt(firstStarted.operationId),
+      (error: unknown) => error instanceof UiRuntimeApiError
+        && error.code === 'memory-binding-missing'
+        && error.httpStatus === 404,
+    );
+
+    const secondStarted = second.service.startExecution(task.taskId, { prompt: 'fresh memory receipt' });
+    assert.equal(secondStarted.executionEpoch, firstStarted.executionEpoch + 1);
+    await waitFor(() => assert.equal(second.service.taskDashboard(task.taskId).state, 'succeeded'));
+    assert.equal(second.service.memoryContextReceipt(secondStarted.operationId).executionEpoch, secondStarted.executionEpoch);
+  } finally {
+    await second.server.close();
+  }
+});
+
 test('journal replay fails explicitly instead of silently dropping corrupted projection records', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-journal-corrupt-'));
   const journalPath = join(root, 'ui-runtime-journal.jsonl');

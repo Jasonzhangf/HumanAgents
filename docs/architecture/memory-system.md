@@ -855,6 +855,8 @@ interface MemoryRecallRequest {
 
 注入结果必须保留 `contextId`、`executionEpoch`、namespace、project key、layer、source ref、digest、token cost、omitted reason 和 index version。`attach` 只绑定主 Agent 已主动选择的召回结果，不修改 Task payload 或 Journal 状态；旧 epoch 的 context 必须拒绝。Memory Agent 不拥有 `attach`，也不因自己的分析结果自动改变 live context。
 
+UI `serve` 的 memory-context operation receipt 是进程内的绑定投影，不是可跨重启恢复的 Operation 事实。当前 `UiRuntimeService` 只在进程内保存已绑定 receipt；UI runtime Journal 只恢复 task、operation 和事件投影，不恢复旧 memory binding、recall context 或 attach 事实。进程重启后，旧 operation 仍可由 Journal 查询，但请求其 receipt 必须返回 `memory-binding-missing`；调用方必须创建新 operation，让新 runtime binding 重新 recall/attach。这样不会把已失效的进程内 binding 伪装成当前 binding。若未来要求跨重启读取 receipt，必须另行定义 durable binding 的 owner、重验证和失效语义，不能仅持久化 receipt JSON。
+
 ### 7.3 Memory Interaction Surface
 
 UI 继续通过 `MemoryInteractionPort` 访问记忆；这是用户查询和 review 的唯一边界，不被 context injection seam 取代。这里的 `open` 只创建带 scope/permission 的只读 view handle，不创建 Memory Session，也不保存私有对话上下文：
