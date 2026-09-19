@@ -332,6 +332,45 @@ test('memory agent re-analyzes a correlated follow-up and replays the persisted 
   assert.equal(ports.submissions.length, 2);
 });
 
+test('memory agent preserves an authorized global follow-up namespace in submission scope', async () => {
+  const ports = makeOperations({ candidateId: 'candidate-global-follow-up' });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+  assert.equal((await agent.analyze(analysis())).status, 'ready');
+
+  const globalActor: MemoryActorContext = {
+    ...actor,
+    crossProjectGrantRef: 'grant://project-a/global-memory',
+  };
+  const accepted = await agent.followUp({
+    requestId: 'follow-up-global',
+    operationId: id('operation', 'follow-up-global-operation'),
+    correlationId: 'follow-up-global-correlation',
+    inReplyTo: 'analysis-a',
+    bindingRef: 'binding-a',
+    actor: globalActor,
+    projectKey: 'project-a',
+    namespace: 'global',
+    taskId: task,
+    evidenceRefs: ['journal://project-a/evidence'],
+    evidenceDigests: ['sha256:evidence'],
+    sourceRefs: ['journal://project-a/evidence'],
+    inputDigest: 'sha256:evidence',
+  });
+
+  assert.equal(accepted.status, 'ready');
+  assert.equal(ports.submissions.length, 2);
+  assert.equal(ports.submissions[1]?.candidateCategory, 'global');
+  assert.equal(ports.submissions[1]?.desiredScope, 'global');
+});
+
 test('memory agent persists follow-up results across restart and rejects drifted evidence', async () => {
   const state = {
     value: undefined as unknown,

@@ -427,7 +427,7 @@ function followUpAnalysisRequest(input: MemoryFollowUpRequest, prior: MemoryAnal
     sourceDigests: [...input.evidenceDigests],
     observation: prior.observation,
     requestedKind: prior.requestedKind,
-    candidateCategory: prior.candidateCategory,
+    candidateCategory: input.namespace === 'global' ? 'global' : prior.candidateCategory,
     executionEpoch: prior.executionEpoch,
     trigger: prior.trigger,
   };
