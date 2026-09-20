@@ -1350,3 +1350,44 @@ test('operation contract rejects control leakage, scope expansion, fingerprint c
     completedAt: '2026-09-20T00:00:00Z',
   }), ContractError);
 });
+
+test('operation scope patterns treat omitted organId as wildcard without weakening explicit dimensions', () => {
+  const cycle = id('cycle', 'cycle-a');
+  const requestedScope: ScopeRef = { organId: organ, taskId: task, cycleId: cycle };
+  const operationIntent: OperationIntent = {
+    operationId: operation,
+    taskId: task,
+    cycleId: cycle,
+    requestedBy: 'agent-a',
+    intentRevision: 'directive-r1',
+    kind: 'inspect',
+    toolName: 'file.inspect',
+    inputRef: 'artifact://input-a',
+    inputDigest: 'sha256:input-a',
+    requestedScope,
+    idempotencyKey: 'idempotency-a',
+    expectedOutput: { schemaRef: 'schema://inspect-output/v1', requiredEvidenceKinds: ['operation'] },
+  };
+  const toolRegistration: ToolRegistration = {
+    toolName: 'file.inspect',
+    contractVersion: '1.0.0',
+    supportedKinds: ['inspect'],
+    routeId: 'deterministic-file-route',
+    routeVersion: '1.0.0',
+    mode: 'gateway',
+    acceptedScopes: [{ taskId: task }],
+    inputContract: 'schema://inspect-input/v1',
+    outputContract: 'schema://inspect-output/v1',
+    verifier: 'verifier://inspect/v1',
+    capabilities: ['file.read'],
+    retryPolicy: 'retry://read-only/v1',
+    owner: 'operations-adapter',
+  };
+  assert.doesNotThrow(() => validateOperationIntentForRegistration(operationIntent, toolRegistration));
+
+  const otherTask = id('task', 'task-b');
+  assert.throws(() => validateOperationIntentForRegistration(
+    { ...operationIntent, taskId: otherTask, requestedScope: { ...requestedScope, taskId: otherTask } },
+    toolRegistration,
+  ), ContractError);
+});

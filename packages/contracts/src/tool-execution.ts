@@ -315,7 +315,7 @@ export function validateScopePattern(pattern: ScopePattern, label = 'scope patte
 export function scopePatternMatches(pattern: ScopePattern, scope: Scope): boolean {
   validateScopePattern(pattern);
   validateScope(scope);
-  return sameScopedId(pattern.organId, scope.organId)
+  return (pattern.organId === undefined || sameScopedId(pattern.organId, scope.organId))
     && (pattern.taskId === undefined || sameScopedId(pattern.taskId, scope.taskId))
     && (pattern.cycleId === undefined || sameScopedId(pattern.cycleId, scope.cycleId))
     && (pattern.operationId === undefined || sameScopedId(pattern.operationId, scope.operationId));
