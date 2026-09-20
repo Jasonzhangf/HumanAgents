@@ -1,0 +1,557 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.cordis-host-closeout-proof",
+  "generatedAt": "2026-09-20T08:37:18.048Z",
+  "candidate": {
+    "implementationCommit": "86dbfd0d9956bb0b83bc86db7c0fbbb898cbbc5d",
+    "implementationTree": "dddbe8c21c30176ea0164ba131160a448f1ffae8",
+    "proofCommit": "00650c09ee829639ecd68970262da5b409b04e21",
+    "proofTree": "c851cd4f5ad65286b3257bbbe8738d9d14ba5228",
+    "sourceDigest": "sha256:862318f2a1398f6d4d114924f06569fdd961d94bc8a47bae72fa804e64c1928e"
+  },
+  "root": "/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cordis-closeout-G7twMr",
+  "launch": {
+    "command": "serve",
+    "mode": "fake",
+    "driverRef": "fake",
+    "url": "http://127.0.0.1:50212",
+    "bindingId": "fake-default",
+    "providerId": "fake-provider",
+    "protocol": "responses",
+    "uiRoot": "/Volumes/extension/code/humanagent/playground/mvp-cordis-host-closeout-r3-86dbfd0/docs/ui",
+    "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cordis-closeout-G7twMr/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace/checkpoints/ui-runtime",
+    "memoryRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cordis-closeout-G7twMr/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace/memory",
+    "eventJournal": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cordis-closeout-G7twMr/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace/journal/events.jsonl",
+    "supervisor": {
+      "leasePath": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-cordis-closeout-G7twMr/control/project/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace/daemon/lease.json",
+      "readyAt": "2026-09-20T08:37:18.237Z",
+      "stages": [
+        "cordis-host",
+        "ui-runtime"
+      ]
+    },
+    "plugins": [
+      "humanagent.harness-kernel",
+      "humanagent.agent-templates",
+      "humanagent.fake-provider",
+      "humanagent.memory",
+      "humanagent.ui"
+    ],
+    "composition": {
+      "ownerId": "humanagent.app.entry-composition",
+      "complete": true,
+      "components": [
+        {
+          "component": "configuration",
+          "state": "composed",
+          "ownerId": "humanagent.config",
+          "message": "configuration and control roots are loaded by the app entry"
+        },
+        {
+          "component": "memory",
+          "state": "composed",
+          "ownerId": "humanagent.app.memory-composition",
+          "message": "memory coordinator, backend, and checkpoint boundary are composed by serve"
+        },
+        {
+          "component": "provider-execution",
+          "state": "composed",
+          "ownerId": "humanagent.provider-adapter",
+          "message": "the selected provider execution port is composed by the explicit mode"
+        },
+        {
+          "component": "ui-runtime",
+          "state": "composed",
+          "ownerId": "humanagent.runtime.ui",
+          "message": "task coordinator, journal, checkpoint store, and loopback server are composed by serve"
+        },
+        {
+          "component": "cordis-host",
+          "state": "composed",
+          "ownerId": "humanagent.app.cordis-host",
+          "message": "CordisHost is composed and exposes the live plugin inventory"
+        },
+        {
+          "component": "fixed-harness-kernel",
+          "state": "composed",
+          "ownerId": "humanagent.harness-kernel",
+          "message": "CordisHost unconditionally loaded the fixed Harness Kernel manifest"
+        },
+        {
+          "component": "fake-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.fake-provider",
+          "message": "the explicit fake execution port is loaded as a Cordis plugin"
+        },
+        {
+          "component": "template-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.agent-templates",
+          "message": "the agent template registry is loaded as a Cordis plugin"
+        },
+        {
+          "component": "memory-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.memory",
+          "message": "memory operations and context injection are loaded as a Cordis plugin"
+        },
+        {
+          "component": "ui-plugin",
+          "state": "composed",
+          "ownerId": "humanagent.ui",
+          "message": "the UI runtime projection is loaded as a Cordis plugin"
+        },
+        {
+          "component": "supervisor-lease-startup-dispose",
+          "state": "composed",
+          "ownerId": "humanagent.app.supervisor",
+          "message": "serve acquires a daemon lease and runs staged startup/dispose with reverse cleanup"
+        },
+        {
+          "component": "rejected-interaction-closure",
+          "state": "composed",
+          "ownerId": "humanagent.runtime.explicit-intake",
+          "message": "serve exposes typed rejection and commits InteractionClosure to the UI runtime journal"
+        }
+      ]
+    }
+  },
+  "requests": {
+    "status": {
+      "surface": "runtime-status",
+      "mode": "fake",
+      "state": "ready",
+      "connected": true,
+      "providerState": "ready",
+      "detail": "固定 replay，不访问 RCC",
+      "modes": [
+        {
+          "mode": "fake",
+          "enabled": true,
+          "state": "ready",
+          "detail": "固定 replay"
+        },
+        {
+          "mode": "rcc",
+          "enabled": true,
+          "state": "ready",
+          "detail": "RCC 4444"
+        },
+        {
+          "mode": "dsh",
+          "enabled": false,
+          "state": "disabled",
+          "detail": "DSH 接入完成后开放"
+        }
+      ]
+    },
+    "task": {
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "title": "cordis closeout",
+      "directive": "return the deterministic fake result",
+      "directiveRevision": 1,
+      "state": "created",
+      "currentState": "已创建",
+      "nextStep": "选择模式并发起执行",
+      "updatedAt": "2026-09-20T08:37:18.273Z",
+      "input": "",
+      "output": "",
+      "currentNode": "input.received",
+      "allowedActions": [
+        "start"
+      ],
+      "recentEvents": [],
+      "events": []
+    },
+    "execution": {
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1
+    }
+  },
+  "events": [
+    {
+      "eventId": "ui-operation-1-1",
+      "seq": 1,
+      "occurredAt": "2026-09-20T08:37:18.276Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "execution.started",
+      "state": "running",
+      "summary": "execution started",
+      "evidenceRefs": []
+    },
+    {
+      "eventId": "ui-operation-1-2",
+      "seq": 2,
+      "occurredAt": "2026-09-20T08:37:18.351Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "provider.model",
+      "state": "model",
+      "summary": "model",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-model-0"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/model-0",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eventId": "ui-operation-1-3",
+      "seq": 3,
+      "occurredAt": "2026-09-20T08:37:18.372Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "provider.output",
+      "state": "output",
+      "summary": "fake replay: draft output chunk 1",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-output-1"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/output-1",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eventId": "ui-operation-1-4",
+      "seq": 4,
+      "occurredAt": "2026-09-20T08:37:18.394Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "provider.tool",
+      "state": "tool",
+      "summary": "tool: fake://tool/1",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-tool-2"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/tool-2",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eventId": "ui-operation-1-5",
+      "seq": 5,
+      "occurredAt": "2026-09-20T08:37:18.415Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "provider.output",
+      "state": "output",
+      "summary": "fake replay: final output chunk 2",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-output-3"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/output-3",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eventId": "ui-operation-1-6",
+      "seq": 6,
+      "occurredAt": "2026-09-20T08:37:18.437Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "execution.terminal",
+      "state": "succeeded",
+      "summary": "execution succeeded",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-terminal-4"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/terminal-4",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          }
+        }
+      ],
+      "terminalPhase": "provider"
+    },
+    {
+      "eventId": "ui-operation-1-7",
+      "seq": 7,
+      "occurredAt": "2026-09-20T08:37:18.437Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "execution.settling",
+      "state": "settling",
+      "summary": "execution settling",
+      "evidenceRefs": []
+    },
+    {
+      "eventId": "ui-operation-1-8",
+      "seq": 8,
+      "occurredAt": "2026-09-20T08:37:18.450Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "checkpoint.committed",
+      "state": "succeeded",
+      "summary": "execution succeeded",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "checkpoint-ui-operation-1-1"
+          },
+          "kind": "operation",
+          "source": "humanagent.runtime",
+          "locator": "operation/ui-operation-1/checkpoint",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eventId": "ui-operation-1-9",
+      "seq": 9,
+      "occurredAt": "2026-09-20T08:37:18.614Z",
+      "taskId": {
+        "scope": "task",
+        "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+      },
+      "operationId": "ui-operation-1",
+      "executionEpoch": 1,
+      "kind": "execution.terminal",
+      "state": "succeeded",
+      "summary": "execution succeeded; provider closed",
+      "evidenceRefs": [
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-settle-succeeded"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/settle-succeeded",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          }
+        },
+        {
+          "evidenceId": {
+            "scope": "evidence",
+            "value": "fake-close"
+          },
+          "kind": "execution",
+          "source": "humanagent.fake-provider",
+          "locator": "fake/close",
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "fake-organ"
+            }
+          }
+        }
+      ],
+      "terminalPhase": "final"
+    }
+  ],
+  "task": {
+    "surface": "task-detail",
+    "taskId": {
+      "scope": "task",
+      "value": "ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1"
+    },
+    "title": "cordis closeout",
+    "state": "ready",
+    "data": {
+      "state": "ready",
+      "label": "已完成",
+      "detail": "可发起新的执行或停止",
+      "updatedAt": "2026-09-20T08:37:18.614Z"
+    },
+    "currentState": "已完成",
+    "priorInput": "return the deterministic fake result",
+    "investigation": [
+      "fake replay: draft output chunk 1fake replay: final output chunk 2"
+    ],
+    "proposal": "可发起新的执行或停止",
+    "nextAction": "可发起新的执行或停止",
+    "requiredDecisions": [],
+    "customInputAllowed": false,
+    "output": {
+      "state": "succeeded",
+      "summary": "fake replay: draft output chunk 1fake replay: final output chunk 2",
+      "artifacts": []
+    },
+    "observationRef": "task://ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1/observation"
+  },
+  "artifacts": {
+    "journal": "{\"version\":1,\"seq\":1,\"kind\":\"event\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"}},\"commitId\":\"event:4c486c6058dfb16bbf29291c36069326447fffadb1b542d3cad126627c0d4936\",\"commitFactDigest\":\"sha256:ec9be4796595c15134374b5dc8de1dccb59d1046e440c855aa315e8d40233223\",\"payload\":{\"type\":\"event\",\"event\":{\"messageId\":\"checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"streamId\":\"memory-boundaries:interaction:runtime:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"kind\":\"memory.analysis.requested\",\"class\":\"data\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"}},\"occurredAt\":\"2026-09-20T08:37:18.451Z\",\"summary\":\"checkpoint succeeded for task ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\",\"payload\":{\"trigger\":\"completion\",\"requestedKind\":\"semantic\",\"candidateCategory\":\"project-experience\"},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.app.memory-runtime\",\"locator\":\"humanagent://checkpoint/checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1\",\"digest\":\"sha256:a5e1a904b87201c5055a3d25fca4accff92c32249170eaeda69442dca0629a2d\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}],\"executionEpoch\":1,\"publisherId\":\"memory-boundary-publisher\",\"sequence\":1,\"committedAt\":\"2026-09-20T08:37:18.457Z\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:cb08a24097f56692942c62fa4c696a6e87f8c376973b695022c74980c7db1716\"}\n{\"version\":1,\"seq\":2,\"kind\":\"event\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-event-bus\"}},\"commitId\":\"external-operation:c87bbb36d3a1e28357268b5ef18f1b01c0a005366fe6782d437e410e25ec8406\",\"commitFactDigest\":\"sha256:e338089b32eff312daa107f4628a21e132ff69e4f630643cc023bb1c2b96692a\",\"payload\":{\"type\":\"external-operation\",\"externalOperation\":{\"operationRef\":\"memory-analysis:memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace:checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"consumerKey\":\"memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"messageId\":\"checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"state\":\"pending\"}},\"previousRecordDigest\":\"sha256:cb08a24097f56692942c62fa4c696a6e87f8c376973b695022c74980c7db1716\",\"recordDigest\":\"sha256:97816e56a9286574ba5d24aecc0fc378e0249a56737de6280f0aa30bde72ab57\"}\n{\"version\":1,\"seq\":3,\"kind\":\"event\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-event-bus\"}},\"commitId\":\"barrier-intent:e5025d10aa05401e0d41bf7fb1e0b1ba92893a9a743c07c85b61edcb76b26510\",\"commitFactDigest\":\"sha256:43f727be7f3d9239f5b6f74f08140632dc33fefc4523a4fb6fe52b3fb2a85c7a\",\"payload\":{\"type\":\"barrier-intent\",\"barrierIntent\":{\"consumerKey\":\"memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"messageId\":\"checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"streamId\":\"memory-boundaries:interaction:runtime:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"handledSequence\":1,\"intent\":{\"consumerKey\":\"memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"messageId\":\"checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"disposition\":\"applied\",\"completionMode\":\"operation-barrier\",\"internalEffectFacts\":[\"memory-analysis-request:memory-analysis-f05373d06780702765e536759f03e6b71ffe767f3dce2df68799548b576331c6\"],\"externalOperationRefs\":[\"memory-analysis:memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace:checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\"]}}},\"previousRecordDigest\":\"sha256:97816e56a9286574ba5d24aecc0fc378e0249a56737de6280f0aa30bde72ab57\",\"recordDigest\":\"sha256:c468f9cff7a0063ac23dde7f39437ee454a6b0a6363650d7513a2374827952b5\"}\n{\"version\":1,\"seq\":4,\"kind\":\"event\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-event-bus\"}},\"commitId\":\"memory-agent-state:63c0dead7571359a4d27c118570afaadc62d312631dc8f542c392ce99f1a2038\",\"commitFactDigest\":\"sha256:62b44443c3cc98714cde2b08fbca28758bdf0b71cc46ea7c3878225368b7b5c3\",\"payload\":{\"type\":\"memory-agent-state\",\"memoryAgentState\":{\"version\":1,\"analyses\":[{\"request\":{\"operationId\":{\"scope\":\"operation\",\"value\":\"memory-analysis-f05373d06780702765e536759f03e6b71ffe767f3dce2df68799548b576331c6\"},\"bindingRef\":\"memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"actor\":{\"actorId\":\"memory-agent\",\"roleId\":\"memory\",\"permissions\":[\"memory.read\",\"memory.propose\"],\"projectKey\":\"-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\"},\"projectKey\":\"-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"scope\":{\"kind\":\"organ\",\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"}},\"interactionScopeId\":\"runtime:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"sourceRefs\":[\"humanagent://checkpoint/checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1\"],\"sourceDigests\":[\"sha256:a5e1a904b87201c5055a3d25fca4accff92c32249170eaeda69442dca0629a2d\"],\"observation\":\"checkpoint succeeded for task ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\",\"requestedKind\":\"semantic\",\"candidateCategory\":\"project-experience\",\"executionEpoch\":1,\"trigger\":\"completion\"},\"acceptedAt\":\"2026-09-20T08:37:18.592Z\"}],\"followUps\":[]}},\"previousRecordDigest\":\"sha256:c468f9cff7a0063ac23dde7f39437ee454a6b0a6363650d7513a2374827952b5\",\"recordDigest\":\"sha256:67bae255e9e1eaca5edf240aa77ba7862627c6e27f98f33884c3df1931470d22\"}\n{\"version\":1,\"seq\":5,\"kind\":\"event\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-event-bus\"}},\"commitId\":\"retry:2f0c4536bb7d982c022a3c38012ad3ef8eb97d09782df2d93b095af86aefde4c\",\"commitFactDigest\":\"sha256:5e8d1a8c1d2cdef07925bf423d2060291218a4b4356e9da74201258cf50e2301\",\"payload\":{\"type\":\"retry\",\"retry\":{\"retryKey\":\"138:memory-boundaries:interaction:runtime:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace110:memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace81:checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"consumerKey\":\"memory-ui:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"messageId\":\"checkpoint-checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1-completion\",\"streamId\":\"memory-boundaries:interaction:runtime:-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-cordis-closeout-G7twMr-workspace\",\"failedSequence\":1,\"attempt\":1,\"nextAttemptAt\":\"2026-09-20T08:37:19.603Z\",\"ownerRef\":\"memory-agent\",\"failureRef\":\"memory-agent-source-unavailable\",\"state\":\"pending\"}},\"previousRecordDigest\":\"sha256:67bae255e9e1eaca5edf240aa77ba7862627c6e27f98f33884c3df1931470d22\",\"recordDigest\":\"sha256:fef9a12d6c1b701fe24bd1fa6f6db04188b8a7c00edb488227560bdfe125a0c7\"}\n",
+    "checkpoint": "{\"version\":1,\"seq\":1,\"kind\":\"checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"commitId\":\"checkpoint:humanagent-ui:ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1:ui-cycle-1:-:checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1\",\"commitFactDigest\":\"sha256:4ce6ef89ea82d4034de471a6ad5afd1c333526d2f4f5ee4c6610df9be9705351\",\"checkpoint\":{\"id\":{\"scope\":\"checkpoint\",\"value\":\"checkpoint-ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"seq\":1,\"previousCheckpointId\":null,\"directiveRevision\":1,\"executionEpoch\":1,\"outcome\":\"succeeded\",\"summary\":\"execution succeeded\",\"recoveryStateRef\":{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"recovery-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint-recovery\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}},\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}],\"next\":{\"kind\":\"continue\",\"ref\":\"task://ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1/next\"}},\"previousRecordDigest\":null,\"recordDigest\":\"sha256:e714ec07619eecf10ddf315ad680702b979f5830ef0ddd4dfaf501f00b95d36e\"}\n",
+    "checkpointJournal": "{\"kind\":\"task.created\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"title\":\"cordis closeout\",\"directive\":\"return the deterministic fake result\",\"directiveRevision\":1,\"createdAt\":\"2026-09-20T08:37:18.273Z\",\"taskCounter\":1}\n{\"kind\":\"operation.started\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}},\"executionEpoch\":1,\"operationCounter\":1,\"cycleCounter\":1,\"startedAt\":\"2026-09-20T08:37:18.275Z\",\"input\":\"return the deterministic fake result\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-1\",\"seq\":1,\"occurredAt\":\"2026-09-20T08:37:18.276Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.started\",\"state\":\"running\",\"summary\":\"execution started\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-2\",\"seq\":2,\"occurredAt\":\"2026-09-20T08:37:18.351Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.model\",\"state\":\"model\",\"summary\":\"model\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-model-0\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/model-0\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-3\",\"seq\":3,\"occurredAt\":\"2026-09-20T08:37:18.372Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"fake replay: draft output chunk 1\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-output-1\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/output-1\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"fake replay: draft output chunk 1\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-4\",\"seq\":4,\"occurredAt\":\"2026-09-20T08:37:18.394Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.tool\",\"state\":\"tool\",\"summary\":\"tool: fake://tool/1\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-tool-2\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/tool-2\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-5\",\"seq\":5,\"occurredAt\":\"2026-09-20T08:37:18.415Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"provider.output\",\"state\":\"output\",\"summary\":\"fake replay: final output chunk 2\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-output-3\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/output-3\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}]},\"taskOutput\":\"fake replay: draft output chunk 1fake replay: final output chunk 2\"}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-6\",\"seq\":6,\"occurredAt\":\"2026-09-20T08:37:18.437Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-terminal-4\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/terminal-4\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}}],\"terminalPhase\":\"provider\"}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-7\",\"seq\":7,\"occurredAt\":\"2026-09-20T08:37:18.437Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.settling\",\"state\":\"settling\",\"summary\":\"execution settling\",\"evidenceRefs\":[]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-8\",\"seq\":8,\"occurredAt\":\"2026-09-20T08:37:18.450Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"checkpoint.committed\",\"state\":\"succeeded\",\"summary\":\"execution succeeded\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"checkpoint-ui-operation-1-1\"},\"kind\":\"operation\",\"source\":\"humanagent.runtime\",\"locator\":\"operation/ui-operation-1/checkpoint\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"}}}]}}\n{\"kind\":\"operation.event\",\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"},\"event\":{\"eventId\":\"ui-operation-1-9\",\"seq\":9,\"occurredAt\":\"2026-09-20T08:37:18.614Z\",\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"operationId\":\"ui-operation-1\",\"executionEpoch\":1,\"kind\":\"execution.terminal\",\"state\":\"succeeded\",\"summary\":\"execution succeeded; provider closed\",\"evidenceRefs\":[{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-settle-succeeded\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/settle-succeeded\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"humanagent-ui\"},\"taskId\":{\"scope\":\"task\",\"value\":\"ui-task-24e989b5-bd58-465c-93f7-f385b52807a2-1\"},\"cycleId\":{\"scope\":\"cycle\",\"value\":\"ui-cycle-1\"},\"operationId\":{\"scope\":\"operation\",\"value\":\"ui-operation-1\"}}},{\"evidenceId\":{\"scope\":\"evidence\",\"value\":\"fake-close\"},\"kind\":\"execution\",\"source\":\"humanagent.fake-provider\",\"locator\":\"fake/close\",\"scope\":{\"organId\":{\"scope\":\"organ\",\"value\":\"fake-organ\"}}}],\"terminalPhase\":\"final\"}}\n",
+    "lease": "{\"schemaVersion\":1,\"leaseId\":\"662167e0-86e8-42d7-83b2-995839e883de\",\"generation\":1,\"ownerId\":\"humanagent.app.serve\",\"pid\":17805,\"processStartToken\":\"0eac37f5-136e-4b5d-b6ad-825a279ae016\",\"acquiredAt\":\"2026-09-20T08:37:18.226Z\",\"readyAt\":\"2026-09-20T08:37:18.237Z\"}\n",
+    "leaseAfterShutdown": "{\"schemaVersion\":1,\"leaseId\":\"662167e0-86e8-42d7-83b2-995839e883de\",\"generation\":1,\"ownerId\":\"humanagent.app.serve\",\"pid\":17805,\"processStartToken\":\"0eac37f5-136e-4b5d-b6ad-825a279ae016\",\"acquiredAt\":\"2026-09-20T08:37:18.226Z\",\"readyAt\":\"2026-09-20T08:37:18.237Z\",\"disposedAt\":\"2026-09-20T08:37:18.634Z\"}\n"
+  }
+}
