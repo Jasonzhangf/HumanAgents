@@ -251,7 +251,7 @@ export interface LegacyMemoryScopeCompatibility {
   readonly projectKey: string;
 }
 export type ContextLayer = 'current' | 'task-recent' | 'related' | 'approved-long-term' | 'raw';
-export interface AgentMemoryContextRequest { readonly agentRuntimeId: string; readonly roleId: string; readonly taskId: TaskId; readonly scope: MemoryScope; readonly layers: readonly ContextLayer[]; readonly query?: string; readonly tokenBudget: number; readonly executionEpoch: number; readonly evidenceRequired: boolean; }
+export interface AgentMemoryContextRequest { readonly agentRuntimeId: string; readonly roleId: string; readonly taskId: TaskId; readonly scope: CanonicalMemoryScope; readonly layers: readonly ContextLayer[]; readonly query?: string; readonly tokenBudget: number; readonly executionEpoch: number; readonly evidenceRequired: boolean; }
 export interface AgentMemoryContextEntry { readonly layer: ContextLayer; readonly summary: string; readonly sourceRef: string; readonly sourceDigest: string; readonly scope: string; readonly tokenCost: number; }
 export interface AgentMemoryContext { readonly contextId: string; readonly executionEpoch: number; readonly entries: readonly AgentMemoryContextEntry[]; readonly omitted: readonly { reason: string; sourceRef?: string }[]; readonly indexVersion?: string; }
 export interface AgentMemoryContextInjectionPort { recall(input: AgentMemoryContextRequest): Promise<AgentMemoryContext>; attach(input: { readonly agentRuntimeId: string; readonly context: AgentMemoryContext }): Promise<{ contextId: string; attached: boolean }>; }

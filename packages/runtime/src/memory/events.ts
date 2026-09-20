@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import {
   id,
   type BusinessPayload,
+  type CanonicalMemoryScope,
   type EvidenceRef,
   type MemoryActorContext,
   type MemoryCandidateCategory,
-  type MemoryScope,
   type ScopeRef,
   type TaskId,
 } from '../../../contracts/src/index.js';
@@ -49,7 +49,7 @@ export interface MemoryAnalysisWakeBinding {
   readonly bindingRef: string;
   readonly projectKey: string;
   readonly executionEpoch: number;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly taskId?: TaskId;
   readonly interactionScopeId?: string;
   readonly mainAgentId: string;
@@ -210,7 +210,13 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
   if (!binding.actor.permissions.includes('memory.propose')) {
     return eventIssue('memory-agent-event-invalid', 'memory analysis actor lacks memory.propose permission', 'memory-permission');
   }
-  if (binding.scope.kind === 'task' && binding.scope.taskId === undefined) {
+  if (binding.scope.namespace !== 'project') {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding scope must be project-scoped', 'memory-binding');
+  }
+  if (binding.scope.projectKey !== binding.projectKey) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis binding scope belongs to another project', 'memory-binding');
+  }
+  if (binding.taskId !== undefined && binding.scope.taskId === undefined) {
     return eventIssue('memory-agent-event-invalid', 'task memory analysis binding requires a task id', 'memory-binding');
   }
   if ((binding.taskId === undefined) === (binding.interactionScopeId === undefined)) {
@@ -225,7 +231,8 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
   return null;
 }
 
-function scopeMatchesEvent(scope: MemoryScope, eventScope: ScopeRef): boolean {
+function scopeMatchesEvent(scope: CanonicalMemoryScope, eventScope: ScopeRef): boolean {
+  if (scope.namespace !== 'project') return false;
   if (!sameId(scope.organId, eventScope.organId)) return false;
   if (scope.taskId === undefined) return true;
   return sameId(scope.taskId, eventScope.taskId);
@@ -617,7 +624,7 @@ export function memoryAnalysisRequestFromEvent(
   const taskId = binding.interactionScopeId === undefined
     ? binding.taskId ?? event.scope.taskId
     : undefined;
-  if (binding.scope.kind === 'task' && !sameId(binding.scope.taskId, taskId)) {
+  if (binding.scope.namespace === 'project' && binding.scope.taskId !== undefined && !sameId(binding.scope.taskId, taskId)) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis event task does not match the wake binding', 'memory-analysis-scope');
   }
   const sources = evidenceSources(event);
@@ -662,10 +669,19 @@ export function memoryAnalysisRequestFromEvent(
         permissions: [...binding.actor.permissions],
       },
       projectKey: binding.projectKey,
-      scope: {
-        ...binding.scope,
-        ...(binding.scope.taskId === undefined ? {} : { taskId: { ...binding.scope.taskId } }),
-      },
+      scope: binding.scope.namespace === 'project'
+        ? {
+            namespace: 'project',
+            projectKey: binding.scope.projectKey,
+            organId: { ...binding.scope.organId },
+            ...(binding.scope.taskId === undefined ? {} : { taskId: { ...binding.scope.taskId } }),
+          }
+        : {
+            namespace: 'global',
+            globalId: 'global',
+            ...(binding.scope.sourceProjectKey === undefined ? {} : { sourceProjectKey: binding.scope.sourceProjectKey }),
+            ...(binding.scope.sourceOrganId === undefined ? {} : { sourceOrganId: { ...binding.scope.sourceOrganId } }),
+          },
       ...(taskId === undefined ? {} : { taskId: { ...taskId } }),
       ...(binding.interactionScopeId === undefined ? {} : { interactionScopeId: binding.interactionScopeId }),
       ...(typeof payload.sessionRef === 'string' ? { sessionRef: payload.sessionRef } : {}),

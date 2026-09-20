@@ -1,11 +1,11 @@
 import { join } from 'node:path';
 import {
-  checkpointCommitId,
-  completeCheckpoint,
   executeStopControl,
   recallCheckpoint,
+  submitCheckpoint,
   type AttentionPort,
   type CheckpointCommitPort,
+  type CheckpointClosurePort,
   type CheckpointJournalPort,
   type RecalledCheckpoint,
   type StopControlResult,
@@ -29,6 +29,7 @@ import { composeAgentDriver, ensureDshSettings, resolveDshHome, type ComposedAge
 import { openAgentExecution, type AgentExecutionSession, type AgentExecutionReceipt } from './agent-execution.js';
 import { createJsonlAttentionPort } from './attention-journal.js';
 import {
+  createJsonlCheckpointClosurePort,
   checkpointEvidenceDigest,
   checkpointEvidenceLocator,
   createJsonlCheckpointJournal,
@@ -115,6 +116,7 @@ interface PreparedOperation {
   readonly directiveRevision: number;
   readonly scope: ScopeRef;
   readonly journal: CheckpointJournalPort;
+  readonly closurePort: CheckpointClosurePort;
   readonly previous: RecalledCheckpoint | null;
   readonly recoveryStateRef: EvidenceRef;
   readonly execution: AgentExecutionSession;
@@ -209,6 +211,9 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
     cycleId,
   });
   const journal = checkpointJournal(input.paths);
+  const closurePort = createJsonlCheckpointClosurePort({
+    filePath: join(input.paths.journalRoot, 'checkpoints.jsonl'),
+  });
   const assembled = assemblePrompt(input, agent);
   const recalled = await recallCheckpoint(journal, { ownerId: OWNER, scope });
   const previous = input.newChain ? null : recalled;
@@ -252,6 +257,7 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
     directiveRevision,
     scope,
     journal,
+    closurePort,
     previous,
     recoveryStateRef,
     execution,
@@ -375,12 +381,24 @@ export class AgentOperationController {
     const previousCheckpoint = this.prepared.previous?.checkpoint ?? null;
     const checkpointPort: CheckpointCommitPort = {
       commit: async (checkpoint) => {
-        const receipt = await this.prepared.journal.append({
+        const submitted = await submitCheckpoint({
+          source: 'harness-control',
           ownerId: OWNER,
-          commitId: checkpointCommitId(checkpoint),
           checkpoint,
+          previous: previousCheckpoint,
+          journal: this.prepared.journal,
+          closurePort: this.prepared.closurePort,
         });
-        return { checkpointId: receipt.checkpointId, committed: true as const };
+        const latest = await this.prepared.journal.readLatest(this.prepared.scope);
+        if (!latest || latest.checkpoint.id.value !== submitted.checkpoint.id.value) {
+          throw new AppLifecycleError(
+            'agent-operation-post-commit-recovery-required',
+            `stopped checkpoint ${submitted.checkpoint.id.value} is committed without a readable journal record`,
+            'reconcile the committed stopped checkpoint before publishing or retrying stop',
+            OWNER,
+          );
+        }
+        return { checkpointId: submitted.checkpoint.id, committed: true as const };
       },
     };
     const result = await executeStopControl({
@@ -519,29 +537,40 @@ export class AgentOperationController {
       evidenceRefs,
       next,
     };
-    const completed = await completeCheckpoint(this.prepared.journal, {
+    const submitted = await submitCheckpoint({
+      source: outcome === 'succeeded' || outcome === 'waiting' ? 'agent-tool' : 'harness-control',
       ownerId: OWNER,
-      context: { scope: this.prepared.scope, cycleId: this.prepared.cycleId, executionEpoch: this.prepared.executionEpoch, directiveRevision: this.prepared.directiveRevision },
-      previous: this.prepared.previous?.checkpoint ?? null,
       checkpoint,
+      previous: this.prepared.previous?.checkpoint ?? null,
+      journal: this.prepared.journal,
+      closurePort: this.prepared.closurePort,
     });
-    this.committedCheckpoint = completed.checkpoint;
+    const latest = await this.prepared.journal.readLatest(this.prepared.scope);
+    if (!latest || latest.checkpoint.id.value !== submitted.checkpoint.id.value || !latest.recordDigest) {
+      throw new AppLifecycleError(
+        'agent-operation-post-commit-recovery-required',
+        `checkpoint ${submitted.checkpoint.id.value} is committed without a readable journal record digest`,
+        'reconcile the committed checkpoint record before publishing the memory boundary',
+        OWNER,
+      );
+    }
+    this.committedCheckpoint = submitted.checkpoint;
     await this.writeManifest();
     if (this.prepared.memoryBoundaryPublisher) {
       const trigger = memoryTrigger(outcome);
       if (trigger) {
         const event = createMemoryAnalysisRequestedEvent({
-          messageId: `checkpoint-${completed.checkpoint.id.value}`,
+          messageId: `checkpoint-${submitted.checkpoint.id.value}`,
           streamId: `memory-boundaries:${this.prepared.taskId.value}`,
           scope: this.prepared.scope,
           occurredAt: new Date().toISOString(),
           summary: `checkpoint ${outcome} for task ${this.prepared.taskId.value}`,
           evidenceRefs: [{
-            evidenceId: id('evidence', `checkpoint-${completed.checkpoint.id.value}`),
+            evidenceId: id('evidence', `checkpoint-${submitted.checkpoint.id.value}`),
             kind: 'operation',
             source: OWNER,
-            locator: checkpointEvidenceLocator(completed.checkpoint),
-            digest: checkpointEvidenceDigest(completed.checkpoint),
+            locator: checkpointEvidenceLocator(submitted.checkpoint),
+            digest: checkpointEvidenceDigest(submitted.checkpoint),
             scope: this.prepared.scope,
           }],
           executionEpoch: this.prepared.executionEpoch,
@@ -551,25 +580,16 @@ export class AgentOperationController {
           sessionRef: this.prepared.sessionId,
         });
         const preparedEvent = this.prepared.memoryBoundaryPublisher.prepareProjectPatch
-          ? await this.prepared.memoryBoundaryPublisher.prepareProjectPatch({ event, checkpoint: completed.checkpoint })
+          ? await this.prepared.memoryBoundaryPublisher.prepareProjectPatch({ event, checkpoint: submitted.checkpoint })
           : event;
-        const recordDigest = completed.receipt.recordDigest;
-        if (!recordDigest) {
-          throw new AppLifecycleError(
-            'agent-operation-post-commit-recovery-required',
-            `checkpoint ${completed.checkpoint.id.value} is committed without a journal record digest`,
-            'reconcile the committed checkpoint record before publishing the memory boundary',
-            OWNER,
-          );
-        }
         await this.prepared.memoryBoundaryPublisher.publish({
           event: preparedEvent,
-          checkpoint: completed.checkpoint,
-          recordDigest,
+          checkpoint: submitted.checkpoint,
+          recordDigest: latest.recordDigest,
         });
       }
     }
-    return completed.checkpoint;
+    return submitted.checkpoint;
   }
 
   private async writeManifest(): Promise<void> {

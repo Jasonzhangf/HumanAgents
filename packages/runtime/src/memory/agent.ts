@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
   ContractError,
+  MEMORY_SCOPE_COMPATIBILITY_VERSION,
+  canonicalMemoryScopeToLegacy,
   validateAuditPromptSnapshot,
   validateMemoryActor,
   validateMemoryCurationResult,
@@ -11,6 +13,7 @@ import {
   type AgentInput,
   type AgentOutput,
   type AuditPromptSnapshot,
+  type CanonicalMemoryScope,
   type MemoryActorContext,
   type MemoryAgentStatePort,
   type MemoryAuditPromptSourcePort,
@@ -20,7 +23,6 @@ import {
   type MemoryOperationsPort,
   type MemoryProjectSourcePort,
   type MemoryProjectSourceSnapshot,
-  type MemoryScope,
   type MemorySessionEvidence,
   type MemorySessionEvidenceSourcePort,
   type MemorySubmission,
@@ -69,7 +71,7 @@ export interface MemoryAnalysisRequest {
   readonly bindingRef: string;
   readonly actor: MemoryActorContext;
   readonly projectKey: string;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly taskId?: TaskId;
   readonly interactionScopeId?: string;
   readonly sessionRef?: string;
@@ -130,7 +132,7 @@ export interface MemoryAnalysisInputs {
 export interface MemoryAnalysisBinding {
   readonly bindingRef: string;
   readonly projectKey: string;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly taskId?: TaskId;
   readonly interactionScopeId?: string;
   readonly mainAgentId: string;
@@ -230,6 +232,8 @@ function assertPersisted(condition: unknown): asserts condition {
   if (!condition) invalidPersistedState();
 }
 
+function validatePersistedId(value: unknown, expectedScope: 'task'): asserts value is TaskId;
+function validatePersistedId(value: unknown, expectedScope: 'operation' | 'organ'): asserts value is ScopedId;
 function validatePersistedId(
   value: unknown,
   expectedScope: 'operation' | 'organ' | 'task',
@@ -239,14 +243,42 @@ function validatePersistedId(
   assertPersisted(typeof value.value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.value));
 }
 
-function validatePersistedMemoryScope(value: unknown): asserts value is MemoryScope {
+function validatePersistedMemoryScope(value: unknown): asserts value is CanonicalMemoryScope {
   assertPersisted(isRecord(value));
-  assertPersisted(value.kind === 'task' || value.kind === 'organ' || value.kind === 'approved-global');
-  validatePersistedId(value.organId, 'organ');
-  if (value.kind === 'task') {
-    validatePersistedId(value.taskId, 'task');
+  assertPersisted(value.namespace === 'project' || value.namespace === 'global');
+  if (value.namespace === 'project') {
+    assertPersisted(typeof value.projectKey === 'string' && value.projectKey.trim().length > 0);
+    validatePersistedId(value.organId, 'organ');
+    if (value.taskId !== undefined) validatePersistedId(value.taskId, 'task');
   } else {
-    assertPersisted(value.taskId === undefined);
+    assertPersisted(value.globalId === 'global');
+    if (value.sourceProjectKey !== undefined) {
+      assertPersisted(typeof value.sourceProjectKey === 'string' && value.sourceProjectKey.trim().length > 0);
+    }
+    if (value.sourceOrganId !== undefined) validatePersistedId(value.sourceOrganId, 'organ');
+  }
+}
+
+function samePersistedTaskScope(scope: CanonicalMemoryScope, taskId: TaskId): boolean {
+  return scope.namespace === 'project'
+    && scope.taskId?.scope === 'task'
+    && scope.taskId.value === taskId.value;
+}
+
+function validatePersistedAnalysisScope(
+  scope: CanonicalMemoryScope,
+  taskId: unknown,
+  interactionScopeId: unknown,
+): void {
+  assertPersisted((taskId === undefined) !== (interactionScopeId === undefined));
+  if (taskId !== undefined) {
+    validatePersistedId(taskId, 'task');
+    assertPersisted(scope.namespace === 'project');
+    assertPersisted(samePersistedTaskScope(scope, taskId));
+  }
+  if (interactionScopeId !== undefined) {
+    assertPersisted(typeof interactionScopeId === 'string' && interactionScopeId.trim().length > 0);
+    assertPersisted(scope.namespace === 'project');
   }
 }
 
@@ -267,19 +299,7 @@ function validatePersistedAnalysisRequest(value: unknown): asserts value is Memo
   assertPersisted(typeof value.bindingRef === 'string' && value.bindingRef.trim().length > 0);
   assertPersisted(typeof value.projectKey === 'string' && value.projectKey.trim().length > 0);
   validatePersistedMemoryScope(value.scope);
-  assertPersisted((value.taskId === undefined) !== (value.interactionScopeId === undefined));
-  if (value.taskId !== undefined) {
-    validatePersistedId(value.taskId, 'task');
-    assertPersisted(value.scope.kind === 'task');
-    assertPersisted(
-      (value.scope as MemoryScope).taskId?.scope === 'task'
-      && (value.scope as MemoryScope).taskId?.value === value.taskId.value,
-    );
-  }
-  if (value.interactionScopeId !== undefined) {
-    assertPersisted(typeof value.interactionScopeId === 'string' && value.interactionScopeId.trim().length > 0);
-    assertPersisted(value.scope.kind !== 'task');
-  }
+  validatePersistedAnalysisScope(value.scope, value.taskId, value.interactionScopeId);
   if (value.sessionRef !== undefined) {
     assertPersisted(typeof value.sessionRef === 'string' && value.sessionRef.trim().length > 0);
   }
@@ -581,8 +601,9 @@ function issue(
 
 export const memoryAgentIssue = issue;
 
-function scopeKey(scope: MemoryScope): string {
-  return `${scope.kind}:${scope.organId.value}:${scope.taskId?.value ?? ''}`;
+function scopeKey(scope: CanonicalMemoryScope): string {
+  if (scope.namespace === 'global') return 'global:global';
+  return `project:${scope.projectKey}:${scope.organId.value}:${scope.taskId?.value ?? ''}`;
 }
 
 function sameTask(left: TaskId | undefined, right: TaskId | undefined): boolean {
@@ -630,6 +651,9 @@ function memoryAnalysisInput(
   if (input.taskId === undefined) {
     throw new ContractError('memory analysis provider requires a task-bound request');
   }
+  if (input.scope.namespace !== 'project') {
+    throw new ContractError('memory analysis provider requires a project scope');
+  }
   return {
     taskId: input.taskId,
     executionEpoch: input.executionEpoch,
@@ -639,7 +663,8 @@ function memoryAnalysisInput(
       bindingRef: input.bindingRef,
       projectKey: input.projectKey,
       scope: {
-        kind: input.scope.kind,
+        namespace: 'project',
+        projectKey: input.scope.projectKey,
         organId: input.scope.organId.value,
         ...(input.scope.taskId === undefined ? {} : { taskId: input.scope.taskId.value }),
       },
@@ -776,6 +801,7 @@ async function providerOutcome(
     assignmentId: request.assignmentId,
   });
   if (driver === undefined) throw new ContractError('memory analysis provider is not configured');
+  if (input.scope.namespace !== 'project') throw new ContractError('memory analysis provider requires a project scope');
   const handle = await driver.start({
     runtimeId: request.assignmentId,
     taskId: request.taskId,
@@ -828,10 +854,19 @@ function followUpAnalysisRequest(input: MemoryFollowUpRequest, prior: MemoryAnal
       permissions: [...input.actor.permissions],
     },
     projectKey: input.projectKey,
-    scope: {
-      ...prior.scope,
-      ...(prior.scope.taskId === undefined ? {} : { taskId: { ...prior.scope.taskId } }),
-    },
+    scope: prior.scope.namespace === 'project'
+      ? {
+          namespace: 'project',
+          projectKey: prior.scope.projectKey,
+          organId: { ...prior.scope.organId },
+          ...(prior.scope.taskId === undefined ? {} : { taskId: { ...prior.scope.taskId } }),
+        }
+      : {
+          namespace: 'global',
+          globalId: 'global',
+          ...(prior.scope.sourceProjectKey === undefined ? {} : { sourceProjectKey: prior.scope.sourceProjectKey }),
+          ...(prior.scope.sourceOrganId === undefined ? {} : { sourceOrganId: { ...prior.scope.sourceOrganId } }),
+        },
     ...(input.taskId === undefined ? {} : { taskId: { ...input.taskId } }),
     ...(input.interactionScopeId === undefined ? {} : { interactionScopeId: input.interactionScopeId }),
     ...(prior.sessionRef === undefined ? {} : { sessionRef: prior.sessionRef }),
@@ -1168,7 +1203,10 @@ export class MemoryAgent {
         novelty = undefined;
       } else {
         novelty = await bound.value.binding.operations.detectNovelty({
-          scope: input.scope,
+          scope: canonicalMemoryScopeToLegacy({
+            compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+            scope: input.scope,
+          }),
           sourceRef: input.sourceRefs[0],
           sourceDigest: input.sourceDigests[0],
           candidateRef: input.sourceRefs[0],
@@ -1201,7 +1239,10 @@ export class MemoryAgent {
       for (const pattern of patterns) {
         try {
           const recurrence = await bound.value.binding.operations.detectRecurrence({
-            scope: input.scope,
+            scope: canonicalMemoryScopeToLegacy({
+              compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+              scope: input.scope,
+            }),
             patternRef: pattern.patternRef,
             windowRefs: pattern.windowRefs,
             limit: pattern.windowRefs.length,

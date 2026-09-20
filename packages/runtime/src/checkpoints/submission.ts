@@ -419,6 +419,7 @@ export interface CommitReentryInput {
   readonly ownerId: string;
   readonly closureId: string;
   readonly checkpoint: Checkpoint;
+  readonly source?: 'agent-tool' | 'recovery';
   readonly previousExecutionEpoch: number;
   readonly newExecutionEpoch: number;
   readonly deadEndRef?: string;
@@ -477,7 +478,16 @@ export async function commitReentry(input: CommitReentryInput): Promise<Committe
     if (closure.checkpointId.scope !== latest.checkpoint.id.scope || closure.checkpointId.value !== latest.checkpoint.id.value) {
       throw new CheckpointSubmissionError('committed closure does not match reentry checkpoint');
     }
-    if (!closure.reentry.allowed || !sameReentryDecision(closure.reentry, computeReentryDecision({ outcome: latest.checkpoint.outcome }))) {
+    if (
+      !closure.reentry.allowed
+      && input.source !== 'recovery'
+    ) {
+      throw new CheckpointSubmissionError('committed checkpoint closure does not allow reentry');
+    }
+    if (
+      closure.reentry.allowed
+      && !sameReentryDecision(closure.reentry, computeReentryDecision({ outcome: latest.checkpoint.outcome }))
+    ) {
       throw new CheckpointSubmissionError('committed checkpoint closure does not allow reentry');
     }
     const admission = await input.admissionPort.admit({

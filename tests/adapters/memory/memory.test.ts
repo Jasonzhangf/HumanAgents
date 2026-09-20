@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   ContractError,
   id,
+  type CanonicalMemoryScope,
   type MemoryActorContext,
   type MemoryQueryRequest,
   type MemoryScope,
@@ -27,6 +28,12 @@ import {
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const taskScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const canonicalTaskScope: CanonicalMemoryScope = {
+  namespace: 'project',
+  projectKey: 'project-a',
+  organId: organ,
+  taskId: task,
+};
 const globalScope: MemoryScope = { kind: 'approved-global', organId: id('organ', 'global') };
 const actor: MemoryActorContext = {
   actorId: 'actor-a',
@@ -582,7 +589,7 @@ test('memory backend search, inspect, and context failures are explicit', async 
   await assert.rejects(memory.search({ scope: taskScope, query: '', limit: 1 }), ContractError);
   await assert.rejects(memory.search({ scope: taskScope, query: 'alpha', limit: 0 }), ContractError);
   await assert.rejects(memory.inspect({ sourceRef: 'missing' }), ContractError);
-  await assert.rejects(memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'memory', taskId: task, scope: taskScope, layers: ['current'], tokenBudget: -1, executionEpoch: 1, evidenceRequired: true }), ContractError);
+  await assert.rejects(memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'memory', taskId: task, scope: canonicalTaskScope, layers: ['current'], tokenBudget: -1, executionEpoch: 1, evidenceRequired: true }), ContractError);
 });
 
 test('memory backend detects novelty and recurrence', async () => {
@@ -606,12 +613,12 @@ test('context recall filters layers, enforces budget, and binds attach epoch', a
   memory.addContextEntry({ scope: taskScope, sourceRef: 'journal://task-a/l1', sourceDigest: 'sha256:l1', text: 'recent result', layer: 'task-recent', summary: 'recent summary' });
   memory.addContextEntry({ scope: taskScope, sourceRef: 'journal://task-a/l2', sourceDigest: 'sha256:l2', text: 'related history', layer: 'related', summary: 'related summary' });
 
-  const current = await memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'execution', taskId: task, scope: taskScope, layers: ['current'], query: 'directive', tokenBudget: 100, executionEpoch: 2, evidenceRequired: true });
+  const current = await memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'execution', taskId: task, scope: canonicalTaskScope, layers: ['current'], query: 'directive', tokenBudget: 100, executionEpoch: 2, evidenceRequired: true });
   assert.equal(current.entries.length, 1);
   assert.equal(current.entries[0].layer, 'current');
-  assert.equal(current.contextId, await memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'execution', taskId: task, scope: taskScope, layers: ['current'], query: 'directive', tokenBudget: 100, executionEpoch: 2, evidenceRequired: true }).then((context) => context.contextId));
+  assert.equal(current.contextId, await memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'execution', taskId: task, scope: canonicalTaskScope, layers: ['current'], query: 'directive', tokenBudget: 100, executionEpoch: 2, evidenceRequired: true }).then((context) => context.contextId));
 
-  const bounded = await memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'execution', taskId: task, scope: taskScope, layers: ['current', 'task-recent'], tokenBudget: 3, executionEpoch: 2, evidenceRequired: true });
+  const bounded = await memory.recall({ agentRuntimeId: 'runtime-a', roleId: 'execution', taskId: task, scope: canonicalTaskScope, layers: ['current', 'task-recent'], tokenBudget: 3, executionEpoch: 2, evidenceRequired: true });
   assert.ok(bounded.entries.length >= 1);
   assert.ok(bounded.entries.reduce((total, entry) => total + entry.tokenCost, 0) <= 3);
   assert.ok(bounded.omitted.some((omitted) => omitted.reason === 'token-budget'));

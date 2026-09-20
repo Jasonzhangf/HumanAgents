@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
 import {
   ContractError,
+  MEMORY_SCOPE_COMPATIBILITY_VERSION,
   assertContextBudget,
   assertExecutionEpoch,
   assertScope,
+  canonicalMemoryScopeToLegacy,
+  validateCanonicalMemoryScope,
   type AgentMemoryContext,
   type AgentMemoryContextEntry,
   type AgentMemoryContextInjectionPort,
   type AgentMemoryContextRequest,
+  type CanonicalMemoryScope,
   type ContextLayer,
   type MemoryActorContext,
   type MemoryOperationsPort,
@@ -22,7 +26,6 @@ import {
   type MemoryQueryRequest,
   type MemoryQueryResponse,
   type MemoryReviewReceipt,
-  type MemoryScope,
   type MemorySourceResolution,
   type MemorySubmission,
   type MemorySubmissionReceipt,
@@ -81,7 +84,7 @@ export interface MemoryTaskBinding {
   readonly assignmentId: string;
   readonly executionEpoch: number;
   readonly projectKey: string;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly backendRef: string;
   readonly indexVersion?: string;
   readonly operations: MemoryOperationsPort;
@@ -97,7 +100,7 @@ export interface MemoryTaskBindingReceipt {
   readonly assignmentId: string;
   readonly executionEpoch: number;
   readonly projectKey: string;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly backendRef: string;
   readonly indexVersion?: string;
   readonly ownerId: string;
@@ -154,7 +157,7 @@ export interface MemoryContextReceipt {
   readonly agentRuntimeId: string;
   readonly taskId: TaskId;
   readonly roleId: string;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly layers: readonly ContextLayer[];
   readonly executionEpoch: number;
   readonly indexVersion?: string;
@@ -170,7 +173,7 @@ export interface MemorySearchEntry {
 export interface MemoryContextAttachRequest {
   readonly agentRuntimeId: string;
   readonly taskId: TaskId;
-  readonly scope: MemoryScope;
+  readonly scope: CanonicalMemoryScope;
   readonly executionEpoch: number;
   readonly context: AgentMemoryContext;
 }
@@ -476,28 +479,36 @@ function sameId(
   return left.scope === right.scope && left.value === right.value;
 }
 
-function sameMemoryScope(left: MemoryScope, right: MemoryScope): boolean {
-  return left.kind === right.kind
+function sameCanonicalMemoryScope(left: CanonicalMemoryScope, right: CanonicalMemoryScope): boolean {
+  if (left.namespace !== right.namespace) return false;
+  if (left.namespace === 'global') {
+    return right.namespace === 'global'
+      && left.globalId === right.globalId
+      && left.sourceProjectKey === right.sourceProjectKey
+      && (left.sourceOrganId === undefined) === (right.sourceOrganId === undefined)
+      && (left.sourceOrganId === undefined || sameId(left.sourceOrganId, right.sourceOrganId!));
+  }
+  return right.namespace === 'project'
+    && left.projectKey === right.projectKey
     && sameId(left.organId, right.organId)
     && (left.taskId === undefined) === (right.taskId === undefined)
     && (left.taskId === undefined || sameId(left.taskId, right.taskId!));
 }
 
-function memoryScopeKey(scope: MemoryScope): string {
-  return `${scope.kind}:${scope.organId.value}:${scope.taskId?.value ?? ''}`;
+function memoryScopeKey(scope: CanonicalMemoryScope): string {
+  if (scope.namespace === 'global') return 'global:global';
+  return `project:${scope.projectKey}:${scope.organId.value}:${scope.taskId?.value ?? ''}`;
 }
 
 function entryScopeMatches(entryScope: string, request: AgentMemoryContextRequest): boolean {
   return entryScope === memoryScopeKey(request.scope);
 }
 
-function assertMemoryScope(scope: MemoryScope, taskId?: TaskId): void {
-  assertScope(scope.organId, 'organ');
-  if (scope.kind !== 'task' && scope.kind !== 'organ' && scope.kind !== 'approved-global') {
-    throw new ContractError(`invalid memory scope kind: ${scope.kind}`);
-  }
-  if (scope.kind === 'task' && !scope.taskId) {
-    throw new ContractError('task memory scope requires a task id');
+function assertMemoryScope(scope: CanonicalMemoryScope, taskId?: TaskId): void {
+  validateCanonicalMemoryScope(scope);
+  if (scope.namespace === 'global') {
+    if (taskId !== undefined) throw new ContractError('global memory scope cannot bind a task');
+    return;
   }
   if (scope.taskId) assertScope(scope.taskId, 'task');
   if (taskId && scope.taskId && !sameId(scope.taskId, taskId)) {
@@ -1004,7 +1015,7 @@ export class MemoryCoordinator {
     readonly assignmentId: string;
     readonly executionEpoch: number;
     readonly projectKey: string;
-    readonly scope: MemoryScope;
+    readonly scope: CanonicalMemoryScope;
     readonly backendRef: string;
     readonly indexVersion?: string;
     readonly operations: MemoryOperationsPort;
@@ -1030,7 +1041,7 @@ export class MemoryCoordinator {
     const existing = this.taskBindings.get(input.taskId.value);
     if (existing) {
       const sameIdentity = existing.bindingId === bindingId
-        && sameMemoryScope(existing.scope, input.scope)
+        && sameCanonicalMemoryScope(existing.scope, input.scope)
         && existing.projectKey === projectKey
         && existing.backendRef === backendRef
         && existing.indexVersion === input.indexVersion
@@ -1160,7 +1171,10 @@ export class MemoryCoordinator {
     }
     try {
       const entries = await taskBinding.operations.search({
-        scope: taskBinding.scope,
+        scope: canonicalMemoryScopeToLegacy({
+          compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+          scope: taskBinding.scope,
+        }),
         query,
         limit: input.limit,
       });
@@ -1196,7 +1210,7 @@ export class MemoryCoordinator {
       !sameId(runtimeBinding.taskId, input.taskId)
       || runtimeBinding.roleId !== roleId
       || runtimeBinding.executionEpoch !== input.executionEpoch
-      || !sameMemoryScope(taskBinding.scope, input.scope)
+      || !sameCanonicalMemoryScope(taskBinding.scope, input.scope)
     ) {
       return this.failure(
         'memory-binding-mismatch',
@@ -1273,7 +1287,7 @@ export class MemoryCoordinator {
     if (
       !sameId(runtimeBinding.taskId, input.taskId)
       || runtimeBinding.executionEpoch !== input.executionEpoch
-      || !sameMemoryScope(taskBinding.scope, input.scope)
+      || !sameCanonicalMemoryScope(taskBinding.scope, input.scope)
     ) {
       return this.failure(
         'memory-binding-mismatch',
