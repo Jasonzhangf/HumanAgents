@@ -52,6 +52,12 @@ stop 收拢；`56840b3d62d1d9db943e4d5376ff3febe99d979c` 已通过独立 review
 
 ## 本地启动与增量编译
 
+当前可执行组装入口是 `packages/app/src/cli.ts`；构建后
+`serve --mode fake` 通过 `packages/app/src/cordis-host.ts` 组合 fake provider、
+memory 和 UI plugins。`packages/app/standalone/`、`packages/app/cordis-host/`
+与 `humanagent start` 仅作为 Milestone 1 target/planned 形态，不是当前路径或
+命令。
+
 ```sh
 pnpm run build
 pnpm run test
