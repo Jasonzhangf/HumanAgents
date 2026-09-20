@@ -326,10 +326,11 @@ test('checkpoint links allow operation-bearing stops after business checkpoints 
   ]) {
     assert.throws(() => assertCheckpointLink({ ...checkpoint(2, first.id), scope: mismatch }, first), ContractError);
   }
-  const registered: { drivers: AgentDriver[]; memory: MemoryOperationsPort[]; context: AgentMemoryContextInjectionPort[] } = { drivers: [], memory: [], context: [] };
+  const registered: { drivers: AgentDriver[]; runtimePorts: ExecutionRuntimePort[]; memory: MemoryOperationsPort[]; context: AgentMemoryContextInjectionPort[] } = { drivers: [], runtimePorts: [], memory: [], context: [] };
   const context: HarnessPluginContext = {
     registerCapability: () => undefined,
     registerAgentDriver: (driver) => registered.drivers.push(driver),
+    registerExecutionRuntimePort: (port) => registered.runtimePorts.push(port),
     registerMemoryOperations: (port) => registered.memory.push(port),
     registerAgentMemoryContextInjection: (port) => registered.context.push(port),
   };
@@ -351,9 +352,10 @@ test('checkpoint links allow operation-bearing stops after business checkpoints 
     planForgetting: async (input) => input.plan,
   };
   context.registerAgentDriver(driver);
+  context.registerExecutionRuntimePort(providerPort);
   context.registerMemoryOperations(memory);
   context.registerAgentMemoryContextInjection(injection);
-  assert.deepEqual(registered, { drivers: [driver], memory: [memory], context: [injection] });
+  assert.deepEqual(registered, { drivers: [driver], runtimePorts: [providerPort], memory: [memory], context: [injection] });
   assert.deepEqual(await memory.detectNovelty({ scope: { kind: 'task', organId: organ, taskId: task }, sourceRef: 'source-a', sourceDigest: 'sha256:source-a', candidateRef: 'candidate-a', comparisonRefs: ['memory-a'], limit: 10 }), novelty);
   assert.deepEqual(await memory.detectRecurrence({ scope: { kind: 'task', organId: organ, taskId: task }, patternRef: 'pattern-a', windowRefs: ['memory-a'], limit: 10 }), recurrence);
 });

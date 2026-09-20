@@ -5,6 +5,7 @@ import type {
   AgentCapabilities,
   AgentDriver,
   AgentMemoryContextInjectionPort,
+  ExecutionRuntimePort,
   HarnessPlugin,
   HarnessPluginContext,
   HarnessPluginManifest,
@@ -202,6 +203,7 @@ export class HarnessPluginRegistry {
   private readonly registeredCapabilities = new Set<string>();
   private readonly drivers = new Map<string, AgentDriver>();
   private readonly driverOwners = new Map<string, string>();
+  private readonly executionRuntimePorts = new Map<string, ExecutionRuntimePort>();
   private readonly memoryOperations = new Map<string, MemoryOperationsPort>();
   private readonly memoryContextInjections = new Map<string, AgentMemoryContextInjectionPort>();
 
@@ -231,6 +233,11 @@ export class HarnessPluginRegistry {
         if (this.drivers.has(ownerId) || this.driverOwners.has(driver.kind)) throw fail('plugin-agent-driver-duplicate-owner', `duplicate agent driver owner: ${driver.kind}`, ownerId, 'register', 'retain-one-agent-driver');
         this.drivers.set(ownerId, driver);
         this.driverOwners.set(driver.kind, ownerId);
+      },
+      registerExecutionRuntimePort: (port) => {
+        registerCapability('provider.execution');
+        if (this.executionRuntimePorts.has(ownerId)) throw fail('plugin-execution-runtime-port-duplicate-owner', 'duplicate execution runtime port owner', ownerId, 'register', 'retain-one-execution-runtime-port-owner');
+        this.executionRuntimePorts.set(ownerId, port);
       },
       registerMemoryOperations: (port) => {
         registerCapability('memory.operations');
@@ -271,6 +278,7 @@ export class HarnessPluginRegistry {
     return [...this.drivers.entries()].map(([pluginId, driver]) => ({ pluginId, driver }));
   }
 
+  getExecutionRuntimePort(): ExecutionRuntimePort { return this.requireOne(this.executionRuntimePorts, 'execution runtime port'); }
   getMemoryOperations(): MemoryOperationsPort { return this.requireOne(this.memoryOperations, 'memory operations port'); }
   getAgentMemoryContextInjection(): AgentMemoryContextInjectionPort { return this.requireOne(this.memoryContextInjections, 'agent memory context injection port'); }
 
@@ -343,8 +351,23 @@ export class CordisHost {
     return { state: this.state, pluginIds: this.plugins.map((plugin) => plugin.manifest.pluginId), capabilities: this.registry.snapshotCapabilities(), startedPluginIds: [...this.started] };
   }
   getAgentDriver(kind?: string): AgentDriver { return this.registry.getAgentDriver(kind); }
+  getExecutionRuntimePort(): ExecutionRuntimePort { return this.registry.getExecutionRuntimePort(); }
   getMemoryOperations(): MemoryOperationsPort { return this.registry.getMemoryOperations(); }
   getAgentMemoryContextInjection(): AgentMemoryContextInjectionPort { return this.registry.getAgentMemoryContextInjection(); }
+  assertLoadedPlugins(pluginIds: readonly string[]): void {
+    const loaded = new Set(this.snapshot().pluginIds);
+    for (const pluginId of pluginIds) {
+      if (!loaded.has(pluginId)) {
+        throw fail(
+          'plugin-required-not-loaded',
+          `required plugin is not loaded: ${pluginId}`,
+          pluginId,
+          'manifest',
+          'compose-the-required-plugin',
+        );
+      }
+    }
+  }
 
   private async performStart(): Promise<CordisHostSnapshot> {
     if (this.state === 'ready') return this.snapshot();

@@ -197,6 +197,7 @@ export interface HarnessPlugin { readonly manifest: HarnessPluginManifest; regis
 export interface HarnessPluginContext {
   registerCapability(name: string): void;
   registerAgentDriver(driver: AgentDriver): void;
+  registerExecutionRuntimePort(port: ExecutionRuntimePort): void;
   registerMemoryOperations(port: MemoryOperationsPort): void;
   registerAgentMemoryContextInjection(port: AgentMemoryContextInjectionPort): void;
 }
