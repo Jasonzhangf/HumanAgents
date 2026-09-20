@@ -145,7 +145,7 @@ MVP 只保留满足恢复和审计的字段：
 - [ ] Pipeline Observation 能完整展示每层节点、状态、输入/输出引用和 evidence；drawer/递归返回只读，不提供隐式消费或控制动作。
 - [ ] Operator Console 能显示 running、waiting、error、stopped、stale、disconnected；不使用假进度掩盖未知状态。
 - [ ] UI 只通过各自的 typed projection/command ports 消费状态或发出命令（Organ、Task Interaction、Pipeline Observation），不直接依赖 Journal、DSH Session 或 DSH WebUI shell。
-- [ ] fake replay 与实际 `serve --mode fake` 入口结果一致。
+- [ ] fake replay 与实际独立的 standalone/run 入口结果一致。
 - [ ] 五类 agent 均由标准模板协议启动；模板、skill、tool capability、policy digest 可追溯，不能通过 prompt 或 task customization 越权。
 - [ ] Agent Template、Agent Driver、Agent Runtime 和 Harness Node Orchestrator 的 owner/替换边界明确；fake Driver 不伪装成 DSH，策略不能绕过固定 gate。
 - [ ] Cordis Host 能按 manifest/依赖装载 fixed Kernel 和 extension plugins；重复 owner、未声明 capability、错误 dispose 和 provider readiness 失败均可见。
@@ -168,7 +168,7 @@ MVP 关闭后仍不得宣称 DSH 接通、真实模型可用或生产可部署�
 - Product truth：所有状态来自 `OrganUiProjectionPort`；loading、stale、disconnected、unknown 和 error 必须可见，不得用 shimmer、假进度或折叠摘要掩盖。
 - Required states：empty、ready、running、partial、waiting、degraded、error、permission、cancelled、stopped、stale、disconnected；健康摘要另有 healthy/degraded/attention/unhealthy/unknown，不和任务生命周期合并。
 - Supported widths：至少验证常规桌面宽度和窄窗口；窄窗口优先保留状态、主动作和错误，不保证所有 inspector 同时展开。
-- Incumbent stack：当前未定；MVP 不引入 DSH WebUI shell、第二套 router 或第二套 design system。先使用语义 HTML/CSS（当前入口位于 `docs/ui`）和 target/planned `packages/ui/kit` 的最小 owner。
+- Incumbent stack：当前未定；MVP 不引入 DSH WebUI shell、第二套 router 或第二套 design system。当前最小 owner 是 `docs/ui` 入口；target/planned `packages/ui/kit` 不是当前实现。
 - Evidence：实际 `serve --mode fake` route + 真实 Journal/replay 内容；截图/录屏仅作视觉证据，必须同时保留 command、projection、Journal 和操作结果证据；验证键盘焦点、缩放/重排、暗色模式、错误态、断线态和文案扩展。
 
 ### 3.6.1 UI 开案顺序
