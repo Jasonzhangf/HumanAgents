@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { link, mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
 import type { RuntimePaths, LoadedConfiguration } from '../../config/src/index.js';
 import type {
   EventConsumerBinding,
@@ -7,7 +8,14 @@ import type {
   TrustedEventPublisher,
 } from '../../runtime/src/events/index.js';
 import { consumeEvents, publishEvent } from '../../runtime/src/events/index.js';
-import { id, type Checkpoint, type EvidenceRef, type ScopeRef } from '../../contracts/src/index.js';
+import {
+  id,
+  validateMemorySubmission,
+  type Checkpoint,
+  type EvidenceRef,
+  type MemorySubmission,
+  type ScopeRef,
+} from '../../contracts/src/index.js';
 import {
   createMemoryAnalysisRequestedEvent,
   createMemoryProjectSourceUpdatedEvent,
@@ -30,12 +38,25 @@ import {
   createMemoryBoundaryPatchProducer,
   type MemoryComposition,
   type MemoryCompositionInput,
+  type MemoryEvidenceSourcePort,
 } from './memory-composition.js';
 import { AppLifecycleError } from './errors.js';
 import { prepareBuiltinAuditPrompt } from '../../agent-templates/src/index.js';
 
 const OWNER = 'humanagent.app.memory-runtime';
 const PUBLISHER_ID = 'memory-boundary-publisher';
+const EXPLICIT_SUBMISSION_PENDING_ROOT = 'memory-explicit-submissions';
+
+interface PendingExplicitSubmission {
+  readonly schemaVersion: 1;
+  readonly submission: MemorySubmission;
+  readonly bindingRef: string;
+  readonly consumerKey: string;
+  readonly streamId: string;
+  readonly scope: ScopeRef;
+  readonly executionEpoch: number;
+  readonly occurredAt: string;
+}
 
 export interface MemoryRuntimeInput extends Omit<MemoryCompositionInput, 'paths' | 'projectKey'> {
   readonly paths: RuntimePaths;
@@ -117,6 +138,373 @@ function sameEvidence(left: EvidenceRef, right: EvidenceRef): boolean {
   return left.locator === right.locator
     && left.digest === right.digest
     && sameScope(left.scope, right.scope);
+}
+
+function isScopedId(value: unknown, kind: string): value is { readonly scope: string; readonly value: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as { readonly scope?: unknown; readonly value?: unknown };
+  return candidate.scope === kind && typeof candidate.value === 'string' && candidate.value.trim().length > 0;
+}
+
+function isScopeRef(value: unknown): value is ScopeRef {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as {
+    readonly organId?: unknown;
+    readonly taskId?: unknown;
+    readonly cycleId?: unknown;
+    readonly operationId?: unknown;
+  };
+  return isScopedId(candidate.organId, 'organ')
+    && (candidate.taskId === undefined || isScopedId(candidate.taskId, 'task'))
+    && (candidate.cycleId === undefined || isScopedId(candidate.cycleId, 'cycle'))
+    && (candidate.operationId === undefined || isScopedId(candidate.operationId, 'operation'));
+}
+
+function explicitSubmissionPendingRoot(locksRoot: string, bindingRef: string): string {
+  return join(
+    locksRoot,
+    EXPLICIT_SUBMISSION_PENDING_ROOT,
+    createHash('sha256').update(bindingRef).digest('hex'),
+  );
+}
+
+function explicitSubmissionPendingPath(input: {
+  readonly locksRoot: string;
+  readonly bindingRef: string;
+  readonly submissionId: string;
+}): string {
+  return join(
+    explicitSubmissionPendingRoot(input.locksRoot, input.bindingRef),
+    `${createHash('sha256').update(input.submissionId).digest('hex')}.json`,
+  );
+}
+
+function validatePendingExplicitSubmission(value: unknown): PendingExplicitSubmission {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-recovery-invalid',
+      'pending explicit memory submission is invalid',
+      'preserve the pending submission and inspect its durable record',
+      OWNER,
+    );
+  }
+  const pending = value as Partial<PendingExplicitSubmission>;
+  try {
+    if (pending.schemaVersion !== 1) throw new Error('schema version is invalid');
+    validateMemorySubmission(pending.submission as MemorySubmission);
+    if (typeof pending.bindingRef !== 'string' || !pending.bindingRef.trim()) throw new Error('bindingRef is required');
+    if (typeof pending.consumerKey !== 'string' || !pending.consumerKey.trim()) throw new Error('consumerKey is required');
+    if (typeof pending.streamId !== 'string' || !pending.streamId.trim()) throw new Error('streamId is required');
+    if (!isScopeRef(pending.scope)) throw new Error('scope is invalid');
+    if (!Number.isSafeInteger(pending.executionEpoch) || pending.executionEpoch! < 1) throw new Error('executionEpoch is invalid');
+    if (typeof pending.occurredAt !== 'string' || !Number.isFinite(Date.parse(pending.occurredAt))) {
+      throw new Error('occurredAt is invalid');
+    }
+  } catch (error) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-recovery-invalid',
+      `pending explicit memory submission is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      'preserve the pending submission and inspect its durable record',
+      OWNER,
+    );
+  }
+  return pending as PendingExplicitSubmission;
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, 'r');
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+async function persistPendingExplicitSubmission(input: {
+  readonly locksRoot: string;
+  readonly pending: PendingExplicitSubmission;
+}): Promise<PendingExplicitSubmission> {
+  const root = explicitSubmissionPendingRoot(input.locksRoot, input.pending.bindingRef);
+  await mkdir(root, { recursive: true });
+  const path = explicitSubmissionPendingPath({
+    locksRoot: input.locksRoot,
+    bindingRef: input.pending.bindingRef,
+    submissionId: input.pending.submission.submissionId,
+  });
+  const existing = await loadPendingExplicitSubmission(path);
+  if (existing) {
+    const sameIntent = existing.schemaVersion === input.pending.schemaVersion
+      && existing.bindingRef === input.pending.bindingRef
+      && existing.consumerKey === input.pending.consumerKey
+      && existing.streamId === input.pending.streamId
+      && existing.executionEpoch === input.pending.executionEpoch
+      && sameScope(existing.scope, input.pending.scope)
+      && JSON.stringify(existing.submission) === JSON.stringify(input.pending.submission);
+    if (!sameIntent) {
+      throw new AppLifecycleError(
+        'memory-explicit-submission-recovery-conflict',
+        `pending explicit memory submission identity conflicts with durable state: ${input.pending.submission.submissionId}`,
+        'preserve the pending submission and inspect its durable record',
+        OWNER,
+      );
+    }
+    return existing;
+  }
+  const temp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  const handle = await open(temp, 'wx');
+  try {
+    await handle.writeFile(`${JSON.stringify(input.pending)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await link(temp, path);
+    await rm(temp);
+    await syncDirectory(root);
+    return input.pending;
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    if ((error as { readonly code?: string }).code === 'EEXIST') {
+      const raced = await loadPendingExplicitSubmission(path);
+      if (raced) return raced;
+    }
+    throw error;
+  }
+}
+
+async function loadPendingExplicitSubmission(path: string): Promise<PendingExplicitSubmission | undefined> {
+  try {
+    return validatePendingExplicitSubmission(JSON.parse(await readFile(path, 'utf8')));
+  } catch (error) {
+    if ((error as { readonly code?: string }).code === 'ENOENT') return undefined;
+    if (error instanceof AppLifecycleError) throw error;
+    throw new AppLifecycleError(
+      'memory-explicit-submission-recovery-invalid',
+      `pending explicit memory submission cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      'preserve the pending submission and inspect its durable record',
+      OWNER,
+    );
+  }
+}
+
+async function readPendingExplicitSubmission(path: string): Promise<PendingExplicitSubmission> {
+  const pending = await loadPendingExplicitSubmission(path);
+  if (!pending) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-recovery-missing',
+      `pending explicit memory submission is missing: ${path}`,
+      'preserve the accepted submission and inspect its durable record',
+      OWNER,
+    );
+  }
+  return pending;
+}
+
+async function clearPendingExplicitSubmission(input: {
+  readonly locksRoot: string;
+  readonly bindingRef: string;
+  readonly submissionId: string;
+}): Promise<void> {
+  const root = explicitSubmissionPendingRoot(input.locksRoot, input.bindingRef);
+  const path = explicitSubmissionPendingPath(input);
+  try {
+    await rm(path);
+    await syncDirectory(root);
+  } catch (error) {
+    if ((error as { readonly code?: string }).code === 'ENOENT') return;
+    throw error;
+  }
+}
+
+function assertPendingExplicitSubmissionBinding(input: {
+  readonly pending: PendingExplicitSubmission;
+  readonly binding: MemoryRuntimeInput['binding'];
+  readonly consumer: EventConsumerBinding;
+}): void {
+  if (
+    input.pending.bindingRef !== input.binding.bindingRef
+    || input.pending.consumerKey !== input.consumer.consumerKey
+    || input.pending.streamId !== input.consumer.streamIds[0]
+    || input.pending.executionEpoch !== input.binding.executionEpoch
+    || !sameScope(input.pending.scope, input.consumer.scope)
+  ) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-recovery-binding-mismatch',
+      'pending explicit memory submission does not match the active wake binding',
+      'recover the submission with its original memory binding',
+      OWNER,
+    );
+  }
+}
+
+async function publishPendingExplicitSubmission(input: {
+  readonly pending: PendingExplicitSubmission;
+  readonly evidenceSource: MemoryEvidenceSourcePort;
+  readonly ports: EventBusPorts;
+}): Promise<void> {
+  const { submission, scope, executionEpoch, occurredAt, streamId } = input.pending;
+  const unsupportedEvidence = submission.evidenceRefs.find((ref) => ref !== submission.contentRef);
+  if (unsupportedEvidence !== undefined) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-evidence-unsupported',
+      `explicit submission evidence cannot be verified without a digest: ${unsupportedEvidence}`,
+      'submit only the verified contentRef until the evidence source can provide a digest',
+      OWNER,
+    );
+  }
+  const contentEvidence: EvidenceRef = {
+    evidenceId: id('evidence', `memory-submission-${createHash('sha256').update(submission.submissionId).digest('hex')}`),
+    kind: 'operation',
+    source: OWNER,
+    locator: submission.contentRef,
+    digest: submission.contentDigest,
+    scope,
+  };
+  const content = await input.evidenceSource.read({
+    projectKey: submission.projectKey,
+    scope: scope.taskId === undefined
+      ? { kind: 'organ', organId: scope.organId }
+      : { kind: 'task', organId: scope.organId, taskId: scope.taskId },
+    evidence: contentEvidence,
+  });
+  if (
+    content.sourceRef !== submission.contentRef
+    || content.sourceDigest !== submission.contentDigest
+    || `sha256:${createHash('sha256').update(content.text).digest('hex')}` !== submission.contentDigest
+    || !content.text.trim()
+  ) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-evidence-invalid',
+      `explicit submission content digest or identity drifted: ${submission.contentRef}`,
+      'refresh the submitted content evidence before requesting memory analysis',
+      OWNER,
+    );
+  }
+  const event = createMemoryAnalysisRequestedEvent({
+    messageId: `memory-submission-${createHash('sha256').update(submission.submissionId).digest('hex')}`,
+    streamId,
+    scope,
+    occurredAt,
+    summary: submission.observation,
+    evidenceRefs: [contentEvidence],
+    executionEpoch,
+    trigger: 'explicit-submission',
+    requestedKind: submission.requestedKind,
+    candidateCategory: submission.candidateCategory,
+  });
+  await publishEvent(input.ports, { publisherId: PUBLISHER_ID, event });
+}
+
+async function validateExplicitSubmissionEvidence(input: {
+  readonly submission: MemorySubmission;
+  readonly scope: ScopeRef;
+  readonly evidenceSource: MemoryEvidenceSourcePort;
+}): Promise<void> {
+  const unsupportedEvidence = input.submission.evidenceRefs.find((ref) => ref !== input.submission.contentRef);
+  if (unsupportedEvidence !== undefined) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-evidence-unsupported',
+      `explicit submission evidence cannot be verified without a digest: ${unsupportedEvidence}`,
+      'submit only the verified contentRef until the evidence source can provide a digest',
+      OWNER,
+    );
+  }
+  const contentEvidence: EvidenceRef = {
+    evidenceId: id('evidence', `memory-submission-${createHash('sha256').update(input.submission.submissionId).digest('hex')}`),
+    kind: 'operation',
+    source: OWNER,
+    locator: input.submission.contentRef,
+    digest: input.submission.contentDigest,
+    scope: input.scope,
+  };
+  const content = await input.evidenceSource.read({
+    projectKey: input.submission.projectKey,
+    scope: input.scope.taskId === undefined
+      ? { kind: 'organ', organId: input.scope.organId }
+      : { kind: 'task', organId: input.scope.organId, taskId: input.scope.taskId },
+    evidence: contentEvidence,
+  });
+  if (
+    content.sourceRef !== input.submission.contentRef
+    || content.sourceDigest !== input.submission.contentDigest
+    || `sha256:${createHash('sha256').update(content.text).digest('hex')}` !== input.submission.contentDigest
+    || !content.text.trim()
+  ) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-evidence-invalid',
+      `explicit submission content digest or identity drifted: ${input.submission.contentRef}`,
+      'refresh the submitted content evidence before requesting memory analysis',
+      OWNER,
+    );
+  }
+}
+
+function explicitSubmissionScope(input: {
+  readonly binding: MemoryRuntimeInput['binding'];
+  readonly submission: MemorySubmission;
+  readonly consumer: EventConsumerBinding;
+}): ScopeRef {
+  if (input.binding.interactionScopeId === undefined && input.submission.taskId === undefined) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-scope-missing',
+      'task-bound memory submission is missing its task identity',
+      'refresh the trusted task binding before submitting memory',
+      OWNER,
+    );
+  }
+  if (input.binding.interactionScopeId === undefined && input.submission.taskId?.value !== input.binding.taskId?.value) {
+    throw new AppLifecycleError(
+      'memory-explicit-submission-scope-mismatch',
+      'memory submission task does not match the wake binding',
+      'submit through the trusted task binding',
+      OWNER,
+    );
+  }
+  return input.consumer.scope;
+}
+
+function createPendingExplicitSubmission(input: {
+  readonly binding: MemoryRuntimeInput['binding'];
+  readonly submission: MemorySubmission;
+  readonly consumer: EventConsumerBinding;
+}): PendingExplicitSubmission {
+  return {
+    schemaVersion: 1,
+    submission: input.submission,
+    bindingRef: input.binding.bindingRef,
+    consumerKey: input.consumer.consumerKey,
+    streamId: input.consumer.streamIds[0]!,
+    scope: explicitSubmissionScope(input),
+    executionEpoch: input.binding.executionEpoch,
+    occurredAt: new Date().toISOString(),
+  };
+}
+
+async function recoverPendingExplicitSubmissions(input: {
+  readonly locksRoot: string;
+  readonly binding: MemoryRuntimeInput['binding'];
+  readonly consumer: EventConsumerBinding;
+  readonly submit: (pending: PendingExplicitSubmission) => Promise<unknown>;
+}): Promise<void> {
+  const root = explicitSubmissionPendingRoot(input.locksRoot, input.binding.bindingRef);
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as { readonly code?: string }).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const pending = await readPendingExplicitSubmission(join(root, entry.name));
+    assertPendingExplicitSubmissionBinding({
+      pending,
+      binding: input.binding,
+      consumer: input.consumer,
+    });
+    await input.submit(pending);
+  }
 }
 
 function checkpointEvidenceRef(checkpoint: Checkpoint): EvidenceRef {
@@ -305,6 +693,10 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     externalOperations: journal,
     barrierIntents: journal,
   };
+  const explicitSubmissionEvidenceSource: MemoryEvidenceSourcePort = input.evidenceSource ?? {
+    read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
+  };
+  let recoverPendingSubmissions: (() => Promise<void>) | undefined;
   const projectSourceUpdatePublisher = {
     publish: async (update: {
       readonly receipt: import('../../runtime/src/memory/index.js').MemorySourceUpdateReceipt;
@@ -355,7 +747,78 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     externalOperations: journal,
     state: journal,
     projectSourceUpdatePublisher,
+    explicitSubmissionPublisher: async ({ submission }) => {
+      if (!recoverPendingSubmissions) {
+        throw new AppLifecycleError(
+          'memory-explicit-submission-recovery-unavailable',
+          'explicit submission recovery owner is not initialized',
+          'compose the runtime memory recovery owner before submitting memory',
+          OWNER,
+        );
+      }
+      const pending = await readPendingExplicitSubmission(explicitSubmissionPendingPath({
+        locksRoot: input.paths.locksRoot,
+        bindingRef: input.binding.bindingRef,
+        submissionId: submission.submissionId,
+      }));
+      assertPendingExplicitSubmissionBinding({
+        pending,
+        binding: input.binding,
+        consumer,
+      });
+      try {
+        await publishPendingExplicitSubmission({
+          pending,
+          evidenceSource: explicitSubmissionEvidenceSource,
+          ports,
+        });
+      } catch (error) {
+        throw new AppLifecycleError(
+          error instanceof AppLifecycleError ? error.code : 'memory-explicit-submission-publication-failed',
+          `explicit memory submission was accepted with a durable recovery record, but analysis was not requested: ${error instanceof Error ? error.message : String(error)}`,
+          'restart the runtime to reconcile the explicit memory submission',
+          OWNER,
+        );
+      }
+      await clearPendingExplicitSubmission({
+        locksRoot: input.paths.locksRoot,
+        bindingRef: input.binding.bindingRef,
+        submissionId: submission.submissionId,
+      });
+    },
+    explicitSubmissionPreparer: async (submission) => {
+      const pending = createPendingExplicitSubmission({
+        binding: input.binding,
+        submission,
+        consumer,
+      });
+      await validateExplicitSubmissionEvidence({
+        submission,
+        scope: pending.scope,
+        evidenceSource: explicitSubmissionEvidenceSource,
+      });
+      await persistPendingExplicitSubmission({
+        locksRoot: input.paths.locksRoot,
+        pending,
+      });
+    },
+    explicitSubmissionAborter: async (submission) => {
+      await clearPendingExplicitSubmission({
+        locksRoot: input.paths.locksRoot,
+        bindingRef: input.binding.bindingRef,
+        submissionId: submission.submissionId,
+      });
+    },
   });
+  recoverPendingSubmissions = async () => {
+    await recoverPendingExplicitSubmissions({
+      locksRoot: input.paths.locksRoot,
+      binding: input.binding,
+      consumer,
+      submit: (pending) => composition.submissions.submitCandidate(pending.submission),
+    });
+  };
+  await recoverPendingSubmissions();
   const produceBoundaryPatch = createMemoryBoundaryPatchProducer({
     autoUpdate: input.autoUpdate,
     artifactsRoot: input.paths.artifactsRoot,

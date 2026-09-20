@@ -543,6 +543,28 @@ test('parses memory update and audit config with safe defaults', () => {
   assert.throws(() => validateUserConfig({ schemaVersion: 1, agents, memory: { audit: { prompt_ref: 'source://project-a/audit@r2' } } }), /memory.audit.prompt_ref must be a safe audit prompt file name/);
 });
 
+test('rejects multiple memory-role agents so one main agent cannot bind ambiguously', () => {
+  const agent = (agentId: string) => ({
+    agentId,
+    roleId: 'memory',
+    templateRef: 'builtin/memory@1.0.0',
+    driverRef: 'fake',
+    skills: ['history-search', 'novelty-review', 'recurrence-review'],
+    tools: ['memory.search', 'memory.ask', 'task.history', 'session.history'],
+    permissions: ['memory.read', 'memory.propose'],
+    memoryScopes: ['task'],
+    resourceClass: 'background',
+  });
+  assert.throws(
+    () => validateUserConfig({
+      schemaVersion: 1,
+      agents: [agent('memory-a'), agent('memory-b')],
+      memory: {},
+    }),
+    /multiple memory-role agents are not allowed/,
+  );
+});
+
 test('project memory overrides remain project-scoped and explicit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-config-memory-'));
   const workspace = join(root, 'workspace');

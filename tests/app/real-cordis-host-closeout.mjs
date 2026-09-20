@@ -24,7 +24,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -93,6 +93,7 @@ function startServe(root) {
   const workspace = join(root, 'workspace');
   const controlRoot = join(root, 'control');
   mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, 'AGENTS.md'), '# Cordis closeout project\n', 'utf8');
   mkdirSync(controlRoot, { recursive: true });
   const child = spawn(process.execPath, [
     CLI_PATH,
@@ -282,6 +283,11 @@ function assertArtifacts(record) {
   }
   if (!journalLines.some((line) => line.payload?.type === 'barrier-intent' && line.payload.barrierIntent?.intent?.disposition === 'applied')) {
     throw new Error('event-journal has no applied barrier-intent for the committed checkpoint');
+  }
+  const pendingRetry = journalLines.find((line) =>
+    line.payload?.type === 'retry' && line.payload.retry?.state === 'pending');
+  if (pendingRetry) {
+    throw new Error(`event-journal has a pending retry: ${JSON.stringify(pendingRetry.payload.retry)}`);
   }
   const uiEvents = uiLines.map((line) => line.kind === 'operation.event' ? line.event : line);
   const uiKinds = new Set(uiEvents.map((line) => line.kind));
