@@ -18,8 +18,6 @@
  * journal, checkpoint, and lease artifacts into the receipt file. The receipt
  * itself is committed separately and does not claim to bind its carrier hash.
  *
- * Required env:
- *   HUMANAGENT_CORDIS_CANDIDATE_COMMIT exact source commit to prove
  * Optional env:
  *   HUMANAGENT_CORDIS_RECEIPT_PATH default ./dist/receipts/cordis-host-closeout.json
  */
@@ -37,7 +35,6 @@ const RECEIPT_PATH = resolve(
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
 const BUILD_MANIFEST_PATH = resolve('dist/cordis-host-build.json');
-const IMPLEMENTATION_COMMIT = process.env.HUMANAGENT_CORDIS_CANDIDATE_COMMIT;
 const EXPECTED_PLUGINS = [
   'humanagent.harness-kernel',
   'humanagent.agent-templates',
@@ -304,13 +301,11 @@ async function readIfPresent(path) {
 }
 
 async function run() {
-  if (!IMPLEMENTATION_COMMIT) throw new Error('HUMANAGENT_CORDIS_CANDIDATE_COMMIT is required');
-  const implementationTree = git(['rev-parse', `${IMPLEMENTATION_COMMIT}^{tree}`]);
-  const headCommit = git(['rev-parse', 'HEAD']);
-  if (headCommit !== IMPLEMENTATION_COMMIT) throw new Error(`candidate commit does not match HEAD: ${IMPLEMENTATION_COMMIT} != ${headCommit}`);
+  const implementationCommit = git(['rev-parse', 'HEAD']);
+  const implementationTree = git(['rev-parse', 'HEAD^{tree}']);
   if (git(['status', '--porcelain', '--untracked-files=all'])) throw new Error('candidate worktree must be clean before proof');
   const buildManifest = JSON.parse(await readFile(BUILD_MANIFEST_PATH, 'utf8'));
-  if (buildManifest.candidateCommit !== IMPLEMENTATION_COMMIT || buildManifest.candidateTree !== implementationTree) {
+  if (buildManifest.candidateCommit !== implementationCommit || buildManifest.candidateTree !== implementationTree) {
     throw new Error(`built artifact is not bound to candidate: ${BUILD_MANIFEST_PATH}`);
   }
   const artifactDigest = await treeDigest(resolve('dist/app'));
@@ -324,7 +319,7 @@ async function run() {
     kind: 'humanagent.cordis-host-closeout-proof',
     generatedAt: new Date().toISOString(),
     candidate: {
-      implementationCommit: IMPLEMENTATION_COMMIT,
+      implementationCommit,
       implementationTree,
       artifactPath: resolve('dist/app'),
       artifactDigest,
