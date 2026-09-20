@@ -9,3 +9,4 @@ export * from './bindings.js';
 export * from './events.js';
 export * from './checkpoint-control.js';
 export * from './attention.js';
+export * from './agent-loop.js';

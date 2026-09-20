@@ -9,6 +9,13 @@ import {
   advanceConsumerCursor,
   assertExecutionEventFence,
   assertAgentBindingMatchesRuntime,
+  assertAgentLoopBudgetAvailable,
+  assertAgentModeTransitionCurrent,
+  assertContextReplacementCurrent,
+  assertModeCapabilityGranted,
+  assertModeLeaseCurrent,
+  assertObservationBatchFresh,
+  assertObservationDeltaCurrent,
   assertCheckpointClosureCanReenter,
   assertCheckpointClosureCommitted,
   assertHarnessHealthPublisher,
@@ -35,10 +42,13 @@ import {
   planStopSettle,
   stopRequestIsStopped,
   transitionLifecycle,
+  classifyAgentLoopBudget,
   type ExecutionEventFence,
 } from '../../packages/core/src/index.js';
 import {
   ContractError, consumerKey, id,
+  type AgentLoopBudget, type AgentLoopBudgetUsage, type AgentLoopCheckpointRef, type AgentModeCapabilityProfile, type AgentModeState,
+  type AgentModeTransition, type ContextReplacement, type ModeLease, type ObservationBatch, type ObservationDelta,
   type AgentProviderBinding, type Checkpoint, type CheckpointClosureRecord, type CheckpointReentryRecord,
   type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation, type EvidenceRef, type OrganHealthSnapshot, type RuntimeBinding, type ScopeRef,
 } from '../../packages/contracts/src/index.js';
@@ -427,4 +437,236 @@ test('checkpoint closure committed fact does not imply reentry permission', () =
   assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: true }), coreReentry({ fencedEpochs: [] })), CheckpointError);
   assert.throws(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: true }), coreReentry({ checkpointId: id('checkpoint', 'checkpoint-b') })), CheckpointError);
   assert.doesNotThrow(() => assertCheckpointClosureCanReenter(coreClosure({ reentryAllowed: true }), coreReentry()));
+});
+
+test('agent loop fences stale leases, epochs, checkpoints, events, deltas, and capabilities', () => {
+  const checkpoint: AgentLoopCheckpointRef = { checkpointId: id('checkpoint', 'loop-cp-1'), digest: 'sha256:loop-cp-1' };
+  const profile: AgentModeCapabilityProfile = {
+    profileId: 'execution-profile',
+    role: 'execution',
+    mode: 'observation',
+    observationScopes: ['self', 'task', 'evidence'],
+    observationCapabilities: ['read-assignment', 'read-evidence'],
+    orchestrationScope: 'local',
+    orchestrationCapabilities: ['schedule-self'],
+    capabilityDigest: 'sha256:execution-profile',
+  };
+  const lease: ModeLease = {
+    leaseId: 'lease-a',
+    agentRuntimeId: 'runtime-a',
+    role: 'execution',
+    mode: 'observation',
+    profileId: profile.profileId,
+    executionEpoch: 4,
+    checkpoint,
+    observationScopeId: 'observation-a',
+    permissionRevision: 'permission-r1',
+    capabilityDigest: profile.capabilityDigest,
+    state: 'active',
+    issuedAt: '2026-09-19T00:00:00Z',
+    expiresAt: '2099-01-01T00:00:00Z',
+  };
+  const leaseFence = {
+    agentRuntimeId: 'runtime-a',
+    mode: 'observation' as const,
+    executionEpoch: 4,
+    checkpoint,
+    observationScopeId: 'observation-a',
+    leaseId: 'lease-a',
+  };
+  assert.doesNotThrow(() => assertModeLeaseCurrent(lease, leaseFence, new Date('2026-09-19T00:00:00Z')));
+  assert.throws(() => assertModeLeaseCurrent({ ...lease, state: 'released' }, leaseFence), PermissionError);
+  assert.throws(() => assertModeLeaseCurrent({ ...lease, leaseId: 'lease-old' }, leaseFence), PermissionError);
+  assert.throws(() => assertModeLeaseCurrent({ ...lease, executionEpoch: 3 }, leaseFence), EpochError);
+  assert.throws(() => assertModeLeaseCurrent({ ...lease, checkpoint: { ...checkpoint, digest: 'sha256:old' } }, leaseFence), CheckpointError);
+
+  const modeState: AgentModeState = {
+    agentRuntimeId: 'runtime-a',
+    mode: 'observation',
+    executionEpoch: 4,
+    checkpoint,
+    observationScopeId: 'observation-a',
+    contextViewRef: 'context://view-a',
+    leaseId: 'lease-a',
+    transitionSeq: 1,
+  };
+  const transition: AgentModeTransition = {
+    transitionId: 'transition-a',
+    fromMode: 'observation',
+    toMode: 'orchestration',
+    executionEpoch: 4,
+    baseCheckpoint: checkpoint,
+    successorCheckpointId: id('checkpoint', 'loop-cp-2'),
+    contextReplacementId: 'replacement-a',
+    leaseId: 'lease-a',
+    transitionSeq: 2,
+    reason: 'observation-complete',
+  };
+  assert.doesNotThrow(() => assertAgentModeTransitionCurrent(transition, modeState, lease, new Date('2026-09-19T00:00:00Z')));
+  assert.throws(() => assertAgentModeTransitionCurrent({ ...transition, executionEpoch: 3 }, modeState, lease), EpochError);
+  assert.throws(() => assertAgentModeTransitionCurrent({ ...transition, transitionSeq: 1 }, modeState, lease), CoreError);
+
+  const batch: ObservationBatch = {
+    batchId: 'batch-a',
+    observationScopeId: 'observation-a',
+    executionEpoch: 4,
+    baseCheckpoint: checkpoint,
+    eventClass: 'observation',
+    priority: 'normal',
+    watermark: { streamId: 'events-a', sequence: 5 },
+    eventIds: ['event-5'],
+    eventSequences: [5],
+    correlationRefs: ['assignment-a'],
+    idempotencyKey: 'batch-key-5',
+  };
+  const inboxState = {
+    streamId: 'events-a',
+    executionEpoch: 4,
+    checkpoint,
+    observationScopeId: 'observation-a',
+    watermark: 4,
+    handledEventIds: ['event-4'],
+    handledBatchKeys: ['batch-key-4'],
+  };
+  const advancedInbox = assertObservationBatchFresh(inboxState, batch);
+  assert.equal(advancedInbox.watermark, 5);
+  assert.throws(() => assertObservationBatchFresh(advancedInbox, batch), CoreError);
+  assert.throws(() => assertObservationBatchFresh(advancedInbox, {
+    ...batch,
+    batchId: 'batch-b',
+    eventIds: ['event-5'],
+    idempotencyKey: 'batch-key-b',
+  }), CoreError);
+  assert.throws(() => assertObservationBatchFresh(inboxState, { ...batch, executionEpoch: 3 }), EpochError);
+  assert.throws(() => assertObservationBatchFresh(inboxState, {
+    ...batch,
+    baseCheckpoint: { ...checkpoint, digest: 'sha256:old' },
+  }), CheckpointError);
+  assert.throws(() => assertObservationBatchFresh(inboxState, { ...batch, observationScopeId: 'observation-old' }), PermissionError);
+  assert.throws(() => assertObservationBatchFresh(inboxState, {
+    ...batch,
+    watermark: { streamId: 'events-a', sequence: 100 },
+    eventIds: ['event-100'],
+    eventSequences: [100],
+    idempotencyKey: 'batch-key-gap',
+  }), CoreError);
+  assert.throws(() => assertObservationBatchFresh(advancedInbox, {
+    ...batch,
+    batchId: 'batch-c',
+    watermark: { streamId: 'events-a', sequence: 5 },
+    eventIds: ['event-c'],
+    idempotencyKey: 'batch-key-c',
+  }), CoreError);
+
+  const delta: ObservationDelta = {
+    deltaId: 'delta-a',
+    idempotencyKey: 'delta-key-a',
+    deltaDigest: 'sha256:delta-a',
+    observationScopeId: 'observation-a',
+    executionEpoch: 4,
+    baseCheckpoint: checkpoint,
+    watermark: { streamId: 'events-a', sequence: 6 },
+    observationRefs: ['event-6'],
+    eventSequences: [6],
+    summaryRef: 'asset://delta-a',
+  };
+  const deltaState = {
+    executionEpoch: 4,
+    checkpoint,
+    observationScopeId: 'observation-a',
+    watermark: { streamId: 'events-a', sequence: 5 },
+    appliedDeltaIds: ['delta-old'],
+    appliedDeltaKeys: ['delta-key-old'],
+  };
+  const advancedDelta = assertObservationDeltaCurrent(deltaState, delta);
+  assert.equal(advancedDelta.watermark.sequence, 6);
+  assert.throws(() => assertObservationDeltaCurrent(advancedDelta, delta), CoreError);
+  assert.throws(() => assertObservationDeltaCurrent(advancedDelta, {
+    ...delta,
+    deltaId: 'delta-b',
+    idempotencyKey: 'delta-key-a',
+    watermark: { streamId: 'events-a', sequence: 7 },
+    eventSequences: [7],
+  }), CoreError);
+  assert.throws(() => assertObservationDeltaCurrent(deltaState, { ...delta, executionEpoch: 3 }), EpochError);
+  assert.throws(() => assertObservationDeltaCurrent(deltaState, {
+    ...delta,
+    baseCheckpoint: { ...checkpoint, digest: 'sha256:old' },
+  }), CheckpointError);
+  assert.throws(() => assertObservationDeltaCurrent(deltaState, {
+    ...delta,
+    watermark: { streamId: 'events-a', sequence: 5 },
+    eventSequences: [5],
+  }), CoreError);
+  assert.throws(() => assertObservationDeltaCurrent(deltaState, {
+    ...delta,
+    watermark: { streamId: 'events-a', sequence: 100 },
+    observationRefs: ['event-100'],
+    eventSequences: [100],
+    idempotencyKey: 'delta-key-gap',
+  }), CoreError);
+
+  assert.doesNotThrow(() => assertModeCapabilityGranted(profile, { kind: 'observation', scope: 'task', capability: 'read-assignment' }));
+  assert.throws(
+    () => assertModeCapabilityGranted(profile, { kind: 'orchestration', scope: 'project', capability: 'create-assignment' }),
+    PermissionError,
+  );
+  assert.throws(
+    () => assertModeCapabilityGranted(profile, { kind: 'observation', scope: 'project', capability: 'read-assignment' }),
+    PermissionError,
+  );
+  assert.throws(
+    () => assertModeCapabilityGranted(profile, { kind: 'observation', scope: 'task', capability: 'write-file' }),
+    PermissionError,
+  );
+  const orchestrationProfile: AgentModeCapabilityProfile = {
+    ...profile,
+    profileId: 'orchestration-profile',
+    role: 'orchestration',
+    mode: 'orchestration',
+    orchestrationScope: 'project',
+    orchestrationCapabilities: ['create-assignment'],
+    capabilityDigest: 'sha256:orchestration-profile',
+  };
+  assert.doesNotThrow(() => assertModeCapabilityGranted(orchestrationProfile, {
+    kind: 'orchestration',
+    scope: 'project',
+    capability: 'create-assignment',
+  }));
+
+  const replacement: ContextReplacement = {
+    replacementId: 'replacement-a',
+    executionEpoch: 4,
+    baseCheckpoint: checkpoint,
+    successorCheckpoint: { checkpointId: id('checkpoint', 'loop-cp-2'), digest: 'sha256:loop-cp-2' },
+    fromContextViewRef: 'context://view-a',
+    toContextViewRef: 'context://view-b',
+    toContextDigest: 'sha256:context-b',
+    deltaIds: ['delta-a'],
+    reason: 'observation',
+    replacementDigest: 'sha256:replacement-a',
+  };
+  assert.doesNotThrow(() => assertContextReplacementCurrent(replacement, checkpoint, 4));
+  assert.throws(() => assertContextReplacementCurrent(replacement, checkpoint, 5), EpochError);
+  assert.throws(() => assertContextReplacementCurrent(replacement, { ...checkpoint, digest: 'sha256:old' }, 4), CheckpointError);
+
+  const budget: AgentLoopBudget = {
+    maxModeTransitions: 2,
+    maxObservationScopes: 2,
+    maxContextReplacements: 2,
+    maxDeferredEvents: 1,
+  };
+  const usage: AgentLoopBudgetUsage = {
+    modeTransitions: 1,
+    observationScopes: 1,
+    contextReplacements: 1,
+    deferredEvents: 0,
+  };
+  assert.deepEqual(classifyAgentLoopBudget(budget, usage), { state: 'allowed' });
+  assert.deepEqual(classifyAgentLoopBudget(budget, { ...usage, deferredEvents: 1 }), {
+    state: 'blocked',
+    reason: 'maxDeferredEvents',
+    nextAction: { kind: 'wait', ref: 'agent-loop-budget:maxDeferredEvents' },
+  });
+  assert.throws(() => assertAgentLoopBudgetAvailable(budget, { ...usage, contextReplacements: 2 }), CoreError);
 });
