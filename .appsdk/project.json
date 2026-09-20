@@ -56,6 +56,7 @@
       "contracts/records/merge-queue-state.schema.json",
       "contracts/records/integration-record.schema.json",
       "contracts/records/mainline-receipt-record.schema.json",
+      "contracts/records/collab-live-closure-record.schema.json",
       "contracts/records/merge-record.schema.json",
       "contracts/records/promotion-record.schema.json",
       "contracts/records/regression-report.schema.json",
@@ -67,7 +68,7 @@
       "generated/**",
       "protected/source/**"
     ],
-    "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json"
+    "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json"
   },
   "guidance": {
     "compiled_manifest": ".appsdk/guidance/compiled.json",
