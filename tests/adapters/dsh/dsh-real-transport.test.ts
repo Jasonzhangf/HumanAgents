@@ -14,18 +14,23 @@ import {
   validateProviderCloseResult,
   validateProviderRecoveryResult,
   type EvidenceRef,
+  type MemoryOperationsPort,
+  type MemorySubmission,
   type ProviderBinding,
   type ProviderStartInput,
   type ProviderSubmitInput,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import {
+  createDshAgentDriver,
+  createDshExecutionRuntimePort,
   createRealDshTransport,
   dshBaselineLock,
   type DshRealTransportOptions,
   type DshProfileDescriptor,
   verifyDshSessionPersistence,
 } from '../../../packages/adapters/dsh/src/index.js';
+import { MemoryAgent } from '../../../packages/runtime/src/memory/index.js';
 
 /**
  * Fake-contract layer for the real DSH transport. The transport is driven
@@ -296,9 +301,153 @@ test('real DSH transport maps a model -> tool -> result -> continuation loop', a
   assert.deepEqual(kinds, ['output', 'tool', 'tool', 'output', 'terminal']);
   const terminal = observed[observed.length - 1];
   assert.equal(terminal.terminalState, 'succeeded');
+  assert.equal(observed[0].summary, 'I will read it.');
+  assert.equal(observed[3].summary, 'feature_flag=true');
   // The tool result carries the same call id as its call, proving the pairing.
   assert.deepEqual(observed[1].outputRefs, ['call-1']);
   assert.deepEqual(observed[2].outputRefs, ['call-1']);
+});
+
+test('real DSH transport feeds MemoryAgent curation into candidate submission', async () => {
+  const memoryOperation = id('operation', 'analysis-a');
+  const assignmentId = `memory-analysis:${memoryOperation.value}`;
+  const prompt = {
+    sourceRef: 'prompt://project-a/project-memory-audit@abc',
+    promptRef: 'project-memory-audit',
+    canonicalRef: 'prompt://project-a/project-memory-audit',
+    revision: 'sha256:prompt-revision',
+    digest: 'sha256:prompt-digest',
+    loadedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const curation = {
+    operationId: { scope: 'operation', value: memoryOperation.value },
+    auditPrompt: prompt,
+    sourceRefs: ['journal://project-a/checkpoint'],
+    outcome: 'candidate',
+    candidateId: 'provider-candidate',
+    matchedMemoryIds: [],
+    conflictRefs: [],
+    explanation: 'provider analysis',
+    nextAction: 'review',
+  };
+  const child = makeChild({
+    'session/prompt': (_params: unknown, requestId: number) => {
+      const sessionId = `${assignmentId}:${task.value}:${memoryOperation.value}:2`;
+      child.push({
+        jsonrpc: '2.0',
+        method: 'session.event',
+        params: {
+          sessionId,
+          event: {
+            type: 'assistant/message',
+            seq: 1,
+            data: { message: { content: [{ type: 'text', text: JSON.stringify(curation) }] } },
+          },
+        },
+      });
+      child.push({
+        jsonrpc: '2.0',
+        method: 'session.event',
+        params: {
+          sessionId,
+          event: { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
+        },
+      });
+      return { jsonrpc: '2.0', id: requestId, result: { messageId: 'memory-message-1' } };
+    },
+  });
+  const transport = makeTransport(child);
+  const runtime = createDshExecutionRuntimePort({
+    lock: dshBaselineLock,
+    profile,
+    transport,
+    requiredCapabilities: ['dsh.session', 'dsh.model'],
+    ownerId: 'dsh-memory-agent-test',
+  });
+  const driver = createDshAgentDriver({ runtime, binding });
+  const submissions: MemorySubmission[] = [];
+  const operations: MemoryOperationsPort = {
+    ingest: async (input) => ({ sourceRef: input.sourceRef }),
+    search: async () => [],
+    inspect: async (input) => ({
+      sourceRef: input.sourceRef,
+      sourceDigest: 'sha256:checkpoint',
+      text: 'source',
+    }),
+    compare: async () => ({ relation: 'different' }),
+    detectNovelty: async () => ({ classification: 'novel', matchedRefs: [], reason: 'new source' }),
+    detectRecurrence: async () => ({ classification: 'one-off', occurrences: [], reason: 'not recurring' }),
+    query: async (input) => ({
+      requestId: input.requestId,
+      status: 'ready',
+      entries: [],
+      sourceFactRef: 'memory-query:test',
+      omitted: [],
+    }),
+    submitCandidate: async (input) => {
+      submissions.push(input);
+      return {
+        submissionId: input.submissionId,
+        status: 'accepted',
+        candidateId: 'candidate-e2e',
+        operationId: input.operationId,
+        nextAction: 'review-required',
+      };
+    },
+    reviewCandidate: async (input) => input,
+    promoteCandidate: async (input) => input,
+    planForgetting: async (input) => input.plan,
+  };
+  const agent = new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: prompt.promptRef,
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => { throw new Error('session evidence is not requested'); } },
+    projectSources: { readProject: async () => { throw new Error('project source is not requested'); }, list: async () => [] },
+    auditPrompts: { readPrompt: async () => ({ ...prompt, content: '# Audit\n' }) },
+    projectUpdateOwner: { apply: async () => { throw new Error('project update is not requested'); } },
+  });
+  agent.bind({
+    bindingRef: 'binding-memory-e2e',
+    projectKey: 'project-a',
+    scope: { kind: 'task', organId: organ, taskId: task },
+    taskId: task,
+    mainAgentId: 'main-agent-a',
+    executionEpoch: 2,
+    ownerId: 'memory-agent',
+    operations,
+  });
+
+  const result = await agent.analyze({
+    operationId: memoryOperation,
+    bindingRef: 'binding-memory-e2e',
+    actor: {
+      actorId: 'memory-agent-a',
+      roleId: 'memory',
+      permissions: ['memory.propose'],
+      projectKey: 'project-a',
+    },
+    projectKey: 'project-a',
+    scope: { kind: 'task', organId: organ, taskId: task },
+    taskId: task,
+    sourceRefs: ['journal://project-a/checkpoint'],
+    sourceDigests: ['sha256:checkpoint'],
+    observation: 'checkpoint settle required a recovery action',
+    requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
+    executionEpoch: 2,
+    trigger: 'blocked',
+  });
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  assert.equal(result.value.curation.explanation, 'provider analysis');
+  assert.equal(result.value.submission?.candidateId, 'candidate-e2e');
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0]?.operationId.value, memoryOperation.value);
+  assert.equal(child.written.some((frame) => frame.method === 'session/prompt'), true);
+  assert.equal(child.written.some((frame) => frame.method === 'shutdown'), true);
 });
 
 test('distinct operations in one runtime epoch cannot share a DSH session artifact', async () => {
