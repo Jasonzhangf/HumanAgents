@@ -31,6 +31,8 @@
     "proof:cordis-host-closeout": "node tests/app/real-cordis-host-closeout.mjs",
     "test:release": "node --test tests/release/release-gates.test.mjs",
     "test:journal": "pnpm build:contracts && tsc -p tests/adapters/jsonl/tsconfig.json && node --test dist/tests/adapters/jsonl/journal.test.js",
+    "test:operations": "pnpm build:contracts && tsc -p tests/adapters/operations/tsconfig.json && node --test dist/tests/adapters/operations/tests/adapters/operations/operations.test.js",
+    "test:gateway": "tsc -p tests/runtime/gateway/tsconfig.json && node --test dist/tests/runtime/gateway/tests/runtime/gateway/gateway.test.js",
     "test:memory": "pnpm exec tsc -p tests/adapters/memory/tsconfig.json && node --test dist/tests/tests/adapters/memory/memory.test.js dist/tests/tests/adapters/memory/sources.test.js",
     "test:context": "tsc -p tests/runtime/context/tsconfig.json && node --test dist/tests/tests/runtime/context/context.test.js",
     "test:agent-io": "tsc -p tests/runtime/agent-io/tsconfig.json && node --test dist/tests/runtime/agent-io/tests/runtime/agent-io/agent-io.test.js",
