@@ -1709,6 +1709,7 @@ test('runtime memory explicit submission publishes one durable analysis request 
   assert.deepEqual(evidenceReads, [
     `${evidence.locator}:${taskId.value}`,
     `${evidence.locator}:${taskId.value}`,
+    `${evidence.locator}:${taskId.value}`,
   ]);
   assert.deepEqual(driver.events.map((event) => event.split(':')[0]), [
     'start',
@@ -1716,6 +1717,130 @@ test('runtime memory explicit submission publishes one durable analysis request 
     'observe',
     'settle',
   ]);
+  await runtime.lock.release();
+  await rm(root, { recursive: true, force: true });
+});
+
+test('runtime memory recovers an accepted explicit submission when analysis publication fails', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-explicit-recovery-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Explicit recovery\n', 'utf8');
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-memory-explicit-recovery',
+  });
+  const { paths, configuration } = runtime;
+  const taskId = id('task', 'session-memory-explicit-recovery');
+  const contentText = 'explicit submission recovery evidence';
+  const contentDigest = `sha256:${createHash('sha256').update(contentText).digest('hex')}`;
+  const contentRef = 'humanagent://checkpoint/explicit-recovery';
+  const organId = id('organ', `agent-${configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId}`);
+  let reads = 0;
+  const compose = () => composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    assignmentId: 'explicit-recovery-assignment',
+    agentRuntimeId: 'explicit-recovery-runtime',
+    roleId: 'interaction',
+    driverFor: () => new MemoryAnalysisDriver(),
+    evidenceSource: {
+      read: async ({ evidence: requested }) => {
+        reads += 1;
+        if (reads === 2) throw new Error('injected analysis publication failure');
+        return {
+          sourceRef: requested.locator,
+          sourceDigest: requested.digest!,
+          text: contentText,
+        };
+      },
+    },
+    binding: {
+      bindingRef: 'memory-binding:explicit-recovery',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId,
+        taskId,
+      },
+      taskId,
+      mainAgentId: 'explicit-recovery-main',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  const submission = {
+    submissionId: 'submission:explicit-recovery',
+    requestId: 'request:explicit-recovery',
+    operationId: id('operation', 'explicit-recovery-request'),
+    bindingRef: 'memory-binding:explicit-recovery',
+    actor: {
+      actorId: 'main-agent',
+      roleId: 'interaction' as const,
+      permissions: ['memory.read', 'memory.propose'] as const,
+      projectKey: paths.projectKey,
+    },
+    projectKey: paths.projectKey,
+    taskId,
+    requestedKind: 'semantic' as const,
+    candidateCategory: 'project-fact' as const,
+    contentRef,
+    contentDigest,
+    evidenceRefs: [contentRef],
+    observation: 'explicit submission recovery',
+    desiredScope: 'project' as const,
+    reason: 'prove accepted submission remains recoverable',
+    inputDigest: `sha256:${createHash('sha256').update('explicit-recovery-input').digest('hex')}`,
+  };
+
+  const first = await compose();
+  await assert.rejects(
+    () => first.composition.submissions.submitCandidate(submission),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-explicit-submission-publication-failed'
+      && error.message.includes('durable recovery record'),
+  );
+  const pendingRoot = join(paths.locksRoot, 'memory-explicit-submissions');
+  const pendingFiles = async (): Promise<readonly string[]> => {
+    const bindingRoot = join(
+      pendingRoot,
+      createHash('sha256').update('memory-binding:explicit-recovery').digest('hex'),
+    );
+    try {
+      return (await readdir(bindingRoot)).filter((entry) => entry.endsWith('.json'));
+    } catch (error) {
+      if ((error as { readonly code?: string }).code === 'ENOENT') return [];
+      throw error;
+    }
+  };
+  assert.equal((await pendingFiles()).length, 1);
+  assert.equal((await first.journal.readEvents({
+    streamId: `memory-boundaries:${taskId.value}`,
+    afterSequence: 0,
+    limit: 10,
+  })).length, 0);
+
+  const restarted = await compose();
+  assert.equal((await restarted.journal.readEvents({
+    streamId: `memory-boundaries:${taskId.value}`,
+    afterSequence: 0,
+    limit: 10,
+  })).length, 1);
+  assert.equal((await pendingFiles()).length, 0);
+  assert.equal((await restarted.consume()).committed.length, 1);
+
   await runtime.lock.release();
   await rm(root, { recursive: true, force: true });
 });
