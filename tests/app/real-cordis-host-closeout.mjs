@@ -243,6 +243,60 @@ function assertShutdown(leaseAfterShutdown) {
   }
 }
 
+function readJsonlLines(text, label) {
+  if (!text) throw new Error(`${label} artifact is missing`);
+  const lines = text.split('\n').filter((line) => line.length > 0);
+  if (lines.length === 0) throw new Error(`${label} artifact contains no records`);
+  return lines.map((line, row) => {
+    try {
+      return JSON.parse(line);
+    } catch (error) {
+      throw new Error(`${label} artifact row ${row} is not JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+}
+
+function assertArtifacts(record) {
+  const { journal, checkpoint, checkpointJournal } = record.artifacts;
+  const journalLines = readJsonlLines(journal, 'event-journal');
+  const checkpointLines = readJsonlLines(checkpoint, 'checkpoint');
+  const uiLines = readJsonlLines(checkpointJournal, 'ui-runtime-journal');
+  const checkpointRecord = checkpointLines[checkpointLines.length - 1]?.checkpoint;
+  if (!checkpointRecord) {
+    throw new Error('checkpoint artifact has no checkpoint record');
+  }
+  if (checkpointRecord.outcome !== 'succeeded') {
+    throw new Error(`checkpoint outcome is not succeeded: ${checkpointRecord.outcome}`);
+  }
+  if (checkpointRecord.summary !== 'execution succeeded') {
+    throw new Error(`checkpoint summary is not 'execution succeeded': ${checkpointRecord.summary}`);
+  }
+  const journalKinds = new Set(journalLines.map((line) => line.payload?.type ?? line.kind));
+  for (const required of ['event', 'barrier-intent']) {
+    if (!journalKinds.has(required)) {
+      throw new Error(`event-journal is missing ${required}: ${[...journalKinds].join(',')}`);
+    }
+  }
+  if (!journalLines.some((line) => line.payload?.type === 'barrier-intent' && line.payload.barrierIntent?.intent?.disposition === 'applied')) {
+    throw new Error('event-journal has no applied barrier-intent for the committed checkpoint');
+  }
+  const uiEvents = uiLines.map((line) => line.kind === 'operation.event' ? line.event : line);
+  const uiKinds = new Set(uiEvents.map((line) => line.kind));
+  for (const required of ['task.created', 'checkpoint.committed', 'execution.terminal']) {
+    if (!uiKinds.has(required)) {
+      throw new Error(`ui-runtime-journal is missing ${required}: ${[...uiKinds].join(',')}`);
+    }
+  }
+  const terminal = uiEvents.find((line) => line.kind === 'execution.terminal' && line.terminalPhase === 'final');
+  if (!terminal) throw new Error(`ui-runtime-journal is missing the final terminal event`);
+  const evidenceIds = (terminal.evidenceRefs ?? []).map((ref) => ref.evidenceId?.value);
+  for (const required of ['fake-settle-succeeded', 'fake-close']) {
+    if (!evidenceIds.includes(required)) {
+      throw new Error(`final terminal evidence is missing ${required}: ${evidenceIds.join(',')}`);
+    }
+  }
+}
+
 async function readIfPresent(path) {
   try {
     return await readFile(path, 'utf8');
@@ -332,12 +386,21 @@ async function run() {
 async function main() {
   const receipt = await run();
   assertShutdown(receipt.artifacts.leaseAfterShutdown);
+  assertArtifacts(receipt);
   await mkdir(dirname(RECEIPT_PATH), { recursive: true });
   await writeFile(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
   console.log(JSON.stringify({
     receipt: RECEIPT_PATH,
     implementationCommit: receipt.candidate.implementationCommit,
     proofCommit: receipt.candidate.proofCommit,
+    journalKinds: [...new Set(JSON.parse('[' + receipt.artifacts.journal.split('\n').filter(Boolean).join(',') + ']').map((line) => line.payload?.type ?? line.kind))],
+    checkpointOutcome: JSON.parse(receipt.artifacts.checkpoint.split('\n').at(-2)).checkpoint.outcome,
+    terminalSummary: (function () {
+      const lines = receipt.artifacts.checkpointJournal.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      const terminal = lines.map((line) => line.kind === 'operation.event' ? line.event : line)
+        .find((line) => line.kind === 'execution.terminal' && line.terminalPhase === 'final');
+      return terminal?.summary;
+    })(),
     plugins: receipt.launch.plugins,
     compositionComplete: receipt.launch.composition.complete,
     eventKinds: receipt.events.map((event) => event.kind),
