@@ -4,13 +4,8 @@ import {
   type ArtifactRef,
   type EvidenceRef,
   type OperationId,
-  type Scope,
 } from '../../../contracts/src/index.js';
-import {
-  OperationAdapterError,
-  failureEvidence,
-  operationFailure,
-} from './errors.js';
+import { OperationAdapterError, failureEvidence, operationFailure } from './errors.js';
 
 import type {
   LegacyInternalExecutionResult,
@@ -48,7 +43,7 @@ export class LegacyInternalRouteAdapter implements OperationExecutorPort {
     for (const evidenceRef of legacy.evidenceRefs) {
       try {
         assertEvidenceRef(evidenceRef);
-        assertScopeWithin(input.effectiveScope, evidenceRef.scope);
+        assertScopeWithin(evidenceRef.scope, input.effectiveScope);
       } catch (error) {
         throw legacyFailure(
           input,

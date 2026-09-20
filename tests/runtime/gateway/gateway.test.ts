@@ -355,18 +355,56 @@ test('scope widening and missing route are rejected before acceptance', async ()
   assert.equal(context.journal.committed.length, 0);
 });
 
-test('stale executor epoch is rejected and does not advance to verification', async () => {
+test('stale executor epoch becomes a durable blocked recovery state', async () => {
   const executor = new Executor();
   executor.next = observation({ executionEpoch: 99 });
   const context = setup({ executor });
   await context.gateway.submit(intent());
 
-  await assert.rejects(
-    () => context.gateway.execute(operation),
-    (error: unknown) => error instanceof GatewayError && error.code === 'stale-epoch',
-  );
+  const result = await context.gateway.execute(operation);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.blocked?.blockedAfter, 'execution');
+  assert.equal(result.blocked?.sideEffectState, 'possible');
+  assert.equal(result.blocked?.retryAllowed, false);
+  assert.equal(result.blocked?.nextAction.ref, 'reconcile');
   assert.equal(context.verifier.requests.length, 0);
-  assert.equal(context.gateway.get(operation).status, 'running');
+  assert.equal(context.journal.committed.at(-1)?.kind, 'operation.blocked');
+  assert.equal(context.gateway.get(operation).status, 'blocked');
+});
+
+test('stale verifier epoch becomes a durable blocked recovery state', async () => {
+  const verifier = new Verifier();
+  verifier.next = {
+    executionEpoch: 99,
+    accepted: true,
+    decision: 'accepted',
+    evidenceRefs: [evidence('verifier-stale')],
+  };
+  const context = setup({ verifier });
+  await context.gateway.submit(intent());
+
+  const result = await context.gateway.execute(operation);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.blocked?.blockedAfter, 'verification');
+  assert.equal(result.blocked?.sideEffectState, 'possible');
+  assert.equal(context.journal.committed.at(-1)?.kind, 'operation.blocked');
+  assert.equal(context.gateway.get(operation).status, 'blocked');
+});
+
+test('gateway durable identifiers are unique across runtime instances', async () => {
+  const first = setup();
+  const second = setup();
+  await first.gateway.submit(intent());
+  await second.gateway.submit(intent());
+  await first.gateway.execute(operation);
+  await second.gateway.execute(operation);
+
+  assert.ok(first.journal.committed[0]?.eventId !== second.journal.committed[0]?.eventId);
+  const firstQueued = first.journal.committed.find((event) => event.kind === 'operation.queued');
+  const secondQueued = second.journal.committed.find((event) => event.kind === 'operation.queued');
+  assert.ok(
+    firstQueued?.evidenceRefs[0]?.evidenceId.value !== secondQueued?.evidenceRefs[0]?.evidenceId.value,
+  );
 });
 
 test('verifier failure records owner, failure evidence, and failed result', async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   assertEvidenceRef,
   validateOperationFailure,
@@ -80,8 +81,6 @@ interface FailureInput {
 }
 
 export class HandRuntime {
-  private failureOrdinal = 0;
-
   constructor(private readonly dependencies: HandRuntimeDependencies) {}
 
   async execute(input: ExecuteHandInput): Promise<HandRunResult> {
@@ -94,7 +93,12 @@ export class HandRuntime {
       return await this.failExecution(input, error);
     }
 
-    this.assertEpoch(input.intent, input.lease.executionEpoch, observation.executionEpoch, 'running');
+    try {
+      this.assertEpoch(input.intent, input.lease.executionEpoch, observation.executionEpoch, 'running');
+    } catch (error) {
+      if (!(error instanceof GatewayError) || error.code !== 'stale-epoch') throw error;
+      return this.blockStale(input, 'execution', observation, error);
+    }
 
     if (observation.status === 'blocked') {
       assertTransitionOperationStatus('running', 'settling');
@@ -175,7 +179,12 @@ export class HandRuntime {
       return await this.failVerification(input, error);
     }
 
-    this.assertEpoch(input.intent, input.observation.executionEpoch, decision.executionEpoch, 'verifying');
+    try {
+      this.assertEpoch(input.intent, input.observation.executionEpoch, decision.executionEpoch, 'verifying');
+    } catch (error) {
+      if (!(error instanceof GatewayError) || error.code !== 'stale-epoch') throw error;
+      return this.blockStale(input, 'verification', input.observation, error);
+    }
     if (!decision.accepted) {
       const failure = this.failure({
         intent: input.intent,
@@ -258,7 +267,7 @@ export class HandRuntime {
 
   private failure(input: FailureInput): OperationFailure {
     const failure: OperationFailure = {
-      errorId: `runtime-gateway-error-${++this.failureOrdinal}`,
+      errorId: `runtime-gateway-error-${randomUUID()}`,
       operationId: input.intent.operationId,
       owner: input.registration.owner,
       phase: input.phase,
@@ -357,6 +366,34 @@ export class HandRuntime {
       ...(resultRef ? { resultRef } : {}),
       ...(failure ? { failure } : {}),
     });
+  }
+
+  private async blockStale(
+    input: ExecuteHandInput | VerifyOnlyHandInput,
+    blockedAfter: 'execution' | 'verification',
+    observation: OperationExecutorObservation,
+    error: GatewayError,
+  ): Promise<HandRunResult> {
+    if (blockedAfter === 'execution') {
+      assertTransitionOperationStatus('running', 'settling');
+      assertTransitionOperationStatus('settling', 'blocked');
+    } else {
+      assertTransitionOperationStatus('verifying', 'blocked');
+    }
+    const blocked: OperationBlockedState = {
+      blockedAfter,
+      sideEffectState: 'possible',
+      retryAllowed: false,
+      owner: observation.owner,
+      nextAction: { kind: 'recover', ref: 'reconcile' },
+      evidenceRefs: this.ensureEvidence(
+        [...observation.evidenceRefs, ...error.evidenceRefs],
+        `stale-${blockedAfter}`,
+        input.route.effectiveScope,
+      ),
+    };
+    await this.emitStatus(input, 'operation.blocked', 'blocked', blocked.evidenceRefs);
+    return { status: 'blocked', observation, blocked };
   }
 
   private assertEpoch(

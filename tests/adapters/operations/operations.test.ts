@@ -278,3 +278,28 @@ test('legacy adapter rejects evidence outside the effective scope', async () => 
       && /scope/.test(error.failure.message),
   );
 });
+
+test('legacy adapter rejects evidence with a broader scope than the operation', async () => {
+  const adapter = new LegacyInternalRouteAdapter({
+    entryId: 'internal.tool.broad',
+    async execute() {
+      return {
+        outputRef: 'artifact://legacy/broad/output',
+        outputDigest: 'sha256:broad',
+        evidenceRefs: [{
+          evidenceId: id('evidence', 'broad-evidence'),
+          kind: 'tool',
+          source: 'legacy-test',
+          locator: 'legacy://broad',
+          scope: { organId },
+        }],
+      };
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.execute(request()),
+    (error) => error instanceof OperationAdapterError
+      && /scope/.test(error.failure.message),
+  );
+});

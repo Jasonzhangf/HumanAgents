@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   assertEvidenceRef,
   assertScope,
@@ -103,10 +104,6 @@ export class ToolExecutionGateway {
   private readonly pendingSubmissions = new Map<string, PendingSubmission>();
   private readonly operationLocks = new Map<string, Promise<void>>();
   private readonly notificationFailures = new Map<string, OperationNotificationError>();
-  private eventOrdinal = 0;
-  private evidenceOrdinal = 0;
-  private leaseOrdinal = 0;
-
   constructor(options: GatewayOptions) {
     this.registry = options.registry;
     this.permissions = options.permissions;
@@ -577,21 +574,12 @@ export class ToolExecutionGateway {
     record: OperationRecord,
     lease: OperationLease,
   ): Promise<Awaited<ReturnType<HandRuntime['execute']>>> {
-    let outcome;
-    try {
-      outcome = await this.hand.execute({
-        intent: record.intent,
-        registration: record.registration,
-        route: record.route,
-        lease,
-      });
-    } catch (error) {
-      if (error instanceof GatewayError && error.code === 'stale-epoch') {
-        record.status = error.operationStatus ?? record.status;
-      }
-      throw error;
-    }
-    return outcome;
+    return this.hand.execute({
+      intent: record.intent,
+      registration: record.registration,
+      route: record.route,
+      lease,
+    });
   }
 
   private issueLease(record: OperationRecord): OperationLease {
@@ -599,7 +587,7 @@ export class ToolExecutionGateway {
     const issuedAt = this.now();
     const expiresAt = new Date(issuedAt.getTime() + this.leaseDurationMs);
     const lease: OperationLease = {
-      leaseId: `runtime-gateway-lease-${++this.leaseOrdinal}`,
+      leaseId: `runtime-gateway-lease-${randomUUID()}`,
       operationId: record.intent.operationId,
       taskId: record.intent.taskId,
       executionEpoch,
@@ -654,7 +642,7 @@ export class ToolExecutionGateway {
     afterCommit?: () => void,
   ): Promise<void> {
     const event: OperationEvent = {
-      eventId: `runtime-gateway-event-${++this.eventOrdinal}`,
+      eventId: `runtime-gateway-event-${randomUUID()}`,
       schemaVersion: 1,
       occurredAt: this.now().toISOString(),
       ...input,
@@ -803,7 +791,7 @@ export class ToolExecutionGateway {
     return {
       evidenceId: {
         scope: 'evidence',
-        value: `runtime-gateway-evidence-${++this.evidenceOrdinal}`,
+        value: `runtime-gateway-evidence-${randomUUID()}`,
       },
       kind: 'operation',
       source: 'runtime-gateway',
@@ -870,7 +858,7 @@ export class ToolExecutionGateway {
     nextAction: OperationFailure['nextAction'],
   ): OperationFailure {
     const failure: OperationFailure = {
-      errorId: `runtime-gateway-error-${++this.eventOrdinal}`,
+      errorId: `runtime-gateway-error-${randomUUID()}`,
       operationId: intent.operationId,
       owner: registration.owner,
       phase,
