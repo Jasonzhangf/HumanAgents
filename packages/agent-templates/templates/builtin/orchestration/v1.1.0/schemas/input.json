@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/orchestration/1.1.0/input",
+  "title": "Orchestration Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "requirementId",
+    "taskId",
+    "pipelineNodeId",
+    "inputRevision",
+    "executionEpoch",
+    "objective",
+    "acceptanceCriteriaDigest"
+  ],
+  "properties": {
+    "requirementId": { "type": "string", "minLength": 1 },
+    "taskId": { "type": "string", "minLength": 1 },
+    "pipelineNodeId": { "type": "string", "minLength": 1 },
+    "inputRevision": { "type": "integer", "minimum": 1 },
+    "executionEpoch": { "type": "integer", "minimum": 1 },
+    "objective": { "type": "string", "minLength": 1 },
+    "acceptanceCriteriaDigest": { "type": "string", "minLength": 1 },
+    "targetRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "resourceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+  }
+}

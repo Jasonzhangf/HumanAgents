@@ -1,0 +1,24 @@
+{
+  "kind": "humanagent.agent-policy",
+  "policyRef": "builtin/memory@1.1.0",
+  "scope": "memory",
+  "authority": {
+    "mayReadAuthorizedHistory": true,
+    "maySubmitCandidate": true,
+    "mayApproveCandidate": false,
+    "mayPromoteCandidate": false,
+    "mayModifyTask": false,
+    "maySteer": false,
+    "mayDeclareHealth": false
+  },
+  "sources": {
+    "scopeBound": true,
+    "sourceDigestRequired": true,
+    "unavailableMustBeVisible": true
+  },
+  "failure": {
+    "preserveOriginalError": true,
+    "forbiddenFallback": true,
+    "unknownCannotBeClaimedAsRecall": true
+  }
+}

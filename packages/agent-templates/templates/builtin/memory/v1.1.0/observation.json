@@ -1,0 +1,21 @@
+{
+  "kind": "humanagent.agent-observation-projection",
+  "projectionRef": "builtin/memory@1.1.0",
+  "readOnly": true,
+  "fields": [
+    { "name": "bindingRef", "source": "memory.binding" },
+    { "name": "operationId", "source": "memory.operation" },
+    { "name": "sourceRefs", "source": "memory.sources" },
+    { "name": "sourceDigests", "source": "memory.source-digests" },
+    { "name": "curationOutcome", "source": "memory.curation-outcome" },
+    { "name": "candidateRef", "source": "memory.candidate" },
+    { "name": "evidenceRefs", "source": "memory.evidence" }
+  ],
+  "forbiddenActions": [
+    "modify-task",
+    "modify-queue",
+    "execute-steer",
+    "approve-candidate",
+    "promote-candidate"
+  ]
+}

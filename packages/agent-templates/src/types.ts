@@ -5,6 +5,25 @@ export type AgentRole = (typeof AGENT_ROLE_IDS)[number];
 
 export type MemoryContextScope = 'task' | 'organ' | 'approved-global';
 export type MemoryContextLayer = 'current' | 'task-recent' | 'related' | 'approved-long-term' | 'raw';
+export type AgentMode = 'observation' | 'orchestration';
+export type ObservationScopeKind = 'self' | 'task' | 'project' | 'evidence' | 'memory';
+export type OrchestrationScope = 'local' | 'project';
+
+export interface AgentModeCapabilityProfile {
+  readonly profileId: string;
+  readonly role: AgentRole;
+  readonly mode: AgentMode;
+  readonly observationScopes: readonly ObservationScopeKind[];
+  readonly observationCapabilities: readonly string[];
+  readonly orchestrationScope: OrchestrationScope;
+  readonly orchestrationCapabilities: readonly string[];
+  readonly capabilityDigest: string;
+}
+
+export interface AgentModeCapabilityProfiles {
+  readonly observation: AgentModeCapabilityProfile;
+  readonly orchestration: AgentModeCapabilityProfile;
+}
 
 export interface AgentTemplateManifest {
   readonly kind: 'humanagent.agent-template';
@@ -19,6 +38,7 @@ export interface AgentTemplateManifest {
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
   readonly promptSegmentRefs: readonly string[];
+  readonly modeCapabilityProfile: AgentModeCapabilityProfiles;
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
   readonly policyRef: string;
@@ -49,6 +69,7 @@ export interface CompiledAgentTemplate {
   readonly toolCapabilityRefs: readonly string[];
   readonly promptSegmentRefs: readonly string[];
   readonly promptSegmentDigest: string;
+  readonly modeCapabilityProfile: AgentModeCapabilityProfiles;
   readonly inputSchemaRef: string;
   readonly outputSchemaRef: string;
   readonly policyRef: string;

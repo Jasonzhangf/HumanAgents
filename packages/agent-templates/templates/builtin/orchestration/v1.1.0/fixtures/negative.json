@@ -1,0 +1,46 @@
+{
+  "fixture": "orchestration-negative",
+  "description": "An assignment without an explicit owner must be rejected.",
+  "expected": "rejected",
+  "output": {
+    "assignments": [
+      {
+        "assignmentId": "assignment-a",
+        "taskId": "task-a",
+        "pipelineNodeId": "node-a",
+        "attempt": 1,
+        "executionEpoch": 1,
+        "inputRevision": 1,
+        "objective": "Implement the bounded task.",
+        "targetRefs": [
+          "workspace/a"
+        ],
+        "expectedOutputRefs": [
+          "artifact/a"
+        ],
+        "expectedArtifactDigests": [
+          "sha256:artifact-a"
+        ],
+        "acceptanceCriteriaDigest": "sha256:criteria-a",
+        "successCriteria": [
+          "The requested output is produced."
+        ],
+        "failureCriteria": [
+          "The requested output cannot be produced."
+        ],
+        "incompleteCriteria": [
+          "The task is missing required evidence."
+        ],
+        "requiredCapabilities": [
+          "coding"
+        ],
+        "mergeGate": "required"
+      }
+    ],
+    "reviewRequests": [],
+    "nextAction": {
+      "kind": "dispatch",
+      "ref": "assignment-a"
+    }
+  }
+}

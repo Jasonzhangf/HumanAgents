@@ -91,6 +91,12 @@
     "bug.reopen"
   ],
   "promptSegmentRefs": [
+    "common/observation.md",
+    "common/orchestration.md",
+    "common/checkpoint.md",
+    "common/context-replacement.md",
+    "common/interruption.md",
+    "common/control-boundaries.md",
     "interaction/profiles/explicit-brain/identity.md",
     "interaction/profiles/explicit-brain/mission.md",
     "interaction/profiles/explicit-brain/input-output.md",
@@ -128,5 +134,51 @@
     ],
     "requiredCapabilities": []
   },
-  "digest": "fnv1a:194ed7a3"
+  "modeCapabilityProfile": {
+    "observation": {
+      "profileId": "builtin/interaction/observation@1.1.0",
+      "role": "interaction",
+      "mode": "observation",
+      "observationScopes": [
+        "self",
+        "task",
+        "memory"
+      ],
+      "observationCapabilities": [
+        "read-input",
+        "read-task-state",
+        "read-related-memory"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "route-input",
+        "ask-user",
+        "submit-confirmed-requirement"
+      ],
+      "capabilityDigest": "sha256:f370ecf72dea23c60317ccd039aee309d51d5a5f95667658f83d6d9e7bd5ae36"
+    },
+    "orchestration": {
+      "profileId": "builtin/interaction/orchestration@1.1.0",
+      "role": "interaction",
+      "mode": "orchestration",
+      "observationScopes": [
+        "self",
+        "task",
+        "memory"
+      ],
+      "observationCapabilities": [
+        "read-input",
+        "read-task-state",
+        "read-related-memory"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "route-input",
+        "ask-user",
+        "submit-confirmed-requirement"
+      ],
+      "capabilityDigest": "sha256:f480ee7510d6ead321b5ea2046521b801077a6ee725b70cc3b7241b4b0c87427"
+    }
+  },
+  "digest": "fnv1a:2aa89329"
 }

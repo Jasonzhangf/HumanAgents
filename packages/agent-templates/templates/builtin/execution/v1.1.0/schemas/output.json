@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/execution/1.1.0/output",
+  "title": "Execution Work Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "pipelineNodeId",
+    "agentId",
+    "assignmentId",
+    "attempt",
+    "executionEpoch",
+    "inputRevision",
+    "producedArtifactRefs",
+    "producedArtifactDigests",
+    "status",
+    "summary",
+    "outputRefs",
+    "evidenceRefs",
+    "nextAction"
+  ],
+  "properties": {
+    "taskId": { "type": "string", "minLength": 1 },
+    "pipelineNodeId": { "type": "string", "minLength": 1 },
+    "agentId": { "type": "string", "minLength": 1 },
+    "assignmentId": { "type": "string", "minLength": 1 },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "executionEpoch": { "type": "integer", "minimum": 1 },
+    "inputRevision": { "type": "integer", "minimum": 1 },
+    "producedArtifactRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "producedArtifactDigests": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "status": { "enum": ["succeeded", "failed", "incomplete", "blocked", "cancelled"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "outputRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "evidenceRefs": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "nextAction": { "enum": ["continue", "wait", "attention", "review", "settle", "remediate"] },
+    "conditionRef": { "type": "string", "minLength": 1 },
+    "failureRef": { "type": "string", "minLength": 1 }
+  }
+}

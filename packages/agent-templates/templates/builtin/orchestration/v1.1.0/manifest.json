@@ -1,0 +1,130 @@
+{
+  "kind": "humanagent.agent-template",
+  "templateApiVersion": 1,
+  "roleId": "orchestration",
+  "templateVersion": "1.1.0",
+  "extends": {
+    "roleId": "_base",
+    "version": "1.0.0"
+  },
+  "capabilityRefs": [
+    "plan",
+    "resource.allocate",
+    "queue.query",
+    "task.query",
+    "assignment.create",
+    "result.submit",
+    "review.orchestrate"
+  ],
+  "skillRefs": [
+    "stage-planning",
+    "resource-planning",
+    "result-checking",
+    "review-orchestration"
+  ],
+  "toolCapabilityRefs": [
+    "task.query",
+    "queue.query",
+    "resource.query",
+    "assignment.create",
+    "result.submit"
+  ],
+  "promptSegmentRefs": [
+    "common/observation.md",
+    "common/orchestration.md",
+    "common/checkpoint.md",
+    "common/context-replacement.md",
+    "common/interruption.md",
+    "common/control-boundaries.md",
+    "orchestration/v1.1.0/prompts/identity.md",
+    "orchestration/v1.1.0/prompts/mission.md",
+    "orchestration/v1.1.0/prompts/input-output.md",
+    "orchestration/v1.1.0/prompts/failure.md",
+    "orchestration/v1.1.0/prompts/boundaries.md"
+  ],
+  "inputSchemaRef": "orchestration/v1.1.0/schemas/input.json",
+  "outputSchemaRef": "orchestration/v1.1.0/schemas/output.json",
+  "policyRef": "orchestration/v1.1.0/policy.json",
+  "observationProjectionRef": "orchestration/v1.1.0/observation.json",
+  "testFixtureRefs": [
+    "orchestration/v1.1.0/fixtures/positive.json",
+    "orchestration/v1.1.0/fixtures/negative.json"
+  ],
+  "memoryContextPolicy": {
+    "allowedScopes": [
+      "task",
+      "organ",
+      "approved-global"
+    ],
+    "allowedLayers": [
+      "current",
+      "task-recent",
+      "related",
+      "approved-long-term"
+    ],
+    "maxTokenBudget": 8192,
+    "required": false
+  },
+  "driverRequirements": {
+    "allowedDriverKinds": [
+      "fake",
+      "dsh"
+    ],
+    "requiredCapabilities": []
+  },
+  "modeCapabilityProfile": {
+    "observation": {
+      "profileId": "builtin/orchestration/observation@1.1.0",
+      "role": "orchestration",
+      "mode": "observation",
+      "observationScopes": [
+        "self",
+        "task",
+        "project",
+        "evidence",
+        "memory"
+      ],
+      "observationCapabilities": [
+        "read-project-projection",
+        "read-worker-session",
+        "read-evidence",
+        "read-memory-projection"
+      ],
+      "orchestrationScope": "project",
+      "orchestrationCapabilities": [
+        "create-phase",
+        "create-assignment",
+        "request-review",
+        "request-merge"
+      ],
+      "capabilityDigest": "sha256:a61a9c8bb17aeff23f5df071c0f8fbc5beb1f07ed62dc4199b65e236629d0cd5"
+    },
+    "orchestration": {
+      "profileId": "builtin/orchestration/orchestration@1.1.0",
+      "role": "orchestration",
+      "mode": "orchestration",
+      "observationScopes": [
+        "self",
+        "task",
+        "project",
+        "evidence",
+        "memory"
+      ],
+      "observationCapabilities": [
+        "read-project-projection",
+        "read-worker-session",
+        "read-evidence",
+        "read-memory-projection"
+      ],
+      "orchestrationScope": "project",
+      "orchestrationCapabilities": [
+        "create-phase",
+        "create-assignment",
+        "request-review",
+        "request-merge"
+      ],
+      "capabilityDigest": "sha256:84ae7f91dda578ad1fe493779c04bba90c89c0d8288977a21c93907e7e3e219b"
+    }
+  },
+  "digest": "fnv1a:31d9b167"
+}

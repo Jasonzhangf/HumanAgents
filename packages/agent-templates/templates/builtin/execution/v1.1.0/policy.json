@@ -1,0 +1,22 @@
+{
+  "kind": "humanagent.agent-policy",
+  "policyRef": "builtin/execution@1.1.0",
+  "scope": "execution",
+  "authority": {
+    "assignmentBound": true,
+    "mayChangeObjective": false,
+    "maySpawnAgents": false,
+    "mayModifyControlPlane": false,
+    "mayMerge": false
+  },
+  "tools": {
+    "assignmentScoped": true,
+    "workspaceScoped": true,
+    "reasonRequired": true
+  },
+  "failure": {
+    "preserveOriginalError": true,
+    "forbiddenFallback": true,
+    "partialResultCannotSucceed": true
+  }
+}

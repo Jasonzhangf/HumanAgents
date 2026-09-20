@@ -1,0 +1,19 @@
+{
+  "kind": "humanagent.agent-observation-projection",
+  "projectionRef": "builtin/orchestration@1.1.0",
+  "readOnly": true,
+  "fields": [
+    { "name": "runtimeBindingRef", "source": "runtime.binding" },
+    { "name": "assignmentRefs", "source": "assignment.refs" },
+    { "name": "stageState", "source": "assignment.graph-state" },
+    { "name": "reviewRefs", "source": "review.refs" },
+    { "name": "resourceRefs", "source": "resource.refs" },
+    { "name": "evidenceRefs", "source": "decision.evidence" }
+  ],
+  "forbiddenActions": [
+    "execute-worker-operation",
+    "bypass-assignment",
+    "modify-control-plane",
+    "execute-steer"
+  ]
+}

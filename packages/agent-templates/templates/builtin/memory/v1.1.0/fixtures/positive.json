@@ -1,0 +1,5 @@
+{
+  "fixture": "memory-positive",
+  "description": "Authorized source history produces a bounded curation result or candidate without mutating live context.",
+  "expected": "accepted"
+}

@@ -122,9 +122,7 @@ export async function loadBuiltinAgentTemplate(
 ): Promise<AgentTemplateManifest> {
   const source = createFilePromptSource(join(templateRoot, 'builtin'));
   const ref = templateVersion === '1.1.0'
-    ? roleId === 'interaction'
-      ? 'interaction/v1.1.0/manifest.json'
-      : undefined
+    ? `${roleId}/v1.1.0/manifest.json`
     : templateVersion === '1.0.0'
       ? `${roleId}/manifest.json`
       : undefined;
@@ -141,5 +139,16 @@ export async function loadBuiltinAgentTemplate(
   }
   await assertBuiltinTemplateResources(source, manifest);
   validateAgentTemplate(manifest, registry ?? builtinAgentTemplateRegistry(roleId, templateVersion));
+  if (templateVersion === '1.1.0') {
+    const promptRegistry = await loadBuiltinPromptRegistry(templateRoot, templateVersion);
+    const registryRefs = promptRegistry.roles[roleId];
+    if (
+      manifest.promptSegmentRefs.length !== registryRefs.length
+      || manifest.promptSegmentRefs.some((ref, index) => ref !== registryRefs[index])
+    ) {
+      throw new AgentTemplateError(`builtin prompt registry refs do not match manifest: ${roleId}`);
+    }
+    await loadBuiltinPromptSegments(roleId, templateRoot, templateVersion);
+  }
   return manifest;
 }

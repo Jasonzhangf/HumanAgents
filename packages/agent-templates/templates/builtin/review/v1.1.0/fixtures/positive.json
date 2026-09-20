@@ -1,0 +1,5 @@
+{
+  "fixture": "review-positive",
+  "description": "A complete immutable subject can receive a read-only result with findings and evidence.",
+  "expected": "accepted"
+}

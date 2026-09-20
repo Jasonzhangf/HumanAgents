@@ -1,0 +1,22 @@
+{
+  "kind": "humanagent.agent-policy",
+  "policyRef": "builtin/orchestration@1.1.0",
+  "scope": "orchestration",
+  "authority": {
+    "mayPlan": true,
+    "mayAllocateResources": true,
+    "mayCreateAssignments": true,
+    "mayExecuteWorkerOperations": false,
+    "mayMergeWithoutGate": false
+  },
+  "assignment": {
+    "requiresDeliveryConditions": true,
+    "requiresOwner": true,
+    "requiredCriteria": ["successCriteria", "failureCriteria", "incompleteCriteria"]
+  },
+  "failure": {
+    "preserveOriginalError": true,
+    "forbiddenFallback": true,
+    "retryRequiresEvidence": true
+  }
+}

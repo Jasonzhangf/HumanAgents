@@ -1,0 +1,20 @@
+{
+  "kind": "humanagent.agent-observation-projection",
+  "projectionRef": "builtin/review@1.1.0",
+  "readOnly": true,
+  "fields": [
+    { "name": "reviewAssignmentRef", "source": "review.assignment" },
+    { "name": "workerResultRef", "source": "work-result.ref" },
+    { "name": "reviewKind", "source": "review.kind" },
+    { "name": "subjectRefs", "source": "review.subjects" },
+    { "name": "findings", "source": "review.findings" },
+    { "name": "reviewStatus", "source": "review.status" },
+    { "name": "evidenceRefs", "source": "review.evidence" }
+  ],
+  "forbiddenActions": [
+    "modify-candidate",
+    "remediate",
+    "merge",
+    "declare-health"
+  ]
+}

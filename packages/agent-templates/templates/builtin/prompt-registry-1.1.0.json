@@ -3,14 +3,20 @@
   "schemaVersion": 1,
   "templateVersion": "1.1.0",
   "contentDigests": {
-    "interaction": "sha256:87ec07e7268651da68d66c71da300e5d6ff402722ed640087e697b8dcbc1245e",
-    "orchestration": "sha256:1de7d7d3e83f70972eea86e64620bde4244d01a1bdc925f4bded1cbc5ef8c288",
-    "execution": "sha256:90bc73b6ac85d6c6c2d4ce64346555f01d6d535113cbb5472759953d62cc25f7",
-    "review": "sha256:ca89e88b27281039c22c8f2aae15c9dfab51363655c6b0c9d20a16f9476f4cfc",
-    "memory": "sha256:b93ced4a7e090972faa180d13b299e3229a9d3fad7a391e763c6923ca8767961"
+    "interaction": "sha256:ef2871e7c1773cf23f2614e0ec03f2093c0aedee90a89ed4ee4056f8fe09f590",
+    "orchestration": "sha256:381a1487f48bf668d3f7356a4d8ed1f037825546ebd5061240962f7d01a8cfb5",
+    "execution": "sha256:87f8747387ab4f77ac3ce29feb7bc070f9be18124dc707b0be25cdfc41c9356e",
+    "review": "sha256:6ffd0efc0391a7b1168a6eda630c4abd3751aba02fdcbf9aa78279b8fc0d1bbb",
+    "memory": "sha256:8676cb1fa760d8ca5ac2e6c683b784cc19d1d3ffe9267e9b13e07533d01d1964"
   },
   "roles": {
     "interaction": [
+      "common/observation.md",
+      "common/orchestration.md",
+      "common/checkpoint.md",
+      "common/context-replacement.md",
+      "common/interruption.md",
+      "common/control-boundaries.md",
       "interaction/profiles/explicit-brain/identity.md",
       "interaction/profiles/explicit-brain/mission.md",
       "interaction/profiles/explicit-brain/input-output.md",
@@ -18,32 +24,56 @@
       "interaction/profiles/explicit-brain/boundaries.md"
     ],
     "orchestration": [
-      "orchestration/identity.md",
-      "orchestration/mission.md",
-      "orchestration/input-output.md",
-      "orchestration/failure.md",
-      "orchestration/boundaries.md"
+      "common/observation.md",
+      "common/orchestration.md",
+      "common/checkpoint.md",
+      "common/context-replacement.md",
+      "common/interruption.md",
+      "common/control-boundaries.md",
+      "orchestration/v1.1.0/prompts/identity.md",
+      "orchestration/v1.1.0/prompts/mission.md",
+      "orchestration/v1.1.0/prompts/input-output.md",
+      "orchestration/v1.1.0/prompts/failure.md",
+      "orchestration/v1.1.0/prompts/boundaries.md"
     ],
     "execution": [
-      "execution/identity.md",
-      "execution/mission.md",
-      "execution/input-output.md",
-      "execution/failure.md",
-      "execution/boundaries.md"
+      "common/observation.md",
+      "common/orchestration.md",
+      "common/checkpoint.md",
+      "common/context-replacement.md",
+      "common/interruption.md",
+      "common/control-boundaries.md",
+      "execution/v1.1.0/prompts/identity.md",
+      "execution/v1.1.0/prompts/mission.md",
+      "execution/v1.1.0/prompts/input-output.md",
+      "execution/v1.1.0/prompts/failure.md",
+      "execution/v1.1.0/prompts/boundaries.md"
     ],
     "review": [
-      "review/identity.md",
-      "review/mission.md",
-      "review/input-output.md",
-      "review/failure.md",
-      "review/boundaries.md"
+      "common/observation.md",
+      "common/orchestration.md",
+      "common/checkpoint.md",
+      "common/context-replacement.md",
+      "common/interruption.md",
+      "common/control-boundaries.md",
+      "review/v1.1.0/prompts/identity.md",
+      "review/v1.1.0/prompts/mission.md",
+      "review/v1.1.0/prompts/input-output.md",
+      "review/v1.1.0/prompts/failure.md",
+      "review/v1.1.0/prompts/boundaries.md"
     ],
     "memory": [
-      "memory/identity.md",
-      "memory/mission.md",
-      "memory/input-output.md",
-      "memory/failure.md",
-      "memory/boundaries.md"
+      "common/observation.md",
+      "common/orchestration.md",
+      "common/checkpoint.md",
+      "common/context-replacement.md",
+      "common/interruption.md",
+      "common/control-boundaries.md",
+      "memory/v1.1.0/prompts/identity.md",
+      "memory/v1.1.0/prompts/mission.md",
+      "memory/v1.1.0/prompts/input-output.md",
+      "memory/v1.1.0/prompts/failure.md",
+      "memory/v1.1.0/prompts/boundaries.md"
     ]
   }
 }

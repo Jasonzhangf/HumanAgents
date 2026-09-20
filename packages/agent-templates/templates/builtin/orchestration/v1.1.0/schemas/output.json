@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/orchestration/1.1.0/output",
+  "title": "Orchestration Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assignments", "nextAction"],
+  "properties": {
+    "assignments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assignmentId",
+          "taskId",
+          "pipelineNodeId",
+          "attempt",
+          "executionEpoch",
+          "inputRevision",
+          "ownerId",
+          "objective",
+          "successCriteria",
+          "failureCriteria",
+          "incompleteCriteria",
+          "requiredCapabilities",
+          "mergeGate"
+        ],
+        "properties": {
+          "assignmentId": { "type": "string", "minLength": 1 },
+          "taskId": { "type": "string", "minLength": 1 },
+          "pipelineNodeId": { "type": "string", "minLength": 1 },
+          "attempt": { "type": "integer", "minimum": 1 },
+          "executionEpoch": { "type": "integer", "minimum": 1 },
+          "inputRevision": { "type": "integer", "minimum": 1 },
+          "ownerId": { "type": "string", "minLength": 1 },
+          "objective": { "type": "string", "minLength": 1 },
+          "targetRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "expectedOutputRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "expectedArtifactDigests": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "acceptanceCriteriaDigest": { "type": "string", "minLength": 1 },
+          "successCriteria": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "failureCriteria": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "incompleteCriteria": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "requiredCapabilities": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "mergeGate": { "enum": ["required", "not-required"] }
+        }
+      }
+    },
+    "reviewRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assignmentId", "reviewKind"],
+        "properties": {
+          "assignmentId": { "type": "string", "minLength": 1 },
+          "reviewKind": { "enum": ["architecture", "baseline", "quality", "security", "delivery"] }
+        }
+      }
+    },
+    "nextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "enum": ["dispatch", "wait", "review", "remediate", "settle", "attention"] },
+        "ref": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

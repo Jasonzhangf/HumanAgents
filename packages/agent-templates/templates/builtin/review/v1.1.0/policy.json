@@ -1,0 +1,23 @@
+{
+  "kind": "humanagent.agent-policy",
+  "policyRef": "builtin/review@1.1.0",
+  "scope": "review",
+  "authority": {
+    "readOnly": true,
+    "mayModifyCandidate": false,
+    "mayRemediate": false,
+    "mayMerge": false,
+    "mayDeclareHealth": false
+  },
+  "findings": {
+    "severityRequired": true,
+    "locationRequired": true,
+    "evidenceRequired": true,
+    "missingEvidenceStatus": "inconclusive"
+  },
+  "failure": {
+    "preserveOriginalError": true,
+    "forbiddenFallback": true,
+    "unverifiedCannotPass": true
+  }
+}

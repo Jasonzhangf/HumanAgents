@@ -13,6 +13,7 @@ import {
   compileAgentTemplate,
   createFilePromptSource,
   digestAgentTemplate,
+  digestModeCapabilityProfile,
   digestPromptSegments,
   loadAgentTemplate,
   loadBuiltinAgentTemplate,
@@ -22,6 +23,7 @@ import {
   validateAgentTemplate,
   validateConfiguredAgentBinding,
   type AgentRole,
+  type AgentModeCapabilityProfiles,
   type AgentTemplateManifest,
   type AgentTemplateRegistry,
 } from '../../packages/agent-templates/src/index.js';
@@ -96,6 +98,32 @@ const registry: AgentTemplateRegistry = {
   ],
 };
 
+function modeCapabilityProfile(role: AgentRole): AgentModeCapabilityProfiles {
+  const project = role === 'orchestration';
+  const observation = {
+    profileId: `test/${role}/observation`,
+    role,
+    mode: 'observation' as const,
+    observationScopes: ['self', 'task', 'evidence'] as const,
+    observationCapabilities: ['read-assignment'],
+    orchestrationScope: project ? 'project' as const : 'local' as const,
+    orchestrationCapabilities: ['plan-own-tool-steps'],
+    capabilityDigest: '',
+  };
+  observation.capabilityDigest = digestModeCapabilityProfile(observation);
+  const orchestration = {
+    ...observation,
+    profileId: `test/${role}/orchestration`,
+    mode: 'orchestration' as const,
+    capabilityDigest: '',
+  };
+  orchestration.capabilityDigest = digestModeCapabilityProfile(orchestration);
+  return {
+    observation,
+    orchestration,
+  };
+}
+
 function template(overrides: Partial<AgentTemplateManifest> = {}): AgentTemplateManifest {
   const manifest: AgentTemplateManifest = {
     kind: 'humanagent.agent-template',
@@ -106,6 +134,7 @@ function template(overrides: Partial<AgentTemplateManifest> = {}): AgentTemplate
     skillRefs: ['single-capability-worker'],
     toolCapabilityRefs: ['test'],
     promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'],
+    modeCapabilityProfile: modeCapabilityProfile('execution'),
     inputSchemaRef: 'execution/schemas/input.json',
     outputSchemaRef: 'execution/schemas/output.json',
     policyRef: 'execution/policies/worker.json',
@@ -165,7 +194,26 @@ test('invalid manifest fields, paths, fixtures, and memory policy are rejected',
       required: false,
     },
   }), registry), AgentTemplateError);
+  const profile = modeCapabilityProfile('execution');
+  assert.throws(() => validateAgentTemplate(template({
+    modeCapabilityProfile: {
+      ...profile,
+      observation: { ...profile.observation, observationCapabilities: ['modify-control-plane'] },
+    },
+  }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({
+    modeCapabilityProfile: {
+      ...profile,
+      observation: { ...profile.observation, capabilityDigest: `sha256:${'b'.repeat(64)}` },
+    },
+  }), registry), AgentTemplateError);
   assert.throws(() => validateAgentTemplate(template({ digest: 'fnv1a:stale' }), registry), AgentTemplateError);
+  assert.throws(() => validateAgentTemplate(template({
+    modeCapabilityProfile: {
+      ...modeCapabilityProfile('execution'),
+      orchestration: { ...modeCapabilityProfile('execution').orchestration, orchestrationScope: 'project' },
+    },
+  }), registry), AgentTemplateError);
 });
 
 test('prompt segment order is part of the compiled contract without loading prompt content', () => {
@@ -320,15 +368,17 @@ test('builtin template loading validates the manifest even without an external r
   );
 });
 
-test('builtin template loading rejects unsupported or mismatched versions', async () => {
+test('builtin template loading rejects unsupported versions and loads all 1.1.0 profiles', async () => {
   const root = join(cwd(), 'packages', 'agent-templates', 'templates');
 
   await assert.rejects(
     () => loadBuiltinAgentTemplate(root, 'interaction', '2.0.0'),
     /unsupported builtin template version: interaction@2\.0\.0/,
   );
-  await assert.rejects(
-    () => loadBuiltinAgentTemplate(root, 'execution', '1.1.0'),
-    /unsupported builtin template version: execution@1\.1\.0/,
-  );
+  for (const roleId of AGENT_ROLE_IDS) {
+    const manifest = await loadBuiltinAgentTemplate(root, roleId, '1.1.0');
+    assert.equal(manifest.modeCapabilityProfile.observation.mode, 'observation');
+    assert.equal(manifest.modeCapabilityProfile.orchestration.mode, 'orchestration');
+    if (roleId !== 'orchestration') assert.notEqual(manifest.modeCapabilityProfile.orchestration.orchestrationScope, 'project');
+  }
 });
