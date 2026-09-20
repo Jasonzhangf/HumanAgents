@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import { mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { RuntimePaths, LoadedConfiguration } from '../../config/src/index.js';
 import type {
@@ -29,6 +28,7 @@ import {
   type MemoryCompositionInput,
 } from './memory-composition.js';
 import { AppLifecycleError } from './errors.js';
+import { prepareBuiltinAuditPrompt } from '../../agent-templates/src/index.js';
 
 const OWNER = 'humanagent.app.memory-runtime';
 const PUBLISHER_ID = 'memory-boundary-publisher';
@@ -196,7 +196,22 @@ function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPubli
 }
 
 export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<MemoryRuntime> {
-  await mkdir(input.auditPromptRoot, { recursive: true });
+  const templateRoot = (globalThis as {
+    readonly process?: { readonly env?: { readonly HUMANAGENT_TEMPLATE_ROOT?: string } };
+  }).process?.env?.HUMANAGENT_TEMPLATE_ROOT;
+  if (!templateRoot) {
+    throw new AppLifecycleError(
+      'memory-audit-prompt-unavailable',
+      'builtin template root is not configured',
+      'configure the locked builtin template root before composing memory',
+      OWNER,
+    );
+  }
+  await prepareBuiltinAuditPrompt({
+    templateRoot,
+    promptRef: input.auditPromptRef,
+    destinationRoot: input.auditPromptRoot,
+  });
   const checkpointFile = join(input.paths.journalRoot, 'checkpoints.jsonl');
   const checkpointEvidence: MemoryRuntimeCheckpointEvidencePort = input.checkpointEvidence ?? {
     readCommitted: ({ checkpoint }) => readCommittedCheckpoint({

@@ -9,6 +9,9 @@
     "review": "sha256:ca89e88b27281039c22c8f2aae15c9dfab51363655c6b0c9d20a16f9476f4cfc",
     "memory": "sha256:b93ced4a7e090972faa180d13b299e3229a9d3fad7a391e763c6923ca8767961"
   },
+  "auditPrompts": {
+    "project-memory-audit": "memory/audit/project-memory-audit.md"
+  },
   "roles": {
     "interaction": [
       "interaction/identity.md",

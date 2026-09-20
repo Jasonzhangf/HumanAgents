@@ -1,5 +1,18 @@
 # Explicit Brain Implementation
 
+## Gate25 replay on 6d52fe2
+
+- Bug: `cd8e2d77a2f9307e15003509b95e5f335131e4552e9600aba8b631227f476651`
+- Old candidate: `32df7773bad2144a30b26aded653a7148eb842bf`, tree `ae3e92be7beb8c8fb8daa6379c5fe8e626f13b84`, parent `ec56133254e3ae51d1dae6731757027556ec91cc`.
+- Exact replay base: `6d52fe2ff4c5cac8c5cbc91e20a2dafb1daef8a7`.
+- Root cause: the base created only the audit-prompt directory at `packages/app/src/memory-runtime.ts:192`; `packages/runtime/src/memory/agent.ts:1112` then read a missing prompt file.
+- Pre-fix red: real serve journal reached `retry` with `failureRef=memory-agent-prompt-unavailable` and no `consumer-commit`.
+- Final candidate commit: recorded in the delivery report after this evidence was folded into it.
+- Focused tests: 3 pass. Full gates: `pnpm build:app`, `pnpm typecheck`, `pnpm test:app` (179 pass), `pnpm test:runtime` (331 pass), `pnpm test:release` (31 pass), `git diff --check` all exit 0.
+- Final positive serve: 6 journal records, `external-operation settled`, `consumer-commit applied`, `retry=0`, prompt unavailable count `0`; prompt digest `sha256:488b1dd16521515737863da1791ff5c0295a4a1008b486aed547edd012357258`.
+- Final negative serve: exit 1, no stdout, explicit unknown builtin audit prompt error, no event journal.
+- Boundary: no merge, push, install, restart, or release was performed. Broader serve composition inventory still reports AgentIo/EventBus, M3, and HarnessNodeRuntime unavailable.
+
 Baseline: `origin/main@811efc03e28eeb3b3ff2bd170aeaf88ff8f310e3`
 Worktree: `/Volumes/extension/code/humanagent/playground/explicit-brain-impl-20260917`
 Branch: `codex/explicit-brain-impl-20260917`

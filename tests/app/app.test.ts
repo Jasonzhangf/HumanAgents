@@ -1045,6 +1045,213 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
   }
 });
 
+test('CLI serve prepares the configured builtin memory audit prompt before checkpoint boundary analysis', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-audit-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await writeFile(join(workspace, 'AGENTS.md'), '# Gate 25 project\n', 'utf8');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const child = spawn(process.execPath, [
+    cli,
+    'serve',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--mode',
+    'fake',
+    '--port',
+    '0',
+  ], {
+    cwd: process.cwd(),
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'HUMANAGENT_TEMPLATE_ROOT')),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  const launched = await new Promise<{ readonly url: string }>((resolve, reject) => {
+    let output = '';
+    const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${stderr}`)), 5_000);
+    child.stdout.on('data', (chunk: Uint8Array) => {
+      output += String(chunk);
+      try {
+        const parsed = JSON.parse(output.trim()) as { readonly url?: string };
+        if (!parsed.url) return;
+        clearTimeout(timeout);
+        resolve({ url: parsed.url });
+      } catch {
+        // The CLI may print partial JSON while the process is starting.
+      }
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`serve exited before startup (${String(code)}): ${output}; stderr=${stderr}`));
+    });
+  });
+  const stop = async (): Promise<void> => {
+    if (child.exitCode !== null) return;
+    child.kill('SIGTERM');
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  };
+  try {
+    const created = await fetch(`${launched.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Gate 25 memory closure', directive: 'prove builtin audit prompt preparation' }),
+    });
+    assert.equal(created.status, 201);
+    const task = await created.json() as { readonly taskId: { readonly value: string } };
+    const started = await fetch(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'close the memory boundary' }),
+    });
+    assert.equal(started.status, 202);
+    const operation = await started.json() as { readonly operationId: string };
+    await waitFor(async () => {
+      const detail = await fetch(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
+      const body = await detail.json() as { readonly state?: string };
+      assert.equal(body.state, 'ready');
+    }, 5_000);
+    const journalPath = join(paths.journalRoot, 'events.jsonl');
+    await waitFor(async () => {
+      const journal = await readFile(journalPath, 'utf8');
+      assert.match(journal, /"kind":"memory.analysis.requested"/);
+      assert.match(journal, /"type":"external-operation"[^\n]*"state":"settled"/);
+      assert.match(journal, /"type":"memory-agent-state"/);
+      assert.match(journal, /"disposition":"applied"/);
+      assert.equal(/memory-agent-prompt-unavailable/.test(journal), false);
+      assert.equal(/"type":"retry"/.test(journal), false);
+    }, 5_000);
+    const promptPath = join(controlRoot, 'memory-audit', 'project-memory-audit.md');
+    const prompt = await readFile(promptPath, 'utf8');
+    const builtinPrompt = await readFile(
+      join(process.cwd(), 'packages', 'agent-templates', 'templates', 'builtin', 'memory', 'audit', 'project-memory-audit.md'),
+      'utf8',
+    );
+    assert.equal(prompt, builtinPrompt);
+    const journal = await readFile(journalPath, 'utf8');
+    const promptDigest = `sha256:${createHash('sha256').update(prompt).digest('hex')}`;
+    const candidateSnapshot = await readFile(join(paths.memoryRoot, 'project', 'snapshot.json'), 'utf8');
+    assert.equal(candidateSnapshot.includes(promptDigest), true);
+    const persistedRecords = journal.trim().split('\n').map((line) =>
+      JSON.parse(line) as {
+        readonly payload?: {
+          readonly type?: string;
+          readonly result?: {
+            readonly receipt?: { readonly disposition?: string; readonly effectRefs?: readonly string[] };
+            readonly cursor?: { readonly lastHandledSequence?: number };
+          };
+        };
+      });
+    const consumerCommit = persistedRecords.find((record) => record.payload?.type === 'consumer-commit');
+    assert.equal(consumerCommit?.payload?.result?.receipt?.disposition, 'applied');
+    assert.equal(consumerCommit?.payload?.result?.receipt?.effectRefs?.some((ref) =>
+      ref.startsWith('memory-analysis-request:')), true);
+    assert.equal(consumerCommit?.payload?.result?.cursor?.lastHandledSequence, 1);
+    assert.equal(operation.operationId.length > 0, true);
+  } finally {
+    await stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI serve rejects an unknown configured memory audit prompt before publishing a boundary', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-audit-unknown-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await writeFile(join(workspace, 'AGENTS.md'), '# Gate 25 project\n', 'utf8');
+  await appendFile(join(controlRoot, 'config.toml'), '\n[memory.audit]\nprompt_ref = "unknown-memory-audit"\n', 'utf8');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  try {
+    const result = await new Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        cli,
+        'serve',
+        '--workspace',
+        workspace,
+        '--control-root',
+        controlRoot,
+        '--mode',
+        'fake',
+        '--port',
+        '0',
+      ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      child.once('error', reject);
+      child.once('exit', (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(result.code === 0, false);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /configured memory audit prompt is not a builtin resource: unknown-memory-audit/);
+    await assert.rejects(
+      async () => readFile(join(paths.journalRoot, 'events.jsonl'), 'utf8'),
+      (error: unknown) => (error as { readonly code?: string }).code === 'ENOENT',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('memory runtime preserves an existing configured audit prompt while keeping its digest observable', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-audit-existing-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Existing audit prompt project\n', 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  const auditPrompt = '# Existing custom audit prompt\n\nKeep this content.\n';
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), auditPrompt, 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-existing-memory-audit',
+  });
+  try {
+    const mainAgentId = configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId;
+    const memory = await composeMemoryRuntime({
+      paths,
+      configuration,
+      workspaceCwd: paths.workspaceCwd,
+      sessionsRoot: paths.sessionsRoot,
+      runNotesRoot: paths.runNotesRoot,
+      auditPromptRoot,
+      auditPromptRef: 'project-memory-audit',
+      autoUpdate: false,
+      binding: {
+        bindingRef: 'memory-runtime-existing-audit',
+        projectKey: paths.projectKey,
+        executionEpoch: 1,
+        scope: {
+          kind: 'task',
+          organId: id('organ', `agent-${mainAgentId}`),
+          taskId: id('task', 'session-existing-memory-audit'),
+        },
+        taskId: id('task', 'session-existing-memory-audit'),
+        mainAgentId,
+        actor: {
+          actorId: 'memory-runtime-existing-audit',
+          roleId: 'memory',
+          permissions: ['memory.read', 'memory.propose'],
+          projectKey: paths.projectKey,
+        },
+      },
+    });
+    assert.equal(await readFile(join(auditPromptRoot, 'project-memory-audit.md'), 'utf8'), auditPrompt);
+    const loadedPrompt = await memory.composition.sources.readPrompt({
+      projectKey: paths.projectKey,
+      promptRef: 'project-memory-audit',
+    });
+    assert.equal(loadedPrompt.content, auditPrompt);
+  } finally {
+    await runtime.lock.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('memory composition binds task and runtime identity to the rooted backend', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

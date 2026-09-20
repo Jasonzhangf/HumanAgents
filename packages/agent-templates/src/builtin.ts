@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AgentTemplateError } from './errors.js';
 import { createFilePromptSource, loadAgentPromptSegments } from './prompt-loader.js';
@@ -17,6 +19,14 @@ export interface BuiltinPromptRegistry {
   readonly templateVersion: string;
   readonly roles: Readonly<Record<AgentRole, readonly string[]>>;
   readonly contentDigests: Readonly<Record<AgentRole, string>>;
+  readonly auditPrompts?: Readonly<Record<string, string>>;
+}
+
+export interface PreparedBuiltinAuditPrompt {
+  readonly promptRef: string;
+  readonly sourceRef: string;
+  readonly destinationPath: string;
+  readonly contentDigest: string;
 }
 
 export function builtinPromptRegistryRef(templateVersion: string): string {
@@ -27,6 +37,59 @@ export function builtinPromptRegistryRef(templateVersion: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function contentDigest(content: string): string {
+  return `sha256:${createHash('sha256').update(content, 'utf8').digest('hex')}`;
+}
+
+function assertSafeAuditPromptRef(promptRef: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(promptRef)) {
+    throw new AgentTemplateError(`invalid builtin audit prompt ref: ${promptRef}`);
+  }
+}
+
+export async function prepareBuiltinAuditPrompt(input: {
+  readonly templateRoot: string;
+  readonly promptRef: string;
+  readonly destinationRoot: string;
+  readonly expectedTemplateVersion?: string;
+}): Promise<PreparedBuiltinAuditPrompt> {
+  assertSafeAuditPromptRef(input.promptRef);
+  const registry = await loadBuiltinPromptRegistry(
+    input.templateRoot,
+    input.expectedTemplateVersion ?? '1.0.0',
+  );
+  const sourceRef = registry.auditPrompts?.[input.promptRef];
+  if (!sourceRef) {
+    throw new AgentTemplateError(
+      `configured memory audit prompt is not a builtin resource: ${input.promptRef}`,
+    );
+  }
+  const source = createFilePromptSource(join(input.templateRoot, 'builtin'));
+  const content = await source.read(sourceRef);
+  if (!content.trim()) throw new AgentTemplateError(`builtin audit prompt is empty: ${sourceRef}`);
+  const destinationPath = join(input.destinationRoot, `${input.promptRef}.md`);
+  await mkdir(input.destinationRoot, { recursive: true });
+  let existing = false;
+  try {
+    const current = await lstat(destinationPath);
+    if (current.isSymbolicLink() || !current.isFile()) {
+      throw new AgentTemplateError(`builtin audit prompt destination is not a regular file: ${destinationPath}`);
+    }
+    existing = true;
+  } catch (error) {
+    if ((error as { readonly code?: string }).code !== 'ENOENT') throw error;
+    await writeFile(destinationPath, content, 'utf8');
+  }
+  const written = existing ? await readFile(destinationPath, 'utf8') : content;
+  if (!written.trim()) throw new AgentTemplateError(`builtin audit prompt destination is empty: ${destinationPath}`);
+  return {
+    promptRef: input.promptRef,
+    sourceRef,
+    destinationPath,
+    contentDigest: contentDigest(written),
+  };
 }
 
 async function assertBuiltinTemplateResources(
@@ -63,7 +126,8 @@ export async function loadBuiltinPromptRegistry(
     throw new AgentTemplateError(`builtin prompt registry is invalid: ${String(error)}`);
   }
   if (!isRecord(parsed) || parsed.kind !== 'humanagent.prompt-registry' || parsed.schemaVersion !== 1
-    || typeof parsed.templateVersion !== 'string' || !isRecord(parsed.roles) || !isRecord(parsed.contentDigests)) {
+    || typeof parsed.templateVersion !== 'string' || !isRecord(parsed.roles) || !isRecord(parsed.contentDigests)
+    || (parsed.auditPrompts !== undefined && !isRecord(parsed.auditPrompts))) {
     throw new AgentTemplateError('builtin prompt registry has an invalid shape');
   }
   if (parsed.templateVersion !== templateVersion) {
@@ -86,7 +150,22 @@ export async function loadBuiltinPromptRegistry(
   }
   const unknownRole = Object.keys(parsed.roles).find((roleId) => !(AGENT_ROLE_IDS as readonly string[]).includes(roleId));
   if (unknownRole) throw new AgentTemplateError(`builtin prompt registry has unknown role: ${unknownRole}`);
-  return { kind: 'humanagent.prompt-registry', schemaVersion: 1, templateVersion: parsed.templateVersion, roles, contentDigests };
+  const auditPrompts: Record<string, string> = {};
+  for (const [promptRef, sourceRef] of Object.entries(parsed.auditPrompts ?? {})) {
+    assertSafeAuditPromptRef(promptRef);
+    if (typeof sourceRef !== 'string' || !sourceRef.startsWith('memory/') || !sourceRef.endsWith('.md')) {
+      throw new AgentTemplateError(`builtin audit prompt has an invalid resource ref: ${promptRef}`);
+    }
+    auditPrompts[promptRef] = sourceRef;
+  }
+  return {
+    kind: 'humanagent.prompt-registry',
+    schemaVersion: 1,
+    templateVersion: parsed.templateVersion,
+    roles,
+    contentDigests,
+    ...(Object.keys(auditPrompts).length === 0 ? {} : { auditPrompts }),
+  };
 }
 
 export async function builtinPromptSegmentRefs(templateRoot: string, roleId: AgentRole): Promise<readonly string[]> {

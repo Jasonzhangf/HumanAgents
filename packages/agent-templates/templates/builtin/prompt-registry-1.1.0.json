@@ -9,6 +9,9 @@
     "review": "sha256:6ffd0efc0391a7b1168a6eda630c4abd3751aba02fdcbf9aa78279b8fc0d1bbb",
     "memory": "sha256:8676cb1fa760d8ca5ac2e6c683b784cc19d1d3ffe9267e9b13e07533d01d1964"
   },
+  "auditPrompts": {
+    "project-memory-audit": "memory/audit/project-memory-audit.md"
+  },
   "roles": {
     "interaction": [
       "common/observation.md",
