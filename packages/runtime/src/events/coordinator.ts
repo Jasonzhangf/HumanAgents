@@ -17,6 +17,8 @@ import type {
   EventJournalPort,
   EventPublisherRegistryPort,
   EventExternalOperationPort,
+  ReadEventInput,
+  ReadEventsInput,
 } from './ports.js';
 import {
   eventIdentityKey,
@@ -39,6 +41,17 @@ import {
   type EventRecord,
   type EventRetryObligation,
 } from './types.js';
+
+export interface EventPublishPorts {
+  readonly journal: EventPublishJournalPort;
+  readonly publishers: EventPublisherRegistryPort;
+}
+
+export interface EventPublishJournalPort {
+  appendEvent(input: AppendEventRequest): Promise<EventRecord>;
+  readEvent(input: ReadEventInput): Promise<EventRecord | null>;
+  readEvents(input: ReadEventsInput): Promise<readonly EventRecord[]>;
+}
 
 export interface EventBusPorts {
   readonly journal: EventJournalPort;
@@ -299,7 +312,7 @@ function assertRetryIntent(
 }
 
 export async function publishEvent(
-  ports: EventBusPorts,
+  ports: EventPublishPorts,
   input: PublishEventInput,
 ): Promise<PublishedEvent> {
   assertNonEmpty(input.publisherId, 'publisher id');

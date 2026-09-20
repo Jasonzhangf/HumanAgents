@@ -12,6 +12,17 @@ import {
   type EpisodicMemorySource,
   type ScopeRef,
 } from '@humanagent/contracts';
+import type {
+  EventPublishJournalPort,
+} from '../../../runtime/src/events/coordinator.js';
+import type {
+  EventRecord,
+} from '../../../runtime/src/events/types.js';
+import type {
+  AppendEventRequest,
+  ReadEventInput,
+  ReadEventsInput,
+} from '../../../runtime/src/events/ports.js';
 
 declare module 'node:fs/promises' {
   interface FileHandle {
@@ -516,4 +527,93 @@ function sameCanonicalMemoryScope(left: CanonicalMemoryScope, right: CanonicalMe
     && left.organId.scope === right.organId.scope
     && left.organId.value === right.organId.value
     && left.taskId?.value === right.taskId?.value;
+}
+
+function eventRecord(record: JournalRecord): EventRecord {
+  if (record.kind !== 'event' || record.payload?.type !== 'event') {
+    throw new JournalIntegrityError('event publication journal contains a non-event record');
+  }
+  return record.payload.event as EventRecord;
+}
+
+export function createJsonlEventPublicationJournal(input: {
+  readonly filePath: string;
+}): EventPublishJournalPort {
+  if (!input.filePath.trim()) throw new JournalIntegrityError('event publication journal path is required');
+  const journal = new JsonlOrganJournal(input.filePath);
+
+  async function records(): Promise<readonly EventRecord[]> {
+    const verification = await journal.verify();
+    if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'event publication journal is invalid');
+    return verification.records
+      .filter((record) => record.kind === 'event' && record.payload?.type === 'event')
+      .map(eventRecord);
+  }
+
+  return {
+    async appendEvent(input: AppendEventRequest): Promise<EventRecord> {
+      return journal.transaction<
+        { readonly event: EventRecord; readonly append: boolean },
+        EventRecord
+      >(({ records: all }) => {
+        const existing = all
+          .filter((record) => record.kind === 'event' && record.payload?.type === 'event')
+          .map(eventRecord)
+          .find((record) =>
+            record.streamId === input.event.streamId && record.messageId === input.event.messageId);
+        if (existing) {
+          const expected = {
+            ...input.event,
+            publisherId: input.publisherId,
+            sequence: existing.sequence,
+            committedAt: existing.committedAt,
+          };
+          if (JSON.stringify(existing) !== JSON.stringify(expected)) {
+            throw new JournalIntegrityError(`event identity conflicts with committed history: ${input.event.messageId}`);
+          }
+          return { event: existing, append: false };
+        }
+        const prior = all
+          .filter((record) => record.kind === 'event' && record.payload?.type === 'event')
+          .map(eventRecord)
+          .filter((record) => record.streamId === input.event.streamId)
+          .sort((left, right) => left.sequence - right.sequence);
+        return {
+          event: {
+            ...input.event,
+            publisherId: input.publisherId,
+            sequence: (prior.at(-1)?.sequence ?? 0) + 1,
+            committedAt: new Date().toISOString(),
+          },
+          append: true,
+        };
+      }, async (plan, append) => {
+        if (!plan.append) return plan.event;
+        const appended = await append({
+          commitId: `event-publication:${createHash('sha256')
+            .update(`${input.event.streamId.length}:${input.event.streamId}${input.event.messageId.length}:${input.event.messageId}`)
+            .digest('hex')}`,
+          kind: 'event',
+          scope: plan.event.scope,
+          payload: {
+            type: 'event',
+            event: plan.event,
+          },
+        });
+        return eventRecord(appended);
+      });
+    },
+
+    async readEvents(input: ReadEventsInput): Promise<readonly EventRecord[]> {
+      return (await records())
+        .filter((record) => record.streamId === input.streamId && record.sequence > input.afterSequence)
+        .sort((left, right) => left.sequence - right.sequence)
+        .slice(0, input.limit);
+    },
+
+    async readEvent(input: ReadEventInput): Promise<EventRecord | null> {
+      return (await records()).find((record) =>
+        record.streamId === input.streamId && record.messageId === input.messageId) ?? null;
+    },
+  };
 }

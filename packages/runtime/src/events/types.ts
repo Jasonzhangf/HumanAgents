@@ -2,6 +2,9 @@ import type {
   BusinessPayload,
   EvidenceRef,
   NextAction,
+  OperationFailure,
+  OperationId,
+  OperationStatus,
   ScopeRef,
 } from '../../../contracts/src/index.js';
 
@@ -23,6 +26,8 @@ export type ConsumerCommitMode = (typeof CONSUMER_COMMIT_MODES)[number];
 export type EventPublisherKind = 'harness' | 'agent' | 'external';
 
 export interface EventEnvelope {
+  readonly eventId?: string;
+  readonly schemaVersion?: 1;
   readonly messageId: string;
   readonly streamId: string;
   readonly kind?: string;
@@ -35,6 +40,16 @@ export interface EventEnvelope {
   readonly executionEpoch?: number;
   readonly attempt?: number;
   readonly inputRevision?: number;
+  readonly operation?: EventOperationMetadata;
+}
+
+export interface EventOperationMetadata {
+  readonly operationId: OperationId;
+  readonly status: OperationStatus;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
+  readonly resultRef?: string;
+  readonly failure?: OperationFailure;
 }
 
 export interface EventRecord extends EventEnvelope {

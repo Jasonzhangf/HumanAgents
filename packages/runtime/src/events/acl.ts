@@ -60,6 +60,10 @@ export function assertPublisherCanPublish(
 }
 
 export function validateEventEnvelope(event: EventEnvelope): void {
+  if (event.eventId !== undefined) assertNonEmpty(event.eventId, 'event id');
+  if (event.schemaVersion !== undefined && event.schemaVersion !== 1) {
+    throw new EventPublisherError('event schema version is invalid');
+  }
   assertNonEmpty(event.messageId, 'event message id');
   assertNonEmpty(event.streamId, 'event stream id');
   if (event.kind !== undefined) assertNonEmpty(event.kind, 'event kind');

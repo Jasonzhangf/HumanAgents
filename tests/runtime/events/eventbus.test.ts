@@ -4,7 +4,9 @@ import { id, type BusinessPayload, type EvidenceRef, type ScopeRef } from '../..
 import {
   consumeEvents,
   EventConsumerError,
+  OperationEventPublicationError,
   EventPublisherError,
+  publishOperationEvent,
   publishEvent,
   type EventBusPorts,
   type ConsumerCommitRequest,
@@ -16,6 +18,8 @@ import {
   type EventHandlerCommit,
   type EventRetryObligation,
   type EventRecord,
+  type OperationEventNotificationAck,
+  type OperationEventNotificationPort,
   type TrustedEventPublisher,
 } from '../../../packages/runtime/src/events/index.js';
 import type {
@@ -125,6 +129,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
   commitCalls = 0;
   failBeforeCommit = false;
   failAfterCommit = false;
+  failRead = false;
   beforeCommit?: (input: ConsumerCommitRequest) => void;
 
   private cursorKey(streamId: string, consumerKeyValue: string): string {
@@ -150,6 +155,7 @@ class FakeJournal implements EventJournalPort, EventExternalOperationPort {
     readonly afterSequence: number;
     readonly limit: number;
   }): Promise<readonly EventRecord[]> {
+    if (this.failRead) throw new Error('read failed');
     return this.events
       .filter((candidate) => candidate.streamId === input.streamId && candidate.sequence > input.afterSequence)
       .slice(0, input.limit);
@@ -1543,4 +1549,182 @@ test('consumer payload must not leak control fields through business payload', a
     /control field leaked/,
   );
   assert.equal(journal.appendCalls, 0);
+});
+
+test('operation publication aligns duplicate and stale events with one durable consumer receipt', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  registry.consumers.set(consumerKey, consumer({ currentEpoch: 2 }));
+  const bus = ports(journal, registry);
+  const operationId = id('operation', 'operation-g2-alignment');
+  const operationScope: ScopeRef = { ...scope, operationId };
+  const operationStream = 'operation-events:organ-a/task-a';
+  registry.consumers.set(consumerKey, consumer({
+    currentEpoch: 2,
+    streamIds: [operationStream],
+  }));
+  const notification: OperationEventNotificationPort = {
+    async notify(): Promise<OperationEventNotificationAck> {
+      return { ackRef: 'ack:operation-g2-alignment', acknowledgedAt: occurredAt };
+    },
+  };
+  const event = {
+    eventId: 'operation-g2-alignment',
+    schemaVersion: 1 as const,
+    kind: 'operation.started' as const,
+    operationId,
+    taskId: task,
+    executionEpoch: 2,
+    status: 'running' as const,
+    occurredAt,
+    evidenceRefs: [{
+      ...evidence('operation-g2-alignment'),
+      scope: operationScope,
+    }],
+  };
+  const publicationPorts = {
+    journal,
+    publishers: registry,
+  };
+
+  const first = await publishOperationEvent(publicationPorts, notification, {
+    publisherId: harnessPublisher.publisherId,
+    streamId: operationStream,
+    scope: operationScope,
+    event,
+    currentEpoch: 2,
+  });
+  const duplicate = await publishOperationEvent(publicationPorts, notification, {
+    publisherId: harnessPublisher.publisherId,
+    streamId: operationStream,
+    scope: operationScope,
+    event,
+    currentEpoch: 2,
+  });
+
+  assert.equal(first.event.sequence, 1);
+  assert.equal(duplicate.event.sequence, first.event.sequence);
+  assert.equal(journal.events.length, 1);
+
+  let handlerCalls = 0;
+  const consumed = await consumeEvents(bus, {
+    consumerKey,
+    limit: 10,
+    now: occurredAt,
+  }, async ({ event: delivered }) => {
+    handlerCalls += 1;
+    return applied(delivered.messageId, ['effect:operation-g2-alignment']);
+  });
+
+  assert.equal(handlerCalls, 1);
+  assert.equal(consumed.committed.length, 1);
+  assert.equal(consumed.committed[0]?.disposition, 'applied');
+  assert.equal(consumed.committed[0]?.handledSequence, first.event.sequence);
+  assert.equal(consumed.cursors[0]?.lastHandledSequence, first.event.sequence);
+  assert.equal(journal.receipts.size, 1);
+  assert.equal(journal.cursors.size, 1);
+
+  registry.consumers.set(consumerKey, consumer({
+    currentEpoch: 3,
+    streamIds: [operationStream],
+  }));
+  const stale = await publishOperationEvent(publicationPorts, notification, {
+    publisherId: harnessPublisher.publisherId,
+    streamId: operationStream,
+    scope: operationScope,
+    event: {
+      ...event,
+      eventId: 'operation-g2-stale',
+      executionEpoch: 2,
+    },
+    currentEpoch: 2,
+  });
+  assert.equal(stale.event.sequence, 2);
+
+  const staleResult = await consumeEvents(bus, {
+    consumerKey,
+    limit: 10,
+    now: occurredAt,
+  }, async () => {
+    throw new Error('stale operation event must not reach handler');
+  });
+  assert.equal(handlerCalls, 1);
+  assert.equal(staleResult.committed[0]?.disposition, 'stale');
+  assert.equal(staleResult.cursors[0]?.lastHandledSequence, stale.event.sequence);
+  assert.equal((await journal.readCursor({
+    streamId: operationStream,
+    consumerKey,
+  }))?.lastHandledSequence, stale.event.sequence);
+});
+
+test('operation publication rejects journal failure and stale epoch before notification', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.publishers.set(harnessPublisher.publisherId, harnessPublisher);
+  const operationId = id('operation', 'operation-g2-failure');
+  const operationScope: ScopeRef = { ...scope, operationId };
+  const operationStream = 'operation-events:organ-a/task-a';
+  const notifications: string[] = [];
+  const notification: OperationEventNotificationPort = {
+    async notify(input): Promise<OperationEventNotificationAck> {
+      notifications.push(input.event.messageId);
+      return { ackRef: `ack:${input.event.messageId}`, acknowledgedAt: occurredAt };
+    },
+  };
+  const publicationPorts = {
+    journal,
+    publishers: registry,
+  };
+  const event = {
+    eventId: 'operation-g2-failure',
+    schemaVersion: 1 as const,
+    kind: 'operation.started' as const,
+    operationId,
+    taskId: task,
+    executionEpoch: 2,
+    status: 'running' as const,
+    occurredAt,
+    evidenceRefs: [{
+      ...evidence('operation-g2-failure'),
+      scope: operationScope,
+    }],
+  };
+
+  journal.failBeforeCommit = true;
+  await assert.rejects(
+    () => publishOperationEvent(publicationPorts, notification, {
+      publisherId: harnessPublisher.publisherId,
+      streamId: operationStream,
+      scope: operationScope,
+      event,
+      currentEpoch: 2,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof OperationEventPublicationError);
+      assert.equal(error.code, 'journal-commit-failed');
+      assert.equal(error.committed, false);
+      return true;
+    },
+  );
+  assert.equal(notifications.length, 0);
+
+  journal.failBeforeCommit = false;
+  journal.failRead = true;
+  await assert.rejects(
+    () => publishOperationEvent(publicationPorts, notification, {
+      publisherId: harnessPublisher.publisherId,
+      streamId: operationStream,
+      scope: operationScope,
+      event: { ...event, executionEpoch: 1 },
+      currentEpoch: 2,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof OperationEventPublicationError);
+      assert.equal(error.code, 'stale-operation-event');
+      assert.equal(error.committed, false);
+      return true;
+    },
+  );
+  assert.equal(notifications.length, 0);
 });
