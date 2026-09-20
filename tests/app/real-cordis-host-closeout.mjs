@@ -13,8 +13,10 @@
  *   projection  - task detail reports the same terminal output/state
  *   shutdown    - SIGTERM releases the daemon lease and leaves no live process
  *
- * The receipt binds the candidate commit/tree and copies the durable launch,
- * SSE, task, journal, checkpoint, and lease artifacts into the receipt file.
+ * The receipt binds the implementation commit/tree and a digest of all
+ * non-evidence tracked source, then copies the durable launch, SSE, task,
+ * journal, checkpoint, and lease artifacts into the receipt file. The receipt
+ * itself is committed separately and does not claim to bind its carrier hash.
  *
  * Optional env:
  *   HUMANAGENT_CORDIS_RECEIPT_PATH default ./dist/receipts/cordis-host-closeout.json
@@ -320,8 +322,6 @@ async function run() {
     candidate: {
       implementationCommit: IMPLEMENTATION_COMMIT,
       implementationTree: IMPLEMENTATION_TREE,
-      proofCommit: git(['rev-parse', 'HEAD']),
-      proofTree: git(['rev-parse', 'HEAD^{tree}']),
       sourceDigest: sourceDigest(),
     },
     root,
@@ -392,7 +392,6 @@ async function main() {
   console.log(JSON.stringify({
     receipt: RECEIPT_PATH,
     implementationCommit: receipt.candidate.implementationCommit,
-    proofCommit: receipt.candidate.proofCommit,
     journalKinds: [...new Set(JSON.parse('[' + receipt.artifacts.journal.split('\n').filter(Boolean).join(',') + ']').map((line) => line.payload?.type ?? line.kind))],
     checkpointOutcome: JSON.parse(receipt.artifacts.checkpoint.split('\n').at(-2)).checkpoint.outcome,
     terminalSummary: (function () {

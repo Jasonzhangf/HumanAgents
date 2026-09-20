@@ -41,9 +41,11 @@ The proof starts the built `serve --mode fake` entry on an isolated temporary
 workspace and control root, captures the live launch JSON, runs the task over
 HTTP/SSE, verifies the task projection and shutdown lease, and writes the
 bound receipt to `dist/receipts/cordis-host-closeout.json`. The receipt binds
-the implementation commit/tree `86dbfd0` / `dddbe8c`, the proof commit/tree, a
-tracked-source digest, and copied launch, request, SSE, task, event-journal,
-checkpoint-journal, and lease artifacts.
+the implementation commit/tree `86dbfd0` / `dddbe8c`, a digest of all
+non-evidence tracked source, and copied launch, request, SSE, task,
+event-journal, checkpoint-journal, and lease artifacts. The receipt is
+generated from that proof source and committed as an evidence-only carrier;
+the receipt does not claim to bind the hash of the commit that contains it.
 
 Command:
 
