@@ -29,6 +29,22 @@ and artifact digest rejection before import.
 
 ## Actual Serve Entry
 
+Deterministic replay entry:
+
+```sh
+pnpm build:contracts
+pnpm build:app
+pnpm proof:cordis-host-closeout
+```
+
+The proof starts the built `serve --mode fake` entry on an isolated temporary
+workspace and control root, captures the live launch JSON, runs the task over
+HTTP/SSE, verifies the task projection and shutdown lease, and writes the
+bound receipt to `dist/receipts/cordis-host-closeout.json`. The receipt binds
+the implementation commit/tree `86dbfd0` / `dddbe8c`, the proof commit/tree, a
+tracked-source digest, and copied launch, request, SSE, task, event-journal,
+checkpoint-journal, and lease artifacts.
+
 Command:
 
 ```sh
@@ -48,15 +64,18 @@ Observed launch evidence:
 - Every live composition component, including `cordis-host`,
   `fixed-harness-kernel`, provider, template, memory, UI, supervisor lease, and
   rejected-interaction closure, reported `composed`.
-- Supervisor stages were `cordis-host` then `ui-runtime`; the daemon lease was
-  acquired and later recorded `disposedAt`.
+- Supervisor stages were `cordis-host` then `ui-runtime`; the proof waits for
+  graceful shutdown and requires the captured daemon lease to contain
+  `disposedAt`.
 
-An HTTP task execution through the same live server produced nine ordered
-events: `execution.started`, provider model/output/tool/output events, provider
+The proof requires the live server to produce this exact ordered event sequence:
+`execution.started`, provider model/output/tool/output events, provider
 terminal, `execution.settling`, `checkpoint.committed`, and the final terminal.
-The final terminal reported `succeeded; provider closed` with
-`fake/settle-succeeded` and `fake/close` evidence. Task detail reported
-`state=ready` and `output.state=succeeded`.
+It requires the final terminal to report `succeeded; provider closed` with
+`fake/settle-succeeded` and `fake/close` evidence, and task detail to report
+`state=ready` and `output.state=succeeded`. The receipt copies the durable
+launch, runtime status, task requests, SSE events, task projection, event
+journal, checkpoint journal, and lease artifact.
 
 ## Boundary
 
