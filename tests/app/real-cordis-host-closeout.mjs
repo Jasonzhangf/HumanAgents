@@ -332,6 +332,7 @@ async function run() {
     artifacts: {},
   };
   let stream;
+  let primaryError;
   try {
     const launch = await serve.ready;
     record.launch = launch;
@@ -373,13 +374,36 @@ async function run() {
     record.artifacts.checkpointJournal = await readIfPresent(join(launch.checkpointRoot, 'fake', 'ui-runtime-journal.jsonl'));
     record.artifacts.lease = await readIfPresent(launch.supervisor.leasePath);
     return record;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    if (stream) await stream.close();
-    await serve.stop();
-    if (record.launch?.supervisor?.leasePath) {
-      record.artifacts.leaseAfterShutdown = await readIfPresent(record.launch.supervisor.leasePath);
+    const cleanupErrors = [];
+    if (stream) {
+      try {
+        await stream.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
-    await rm(root, { recursive: true, force: true });
+    try {
+      await serve.stop();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (record.launch?.supervisor?.leasePath) {
+        record.artifacts.leaseAfterShutdown = await readIfPresent(record.launch.supervisor.leasePath);
+      }
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (!primaryError && cleanupErrors.length > 0) throw cleanupErrors[0];
   }
 }
 
