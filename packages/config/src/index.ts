@@ -450,10 +450,13 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   if (!Array.isArray(value.agents) || value.agents.length === 0) fail('config-invalid', 'at least one agent is required');
   const agents = value.agents.map(validateAgent);
   const ids = new Set<string>();
+  let memoryRoleCount = 0;
   for (const agent of agents) {
     if (ids.has(agent.agentId)) fail('config-invalid', `duplicate agent id: ${agent.agentId}`);
     ids.add(agent.agentId);
+    if (agent.roleId === 'memory') memoryRoleCount += 1;
   }
+  if (memoryRoleCount > 1) fail('config-invalid', 'multiple memory-role agents are not allowed');
   const project = value.project === undefined ? undefined : asRecord(value.project, 'project');
   const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');

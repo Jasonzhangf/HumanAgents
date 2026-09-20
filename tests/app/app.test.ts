@@ -1587,6 +1587,227 @@ test('memory composition exposes candidate submission without hiding waiting or 
   );
 });
 
+test('runtime memory explicit submission publishes one durable analysis request and consumes it', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-explicit-submission-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Explicit submission\n', 'utf8');
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-memory-explicit-submission',
+  });
+  const { paths, configuration } = runtime;
+  const taskId = id('task', 'session-memory-explicit-submission');
+  const evidenceText = 'explicit submission evidence';
+  const evidenceDigest = `sha256:${createHash('sha256').update(evidenceText).digest('hex')}`;
+  const evidence: EvidenceRef = {
+    evidenceId: id('evidence', 'memory-explicit-submission-evidence'),
+    kind: 'operation',
+    source: 'test',
+    locator: 'humanagent://checkpoint/explicit-submission',
+    digest: evidenceDigest,
+    scope: {
+      organId: id('organ', `agent-${configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId}`),
+      taskId,
+      cycleId: id('cycle', 'explicit-submission-cycle'),
+      operationId: id('operation', 'explicit-submission-operation'),
+    },
+  };
+  const driver = new MemoryAnalysisDriver();
+  const evidenceReads: string[] = [];
+  const memory = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    assignmentId: 'explicit-submission-assignment',
+    agentRuntimeId: 'explicit-submission-runtime',
+    roleId: 'interaction',
+    driverFor: () => driver,
+    evidenceSource: {
+      read: async ({ evidence: requested }) => {
+        evidenceReads.push(`${requested.locator}:${requested.scope.taskId?.value ?? 'organ'}`);
+        return {
+          sourceRef: requested.locator,
+          sourceDigest: requested.digest!,
+          text: evidenceText,
+        };
+      },
+    },
+    binding: {
+      bindingRef: 'memory-binding:explicit-submission',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: evidence.scope.organId,
+        taskId,
+      },
+      taskId,
+      mainAgentId: 'explicit-submission-main',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+
+  const receipt = await memory.composition.submissions.submitCandidate({
+    submissionId: 'submission:explicit',
+    requestId: 'request:explicit',
+    operationId: id('operation', 'explicit-submission-request'),
+    bindingRef: memory.composition.bindingRef,
+    actor: {
+      actorId: 'main-agent',
+      roleId: 'interaction',
+      permissions: ['memory.read', 'memory.propose'],
+      projectKey: paths.projectKey,
+    },
+    projectKey: paths.projectKey,
+    taskId,
+    requestedKind: 'semantic',
+    candidateCategory: 'project-fact',
+    contentRef: evidence.locator,
+    contentDigest: evidence.digest!,
+    evidenceRefs: [evidence.locator],
+    observation: 'explicit memory submission',
+    desiredScope: 'project',
+    reason: 'explicit submission must trigger analysis',
+    inputDigest: `sha256:${createHash('sha256').update('explicit-submission-input').digest('hex')}`,
+  });
+  assert.equal(receipt.status, 'accepted');
+
+  const analysisEvents = await memory.journal.readEvents({
+    streamId: `memory-boundaries:${taskId.value}`,
+    afterSequence: 0,
+    limit: 10,
+  });
+  assert.equal(analysisEvents.length, 1);
+  assert.equal(analysisEvents[0]?.kind, 'memory.analysis.requested');
+  assert.equal(analysisEvents[0]?.payload?.trigger, 'explicit-submission');
+  assert.deepEqual(analysisEvents[0]?.evidenceRefs, [{
+    evidenceId: analysisEvents[0]?.evidenceRefs[0]?.evidenceId,
+    kind: 'operation',
+    source: 'humanagent.app.memory-runtime',
+    locator: evidence.locator,
+    digest: evidence.digest,
+    scope: {
+      organId: evidence.scope.organId,
+      taskId,
+    },
+  }]);
+  const consumed = await memory.consume();
+  assert.equal(consumed.committed.length, 1, JSON.stringify(consumed));
+  assert.equal(consumed.committed[0]?.disposition, 'applied');
+  assert.deepEqual(evidenceReads, [
+    `${evidence.locator}:${taskId.value}`,
+    `${evidence.locator}:${taskId.value}`,
+  ]);
+  assert.deepEqual(driver.events.map((event) => event.split(':')[0]), [
+    'start',
+    'submit',
+    'observe',
+    'settle',
+  ]);
+  await runtime.lock.release();
+  await rm(root, { recursive: true, force: true });
+});
+
+test('runtime memory rejects explicit submission evidence without a verifiable digest', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-explicit-evidence-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Explicit evidence\n', 'utf8');
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-memory-explicit-evidence',
+  });
+  const { paths, configuration } = runtime;
+  const taskId = id('task', 'session-memory-explicit-evidence');
+  const contentText = 'explicit submission content';
+  const contentDigest = `sha256:${createHash('sha256').update(contentText).digest('hex')}`;
+  const organId = id('organ', `agent-${configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId}`);
+  const interactionScopeId = 'interaction-memory-explicit-evidence';
+  const memory = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    evidenceSource: {
+      read: async ({ evidence: requested }) => ({
+        sourceRef: requested.locator,
+        sourceDigest: requested.digest!,
+        text: contentText,
+      }),
+    },
+    binding: {
+      bindingRef: 'memory-binding:explicit-evidence',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId,
+      },
+      interactionScopeId,
+      mainAgentId: 'explicit-evidence-main',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => memory.composition.submissions.submitCandidate({
+      submissionId: 'submission:explicit-evidence',
+      requestId: 'request:explicit-evidence',
+      operationId: id('operation', 'explicit-evidence-request'),
+      bindingRef: memory.composition.bindingRef,
+      actor: {
+        actorId: 'main-agent',
+        roleId: 'interaction',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+      projectKey: paths.projectKey,
+      taskId,
+      requestedKind: 'semantic',
+      candidateCategory: 'project-fact',
+      contentRef: 'humanagent://checkpoint/explicit-content',
+      contentDigest,
+      evidenceRefs: ['journal://unverifiable/evidence'],
+      observation: 'explicit evidence submission',
+      desiredScope: 'project',
+      reason: 'unverifiable evidence must not be dropped',
+      inputDigest: `sha256:${createHash('sha256').update('explicit-evidence-input').digest('hex')}`,
+    }),
+    (error: unknown) => error instanceof AppLifecycleError
+      && error.code === 'memory-explicit-submission-evidence-unsupported',
+  );
+  const events = await memory.journal.readEvents({
+    streamId: `memory-boundaries:${taskId.value}`,
+    afterSequence: 0,
+    limit: 10,
+  });
+  assert.equal(events.length, 0);
+  await runtime.lock.release();
+  await rm(root, { recursive: true, force: true });
+});
+
 test('memory composition rejects partial runtime bindings explicitly', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-partial-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

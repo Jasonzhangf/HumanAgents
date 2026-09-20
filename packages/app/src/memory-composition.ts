@@ -192,6 +192,10 @@ export interface MemoryCompositionInput {
   readonly feedbackPublisher?: {
     publish(event: import('../../runtime/src/events/index.js').EventEnvelope): Promise<void>;
   };
+  readonly explicitSubmissionPublisher?: (input: {
+    readonly submission: import('../../contracts/src/index.js').MemorySubmission;
+    readonly receipt: import('../../contracts/src/index.js').MemorySubmissionReceipt;
+  }) => Promise<void>;
   readonly state?: import('../../contracts/src/index.js').MemoryAgentStatePort;
 }
 
@@ -884,7 +888,9 @@ function createAdmission(
             issue: memoryAgentIssue(
               'memory-agent-source-unavailable',
               'attention',
-              error instanceof Error ? error.message : `memory evidence is unavailable: ${evidence.locator}`,
+              error instanceof Error
+                ? `${error.message}: ${evidence.locator}`
+                : `memory evidence is unavailable: ${evidence.locator}`,
               'memory-evidence-ready',
             ),
           };
@@ -1189,7 +1195,15 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
   const submissions: MemorySubmissionPort = {
     async submitCandidate(submission) {
       const outcome = await coordinator.submitCandidate(submission);
-      if (outcome.status === 'ready') return outcome.value;
+      if (outcome.status === 'ready') {
+        if (input.explicitSubmissionPublisher) {
+          await input.explicitSubmissionPublisher({
+            submission,
+            receipt: outcome.value,
+          });
+        }
+        return outcome.value;
+      }
       throw new AppLifecycleError(
         outcome.issue.code,
         outcome.issue.message,

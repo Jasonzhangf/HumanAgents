@@ -355,6 +355,77 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     externalOperations: journal,
     state: journal,
     projectSourceUpdatePublisher,
+    explicitSubmissionPublisher: async ({ submission }) => {
+      if (input.binding.interactionScopeId === undefined && submission.taskId === undefined) {
+        throw new AppLifecycleError(
+          'memory-explicit-submission-scope-missing',
+          'task-bound memory submission is missing its task identity',
+          'refresh the trusted task binding before submitting memory',
+          OWNER,
+        );
+      }
+      if (input.binding.interactionScopeId === undefined && submission.taskId?.value !== input.binding.taskId?.value) {
+        throw new AppLifecycleError(
+          'memory-explicit-submission-scope-mismatch',
+          'memory submission task does not match the wake binding',
+          'submit through the trusted task binding',
+          OWNER,
+        );
+      }
+      const unsupportedEvidence = submission.evidenceRefs.find((ref) => ref !== submission.contentRef);
+      if (unsupportedEvidence !== undefined) {
+        throw new AppLifecycleError(
+          'memory-explicit-submission-evidence-unsupported',
+          `explicit submission evidence cannot be verified without a digest: ${unsupportedEvidence}`,
+          'submit only the verified contentRef until the evidence source can provide a digest',
+          OWNER,
+        );
+      }
+      const contentEvidence: EvidenceRef = {
+        evidenceId: id('evidence', `memory-submission-${createHash('sha256').update(submission.submissionId).digest('hex')}`),
+        kind: 'operation',
+        source: OWNER,
+        locator: submission.contentRef,
+        digest: submission.contentDigest,
+        scope: consumer.scope,
+      };
+      const evidenceSource = input.evidenceSource ?? {
+        read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
+      };
+      const content = await evidenceSource.read({
+        projectKey: input.paths.projectKey,
+        scope: consumer.scope.taskId === undefined
+          ? { kind: 'organ', organId: consumer.scope.organId }
+          : { kind: 'task', organId: consumer.scope.organId, taskId: consumer.scope.taskId },
+        evidence: contentEvidence,
+      });
+      if (
+        content.sourceRef !== submission.contentRef
+        || content.sourceDigest !== submission.contentDigest
+        || `sha256:${createHash('sha256').update(content.text).digest('hex')}` !== submission.contentDigest
+        || !content.text.trim()
+      ) {
+        throw new AppLifecycleError(
+          'memory-explicit-submission-evidence-invalid',
+          `explicit submission content digest or identity drifted: ${submission.contentRef}`,
+          'refresh the submitted content evidence before requesting memory analysis',
+          OWNER,
+        );
+      }
+      const event = createMemoryAnalysisRequestedEvent({
+        messageId: `memory-submission-${createHash('sha256').update(submission.submissionId).digest('hex')}`,
+        streamId: consumer.streamIds[0]!,
+        scope: consumer.scope,
+        occurredAt: new Date().toISOString(),
+        summary: submission.observation,
+        evidenceRefs: [contentEvidence],
+        executionEpoch: input.binding.executionEpoch,
+        trigger: 'explicit-submission',
+        requestedKind: submission.requestedKind,
+        candidateCategory: submission.candidateCategory,
+      });
+      await publishEvent(ports, { publisherId: PUBLISHER_ID, event });
+    },
   });
   const produceBoundaryPatch = createMemoryBoundaryPatchProducer({
     autoUpdate: input.autoUpdate,
