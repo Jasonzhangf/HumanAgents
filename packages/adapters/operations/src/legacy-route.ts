@@ -6,6 +6,7 @@ import {
   type OperationId,
   type Scope,
 } from '../../../contracts/src/index.js';
+import { OperationAdapterError, failureEvidence, operationFailure } from './errors.js';
 
 import type {
   LegacyInternalExecutionResult,

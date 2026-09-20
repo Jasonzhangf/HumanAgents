@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   createToolExecutionGateway,
 } from '../../packages/app/src/index.js';
+import { DeterministicInspectRoute } from '../../packages/adapters/operations/src/index.js';
 import { id, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope } from '../../packages/contracts/src/index.js';
 import type { OperationJournalPort } from '../../packages/runtime/src/gateway/index.js';
 
@@ -69,4 +70,68 @@ test('app assembly registers the deterministic operations route in the execution
   assert.equal(submitted.operation.route?.routeId, 'deterministic-inspect');
   assert.equal(result.status, 'succeeded');
   assert.equal(result.result?.outputRef, 'artifact://operations/inspect/app-gateway-operation');
+});
+
+test('app assembly rejects an adapter observation with a different operation identity', async () => {
+  const foreignOperation = id('operation', 'app-gateway-foreign-operation');
+  class MismatchedRoute extends DeterministicInspectRoute {
+    override async execute(input: Parameters<DeterministicInspectRoute['execute']>[0]) {
+      const observation = await super.execute(input);
+      return { ...observation, operationId: foreignOperation };
+    }
+  }
+  const gateway = createToolExecutionGateway({
+    route: new MismatchedRoute(),
+    permissions: {
+      async readGrant() {
+        return { scope, revoked: false, evidenceRefs: [evidence('permission-mismatch')] };
+      },
+    },
+    taskBoundaries: {
+      async readBoundary() {
+        return { scope, evidenceRefs: [evidence('boundary-mismatch')] };
+      },
+    },
+    journal,
+    now: () => new Date('2026-09-20T00:00:00.000Z'),
+  });
+
+  await gateway.submit({ ...intent(), idempotencyKey: 'app-gateway-mismatch-idempotency' });
+  const result = await gateway.execute(operation);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failure?.failureClass, 'executor');
+  assert.match(result.failure?.message ?? '', /different operation/);
+});
+
+test('app assembly rejects an adapter verification result with a different operation identity', async () => {
+  const foreignOperation = id('operation', 'app-gateway-foreign-verification');
+  class MismatchedVerifierRoute extends DeterministicInspectRoute {
+    override async verify(input: Parameters<DeterministicInspectRoute['verify']>[0]) {
+      const result = await super.verify(input);
+      return { ...result, operationId: foreignOperation };
+    }
+  }
+  const gateway = createToolExecutionGateway({
+    route: new MismatchedVerifierRoute(),
+    permissions: {
+      async readGrant() {
+        return { scope, revoked: false, evidenceRefs: [evidence('permission-verification-mismatch')] };
+      },
+    },
+    taskBoundaries: {
+      async readBoundary() {
+        return { scope, evidenceRefs: [evidence('boundary-verification-mismatch')] };
+      },
+    },
+    journal,
+    now: () => new Date('2026-09-20T00:00:00.000Z'),
+  });
+
+  await gateway.submit({ ...intent(), idempotencyKey: 'app-gateway-verification-mismatch-idempotency' });
+  const result = await gateway.execute(operation);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failure?.failureClass, 'verifier');
+  assert.match(result.failure?.message ?? '', /verification result for a different operation/);
 });
