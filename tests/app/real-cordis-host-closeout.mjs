@@ -25,7 +25,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { treeDigest } from '../../scripts/digests.mjs';
@@ -34,7 +34,6 @@ const RECEIPT_PATH = resolve(
   process.env.HUMANAGENT_CORDIS_RECEIPT_PATH ?? 'dist/receipts/cordis-host-closeout.json',
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
-const BUILD_MANIFEST_PATH = resolve('dist/cordis-host-build.json');
 const EXPECTED_PLUGINS = [
   'humanagent.harness-kernel',
   'humanagent.agent-templates',
@@ -70,6 +69,16 @@ const EXPECTED_EVENT_KINDS = [
 
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' }).trim();
+}
+
+async function buildArtifact() {
+  await rm(resolve('dist/app'), { recursive: true, force: true });
+  execFileSync('pnpm', ['exec', 'tsc', '-p', 'packages/app/tsconfig.json'], { stdio: 'inherit' });
+  await cp(
+    resolve('packages/agent-templates/templates'),
+    resolve('dist/app/agent-templates/templates'),
+    { recursive: true },
+  );
 }
 
 function sourceDigest() {
@@ -304,14 +313,8 @@ async function run() {
   const implementationCommit = git(['rev-parse', 'HEAD']);
   const implementationTree = git(['rev-parse', 'HEAD^{tree}']);
   if (git(['status', '--porcelain', '--untracked-files=all'])) throw new Error('candidate worktree must be clean before proof');
-  const buildManifest = JSON.parse(await readFile(BUILD_MANIFEST_PATH, 'utf8'));
-  if (buildManifest.candidateCommit !== implementationCommit || buildManifest.candidateTree !== implementationTree) {
-    throw new Error(`built artifact is not bound to candidate: ${BUILD_MANIFEST_PATH}`);
-  }
+  await buildArtifact();
   const artifactDigest = await treeDigest(resolve('dist/app'));
-  if (buildManifest.artifactDigest !== artifactDigest) {
-    throw new Error(`built artifact digest mismatch: ${buildManifest.artifactDigest} != ${artifactDigest}`);
-  }
   const root = await mkdtemp(join(tmpdir(), 'humanagent-cordis-closeout-'));
   const serve = startServe(root);
   const record = {

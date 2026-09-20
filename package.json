@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "build:contracts": "tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json",
     "build:config": "tsc -p packages/config/tsconfig.json",
-    "build:app": "tsc -p packages/app/tsconfig.json && node scripts/copy-template-assets.mjs && node scripts/record-cordis-build.mjs",
+    "build:app": "tsc -p packages/app/tsconfig.json && node scripts/copy-template-assets.mjs",
     "build:runtime": "tsc -p tests/runtime/tsconfig.json && tsc -p tests/runtime/admission/tsconfig.json && tsc -p tests/runtime/agent-io/tsconfig.json && tsc -p tests/runtime/agent-loop/tsconfig.json && tsc -p tests/runtime/checkpoints/tsconfig.json && tsc -p tests/runtime/context/tsconfig.json && tsc -p tests/runtime/control/tsconfig.json && tsc -p tests/runtime/events/tsconfig.json && tsc -p tests/runtime/health/tsconfig.json && tsc -p tests/runtime/hooks/tsconfig.json && tsc -p tests/runtime/intake/tsconfig.json && tsc -p tests/runtime/memory/tsconfig.json && tsc -p tests/runtime/nodes/tsconfig.json && tsc -p tests/runtime/orchestration/tsconfig.json && tsc -p tests/runtime/communication/tsconfig.json && tsc -p tests/runtime/review/tsconfig.json",
     "build:acp": "tsc -p tests/adapters/acp/tsconfig.json",
     "test:explicit-brain": "pnpm build:contracts && pnpm exec tsc -p tests/runtime/explicit-brain/tsconfig.json && node --test dist/tests-explicit-brain/tests/runtime/explicit-brain/explicit-brain.test.js",
