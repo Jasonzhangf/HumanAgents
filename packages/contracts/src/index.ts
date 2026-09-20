@@ -1419,3 +1419,4 @@ export function assertProviderExecutionIdentityMatch(actual: ProviderExecutionId
 export * from './framework.js';
 export * from './explicit-brain.js';
 export * from './agent-loop.js';
+export * from './tool-execution.js';

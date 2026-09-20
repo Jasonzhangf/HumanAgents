@@ -6,7 +6,8 @@ import {
   assertAgentLoopCheckpointLink,
   assertNotExpired, assertPermissionRevisionMatches, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
   assertScopeAcl,
-  assertSameScope, assertScope, checkProviderEventEpoch, checkScopeAcl, consumerKey, id, occurrenceIdempotencyKey, runtimeId,
+  assertSameScope, assertScope, checkProviderEventEpoch, checkScopeAcl, classifyOperationSubmission, consumerKey, effectiveOperationScope, id,
+  occurrenceIdempotencyKey, operationIdempotencyKey, operationSemanticFingerprint, operationSemanticFingerprintKey, runtimeId,
   validateAgentCloseReceipt, validateAgentDispatchReceipt, validateAgentDriverReceipt, validateAgentObservationEvent, validateAgentReconcileResult,
   validateAgentLoopBudget, validateAgentLoopBudgetUsage, validateAgentLoopCheckpoint, validateAgentLoopCheckpointRef, validateAgentLoopEventWatermark,
   validateAgentModeState, validateAgentModeTransition, validateContextReplacement, validateContextView,
@@ -25,6 +26,7 @@ import {
   validateProviderSettleInput, validateProviderSettlement, validateProviderStartInput, validateProviderStartReceipt, validateProviderStopReceipt,
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
   validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
+  validateOperationIntentForRegistration, validateOperationResult,
   validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
   type AgentDriverV1, type AgentRequestEnvelope, type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
   type AgentLoopBudget, type AgentLoopBudgetUsage, type AgentLoopCheckpoint, type AgentModeState, type AgentModeTransition,
@@ -38,7 +40,8 @@ import {
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
-  type RequirementEnvelope, type ScopeRef, type WorkAssignment, type WorkResult,
+  type OperationIdempotencyRecord, type OperationIntent, type RequirementEnvelope, type ScopeRef, type ToolRegistration,
+  type WorkAssignment, type WorkResult,
 } from '@humanagent/contracts';
 
 const memoryActor = (overrides: Partial<MemoryActorContext> = {}): MemoryActorContext => ({
@@ -1280,4 +1283,70 @@ test('memory curation, follow-up, audit prompt, recall policy, and source propos
   };
   validateProjectSourceUpdateProposal(proposal);
   assert.throws(() => validateProjectSourceUpdateProposal({ ...proposal, target: 'global-agents' as never }), ContractError);
+});
+
+test('operation contract rejects control leakage, scope expansion, fingerprint conflict, and illegal result shape', () => {
+  const cycle = id('cycle', 'cycle-a');
+  const requestedScope: ScopeRef = { organId: organ, taskId: task, cycleId: cycle };
+  const operationIntent: OperationIntent = {
+    operationId: operation,
+    taskId: task,
+    cycleId: cycle,
+    requestedBy: 'agent-a',
+    intentRevision: 'directive-r1',
+    kind: 'inspect',
+    toolName: 'file.inspect',
+    inputRef: 'artifact://input-a',
+    inputDigest: 'sha256:input-a',
+    requestedScope,
+    idempotencyKey: 'idempotency-a',
+    expectedOutput: { schemaRef: 'schema://inspect-output/v1', requiredEvidenceKinds: ['operation'] },
+  };
+  const toolRegistration: ToolRegistration = {
+    toolName: 'file.inspect',
+    contractVersion: '1.0.0',
+    supportedKinds: ['inspect', 'verify'],
+    routeId: 'deterministic-file-route',
+    routeVersion: '1.0.0',
+    mode: 'gateway',
+    acceptedScopes: [{ organId: organ, taskId: task }],
+    inputContract: 'schema://inspect-input/v1',
+    outputContract: 'schema://inspect-output/v1',
+    verifier: 'verifier://inspect/v1',
+    capabilities: ['file.read'],
+    retryPolicy: 'retry://read-only/v1',
+    owner: 'operations-adapter',
+  };
+  assert.doesNotThrow(() => validateOperationIntentForRegistration(operationIntent, toolRegistration));
+  assert.throws(() => validateOperationIntentForRegistration(
+    operationIntent,
+    { ...toolRegistration, acceptedScopes: [{ organId: id('organ', 'organ-b') }] },
+  ), ContractError);
+  assert.throws(() => validateOperationIntentForRegistration(
+    operationIntent,
+    { ...toolRegistration, mode: 'retired' },
+  ), ContractError);
+  assert.throws(() => effectiveOperationScope(
+    requestedScope,
+    { organId: organ, taskId: task },
+    { organId: organ, cycleId: cycle },
+    { organId: organ, taskId: id('task', 'task-b') },
+  ), ContractError);
+  const namespaceKey = operationIdempotencyKey(operationIntent);
+  const fingerprintKey = operationSemanticFingerprintKey(operationSemanticFingerprint(operationIntent, toolRegistration));
+  const record: OperationIdempotencyRecord = { namespaceKey, fingerprintKey, operationId: operation };
+  assert.equal(classifyOperationSubmission(record, operationIntent, toolRegistration), 'replay');
+  assert.equal(classifyOperationSubmission(
+    record,
+    { ...operationIntent, inputDigest: 'sha256:changed' },
+    toolRegistration,
+  ), 'conflict');
+  assert.throws(() => validateOperationResult({
+    operationId: operation,
+    status: 'succeeded',
+    outputRef: 'artifact://output-a',
+    evidenceRefs: [],
+    verifier: { name: 'inspect-verifier', version: '1.0.0', decision: 'accepted' },
+    completedAt: '2026-09-20T00:00:00Z',
+  }), ContractError);
 });

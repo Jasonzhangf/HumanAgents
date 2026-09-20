@@ -5,6 +5,7 @@ import {
   CheckpointError,
   EpochError,
   HealthError,
+  LifecycleError,
   PermissionError,
   advanceConsumerCursor,
   assertExecutionEventFence,
@@ -12,10 +13,13 @@ import {
   assertAgentLoopBudgetAvailable,
   assertAgentModeTransitionCurrent,
   assertContextReplacementCurrent,
+  assertOperationEventFence,
   assertModeCapabilityGranted,
   assertModeLeaseCurrent,
   assertObservationBatchFresh,
   assertObservationDeltaCurrent,
+  assertOperationFailureMatchesStatus,
+  assertOperationLifecycleProjection,
   assertCheckpointClosureCanReenter,
   assertCheckpointClosureCommitted,
   assertHarnessHealthPublisher,
@@ -28,20 +32,31 @@ import {
   assertRuntimeBindingPermission,
   assertRuntimeProviderBindingLocked,
   assertSteerPermission,
+  assertTerminalOperationStatus,
+  assertTransitionOperationStatus,
+  assertVerifyOnlyRecovery,
   canRetryNow,
   canTransitionLifecycle,
   canTransitionOrgan,
+  canTransitionOperationStatus,
   classifyErrorPolicy,
   classifyHealth,
   classifyHealthSnapshot,
   fenceExecutionEvent,
+  fenceOperationEvent,
   isLateEventRejection,
   isRetryPending,
   isTerminalLifecycleState,
+  isTerminalOperationStatus,
+  operationStatusToLifecycleState,
+  planBlockedRecovery,
+  planOperationCancellation,
+  planReconcileRequiredResolution,
   planStopRequest,
   planStopSettle,
   stopRequestIsStopped,
   transitionLifecycle,
+  transitionOperationStatus,
   classifyAgentLoopBudget,
   type ExecutionEventFence,
 } from '../../packages/core/src/index.js';
@@ -49,6 +64,7 @@ import {
   ContractError, consumerKey, id,
   type AgentLoopBudget, type AgentLoopBudgetUsage, type AgentLoopCheckpointRef, type AgentModeCapabilityProfile, type AgentModeState,
   type AgentModeTransition, type ContextReplacement, type ModeLease, type ObservationBatch, type ObservationDelta,
+  type OperationEvent,
   type AgentProviderBinding, type Checkpoint, type CheckpointClosureRecord, type CheckpointReentryRecord,
   type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation, type EvidenceRef, type OrganHealthSnapshot, type RuntimeBinding, type ScopeRef,
 } from '../../packages/contracts/src/index.js';
@@ -669,4 +685,83 @@ test('agent loop fences stale leases, epochs, checkpoints, events, deltas, and c
     nextAction: { kind: 'wait', ref: 'agent-loop-budget:maxDeferredEvents' },
   });
   assert.throws(() => assertAgentLoopBudgetAvailable(budget, { ...usage, contextReplacements: 2 }), CoreError);
+});
+
+test('operation lifecycle maps to core state and fences stale epochs', () => {
+  assert.equal(operationStatusToLifecycleState('accepted'), 'admitted');
+  assert.equal(operationStatusToLifecycleState('queued'), 'waiting');
+  assert.equal(operationStatusToLifecycleState('leased'), 'running');
+  assert.equal(operationStatusToLifecycleState('verifying'), 'settling');
+  assert.equal(operationStatusToLifecycleState('reconcile_required'), 'unknown');
+  assert.equal(canTransitionOperationStatus('running', 'succeeded'), false);
+  assert.equal(canTransitionOperationStatus('running', 'failed'), false);
+  assert.equal(canTransitionOperationStatus('running', 'settling'), true);
+  assert.equal(transitionOperationStatus('accepted', 'queued'), 'queued');
+  assert.throws(() => assertTransitionOperationStatus('running', 'succeeded'), LifecycleError);
+  assert.throws(() => assertOperationLifecycleProjection('running', 'succeeded'), LifecycleError);
+  assert.doesNotThrow(() => assertTerminalOperationStatus('succeeded'));
+  assert.throws(() => assertTerminalOperationStatus('blocked'), LifecycleError);
+  assert.equal(isTerminalOperationStatus('failed'), true);
+  assert.equal(isTerminalOperationStatus('blocked'), false);
+
+  const verifyOnly = {
+    status: 'verifying',
+    executionMode: 'verify-only',
+    requiresExecutor: false,
+    requiresVerifier: true,
+  } as const;
+  assert.deepEqual(planBlockedRecovery({
+    blockedAfter: 'admission',
+    sideEffectState: 'none',
+    retryAllowed: false,
+  }), {
+    status: 'queued',
+    executionMode: 'execute',
+    requiresExecutor: true,
+    requiresVerifier: true,
+  });
+  assert.deepEqual(planBlockedRecovery({
+    blockedAfter: 'execution',
+    sideEffectState: 'none',
+    retryAllowed: false,
+  }), verifyOnly);
+  assert.doesNotThrow(() => assertVerifyOnlyRecovery(verifyOnly));
+  assert.deepEqual(planOperationCancellation('cancel_requested', {
+    stopped: true,
+    sideEffectState: 'none',
+    evidenceRefs: [evidence('cancel')],
+  }), { status: 'cancelled', reason: 'stopped' });
+  assert.deepEqual(planReconcileRequiredResolution('reconcile_required', 'recovered'), {
+    status: 'blocked',
+    blockedAfter: 'reconcile',
+  });
+
+  const operationEvent: OperationEvent = {
+    eventId: 'operation-event-a',
+    schemaVersion: 1,
+    kind: 'operation.started',
+    operationId: operation,
+    taskId: task,
+    executionEpoch: 4,
+    status: 'running',
+    occurredAt: '2026-09-20T00:00:00Z',
+    evidenceRefs: [evidence('operation-event')],
+  };
+  const current = { taskId: task, operationId: operation, executionEpoch: 4 };
+  assert.doesNotThrow(() => assertOperationEventFence(current, operationEvent));
+  assert.equal(isLateEventRejection(fenceOperationEvent(current, { ...operationEvent, executionEpoch: 3 })), true);
+  assert.throws(() => assertOperationEventFence(current, { ...operationEvent, executionEpoch: 3 }), EpochError);
+  assert.throws(() => assertOperationFailureMatchesStatus('running', {
+    errorId: 'error-a',
+    operationId: operation,
+    owner: 'owner-a',
+    phase: 'execution',
+    failureClass: 'executor',
+    message: 'failed',
+    observedAt: '2026-09-20T00:00:00Z',
+    impact: 'none',
+    protectiveAction: 'stop',
+    nextAction: { kind: 'stop' },
+    evidenceRefs: [evidence('failure')],
+  }), LifecycleError);
 });
