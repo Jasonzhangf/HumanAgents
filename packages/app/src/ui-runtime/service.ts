@@ -18,6 +18,7 @@ import {
   type CycleId,
   type ExecutionRuntimePort,
   type MemoryActorContext,
+  type CanonicalMemoryScope,
   type MemoryComparisonView,
   type MemoryDetailView,
   type MemoryInteractionPort,
@@ -1157,8 +1158,13 @@ function memoryFailure(error: MemoryIssue): UiRuntimeApiError {
   );
 }
 
-function memoryScope(input: RuntimeExecutionDriverInput): MemoryScope {
-  return { kind: 'task', organId: input.scope.organId, taskId: input.taskId };
+function memoryScope(input: RuntimeExecutionDriverInput, projectKey: string): CanonicalMemoryScope {
+  return {
+    namespace: 'project',
+    projectKey,
+    organId: input.scope.organId,
+    taskId: input.taskId,
+  };
 }
 
 export class MemoryContextCapture implements AgentMemoryContextInjectionPort {
@@ -1238,7 +1244,7 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
   private async bindMemory(): Promise<void> {
     if (this.binding) return;
     const backendRef = `memory://${this.composition.projectKey}`;
-    const scope = memoryScope(this.input);
+    const scope = memoryScope(this.input, this.composition.projectKey);
     try {
       this.composition.coordinator.bindTask({
         taskId: this.input.taskId,

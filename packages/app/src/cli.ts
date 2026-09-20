@@ -159,7 +159,8 @@ async function composeTaskMemory(input: {
       projectKey: input.paths.projectKey,
       executionEpoch: input.executionEpoch,
       scope: {
-        kind: 'task',
+        namespace: 'project',
+        projectKey: input.paths.projectKey,
         organId: id('organ', `agent-${mainAgentId}`),
         taskId: id('task', input.sessionId),
       },
@@ -460,17 +461,29 @@ export async function main(args: readonly string[]): Promise<void> {
         driverRef: manifest.driverRef,
       });
       let memoryResult: Awaited<ReturnType<NonNullable<typeof memory>['consume']>> | undefined;
-      if (memory && recovered.recovered && recovered.execution) {
-        const committed = await readCommittedCheckpoint({
+      if (memory && recovered.recovered && recovered.execution && recovered.reentry) {
+        const failed = await readCommittedCheckpoint({
           filePath: join(runtime.paths.journalRoot, 'checkpoints.jsonl'),
           scope: recovered.recovered.checkpoint.scope,
           checkpointId: recovered.recovered.checkpoint.id,
         });
+        const recovery = await readCommittedCheckpoint({
+          filePath: join(runtime.paths.journalRoot, 'checkpoints.jsonl'),
+          scope: recovered.execution.checkpoint.scope,
+          checkpointId: recovered.execution.checkpoint.id,
+        });
         await memory.boundaryPublisher.publish({
-          checkpoint: committed.checkpoint,
-          recordDigest: committed.recordDigest,
+          checkpoint: recovery.checkpoint,
+          recordDigest: recovery.recordDigest,
           trigger: 'rewind',
-          relatedCheckpoints: [recovered.execution.checkpoint],
+          relatedCheckpoints: [failed.checkpoint],
+          rewind: {
+            failedCheckpoint: failed.checkpoint,
+            failedCheckpointRecordDigest: failed.recordDigest,
+            recoveryCheckpoint: recovery.checkpoint,
+            recoveryCheckpointRecordDigest: recovery.recordDigest,
+            reentry: recovered.reentry.record,
+          },
         });
         memoryResult = await memory.consume();
       }
@@ -557,12 +570,16 @@ export async function main(args: readonly string[]): Promise<void> {
       runNotesRoot: paths.runNotesRoot,
       auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
       auditPromptRef: configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
-      autoUpdate: false,
+      autoUpdate: configuration.effective.memory?.update.auto ?? false,
       binding: {
         bindingRef: `memory-ui:${paths.projectKey}`,
         projectKey: paths.projectKey,
         executionEpoch: 1,
-        scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
+        scope: {
+          namespace: 'project',
+          projectKey: paths.projectKey,
+          organId: id('organ', 'humanagent-ui'),
+        },
         interactionScopeId: `runtime:${paths.projectKey}`,
         mainAgentId: 'humanagent-ui',
         actor: {

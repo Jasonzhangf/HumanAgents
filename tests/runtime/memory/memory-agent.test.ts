@@ -4,13 +4,13 @@ import {
   id,
   type AgentDriver,
   type AgentOutput,
+  type CanonicalMemoryScope,
   type MemoryActorContext,
   type MemoryAuditPromptSnapshotSource,
   type MemoryAuditPromptSourcePort,
   type MemoryOperationsPort,
   type MemoryProjectSourcePort,
   type MemoryProjectSourceSnapshot,
-  type MemoryScope,
   type MemorySessionEvidence,
   type MemorySessionEvidenceSourcePort,
   type MemorySubmission,
@@ -26,7 +26,12 @@ import {
 
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
-const scope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const scope: CanonicalMemoryScope = {
+  namespace: 'project',
+  projectKey: 'project-a',
+  organId: organ,
+  taskId: task,
+};
 const actor: MemoryActorContext = {
   actorId: 'memory-agent-a',
   roleId: 'memory',
@@ -773,7 +778,7 @@ test('memory agent accepts interaction follow-ups when analysis and binding epoc
   agent.bind({
     bindingRef: 'binding-interaction',
     projectKey: 'project-a',
-    scope: { kind: 'organ', organId: organ },
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
     interactionScopeId,
     mainAgentId: 'main-agent-interaction',
     executionEpoch: 2,
@@ -784,7 +789,7 @@ test('memory agent accepts interaction follow-ups when analysis and binding epoc
   const analyzed = await agent.analyze(analysis({
     operationId: id('operation', 'interaction-analysis'),
     bindingRef: 'binding-interaction',
-    scope: { kind: 'organ', organId: organ },
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
     taskId: undefined,
     interactionScopeId,
     sessionRef: undefined,
@@ -1487,7 +1492,7 @@ test('memory agent does not synthesize a Task for interaction-bound provider ana
   agent.bind({
     bindingRef: 'binding-interaction',
     projectKey: 'project-a',
-    scope: { kind: 'organ', organId: organ },
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
     interactionScopeId: interactionScope,
     mainAgentId: 'main-agent-interaction',
     executionEpoch: 2,
@@ -1499,7 +1504,7 @@ test('memory agent does not synthesize a Task for interaction-bound provider ana
     bindingRef: 'binding-interaction',
     taskId: undefined,
     interactionScopeId: interactionScope,
-    scope: { kind: 'organ', organId: organ },
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
     sourceRefs: ['journal://project-a/interaction-evidence'],
     sourceDigests: ['sha256:interaction-evidence'],
   }));

@@ -7,13 +7,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
 import { JsonlOrganJournal, JournalCommitConflictError } from '../../packages/adapters/jsonl/src/index.js';
 import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coordinator.js';
+import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import { readCommittedCheckpoint } from '../../packages/app/src/checkpoint-journal.js';
 import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
 
@@ -198,7 +199,8 @@ test('memory runtime publishes a committed checkpoint boundary and consumes it i
         projectKey: paths.projectKey,
         executionEpoch: 1,
         scope: {
-          kind: 'task',
+          namespace: 'project',
+          projectKey: paths.projectKey,
           organId: id('organ', `agent-${mainAgentId}`),
           taskId: id('task', 'session-memory-runtime-boundary'),
         },
@@ -308,7 +310,12 @@ test('committed checkpoint memory boundary emits a typed patch only for auto upd
         bindingRef: `memory-boundary-auto-${autoUpdate ? 'on' : 'off'}`,
         projectKey: paths.projectKey,
         executionEpoch: 1,
-        scope: { kind: 'task', organId: id('organ', `agent-${mainAgentId}`), taskId },
+        scope: {
+          namespace: 'project',
+          projectKey: paths.projectKey,
+          organId: id('organ', `agent-${mainAgentId}`),
+          taskId,
+        },
         taskId,
         mainAgentId,
         actor: {
@@ -409,7 +416,12 @@ async function composeMemoryFixture(input: {
   const organId = id('organ', 'memory-composition-organ');
   const taskId = id('task', 'memory-composition-task');
   const scope = { organId: organId, taskId };
-  const memoryScope = { kind: 'task' as const, organId: organId, taskId };
+  const memoryScope = {
+    namespace: 'project' as const,
+    projectKey: input.bindingProjectKey ?? input.paths.projectKey,
+    organId,
+    taskId,
+  };
   const actor = {
     actorId: 'memory-composition-actor',
     roleId: 'memory' as const,
@@ -1275,7 +1287,8 @@ test('memory runtime preserves an existing configured audit prompt while keeping
         projectKey: paths.projectKey,
         executionEpoch: 1,
         scope: {
-          kind: 'task',
+          namespace: 'project',
+          projectKey: paths.projectKey,
           organId: id('organ', `agent-${mainAgentId}`),
           taskId: id('task', 'session-existing-memory-audit'),
         },
@@ -1462,7 +1475,11 @@ test('memory composition registers interaction bindings for the interaction port
       bindingRef: 'memory-binding:interaction-composition',
       projectKey: paths.projectKey,
       executionEpoch: 1,
-      scope: { kind: 'organ', organId: id('organ', 'memory-interaction-composition') },
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'memory-interaction-composition'),
+      },
       interactionScopeId,
       mainAgentId: 'main-agent-a',
       actor,
@@ -1516,7 +1533,11 @@ test('memory composition exposes candidate submission without hiding waiting or 
       bindingRef: 'memory-binding:interaction-submission',
       projectKey: paths.projectKey,
       executionEpoch: 1,
-      scope: { kind: 'organ', organId: id('organ', 'memory-interaction-submission') },
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'memory-interaction-submission'),
+      },
       interactionScopeId,
       mainAgentId: 'main-agent-a',
       actor,
@@ -1786,7 +1807,11 @@ test('project source auto updates require a durable publisher', async () => {
         bindingRef: 'memory-binding:publisher-required',
         projectKey: paths.projectKey,
         executionEpoch: 1,
-        scope: { kind: 'organ', organId: id('organ', 'memory-publisher-required') },
+        scope: {
+          namespace: 'project',
+          projectKey: paths.projectKey,
+          organId: id('organ', 'memory-publisher-required'),
+        },
         interactionScopeId: `runtime:${paths.projectKey}`,
         mainAgentId: 'main-agent-a',
         actor: {
@@ -1813,7 +1838,11 @@ test('memory runtime applies immutable project patches and publishes a durable u
   const patchRef = 'project-agents-next';
   const patchDigest = await writeMemoryEntryPatchArtifact(paths.artifactsRoot, patchRef, 'project-agents');
   const configuration = await loadConfiguration(paths);
-  const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update') };
+  const scope = {
+    namespace: 'project' as const,
+    projectKey: paths.projectKey,
+    organId: id('organ', 'memory-auto-update'),
+  };
   const runtime = await composeMemoryRuntime({
     paths,
     configuration,
@@ -1881,7 +1910,15 @@ test('memory runtime recovers a committed source update when its durable fact wa
   const patchRef = 'project-agents-recovery';
   const patchDigest = await writeProjectPatchArtifact(paths.artifactsRoot, patchRef, 'project-agents', next);
   const configuration = await loadConfiguration(paths);
-  const scope = { kind: 'organ' as const, organId: id('organ', 'memory-auto-update-recovery') };
+  const legacyScope = {
+    kind: 'organ' as const,
+    organId: id('organ', 'memory-auto-update-recovery'),
+  };
+  const scope = {
+    namespace: 'project' as const,
+    projectKey: paths.projectKey,
+    organId: legacyScope.organId,
+  };
   const owner = createProjectSourceUpdateOwner({
     workspaceCwd: paths.workspaceCwd,
     projectKey: paths.projectKey,
@@ -1892,7 +1929,7 @@ test('memory runtime recovers a committed source update when its durable fact wa
     projectSourceUpdatePublisher: {
       publish: async () => { throw new Error('journal unavailable'); },
     },
-    sourceScope: scope,
+    sourceScope: legacyScope,
     executionEpoch: 1,
   });
   const current = {
@@ -1980,7 +2017,11 @@ test('memory runtime rejects missing or drifted immutable project patches', asyn
       bindingRef: 'memory-binding:auto-update-invalid',
       projectKey: paths.projectKey,
       executionEpoch: 1,
-      scope: { kind: 'organ', organId: id('organ', 'memory-auto-update-invalid') },
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'memory-auto-update-invalid'),
+      },
       interactionScopeId: `runtime:${paths.projectKey}`,
       mainAgentId: 'main-agent-a',
       actor: {
@@ -2072,7 +2113,11 @@ test('memory runtime rejects control and security semantics before persisting a 
       bindingRef: 'memory-binding:auto-update-control',
       projectKey: paths.projectKey,
       executionEpoch: 1,
-      scope: { kind: 'organ', organId: id('organ', 'memory-auto-update-control') },
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'memory-auto-update-control'),
+      },
       interactionScopeId: `runtime:${paths.projectKey}`,
       mainAgentId: 'main-agent-a',
       actor: {
@@ -3510,6 +3555,167 @@ test('resume from a failed checkpoint starts a new HumanAgent epoch', async () =
   assert.equal(recovered.recovered?.checkpoint.id.value, first.checkpoint.id.value);
   assert.equal(recovered.execution?.executionEpoch, 2);
   assert.equal(recovered.execution?.checkpoint.outcome, 'succeeded');
+  assert.equal(recovered.reentry?.state, 'committed');
+  assert.equal(recovered.reentry?.record.closureKind, 'reentry');
+  assert.equal(recovered.reentry?.record.checkpointId.value, first.checkpoint.id.value);
+  assert.equal(recovered.reentry?.record.previousExecutionEpoch, 1);
+  assert.equal(recovered.reentry?.record.newExecutionEpoch, 2);
+
+  const closurePort = createJsonlCheckpointClosurePort({
+    filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+  });
+  const reentry = await closurePort.read(recovered.reentry!.record.closureId);
+  assert.deepEqual(reentry, recovered.reentry?.record);
+});
+
+test('resume rejects recovery when the committed closure has a hard blocker', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-resume-blocked-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const sessionId = 'session-resume-blocked';
+  const taskId = id('task', sessionId);
+  const cycleId = id('cycle', `${sessionId}-cycle-1`);
+  const operationId = id('operation', `runtime-runtime-${sessionId}-epoch-1`);
+  const scope = {
+    organId: id('organ', 'agent-interaction-default'),
+    taskId,
+    cycleId,
+    operationId,
+  };
+  const journal = createJsonlCheckpointJournal({
+    filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+  });
+  const closurePort = createJsonlCheckpointClosurePort({
+    filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+  });
+  const recoveryStateRef: EvidenceRef = {
+    evidenceId: id('evidence', `recovery-${sessionId}-1`),
+    kind: 'operation',
+    source: 'test',
+    locator: `humanagent://session/${sessionId}/epoch/1`,
+    scope,
+  };
+  const checkpoint = {
+    id: id('checkpoint', `${sessionId}-1-1`),
+    scope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'blocked' as const,
+    summary: 'permission revoked',
+    recoveryStateRef,
+    evidenceRefs: [recoveryStateRef],
+    next: { kind: 'recover' as const, ref: recoveryStateRef.locator },
+  };
+  await submitCheckpoint({
+    source: 'harness-control',
+    ownerId: 'test',
+    checkpoint,
+    previous: null,
+    journal,
+    closurePort,
+    permissionRevoked: true,
+  });
+
+  await assert.rejects(
+    () => resumeAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId,
+      plan: 'default',
+      prompt: 'must not resume revoked work',
+      taskId,
+      cycleId,
+      scope,
+      executionEpoch: 1,
+      directiveRevision: 1,
+      agentId: 'interaction-default',
+      driverRef: 'fake',
+    }),
+    (error: unknown) => error instanceof Error
+      && error.name === 'CheckpointSubmissionError'
+      && /reentry admission denied/.test(error.message),
+  );
+  assert.equal(await closurePort.read(`reentry:${sessionId}:1:2`), null);
+});
+
+test('resume rejects recovery for an unknown checkpoint without committing reentry', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-resume-unknown-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const sessionId = 'session-resume-unknown';
+  const taskId = id('task', sessionId);
+  const cycleId = id('cycle', `${sessionId}-cycle-1`);
+  const operationId = id('operation', `runtime-runtime-${sessionId}-epoch-1`);
+  const scope = {
+    organId: id('organ', 'agent-interaction-default'),
+    taskId,
+    cycleId,
+    operationId,
+  };
+  const journal = createJsonlCheckpointJournal({
+    filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+  });
+  const closurePort = createJsonlCheckpointClosurePort({
+    filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+  });
+  const recoveryStateRef: EvidenceRef = {
+    evidenceId: id('evidence', `recovery-${sessionId}-1`),
+    kind: 'operation',
+    source: 'test',
+    locator: `humanagent://session/${sessionId}/epoch/1`,
+    scope,
+  };
+  const checkpoint = {
+    id: id('checkpoint', `${sessionId}-1-1`),
+    scope,
+    cycleId,
+    seq: 1,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: 1,
+    outcome: 'unknown' as const,
+    summary: 'side effect reconciliation required',
+    recoveryStateRef,
+    evidenceRefs: [recoveryStateRef],
+    next: { kind: 'recover' as const, ref: recoveryStateRef.locator },
+  };
+  await submitCheckpoint({
+    source: 'harness-control',
+    ownerId: 'test',
+    checkpoint,
+    previous: null,
+    journal,
+    closurePort,
+    unknownOperations: [operationId],
+  });
+
+  await assert.rejects(
+    () => resumeAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId,
+      plan: 'default',
+      prompt: 'must not resume unreconciled work',
+      taskId,
+      cycleId,
+      scope,
+      executionEpoch: 1,
+      directiveRevision: 1,
+      agentId: 'interaction-default',
+      driverRef: 'fake',
+    }),
+    (error: unknown) => error instanceof Error
+      && error.name === 'CheckpointSubmissionError'
+      && /reentry admission denied/.test(error.message),
+  );
+  assert.equal(await closurePort.read(`reentry:${sessionId}:1:2`), null);
 });
 
 test('CLI resume closes the session with the checkpoint from the recovered execution', async () => {
@@ -3616,9 +3822,36 @@ test('CLI resume publishes exactly one durable rewind after actual checkpoint re
   });
   assert.equal(events.length, 1);
   assert.equal((events[0]?.payload as { readonly trigger?: string } | undefined)?.trigger, 'rewind');
-  assert.equal(events[0]?.evidenceRefs.length, 2);
-  assert.equal(events[0]?.evidenceRefs[0]?.locator, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
-  assert.equal(events[0]?.evidenceRefs[1]?.locator, `humanagent://checkpoint/${resumed.checkpointId}`);
+  assert.equal(events[0]?.evidenceRefs.length, 3);
+  assert.equal(events[0]?.evidenceRefs[0]?.locator, `humanagent://checkpoint/${resumed.checkpointId}`);
+  assert.equal(events[0]?.evidenceRefs[1]?.locator, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
+  assert.match(events[0]?.evidenceRefs[2]?.locator ?? '', /^humanagent:\/\/checkpoint-closure\/reentry:/);
+  const analysisInputs = (events[0]?.payload as {
+    readonly analysisInputs?: {
+      readonly rewindChains?: readonly {
+        readonly failedBranchRef: string;
+        readonly rewindCheckpointRef: string;
+        readonly recoveryCheckpointRef: string;
+        readonly reentryFactRef?: string;
+        readonly successfulBranchRefs: readonly string[];
+        readonly successEvidenceRefs: readonly string[];
+        readonly absoluteJournalRefs: readonly string[];
+      }[];
+    };
+  } | undefined)?.analysisInputs;
+  assert.equal(analysisInputs?.rewindChains?.length, 1);
+  const chain = analysisInputs?.rewindChains?.[0];
+  assert.equal(chain?.failedBranchRef, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
+  assert.equal(chain?.rewindCheckpointRef, `humanagent://checkpoint/${failed.checkpoint.id.value}`);
+  assert.equal(chain?.recoveryCheckpointRef, `humanagent://checkpoint/${resumed.checkpointId}`);
+  assert.equal(chain?.reentryFactRef, events[0]?.evidenceRefs[2]?.locator);
+  assert.deepEqual(chain?.successfulBranchRefs, [`humanagent://checkpoint/${resumed.checkpointId}`]);
+  assert.equal((chain?.successEvidenceRefs.length ?? 0) > 0, true);
+  assert.deepEqual(chain?.absoluteJournalRefs, [
+    `humanagent://checkpoint/${failed.checkpoint.id.value}`,
+    `humanagent://checkpoint/${resumed.checkpointId}`,
+    events[0]?.evidenceRefs[2]?.locator,
+  ]);
   assert.equal((await journal.readCursor({
     streamId: `memory-boundaries:${sessionId}`,
     consumerKey: 'memory-cli-resume',
@@ -3734,7 +3967,12 @@ test('memory composition connects an injected memory driver to checkpoint analys
       bindingRef: 'memory-binding:composition-driver',
       projectKey: paths.projectKey,
       executionEpoch: 1,
-      scope: { kind: 'task', organId: id('organ', `agent-${configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId}`), taskId },
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', `agent-${configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId}`),
+        taskId,
+      },
       taskId,
       mainAgentId: 'composition-driver-main',
       actor: {

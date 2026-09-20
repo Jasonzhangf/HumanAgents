@@ -16,11 +16,15 @@ import {
 } from '../../runtime/src/memory/index.js';
 import { createJsonlEventJournal, type JsonlEventJournal } from './event-journal.js';
 import {
+  checkpointClosureEvidenceDigest,
+  checkpointClosureEvidenceLocator,
   checkpointEvidenceDigest,
   checkpointEvidenceLocator,
   readCheckpointEvidence,
   readCommittedCheckpoint,
 } from './checkpoint-journal.js';
+import type { ClosureRecord } from '../../runtime/src/checkpoints/closure.js';
+import type { MemoryRewindChain } from '../../runtime/src/memory/index.js';
 import {
   composeMemory,
   createMemoryBoundaryPatchProducer,
@@ -54,6 +58,13 @@ export interface MemoryRuntimeBoundaryPublisher {
     readonly recordDigest: string;
     readonly trigger: MemoryAnalysisTrigger;
     readonly relatedCheckpoints?: readonly Checkpoint[];
+    readonly rewind?: {
+      readonly failedCheckpoint: Checkpoint;
+      readonly failedCheckpointRecordDigest: string;
+      readonly recoveryCheckpoint: Checkpoint;
+      readonly recoveryCheckpointRecordDigest: string;
+      readonly reentry: ClosureRecord;
+    };
   }): Promise<void>;
 }
 
@@ -87,6 +98,21 @@ function sameScope(left: ScopeRef, right: ScopeRef): boolean {
     && left.operationId?.value === right.operationId?.value;
 }
 
+function bindingScope(binding: MemoryAnalysisWakeBinding): ScopeRef {
+  if (binding.scope.namespace !== 'project') {
+    throw new AppLifecycleError(
+      'memory-boundary-scope-invalid',
+      'memory boundary events require a project-scoped binding',
+      'configure the memory binding with project scope',
+      OWNER,
+    );
+  }
+  return {
+    organId: binding.scope.organId,
+    ...(binding.taskId === undefined ? {} : { taskId: binding.taskId }),
+  };
+}
+
 function sameEvidence(left: EvidenceRef, right: EvidenceRef): boolean {
   return left.locator === right.locator
     && left.digest === right.digest
@@ -101,6 +127,48 @@ function checkpointEvidenceRef(checkpoint: Checkpoint): EvidenceRef {
     locator: checkpointEvidenceLocator(checkpoint),
     digest: checkpointEvidenceDigest(checkpoint),
     scope: checkpoint.scope,
+  };
+}
+
+function closureEvidenceRef(closure: ClosureRecord, scope: ScopeRef): EvidenceRef {
+  const closureId = 'closureId' in closure ? closure.closureId : closure.deadEndRef;
+  const evidenceId = `checkpoint-closure-${createHash('sha256').update(closureId).digest('hex').slice(0, 24)}`;
+  return {
+    evidenceId: id('evidence', evidenceId),
+    kind: 'operation',
+    source: OWNER,
+    locator: checkpointClosureEvidenceLocator(closureId),
+    digest: checkpointClosureEvidenceDigest(closure),
+    scope,
+  };
+}
+
+function rewindAnalysisInputs(input: {
+  readonly failedCheckpoint: Checkpoint;
+  readonly recoveryCheckpoint: Checkpoint;
+  readonly reentry: ClosureRecord;
+}): MemoryRewindChain {
+  if (!('closureKind' in input.reentry) || input.reentry.closureKind !== 'reentry') {
+    throw new AppLifecycleError(
+      'memory-boundary-reentry-invalid',
+      'rewind boundary requires a committed reentry closure',
+      'commit the reentry fact before publishing the rewind boundary',
+      OWNER,
+    );
+  }
+  const reentryId = input.reentry.closureId;
+  return {
+    failedBranchRef: checkpointEvidenceLocator(input.failedCheckpoint),
+    rewindCheckpointRef: checkpointEvidenceLocator(input.failedCheckpoint),
+    recoveryCheckpointRef: checkpointEvidenceLocator(input.recoveryCheckpoint),
+    reentryFactRef: checkpointClosureEvidenceLocator(reentryId),
+    successfulBranchRefs: [checkpointEvidenceLocator(input.recoveryCheckpoint)],
+    successEvidenceRefs: input.recoveryCheckpoint.evidenceRefs.map((evidence) => evidence.locator),
+    absoluteJournalRefs: [
+      checkpointEvidenceLocator(input.failedCheckpoint),
+      checkpointEvidenceLocator(input.recoveryCheckpoint),
+      checkpointClosureEvidenceLocator(reentryId),
+    ],
   };
 }
 
@@ -152,8 +220,9 @@ function validateMemoryBoundary(input: {
 }
 
 function consumerBinding(binding: MemoryAnalysisWakeBinding): EventConsumerBinding {
+  const scope = bindingScope(binding);
   const scopeRef = binding.interactionScopeId === undefined
-    ? `memory:${binding.projectKey}:${binding.scope.organId.value}:${binding.taskId!.value}`
+    ? `memory:${binding.projectKey}:${scope.organId.value}:${binding.taskId!.value}`
     : `memory:${binding.projectKey}:interaction:${binding.interactionScopeId}`;
   const streamId = binding.interactionScopeId === undefined
     ? `memory-boundaries:${binding.taskId!.value}`
@@ -163,10 +232,7 @@ function consumerBinding(binding: MemoryAnalysisWakeBinding): EventConsumerBindi
     consumerOwner: 'memory-agent',
     scopeRef,
     contractVersion: 'memory-analysis-v1',
-    scope: {
-      organId: binding.scope.organId,
-      ...(binding.taskId === undefined ? {} : { taskId: binding.taskId }),
-    },
+    scope,
     streamIds: [streamId],
     allowedClasses: ['data'],
     retryLimit: 3,
@@ -175,14 +241,12 @@ function consumerBinding(binding: MemoryAnalysisWakeBinding): EventConsumerBindi
 }
 
 function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPublisher {
+  const scope = bindingScope(binding);
   return {
     publisherId: PUBLISHER_ID,
     kind: 'harness',
     ownerId: OWNER,
-    scope: {
-      organId: binding.scope.organId,
-      ...(binding.taskId === undefined ? {} : { taskId: binding.taskId }),
-    },
+    scope,
     allowedClasses: ['data'],
     capabilities: [
       'memory.analysis.requested',
@@ -340,11 +404,29 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
       },
     },
     boundaryPublisher: {
-      publish: async ({ checkpoint, recordDigest, trigger, relatedCheckpoints = [] }) => {
+      publish: async ({ checkpoint, recordDigest, trigger, relatedCheckpoints = [], rewind }) => {
         const committed = await checkpointEvidence.readCommitted({ checkpoint });
         const related = await Promise.all(relatedCheckpoints.map((candidate) =>
           checkpointEvidence.readCommitted({ checkpoint: candidate })));
         const primaryEvidence = checkpointEvidenceRef(committed.checkpoint);
+        if (trigger === 'rewind' && rewind === undefined) {
+          throw new AppLifecycleError(
+            'memory-boundary-rewind-incomplete',
+            'rewind boundary is missing the committed failed/recovery/reentry chain',
+            'publish the rewind boundary from the checkpoint and reentry owners',
+            OWNER,
+          );
+        }
+        const rewindChain = rewind === undefined
+          ? undefined
+          : rewindAnalysisInputs({
+              failedCheckpoint: rewind.failedCheckpoint,
+              recoveryCheckpoint: rewind.recoveryCheckpoint,
+              reentry: rewind.reentry,
+            });
+        const reentryEvidence = rewind === undefined
+          ? undefined
+          : closureEvidenceRef(rewind.reentry, rewind.failedCheckpoint.scope);
         const event = createMemoryAnalysisRequestedEvent({
           messageId: `checkpoint-${committed.checkpoint.id.value}-${trigger}`,
           streamId: consumer.streamIds[0]!,
@@ -356,11 +438,23 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
           evidenceRefs: [
             primaryEvidence,
             ...related.map((candidate) => checkpointEvidenceRef(candidate.checkpoint)),
+            ...(reentryEvidence === undefined ? [] : [reentryEvidence]),
           ],
           executionEpoch: committed.checkpoint.executionEpoch,
           trigger,
           requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
           candidateCategory: trigger === 'completion' || trigger === 'rewind' ? 'project-experience' : 'project-fact',
+          ...(rewindChain === undefined
+            ? {}
+            : {
+                analysisInputs: {
+                  corrections: [],
+                  errors: [],
+                  rewindChains: [rewindChain],
+                  actualPathRefs: [],
+                  declaredPathRefs: [],
+                },
+              }),
           ...(trigger !== 'rewind'
             && input.binding.interactionScopeId === undefined
             && committed.checkpoint.scope.taskId

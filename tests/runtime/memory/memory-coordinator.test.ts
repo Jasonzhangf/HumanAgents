@@ -9,10 +9,10 @@ import {
 import {
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
+  type CanonicalMemoryScope,
   type MemoryOperationsPort,
   type MemoryQueryRequest,
   type MemoryQueryResponse,
-  type MemoryScope,
   type NoveltyResult,
   type RecurrenceResult,
   type TaskId,
@@ -22,8 +22,13 @@ import {
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const otherTask = id('task', 'task-b');
-const taskScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
 const taskProjectKey = 'project-a';
+const taskScope: CanonicalMemoryScope = {
+  namespace: 'project',
+  projectKey: taskProjectKey,
+  organId: organ,
+  taskId: task,
+};
 const taskAssignmentId = 'assignment-a';
 const taskExecutionEpoch = 2;
 
@@ -52,7 +57,7 @@ function makeContext(input: { runtimeId: string; epoch: number; budget: number }
       summary: 'directive summary',
       sourceRef: 'journal://task-a/current',
       sourceDigest: 'sha256:current',
-      scope: `task:${organ.value}:${task.value}`,
+      scope: `project:${taskProjectKey}:${organ.value}:${task.value}`,
       tokenCost: 2,
     }],
     omitted: [],
@@ -197,7 +202,7 @@ test('memory coordinator recalls by bound scope, role, layer, query, budget, and
         summary: 'directive summary',
         sourceRef: 'journal://task-a/current',
         sourceDigest: 'sha256:current',
-        scope: `task:${organ.value}:${task.value}`,
+        scope: `project:${taskProjectKey}:${organ.value}:${task.value}`,
         tokenCost: 2,
       }],
       omitted: [],
@@ -221,13 +226,13 @@ test('memory coordinator rejects recalled entries whose scope does not match the
         ...baseContext.entries[0],
         sourceRef: 'journal://task-b/current',
         sourceDigest: 'sha256:task-b-current',
-        scope: `task:${organ.value}:${otherTask.value}`,
+        scope: `project:${taskProjectKey}:${organ.value}:${otherTask.value}`,
       },
       {
         ...baseContext.entries[0],
         sourceRef: 'journal://task-b/legacy',
         sourceDigest: 'sha256:task-b-legacy',
-        scope: `task:${otherTask.value}`,
+        scope: `project:${taskProjectKey}:${otherTask.value}:`,
       },
     ],
   };
@@ -463,7 +468,12 @@ test('memory coordinator rejects invalid binding advances without mutating curre
     MemoryCoordinatorError,
   );
   assert.throws(
-    () => coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 3, scope: { kind: 'organ', organId: organ, taskId: task } }),
+    () => coordinator.bindTask({
+      ...base,
+      assignmentId: 'assignment-b',
+      executionEpoch: 3,
+      scope: { namespace: 'project', projectKey: taskProjectKey, organId: organ },
+    }),
     MemoryCoordinatorError,
   );
   assert.throws(
@@ -501,7 +511,7 @@ test('memory coordinator reuses a compatible project backend and rejects conflic
     assignmentId: 'assignment-b',
     executionEpoch: 1,
     projectKey: taskProjectKey,
-    scope: { kind: 'task', organId: organ, taskId: otherTask },
+    scope: { namespace: 'project', projectKey: taskProjectKey, organId: organ, taskId: otherTask },
     backendRef: 'memory://first',
     operations: firstPorts.operations,
     injection: firstPorts.injection,
@@ -516,7 +526,7 @@ test('memory coordinator reuses a compatible project backend and rejects conflic
       assignmentId: 'assignment-c',
       executionEpoch: 1,
       projectKey: taskProjectKey,
-      scope: { kind: 'task', organId: organ, taskId: thirdTask },
+      scope: { namespace: 'project', projectKey: taskProjectKey, organId: organ, taskId: thirdTask },
       backendRef: 'memory://conflict',
       operations: conflictingPorts.operations,
       injection: conflictingPorts.injection,
@@ -532,7 +542,7 @@ test('memory coordinator reuses a compatible project backend and rejects conflic
     assignmentId: 'assignment-c',
     executionEpoch: 1,
     projectKey: taskProjectKey,
-    scope: { kind: 'task', organId: organ, taskId: thirdTask },
+    scope: { namespace: 'project', projectKey: taskProjectKey, organId: organ, taskId: thirdTask },
     backendRef: 'memory://first',
     operations: firstPorts.operations,
     injection: firstPorts.injection,

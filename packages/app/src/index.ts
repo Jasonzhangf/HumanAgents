@@ -120,6 +120,8 @@ export {
   checkpointEvidenceDigest,
   checkpointEvidenceLocator,
   checkpointEvidenceText,
+  createCheckpointReentryAdmissionPort,
+  createJsonlCheckpointClosurePort,
   createJsonlCheckpointJournal,
   readCommittedCheckpoint,
   readCheckpointEvidence,

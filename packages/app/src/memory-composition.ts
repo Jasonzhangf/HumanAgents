@@ -10,12 +10,19 @@ import type {
   MemoryInteractionPort,
   MemoryProjectSourcePort,
   MemoryProjectSourceSnapshot,
+  CanonicalMemoryScope,
   MemoryScope,
   ProjectSourcePatchArtifact,
   ProjectSourceUpdateProposal,
   ScopeRef,
 } from '../../contracts/src/index.js';
-import { id, validateProjectSourcePatchArtifact } from '../../contracts/src/index.js';
+import {
+  MEMORY_SCOPE_COMPATIBILITY_VERSION,
+  canonicalMemoryScopeToLegacy,
+  id,
+  legacyMemoryScopeToCanonical,
+  validateProjectSourcePatchArtifact,
+} from '../../contracts/src/index.js';
 import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
 import {
   DeterministicMemoryBackend,
@@ -164,6 +171,7 @@ export interface MemoryCompositionInput {
   readonly auditPromptRef: string;
   readonly autoUpdate: boolean;
   readonly binding: MemoryAnalysisWakeBinding;
+  readonly taskScope?: CanonicalMemoryScope;
   readonly mainAgentId?: string;
   readonly assignmentId?: string;
   readonly agentRuntimeId?: string;
@@ -383,7 +391,11 @@ export async function composeRuntimeMemory(
       bindingRef: `memory-binding:${projectKey}`,
       projectKey,
       executionEpoch: 1,
-      scope: { kind: 'organ', organId: id('organ', 'humanagent-ui') },
+      scope: {
+        namespace: 'project',
+        projectKey,
+        organId: id('organ', 'humanagent-ui'),
+      },
       interactionScopeId: `runtime:${projectKey}`,
       mainAgentId: 'humanagent-ui',
       actor,
@@ -896,7 +908,10 @@ function createAdmission(
           };
         }
         await backend.ingest({
-          scope: request.scope,
+          scope: canonicalMemoryScopeToLegacy({
+            compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+            scope: request.scope,
+          }),
           sourceRef: source.sourceRef,
           sourceDigest: source.sourceDigest,
           text: source.text,
@@ -965,7 +980,7 @@ function bindCoordinator(
       assignmentId: input.assignmentId,
       executionEpoch: input.binding.executionEpoch,
       projectKey: input.projectKey,
-      scope: input.binding.scope,
+      scope: input.taskScope ?? input.binding.scope,
       backendRef: 'memory://deterministic',
       indexVersion: backend.indexVersion,
       operations: backend,
@@ -1088,7 +1103,19 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       ...(input.patchReader === undefined ? {} : { patchReader: input.patchReader }),
       ...(input.projectSourceUpdatePublisher === undefined ? {} : {
         projectSourceUpdatePublisher: input.projectSourceUpdatePublisher,
-        sourceScope: input.binding.scope,
+        sourceScope: input.taskScope
+          ? {
+              organId: input.taskScope.namespace === 'project' ? input.taskScope.organId : { scope: 'organ' as const, value: 'global' },
+              ...(input.taskScope.namespace === 'project' && input.taskScope.taskId ? { taskId: input.taskScope.taskId } : {}),
+            }
+          : {
+              organId: input.binding.scope.namespace === 'project'
+                ? input.binding.scope.organId
+                : { scope: 'organ' as const, value: 'global' },
+              ...(input.binding.scope.namespace === 'project' && input.binding.scope.taskId
+                ? { taskId: input.binding.scope.taskId }
+                : {}),
+            },
         executionEpoch: input.binding.executionEpoch,
       }),
     }),

@@ -7,7 +7,7 @@ import {
   type Attention,
   type Checkpoint,
   type EvidenceRef,
-  type MemoryScope,
+  type CanonicalMemoryScope,
   type OperationId,
   type RequirementEnvelope,
   type ScopeRef,
@@ -367,10 +367,16 @@ test('confirmed intake flows through admission, node execution, checkpoint, and 
   const recalled = await recallCheckpoint(journal, { ownerId: 'task-owner', scope: nodeScope });
   assert.equal(recalled?.checkpoint.id.value, 'checkpoint-wave2-1');
 
-  const memoryScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+  const memoryScope: CanonicalMemoryScope = {
+    namespace: 'project',
+    projectKey: 'project-wave2',
+    organId: organ,
+    taskId: task,
+  };
+  const legacyMemoryScope = { kind: 'task' as const, organId: organ, taskId: task };
   const memoryBackend = new DeterministicMemoryBackend();
   memoryBackend.addContextEntry({
-    scope: memoryScope,
+    scope: legacyMemoryScope,
     sourceRef: 'journal://task-wave2/checkpoint-wave2-1',
     sourceDigest: 'sha256:checkpoint-wave2-1',
     text: 'wave 2 integration cycle succeeded with deterministic evidence',

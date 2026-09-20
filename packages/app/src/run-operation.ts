@@ -1,4 +1,7 @@
+import { join } from 'node:path';
 import {
+  commitReentry,
+  checkpointCommitId,
   recallCheckpoint,
   type RecalledCheckpoint,
 } from '../../runtime/src/index.js';
@@ -17,6 +20,10 @@ import {
   type OpenAgentOperationInput,
   type RunAgentOperationResult,
 } from './agent-operation.js';
+import {
+  createCheckpointReentryAdmissionPort,
+  createJsonlCheckpointClosurePort,
+} from './checkpoint-journal.js';
 import { AppLifecycleError } from './errors.js';
 import { projectExecutionSemanticEvents } from './fake-execution.js';
 
@@ -144,6 +151,7 @@ export interface ResumeAgentOperationInput {
 export interface ResumeAgentOperationResult {
   readonly recovered: RecalledCheckpoint | null;
   readonly execution?: RunAgentOperationResult;
+  readonly reentry?: Awaited<ReturnType<typeof commitReentry>>;
   readonly waitingReason?: string;
 }
 
@@ -183,6 +191,30 @@ export async function resumeAgentOperation(input: ResumeAgentOperationInput): Pr
     );
   }
   const nextEpoch = Math.max(checkpoint.executionEpoch, input.executionEpoch) + 1;
+  const checkpointFile = join(input.paths.journalRoot, 'checkpoints.jsonl');
+  const closurePort = createJsonlCheckpointClosurePort({ filePath: checkpointFile });
+  const recoveryAdmission = createCheckpointReentryAdmissionPort({
+    admitRecovery: async () => {
+      const closure = await closurePort.read(`checkpoint-closure:${checkpointCommitId(checkpoint)}`);
+      if (!closure || !('closureKind' in closure) || closure.closureKind !== 'checkpoint') {
+        return false;
+      }
+      if (closure.reentry.allowed) return true;
+      return checkpoint.outcome === 'failed' && (closure.reentry.blockedBy?.length ?? 0) === 0;
+    },
+  });
+  const reentry = await commitReentry({
+    ownerId: OWNER,
+    closureId: `reentry:${input.sessionId}:${checkpoint.executionEpoch}:${nextEpoch}`,
+    checkpoint,
+    source: 'recovery',
+    previousExecutionEpoch: checkpoint.executionEpoch,
+    newExecutionEpoch: nextEpoch,
+    nextAction: { kind: 'continue', ref: `humanagent://session/${input.sessionId}/epoch/${nextEpoch}` },
+    journal,
+    closurePort,
+    admissionPort: recoveryAdmission,
+  });
   const execution = await runAgentOperation({
     paths: input.paths,
     configuration: input.configuration,
@@ -198,7 +230,7 @@ export async function resumeAgentOperation(input: ResumeAgentOperationInput): Pr
     // checkpoint is the recovery evidence, not a predecessor link.
     newChain: true,
   });
-  return { recovered, execution };
+  return { recovered, execution, reentry };
 }
 
 export function checkpointIdFor(checkpoint: Checkpoint): CheckpointId {

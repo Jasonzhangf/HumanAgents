@@ -4,9 +4,9 @@ import test from 'node:test';
 import {
   assertBusinessPayload,
   id,
+  type CanonicalMemoryScope,
   type EvidenceRef,
   type MemoryActorContext,
-  type MemoryScope,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import {
@@ -48,7 +48,12 @@ import {
 const organ = id('organ', 'organ-a');
 const task = id('task', 'task-a');
 const scope: ScopeRef = { organId: organ, taskId: task };
-const memoryScope: MemoryScope = { kind: 'task', organId: organ, taskId: task };
+const memoryScope: CanonicalMemoryScope = {
+  namespace: 'project',
+  projectKey: 'project-a',
+  organId: organ,
+  taskId: task,
+};
 const actor: MemoryActorContext = {
   actorId: 'memory-agent-a',
   roleId: 'memory',
@@ -906,7 +911,7 @@ test('memory analysis consumer rejects a binding mismatch before admission', asy
     createMemoryAnalysisEventHandler({
       binding: {
         ...binding,
-        scope: { kind: 'task', organId: organ, taskId: id('task', 'task-b') },
+        scope: { namespace: 'project', projectKey: 'project-a', organId: organ, taskId: id('task', 'task-b') },
         taskId: id('task', 'task-b'),
       },
       admission: {
@@ -933,7 +938,7 @@ test('memory analysis consumer rejects an empty interaction scope before admissi
   const handler = createMemoryAnalysisEventHandler({
     binding: {
       ...binding,
-      scope: { kind: 'organ', organId: organ },
+      scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
       taskId: undefined,
       interactionScopeId: '',
     },

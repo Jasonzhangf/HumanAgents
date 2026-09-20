@@ -1105,6 +1105,11 @@ export class RootedMemoryPersistence implements MemoryPersistencePort {
 
 function scopeKey(scope: MemoryScope): string { return `${scope.kind}:${scope.organId.value}:${scope.taskId?.value ?? ''}`; }
 function visible(record: RecordEntry, scope: MemoryScope): boolean { return scopeKey(record.scope) === scopeKey(scope) || (scope.kind === 'approved-global' && record.scope.kind === 'approved-global' && record.scope.organId.value === scope.organId.value); }
+function canonicalScopeKey(scope: CanonicalMemoryScope): string {
+  return scope.namespace === 'global'
+    ? 'global:global'
+    : `project:${scope.projectKey}:${scope.organId.value}:${scope.taskId?.value ?? ''}`;
+}
 function tokens(text: string): number { return text.trim() ? text.trim().split(/\s+/u).length : 0; }
 function stable(value: string): string { let hash = 0; for (const char of value) hash = Math.imul(hash ^ char.charCodeAt(0), 31); return `memory:${(hash >>> 0).toString(16).padStart(8, '0')}`; }
 function nonEmpty(value: string, label: string): string { if (!value.trim()) throw new ContractError(`${label} must be non-empty`); return value; }
@@ -1715,10 +1720,14 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
   async recall(input: AgentMemoryContextRequest): Promise<AgentMemoryContext> {
     return this.runMutation(async () => {
       if (!Number.isSafeInteger(input.tokenBudget) || input.tokenBudget < 0) throw new ContractError('context token budget must be finite and non-negative');
-      const contextId = stable(`${input.agentRuntimeId}:${scopeKey(input.scope)}:${input.taskId.value}:${input.executionEpoch}:${input.query ?? ''}:${input.layers.join(',')}`);
+      const contextId = stable(`${input.agentRuntimeId}:${canonicalScopeKey(input.scope)}:${input.taskId.value}:${input.executionEpoch}:${input.query ?? ''}:${input.layers.join(',')}`);
       let remaining = input.tokenBudget;
       const omitted: { reason: string; sourceRef?: string }[] = [];
-      const entries = [...this.records.values()].filter((record) => visible(record, input.scope) && record.layer && input.layers.includes(record.layer)).filter((record) => !input.query || record.text.toLowerCase().includes(input.query.toLowerCase())).flatMap((record) => { const tokenCost = tokens(record.summary ?? record.text); if (tokenCost > remaining) { omitted.push({ reason: 'token-budget', sourceRef: record.sourceRef }); return []; } remaining -= tokenCost; return [{ layer: record.layer!, summary: record.summary ?? record.text, sourceRef: record.sourceRef, sourceDigest: record.sourceDigest, scope: scopeKey(record.scope), tokenCost }]; });
+      const legacyScope = canonicalMemoryScopeToLegacy({
+        compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+        scope: input.scope,
+      });
+      const entries = [...this.records.values()].filter((record) => visible(record, legacyScope) && record.layer && input.layers.includes(record.layer)).filter((record) => !input.query || record.text.toLowerCase().includes(input.query.toLowerCase())).flatMap((record) => { const tokenCost = tokens(record.summary ?? record.text); if (tokenCost > remaining) { omitted.push({ reason: 'token-budget', sourceRef: record.sourceRef }); return []; } remaining -= tokenCost; return [{ layer: record.layer!, summary: record.summary ?? record.text, sourceRef: record.sourceRef, sourceDigest: record.sourceDigest, scope: canonicalScopeKey(input.scope), tokenCost }]; });
       const context: AgentMemoryContext = { contextId, executionEpoch: input.executionEpoch, entries, omitted, indexVersion: this.indexVersion };
       assertContextBudget(context, input.tokenBudget);
       const before = this.snapshot();
