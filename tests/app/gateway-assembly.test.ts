@@ -48,6 +48,17 @@ const journal: OperationJournalPort = {
   async publishCommitted(_event: OperationEvent): Promise<void> {},
 };
 
+function recordingJournal(): OperationJournalPort & { readonly committed: OperationEvent[] } {
+  const committed: OperationEvent[] = [];
+  return {
+    committed,
+    async commit(event) {
+      committed.push(event);
+    },
+    async publishCommitted(_event) {},
+  };
+}
+
 test('app assembly registers the deterministic operations route in the execution gateway', async () => {
   const gateway = createToolExecutionGateway({
     permissions: {
@@ -80,6 +91,7 @@ test('app assembly rejects an adapter observation with a different operation ide
       return { ...observation, operationId: foreignOperation };
     }
   }
+  const mismatchJournal = recordingJournal();
   const gateway = createToolExecutionGateway({
     route: new MismatchedRoute(),
     permissions: {
@@ -92,7 +104,7 @@ test('app assembly rejects an adapter observation with a different operation ide
         return { scope, evidenceRefs: [evidence('boundary-mismatch')] };
       },
     },
-    journal,
+    journal: mismatchJournal,
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
@@ -100,8 +112,14 @@ test('app assembly rejects an adapter observation with a different operation ide
   const result = await gateway.execute(operation);
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.failure?.failureClass, 'executor');
+  assert.equal(result.failure?.failureClass, 'contract');
+  assert.equal(result.failure?.owner, 'humanagent.operations-adapter');
+  assert.equal(result.failure?.nextAction.ref, 'deterministic-inspect');
   assert.match(result.failure?.message ?? '', /different operation/);
+  assert.equal(result.failure?.evidenceRefs.length, 1);
+  assert.equal(result.failure?.evidenceRefs[0]?.source, 'humanagent.operations-adapter');
+  assert.equal(result.result?.failure, result.failure);
+  assert.equal(mismatchJournal.committed.at(-1)?.failure, result.failure);
 });
 
 test('app assembly rejects an adapter verification result with a different operation identity', async () => {
@@ -112,6 +130,7 @@ test('app assembly rejects an adapter verification result with a different opera
       return { ...result, operationId: foreignOperation };
     }
   }
+  const mismatchJournal = recordingJournal();
   const gateway = createToolExecutionGateway({
     route: new MismatchedVerifierRoute(),
     permissions: {
@@ -124,7 +143,7 @@ test('app assembly rejects an adapter verification result with a different opera
         return { scope, evidenceRefs: [evidence('boundary-verification-mismatch')] };
       },
     },
-    journal,
+    journal: mismatchJournal,
     now: () => new Date('2026-09-20T00:00:00.000Z'),
   });
 
@@ -132,6 +151,12 @@ test('app assembly rejects an adapter verification result with a different opera
   const result = await gateway.execute(operation);
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.failure?.failureClass, 'verifier');
+  assert.equal(result.failure?.failureClass, 'contract');
+  assert.equal(result.failure?.owner, 'humanagent.operations-adapter');
+  assert.equal(result.failure?.nextAction.ref, 'deterministic-inspect');
   assert.match(result.failure?.message ?? '', /verification result for a different operation/);
+  assert.equal(result.failure?.evidenceRefs.length, 1);
+  assert.equal(result.failure?.evidenceRefs[0]?.source, 'humanagent.operations-adapter');
+  assert.equal(result.result?.failure, result.failure);
+  assert.equal(mismatchJournal.committed.at(-1)?.failure, result.failure);
 });

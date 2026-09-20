@@ -80,6 +80,28 @@ interface FailureInput {
   readonly recoveryCondition?: string;
 }
 
+function structuredFailure(
+  error: unknown,
+  operationId: OperationIntent['operationId'],
+  phase: OperationFailure['phase'],
+): OperationFailure | undefined {
+  if (error === null || typeof error !== 'object' || !('failure' in error)) return undefined;
+  const failure = (error as { readonly failure?: unknown }).failure;
+  if (failure === null || typeof failure !== 'object') return undefined;
+  try {
+    validateOperationFailure(failure as OperationFailure);
+  } catch {
+    return undefined;
+  }
+  const validated = failure as OperationFailure;
+  if (validated.operationId.scope !== operationId.scope
+    || validated.operationId.value !== operationId.value
+    || validated.phase !== phase) {
+    return undefined;
+  }
+  return validated;
+}
+
 export class HandRuntime {
   constructor(private readonly dependencies: HandRuntimeDependencies) {}
 
@@ -229,7 +251,7 @@ export class HandRuntime {
       'execution-failed',
       input.route.effectiveScope,
     );
-    const failure = this.failure({
+    const failure = structuredFailure(error, input.intent.operationId, 'execution') ?? this.failure({
       intent: input.intent,
       registration: input.registration,
       route: input.route,
@@ -250,7 +272,7 @@ export class HandRuntime {
 
   private async failVerification(input: VerifyOnlyHandInput, error: unknown): Promise<HandRunResult> {
     assertTransitionOperationStatus('verifying', 'failed');
-    const failure = this.failure({
+    const failure = structuredFailure(error, input.intent.operationId, 'verification') ?? this.failure({
       intent: input.intent,
       registration: input.registration,
       route: input.route,

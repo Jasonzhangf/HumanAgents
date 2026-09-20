@@ -430,6 +430,92 @@ test('verifier failure records owner, failure evidence, and failed result', asyn
   assert.equal(context.journal.committed.at(-1)?.kind, 'operation.failed');
 });
 
+test('structured adapter failures with mismatched identity or phase fall back to synthesized failures', async () => {
+  const executor = new Executor();
+  executor.execute = async (input) => {
+    executor.requests.push(input);
+    throw {
+      failure: {
+        errorId: 'adapter-failure-mismatch',
+        operationId: id('operation', 'foreign-operation'),
+        owner: 'humanagent.operations-adapter',
+        phase: 'execution',
+        failureClass: 'contract',
+        message: 'foreign operation failure',
+        observedAt: '2026-09-20T00:00:00.000Z',
+        impact: 'must not be trusted',
+        protectiveAction: 'fall back to runtime failure synthesis',
+        nextAction: { kind: 'recover', ref: 'deterministic-inspect' },
+        evidenceRefs: [evidence('foreign-failure')],
+      },
+    };
+  };
+  const context = setup({ executor });
+  await context.gateway.submit(intent());
+
+  const result = await context.gateway.execute(operation);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failure?.failureClass, 'executor');
+  assert.equal(result.failure?.owner, 'operations-adapter');
+  assert.ok(result.failure?.errorId !== 'adapter-failure-mismatch');
+  assert.ok(!/foreign operation failure/.test(result.failure?.message ?? ''));
+});
+
+test('structured verifier failures with the wrong phase fall back to synthesized failures', async () => {
+  const verifier = new Verifier();
+  verifier.verify = async (input) => {
+    verifier.requests.push(input);
+    throw {
+      failure: {
+        errorId: 'verifier-phase-mismatch',
+        operationId: operation,
+        owner: 'humanagent.operations-adapter',
+        phase: 'execution',
+        failureClass: 'contract',
+        message: 'execution failure from verifier',
+        observedAt: '2026-09-20T00:00:00.000Z',
+        impact: 'must not be trusted',
+        protectiveAction: 'fall back to runtime failure synthesis',
+        nextAction: { kind: 'recover', ref: 'deterministic-inspect' },
+        evidenceRefs: [evidence('wrong-phase-failure')],
+      },
+    };
+  };
+  const context = setup({ verifier });
+  await context.gateway.submit(intent());
+
+  const result = await context.gateway.execute(operation);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failure?.phase, 'verification');
+  assert.equal(result.failure?.failureClass, 'verifier');
+  assert.ok(result.failure?.errorId !== 'verifier-phase-mismatch');
+  assert.ok(!/execution failure from verifier/.test(result.failure?.message ?? ''));
+});
+
+test('malformed structured failures fall back to synthesized failures', async () => {
+  const executor = new Executor();
+  executor.execute = async (input) => {
+    executor.requests.push(input);
+    throw {
+      failure: {
+        operationId: operation,
+        phase: 'execution',
+      },
+    };
+  };
+  const context = setup({ executor });
+  await context.gateway.submit(intent());
+
+  const result = await context.gateway.execute(operation);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failure?.failureClass, 'executor');
+  assert.equal(result.failure?.owner, 'operations-adapter');
+  assert.ok(result.failure?.errorId.startsWith('runtime-gateway-error-'));
+});
+
 test('blocked after execution resumes verify-only without double execution', async () => {
   const executor = new Executor();
   executor.next = observation({
@@ -457,6 +543,67 @@ test('blocked after execution resumes verify-only without double execution', asy
   assert.equal(context.executor.requests.length, 1);
   assert.equal(context.verifier.requests.length, 1);
   assert.equal(context.journal.committed.some((event) => event.kind === 'operation.queued' && event.executionEpoch > 1), false);
+});
+
+test('blocked execution recovery can be cancelled while the resumed executor is running', async () => {
+  const executor = new Executor();
+  let resumedStarted!: () => void;
+  const resumedStartedPromise = new Promise<void>((resolve) => {
+    resumedStarted = resolve;
+  });
+  let releaseResumed!: () => void;
+  const releaseResumedPromise = new Promise<void>((resolve) => {
+    releaseResumed = resolve;
+  });
+  executor.execute = async (input) => {
+    executor.requests.push(input);
+    if (executor.requests.length === 1) {
+      return observation({
+        status: 'blocked',
+        owner: 'operations-adapter',
+        sideEffectState: 'none',
+        nextAction: { kind: 'recover', ref: 'retry-execution' },
+        message: 'execution may be retried',
+      });
+    }
+    resumedStarted();
+    await releaseResumedPromise;
+    return observation({ executionEpoch: input.lease.executionEpoch });
+  };
+  const context = setup({ executor });
+  await context.gateway.submit(intent());
+
+  const blocked = await context.gateway.execute(operation);
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.blocked?.blockedAfter, 'execution');
+
+  const resumed = context.gateway.resume(operation, {
+    blockedAfter: 'execution',
+    sideEffectState: 'none',
+    retryAllowed: true,
+  });
+  await resumedStartedPromise;
+
+  const cancelPromise = context.gateway.requestCancel(operation);
+  const cancel = await Promise.race([
+    cancelPromise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+  ]);
+  if (cancel === null) {
+    releaseResumed();
+    await resumed.catch(() => undefined);
+    await cancelPromise.catch(() => undefined);
+    throw new Error('requestCancel waited for the resumed executor instead of settling during execution');
+  }
+  assert.equal(cancel.status, 'cancel_requested');
+
+  const settled = await context.gateway.settleCancellation(operation);
+  assert.equal(settled.status, 'cancelled');
+  releaseResumed();
+
+  assert.equal((await resumed).status, 'cancelled');
+  assert.equal(context.executor.requests.length, 2);
+  assert.equal(context.gateway.get(operation).status, 'cancelled');
 });
 
 test('reconcile_required does not execute again and can resolve through blocked verify-only', async () => {

@@ -200,7 +200,7 @@ export class ToolExecutionGateway {
   }
 
   async resume(operationId: OperationIntent['operationId'], input: ResumeOperationInput = {}): Promise<OperationSnapshot> {
-    return this.withOperationLock(operationId, async () => {
+    const recovery = await this.withOperationLock(operationId, async () => {
       const record = this.requireOperation(operationId);
       if (record.status !== 'blocked' || !record.blocked) {
         throw new GatewayError(
@@ -218,7 +218,11 @@ export class ToolExecutionGateway {
       if (decision.status === 'queued' && decision.executionMode === 'execute') {
         await this.transition(record, 'queued', 'operation.queued', input.evidenceRefs ?? record.blocked.evidenceRefs);
         record.blocked = undefined;
-        return this.leaseAndExecute(record);
+        return {
+          kind: 'execute' as const,
+          record,
+          lease: await this.leaseAndPrepare(record),
+        };
       }
 
       if (decision.status !== 'verifying' || decision.executionMode !== 'verify-only' || decision.requiresExecutor) {
@@ -245,6 +249,20 @@ export class ToolExecutionGateway {
         verificationStartedAlready: true,
       });
       record.blocked = undefined;
+      return {
+        kind: 'snapshot' as const,
+        snapshot: await this.applyHandOutcome(record, outcome),
+      };
+    });
+
+    if (recovery.kind === 'snapshot') return recovery.snapshot;
+    if (!recovery.lease) return this.snapshot(recovery.record);
+    const outcome = await this.executePrepared(recovery.record, recovery.lease);
+    return this.withOperationLock(operationId, async () => {
+      const record = this.requireOperation(operationId);
+      if (record.status === 'cancel_requested' || record.status === 'cancelled') {
+        return this.snapshot(record);
+      }
       return this.applyHandOutcome(record, outcome);
     });
   }
@@ -520,13 +538,6 @@ export class ToolExecutionGateway {
       throw new GatewayError('invalid-state', 'idempotency record points to a missing operation');
     }
     return { decision: 'replay', operation: this.snapshot(operation) };
-  }
-
-  private async leaseAndExecute(record: OperationRecord): Promise<OperationSnapshot> {
-    const lease = await this.leaseAndPrepare(record);
-    if (!lease) return this.snapshot(record);
-    const outcome = await this.executePrepared(record, lease);
-    return this.applyHandOutcome(record, outcome);
   }
 
   private async leaseAndPrepare(record: OperationRecord): Promise<OperationLease | undefined> {
