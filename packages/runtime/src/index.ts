@@ -25,3 +25,4 @@ export * from './explicit-brain/index.js';
 export * from './communication/index.js';
 export * from './health/index.js';
 export * from './agent-loop/index.js';
+export * from './gateway/index.js';

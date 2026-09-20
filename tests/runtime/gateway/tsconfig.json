@@ -1,0 +1,18 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/gateway",
+    "noEmitOnError": true
+  },
+  "include": [
+    "node-modules.d.ts",
+    "**/*.ts",
+    "../../../packages/runtime/src/gateway/**/*.ts",
+    "../../../packages/runtime/src/node-modules.d.ts",
+    "../../../packages/runtime/src/nodes/errors.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/core/src/**/*.ts"
+  ]
+}
