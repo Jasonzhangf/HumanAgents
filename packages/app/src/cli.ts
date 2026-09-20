@@ -7,7 +7,14 @@ import {
   type LoadedConfiguration,
   type RuntimePaths,
 } from '../../config/src/index.js';
-import { id, type Checkpoint, type EvidenceRef, type ProviderBinding } from '../../contracts/src/index.js';
+import {
+  id,
+  type Checkpoint,
+  type EvidenceRef,
+  type ExecutionRuntimePort,
+  type HarnessPlugin,
+  type ProviderBinding,
+} from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 import {
   closeRuntime,
@@ -26,7 +33,14 @@ import {
 import { SessionStore } from './session-store.js';
 import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
 import { FakeProviderAgentDriver, fakeExecutionBinding } from './fake-execution.js';
-import { entryCompositionInventory } from './entry-composition.js';
+import {
+  entryCompositionInventory,
+  FAKE_SERVE_PROVIDER_PLUGIN,
+  RCC_SERVE_PROVIDER_PLUGIN,
+  SERVE_COMPOSITION_PLUGINS,
+  serveCompositionComplete,
+  serveCompositionManifestMatches,
+} from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
 import { runSupervisorStartup } from './supervisor/supervisor.js';
 import { join } from 'node:path';
@@ -175,6 +189,87 @@ export function memoryDriverFactory(input: {
 }
 
 type UiProviderProtocol = 'responses' | 'openai' | 'anthropic';
+
+function servePlugins(mode: 'fake' | 'rcc', input: {
+  readonly memory: Parameters<typeof startUiRuntime>[0]['memory'];
+  readonly executionPort: ExecutionRuntimePort;
+}): readonly HarnessPlugin[] {
+  const dependencies = ['humanagent.harness-kernel'];
+  const memoryBackend = input.memory.backend;
+  const provider = mode === 'fake' ? FAKE_SERVE_PROVIDER_PLUGIN : RCC_SERVE_PROVIDER_PLUGIN;
+  const providerPlugin: HarnessPlugin = {
+    manifest: {
+      kind: 'humanagent.plugin',
+      pluginId: provider.pluginId,
+      version: '1.0.0',
+      apiVersion: 1,
+      entry: `builtin:${provider.pluginId}`,
+      dependencies,
+      provides: [...provider.capabilities],
+      consumes: ['harness.kernel'],
+      permissions: [],
+      digest: `builtin:${provider.pluginId}:v1`,
+    },
+    register(context) {
+      context.registerExecutionRuntimePort(input.executionPort);
+    },
+  };
+  return [
+    providerPlugin,
+    {
+      manifest: {
+        kind: 'humanagent.plugin',
+        pluginId: 'humanagent.agent-templates',
+        version: '1.0.0',
+        apiVersion: 1,
+        entry: 'builtin:humanagent.agent-templates',
+        dependencies,
+        provides: ['agent.templates'],
+        consumes: ['harness.kernel'],
+        permissions: [],
+        digest: 'builtin:humanagent.agent-templates:v1',
+      },
+      register(context) {
+        context.registerCapability('agent.templates');
+      },
+    },
+    {
+      manifest: {
+        kind: 'humanagent.plugin',
+        pluginId: 'humanagent.memory',
+        version: '1.0.0',
+        apiVersion: 1,
+        entry: 'builtin:humanagent.memory',
+        dependencies,
+        provides: ['memory.operations', 'memory.context'],
+        consumes: ['harness.kernel'],
+        permissions: [],
+        digest: 'builtin:humanagent.memory:v1',
+      },
+      register(context) {
+        context.registerMemoryOperations(memoryBackend);
+        context.registerAgentMemoryContextInjection(memoryBackend);
+      },
+    },
+    {
+      manifest: {
+        kind: 'humanagent.plugin',
+        pluginId: 'humanagent.ui',
+        version: '1.0.0',
+        apiVersion: 1,
+        entry: 'builtin:humanagent.ui',
+        dependencies,
+        provides: ['ui.projection'],
+        consumes: ['harness.kernel'],
+        permissions: [],
+        digest: 'builtin:humanagent.ui:v1',
+      },
+      register(context) {
+        context.registerCapability('ui.projection');
+      },
+    },
+  ];
+}
 
 function providerBindingFromOptions(
   args: readonly string[],
@@ -463,14 +558,43 @@ export async function main(args: readonly string[]): Promise<void> {
           maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
         }, evidenceRoot)
       : buildFakeExecutionPort(binding, option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined);
-    const cordisHost = createCordisHost([]);
+    const plugins = servePlugins(mode, {
+      executionPort: port,
+      memory: {
+        coordinator: memoryRuntime.composition.coordinator,
+        backend: memoryRuntime.composition.backend,
+        projectKey: paths.projectKey,
+        interaction: memoryRuntime.composition.interaction,
+        bindingRef: memoryRuntime.composition.bindingRef,
+      },
+    });
+    if (!serveCompositionManifestMatches(plugins, mode)) {
+      throw new AppLifecycleError(
+        'serve.composition.manifest-mismatch',
+        `serve ${mode} plugin manifests do not match the declared composition contract`,
+        'repair the Cordis serve plugin manifests before retrying',
+        'humanagent.app.entry-composition',
+      );
+    }
+    const cordisHost = createCordisHost(plugins);
+    cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     const supervisor = await runSupervisorStartup(paths, [
       {
         name: 'cordis-host',
         ownerId: 'humanagent.app.cordis-host',
         nextAction: 'repair Cordis host startup before retrying serve',
-        start: async () => { await cordisHost.start(); },
+        start: async () => {
+          await cordisHost.start();
+          if (!serveCompositionComplete(cordisHost.snapshot(), mode)) {
+            throw new AppLifecycleError(
+              'serve.composition.incomplete',
+              `serve ${mode} composition does not match the declared plugin contract`,
+              'repair the Cordis serve plugin composition before retrying',
+              'humanagent.app.entry-composition',
+            );
+          }
+        },
         dispose: async () => { await cordisHost.dispose(); },
       },
       {
@@ -482,7 +606,7 @@ export async function main(args: readonly string[]): Promise<void> {
             mode,
             organId: id('organ', 'humanagent-ui'),
             binding,
-            port,
+            port: cordisHost.getExecutionRuntimePort(),
             checkpointRoot,
             evidenceRoot,
             uiRoot,
@@ -547,7 +671,8 @@ export async function main(args: readonly string[]): Promise<void> {
         readyAt: supervisor.readyAt,
         stages: supervisor.stages,
       },
-      composition: entryCompositionInventory(),
+      plugins: cordisHost.snapshot().pluginIds,
+      composition: entryCompositionInventory(cordisHost.snapshot(), mode),
     }, null, 2));
     return;
   }

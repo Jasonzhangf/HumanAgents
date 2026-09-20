@@ -1,3 +1,5 @@
+import type { CordisHostSnapshot } from './cordis-host.js';
+
 export type EntryComponentState = 'composed' | 'unavailable';
 
 export interface EntryComponentEvidence {
@@ -14,12 +16,66 @@ export interface EntryCompositionInventory {
   readonly components: readonly EntryComponentEvidence[];
 }
 
+export const FAKE_SERVE_PROVIDER_PLUGIN = {
+  pluginId: 'humanagent.fake-provider',
+  capabilities: ['provider.execution'],
+} as const;
+
+export const RCC_SERVE_PROVIDER_PLUGIN = {
+  pluginId: 'humanagent.rcc-provider',
+  capabilities: ['provider.execution'],
+} as const;
+
+export const SERVE_COMPOSITION_PLUGINS = {
+  fake: [
+    { pluginId: 'humanagent.harness-kernel', capabilities: ['harness.kernel'] },
+    FAKE_SERVE_PROVIDER_PLUGIN,
+    { pluginId: 'humanagent.agent-templates', capabilities: ['agent.templates'] },
+    { pluginId: 'humanagent.memory', capabilities: ['memory.operations', 'memory.context'] },
+    { pluginId: 'humanagent.ui', capabilities: ['ui.projection'] },
+  ],
+  rcc: [
+    { pluginId: 'humanagent.harness-kernel', capabilities: ['harness.kernel'] },
+    RCC_SERVE_PROVIDER_PLUGIN,
+    { pluginId: 'humanagent.agent-templates', capabilities: ['agent.templates'] },
+    { pluginId: 'humanagent.memory', capabilities: ['memory.operations', 'memory.context'] },
+    { pluginId: 'humanagent.ui', capabilities: ['ui.projection'] },
+  ],
+} as const;
+
+export function serveCompositionManifestMatches(
+  plugins: readonly Pick<import('./cordis-host.js').CordisExtensionPlugin, 'manifest'>[],
+  mode: keyof typeof SERVE_COMPOSITION_PLUGINS,
+): boolean {
+  const expected = SERVE_COMPOSITION_PLUGINS[mode];
+  const actual = new Map(plugins.map((plugin) => [plugin.manifest.pluginId, plugin.manifest.provides]));
+  return plugins.length === expected.length - 1
+    && expected.every((plugin) =>
+      plugin.pluginId === 'humanagent.harness-kernel'
+        ? !actual.has(plugin.pluginId)
+        : actual.get(plugin.pluginId)?.length === plugin.capabilities.length
+          && plugin.capabilities.every((capability) => actual.get(plugin.pluginId)?.includes(capability)));
+}
+
 /**
- * Records the real composition boundary of the CLI entry. MVP-scoped stages
- * are marked composed only when serve starts their owner; deferred runtime
- * capabilities remain explicit, typed scope evidence.
+ * Projects the live serve composition boundary. Components not owned by the
+ * serve entry are outside this inventory.
  */
-export function entryCompositionInventory(): EntryCompositionInventory {
+export function entryCompositionInventory(
+  host: Pick<CordisHostSnapshot, 'state' | 'pluginIds' | 'capabilities' | 'startedPluginIds'>,
+  mode: keyof typeof SERVE_COMPOSITION_PLUGINS,
+): EntryCompositionInventory {
+  const pluginIds = new Set(host.pluginIds);
+  const startedPluginIds = new Set(host.startedPluginIds);
+  const hostState = host.state === 'ready' ? 'composed' : 'unavailable';
+  const pluginState = (pluginId: string, capabilities: readonly string[]): EntryComponentState =>
+    host.state === 'ready'
+      && pluginIds.has(pluginId)
+      && startedPluginIds.has(pluginId)
+      && capabilities.every((capability) => host.capabilities[capability] === pluginId)
+      ? 'composed'
+      : 'unavailable';
+  const provider = mode === 'fake' ? FAKE_SERVE_PROVIDER_PLUGIN : RCC_SERVE_PROVIDER_PLUGIN;
   const components: EntryComponentEvidence[] = [
     {
       component: 'configuration',
@@ -47,39 +103,75 @@ export function entryCompositionInventory(): EntryCompositionInventory {
     },
     {
       component: 'cordis-host',
-      state: 'composed',
+      state: hostState,
       ownerId: 'humanagent.app.cordis-host',
-      message: 'serve starts and disposes the CordisHost through supervisor stages',
+      ...(host.state !== 'ready' ? {
+        code: 'entry.component.not-composed',
+        message: 'CordisHost has not reached the ready lifecycle state',
+        nextAction: 'compose, start, and ready the CordisHost',
+      } : {
+        message: 'CordisHost is composed and exposes the live plugin inventory',
+      }),
     },
     {
       component: 'fixed-harness-kernel',
-      state: 'composed',
+      state: pluginState('humanagent.harness-kernel', ['harness.kernel']),
       ownerId: 'humanagent.harness-kernel',
-      message: 'CordisHost unconditionally registers the typed fixed Harness Kernel manifest',
+      ...(pluginState('humanagent.harness-kernel', ['harness.kernel']) === 'composed' ? {
+        message: 'CordisHost unconditionally loaded the fixed Harness Kernel manifest',
+      } : {
+        code: 'entry.component.not-composed',
+        message: 'the fixed Harness Kernel plugin is absent from the live CordisHost',
+        nextAction: 'repair CordisHost fixed-kernel composition',
+      }),
     },
     {
-      component: 'agent-io-eventbus',
-      state: 'unavailable',
-      ownerId: 'humanagent.runtime.agent-io',
-      code: 'entry.component.not-composed',
-      message: 'MVP serve exposes the provider-neutral UI runtime and memory EventBus; raw AgentIo request settlement and task EventBus capability are outside this entry contract',
-      nextAction: 'open the AgentIo/task EventBus contract before adding it to serve',
+      component: mode === 'fake' ? 'fake-plugin' : 'rcc-plugin',
+      state: pluginState(provider.pluginId, provider.capabilities),
+      ownerId: provider.pluginId,
+      ...(pluginState(provider.pluginId, provider.capabilities) === 'composed' ? {
+        message: `the explicit ${mode} execution port is loaded as a Cordis plugin`,
+      } : {
+        code: 'entry.component.not-composed',
+        message: `the ${mode} execution plugin is missing its provider execution capability owner`,
+        nextAction: `repair ${mode} provider plugin composition`,
+      }),
     },
     {
-      component: 'm3-orchestration',
-      state: 'unavailable',
-      ownerId: 'humanagent.app.m3-assembly',
-      code: 'entry.component.not-composed',
-      message: 'M3 assignment/review/merge orchestration is an offline assembly contract, outside the MVP serve entry',
-      nextAction: 'define a real serve task-to-M3 ownership boundary before composing it',
+      component: 'template-plugin',
+      state: pluginState('humanagent.agent-templates', ['agent.templates']),
+      ownerId: 'humanagent.agent-templates',
+      ...(pluginState('humanagent.agent-templates', ['agent.templates']) === 'composed' ? {
+        message: 'the agent template registry is loaded as a Cordis plugin',
+      } : {
+        code: 'entry.component.not-composed',
+        message: 'the agent template plugin is absent from the live CordisHost',
+        nextAction: 'compose the agent template plugin',
+      }),
     },
     {
-      component: 'harness-node-runtime',
-      state: 'unavailable',
-      ownerId: 'humanagent.runtime.nodes',
-      code: 'entry.component.not-composed',
-      message: 'HarnessNodeRuntime is not part of the MVP UI provider execution contract',
-      nextAction: 'define a real node admission boundary before composing it',
+      component: 'memory-plugin',
+      state: pluginState('humanagent.memory', ['memory.operations', 'memory.context']),
+      ownerId: 'humanagent.memory',
+      ...(pluginState('humanagent.memory', ['memory.operations', 'memory.context']) === 'composed' ? {
+        message: 'memory operations and context injection are loaded as a Cordis plugin',
+      } : {
+        code: 'entry.component.not-composed',
+        message: 'the memory plugin is absent from the live CordisHost',
+        nextAction: 'compose the memory plugin',
+      }),
+    },
+    {
+      component: 'ui-plugin',
+      state: pluginState('humanagent.ui', ['ui.projection']),
+      ownerId: 'humanagent.ui',
+      ...(pluginState('humanagent.ui', ['ui.projection']) === 'composed' ? {
+        message: 'the UI runtime projection is loaded as a Cordis plugin',
+      } : {
+        code: 'entry.component.not-composed',
+        message: 'the UI plugin is absent from the live CordisHost',
+        nextAction: 'compose the UI plugin',
+      }),
     },
     {
       component: 'supervisor-lease-startup-dispose',
@@ -99,4 +191,17 @@ export function entryCompositionInventory(): EntryCompositionInventory {
     complete: components.every((component) => component.state === 'composed'),
     components,
   };
+}
+
+export function serveCompositionComplete(
+  host: Pick<CordisHostSnapshot, 'state' | 'pluginIds' | 'capabilities' | 'startedPluginIds'>,
+  mode: keyof typeof SERVE_COMPOSITION_PLUGINS,
+): boolean {
+  const pluginIds = new Set(host.pluginIds);
+  const startedPluginIds = new Set(host.startedPluginIds);
+  return host.state === 'ready'
+    && SERVE_COMPOSITION_PLUGINS[mode].every((plugin) =>
+      pluginIds.has(plugin.pluginId)
+      && startedPluginIds.has(plugin.pluginId)
+      && plugin.capabilities.every((capability) => host.capabilities[capability] === plugin.pluginId));
 }

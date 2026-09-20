@@ -4,10 +4,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { AgentCapabilities, AgentDriver, HarnessPlugin } from '../../packages/contracts/src/index.js';
+import type { AgentCapabilities, AgentDriver, ExecutionRuntimePort, HarnessPlugin } from '../../packages/contracts/src/index.js';
 import {
   CordisHost,
   CordisHostError,
+  FIXED_HARNESS_KERNEL_PLUGIN_ID,
+  createCordisHost,
+  fixedHarnessKernelPlugin,
   loadCordisHost,
   type CordisExtensionPlugin,
 } from '../../packages/app/src/index.js';
@@ -78,6 +81,64 @@ test('Cordis host orders manifests deterministically and rejects duplicate owner
   );
 });
 
+test('fixed kernel remains the unconditional owner and cannot be supplied by a caller', async () => {
+  const host = createCordisHost([]);
+  assert.deepEqual(host.snapshot().pluginIds, [FIXED_HARNESS_KERNEL_PLUGIN_ID]);
+  assert.equal(host.snapshot().capabilities['harness.kernel'], FIXED_HARNESS_KERNEL_PLUGIN_ID);
+  await host.start();
+  assert.equal(host.snapshot().state, 'ready');
+  await host.dispose();
+  assert.equal(host.snapshot().state, 'stopped');
+
+  assert.throws(
+    () => createCordisHost([fixedHarnessKernelPlugin()]),
+    (error: unknown) => error instanceof CordisHostError && error.code === 'plugin-reserved-owner',
+  );
+});
+
+test('Cordis host exposes the fixed kernel plus only the explicitly supplied plugins', () => {
+  const host = createCordisHost([
+    plugin({ id: 'plugin-b', provides: ['cap.b'] }),
+    plugin({ id: 'plugin-a', provides: ['cap.a'] }),
+  ]);
+  assert.deepEqual(host.snapshot().pluginIds, [
+    FIXED_HARNESS_KERNEL_PLUGIN_ID,
+    'plugin-a',
+    'plugin-b',
+  ]);
+});
+
+test('required plugin set fails before startup when any owner is absent', () => {
+  const host = createCordisHost([plugin({ id: 'present', provides: ['cap.present'] })]);
+  assert.throws(
+    () => host.assertLoadedPlugins(['humanagent.harness-kernel', 'present', 'missing']),
+    (error: unknown) => error instanceof CordisHostError
+      && error.code === 'plugin-required-not-loaded'
+      && error.ownerId === 'missing',
+  );
+});
+
+test('execution runtime port is owned by the declared provider plugin and required at consumption', () => {
+  const executionPort = {} as ExecutionRuntimePort;
+  const host = createCordisHost([
+    plugin({
+      id: 'provider',
+      provides: ['provider.execution'],
+      register: (context) => context.registerExecutionRuntimePort(executionPort),
+    }),
+  ]);
+  assert.equal(host.getExecutionRuntimePort(), executionPort);
+  assert.equal(host.snapshot().capabilities['provider.execution'], 'provider');
+
+  const missing = createCordisHost([plugin({ id: 'unrelated', provides: ['unrelated.capability'] })]);
+  assert.throws(
+    () => missing.getExecutionRuntimePort(),
+    (error: unknown) => error instanceof CordisHostError
+      && error.code === 'plugin-required-port-missing'
+      && error.ownerId === 'cordis-host',
+  );
+});
+
 test('Cordis host registers before start and disposes started plugins in reverse order after start failure', async () => {
   const events: string[] = [];
   const host = new CordisHost([
@@ -87,6 +148,49 @@ test('Cordis host registers before start and disposes started plugins in reverse
   await assert.rejects(() => host.start(), (error: unknown) => error instanceof CordisHostError && error.code === 'plugin-start-failed');
   assert.deepEqual(events, ['start:a', 'start:b', 'dispose:b', 'dispose:a']);
   assert.equal(host.snapshot().state, 'failed');
+  assert.deepEqual(host.snapshot().startedPluginIds, []);
+});
+
+test('Cordis host orders plugins by manifest dependencies before start and reverse-disposes on dispose failure', async () => {
+  const events: string[] = [];
+  let failDispose = true;
+  const host = createCordisHost([
+    plugin({
+      id: 'plugin-z',
+      dependencies: ['plugin-a'],
+      provides: ['cap.z'],
+      consumes: ['cap.a'],
+      start: async () => { events.push('start:z'); },
+      dispose: async () => { events.push('dispose:z'); },
+    }),
+    plugin({
+      id: 'plugin-a',
+      provides: ['cap.a'],
+      start: async () => { events.push('start:a'); },
+      dispose: async () => {
+        events.push('dispose:a');
+        if (failDispose) throw new Error('dispose failed');
+      },
+    }),
+  ]);
+  await host.start();
+  assert.deepEqual(host.snapshot().startedPluginIds, [
+    'humanagent.harness-kernel',
+    'plugin-a',
+    'plugin-z',
+  ]);
+  await assert.rejects(
+    () => host.dispose(),
+    (error: unknown) => error instanceof CordisHostError
+      && error.code === 'plugin-dispose-failed'
+      && error.ownerId === 'plugin-a'
+      && error.phase === 'dispose'
+      && host.snapshot().state === 'failed',
+  );
+  assert.deepEqual(events, ['start:a', 'start:z', 'dispose:z', 'dispose:a']);
+  failDispose = false;
+  await host.dispose();
+  assert.equal(host.snapshot().state, 'stopped');
   assert.deepEqual(host.snapshot().startedPluginIds, []);
 });
 

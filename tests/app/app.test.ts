@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -974,6 +974,77 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
   }
 });
 
+test('CLI serve launch reports the live Cordis plugin composition', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-cordis-composition-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const child = spawn(process.execPath, [
+    cli,
+    'serve',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--mode',
+    'fake',
+    '--port',
+    '0',
+  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  try {
+    const launch = await new Promise<{
+      readonly plugins: readonly string[];
+      readonly composition: {
+        readonly complete: boolean;
+        readonly components: readonly { readonly component: string; readonly state: string }[];
+      };
+    }>((resolve, reject) => {
+      let output = '';
+      const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${stderr}`)), 5_000);
+      child.stdout.on('data', (chunk: Uint8Array) => {
+        output += String(chunk);
+        try {
+          const parsed = JSON.parse(output.trim()) as {
+            readonly plugins?: readonly string[];
+            readonly composition?: {
+              readonly complete: boolean;
+              readonly components: readonly { readonly component: string; readonly state: string }[];
+            };
+          };
+          if (parsed.plugins && parsed.composition) {
+            clearTimeout(timeout);
+            resolve({ plugins: parsed.plugins, composition: parsed.composition });
+          }
+        } catch {
+          // The CLI may print partial JSON while the process is starting.
+        }
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`serve exited before startup (${String(code)}): ${output}; stderr=${stderr}`));
+      });
+    });
+
+    assert.deepEqual(launch.plugins, [
+      'humanagent.harness-kernel',
+      'humanagent.agent-templates',
+      'humanagent.fake-provider',
+      'humanagent.memory',
+      'humanagent.ui',
+    ]);
+    assert.equal(launch.composition.complete, true);
+    for (const component of ['cordis-host', 'fixed-harness-kernel', 'fake-plugin', 'template-plugin', 'memory-plugin', 'ui-plugin']) {
+      assert.equal(launch.composition.components.find((candidate) => candidate.component === component)?.state, 'composed');
+    }
+  } finally {
+    child.kill('SIGTERM');
+    if (child.exitCode === null) {
+      await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    }
+  }
+});
+
 test('memory composition binds task and runtime identity to the rooted backend', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -998,6 +1069,68 @@ test('memory composition binds task and runtime identity to the rooted backend',
   if (recalled.status !== 'ready') throw new Error('expected memory recall');
   assert.equal(recalled.value.bindingId, binding.bindingRef);
   assert.deepEqual(scope.taskId, taskId);
+});
+
+test('entry composition reports live serve plugins and rejects an incomplete host', () => {
+  const snapshot = {
+    state: 'ready' as const,
+    pluginIds: [
+      'humanagent.harness-kernel',
+      'humanagent.agent-templates',
+      'humanagent.fake-provider',
+      'humanagent.memory',
+      'humanagent.ui',
+    ],
+    capabilities: {
+      'harness.kernel': 'humanagent.harness-kernel',
+      'agent.templates': 'humanagent.agent-templates',
+      'provider.execution': 'humanagent.fake-provider',
+      'memory.operations': 'humanagent.memory',
+      'memory.context': 'humanagent.memory',
+      'ui.projection': 'humanagent.ui',
+    },
+    startedPluginIds: [
+      'humanagent.harness-kernel',
+      'humanagent.agent-templates',
+      'humanagent.fake-provider',
+      'humanagent.memory',
+      'humanagent.ui',
+    ],
+  };
+  const inventory = entryCompositionInventory(snapshot, 'fake');
+  assert.equal(inventory.complete, true);
+  assert.equal(serveCompositionComplete(snapshot, 'fake'), true);
+  assert.equal(inventory.components.some((component) => component.state === 'unavailable'), false);
+  assert.equal(serveCompositionComplete({ ...snapshot, startedPluginIds: snapshot.startedPluginIds.slice(0, -1) }, 'fake'), false);
+});
+
+test('serve composition contract is independent from the constructed plugin list', () => {
+  const plugin = (pluginId: string, provides: readonly string[]) => ({
+    manifest: {
+      kind: 'humanagent.plugin' as const,
+      pluginId,
+      version: '1.0.0',
+      apiVersion: 1,
+      entry: `builtin:${pluginId}`,
+      dependencies: ['humanagent.harness-kernel'],
+      provides,
+      consumes: ['harness.kernel'],
+      permissions: [],
+      digest: `builtin:${pluginId}:v1`,
+    },
+  });
+  const complete = [
+    plugin('humanagent.fake-provider', ['provider.execution']),
+    plugin('humanagent.agent-templates', ['agent.templates']),
+    plugin('humanagent.memory', ['memory.operations', 'memory.context']),
+    plugin('humanagent.ui', ['ui.projection']),
+  ];
+  assert.equal(serveCompositionManifestMatches(complete, 'fake'), true);
+  assert.equal(serveCompositionManifestMatches(complete.slice(1), 'fake'), false);
+  assert.equal(serveCompositionManifestMatches([
+    ...complete,
+    plugin('humanagent.harness-kernel', ['harness.kernel']),
+  ], 'fake'), false);
 });
 
 test('memory composition uses the trusted task binding ref for explicit brain memory operations', async () => {
@@ -2210,9 +2343,33 @@ test('standalone fake entry shares provider replay output, events, checkpoint ev
   assert.equal(result.checkpoint.outcome, 'succeeded');
   assert.equal(result.receipt.providerClose?.evidenceRefs.some((ref) => ref.locator === 'fake/close'), true);
   assert.equal(result.receipt.observedEvents.at(-1)?.kind, 'provider.terminal');
-  const inventory = entryCompositionInventory();
-  assert.equal(inventory.complete, false);
-  assert.equal(inventory.components.find((component) => component.component === 'm3-orchestration')?.code, 'entry.component.not-composed');
+  const inventory = entryCompositionInventory({
+    state: 'ready',
+    pluginIds: [
+      'humanagent.harness-kernel',
+      'humanagent.agent-templates',
+      'humanagent.fake-provider',
+      'humanagent.memory',
+      'humanagent.ui',
+    ],
+    startedPluginIds: [
+      'humanagent.harness-kernel',
+      'humanagent.agent-templates',
+      'humanagent.fake-provider',
+      'humanagent.memory',
+      'humanagent.ui',
+    ],
+    capabilities: {
+      'harness.kernel': 'humanagent.harness-kernel',
+      'agent.templates': 'humanagent.agent-templates',
+      'provider.execution': 'humanagent.fake-provider',
+      'memory.operations': 'humanagent.memory',
+      'memory.context': 'humanagent.memory',
+      'ui.projection': 'humanagent.ui',
+    },
+  }, 'fake');
+  assert.equal(inventory.complete, true);
+  assert.equal(inventory.components.some((component) => component.component === 'm3-orchestration'), false);
   await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
 });
 
