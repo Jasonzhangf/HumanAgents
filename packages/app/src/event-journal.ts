@@ -27,6 +27,8 @@ import {
 } from '../../runtime/src/events/index.js';
 import { id, type MemoryAgentStatePort, type ScopeRef } from '../../contracts/src/index.js';
 import type { EventBarrierIntent, EventBarrierIntentPort } from '../../runtime/src/events/coordinator.js';
+import { publishOperationEvent, type OperationEventNotificationPort, type PublishOperationEventInput, type OperationEventPublicationReceipt } from '../../runtime/src/events/operation-publication.js';
+import type { EventPublisherRegistryPort } from '../../runtime/src/events/ports.js';
 import { AppLifecycleError } from './errors.js';
 
 const OWNER = 'humanagent.app.event-journal';
@@ -56,6 +58,24 @@ interface PersistedRecord {
 export interface JsonlEventJournal
   extends EventJournalPort, EventExternalOperationPort, EventBarrierIntentPort, MemoryAgentStatePort {
   commitExternalOperation(operation: EventExternalOperation): Promise<EventExternalOperation>;
+}
+
+export interface JsonlOperationEventPublicationInput {
+  readonly journal: JsonlEventJournal;
+  readonly publishers: EventPublisherRegistryPort;
+  readonly notification: OperationEventNotificationPort;
+}
+
+/** Application entry for operation events; it reuses the existing shared event journal. */
+export function publishJsonlOperationEvent(
+  input: JsonlOperationEventPublicationInput,
+  event: PublishOperationEventInput,
+): Promise<OperationEventPublicationReceipt> {
+  return publishOperationEvent(
+    { journal: input.journal, publishers: input.publishers },
+    input.notification,
+    event,
+  );
 }
 
 function commitId(kind: PersistedKind, identity: string): string {
