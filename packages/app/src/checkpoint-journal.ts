@@ -22,6 +22,7 @@ import {
   sameReentryRecord,
   type ClosureRecord,
 } from '../../runtime/src/checkpoints/closure.js';
+import { scopeContains } from '../../runtime/src/events/index.js';
 import { AppLifecycleError } from './errors.js';
 
 const CHECKPOINT_EVIDENCE_PREFIX = 'humanagent://checkpoint/';
@@ -107,7 +108,7 @@ export async function readCheckpointEvidence(input: {
   const record = verification.records.find((candidate) =>
     candidate.kind === 'checkpoint'
     && candidate.checkpoint !== undefined
-    && sameScope(candidate.checkpoint.scope, input.scope)
+    && scopeContains(input.scope, candidate.checkpoint.scope)
     && checkpointEvidenceLocator(candidate.checkpoint) === input.evidence.locator);
   if (!record?.checkpoint) {
     throw new AppLifecycleError(

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -280,6 +280,84 @@ test('memory runtime publishes a committed checkpoint boundary and consumes it i
     } catch {
       // The successful settlement path already releases the session lock.
     }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('checkpoint evidence reads a committed checkpoint through a containing task scope', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-checkpoint-evidence-scope-');
+  try {
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    await ensureControlLayout(paths);
+    const taskId = id('task', 'checkpoint-evidence-scope');
+    const cycleId = id('cycle', 'checkpoint-evidence-scope-cycle-1');
+    const operationId = id('operation', 'checkpoint-evidence-scope-operation-1');
+    const checkpointScope = {
+      organId: id('organ', 'checkpoint-evidence-scope-organ'),
+      taskId,
+      cycleId,
+      operationId,
+    };
+    const recoveryStateRef: EvidenceRef = {
+      evidenceId: id('evidence', 'checkpoint-evidence-scope-recovery'),
+      kind: 'operation',
+      source: 'test',
+      locator: 'humanagent://checkpoint-evidence-scope/recovery',
+      scope: checkpointScope,
+    };
+    const checkpoint = {
+      id: id('checkpoint', 'checkpoint-evidence-scope-1'),
+      scope: checkpointScope,
+      cycleId,
+      seq: 1,
+      previousCheckpointId: null,
+      directiveRevision: 1,
+      executionEpoch: 1,
+      outcome: 'succeeded' as const,
+      summary: 'checkpoint evidence scope regression',
+      recoveryStateRef,
+      evidenceRefs: [recoveryStateRef],
+      next: { kind: 'continue' as const, ref: 'checkpoint-evidence-scope/next' },
+    };
+    const journal = new JsonlOrganJournal(join(paths.journalRoot, 'checkpoints.jsonl'));
+    await journal.append({
+      commitId: checkpointCommitId(checkpoint),
+      kind: 'checkpoint',
+      scope: checkpointScope,
+      checkpoint,
+    });
+    const evidence: EvidenceRef = {
+      ...recoveryStateRef,
+      evidenceId: id('evidence', 'checkpoint-evidence-scope-locator'),
+      locator: 'humanagent://checkpoint/' + checkpoint.id.value,
+      digest: checkpointEvidenceDigest(checkpoint),
+    };
+    const taskScope = { organId: checkpointScope.organId, taskId };
+    const read = await readCheckpointEvidence({
+      filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+      scope: taskScope,
+      evidence,
+    });
+    assert.equal(read.sourceRef, evidence.locator);
+    assert.equal(read.sourceDigest, evidence.digest);
+
+    await assert.rejects(
+      () => readCheckpointEvidence({
+        filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+        scope: { ...taskScope, cycleId: id('cycle', 'other-cycle') },
+        evidence,
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'checkpoint-evidence-missing',
+    );
+    await assert.rejects(
+      () => readCheckpointEvidence({
+        filePath: join(paths.journalRoot, 'checkpoints.jsonl'),
+        scope: { organId: checkpointScope.organId, taskId: id('task', 'other-task') },
+        evidence,
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'checkpoint-evidence-missing',
+    );
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
