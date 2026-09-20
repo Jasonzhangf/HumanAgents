@@ -23,7 +23,7 @@
       {"from":"integration_verified","to":"mainline_merged","scenario_condition":"parallel_pair_enabled","requirements":["tested_integration_commit_merged"]},
       {"from":"mainline_merged","to":"remote_verified","scenario_condition":"parallel_pair_enabled","requirements":["remote_main_receipt"]},
       {"from":"mainline_merged","to":"promoted","scenario_condition":"parallel_pair_disabled","requirements":["promotion_record","record_graph_pass"]},
-      {"from":"remote_verified","to":"promoted","scenario_condition":"parallel_pair_enabled","requirements":["promotion_record","record_graph_pass","debug_merge_comment"]},
+      {"from":"remote_verified","to":"promoted","scenario_condition":"parallel_pair_enabled","requirements":["promotion_record","record_graph_pass","debug_merge_comment","collab_live_closure"]},
       {"from":"promoted","to":"closed","requirements":["closeout_record","playground_cleanup"]}
     ]
   },
