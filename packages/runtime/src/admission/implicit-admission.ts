@@ -1,6 +1,8 @@
 import {
   assertBusinessPayload,
   validateRequirementEnvelope,
+  type BusinessPayload,
+  type HealthState,
   type RequirementEnvelope,
 } from '../../../contracts/src/index.js';
 import { AdmissionError } from './errors.js';
@@ -10,6 +12,7 @@ import {
   type AdmissionDecision,
   type AdmissionQueueConfig,
   type AdmissionQueueKind,
+  type CheckpointRecoveryFacts,
   type ClassifiedRequirement,
   type QueueLoadSnapshot,
   type TaskRevision,
@@ -55,6 +58,63 @@ export function classifyRequirement(input: {
   validateRequirementEnvelope(input.envelope);
   assertQueueRegistered(input.queue, input.registeredQueues);
   return { envelope: input.envelope, queue: input.queue };
+}
+
+export class RequirementAdmissionError extends Error {
+  readonly decision: AdmissionDecision;
+
+  constructor(decision: AdmissionDecision) {
+    super(decision.reason);
+    this.name = 'RequirementAdmissionError';
+    this.decision = decision;
+  }
+}
+
+export interface RequirementAdmissionInput {
+  readonly envelope: RequirementEnvelope;
+  readonly queue: AdmissionQueueConfig;
+  readonly registeredQueues: readonly AdmissionQueueKind[];
+  readonly queueLoad: QueueLoadSnapshot;
+  readonly requiredCapabilities: readonly string[];
+  readonly availableCapabilities: readonly string[];
+  readonly health: HealthState;
+  readonly requiredInputRefs: readonly string[];
+  readonly providedInputRefs: readonly string[];
+  readonly checkpoint: CheckpointRecoveryFacts;
+  readonly businessPayload?: BusinessPayload;
+  readonly ownerId?: string;
+}
+
+export interface RequirementAdmissionReceipt {
+  readonly classified: ClassifiedRequirement;
+  readonly decision: AdmissionDecision;
+}
+
+/**
+ * The single implicit classification/admission path for a confirmed
+ * requirement. A requirement that is not admitted never yields a receipt, so
+ * callers cannot create a task or start execution from it.
+ */
+export function admitRequirement(input: RequirementAdmissionInput): RequirementAdmissionReceipt {
+  const classified = classifyRequirement({
+    envelope: input.envelope,
+    queue: input.queue.kind,
+    registeredQueues: input.registeredQueues,
+  });
+  const decision = checkAdmission({
+    queue: input.queue,
+    queueLoad: input.queueLoad,
+    requiredCapabilities: input.requiredCapabilities,
+    availableCapabilities: input.availableCapabilities,
+    health: input.health,
+    requiredInputRefs: input.requiredInputRefs,
+    providedInputRefs: input.providedInputRefs,
+    checkpoint: input.checkpoint,
+    ...(input.businessPayload === undefined ? {} : { businessPayload: input.businessPayload }),
+    ...(input.ownerId === undefined ? {} : { ownerId: input.ownerId }),
+  });
+  if (decision.status !== 'admitted') throw new RequirementAdmissionError(decision);
+  return { classified, decision };
 }
 
 function waiting(

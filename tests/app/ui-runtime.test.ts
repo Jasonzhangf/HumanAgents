@@ -1331,6 +1331,51 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
+test('confirmed requirement cannot bypass implicit admission when the provider is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-admission-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'unavailable',
+  );
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:task-detail',
+    rawInput: 'admit this requirement before creating work',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'admit this requirement before creating work',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the admission-gated requirement',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-admission',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-17T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-admission',
+  });
+
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'implicit-admission.blocked'
+      && error.ownerId === 'runtime-coordinator'
+      && error.httpStatus === 409,
+  );
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+});
+
 test('explicit brain status query never creates a task or FIFO entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
@@ -1566,6 +1611,76 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     const control = await controlResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
     assert.equal(control.error.code, 'explicit-brain.control.unsupported');
     assert.equal(control.error.ownerId, 'humanagent.app');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('explicit brain HTTP dispatch blocks on implicit admission instead of creating a task', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-http-admission-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    providerState: 'unavailable',
+    memory: testMemory('project-ui-explicit-http-admission'),
+  });
+  try {
+    const inputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:http-admission',
+        rawInput: 'block at admission over HTTP',
+        channel: 'business',
+      }),
+    });
+    const input = await inputResponse.json() as { readonly interactionId: string };
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/matching`, { method: 'POST' });
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/match`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        normalizedInput: 'block at admission over HTTP',
+        matchedTasks: [],
+        knownFacts: [],
+      }),
+    });
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/proposal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        proposedIntent: 'create',
+        proposal: 'create the admission-gated HTTP requirement',
+      }),
+    });
+    const inspected = await (await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}`,
+    )).json() as { readonly draft?: { readonly draftId: string } };
+    assert.ok(inspected.draft);
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/confirmation`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: inspected.draft!.draftId,
+        inputRevision: 1,
+        confirmationRef: 'confirmation:http-admission',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-09-17T00:00:00.000Z',
+        payloadRef: 'asset://requirements/http-admission',
+      }),
+    });
+
+    const dispatchResponse = await fetch(`${runtime.server.url}/api/explicit/dispatch-next`, { method: 'POST' });
+    assert.equal(dispatchResponse.status, 409);
+    const body = await dispatchResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
+    assert.equal(body.error.code, 'implicit-admission.blocked');
+    assert.equal(body.error.ownerId, 'runtime-coordinator');
+    assert.equal(runtime.service.listTasks().counts.total, 0);
   } finally {
     await runtime.server.close();
   }

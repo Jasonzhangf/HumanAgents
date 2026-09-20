@@ -64,6 +64,12 @@ import {
   type RequirementSubmitReceipt,
 } from '../../../runtime/src/explicit-brain/router.js';
 import { IntakeError } from '../../../runtime/src/intake/errors.js';
+import {
+  ADMISSION_QUEUE_KINDS,
+  RequirementAdmissionError,
+  admitRequirement,
+  type RequirementAdmissionReceipt,
+} from '../../../runtime/src/admission/index.js';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
@@ -120,6 +126,11 @@ import type { UiRuntimeJournal } from './journal.js';
 
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
+const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
+// The UI runtime composes no queue-capacity policy yet, so the execution queue
+// is explicitly unbounded. Capability, health, input, and checkpoint gates
+// still apply; only the backlog/quota dimensions are declared unlimited.
+const UNBOUNDED_QUEUE_LIMIT = Number.MAX_SAFE_INTEGER;
 
 const LIFECYCLE_STATES = new Set([
   'created',
@@ -206,6 +217,16 @@ function apiError(error: unknown): UiRuntimeApiError {
   if (error instanceof UiRuntimeApiError) return error;
   if (error instanceof IntakeError) {
     return new UiRuntimeApiError(error.name, error.owner, error.message, error.nextAction, 409);
+  }
+  if (error instanceof RequirementAdmissionError) {
+    const { decision } = error;
+    return new UiRuntimeApiError(
+      `implicit-admission.${decision.status}`,
+      decision.ownerId,
+      decision.reason,
+      `${decision.nextAction.kind}${decision.nextAction.ref ? `:${decision.nextAction.ref}` : ''}`,
+      409,
+    );
   }
   if (error instanceof ExplicitBrainRouterError) {
     return new UiRuntimeApiError(
@@ -1100,13 +1121,16 @@ export class UiRuntimeService {
           executionEpoch: existingDispatch.executionEpoch,
         };
       }
+      const admitted = this.classifyAndAdmitConfirmedRequirement(consumed);
       const task = consumed.taskRef
         ? this.coordinator.taskSnapshot(consumed.taskRef)
         : this.coordinator.createTask({
-            title: consumed.normalizedInput,
-            directive: consumed.normalizedInput,
+            title: admitted.classified.envelope.normalizedInput,
+            directive: admitted.classified.envelope.normalizedInput,
           });
-      const started = this.coordinator.startExecution(task.taskId, { prompt: consumed.payloadRef });
+      const started = this.coordinator.startExecution(task.taskId, {
+        prompt: admitted.classified.envelope.payloadRef,
+      });
       this.dispatchLedger.set(consumed.draftId, {
         draftId: consumed.draftId,
         taskId: task.taskId,
@@ -1132,6 +1156,33 @@ export class UiRuntimeService {
     } finally {
       release();
     }
+  }
+
+  private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {
+    const status = this.status();
+    const health = status.state === 'ready'
+      ? 'healthy'
+      : status.state === 'degraded'
+        ? 'degraded'
+        : status.state === 'unknown'
+          ? 'unknown'
+          : 'unhealthy';
+    const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
+      ? [PROVIDER_EXECUTION_CAPABILITY]
+      : [];
+    return admitRequirement({
+      envelope,
+      queue: { kind: 'execution', concurrencyLimit: UNBOUNDED_QUEUE_LIMIT, maxBacklog: UNBOUNDED_QUEUE_LIMIT },
+      registeredQueues: ADMISSION_QUEUE_KINDS,
+      queueLoad: { running: 0, queued: 0 },
+      requiredCapabilities: [PROVIDER_EXECUTION_CAPABILITY],
+      availableCapabilities,
+      health,
+      requiredInputRefs: [envelope.payloadRef],
+      providedInputRefs: [envelope.payloadRef],
+      checkpoint: { recoverable: true },
+      ownerId: 'runtime-coordinator',
+    });
   }
 
   private persistExplicitBrainState(): void {
