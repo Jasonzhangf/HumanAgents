@@ -144,6 +144,7 @@ test('provider agent driver maps provider start, observe, stop, settle, and clos
   for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
   assert.deepEqual(events.map((event) => event.kind), ['provider.output', 'provider.terminal']);
   assert.equal(events[0]?.summary, 'normalized output');
+  assert.equal(events[1]?.terminalState, 'succeeded');
 
   const stop = await instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: 1, operationId });
   assert.equal(stop.requested, true);

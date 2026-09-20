@@ -65,6 +65,8 @@ function toAgentEvent(instance: DriverInstance, event: ProviderEvent): AgentEven
     executionEpoch: instance.executionEpoch,
     kind: event.kind,
     evidenceRefs: event.evidenceRefs,
+    ...(event.summary === undefined ? {} : { summary: event.summary }),
+    ...(event.terminalState === undefined ? {} : { terminalState: event.terminalState }),
   };
 }
 

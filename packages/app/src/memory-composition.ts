@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'n
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { ImmutableAssetStore } from '../../adapters/filesystem/src/index.js';
 import type {
+  AgentDriver,
   EvidenceRef,
   MemoryCandidateCategory,
   MemoryActorContext,
@@ -169,6 +170,13 @@ export interface MemoryCompositionInput {
   readonly evidenceSource?: MemoryEvidenceSourcePort;
   readonly patchReader?: MemoryProjectPatchReader;
   readonly projectSourceUpdatePublisher?: MemoryProjectSourceUpdatePublisher;
+  readonly driver?: AgentDriver;
+  readonly driverFor?: (input: {
+    readonly taskId: import('../../contracts/src/index.js').TaskId;
+    readonly operationId: import('../../contracts/src/index.js').OperationId;
+    readonly executionEpoch: number;
+    readonly assignmentId: string;
+  }) => AgentDriver;
   readonly externalOperations?: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
   };
@@ -1067,6 +1075,8 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
         executionEpoch: input.binding.executionEpoch,
       }),
     }),
+    ...(input.driver === undefined ? {} : { driver: input.driver }),
+    ...(input.driverFor === undefined ? {} : { driverFor: input.driverFor }),
     ...(input.state === undefined ? {} : { state: input.state }),
   });
   agent.bind({

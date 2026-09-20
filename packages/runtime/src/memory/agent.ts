@@ -6,6 +6,10 @@ import {
   validateMemoryCurationResult,
   validateMemoryFollowUpRequest,
   validateProjectSourceUpdateProposal,
+  type AgentDriver,
+  type AgentEvent,
+  type AgentInput,
+  type AgentOutput,
   type AuditPromptSnapshot,
   type MemoryActorContext,
   type MemoryAgentStatePort,
@@ -95,6 +99,15 @@ export interface MemoryAnalysisError {
   readonly fingerprint: string;
 }
 
+export interface MemoryProceduralEvidence {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly success: boolean;
+  readonly preconditionFingerprint: string;
+  readonly stepFingerprint: string;
+  readonly failureBoundaryFingerprint: string;
+}
+
 export interface MemoryRewindChain {
   readonly failedBranchRef: string;
   readonly rewindCheckpointRef: string;
@@ -108,6 +121,7 @@ export interface MemoryRewindChain {
 export interface MemoryAnalysisInputs {
   readonly corrections: readonly MemoryAnalysisCorrection[];
   readonly errors: readonly MemoryAnalysisError[];
+  readonly proceduralEvidence?: readonly MemoryProceduralEvidence[];
   readonly rewindChains: readonly MemoryRewindChain[];
   readonly actualPathRefs: readonly string[];
   readonly declaredPathRefs: readonly string[];
@@ -167,6 +181,13 @@ export interface MemoryAgentOptions {
   readonly projectKey: string;
   readonly auditPromptRef: string;
   readonly autoUpdate: boolean;
+  readonly driver?: AgentDriver;
+  readonly driverFor?: (input: {
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+    readonly assignmentId: string;
+  }) => AgentDriver;
   readonly sessions: MemorySessionEvidenceSourcePort;
   readonly projectSources: MemoryProjectSourcePort;
   readonly auditPrompts: MemoryAuditPromptSourcePort;
@@ -324,15 +345,49 @@ function validateFingerprintInputs(value: unknown, label: string): void {
   }
 }
 
+function validateProceduralEvidence(value: unknown): asserts value is readonly MemoryProceduralEvidence[] {
+  if (!Array.isArray(value)) throw new ContractError('memory analysis proceduralEvidence must be an array');
+  for (const entry of value) {
+    if (!isRecord(entry)) throw new ContractError('memory analysis proceduralEvidence entries must be objects');
+    assertOnlyKeys(
+      entry,
+      [
+        'sourceRef',
+        'sourceDigest',
+        'success',
+        'preconditionFingerprint',
+        'stepFingerprint',
+        'failureBoundaryFingerprint',
+      ],
+      'memory analysis proceduralEvidence',
+    );
+    if (typeof entry.sourceRef !== 'string' || entry.sourceRef.trim() === '') {
+      throw new ContractError('memory analysis proceduralEvidence sourceRef is required');
+    }
+    if (typeof entry.sourceDigest !== 'string' || entry.sourceDigest.trim() === '') {
+      throw new ContractError('memory analysis proceduralEvidence sourceDigest is required');
+    }
+    if (typeof entry.success !== 'boolean') {
+      throw new ContractError('memory analysis proceduralEvidence success is required');
+    }
+    for (const field of ['preconditionFingerprint', 'stepFingerprint', 'failureBoundaryFingerprint'] as const) {
+      if (typeof entry[field] !== 'string' || entry[field].trim() === '') {
+        throw new ContractError(`memory analysis proceduralEvidence ${field} is required`);
+      }
+    }
+  }
+}
+
 export function validateMemoryAnalysisInputs(value: unknown): asserts value is MemoryAnalysisInputs {
   if (!isRecord(value)) throw new ContractError('memory analysis inputs must be an object');
   assertOnlyKeys(
     value,
-    ['corrections', 'errors', 'rewindChains', 'actualPathRefs', 'declaredPathRefs'],
+    ['corrections', 'errors', 'proceduralEvidence', 'rewindChains', 'actualPathRefs', 'declaredPathRefs'],
     'memory analysis inputs',
   );
   validateFingerprintInputs(value.corrections, 'memory analysis corrections');
   validateFingerprintInputs(value.errors, 'memory analysis errors');
+  if (value.proceduralEvidence !== undefined) validateProceduralEvidence(value.proceduralEvidence);
   validateStringArray(value.actualPathRefs, 'memory analysis actualPathRefs');
   validateStringArray(value.declaredPathRefs, 'memory analysis declaredPathRefs');
   if (!Array.isArray(value.rewindChains)) throw new ContractError('memory analysis rewindChains must be an array');
@@ -367,6 +422,42 @@ export function validateMemoryAnalysisInputs(value: unknown): asserts value is M
   if (value.declaredPathRefs.length > 0 && value.actualPathRefs.length === 0) {
     throw new ContractError('memory analysis actualPathRefs are required when declaredPathRefs are provided');
   }
+}
+
+function proceduralEvidence(input: MemoryAnalysisInputs | undefined): readonly MemoryProceduralEvidence[] {
+  return input?.proceduralEvidence ?? [];
+}
+
+function proceduralSkillGate(
+  input: MemoryAnalysisRequest,
+  prompt: AuditPromptSnapshot,
+): MemoryCurationResult | undefined {
+  if (input.candidateCategory !== 'local-skill-update') return undefined;
+  const evidence = proceduralEvidence(input.analysisInputs);
+  const successful = evidence.filter((entry) => entry.success);
+  const failed = evidence.filter((entry) => !entry.success);
+  const fingerprints = new Set(evidence.map((entry) =>
+    `${entry.preconditionFingerprint}\u0000${entry.stepFingerprint}\u0000${entry.failureBoundaryFingerprint}`));
+  const reason = evidence.length < 2
+    ? 'local Skill update requires at least two procedural evidence records'
+    : failed.length > 0
+      ? 'local Skill update requires every procedural evidence record to report success'
+      : successful.length < 2
+        ? 'local Skill update requires at least two successful procedural evidence records'
+        : fingerprints.size !== 1
+          ? 'local Skill update procedural evidence fingerprints must describe the same repeatable procedure'
+          : undefined;
+  if (reason === undefined) return undefined;
+  return {
+    operationId: input.operationId,
+    auditPrompt: prompt,
+    sourceRefs: [...input.sourceRefs],
+    outcome: 'attention',
+    matchedMemoryIds: [],
+    conflictRefs: [],
+    explanation: reason,
+    nextAction: 'attention',
+  };
 }
 
 function validatePersistedFollowUpRequest(value: unknown): asserts value is MemoryFollowUpRequest {
@@ -524,6 +615,210 @@ function sameFollowUpRequest(left: MemoryFollowUpRequest, right: MemoryFollowUpR
     && left.inputDigest === right.inputDigest;
 }
 
+interface InspectedMemorySource {
+  readonly sourceRef: string;
+  readonly sourceDigest: string;
+  readonly text: string;
+}
+
+function memoryAnalysisInput(
+  input: MemoryAnalysisRequest,
+  prompt: AuditPromptSnapshot,
+  promptContent: string,
+  inspectedSources: readonly InspectedMemorySource[],
+): AgentInput {
+  if (input.taskId === undefined) {
+    throw new ContractError('memory analysis provider requires a task-bound request');
+  }
+  return {
+    taskId: input.taskId,
+    executionEpoch: input.executionEpoch,
+    assignmentId: `memory-analysis:${input.operationId.value}`,
+    payload: {
+      operationId: input.operationId.value,
+      bindingRef: input.bindingRef,
+      projectKey: input.projectKey,
+      scope: {
+        kind: input.scope.kind,
+        organId: input.scope.organId.value,
+        ...(input.scope.taskId === undefined ? {} : { taskId: input.scope.taskId.value }),
+      },
+      sourceRefs: [...input.sourceRefs],
+      sourceDigests: [...input.sourceDigests],
+      observation: input.observation,
+      requestedKind: input.requestedKind,
+      candidateCategory: input.candidateCategory,
+      trigger: input.trigger,
+      prompt: {
+        promptRef: prompt.promptRef,
+        canonicalRef: prompt.canonicalRef,
+        revision: prompt.revision,
+        digest: prompt.digest,
+        loadedAt: prompt.loadedAt,
+        content: promptContent,
+      },
+      sources: inspectedSources.map((source) => ({
+        sourceRef: source.sourceRef,
+        sourceDigest: source.sourceDigest,
+        text: source.text,
+      })),
+      ...(input.analysisInputs === undefined
+        ? {}
+        : {
+            analysisInputs: {
+              corrections: input.analysisInputs.corrections.map((entry) => ({ ...entry })),
+              errors: input.analysisInputs.errors.map((entry) => ({ ...entry })),
+              ...(input.analysisInputs.proceduralEvidence === undefined
+                ? {}
+                : {
+                    proceduralEvidence: input.analysisInputs.proceduralEvidence.map((entry) => ({ ...entry })),
+                  }),
+              rewindChains: input.analysisInputs.rewindChains.map((chain) => ({
+                ...chain,
+                successfulBranchRefs: [...chain.successfulBranchRefs],
+                successEvidenceRefs: [...chain.successEvidenceRefs],
+                absoluteJournalRefs: [...chain.absoluteJournalRefs],
+              })),
+              actualPathRefs: [...input.analysisInputs.actualPathRefs],
+              declaredPathRefs: [...input.analysisInputs.declaredPathRefs],
+            },
+          }),
+    },
+  };
+}
+
+function providerCuration(curation: unknown, input: MemoryAnalysisRequest, prompt: AuditPromptSnapshot): MemoryCurationResult {
+  if (!isRecord(curation)) throw new ContractError('memory provider output is missing curation');
+  const result = curation as unknown as MemoryCurationResult;
+  validateMemoryCurationResult(result);
+  if (
+    result.operationId.scope !== input.operationId.scope
+    || result.operationId.value !== input.operationId.value
+    || result.auditPrompt.promptRef !== prompt.promptRef
+    || result.auditPrompt.canonicalRef !== prompt.canonicalRef
+    || result.auditPrompt.revision !== prompt.revision
+    || result.auditPrompt.digest !== prompt.digest
+    || result.auditPrompt.loadedAt !== prompt.loadedAt
+    || result.sourceRefs.length !== input.sourceRefs.length
+    || result.sourceRefs.some((ref, index) => ref !== input.sourceRefs[index])
+  ) {
+    throw new ContractError('memory provider curation does not match the admitted analysis operation');
+  }
+  return {
+    ...result,
+    operationId: { ...result.operationId },
+    auditPrompt: { ...result.auditPrompt },
+    sourceRefs: [...result.sourceRefs],
+    matchedMemoryIds: [...result.matchedMemoryIds],
+    conflictRefs: [...result.conflictRefs],
+  };
+}
+
+function parseProviderCuration(text: string): unknown {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) throw new ContractError('memory provider produced no curation output');
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
+  const candidate = fenced?.[1]?.trim() ?? trimmed;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const start = candidate.indexOf('{');
+    const end = candidate.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(candidate.slice(start, end + 1));
+      } catch {
+        // fall through to the explicit malformed-output error below
+      }
+    }
+    throw new ContractError('memory provider produced malformed curation JSON');
+  }
+}
+
+function isTerminalEvent(event: AgentEvent): boolean {
+  return event.kind === 'terminal' || event.kind.endsWith('.terminal');
+}
+
+async function observeCuration(driver: AgentDriver, request: AgentInput): Promise<unknown> {
+  let terminalState: string | undefined;
+  let observed = '';
+  for await (const event of driver.observe({ runtimeId: request.assignmentId })) {
+    if (event.taskId.value !== request.taskId.value || event.executionEpoch !== request.executionEpoch) {
+      throw new ContractError('memory provider event is not bound to the admitted operation');
+    }
+    if (isTerminalEvent(event)) {
+      terminalState = event.terminalState;
+      break;
+    }
+    if (event.summary !== undefined && event.summary.length > 0) observed += event.summary;
+  }
+  if (terminalState === undefined) {
+    throw new ContractError('memory provider observe ended without a terminal event');
+  }
+  if (terminalState !== 'succeeded') {
+    throw new ContractError(`memory provider terminal state was ${terminalState}`);
+  }
+  return parseProviderCuration(observed);
+}
+
+async function providerOutcome(
+  options: Pick<MemoryAgentOptions, 'driver' | 'driverFor'>,
+  input: MemoryAnalysisRequest,
+  prompt: AuditPromptSnapshot,
+  promptContent: string,
+  inspectedSources: readonly InspectedMemorySource[],
+): Promise<MemoryCurationResult> {
+  const request = memoryAnalysisInput(input, prompt, promptContent, inspectedSources);
+  const driver = options.driver ?? options.driverFor?.({
+    taskId: request.taskId,
+    operationId: input.operationId,
+    executionEpoch: request.executionEpoch,
+    assignmentId: request.assignmentId,
+  });
+  if (driver === undefined) throw new ContractError('memory analysis provider is not configured');
+  const handle = await driver.start({
+    runtimeId: request.assignmentId,
+    taskId: request.taskId,
+    executionEpoch: request.executionEpoch,
+    assignmentId: request.assignmentId,
+    organId: input.scope.organId,
+    operationId: input.operationId,
+  });
+  if (handle.runtimeId !== request.assignmentId || handle.executionEpoch !== request.executionEpoch) {
+    throw new ContractError('memory provider returned a handle for another runtime or epoch');
+  }
+  let firstError: unknown;
+  try {
+    const output = await driver.submit(request);
+    if (
+      output.taskId.value !== request.taskId.value
+      || output.executionEpoch !== request.executionEpoch
+      || output.assignmentId !== request.assignmentId
+    ) {
+      throw new ContractError('memory provider output is not bound to the admitted operation');
+    }
+    const payload = output.payload as Record<string, unknown>;
+    if (payload.curation !== undefined) {
+      return providerCuration(payload.curation, input, prompt);
+    }
+    const observed = await observeCuration(driver, request);
+    return providerCuration(observed, input, prompt);
+  } catch (error) {
+    firstError = error;
+    throw error;
+  } finally {
+    try {
+      const closure = await driver.settle({ runtimeId: request.assignmentId, executionEpoch: request.executionEpoch });
+      if (closure.state !== 'succeeded') {
+        const settleError = new ContractError(`memory provider settle did not succeed: ${closure.state}`);
+        if (firstError === undefined) throw settleError;
+      }
+    } catch (settleError) {
+      if (firstError === undefined) throw settleError;
+    }
+  }
+}
+
 function followUpAnalysisRequest(input: MemoryFollowUpRequest, prior: MemoryAnalysisRequest): MemoryAnalysisRequest {
   return {
     operationId: input.operationId,
@@ -581,6 +876,9 @@ export class MemoryAgent {
   constructor(private readonly options: MemoryAgentOptions) {
     nonEmpty(options.projectKey, 'memory agent project key');
     nonEmpty(options.auditPromptRef, 'memory agent audit prompt ref');
+    if (options.driver !== undefined && options.driverFor !== undefined) {
+      throw new ContractError('memory agent accepts either driver or driverFor, not both');
+    }
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -732,6 +1030,7 @@ export class MemoryAgent {
         issue: issue('memory-agent-source-invalid', 'attention', 'memory analysis sources and digests must be non-empty and aligned', 'memory-source-integrity'),
       };
     }
+    const inspectedSources: InspectedMemorySource[] = [];
     for (const [index, sourceRef] of input.sourceRefs.entries()) {
       let inspected;
       try {
@@ -748,6 +1047,11 @@ export class MemoryAgent {
           issue: issue('memory-agent-source-invalid', 'attention', `memory source digest drifted: ${sourceRef}`, 'memory-source-integrity'),
         };
       }
+      inspectedSources.push({
+        sourceRef: inspected.sourceRef,
+        sourceDigest: inspected.sourceDigest,
+        text: inspected.text,
+      });
     }
 
     if (input.analysisInputs !== undefined) {
@@ -763,6 +1067,10 @@ export class MemoryAgent {
       const analysisSources = [
         ...input.analysisInputs.corrections.map((entry) => ({ sourceRef: entry.sourceRef, expectedDigest: entry.sourceDigest })),
         ...input.analysisInputs.errors.map((entry) => ({ sourceRef: entry.sourceRef, expectedDigest: entry.sourceDigest })),
+        ...(input.analysisInputs.proceduralEvidence ?? []).map((entry) => ({
+          sourceRef: entry.sourceRef,
+          expectedDigest: entry.sourceDigest,
+        })),
         ...input.analysisInputs.rewindChains.flatMap((chain) => [
           { sourceRef: chain.failedBranchRef, expectedDigest: knownSources.get(chain.failedBranchRef) },
           { sourceRef: chain.rewindCheckpointRef, expectedDigest: knownSources.get(chain.rewindCheckpointRef) },
@@ -832,6 +1140,8 @@ export class MemoryAgent {
         explanation: 'rewind evidence chain is missing',
         nextAction: 'attention',
       };
+    } else if (input.candidateCategory === 'local-skill-update') {
+      analysisAttention = proceduralSkillGate(input, promptSnapshot);
     } else if (input.analysisInputs !== undefined) {
       const incompleteRewind = input.analysisInputs.rewindChains.find((chain) =>
         chain.reentryFactRef === undefined
@@ -1011,7 +1321,7 @@ export class MemoryAgent {
       }
     }
 
-    let outcome: MemoryCurationResult;
+    let outcome: MemoryCurationResult | undefined;
     if (analysisAttention !== undefined) {
       outcome = analysisAttention;
     } else if (novelty!.classification === 'unknown') {
@@ -1037,6 +1347,49 @@ export class MemoryAgent {
         nextAction: 'none',
       };
     } else {
+      if (this.options.driver !== undefined || this.options.driverFor !== undefined) {
+        try {
+          outcome = await providerOutcome(
+            this.options,
+            input,
+            promptSnapshot,
+            prompt.content,
+            inspectedSources,
+          );
+        } catch (error) {
+          return {
+            status: 'waiting',
+            issue: issue(
+              'memory-agent-analysis-unavailable',
+              'waiting',
+              error instanceof Error ? error.message : 'memory analysis provider is unavailable',
+              'memory-analysis-provider',
+            ),
+          };
+        }
+        validateMemoryCurationResult(outcome);
+        if (outcome.outcome !== 'candidate') {
+          this.analyses.set(input.operationId.value, {
+            request: {
+              ...input,
+              sourceRefs: [...input.sourceRefs],
+              sourceDigests: [...input.sourceDigests],
+              ...(input.projectPatch === undefined ? {} : { projectPatch: { ...input.projectPatch } }),
+            },
+            acceptedAt: this.now(),
+          });
+          await this.persistState();
+          return {
+            status: 'ready',
+            value: {
+              curation: outcome,
+              projectSources: [],
+              liveContextMutated: false,
+              promptSnapshot,
+            },
+          };
+        }
+      }
       const submission = await bound.value.binding.operations.submitCandidate({
         submissionId: `memory-analysis:${input.operationId.value}`,
         requestId: `memory-analysis:${input.operationId.value}`,
@@ -1055,17 +1408,22 @@ export class MemoryAgent {
         reason: `${input.trigger}:${sessionEvidence?.sourceRef ?? prompt.canonicalRef}`,
         inputDigest: prompt.digest,
       });
-      outcome = {
-        operationId: input.operationId,
-        auditPrompt: promptSnapshot,
-        sourceRefs: [...input.sourceRefs],
-        outcome: 'candidate',
-        ...(submission.candidateId === undefined ? {} : { candidateId: submission.candidateId }),
-        matchedMemoryIds: [],
-        conflictRefs: [],
-        explanation: `memory analysis produced a ${input.candidateCategory} candidate for review`,
-        nextAction: 'review',
-      };
+      outcome = outcome === undefined
+        ? {
+            operationId: input.operationId,
+            auditPrompt: promptSnapshot,
+            sourceRefs: [...input.sourceRefs],
+            outcome: 'candidate',
+            ...(submission.candidateId === undefined ? {} : { candidateId: submission.candidateId }),
+            matchedMemoryIds: [],
+            conflictRefs: [],
+            explanation: `memory analysis produced a ${input.candidateCategory} candidate for review`,
+            nextAction: 'review',
+          }
+        : {
+            ...outcome,
+            candidateId: submission.candidateId ?? outcome.candidateId,
+          };
       validateMemoryCurationResult(outcome);
       this.analyses.set(input.operationId.value, {
         request: {

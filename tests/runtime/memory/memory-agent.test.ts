@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   id,
+  type AgentDriver,
+  type AgentOutput,
   type MemoryActorContext,
   type MemoryAuditPromptSnapshotSource,
   type MemoryAuditPromptSourcePort,
@@ -161,6 +163,222 @@ function bind(agent: MemoryAgent, operations: MemoryOperationsPort): MemoryAgent
   return agent;
 }
 
+function providerDriver(input: {
+  readonly events: string[];
+  readonly outcome?: 'candidate' | 'attention';
+  readonly settleState?: 'succeeded' | 'failed';
+  readonly mutateOutput?: (output: AgentOutput) => AgentOutput;
+}): AgentDriver {
+  return {
+    kind: 'memory-test',
+    capabilities: async () => ({ driverKind: 'memory-test', capabilities: ['analysis'], version: '1' }),
+    start: async (request) => {
+      input.events.push(`start:${request.taskId.value}:${request.executionEpoch}`);
+      return { runtimeId: request.runtimeId, executionEpoch: request.executionEpoch };
+    },
+    resume: async () => { throw new Error('unused'); },
+    submit: async (request) => {
+      input.events.push(`submit:${request.taskId.value}:${request.executionEpoch}`);
+      const output: AgentOutput = {
+        taskId: request.taskId,
+        executionEpoch: request.executionEpoch,
+        assignmentId: request.assignmentId,
+        payload: {
+          curation: {
+            operationId: {
+              scope: 'operation',
+              value: request.payload.operationId as string,
+            },
+            auditPrompt: request.payload.prompt,
+            sourceRefs: request.payload.sourceRefs,
+            outcome: input.outcome ?? 'candidate',
+            ...(input.outcome === 'attention' ? {} : { candidateId: 'provider-candidate' }),
+            matchedMemoryIds: [],
+            conflictRefs: [],
+            explanation: 'provider analysis',
+            nextAction: input.outcome === 'attention' ? 'attention' : 'review',
+          },
+        },
+        outputRefs: ['memory://provider-output'],
+        evidenceRefs: [],
+      };
+      return input.mutateOutput?.(output) ?? output;
+    },
+    async *observe() { /* unused */ },
+    requestStop: async () => ({ requested: true, operationId: id('operation', 'stop') }),
+    settle: async () => {
+      input.events.push('settle');
+      return { state: input.settleState ?? 'succeeded', evidenceRefs: [] };
+    },
+  };
+}
+
+function streamingProviderDriver(input: {
+  readonly events: string[];
+  readonly terminalState?: 'succeeded' | 'failed';
+  readonly summary?: string;
+  readonly capture?: (payload: Record<string, unknown>) => void;
+}): AgentDriver {
+  return {
+    kind: 'memory-streaming-test',
+    capabilities: async () => ({ driverKind: 'memory-streaming-test', capabilities: ['analysis'], version: '1' }),
+    start: async (request) => {
+      input.events.push(`start:${request.taskId.value}:${request.executionEpoch}`);
+      return { runtimeId: request.runtimeId, executionEpoch: request.executionEpoch };
+    },
+    resume: async () => { throw new Error('unused'); },
+    submit: async (request) => {
+      input.events.push(`submit:${request.taskId.value}:${request.executionEpoch}`);
+      input.capture?.(request.payload as Record<string, unknown>);
+      return {
+        taskId: request.taskId,
+        executionEpoch: request.executionEpoch,
+        assignmentId: request.assignmentId,
+        payload: { mode: 'provider', status: 'accepted' },
+        outputRefs: [],
+        evidenceRefs: [],
+      };
+    },
+    async *observe(request) {
+      input.events.push(`observe:${request.runtimeId}`);
+      const payload = input.summary ?? JSON.stringify({
+        operationId: { scope: 'operation', value: 'analysis-a' },
+        auditPrompt: {
+          promptRef: 'project-memory-audit',
+          canonicalRef: 'prompt://project-a/project-memory-audit',
+          revision: 'sha256:prompt-revision',
+          digest: 'sha256:prompt-digest',
+          loadedAt: '2026-09-17T00:00:00.000Z',
+        },
+        sourceRefs: ['journal://project-a/checkpoint'],
+        outcome: 'candidate',
+        candidateId: 'streaming-candidate',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'streaming provider analysis',
+        nextAction: 'review',
+      });
+      yield { taskId: task, executionEpoch: 2, kind: 'provider.output', evidenceRefs: [], summary: payload };
+      yield {
+        taskId: task,
+        executionEpoch: 2,
+        kind: 'provider.terminal',
+        evidenceRefs: [],
+        terminalState: input.terminalState ?? 'succeeded',
+      };
+    },
+    requestStop: async () => ({ requested: true, operationId: id('operation', 'stop') }),
+    settle: async () => {
+      input.events.push('settle');
+      return { state: 'succeeded', evidenceRefs: [] };
+    },
+  };
+}
+
+test('memory agent drives observe to a terminal event and parses streaming curation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = streamingProviderDriver({ events });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  assert.equal(result.value.curation.outcome, 'candidate');
+  assert.equal(result.value.curation.explanation, 'streaming provider analysis');
+  assert.equal(ports.submissions.length, 1);
+  assert.deepEqual(events, [
+    `start:${task.value}:2`,
+    `submit:${task.value}:2`,
+    `observe:memory-analysis:analysis-a`,
+    'settle',
+  ]);
+});
+
+test('memory agent sends the audit prompt body and inspected source text to the provider', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  let captured: Record<string, unknown> | undefined;
+  const driver = streamingProviderDriver({
+    events,
+    capture: (payload) => { captured = payload; },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource('# Audit\n') },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  assert.equal((captured!.prompt as { readonly content: string }).content, '# Audit\n');
+  const sources = captured!.sources as readonly { readonly sourceRef: string; readonly text: string }[];
+  assert.equal(sources[0]!.sourceRef, 'journal://project-a/checkpoint');
+  assert.equal(sources[0]!.text, 'source');
+});
+
+test('memory agent fails closed when streaming provider emits no terminal event', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = streamingProviderDriver({ events });
+  driver.observe = async function* () {
+    yield { taskId: task, executionEpoch: 2, kind: 'provider.output', evidenceRefs: [], summary: '{}' };
+  };
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.ok(/without a terminal event/.test(result.status === 'waiting' ? result.issue.message : ''));
+});
+
+test('memory agent rejects a non-succeeded terminal event before parsing curation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = streamingProviderDriver({ events, terminalState: 'failed' });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.ok(/terminal state was failed/.test(result.status === 'waiting' ? result.issue.message : ''));
+  assert.equal(ports.submissions.length, 0);
+});
+
 function analysis(overrides: Record<string, unknown> = {}) {
   return {
     operationId: id('operation', 'analysis-a'),
@@ -178,6 +396,17 @@ function analysis(overrides: Record<string, unknown> = {}) {
     executionEpoch: 2,
     trigger: 'blocked' as const,
     ...overrides,
+  };
+}
+
+function proceduralEvidence(source: string, success = true) {
+  return {
+    sourceRef: source,
+    sourceDigest: `sha256:${source.split('/').at(-1)}`,
+    success,
+    preconditionFingerprint: 'precondition:clean-worktree',
+    stepFingerprint: 'step:run-focused-gate',
+    failureBoundaryFingerprint: 'failure:gate-red',
   };
 }
 
@@ -1092,4 +1321,372 @@ test('memory agent compares actual and declared paths before proposing an effici
   if (result.status !== 'ready') throw new Error('expected efficiency analysis');
   assert.deepEqual(ports.comparisons, [{ leftRef: actualRef, rightRef: declaredRef }]);
   assert.equal(result.value.curation.outcome, 'candidate');
+});
+
+test('memory agent uses the framework driver in start submit settle order and binds output to the operation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = providerDriver({ events });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  assert.deepEqual(events, [`start:${task.value}:2`, `submit:${task.value}:2`, 'settle']);
+  assert.equal(result.value.curation.outcome, 'candidate');
+  assert.equal(ports.submissions.length, 1);
+});
+
+test('memory agent assembles a driver for each admitted operation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const assignments: string[] = [];
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor: (input) => {
+      assignments.push(input.assignmentId);
+      assert.equal(input.taskId.value, task.value);
+      assert.equal(input.executionEpoch, 2);
+      return providerDriver({ events });
+    },
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const first = await agent.analyze(analysis());
+  const second = await agent.analyze(analysis({
+    operationId: id('operation', 'analysis-b'),
+  }));
+
+  assert.equal(first.status, 'ready');
+  assert.equal(second.status, 'ready');
+  assert.deepEqual(assignments, ['memory-analysis:analysis-a', 'memory-analysis:analysis-b']);
+  assert.deepEqual(events, [
+    `start:${task.value}:2`,
+    `submit:${task.value}:2`,
+    'settle',
+    `start:${task.value}:2`,
+    `submit:${task.value}:2`,
+    'settle',
+  ]);
+});
+
+test('memory agent rejects simultaneous static and per-operation drivers', () => {
+  const ports = makeOperations();
+  assert.throws(() => new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver: providerDriver({ events: [] }),
+    driverFor: () => providerDriver({ events: [] }),
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), /either driver or driverFor/);
+});
+
+test('memory agent rejects a provider curation for another operation', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = providerDriver({
+    events,
+    mutateOutput: (output) => ({
+      ...output,
+      payload: {
+        curation: {
+          ...(output.payload.curation as Record<string, unknown>),
+          operationId: { scope: 'operation', value: 'other-operation' },
+        },
+      },
+    }),
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.equal(ports.submissions.length, 0);
+  assert.deepEqual(events, [`start:${task.value}:2`, `submit:${task.value}:2`, 'settle']);
+});
+
+test('memory agent rejects a provider curation with a drifted prompt snapshot', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = providerDriver({
+    events,
+    mutateOutput: (output) => ({
+      ...output,
+      payload: {
+        curation: {
+          ...(output.payload.curation as Record<string, unknown>),
+          auditPrompt: {
+            ...(output.payload.curation as { auditPrompt: Record<string, unknown> }).auditPrompt,
+            canonicalRef: 'prompt://project-a/other-prompt',
+          },
+        },
+      },
+    }),
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.equal(ports.submissions.length, 0);
+  assert.deepEqual(events, [`start:${task.value}:2`, `submit:${task.value}:2`, 'settle']);
+});
+
+test('memory agent does not synthesize a Task for interaction-bound provider analysis', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = providerDriver({ events });
+  const interactionScope = 'interaction-no-task';
+  const agent = new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  });
+  agent.bind({
+    bindingRef: 'binding-interaction',
+    projectKey: 'project-a',
+    scope: { kind: 'organ', organId: organ },
+    interactionScopeId: interactionScope,
+    mainAgentId: 'main-agent-interaction',
+    executionEpoch: 2,
+    ownerId: 'memory-agent',
+    operations: ports.operations,
+  });
+
+  const result = await agent.analyze(analysis({
+    bindingRef: 'binding-interaction',
+    taskId: undefined,
+    interactionScopeId: interactionScope,
+    scope: { kind: 'organ', organId: organ },
+    sourceRefs: ['journal://project-a/interaction-evidence'],
+    sourceDigests: ['sha256:interaction-evidence'],
+  }));
+
+  assert.equal(result.status, 'waiting');
+  assert.equal(result.status === 'waiting' && result.issue.message, 'memory analysis provider requires a task-bound request');
+  assert.deepEqual(events, []);
+});
+
+test('memory agent treats a non-succeeded provider settle as an explicit analysis failure', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = providerDriver({ events, settleState: 'failed' });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'waiting');
+  assert.ok(/settle did not succeed/.test(result.status === 'waiting' ? result.issue.message : ''));
+  assert.equal(ports.submissions.length, 0);
+});
+
+test('memory agent requires repeatable successful evidence before a local Skill update candidate', async () => {
+  const first = 'journal://project-a/skill-run-1';
+  const second = 'journal://project-a/skill-run-2';
+  const ports = makeOperations({
+    sourceDigests: {
+      [first]: 'sha256:skill-run-1',
+      [second]: 'sha256:skill-run-2',
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const insufficient = await agent.analyze(analysis({
+    requestedKind: 'procedural',
+    candidateCategory: 'local-skill-update',
+    sourceRefs: [first],
+    sourceDigests: ['sha256:skill-run-1'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      proceduralEvidence: [proceduralEvidence(first)],
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+  assert.equal(insufficient.status, 'ready');
+  assert.equal(insufficient.status === 'ready' && insufficient.value.curation.outcome, 'attention');
+  assert.equal(ports.submissions.length, 0);
+
+  const repeatable = await agent.analyze(analysis({
+    operationId: id('operation', 'analysis-skill-repeatable'),
+    requestedKind: 'procedural',
+    candidateCategory: 'local-skill-update',
+    sourceRefs: [first, second],
+    sourceDigests: ['sha256:skill-run-1', 'sha256:skill-run-2'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      proceduralEvidence: [proceduralEvidence(first), proceduralEvidence(second)],
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+  assert.equal(repeatable.status, 'ready');
+  assert.equal(repeatable.status === 'ready' && repeatable.value.curation.outcome, 'candidate');
+  assert.equal(ports.submissions.length, 1);
+});
+
+test('memory agent rejects failed or fingerprint-divergent local Skill evidence', async () => {
+  const first = 'journal://project-a/skill-run-1';
+  const second = 'journal://project-a/skill-run-2';
+  const ports = makeOperations({
+    sourceDigests: {
+      [first]: 'sha256:skill-run-1',
+      [second]: 'sha256:skill-run-2',
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const failedEvidence = await agent.analyze(analysis({
+    requestedKind: 'procedural',
+    candidateCategory: 'local-skill-update',
+    sourceRefs: [first, second],
+    sourceDigests: ['sha256:skill-run-1', 'sha256:skill-run-2'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      proceduralEvidence: [proceduralEvidence(first), proceduralEvidence(second, false)],
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+  assert.equal(failedEvidence.status, 'ready');
+  assert.equal(failedEvidence.status === 'ready' && failedEvidence.value.curation.outcome, 'attention');
+
+  const divergentEvidence = await agent.analyze(analysis({
+    operationId: id('operation', 'analysis-skill-divergent'),
+    requestedKind: 'procedural',
+    candidateCategory: 'local-skill-update',
+    sourceRefs: [first, second],
+    sourceDigests: ['sha256:skill-run-1', 'sha256:skill-run-2'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      proceduralEvidence: [
+        proceduralEvidence(first),
+        { ...proceduralEvidence(second), stepFingerprint: 'step:different' },
+      ],
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+  assert.equal(divergentEvidence.status, 'ready');
+  assert.equal(divergentEvidence.status === 'ready' && divergentEvidence.value.curation.outcome, 'attention');
+  assert.equal(ports.submissions.length, 0);
+});
+
+test('memory agent rejects procedural evidence whose source digest is not admitted', async () => {
+  const admitted = 'journal://project-a/skill-run-1';
+  const unadmitted = 'journal://project-a/skill-run-unlisted';
+  const ports = makeOperations({
+    sourceDigests: {
+      [admitted]: 'sha256:skill-run-1',
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis({
+    requestedKind: 'procedural',
+    candidateCategory: 'local-skill-update',
+    sourceRefs: [admitted],
+    sourceDigests: ['sha256:skill-run-1'],
+    analysisInputs: {
+      corrections: [],
+      errors: [],
+      proceduralEvidence: [
+        proceduralEvidence(admitted),
+        proceduralEvidence(unadmitted),
+      ],
+      rewindChains: [],
+      actualPathRefs: [],
+      declaredPathRefs: [],
+    },
+  }));
+
+  assert.equal(result.status, 'attention');
+  assert.equal(
+    result.status === 'attention' && result.issue.message,
+    `memory analysis input source or digest does not match source refs: ${unadmitted}`,
+  );
+  assert.equal(ports.submissions.length, 0);
 });

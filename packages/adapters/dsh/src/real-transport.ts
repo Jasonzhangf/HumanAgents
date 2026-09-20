@@ -577,11 +577,13 @@ export function createRealDshTransport(options: DshRealTransportOptions): DshTra
         } satisfies ProviderEvent];
       }
       case 'assistant/message': {
-        if (assistantText(envelope.data).length === 0) return [];
+        const text = assistantText(envelope.data);
+        if (text.length === 0) return [];
         return [{
           ...base,
           eventId,
           kind: 'output',
+          summary: text,
           outputRefs: [`dsh-message-${instance.sessionId}-${envelope.seq}`],
           evidenceRefs: [evidence(instance.scope, 'execution', `assistant-${envelope.seq}`, `dsh://session/${instance.sessionId}/assistant/${envelope.seq}`)],
         } satisfies ProviderEvent];

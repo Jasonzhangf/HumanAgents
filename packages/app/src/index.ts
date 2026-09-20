@@ -159,6 +159,7 @@ export type {
 } from './memory-composition.js';
 export { SessionStore } from './session-store.js';
 export type { SessionLock, SessionRecord, SessionSnapshot, SessionState } from './session-store.js';
+export { memoryDriverFactory } from './cli.js';
 
 export {
   CordisHost,
