@@ -3110,6 +3110,17 @@ test('memory composition connects an injected memory driver to checkpoint analys
       'observe',
       'settle',
     ]);
+    const feedback = await memory.journal.readEvents({
+      streamId: `memory-feedback:${taskId.value}`,
+      afterSequence: 0,
+      limit: 10,
+    });
+    assert.equal(feedback.length, 1);
+    assert.equal(feedback[0]?.kind, 'memory.candidate.review-required');
+    assert.equal(typeof feedback[0]?.payload?.analysisRef, 'string');
+    assert.equal(typeof feedback[0]?.payload?.candidateId, 'string');
+    assert.equal('operationId' in (feedback[0]?.payload ?? {}), false);
+    assert.equal('nextAction' in (feedback[0]?.payload ?? {}), false);
     await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
   } finally {
     try {

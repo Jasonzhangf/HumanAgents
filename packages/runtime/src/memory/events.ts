@@ -25,11 +25,16 @@ import {
   type MemoryAgentIssue,
   type MemoryAgentOutcome,
   type MemoryAnalysisRequest,
+  type MemoryAnalysisResult,
   type MemoryAnalysisInputs,
   validateMemoryAnalysisInputs,
 } from './agent.js';
 
 export const MEMORY_ANALYSIS_REQUESTED_KIND = 'memory.analysis.requested';
+export const MEMORY_CANDIDATE_CREATED_KIND = 'memory.candidate.created';
+export const MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND = 'memory.candidate.review-required';
+export const MEMORY_FEEDBACK_KIND = 'memory.feedback';
+export const MEMORY_ATTENTION_KIND = 'memory.attention';
 export const MEMORY_PROJECT_SOURCE_UPDATED_KIND = 'memory.project-source.updated';
 
 export const MEMORY_ANALYSIS_TRIGGERS = [
@@ -55,12 +60,14 @@ export interface MemoryAnalysisAdmissionReceipt {
   readonly admissionRef: string;
   readonly externalOperationRef?: string;
   readonly effectRefs?: readonly string[];
+  readonly result?: MemoryAnalysisResult;
 }
 
 export interface MemoryAnalysisBarrierDriverOptions extends MemoryAnalysisEventConsumerOptions {
   readonly externalOperations: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
   };
+  readonly publishFeedback?: (event: EventEnvelope) => Promise<void>;
 }
 
 export interface MemoryAnalysisAdmissionPort {
@@ -133,6 +140,15 @@ export interface MemoryProjectSourceUpdatedEventInput {
   readonly patchRef: string;
   readonly patchDigest: string;
   readonly sourceEvidenceRefs: readonly string[];
+}
+
+export interface MemoryCurationFeedbackEventInput {
+  readonly messageId: string;
+  readonly streamId: string;
+  readonly scope: ScopeRef;
+  readonly occurredAt: string;
+  readonly executionEpoch: number;
+  readonly result: MemoryAnalysisResult;
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -439,6 +455,141 @@ export function createMemoryProjectSourceUpdatedEvent(
   };
 }
 
+function feedbackPayload(
+  kind:
+    | typeof MEMORY_CANDIDATE_CREATED_KIND
+    | typeof MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND
+    | typeof MEMORY_FEEDBACK_KIND
+    | typeof MEMORY_ATTENTION_KIND,
+  result: MemoryAnalysisResult,
+): BusinessPayload {
+  const curation = result.curation;
+  return {
+    kind,
+    analysisRef: curation.operationId.value,
+    outcome: curation.outcome,
+    ...(curation.candidateId === undefined ? {} : { candidateId: curation.candidateId }),
+    ...(result.submission === undefined ? {} : { submissionId: result.submission.submissionId }),
+    matchedMemoryIds: [...curation.matchedMemoryIds],
+    conflictRefs: [...curation.conflictRefs],
+    explanation: curation.explanation,
+    sourceRefs: [...curation.sourceRefs],
+    prompt: {
+      promptRef: curation.auditPrompt.promptRef,
+      canonicalRef: curation.auditPrompt.canonicalRef,
+      revision: curation.auditPrompt.revision,
+      digest: curation.auditPrompt.digest,
+      loadedAt: curation.auditPrompt.loadedAt,
+    },
+    ...(result.proposal === undefined
+      ? {}
+      : {
+          proposal: {
+            target: result.proposal.target,
+            sourceRef: result.proposal.sourceRef,
+            expectedRevision: result.proposal.expectedRevision,
+            expectedDigest: result.proposal.expectedDigest,
+            patchRef: result.proposal.patchRef,
+            patchDigest: result.proposal.patchDigest,
+            evidenceRefs: [...result.proposal.evidenceRefs],
+            ownerRef: result.proposal.ownerRef,
+          },
+        }),
+    ...(result.projectUpdate === undefined
+      ? {}
+      : {
+          projectUpdate: {
+            target: result.projectUpdate.target,
+            sourceRef: result.projectUpdate.sourceRef,
+            previousRevision: result.projectUpdate.previousRevision,
+            previousDigest: result.projectUpdate.previousDigest,
+            nextRevision: result.projectUpdate.nextRevision,
+            nextDigest: result.projectUpdate.nextDigest,
+            patchRef: result.projectUpdate.patchRef,
+            patchDigest: result.projectUpdate.patchDigest,
+            updated: result.projectUpdate.updated,
+            evidenceRefs: [...result.projectUpdate.evidenceRefs],
+          },
+        }),
+  };
+}
+
+function feedbackKind(result: MemoryAnalysisResult): {
+  readonly kind:
+    | typeof MEMORY_CANDIDATE_CREATED_KIND
+    | typeof MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND
+    | typeof MEMORY_FEEDBACK_KIND
+    | typeof MEMORY_ATTENTION_KIND;
+  readonly summary: string;
+} {
+  const curation = result.curation;
+  if (curation.outcome === 'attention') {
+    return {
+      kind: MEMORY_ATTENTION_KIND,
+      summary: `memory analysis requires attention: ${curation.explanation}`,
+    };
+  }
+  if (
+    curation.outcome === 'candidate'
+    && (curation.nextAction === 'review' || curation.nextAction === 'supersede-review')
+  ) {
+    return {
+      kind: MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND,
+      summary: `memory candidate requires review: ${curation.candidateId ?? curation.operationId.value}`,
+    };
+  }
+  if (curation.outcome === 'candidate') {
+    return {
+      kind: MEMORY_CANDIDATE_CREATED_KIND,
+      summary: `memory candidate created: ${curation.candidateId ?? curation.operationId.value}`,
+    };
+  }
+  return {
+    kind: MEMORY_FEEDBACK_KIND,
+    summary: `memory analysis completed with ${curation.outcome}`,
+  };
+}
+
+export function createMemoryCurationFeedbackEvent(
+  input: MemoryCurationFeedbackEventInput,
+): EventEnvelope {
+  nonEmpty(input.messageId, 'memory curation feedback message id');
+  if (!safeOperationSegment(input.messageId)) {
+    throw new Error('memory curation feedback message id cannot form a stable event id');
+  }
+  nonEmpty(input.streamId, 'memory curation feedback stream id');
+  if (!Number.isFinite(Date.parse(input.occurredAt))) throw new Error('memory curation feedback occurredAt is invalid');
+  if (!Number.isSafeInteger(input.executionEpoch) || input.executionEpoch < 1) {
+    throw new Error('memory curation feedback execution epoch must be positive');
+  }
+  const feedback = feedbackKind(input.result);
+  return {
+    messageId: input.messageId,
+    streamId: input.streamId,
+    kind: feedback.kind,
+    class: 'data',
+    scope: input.scope,
+    occurredAt: input.occurredAt,
+    summary: feedback.summary,
+    payload: feedbackPayload(feedback.kind, input.result),
+    evidenceRefs: [],
+    executionEpoch: input.executionEpoch,
+  };
+}
+
+function feedbackEvent(event: EventRecord, result: MemoryAnalysisResult): EventEnvelope {
+  return createMemoryCurationFeedbackEvent({
+    messageId: `memory-feedback-${createHash('sha256')
+      .update(`${event.streamId.length}:${event.streamId}${event.messageId.length}:${event.messageId}`)
+      .digest('hex')}`,
+    streamId: `memory-feedback:${event.scope.taskId?.value ?? event.scope.organId.value}`,
+    scope: event.scope,
+    occurredAt: event.committedAt,
+    executionEpoch: event.executionEpoch ?? 1,
+    result,
+  });
+}
+
 export function memoryAnalysisRequestFromEvent(
   event: EventRecord,
   binding: MemoryAnalysisWakeBinding,
@@ -708,6 +859,12 @@ export function memoryAnalysisBarrierDriver(
         retryOwnerRef,
         admissionOutcome.issue.code,
       );
+    }
+    if (admissionOutcome.value.result !== undefined && !options.publishFeedback) {
+      throw new Error('memory analysis feedback publisher is not configured');
+    }
+    if (admissionOutcome.value.result !== undefined) {
+      await options.publishFeedback!(feedbackEvent(delivery.event, admissionOutcome.value.result));
     }
     const expectedRef = admissionOutcome.value.externalOperationRef ?? operationRef;
     if (expectedRef !== operationRef) {

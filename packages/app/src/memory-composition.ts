@@ -180,6 +180,9 @@ export interface MemoryCompositionInput {
   readonly externalOperations?: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;
   };
+  readonly feedbackPublisher?: {
+    publish(event: import('../../runtime/src/events/index.js').EventEnvelope): Promise<void>;
+  };
   readonly state?: import('../../contracts/src/index.js').MemoryAgentStatePort;
 }
 
@@ -892,6 +895,7 @@ function createAdmission(
         status: 'ready',
         value: {
           admissionRef: `memory-analysis:${request.operationId.value}`,
+          result: result.value,
           effectRefs: result.value.submission?.candidateId === undefined
             ? []
             : [`memory-candidate:${result.value.submission.candidateId}`],
@@ -1116,6 +1120,9 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
         );
       },
     },
+    ...(input.feedbackPublisher === undefined
+      ? {}
+      : { publishFeedback: (event) => input.feedbackPublisher!.publish(event) }),
   });
   const coordinator = new MemoryCoordinator();
   const coordinatorBindings = bindCoordinator(coordinator, input, backend);

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
+  assertBusinessPayload,
   id,
   type EvidenceRef,
   type MemoryActorContext,
@@ -30,8 +32,12 @@ import {
 import {
   createMemoryAnalysisEventHandler,
   createMemoryAnalysisRequestedEvent,
+  createMemoryCurationFeedbackEvent,
   createMemoryProjectSourceUpdatedEvent,
   MEMORY_ANALYSIS_REQUESTED_KIND,
+  MEMORY_ATTENTION_KIND,
+  MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND,
+  MEMORY_FEEDBACK_KIND,
   MEMORY_PROJECT_SOURCE_UPDATED_KIND,
   memoryAnalysisRequestFromEvent,
   memoryAnalysisBarrierDriver,
@@ -1194,6 +1200,220 @@ test('project source update facts use a dedicated data event contract', () => {
   assert.equal(envelope.streamId, 'memory-project-source-updates:project-a');
   assert.deepEqual(envelope.evidenceRefs, []);
   assert.deepEqual(envelope.payload?.sourceEvidenceRefs, ['journal://project-a/evidence']);
+});
+
+test('memory curation results map to typed durable feedback events', () => {
+  const prompt = {
+    promptRef: 'project-memory-audit',
+    canonicalRef: 'prompt://project-a/project-memory-audit',
+    revision: 'sha256:prompt-revision',
+    digest: 'sha256:prompt-digest',
+    loadedAt: occurredAt,
+  };
+  const candidate = createMemoryCurationFeedbackEvent({
+    messageId: 'feedback-candidate',
+    streamId: 'memory-feedback:task-a',
+    scope,
+    occurredAt,
+    executionEpoch: 2,
+    result: {
+      curation: {
+        operationId: id('operation', 'analysis-a'),
+        auditPrompt: prompt,
+        sourceRefs: ['journal://project-a/checkpoint-a'],
+        outcome: 'candidate',
+        candidateId: 'candidate-a',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'new project fact',
+        nextAction: 'review',
+      },
+      submission: {
+        submissionId: 'submission-a',
+        status: 'accepted',
+        candidateId: 'candidate-a',
+        operationId: id('operation', 'analysis-a'),
+        nextAction: 'review-required',
+      },
+      projectSources: [],
+      liveContextMutated: false,
+      promptSnapshot: prompt,
+    },
+  });
+  assert.equal(candidate.kind, MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND);
+  assert.equal(candidate.class, 'data');
+  assert.doesNotThrow(() => assertBusinessPayload(candidate.payload!));
+  assert.equal(candidate.payload?.candidateId, 'candidate-a');
+  assert.equal(candidate.payload?.submissionId, 'submission-a');
+  assert.equal(candidate.payload?.analysisRef, 'analysis-a');
+  assert.equal('operationId' in (candidate.payload ?? {}), false);
+  assert.equal('nextAction' in (candidate.payload ?? {}), false);
+
+  const supersede = createMemoryCurationFeedbackEvent({
+    messageId: 'feedback-supersede',
+    streamId: 'memory-feedback:task-a',
+    scope,
+    occurredAt,
+    executionEpoch: 2,
+    result: {
+      curation: {
+        operationId: id('operation', 'analysis-supersede'),
+        auditPrompt: prompt,
+        sourceRefs: ['journal://project-a/checkpoint-supersede'],
+        outcome: 'candidate',
+        candidateId: 'candidate-supersede',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'candidate supersedes an existing memory',
+        nextAction: 'supersede-review',
+      },
+      projectSources: [],
+      liveContextMutated: false,
+      promptSnapshot: prompt,
+    },
+  });
+  assert.equal(supersede.kind, MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND);
+
+  const duplicate = createMemoryCurationFeedbackEvent({
+    messageId: 'feedback-duplicate',
+    streamId: 'memory-feedback:task-a',
+    scope,
+    occurredAt,
+    executionEpoch: 2,
+    result: {
+      curation: {
+        operationId: id('operation', 'analysis-b'),
+        auditPrompt: prompt,
+        sourceRefs: ['journal://project-a/checkpoint-b'],
+        outcome: 'duplicate',
+        matchedMemoryIds: ['memory://known'],
+        conflictRefs: [],
+        explanation: 'already known',
+        nextAction: 'none',
+      },
+      projectSources: [],
+      liveContextMutated: false,
+      promptSnapshot: prompt,
+    },
+  });
+  assert.equal(duplicate.kind, MEMORY_FEEDBACK_KIND);
+  assert.deepEqual(duplicate.payload?.matchedMemoryIds, ['memory://known']);
+
+  const attention = createMemoryCurationFeedbackEvent({
+    messageId: 'feedback-attention',
+    streamId: 'memory-feedback:task-a',
+    scope,
+    occurredAt,
+    executionEpoch: 2,
+    result: {
+      curation: {
+        operationId: id('operation', 'analysis-c'),
+        auditPrompt: prompt,
+        sourceRefs: ['journal://project-a/checkpoint-c'],
+        outcome: 'attention',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'source needs recovery',
+        nextAction: 'attention',
+      },
+      projectSources: [],
+      liveContextMutated: false,
+      promptSnapshot: prompt,
+    },
+  });
+  assert.equal(attention.kind, MEMORY_ATTENTION_KIND);
+});
+
+test('memory analysis barrier publishes feedback before settling and retries without duplicate effects', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  const bus = ports(journal, registry);
+  await publishEvent(bus, { publisherId: publisher.publisherId, event: event() });
+  const published: EventEnvelope[] = [];
+  let failPublication = true;
+  const driver = memoryAnalysisBarrierDriver({
+    binding,
+    admission: {
+      admit: async () => ({
+        status: 'ready',
+        value: {
+          admissionRef: 'memory-admission:message-a',
+          result: {
+            curation: {
+              operationId: id('operation', 'analysis-a'),
+              auditPrompt: {
+                promptRef: 'project-memory-audit',
+                canonicalRef: 'prompt://project-a/project-memory-audit',
+                revision: 'sha256:prompt-revision',
+                digest: 'sha256:prompt-digest',
+                loadedAt: occurredAt,
+              },
+              sourceRefs: ['journal://project-a/checkpoint-a'],
+              outcome: 'candidate',
+              candidateId: 'candidate-a',
+              matchedMemoryIds: [],
+              conflictRefs: [],
+              explanation: 'candidate requires review',
+              nextAction: 'review',
+            },
+            projectSources: [],
+            liveContextMutated: false,
+            promptSnapshot: {
+              promptRef: 'project-memory-audit',
+              canonicalRef: 'prompt://project-a/project-memory-audit',
+              revision: 'sha256:prompt-revision',
+              digest: 'sha256:prompt-digest',
+              loadedAt: occurredAt,
+            },
+          },
+        },
+      }),
+    },
+    externalOperations: journal,
+    publishFeedback: async (candidate) => {
+      if (failPublication) throw new Error('feedback journal unavailable');
+      published.push(candidate);
+    },
+    now: () => occurredAt,
+  });
+
+  await assert.rejects(
+    consumeEvents(
+      bus,
+      { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+      createMemoryAnalysisEventHandler({
+        binding,
+        admission: { admit: async () => { throw new Error('unused'); } },
+      }),
+      driver,
+    ),
+    /feedback journal unavailable/,
+  );
+  assert.equal(journal.receipts.size, 0);
+  assert.equal([...journal.externalOperations.values()][0]?.state, 'pending');
+
+  failPublication = false;
+  const recovered = await consumeEvents(
+    bus,
+    { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+    createMemoryAnalysisEventHandler({
+      binding,
+      admission: { admit: async () => { throw new Error('unused'); } },
+    }),
+    driver,
+  );
+  assert.equal(published.length, 1);
+  assert.equal(
+    published[0]?.messageId,
+    `memory-feedback-${createHash('sha256')
+      .update(`${streamId.length}:${streamId}${event().messageId.length}:${event().messageId}`)
+      .digest('hex')}`,
+  );
+  assert.equal(published[0]?.occurredAt, occurredAt);
+  assert.equal(published[0]?.streamId, `memory-feedback:${task.value}`);
+  assert.equal(published[0]?.kind, MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND);
+  assert.equal(recovered.committed[0]?.disposition, 'applied');
+  assert.equal([...journal.externalOperations.values()][0]?.state, 'reconciled');
 });
 
 test('consumer errors remain explicit for an unregistered memory consumer', async () => {

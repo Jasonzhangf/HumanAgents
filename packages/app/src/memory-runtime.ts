@@ -184,7 +184,14 @@ function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPubli
       ...(binding.taskId === undefined ? {} : { taskId: binding.taskId }),
     },
     allowedClasses: ['data'],
-    capabilities: ['memory.analysis.requested', 'memory.project-source.updated'],
+    capabilities: [
+      'memory.analysis.requested',
+      'memory.candidate.created',
+      'memory.candidate.review-required',
+      'memory.feedback',
+      'memory.attention',
+      'memory.project-source.updated',
+    ],
   };
 }
 
@@ -258,6 +265,11 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     ...input,
     paths: input.paths,
     projectKey: input.paths.projectKey,
+    feedbackPublisher: {
+      publish: async (event) => {
+        await publishEvent(ports, { publisherId: PUBLISHER_ID, event });
+      },
+    },
     evidenceSource: input.evidenceSource ?? {
       read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
     },
