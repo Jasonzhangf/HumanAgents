@@ -168,6 +168,29 @@ export interface AgentEvent {
   readonly summary?: string;
   readonly terminalState?: ProviderTerminalState;
 }
+/**
+ * Provider-neutral semantic lifecycle event. The standalone `run` entry and
+ * `serve --mode fake` expose this projection for equivalent entry evidence.
+ */
+export type AgentSemanticEventKind =
+  | 'execution.started'
+  | 'provider.model'
+  | 'provider.output'
+  | 'provider.tool'
+  | 'provider.error'
+  | 'execution.settling'
+  | 'checkpoint.committed'
+  | 'execution.terminal';
+export interface AgentSemanticEvent {
+  readonly seq: number;
+  readonly kind: AgentSemanticEventKind;
+  readonly state: string;
+  readonly summary: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly ownerId?: string;
+  readonly terminalPhase?: 'provider' | 'final';
+  readonly terminalState?: ProviderTerminalState;
+}
 export interface StopRequestReceipt { readonly requested: boolean; readonly operationId: OperationId; }
 export interface AgentClosure { readonly state: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown'; readonly evidenceRefs: readonly EvidenceRef[]; }
 export interface AgentDriver {

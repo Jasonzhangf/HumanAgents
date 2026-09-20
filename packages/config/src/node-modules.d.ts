@@ -9,6 +9,7 @@ declare module 'node:fs/promises' {
   export function open(path: string, flags: string): Promise<FileHandle>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
   export function writeFile(path: string, data: string, encoding?: string): Promise<void>;
+  export function lstat(path: string): Promise<{ isFile(): boolean; isSymbolicLink(): boolean }>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function realpath(path: string): Promise<string>;
   export function stat(path: string): Promise<{ isDirectory(): boolean }>;

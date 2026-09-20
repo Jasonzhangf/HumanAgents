@@ -3,6 +3,7 @@
   "migration_id": "appsdk-0.1.6-to-0.1.7",
   "source_version": "0.1.6",
   "target_version": "0.1.7",
+  "materialization": "pin_lock_when_migrating",
   "snapshot_root": ".appsdk/migrations/0.1.6-to-0.1.7/maps",
   "record_path": ".appsdk/migrations/0.1.6-to-0.1.7/record.json",
   "maps": [
@@ -12,7 +13,7 @@
       "source": "contracts/migrations/0.1.6/governance-maps/resource-map.json",
       "source_digest": "sha256:6cbb62a74955e7d15d8337b55b3f450c0c4e956d951bf5ce1bf506bd1f1b0166",
       "target": "contracts/maps/resource-map.json",
-      "target_digest": "sha256:6cbb62a74955e7d15d8337b55b3f450c0c4e956d951bf5ce1bf506bd1f1b0166"
+      "target_digest": "sha256:d3084c359d7ea147caba7e45020a0d3f8c1b7ecdff50642d62f2ff17f864717b"
     },
     {
       "name": "function-map.json",
@@ -20,7 +21,7 @@
       "source": "contracts/migrations/0.1.6/governance-maps/function-map.json",
       "source_digest": "sha256:11e13c74049336bf4cd641ed1f6cd1e9fec2a3129e2dd9b932ff606f1ca757af",
       "target": "contracts/maps/function-map.json",
-      "target_digest": "sha256:11e13c74049336bf4cd641ed1f6cd1e9fec2a3129e2dd9b932ff606f1ca757af"
+      "target_digest": "sha256:8146d7ad09cbafa79bc606a0a3f7309a87ca80a84464861f34f5599fe0339293"
     },
     {
       "name": "mainline-call-map.json",
@@ -28,7 +29,7 @@
       "source": "contracts/migrations/0.1.6/governance-maps/mainline-call-map.json",
       "source_digest": "sha256:be26a641397b43c9125803b38bc19436608ec10c9dcd0ba9036150ffa9bd87bd",
       "target": "contracts/maps/mainline-call-map.json",
-      "target_digest": "sha256:be26a641397b43c9125803b38bc19436608ec10c9dcd0ba9036150ffa9bd87bd"
+      "target_digest": "sha256:99bfe6f139f53ee03963a4ee06cf26e96137a559ead4d502b4e3c6205ce81e15"
     },
     {
       "name": "verification-map.json",
@@ -36,7 +37,7 @@
       "source": "contracts/migrations/0.1.6/governance-maps/verification-map.json",
       "source_digest": "sha256:08da294bef2f2228193686a36356a205a281a3e7f2f3dfd8b34a133cd98c5f1c",
       "target": "contracts/maps/verification-map.json",
-      "target_digest": "sha256:cab89a66189ca56e4febcb5e64a2ae59636f164b9327b74231033af2f0473cf3"
+      "target_digest": "sha256:2a273f5e9b69486365d97350a28e0a07fc83dc2c5d40bd55b6cea793e856e377"
     }
   ]
 }

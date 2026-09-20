@@ -223,9 +223,13 @@ test('1.1.0 interaction template loads versioned prompt segments without changin
   const legacy = await loadBuiltinPromptSegments('interaction', root, '1.0.0');
   const current = await loadBuiltinPromptSegments('interaction', root, '1.1.0');
   assert.equal(legacy.segments[0]?.ref, 'interaction/identity.md');
-  assert.equal(current.segments[0]?.ref, 'interaction/profiles/explicit-brain/identity.md');
+  assert.equal(current.segments[0]?.ref, 'common/observation.md');
+  const explicitBrainIdentity = current.segments.find(
+    (segment) => segment.ref === 'interaction/profiles/explicit-brain/identity.md',
+  );
+  assert.ok(explicitBrainIdentity);
   assert.notEqual(legacy.contentDigest, current.contentDigest);
-  assert.match(current.segments[0]?.content ?? '', /Explicit Brain/);
+  assert.match(explicitBrainIdentity.content, /Explicit Brain/);
   const manifest = await loadBuiltinAgentTemplate(root, 'interaction', '1.1.0');
   assert.equal(manifest.digest, digestAgentTemplate(manifest));
   validateAgentTemplate(manifest, {

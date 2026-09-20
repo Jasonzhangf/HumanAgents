@@ -1045,6 +1045,213 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
   }
 });
 
+test('CLI serve prepares the configured builtin memory audit prompt before checkpoint boundary analysis', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-audit-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await writeFile(join(workspace, 'AGENTS.md'), '# Gate 25 project\n', 'utf8');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const child = spawn(process.execPath, [
+    cli,
+    'serve',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--mode',
+    'fake',
+    '--port',
+    '0',
+  ], {
+    cwd: process.cwd(),
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'HUMANAGENT_TEMPLATE_ROOT')),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  const launched = await new Promise<{ readonly url: string }>((resolve, reject) => {
+    let output = '';
+    const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${stderr}`)), 5_000);
+    child.stdout.on('data', (chunk: Uint8Array) => {
+      output += String(chunk);
+      try {
+        const parsed = JSON.parse(output.trim()) as { readonly url?: string };
+        if (!parsed.url) return;
+        clearTimeout(timeout);
+        resolve({ url: parsed.url });
+      } catch {
+        // The CLI may print partial JSON while the process is starting.
+      }
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`serve exited before startup (${String(code)}): ${output}; stderr=${stderr}`));
+    });
+  });
+  const stop = async (): Promise<void> => {
+    if (child.exitCode !== null) return;
+    child.kill('SIGTERM');
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  };
+  try {
+    const created = await fetch(`${launched.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Gate 25 memory closure', directive: 'prove builtin audit prompt preparation' }),
+    });
+    assert.equal(created.status, 201);
+    const task = await created.json() as { readonly taskId: { readonly value: string } };
+    const started = await fetch(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt: 'close the memory boundary' }),
+    });
+    assert.equal(started.status, 202);
+    const operation = await started.json() as { readonly operationId: string };
+    await waitFor(async () => {
+      const detail = await fetch(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
+      const body = await detail.json() as { readonly state?: string };
+      assert.equal(body.state, 'ready');
+    }, 5_000);
+    const journalPath = join(paths.journalRoot, 'events.jsonl');
+    await waitFor(async () => {
+      const journal = await readFile(journalPath, 'utf8');
+      assert.match(journal, /"kind":"memory.analysis.requested"/);
+      assert.match(journal, /"type":"external-operation"[^\n]*"state":"settled"/);
+      assert.match(journal, /"type":"memory-agent-state"/);
+      assert.match(journal, /"disposition":"applied"/);
+      assert.equal(/memory-agent-prompt-unavailable/.test(journal), false);
+      assert.equal(/"type":"retry"/.test(journal), false);
+    }, 5_000);
+    const promptPath = join(controlRoot, 'memory-audit', 'project-memory-audit.md');
+    const prompt = await readFile(promptPath, 'utf8');
+    const builtinPrompt = await readFile(
+      join(process.cwd(), 'packages', 'agent-templates', 'templates', 'builtin', 'memory', 'audit', 'project-memory-audit.md'),
+      'utf8',
+    );
+    assert.equal(prompt, builtinPrompt);
+    const journal = await readFile(journalPath, 'utf8');
+    const promptDigest = `sha256:${createHash('sha256').update(prompt).digest('hex')}`;
+    const candidateSnapshot = await readFile(join(paths.memoryRoot, 'project', 'snapshot.json'), 'utf8');
+    assert.equal(candidateSnapshot.includes(promptDigest), true);
+    const persistedRecords = journal.trim().split('\n').map((line) =>
+      JSON.parse(line) as {
+        readonly payload?: {
+          readonly type?: string;
+          readonly result?: {
+            readonly receipt?: { readonly disposition?: string; readonly effectRefs?: readonly string[] };
+            readonly cursor?: { readonly lastHandledSequence?: number };
+          };
+        };
+      });
+    const consumerCommit = persistedRecords.find((record) => record.payload?.type === 'consumer-commit');
+    assert.equal(consumerCommit?.payload?.result?.receipt?.disposition, 'applied');
+    assert.equal(consumerCommit?.payload?.result?.receipt?.effectRefs?.some((ref) =>
+      ref.startsWith('memory-analysis-request:')), true);
+    assert.equal(consumerCommit?.payload?.result?.cursor?.lastHandledSequence, 1);
+    assert.equal(operation.operationId.length > 0, true);
+  } finally {
+    await stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI serve rejects an unknown configured memory audit prompt before publishing a boundary', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-audit-unknown-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await writeFile(join(workspace, 'AGENTS.md'), '# Gate 25 project\n', 'utf8');
+  await appendFile(join(controlRoot, 'config.toml'), '\n[memory.audit]\nprompt_ref = "unknown-memory-audit"\n', 'utf8');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  try {
+    const result = await new Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [
+        cli,
+        'serve',
+        '--workspace',
+        workspace,
+        '--control-root',
+        controlRoot,
+        '--mode',
+        'fake',
+        '--port',
+        '0',
+      ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+      child.once('error', reject);
+      child.once('exit', (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(result.code === 0, false);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /configured memory audit prompt is not a builtin resource: unknown-memory-audit/);
+    await assert.rejects(
+      async () => readFile(join(paths.journalRoot, 'events.jsonl'), 'utf8'),
+      (error: unknown) => (error as { readonly code?: string }).code === 'ENOENT',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('memory runtime preserves an existing configured audit prompt while keeping its digest observable', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-audit-existing-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Existing audit prompt project\n', 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  const auditPrompt = '# Existing custom audit prompt\n\nKeep this content.\n';
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), auditPrompt, 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const runtime = await openRuntime({
+    controlRoot,
+    workspace,
+    plan: 'default',
+    sessionId: 'session-existing-memory-audit',
+  });
+  try {
+    const mainAgentId = configuration.effective.project?.defaultAgent ?? configuration.agentRoster[0]!.agentId;
+    const memory = await composeMemoryRuntime({
+      paths,
+      configuration,
+      workspaceCwd: paths.workspaceCwd,
+      sessionsRoot: paths.sessionsRoot,
+      runNotesRoot: paths.runNotesRoot,
+      auditPromptRoot,
+      auditPromptRef: 'project-memory-audit',
+      autoUpdate: false,
+      binding: {
+        bindingRef: 'memory-runtime-existing-audit',
+        projectKey: paths.projectKey,
+        executionEpoch: 1,
+        scope: {
+          kind: 'task',
+          organId: id('organ', `agent-${mainAgentId}`),
+          taskId: id('task', 'session-existing-memory-audit'),
+        },
+        taskId: id('task', 'session-existing-memory-audit'),
+        mainAgentId,
+        actor: {
+          actorId: 'memory-runtime-existing-audit',
+          roleId: 'memory',
+          permissions: ['memory.read', 'memory.propose'],
+          projectKey: paths.projectKey,
+        },
+      },
+    });
+    assert.equal(await readFile(join(auditPromptRoot, 'project-memory-audit.md'), 'utf8'), auditPrompt);
+    const loadedPrompt = await memory.composition.sources.readPrompt({
+      projectKey: paths.projectKey,
+      promptRef: 'project-memory-audit',
+    });
+    assert.equal(loadedPrompt.content, auditPrompt);
+  } finally {
+    await runtime.lock.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('memory composition binds task and runtime identity to the rooted backend', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-binding-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -2371,6 +2578,411 @@ test('standalone fake entry shares provider replay output, events, checkpoint ev
   assert.equal(inventory.complete, true);
   assert.equal(inventory.components.some((component) => component.component === 'm3-orchestration'), false);
   await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+});
+
+type EntryScenario = 'success' | 'tool' | 'error' | 'cancel' | 'unknown' | 'close-failure';
+
+interface EntrySemanticEvent {
+  readonly kind: string;
+  readonly state: string;
+  readonly summary?: string;
+  readonly terminalPhase?: string;
+  readonly terminalState?: string;
+  readonly evidenceRefs?: readonly { readonly locator: string }[];
+}
+
+interface EntryRunOutput {
+  readonly driverRef?: string;
+  readonly state?: string;
+  readonly outcome?: string;
+  readonly semanticEvents?: readonly EntrySemanticEvent[];
+  readonly output?: { readonly output?: string };
+  readonly providerClose?: { readonly state?: string };
+}
+
+interface EntryServeResult {
+  readonly driverRef?: string;
+  readonly events: readonly EntrySemanticEvent[];
+  readonly dashboard: { readonly state: string; readonly output: string };
+  readonly finalEvent?: EntrySemanticEvent;
+  readonly error?: { readonly code: string; readonly ownerId: string; readonly nextAction: string; readonly message: string };
+}
+
+interface EntryScenarioResult {
+  readonly run: EntryRunOutput;
+  readonly runExit: number;
+  readonly serve: EntryServeResult;
+}
+
+function isEntryRunOutput(output: EntryRunOutput | { readonly error: { readonly code: string; readonly message: string } }): output is EntryRunOutput {
+  return 'outcome' in output;
+}
+
+async function runStandaloneEntry(input: {
+  readonly cli: string;
+  readonly controlRoot: string;
+  readonly workspace: string;
+  readonly scenario: EntryScenario;
+  readonly session: string;
+}): Promise<{ readonly exit: number; readonly output: EntryRunOutput | { readonly error: { readonly code: string; readonly message: string } } }> {
+  const prompt = `gate18 ${input.scenario} input`;
+  try {
+    const stdout = execFileSync(process.execPath, [
+      input.cli,
+      'run',
+      '--plan',
+      'default',
+      '--prompt',
+      prompt,
+      '--session',
+      input.session,
+      '--workspace',
+      input.workspace,
+      '--control-root',
+      input.controlRoot,
+      '--fake-scenario',
+      input.scenario,
+      '--fake-step-delay-ms',
+      '0',
+    ], { encoding: 'utf8', stdio: 'pipe' });
+    return { exit: 0, output: JSON.parse(stdout) as EntryRunOutput };
+  } catch (error) {
+    const failure = error as { readonly status?: number; readonly stdout?: string; readonly stderr?: string };
+    if (failure.status !== 1) throw error;
+    const output = JSON.parse((failure.stderr ?? '').trim()) as { readonly error: { readonly code: string; readonly message: string } };
+    return { exit: failure.status, output };
+  }
+}
+
+async function runServeEntry(input: {
+  readonly cli: string;
+  readonly controlRoot: string;
+  readonly workspace: string;
+  readonly scenario: EntryScenario;
+}): Promise<EntryServeResult> {
+  const prompt = `gate18 ${input.scenario} input`;
+
+  const serve = spawn(process.execPath, [
+    input.cli,
+    'serve',
+    '--mode',
+    'fake',
+    '--protocol',
+    'responses',
+    '--binding',
+    'fake-default',
+    '--provider',
+    'fake-provider',
+    '--model',
+    'fake.model',
+    '--workspace',
+    input.workspace,
+    '--control-root',
+    input.controlRoot,
+    '--port',
+    '0',
+    '--fake-scenario',
+    input.scenario,
+    '--fake-step-delay-ms',
+    '0',
+  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let serveStderr = '';
+  serve.stderr.on('data', (chunk: Uint8Array) => {
+    serveStderr += String(chunk);
+  });
+  try {
+    const launch = await new Promise<{ readonly url: string; readonly driverRef?: string }>((resolve, reject) => {
+      let stdout = '';
+      const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${stdout}; ${serveStderr}`)), 5_000);
+      serve.stdout.on('data', (chunk: Uint8Array) => {
+        stdout += String(chunk);
+        try {
+          const parsed = JSON.parse(stdout.trim()) as { readonly url?: string; readonly driverRef?: string };
+          if (parsed.url) {
+            clearTimeout(timeout);
+            resolve({ url: parsed.url, ...(parsed.driverRef === undefined ? {} : { driverRef: parsed.driverRef }) });
+          }
+        } catch {
+          // The CLI prints one JSON object incrementally.
+        }
+      });
+      serve.once('error', reject);
+      serve.once('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`serve exited before startup (${String(code)}): ${stdout}; ${serveStderr}`));
+      });
+    });
+
+    const created = await fetch(`${launch.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: `gate18 ${input.scenario}`, directive: prompt }),
+    });
+    assert.equal(created.status, 201);
+    const task = await created.json() as { readonly taskId: { readonly value: string } };
+    const started = await fetch(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'fake', prompt }),
+    });
+    assert.equal(started.status, 202);
+    const operation = await started.json() as { readonly operationId: string };
+
+    const events = await readEntryEvents(`${launch.url}/api/executions/${encodeURIComponent(operation.operationId)}/events`);
+    const dashboard = await (await fetch(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/dashboard`)).json() as {
+      readonly state: string;
+      readonly output: string;
+      readonly error?: { readonly code: string; readonly ownerId: string; readonly nextAction: string; readonly message: string };
+    };
+    return {
+      driverRef: launch.driverRef,
+      events,
+      dashboard,
+      finalEvent: [...events].reverse().find((event) => event.terminalPhase === 'final'),
+      ...(dashboard.error === undefined ? {} : { error: dashboard.error }),
+    };
+  } finally {
+    if (serve.exitCode === null && serve.signalCode === null) {
+      const exited = new Promise<void>((resolve) => serve.once('exit', resolve));
+      serve.kill('SIGTERM');
+      await exited;
+    }
+  }
+}
+
+async function readEntryEvents(url: string): Promise<readonly EntrySemanticEvent[]> {
+  const response = await fetch(url, { headers: { accept: 'text/event-stream' } });
+  assert.equal(response.status, 200);
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('serve event stream has no body');
+  const decoder = new TextDecoder();
+  const events: EntrySemanticEvent[] = [];
+  let buffer = '';
+  const deadline = Date.now() + 5_000;
+  try {
+    while (Date.now() < deadline) {
+      const read = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('serve event stream timed out')), Math.max(1, deadline - Date.now()))),
+      ]);
+      if (read.done) break;
+      buffer += decoder.decode(read.value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = block.split('\n').find((line) => line.startsWith('data: '));
+        if (data) events.push(JSON.parse(data.slice(6)) as EntrySemanticEvent);
+        boundary = buffer.indexOf('\n\n');
+      }
+      const terminal = events.some((event) => event.terminalPhase === 'final');
+      const blocked = events.some((event) => event.kind === 'provider.error' && event.state === 'blocked');
+      if (terminal || blocked) return events;
+    }
+  } finally {
+    await reader.cancel();
+  }
+  throw new Error('serve event stream ended before a terminal or blocked semantic event');
+}
+
+async function runEntryScenario(input: {
+  readonly cli: string;
+  readonly controlRoot: string;
+  readonly workspace: string;
+  readonly scenario: EntryScenario;
+  readonly session: string;
+}): Promise<EntryScenarioResult> {
+  const standalone = await runStandaloneEntry(input);
+  const serve = await runServeEntry(input);
+  if (!isEntryRunOutput(standalone.output)) {
+    throw new Error(`${input.scenario}: standalone failed before semantic events: ${standalone.output.error.message}`);
+  }
+  return { run: standalone.output, runExit: standalone.exit, serve };
+}
+
+function comparableEvents(events: readonly EntrySemanticEvent[] | undefined): readonly {
+  readonly kind: string;
+  readonly state: string;
+  readonly summary: string | null;
+  readonly terminalPhase: string | null;
+  readonly terminalState: string | null;
+  readonly evidenceRefs: readonly string[];
+}[] {
+  return (events ?? []).map((event) => ({
+    kind: event.kind,
+    state: event.state,
+    summary: event.kind === 'checkpoint.committed' ? null : event.summary ?? null,
+    terminalPhase: event.terminalPhase ?? null,
+    terminalState: event.terminalState ?? (event.kind === 'execution.terminal' ? event.state : null),
+    // Checkpoint records are owned by their entry's journal. Provider, settle,
+    // and close evidence remain part of the semantic comparison.
+    evidenceRefs: event.kind === 'checkpoint.committed'
+      ? []
+      : (event.evidenceRefs ?? []).map((ref) => ref.locator),
+  }));
+}
+
+const expectedEventKinds: Readonly<Record<Exclude<EntryScenario, 'close-failure'>, readonly string[]>> = {
+  success: [
+    'execution.started',
+    'provider.model',
+    'provider.output',
+    'provider.tool',
+    'provider.output',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ],
+  tool: [
+    'execution.started',
+    'provider.tool',
+    'provider.output',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ],
+  error: [
+    'execution.started',
+    'provider.model',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ],
+  cancel: [
+    'execution.started',
+    'provider.model',
+    'provider.output',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ],
+  unknown: [
+    'execution.started',
+    'provider.model',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ],
+};
+
+function assertNormalScenario(input: {
+  readonly scenario: Exclude<EntryScenario, 'close-failure'>;
+  readonly first: EntryScenarioResult;
+  readonly second: EntryScenarioResult;
+}): void {
+  const { scenario, first, second } = input;
+  assert.equal(first.runExit, 0, `${scenario}: run exit`);
+  assert.equal(first.run.driverRef, 'fake', `${scenario}: run driverRef`);
+  assert.equal(first.serve.driverRef, 'fake', `${scenario}: serve driverRef`);
+  assert.deepEqual(
+    comparableEvents(first.run.semanticEvents),
+    comparableEvents(first.serve.events),
+    `${scenario}: same-entry semantic event sequence`,
+  );
+  assert.deepEqual(
+    comparableEvents(first.run.semanticEvents).map((event) => event.kind),
+    expectedEventKinds[scenario],
+    `${scenario}: standalone event order`,
+  );
+  assert.deepEqual(
+    comparableEvents(first.serve.events).map((event) => event.kind),
+    expectedEventKinds[scenario],
+    `${scenario}: serve event order`,
+  );
+  assert.deepEqual(
+    comparableEvents(second.run.semanticEvents),
+    comparableEvents(first.run.semanticEvents),
+    `${scenario}: standalone replay determinism`,
+  );
+  assert.deepEqual(
+    comparableEvents(second.serve.events),
+    comparableEvents(first.serve.events),
+    `${scenario}: serve replay determinism`,
+  );
+  assert.equal(first.run.outcome, first.serve.dashboard.state, `${scenario}: checkpoint outcome`);
+  assert.equal(first.run.semanticEvents?.at(-1)?.terminalState, first.run.outcome, `${scenario}: terminal state`);
+  assert.equal(first.run.output?.output, first.serve.dashboard.output, `${scenario}: output`);
+  assert.equal(
+    first.run.providerClose?.state,
+    first.serve.finalEvent?.summary?.includes('provider closed') ? 'closed' : first.serve.finalEvent?.state,
+    `${scenario}: provider close`,
+  );
+  assert.equal(
+    first.run.semanticEvents?.at(-1)?.evidenceRefs?.some((ref) => ref.locator === `fake/settle-${first.run.outcome}`),
+    true,
+    `${scenario}: settle evidence`,
+  );
+  assert.equal(
+    first.run.semanticEvents?.at(-1)?.evidenceRefs?.some((ref) => ref.locator === 'fake/close'),
+    true,
+    `${scenario}: close evidence`,
+  );
+  assert.equal(first.serve.error, undefined, `${scenario}: serve must not report a terminal error`);
+}
+
+test('actual run and serve fake entries stay equivalent across the execution matrix', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-real-entry-matrix-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const scenarios: readonly Exclude<EntryScenario, 'close-failure'>[] = ['success', 'tool', 'error', 'cancel', 'unknown'];
+
+  for (const scenario of scenarios) {
+    const session = `entry-${scenario}`;
+    const first = await runEntryScenario({
+      cli,
+      controlRoot: join(controlRoot, scenario, 'first'),
+      workspace,
+      scenario,
+      session,
+    });
+    const second = await runEntryScenario({
+      cli,
+      controlRoot: join(controlRoot, scenario, 'second'),
+      workspace,
+      scenario,
+      session,
+    });
+    assertNormalScenario({ scenario, first, second });
+  }
+
+  const closeFailure = await runStandaloneEntry({
+    cli,
+    controlRoot: join(controlRoot, 'close-failure', 'first'),
+    workspace,
+    scenario: 'close-failure',
+    session: 'entry-close-failure',
+  });
+  assert.equal(closeFailure.exit, 1);
+  assert.equal(
+    'error' in closeFailure.output ? closeFailure.output.error.code : undefined,
+    'agent-operation-recovery-required',
+  );
+  assert.match('error' in closeFailure.output ? closeFailure.output.error.message : '', /provider close is failed/);
+  assert.match('error' in closeFailure.output ? closeFailure.output.error.message : '', /provider close failed/);
+  const closeFailureServe = await runServeEntry({
+    cli,
+    controlRoot: join(controlRoot, 'close-failure', 'first'),
+    workspace,
+    scenario: 'close-failure',
+  });
+  assert.equal(closeFailureServe.driverRef, 'fake');
+  assert.equal(closeFailureServe.dashboard.state, 'blocked');
+  assert.equal(closeFailureServe.dashboard.output, 'fake replay: draft output chunk 1fake replay: final output chunk 2');
+  assert.equal(closeFailureServe.error?.code, 'provider.close.failed');
+  assert.equal(closeFailureServe.error?.ownerId, 'humanagent.fake-provider');
+  assert.equal(closeFailureServe.error?.nextAction, 'recover:fake.close');
+  assert.equal(
+    closeFailureServe.events.some((event) => event.kind === 'execution.terminal' && event.state === 'succeeded' && event.terminalPhase === 'final'),
+    false,
+  );
+  assert.equal(
+    closeFailureServe.events.some((event) => event.kind === 'provider.error' && event.state === 'blocked'),
+    true,
+  );
 });
 
 test('real JSONL checkpoint journal deduplicates retries by stable commit identity and rejects conflicts', async () => {

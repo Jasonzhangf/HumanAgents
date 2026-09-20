@@ -37,6 +37,7 @@ import {
   type MemoryProjectUpdateOwnerPort,
   type MemorySourceUpdateReceipt,
 } from '../../runtime/src/memory/index.js';
+import { prepareBuiltinAuditPrompt } from '../../agent-templates/src/index.js';
 import type { MemorySubmissionPort } from '../../runtime/src/explicit-brain/index.js';
 import type {
   EventConsumerHandler,
@@ -348,7 +349,19 @@ export async function composeRuntimeMemory(
   const projectKey = input.paths.projectKey;
   const workspaceCwd = input.paths.workspaceCwd;
   const auditPromptRoot = join(input.paths.controlRoot, 'memory-audit');
-  await mkdir(auditPromptRoot, { recursive: true });
+  const auditPromptRef = input.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit';
+  const templateRoot = (globalThis as {
+    readonly process?: { readonly env?: { readonly HUMANAGENT_TEMPLATE_ROOT?: string } };
+  }).process?.env?.HUMANAGENT_TEMPLATE_ROOT;
+  if (!templateRoot) {
+    throw new AppLifecycleError(
+      'memory-audit-prompt-unavailable',
+      'builtin template root is not configured',
+      'configure the locked builtin template root before composing memory',
+      OWNER,
+    );
+  }
+  await prepareBuiltinAuditPrompt({ templateRoot, promptRef: auditPromptRef, destinationRoot: auditPromptRoot });
   const actor: MemoryActorContext = {
     actorId: 'memory-agent',
     roleId: 'memory',
@@ -364,7 +377,7 @@ export async function composeRuntimeMemory(
     localSkillRoot: input.configuration.projectSourceManifest.sources?.localSkill?.root,
     localSkillName: input.configuration.projectSourceManifest.sources?.localSkill?.name,
     auditPromptRoot,
-    auditPromptRef: input.configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
+    auditPromptRef,
     autoUpdate: input.configuration.effective.memory?.update.auto ?? false,
     binding: {
       bindingRef: `memory-binding:${projectKey}`,

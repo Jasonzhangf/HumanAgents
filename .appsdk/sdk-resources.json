@@ -1,10 +1,10 @@
 {
-  "bundle_digest": "sha256:28fdd46b018e57a93c9505133c872f66b53a3ebebc2ce53bd69b8af22e0cd773",
-  "manifest_digest": "sha256:da3f0c34033f8e2edc3b9f4c0b253b09df3e30fae8cb1273e1e036cd1da00668",
+  "bundle_digest": "sha256:926d3704ef7a823d41dbca53c0f27757de15e78b61e61756a83f0d2506f998bb",
+  "manifest_digest": "sha256:c0e3756d3d801912d91e0df0d24ef8ad473a627ca593d6c0c5d7657c0b358c33",
   "resources": [
     {
       "class": "contracts",
-      "digest": "sha256:da3f0c34033f8e2edc3b9f4c0b253b09df3e30fae8cb1273e1e036cd1da00668",
+      "digest": "sha256:c0e3756d3d801912d91e0df0d24ef8ad473a627ca593d6c0c5d7657c0b358c33",
       "path": ".appsdk/contracts/sdk-bundle.manifest.json",
       "source": "contracts/sdk-bundle.manifest.json"
     },
@@ -58,37 +58,37 @@
     },
     {
       "class": "contracts",
-      "digest": "sha256:6cbb62a74955e7d15d8337b55b3f450c0c4e956d951bf5ce1bf506bd1f1b0166",
+      "digest": "sha256:d3084c359d7ea147caba7e45020a0d3f8c1b7ecdff50642d62f2ff17f864717b",
       "path": ".appsdk/contracts/maps/resource-map.json",
       "source": "contracts/maps/resource-map.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:11e13c74049336bf4cd641ed1f6cd1e9fec2a3129e2dd9b932ff606f1ca757af",
+      "digest": "sha256:8146d7ad09cbafa79bc606a0a3f7309a87ca80a84464861f34f5599fe0339293",
       "path": ".appsdk/contracts/maps/function-map.json",
       "source": "contracts/maps/function-map.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:be26a641397b43c9125803b38bc19436608ec10c9dcd0ba9036150ffa9bd87bd",
+      "digest": "sha256:99bfe6f139f53ee03963a4ee06cf26e96137a559ead4d502b4e3c6205ce81e15",
       "path": ".appsdk/contracts/maps/mainline-call-map.json",
       "source": "contracts/maps/mainline-call-map.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:cab89a66189ca56e4febcb5e64a2ae59636f164b9327b74231033af2f0473cf3",
+      "digest": "sha256:2a273f5e9b69486365d97350a28e0a07fc83dc2c5d40bd55b6cea793e856e377",
       "path": ".appsdk/contracts/maps/verification-map.json",
       "source": "contracts/maps/verification-map.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:06a7a225725fa0c082ffa637cdf9c10ca0d3e34fa6dc4f4c0329bb3d39300a8b",
+      "digest": "sha256:d2a31baf1c8e37560554700a3170b71ac52ae44579f7c7723b37768edd3e64eb",
       "path": ".appsdk/contracts/migrations/sdk-0.1.5-to-0.1.6.json",
       "source": "contracts/migrations/sdk-0.1.5-to-0.1.6.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:7b59889d7f838335ef4ff1cdd56b75b221e6bd13d266ac4fb916d4045dcc79dc",
+      "digest": "sha256:76cc991156affbc794eeb8e0bb918a11637b86a6d4b464aa7d6bc2a2cafdb5d0",
       "path": ".appsdk/contracts/migrations/sdk-0.1.6-to-0.1.7.json",
       "source": "contracts/migrations/sdk-0.1.6-to-0.1.7.json"
     },
@@ -160,7 +160,7 @@
     },
     {
       "class": "contracts",
-      "digest": "sha256:aa4b8b6fc1cda1e79f9ff2f26ef818c64644c8a5d5a99f010b12922115cbf6bf",
+      "digest": "sha256:1f3adae1d776005f7667cd9561b29b62c12003378693bf40ee1b781f03254dc1",
       "path": ".appsdk/contracts/records/worktree-record.schema.json",
       "source": "contracts/records/worktree-record.schema.json"
     },
@@ -244,13 +244,19 @@
     },
     {
       "class": "contracts",
+      "digest": "sha256:973bf86f45a072000ad17a1007bc35c76e9082438244ff0a4e7f10d59597e018",
+      "path": ".appsdk/contracts/records/collab-live-closure-record.schema.json",
+      "source": "contracts/records/collab-live-closure-record.schema.json"
+    },
+    {
+      "class": "contracts",
       "digest": "sha256:cc3aef39558bd54911f8cedbd051bfccbc245d421da0d043ec9ce1728067bd45",
       "path": ".appsdk/contracts/records/merge-record.schema.json",
       "source": "contracts/records/merge-record.schema.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:0eb4c53e242bc8d0566cc68ecad1c78359f5d1d7f1bfc6b69a73713706c08f36",
+      "digest": "sha256:8b0f6c48ccd5deae7d85fd3341d33a12d9db1d648afb5e6673f289e1b4313fa4",
       "path": ".appsdk/contracts/records/promotion-record.schema.json",
       "source": "contracts/records/promotion-record.schema.json"
     },
