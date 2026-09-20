@@ -3,6 +3,25 @@
   "$id": "https://appsdk.local/contracts/records/promotion-record.schema.json",
   "type": "object",
   "required": ["promotion_id", "issue_id", "experiment_id", "module_id", "worktree_record_id", "reproduction_record_id", "fix_candidate_id", "architecture_review_id", "effectiveness_record_id", "merge_record_id", "base_commit", "candidate_commit", "merged_commit", "source_commit", "previous_active_version", "new_active_version", "review_id", "evidence_ids", "required_gate_results", "change_set_id", "compatibility_level", "root_cause", "design_id", "change_reason_comment", "playground_cleanup_record_id", "bug_closure_verified", "created_at"],
+  "allOf": [
+    {
+      "if": {
+        "required": ["required_gate_results"],
+        "properties": {
+          "required_gate_results": {
+            "contains": {
+              "type": "object",
+              "required": ["gate_id"],
+              "properties": {
+                "gate_id": {"const": "collab_live_closure"}
+              }
+            }
+          }
+        }
+      },
+      "then": {"required": ["collab_live_closure_record_id"]}
+    }
+  ],
   "properties": {
     "promotion_id": {"type": "string"},
     "issue_id": {"type": "string"},

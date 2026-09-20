@@ -256,7 +256,7 @@
     },
     {
       "class": "contracts",
-      "digest": "sha256:8b0f6c48ccd5deae7d85fd3341d33a12d9db1d648afb5e6673f289e1b4313fa4",
+      "digest": "sha256:179551b1925caf9066b26943c3cc3b0615e1965f4f990fcf4099a7de4272b774",
       "path": ".appsdk/contracts/records/promotion-record.schema.json",
       "source": "contracts/records/promotion-record.schema.json"
     },

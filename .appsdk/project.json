@@ -68,7 +68,7 @@
       "generated/**",
       "protected/source/**"
     ],
-    "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json"
+    "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json"
   },
   "guidance": {
     "compiled_manifest": ".appsdk/guidance/compiled.json",

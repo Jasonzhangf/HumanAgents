@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +13,80 @@ import { validateReleaseVersion } from '../../scripts/release-version.mjs';
 
 const node = process.execPath;
 const command = (source) => [node, '-e', source];
+const repositoryRoot = new URL('../..', import.meta.url);
+
+function fileDigest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+async function readJson(relativePath) {
+  return JSON.parse(await readFile(new URL(relativePath, repositoryRoot), 'utf8'));
+}
+
+test('installed bundle uses the canonical zone transition manifest', async () => {
+  const project = await readJson('.appsdk/project.json');
+  assert.equal(
+    project.governance.zone_transition_contract,
+    'contracts/transitions/zone-transition.manifest.json',
+  );
+
+  const declaredBytes = await readFile(new URL(`.appsdk/${project.governance.zone_transition_contract}`, repositoryRoot));
+  const canonicalBytes = await readFile(new URL('contracts/transitions/zone-transition.manifest.json', repositoryRoot));
+  assert.deepEqual(declaredBytes, canonicalBytes);
+
+  const resources = await readJson('.appsdk/sdk-resources.json');
+  const resource = resources.resources.find((entry) => (
+    entry.class === 'contracts'
+    && entry.source === 'contracts/transitions/zone-transition.manifest.json'
+  ));
+  assert.ok(resource, 'zone transition manifest must be an installed bundle resource');
+  assert.equal(resource.path, '.appsdk/contracts/transitions/zone-transition.manifest.json');
+  assert.equal(resource.digest, fileDigest(declaredBytes));
+});
+
+test('installed promotion schema requires the canonical collab live closure gate', async () => {
+  const canonicalBytes = await readFile(new URL('contracts/records/promotion-record.schema.json', repositoryRoot));
+  const installedBytes = await readFile(new URL('.appsdk/contracts/records/promotion-record.schema.json', repositoryRoot));
+  assert.deepEqual(installedBytes, canonicalBytes);
+
+  const schema = JSON.parse(installedBytes);
+  assert.equal(typeof schema.properties.collab_live_closure_record_id?.type, 'string');
+  const closureCondition = schema.allOf?.find((entry) => (
+    entry.if?.properties?.required_gate_results?.contains?.properties?.gate_id?.const === 'collab_live_closure'
+  ));
+  assert.ok(closureCondition, 'promotion schema must condition on the collab_live_closure gate');
+  assert.deepEqual(closureCondition.then?.required, ['collab_live_closure_record_id']);
+
+  const resources = await readJson('.appsdk/sdk-resources.json');
+  const resource = resources.resources.find((entry) => (
+    entry.class === 'contracts'
+    && entry.source === 'contracts/records/promotion-record.schema.json'
+  ));
+  assert.ok(resource, 'promotion record schema must be an installed bundle resource');
+  assert.equal(resource.path, '.appsdk/contracts/records/promotion-record.schema.json');
+  assert.equal(resource.digest, fileDigest(installedBytes));
+});
+
+test('migration target digests bind installed bundle bytes and verifier maps', async () => {
+  const record = await readJson('.appsdk/migrations/0.1.6-to-0.1.7/record.json');
+  const canonicalManifest = await readJson('.appsdk/contracts/migrations/sdk-0.1.6-to-0.1.7.json');
+  const canonicalMaps = new Map(canonicalManifest.maps.map((entry) => [entry.name, entry]));
+
+  for (const entry of record.maps) {
+    const canonical = canonicalMaps.get(entry.name);
+    assert.ok(canonical, `missing canonical migration entry for ${entry.name}`);
+    const installedBundleDigest = fileDigest(await readFile(
+      new URL(`.appsdk/contracts/maps/${entry.name}`, repositoryRoot),
+    ));
+    const verifierMapDigest = fileDigest(await readFile(
+      new URL(`.appsdk/maps/${entry.name}`, repositoryRoot),
+    ));
+    assert.equal(entry.target_digest, installedBundleDigest);
+    assert.equal(entry.target_digest, verifierMapDigest);
+    assert.equal(entry.canonical_target_digest, canonical.target_digest);
+    assert.equal(entry.canonical_target_digest, entry.target_digest);
+  }
+});
 
 test('release versions are path-safe semantic versions', () => {
   assert.equal(validateReleaseVersion('0.1.0'), '0.1.0');
