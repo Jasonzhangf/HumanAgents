@@ -8,7 +8,7 @@ import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
 import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
-import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
+import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -452,6 +452,55 @@ async function composeMemoryFixture(input: {
 class CrashSubmitDriver extends FakeAgentDriver {
   async submit(): Promise<never> {
     throw new Error('DSH runtime exited before settle');
+  }
+}
+
+class CrashStartDriver extends FakeAgentDriver {
+  async start(): Promise<never> {
+    throw new Error('DSH runtime failed during start');
+  }
+}
+
+class PlainAgentEventDriver extends FakeAgentDriver {
+  private taskId?: AgentEvent['taskId'];
+
+  override async start(input: AgentStartRequest) {
+    this.taskId = input.taskId;
+    return await super.start(input);
+  }
+
+  override async *observe(input: { readonly runtimeId: string }): AsyncIterable<AgentEvent> {
+    const taskId = this.taskId!;
+    const scope = { organId: id('organ', 'agent-execution-fake'), taskId };
+    yield { taskId, executionEpoch: 1, kind: 'model', summary: 'DSH model event', evidenceRefs: [] };
+    yield {
+      taskId,
+      executionEpoch: 1,
+      kind: 'output',
+      summary: 'DSH output event',
+      evidenceRefs: [{
+        evidenceId: id('evidence', `${input.runtimeId}-output`),
+        kind: 'operation',
+        source: 'test-dsh-shaped',
+        locator: 'dsh://output',
+        scope,
+      }],
+    };
+    yield {
+      taskId,
+      executionEpoch: 1,
+      kind: 'tool',
+      summary: 'DSH tool event',
+      evidenceRefs: [{
+        evidenceId: id('evidence', `${input.runtimeId}-tool`),
+        kind: 'tool',
+        source: 'test-dsh-shaped',
+        locator: 'dsh://tool',
+        scope,
+      }],
+    };
+    yield { taskId, executionEpoch: 1, kind: 'error', summary: 'DSH provider error', evidenceRefs: [] };
+    yield { taskId, executionEpoch: 1, kind: 'terminal', terminalState: 'succeeded', summary: 'DSH terminal event', evidenceRefs: [] };
   }
 }
 
@@ -3778,6 +3827,7 @@ test('runtime crash preserves original error in a failed checkpoint and resumes 
   });
   assert.equal(first.checkpoint.outcome, 'failed');
   assert.match(first.checkpoint.evidenceRefs[0]?.locator ?? '', /DSH%20runtime%20exited/);
+  assert.equal(first.semanticEvents.some((event) => event.kind === 'execution.started'), false);
   assert.equal(driver.settleCalls >= 1, true);
   const manifest = await readRunManifest(paths, 'session-crash-epoch');
   const recovered = await resumeAgentOperation({
@@ -3816,6 +3866,65 @@ test('prompt rejection is committed as a failed checkpoint', async () => {
   });
   assert.equal(result.checkpoint.outcome, 'failed');
   assert.match(result.checkpoint.evidenceRefs[0]?.locator ?? '', /prompt-rejected/);
+});
+
+test('start failure commits a failed checkpoint without fabricating execution.started', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-start-failure-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const result = await runAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-start-failure',
+    plan: 'default',
+    prompt: 'fail during start',
+    composed: { driver: new CrashStartDriver() },
+  });
+  assert.equal(result.checkpoint.outcome, 'failed');
+  assert.equal(result.semanticEvents.some((event) => event.kind === 'execution.started'), false);
+  assert.deepEqual(result.semanticEvents.map((event) => event.kind), [
+    'provider.error',
+    'checkpoint.committed',
+    'execution.terminal',
+  ]);
+});
+
+test('DSH-shaped plain agent events retain model output tool error and terminal semantics', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-plain-agent-events-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const result = await runAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-plain-agent-events',
+    plan: 'default',
+    prompt: 'emit plain DSH-shaped events',
+    composed: { driver: new PlainAgentEventDriver() },
+  });
+  assert.deepEqual(result.receipt.observedKinds, ['model', 'output', 'tool', 'error', 'terminal']);
+  assert.deepEqual(result.semanticEvents.map((event) => event.kind), [
+    'execution.started',
+    'provider.model',
+    'provider.output',
+    'provider.tool',
+    'provider.error',
+    'execution.terminal',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ]);
+  assert.deepEqual(
+    result.semanticEvents.slice(1, 5).map((event) => event.summary),
+    ['DSH model event', 'DSH output event', 'DSH tool event', 'DSH provider error'],
+  );
+  assert.equal(result.semanticEvents[5]?.terminalPhase, 'provider');
+  assert.equal(result.semanticEvents[5]?.state, 'succeeded');
+  assert.equal(result.semanticEvents.at(-1)?.terminalPhase, 'final');
+  assert.equal(result.semanticEvents.at(-1)?.terminalState, 'succeeded');
 });
 
 test('session lifecycle is persisted below control root and keeps agent cwd separate', async () => {

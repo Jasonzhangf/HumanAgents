@@ -50,7 +50,10 @@ function selectedAgentDriverRef(input: OpenAgentOperationInput): 'fake' | 'dsh' 
 function withSemanticReceipt(
   result: RunAgentOperationResult,
   input: OpenAgentOperationInput,
-  failure?: { readonly message: string; readonly closure?: AgentClosure },
+  options: {
+    readonly failure?: { readonly message: string; readonly closure?: AgentClosure };
+    readonly executionAdmitted?: boolean;
+  } = {},
 ): AgentOperationResult {
   return {
     ...result,
@@ -59,7 +62,8 @@ function withSemanticReceipt(
       observedEvents: result.receipt.observedEvents,
       checkpoint: result.checkpoint,
       providerClose: result.receipt.providerClose,
-      ...(failure === undefined ? {} : { failure }),
+      executionAdmitted: options.executionAdmitted ?? false,
+      ...(options.failure === undefined ? {} : { failure: options.failure }),
     }),
   };
 }
@@ -72,10 +76,12 @@ function withSemanticReceipt(
  */
 export async function runAgentOperation(input: RunAgentOperationInput): Promise<AgentOperationResult> {
   const controller = await openAgentOperation(input);
+  let executionAdmitted = false;
   try {
     await controller.start();
     await controller.submit();
-    return withSemanticReceipt(await controller.complete(), input);
+    executionAdmitted = true;
+    return withSemanticReceipt(await controller.complete(), input, { executionAdmitted });
   } catch (error) {
     let closeFailure: unknown;
     try {
@@ -101,8 +107,11 @@ export async function runAgentOperation(input: RunAgentOperationInput): Promise<
         );
       }
       return withSemanticReceipt(result, input, {
-        message: error instanceof Error ? error.message : String(error),
-        closure: result.receipt.closure,
+        failure: {
+          message: error instanceof Error ? error.message : String(error),
+          closure: result.receipt.closure,
+        },
+        executionAdmitted,
       });
     } catch (failure) {
       if (failure instanceof AppLifecycleError && failure.code === 'agent-operation-post-commit-recovery-required') {

@@ -20,6 +20,7 @@ import type {
   OperationId,
   ProviderBinding,
   ProviderCloseResult,
+  ProviderError,
   ProviderEvent,
   ProviderSettleInput,
   ProviderSettlement,
@@ -78,13 +79,23 @@ function semanticEventKind(providerKind: ProviderEvent['kind']): AgentSemanticEv
   }
 }
 
-function eventState(event: ProviderEvent): string {
+interface SemanticEventSource {
+  readonly kind: ProviderEvent['kind'];
+  readonly terminalState?: ProviderEvent['terminalState'];
+  readonly outputRefs?: readonly string[];
+  readonly summary?: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly error?: ProviderError;
+  readonly ownerId?: string;
+}
+
+function eventState(event: SemanticEventSource): string {
   if (event.terminalState) return event.terminalState;
   if (event.error) return 'failed';
   return event.kind;
 }
 
-function eventSummary(event: ProviderEvent, kind: AgentSemanticEventKind): string {
+function eventSummary(event: SemanticEventSource, kind: AgentSemanticEventKind): string {
   if (kind === 'execution.terminal') return `execution ${event.terminalState ?? 'unknown'}`;
   if (event.error) return event.error.message ?? 'provider error';
   if (event.summary) return event.summary;
@@ -96,10 +107,33 @@ function providerEventFrom(event: AgentEvent): ProviderEvent | undefined {
   return (event as { readonly providerEvent?: ProviderEvent }).providerEvent;
 }
 
+function semanticEventSourceFrom(event: AgentEvent): SemanticEventSource | undefined {
+  const providerEvent = providerEventFrom(event);
+  if (providerEvent) return providerEvent;
+  switch (event.kind) {
+    case 'model':
+    case 'output':
+    case 'tool':
+    case 'error':
+    case 'terminal':
+    case 'attention':
+    case 'transport':
+      return {
+        kind: event.kind,
+        terminalState: event.terminalState,
+        summary: event.summary,
+        evidenceRefs: event.evidenceRefs,
+      };
+    default:
+      return undefined;
+  }
+}
+
 export function projectExecutionSemanticEvents(input: {
   readonly observedEvents: readonly AgentEvent[];
   readonly checkpoint: Checkpoint;
   readonly providerClose: ProviderCloseResult | undefined;
+  readonly executionAdmitted: boolean;
   readonly failure?: { readonly message: string; readonly closure?: AgentClosure };
 }): AgentSemanticEvent[] {
   const events: AgentSemanticEvent[] = [];
@@ -126,17 +160,17 @@ export function projectExecutionSemanticEvents(input: {
     });
   };
 
-  push('execution.started', 'running', 'execution started', []);
-  let providerTerminal: ProviderEvent | undefined;
+  if (input.executionAdmitted) push('execution.started', 'running', 'execution started', []);
+  let providerTerminal: SemanticEventSource | undefined;
   for (const event of input.observedEvents) {
-    const providerEvent = providerEventFrom(event);
-    if (!providerEvent) continue;
-    const kind = semanticEventKind(providerEvent.kind);
-    push(kind, eventState(providerEvent), eventSummary(providerEvent, kind), providerEvent.evidenceRefs, {
-      ...(providerEvent.kind === 'terminal' ? { terminalPhase: 'provider' as const } : {}),
-      ...(providerEvent.ownerId === undefined ? {} : { ownerId: providerEvent.ownerId }),
+    const source = semanticEventSourceFrom(event);
+    if (!source) continue;
+    const kind = semanticEventKind(source.kind);
+    push(kind, eventState(source), eventSummary(source, kind), source.evidenceRefs, {
+      ...(source.kind === 'terminal' ? { terminalPhase: 'provider' as const } : {}),
+      ...(source.ownerId === undefined ? {} : { ownerId: source.ownerId }),
     });
-    if (providerEvent.kind === 'terminal') providerTerminal = providerEvent;
+    if (source.kind === 'terminal') providerTerminal = source;
   }
   if (input.failure) {
     push('provider.error', 'failed', input.failure.message, input.failure.closure?.evidenceRefs ?? []);
