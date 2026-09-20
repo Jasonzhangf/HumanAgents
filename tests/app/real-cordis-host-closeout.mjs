@@ -18,6 +18,8 @@
  * journal, checkpoint, and lease artifacts into the receipt file. The receipt
  * itself is committed separately and does not claim to bind its carrier hash.
  *
+ * Required env:
+ *   HUMANAGENT_CORDIS_CANDIDATE_COMMIT exact source commit to prove
  * Optional env:
  *   HUMANAGENT_CORDIS_RECEIPT_PATH default ./dist/receipts/cordis-host-closeout.json
  */
@@ -28,21 +30,14 @@ import { mkdirSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { treeDigest } from '../../scripts/digests.mjs';
 
 const RECEIPT_PATH = resolve(
   process.env.HUMANAGENT_CORDIS_RECEIPT_PATH ?? 'dist/receipts/cordis-host-closeout.json',
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
-const IMPLEMENTATION_COMMIT = git(['rev-parse', 'HEAD']);
-const IMPLEMENTATION_TREE = git(['rev-parse', 'HEAD^{tree}']);
-const IMPLEMENTATION_PATHS = [
-  'packages/app/src/cordis-host.ts',
-  'packages/app/src/cli.ts',
-  'packages/app/src/entry-composition.ts',
-  'packages/contracts/src/index.ts',
-  'tests/app/app.test.ts',
-  'tests/app/cordis-host.test.ts',
-];
+const BUILD_MANIFEST_PATH = resolve('dist/cordis-host-build.json');
+const IMPLEMENTATION_COMMIT = process.env.HUMANAGENT_CORDIS_CANDIDATE_COMMIT;
 const EXPECTED_PLUGINS = [
   'humanagent.harness-kernel',
   'humanagent.agent-templates',
@@ -309,10 +304,19 @@ async function readIfPresent(path) {
 }
 
 async function run() {
-  if (git(['rev-parse', `${IMPLEMENTATION_COMMIT}^{tree}`]) !== IMPLEMENTATION_TREE) {
-    throw new Error(`implementation commit tree changed: ${IMPLEMENTATION_COMMIT}`);
+  if (!IMPLEMENTATION_COMMIT) throw new Error('HUMANAGENT_CORDIS_CANDIDATE_COMMIT is required');
+  const implementationTree = git(['rev-parse', `${IMPLEMENTATION_COMMIT}^{tree}`]);
+  const headCommit = git(['rev-parse', 'HEAD']);
+  if (headCommit !== IMPLEMENTATION_COMMIT) throw new Error(`candidate commit does not match HEAD: ${IMPLEMENTATION_COMMIT} != ${headCommit}`);
+  if (git(['status', '--porcelain', '--untracked-files=all'])) throw new Error('candidate worktree must be clean before proof');
+  const buildManifest = JSON.parse(await readFile(BUILD_MANIFEST_PATH, 'utf8'));
+  if (buildManifest.candidateCommit !== IMPLEMENTATION_COMMIT || buildManifest.candidateTree !== implementationTree) {
+    throw new Error(`built artifact is not bound to candidate: ${BUILD_MANIFEST_PATH}`);
   }
-  execFileSync('git', ['diff', '--quiet', 'HEAD', '--', ...IMPLEMENTATION_PATHS]);
+  const artifactDigest = await treeDigest(resolve('dist/app'));
+  if (buildManifest.artifactDigest !== artifactDigest) {
+    throw new Error(`built artifact digest mismatch: ${buildManifest.artifactDigest} != ${artifactDigest}`);
+  }
   const root = await mkdtemp(join(tmpdir(), 'humanagent-cordis-closeout-'));
   const serve = startServe(root);
   const record = {
@@ -321,7 +325,9 @@ async function run() {
     generatedAt: new Date().toISOString(),
     candidate: {
       implementationCommit: IMPLEMENTATION_COMMIT,
-      implementationTree: IMPLEMENTATION_TREE,
+      implementationTree,
+      artifactPath: resolve('dist/app'),
+      artifactDigest,
       sourceDigest: sourceDigest(),
     },
     root,
