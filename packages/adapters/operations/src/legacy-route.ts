@@ -6,6 +6,11 @@ import {
   type OperationId,
   type Scope,
 } from '../../../contracts/src/index.js';
+import {
+  OperationAdapterError,
+  failureEvidence,
+  operationFailure,
+} from './errors.js';
 
 import type {
   LegacyInternalExecutionResult,
@@ -93,19 +98,6 @@ function legacyExecutionResult(output: unknown): LegacyInternalExecutionResult {
     ...(typeof value.outputRef === 'string' ? { outputRef: value.outputRef } : {}),
     ...(typeof value.outputDigest === 'string' ? { outputDigest: value.outputDigest } : {}),
     ...(Array.isArray(value.evidenceRefs) ? { evidenceRefs: value.evidenceRefs as readonly EvidenceRef[] } : {}),
-  };
-}
-
-function legacyEvidence(entryId: string, operationId: OperationId, scope: Scope): EvidenceRef {
-  return {
-    evidenceId: {
-      scope: 'evidence',
-      value: `legacy-${entryId}-${operationId.value}`.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 128),
-    },
-    kind: 'tool',
-    source: `legacy/internal/${entryId}`,
-    locator: `legacy://${entryId}/operations/${operationId.value}`,
-    scope,
   };
 }
 
