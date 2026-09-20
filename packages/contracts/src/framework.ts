@@ -15,13 +15,16 @@ import type {
   MemoryPromotionReceipt,
   MemoryQueryRequest,
   MemoryReviewReceipt,
+  MemoryScope,
   MemorySubmission,
   ProceduralMemoryCandidate,
   ProjectSourcePatchArtifact,
   ProjectSourceUpdateProposal,
   SemanticMemoryCandidate,
   CanonicalMemoryScope,
+  CanonicalMemoryScopeCompatibility,
   AuditPromptSnapshot,
+  LegacyMemoryScopeCompatibility,
   NextAction,
   OperationId,
   ScopeRef,
@@ -312,6 +315,50 @@ export function validateCanonicalMemoryScope(input: CanonicalMemoryScope): void 
   if (input.globalId !== 'global') throw new ContractError('global memory identity must be global');
   if (input.sourceProjectKey !== undefined) nonEmpty(input.sourceProjectKey, 'memory sourceProjectKey');
   if (input.sourceOrganId !== undefined) assertScope(input.sourceOrganId, 'organ');
+}
+
+function assertMemoryScopeCompatibilityVersion(value: number): void {
+  if (value !== 1) throw new ContractError(`unsupported memory scope compatibility version: ${value}`);
+}
+
+function validateLegacyMemoryScope(input: MemoryScope): void {
+  if (input.kind !== 'task' && input.kind !== 'organ' && input.kind !== 'approved-global') {
+    throw new ContractError(`unknown legacy memory scope kind: ${(input as { readonly kind?: string }).kind ?? 'missing'}`);
+  }
+  assertScope(input.organId, 'organ');
+  if (input.kind === 'task') {
+    assertScopedTask(input.taskId, 'memory taskId');
+    return;
+  }
+  if (input.taskId !== undefined) throw new ContractError('memory taskId is only valid for task scope');
+}
+
+export function canonicalMemoryScopeToLegacy(input: CanonicalMemoryScopeCompatibility): MemoryScope {
+  assertMemoryScopeCompatibilityVersion(input.compatibilityVersion);
+  validateCanonicalMemoryScope(input.scope);
+  if (input.scope.namespace === 'project') {
+    return {
+      kind: input.scope.taskId === undefined ? 'organ' : 'task',
+      organId: input.scope.organId,
+      ...(input.scope.taskId === undefined ? {} : { taskId: input.scope.taskId }),
+    };
+  }
+  return { kind: 'approved-global', organId: { scope: 'organ', value: 'global' } };
+}
+
+export function legacyMemoryScopeToCanonical(input: LegacyMemoryScopeCompatibility): CanonicalMemoryScope {
+  assertMemoryScopeCompatibilityVersion(input.compatibilityVersion);
+  validateLegacyMemoryScope(input.scope);
+  nonEmpty(input.projectKey, 'memory compatibility projectKey');
+  if (input.scope.kind === 'approved-global') {
+    throw new ContractError('legacy approved-global scope cannot prove its canonical source identity');
+  }
+  return {
+    namespace: 'project',
+    projectKey: input.projectKey,
+    organId: input.scope.organId,
+    ...(input.scope.taskId === undefined ? {} : { taskId: input.scope.taskId }),
+  };
 }
 
 export function validateMemoryBinding(input: MemoryBinding): void {
