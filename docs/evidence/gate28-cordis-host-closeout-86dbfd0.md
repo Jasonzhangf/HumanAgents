@@ -1,12 +1,12 @@
-# Gate 28 Cordis Host Closeout at 86dbfd0
+# Gate 28 Cordis Host Closeout at c75e518
 
 ## Scope
 
 - Bug: `cd8e2d77a2f9307e15003509b95e5f335131e4552e9600aba8b631227f476651`
-- Exact tested commit: `86dbfd0d9956bb0b83bc86db7c0fbbb898cbbc5d`
-- Exact tested tree: `dddbe8c21c30176ea0164ba131160a448f1ffae8`
+- Exact tested commit: `c75e5181f3ba0f44453d2954ee87b9e482da5c21`
+- Exact tested tree: `006eee296bb3fd6f7b6f3f2de92e6b45ec17a9f4`
 - Worktree: `playground/mvp-cordis-host-closeout-r3-86dbfd0`
-- Baseline: clean detached worktree from `origin/main`
+- Baseline: clean detached worktree from `86dbfd0` on `origin/main`
 
 This closeout verifies the Cordis Host portion of Gate 28 on the current
 mainline. It does not claim completion of the broader Gate 18, Gate 25, or
@@ -41,8 +41,8 @@ The proof starts the built `serve --mode fake` entry on an isolated temporary
 workspace and control root, captures the live launch JSON, runs the task over
 HTTP/SSE, verifies the task projection and shutdown lease, and writes the
 bound receipt to `dist/receipts/cordis-host-closeout.json`. The receipt binds
-the implementation commit/tree `86dbfd0` / `dddbe8c`, a digest of all
-non-evidence tracked source, and copied launch, request, SSE, task,
+the implementation commit/tree `c75e518` / `006eee2`, a digest of all
+non-evidence tracked source and the built app artifact, and copied launch, request, SSE, task,
 event-journal, checkpoint-journal, and lease artifacts. The receipt is
 generated from that proof source and committed as an evidence-only carrier;
 the receipt does not claim to bind the hash of the commit that contains it.
