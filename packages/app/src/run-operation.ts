@@ -3,19 +3,66 @@ import {
   type RecalledCheckpoint,
 } from '../../runtime/src/index.js';
 import {
+  type AgentClosure,
+  type AgentSemanticEvent,
   type Checkpoint,
   type CheckpointId,
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
 import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
-import { checkpointJournal, openAgentOperation, type OpenAgentOperationInput, type RunAgentOperationResult } from './agent-operation.js';
+import {
+  checkpointJournal,
+  openAgentOperation,
+  type OpenAgentOperationInput,
+  type RunAgentOperationResult,
+} from './agent-operation.js';
 import { AppLifecycleError } from './errors.js';
+import { projectExecutionSemanticEvents } from './fake-execution.js';
 
 const OWNER = 'humanagent.app.run-operation';
 
 export interface RunAgentOperationInput extends OpenAgentOperationInput {}
 export type { RunAgentOperationResult } from './agent-operation.js';
+
+export interface AgentOperationResult extends RunAgentOperationResult {
+  readonly driverRef: 'fake' | 'dsh';
+  readonly semanticEvents: readonly AgentSemanticEvent[];
+}
+
+function selectedAgentDriverRef(input: OpenAgentOperationInput): 'fake' | 'dsh' {
+  if (input.agent) return input.agent.driverRef;
+  const defaultAgentId = input.configuration.effective.project?.defaultAgent;
+  const selected = defaultAgentId
+    ? input.configuration.agentRoster.find((agent) => agent.agentId === defaultAgentId)
+    : input.configuration.agentRoster[0];
+  if (!selected) {
+    throw new AppLifecycleError(
+      'run-operation.agent-unconfigured',
+      'no agent is configured to run the requested operation',
+      'configure at least one agent in config.toml',
+      OWNER,
+    );
+  }
+  return selected.driverRef;
+}
+
+function withSemanticReceipt(
+  result: RunAgentOperationResult,
+  input: OpenAgentOperationInput,
+  failure?: { readonly message: string; readonly closure?: AgentClosure },
+): AgentOperationResult {
+  return {
+    ...result,
+    driverRef: selectedAgentDriverRef(input),
+    semanticEvents: projectExecutionSemanticEvents({
+      observedEvents: result.receipt.observedEvents,
+      checkpoint: result.checkpoint,
+      providerClose: result.receipt.providerClose,
+      ...(failure === undefined ? {} : { failure }),
+    }),
+  };
+}
 
 /**
  * Runs one real HumanAgent operation: the app owns Task / Operation / execution
@@ -23,12 +70,12 @@ export type { RunAgentOperationResult } from './agent-operation.js';
  * is written from the actual settle evidence; DSH session logs never become
  * HumanAgent state.
  */
-export async function runAgentOperation(input: RunAgentOperationInput): Promise<RunAgentOperationResult> {
+export async function runAgentOperation(input: RunAgentOperationInput): Promise<AgentOperationResult> {
   const controller = await openAgentOperation(input);
   try {
     await controller.start();
     await controller.submit();
-    return await controller.complete();
+    return withSemanticReceipt(await controller.complete(), input);
   } catch (error) {
     let closeFailure: unknown;
     try {
@@ -53,7 +100,10 @@ export async function runAgentOperation(input: RunAgentOperationInput): Promise<
           { originalError: error, closeFailure, result },
         );
       }
-      return result;
+      return withSemanticReceipt(result, input, {
+        message: error instanceof Error ? error.message : String(error),
+        closure: result.receipt.closure,
+      });
     } catch (failure) {
       if (failure instanceof AppLifecycleError && failure.code === 'agent-operation-post-commit-recovery-required') {
         throw failure;

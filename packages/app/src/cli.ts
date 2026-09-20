@@ -31,8 +31,13 @@ import {
   settleSessionOutcome,
 } from './index.js';
 import { SessionStore } from './session-store.js';
-import { buildFakeExecutionPort, buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
-import { FakeProviderAgentDriver, fakeExecutionBinding } from './fake-execution.js';
+import { buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
+import {
+  createFakeExecutionPort,
+  FakeProviderAgentDriver,
+  fakeExecutionBinding,
+  type FakeExecutionScenario,
+} from './fake-execution.js';
 import {
   entryCompositionInventory,
   FAKE_SERVE_PROVIDER_PLUGIN,
@@ -63,6 +68,22 @@ function requiredPrompt(value: string | undefined): string {
       'provide a non-empty prompt',
       'humanagent.app',
     );
+  }
+  return value;
+}
+
+function fakeScenario(args: readonly string[]): FakeExecutionScenario | undefined {
+  const value = option(args, '--fake-scenario');
+  if (value === undefined) return undefined;
+  if (
+    value !== 'success'
+    && value !== 'tool'
+    && value !== 'error'
+    && value !== 'cancel'
+    && value !== 'unknown'
+    && value !== 'close-failure'
+  ) {
+    throw new Error('--fake-scenario must be success, tool, error, cancel, unknown, or close-failure');
   }
   return value;
 }
@@ -349,6 +370,7 @@ export async function main(args: readonly string[]): Promise<void> {
                 operationId,
               },
               inputRefs: [`humanagent://session/${sessionId}/input/1`],
+              ...(fakeScenario(args) === undefined ? {} : { scenario: fakeScenario(args) }),
               ...(option(args, '--fake-step-delay-ms') === undefined ? {} : { stepDelayMs: Number(option(args, '--fake-step-delay-ms')) }),
             }),
           }
@@ -378,6 +400,8 @@ export async function main(args: readonly string[]): Promise<void> {
         executionEpoch: result.executionEpoch,
         outcome: result.checkpoint.outcome,
         checkpointId: result.checkpoint.id.value,
+        driverRef: result.driverRef,
+        semanticEvents: result.semanticEvents,
         observedKinds: result.receipt.observedKinds,
         observedEvents: result.receipt.observedEvents,
         output: result.receipt.output.payload,
@@ -557,7 +581,11 @@ export async function main(args: readonly string[]): Promise<void> {
           baseUrl: option(args, '--rcc-base-url') ?? 'http://127.0.0.1:4444',
           maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
         }, evidenceRoot)
-      : buildFakeExecutionPort(binding, option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined);
+      : createFakeExecutionPort(
+          binding,
+          option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
+          fakeScenario(args),
+        );
     const plugins = servePlugins(mode, {
       executionPort: port,
       memory: {
@@ -658,6 +686,7 @@ export async function main(args: readonly string[]): Promise<void> {
     console.log(JSON.stringify({
       command,
       mode,
+      driverRef: mode,
       url: runtime.server.url,
       bindingId: binding.bindingId,
       providerId: binding.providerId,
