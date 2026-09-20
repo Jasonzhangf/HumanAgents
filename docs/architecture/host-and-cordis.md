@@ -6,9 +6,16 @@
 
 本文定义 HumanAgent 如何以 Cordis 为第一层插件宿主独立启动，如何装载固定 Harness 内核和可替换模块，如何在外部安装 DSH，以及如何把 DSH 作为一种 Agent/Execution provider 接入。Provider 协议和 RCC v3 临时绑定由 [`provider-adapters.md`](provider-adapters.md) 唯一维护。当前 DSH 源码基线已锁定；真实 adapter 仍需公开入口、profile、能力和同入口验证后才能实现，详见 [`dsh-baseline.md`](dsh-baseline.md)。
 
+当前实现边界（MVP）：可执行入口是 `packages/app/src/cli.ts`，构建后通过
+`node dist/app/app/src/cli.js serve --mode fake --workspace <path>` 启动本地
+Runtime/UI；该入口由 `packages/app/src/cordis-host.ts` 组装 Cordis Host 和显式
+fake/template/memory/ui plugins。`packages/app/standalone/`、
+`packages/app/cordis-host/` 以及 `humanagent start ...` 是 Milestone 1
+target/planned 形态，不是当前目录或当前 CLI 命令。
+
 ## 1. 设计结论
 
-HumanAgent 自己是产品宿主和固定编排的 owner；Cordis 是 HumanAgent 的插件生命周期和模块组装宿主；DSH 只是其中一种可替换的 Agent/Execution provider。Cordis 只进入 `app/cordis-host` 和具体插件实现，不成为 `contracts/core` 的领域依赖。
+HumanAgent 自己是产品宿主和固定编排的 owner；Cordis 是 HumanAgent 的插件生命周期和模块组装宿主；DSH 只是其中一种可替换的 Agent/Execution provider。当前 Cordis Host 实现位于 `packages/app/src/cordis-host.ts`；未来如果拆分目录，target/planned 路径才是 `packages/app/cordis-host/`。Cordis 只进入 app 宿主和具体插件实现，不成为 `contracts/core` 的领域依赖。
 
 ```text
 HumanAgent CLI / Host Supervisor
@@ -100,9 +107,21 @@ checkpoint 或业务 payload。`~/.rcc` 由外部 RCC 管理，HumanAgent 只做
 readiness/capability 检查和非敏感 lock 摘要；协议未知或绑定不可证明时必须
 停在 `capability-unavailable`，不能猜测 codec 或静默切换 provider。
 
-MVP 可以把 fake backend 放在同一个 standalone 进程中，以减少安装面；这不改变上述端口边界。
+当前 MVP 可以把 fake backend 放在 `packages/app/src/cli.ts` 的同一
+`serve --mode fake` 进程中，以减少安装面；Milestone 1 target/planned 的
+standalone 进程形态也必须保持上述端口边界。
 
 ## 3. 独立安装和启动
+
+当前 MVP 实现入口如下：
+
+```sh
+node dist/app/app/src/cli.js serve --mode fake --workspace /absolute/project
+```
+
+以下命令块展示 Milestone 1 target/planned 的 profile/DSH 形态，整块不是当前
+契约；其中 `humanagent start` 当前不可执行。当前 CLI 的 `init`/`doctor`
+不带该 profile/executor 契约。
 
 ### 3.1 安装责任
 
@@ -128,7 +147,7 @@ humanagent doctor --executor dsh
 # 使用 DSH 官方 profile plugin 管理命令安装 HumanAgent 执行插件
 dsh plugin --profile humanagent add <approved-humanagent-dsh-plugin>
 
-# 独立启动 HumanAgent，Host 决定何时连接 DSH
+# Milestone 1 target/planned：独立启动 HumanAgent，Host 决定何时连接 DSH
 humanagent start --profile default --executor dsh --dsh-profile humanagent
 ```
 
@@ -210,7 +229,7 @@ interface HarnessPlugin {
 }
 ```
 
-上面的 manifest 和接口是 HumanAgent 自己的框架无关契约；`app/cordis-host` 负责将它映射为 Cordis 的 Definition/Provider/Consumer 和生命周期 hook。`HarnessPluginContext` 只暴露注册过的 typed seam，例如 `registerNodeStrategy`、`registerAgentDriver`、`registerAgentLifecycleHook`、`registerAcpAdapter`、`registerSkillSource`、`registerMcpSource`、`registerMemoryInteraction`、`registerMemoryOperations`、`registerInputSource`、`registerAssetStore`、`registerHealthProbe` 和 `registerUiProjection`。内置 Checkpoint tools 由 Harness Kernel 唯一注册，插件不能替换或另建一套。没有通用的“拿到 root context 后任意修改状态”入口。
+上面的 manifest 和接口是 HumanAgent 自己的框架无关契约；当前由 `packages/app/src/cordis-host.ts` 负责将它映射为 Cordis 的 Definition/Provider/Consumer 和生命周期 hook。`HarnessPluginContext` 只暴露注册过的 typed seam，例如 `registerNodeStrategy`、`registerAgentDriver`、`registerAgentLifecycleHook`、`registerAcpAdapter`、`registerSkillSource`、`registerMcpSource`、`registerMemoryInteraction`、`registerMemoryOperations`、`registerInputSource`、`registerAssetStore`、`registerHealthProbe` 和 `registerUiProjection`。内置 Checkpoint tools 由 Harness Kernel 唯一注册，插件不能替换或另建一套。没有通用的“拿到 root context 后任意修改状态”入口。
 
 同进程 plugin 是受信任代码，不等同于 sandbox：它拥有宿主进程的语言运行时权限。默认选择独立 DSH provider 进程；若未来允许同进程 plugin，必须额外通过 signed/allowlisted package、API compatibility、permission review 和独立 test fixture，且仍只能拿到 capability facade。manifest 中的 `permissions` 是 Harness 的准入输入，不是对恶意代码的安全隔离承诺。
 
@@ -329,7 +348,7 @@ HumanAgent profile 保存高层 plugin/template 配置和锁；DSH profile 保�
 
 ## 7. 典型流程
 
-### 7.1 首次启动
+### 7.1 首次启动（Milestone 1 target/planned）
 
 ```text
 user installs DSH independently
@@ -377,7 +396,10 @@ health probe or provider error
 
 ### MVP
 
-- `humanagent start --executor fake` 可以独立启动，不安装 DSH；
+- 当前实际入口
+  `node dist/app/app/src/cli.js serve --mode fake --workspace /absolute/project`
+  可以独立启动，不安装 DSH；`humanagent start --executor fake` 是
+  target/planned，不是当前命令；
 - Cordis Host 可以装载 fixed Harness Kernel、fake Agent Driver、deterministic Memory backend 和 UI projection plugins；
 - core/runtime/plugin/template contracts 不依赖 Cordis 或 DSH 类型；
 - explicit plugin manifest、digest、模板加载和 dispose 生命周期可 replay；

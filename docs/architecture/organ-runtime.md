@@ -114,21 +114,30 @@ packages/
   ui/
     contracts/              Task List、Dashboard/Task Detail/Task Dashboard 和 Organ Console view model/command
     projection/             Runtime snapshot/event → UI projection
-    shell/                  HumanAgent 产品壳和导航
-    surfaces/               Task List、Dashboard/Task Detail/Task Dashboard、Organ Console、Observation、Checkpoint/Attention 界面
-    kit/                    HumanAgent semantic UI primitives facade
+    surfaces/               target/planned 产品 surface 实现；当前仅含静态 replay fixture
+    shell/                  target/planned HumanAgent 产品壳和导航；当前产品 UI 位于 docs/ui
+    kit/                    target/planned HumanAgent semantic UI primitives facade
 
   app/
-    standalone/             无 DSH 的组装入口
-    cordis-host/            HumanAgent Cordis Host、固定 kernel 和 plugin registry
-    dsh-plugin/             DSH provider plugin 组装入口
-    supervisor/              Host 启动、关闭、plugin lock 和 provider 监督
-    configuration/          配置解析和依赖绑定
+    src/                    当前可执行组装入口
+      cli.ts                当前 CLI；serve --mode fake 启动本地 Runtime/UI
+      cordis-host.ts        当前 Cordis Host、固定 kernel 和 plugin registry
+      entry-composition.ts  当前 serve plugin composition 和 manifest 校验
+      supervisor/           当前 Host 启动、关闭、plugin lock 和 provider 监督
+      ui-runtime/           当前 Runtime API、SSE 和 UI server
+    standalone/             target/planned（Milestone 1）；当前不存在
+    cordis-host/            target/planned（仅在需要目录拆分时）；当前实现是 src/cordis-host.ts
+    dsh-plugin/             target/planned（Milestone 1）
+    configuration/          target/planned（当前配置 owner 是 packages/config）
 ```
 
 依赖只能向下：`contracts ← core ← runtime ← app`。adapter 实现 ports，不向 `core` 导入；DSH 类型只能出现在 `adapters/dsh` 和其测试中。
 
-UI 是独立的呈现边界：`runtime → ui/projection → ui/surfaces → ui/kit`。UI 只能接收 typed view model 和 command port；不能直接读取 Journal、调用 DSH Session、从 debug 日志重建状态，或把 React store 当作运行时真源。
+UI 是独立的呈现边界：当前 `runtime → ui/projection → docs/ui`，由
+`packages/app/src/ui-runtime` 提供 Runtime API 和静态 UI server；target/planned
+的 `ui/surfaces` 与 `ui/kit` 仍需保持同一 typed view model/command 边界。UI
+只能接收 typed view model 和 command port；不能直接读取 Journal、调用 DSH
+Session、从 debug 日志重建状态，或把 React store 当作运行时真源。
 
 ## 3.1 Brain 分层与任务流
 
@@ -391,7 +400,7 @@ Organ Diagnostics 是两个界面都可以链接到的只读特殊入口，用�
 UI 分阶段处理：
 
 - MVP：自己实现最小 Task List + Dashboard + Task Detail + Task Dashboard + Operator Console，使用语义 HTML/CSS 和少量 `kit`；证明任务索引、输入理解确认门禁、任务输入输出、agent 输入/输出预览、状态呈现、错误可见、steer 结果可见、断线/过期状态不伪装；为一个 Organ 提供确定性基础自诊断摘要。
-- Milestone 1：评估 DSH `ui-primitives` 作为视觉积木；即使采用，也只能在 `ui/kit` facade 后，不让 DSH Session/renderer 类型进入 `ui/contracts`。
+- Milestone 1：评估 DSH `ui-primitives` 作为视觉积木；即使采用，也只能在 target/planned `ui/kit` facade 后，不让 DSH Session/renderer 类型进入 `ui/contracts`。
 - Milestone 2：实现长程专属的 history/checkpoint/attention/operation inspector、健康趋势和诊断历史；UI 订阅 projection，不读取 Journal 文件。
 - Milestone 3：完善多任务、多器官、权限、背压、部署和可观测界面；保留 DSH-specific execution detail 为可选面板，不让它取代 HumanAgent 产品壳。
 
@@ -734,7 +743,9 @@ SQLite 或其他查询存储只保存从 Journal 投影的 `seq`、范围、标�
 - 高层状态转换只由 `core/runtime` 决定；DSH 事件只能作为输入事实，经 adapter 映射后进入高层事件。
 - DSH 原生 session log 保留为执行证据；高层恢复只读取 HumanAgent 自己已提交的 checkpoint recovery state。adapter 的 `recoveryStateRef` 只能定位外部执行证据/会话细节，不能成为高层恢复真相。
 - adapter 不得通过请求 metadata、prompt 隐藏字段或 debug 日志传递高层控制状态。
-- DSH 不可用时，standalone/fake backend 可以用于测试；生产路径不得静默切换到 fake 或未授权 fallback。
+- DSH 不可用时，当前 `serve --mode fake` 可以用于测试；Milestone 1
+  target/planned 的 standalone/fake backend 也受同一限制，生产路径不得静默
+  切换到 fake 或未授权 fallback。
 - Provider protocol adapter 不属于 `core/runtime`；它只把明确绑定的协议事实
   映射到 provider-neutral execution event。DSH bridge 可以消费该 port，也可以
   在经批准的 direct-provider 验证路径中由 Host 装载，但两者都不能改变高层

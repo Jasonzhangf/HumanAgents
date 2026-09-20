@@ -28,7 +28,7 @@ DSH 从 Milestone 1 开始接入。原因：如果 MVP 直接依赖 DSH，生命
 | 阶段 | 交付主题 | 运行形态 | 核心新增证据 | 明确不做 |
 |---|---|---|---|---|
 | MVP | 单器官最小纵切面 + 显式 Brain 交互与任务 I/O | HumanAgent Cordis Host + fixed Harness Kernel + fake Agent Driver + Agent Template Loader + deterministic Memory Operations Backend + Task List/Dashboard/Task Detail/Task Dashboard + Operator Console | Journal replay、checkpoint recall/completion、steer 收拢、错误策略、输入理解确认、任务输入输出、WorkResult、skill review、基础自诊断、模板/插件校验、Memory context injection 和阶段故障闭环 | DSH provider、远端 provider、向量/RAG、并发多器官、SQLite、完整产品 UI、生产插件签名 |
-| Milestone 1 | 真实执行后端、RCC Provider adapter 和 DSH Cordis bridge | standalone HumanAgent Cordis Host + 独立 DSH profile + `cc`/`goaichat` protocol adapters + DSH Agent Driver | clean DSH 版本绑定、RCC v3 `4444` readiness、Responses/Anthropic 分离、专用 profile/plugin 安装、真实同入口 start/resume/stop、Session Log 证据分离、provider 意外闭环、每个小阶段 Astra receipt | 长程压缩策略、生产部署、多租户、多 provider 路由 |
+| Milestone 1 | 真实执行后端、RCC Provider adapter 和 DSH Cordis bridge | target/planned：standalone HumanAgent Cordis Host + 独立 DSH profile + `cc`/`goaichat` protocol adapters + DSH Agent Driver | clean DSH 版本绑定、RCC v3 `4444` readiness、Responses/Anthropic 分离、专用 profile/plugin 安装、真实同入口 start/resume/stop、Session Log 证据分离、provider 意外闭环、每个小阶段 Astra receipt | 长程压缩策略、生产部署、多租户、多 provider 路由 |
 | Milestone 2 | 长程耐久、恢复和插件状态持久化 | daemon/worker 可重启运行 | 崩溃恢复、Index 重建、历史压缩/归档、监督恢复、有限重试、template/plugin snapshot 恢复 | 多节点调度、完整产品 UI、跨租户治理 |
 | Milestone 3 | 可交付运行时 | 可部署、多任务、多器官、多 profile | 真实入口、并发/背压、安全、可观测、插件发布/签名/回滚证据 | 未经验证的跨节点一致性和无限规模承诺 |
 
@@ -76,16 +76,23 @@ packages/adapters/filesystem/
 packages/adapters/testing/
 packages/agent-templates/
 packages/adapters/memory/
-packages/app/standalone/
-packages/app/cordis-host/
+packages/app/src/
 packages/ui/contracts/
 packages/ui/projection/
-packages/ui/shell/
-packages/ui/surfaces/
-packages/ui/kit/
+packages/ui/surfaces/       # 当前仅含静态 replay fixture
+docs/ui/                    # 当前产品静态 UI shell/surfaces，由 serve 提供
+# target/planned（当前不存在）：packages/ui/shell/、packages/ui/kit/
 ```
 
-MVP 不创建 DSH provider、DSH-specific adapter、`adapters/sqlite`、远端 transport、daemon、DSH WebUI 依赖或 DSH-specific 目录；但必须创建最小 `app/cordis-host`，由 Cordis Host 装载固定 Harness Kernel、fake Agent Driver、节点策略、模板、Memory 和 UI plugins。`packages/agent-templates` 只负责本地模板 registry/校验，不加载 DSH plugin。
+当前 MVP app owner 是 `packages/app/src/`：`cli.ts` 是当前可执行入口，
+`cordis-host.ts` 是当前 Cordis Host，`entry-composition.ts` 定义 serve
+composition。`packages/app/standalone/` 和 `packages/app/cordis-host/` 仅保留为
+Milestone 1 target/planned 目录拆分，不是当前实现。MVP 不创建 DSH provider、
+DSH-specific adapter、`adapters/sqlite`、远端 transport、daemon、DSH WebUI
+依赖或 DSH-specific 目录；但必须创建最小 `packages/app/src/cordis-host.ts`，
+由 Cordis Host 装载固定 Harness Kernel、fake Agent Driver、节点策略、模板、
+Memory 和 UI plugins。`packages/agent-templates` 只负责本地模板
+registry/校验，不加载 DSH plugin。
 
 ### 3.3 MVP 实现顺序
 
@@ -97,7 +104,7 @@ MVP 不创建 DSH provider、DSH-specific adapter、`adapters/sqlite`、远端 t
 | M0.4 | `runtime` | 实现显式输入 → 任务匹配 → 状态查询 → 意图确认 → 整理反馈 → FIFO RequirementInbox → 隐式分类/运行任务更新/资源准入 → fixed Harness nodes，再执行 recall → template-bound Agent Runtime → Agent Driver work → completion、Task 输入输出、Memory context injection 和基础诊断 | 未确认不派发；四种意图；确认后 FIFO；分类队列、运行任务更新、资源不足等待、serial/parallel/review/wait 节点、单 cycle、后台/前台故障、steer race、输入请求、输出交付、Memory unavailable、探针失败、runtime 意外接管 |
 | M0.5 | `adapters/testing` + `adapters/memory` | fake Agent Driver 和 deterministic Memory Operations Backend 可确定性地产生 success/tool/error/cancel/late-event/crash、exact/full-text search、inspect、recurrence 和 context attach，并提供可观测 pipeline 节点和各角色 template fixture | 同一输入 replay 结果一致；不得生成“真实 DSH”或虚假 RAG 证据；节点树、template/tool/context digest、issue owner 和 evidence ref 可追溯 |
 | M0.6 | `packages/ui` | Task List 驱动任务索引；Dashboard 驱动简洁状态入口；Task Detail 驱动任务输入、调查结果、建议方案、用户选择、skill review 和任务输出；Task Dashboard 驱动各 agent 输入/输出预览和动态摘要入口；`OrganUiProjectionPort` 驱动运行控制，`PipelineObservationProjectionPort` 驱动只读递归观测；内部健康和节点细节走特殊入口 | 实际入口验证三组任务列表、搜索/状态筛选、Dashboard 待处理/正在处理/最近输入/历史、任务详情导航、无须批准时直接继续、需要选择时固定选项+自定义、skill review、Task Dashboard agent cards/drawer、任务观测入口、节点 drawer、递归进入/返回、键盘/焦点、错误可见性、窄宽度和断线状态 |
-| M0.7 | `app/cordis-host` + `app/standalone` | Cordis Host 装载 fixed Kernel 和显式列出的 fake/template/memory/ui plugins；本地入口可启动、推进、steer、重启恢复和 replay，并挂载最小 UI | 使用实际入口运行全部 MVP 场景；验证注册顺序、重复 owner/未声明 capability 失败；记录 Journal、checkpoint、attention、context injection 和 UI 状态证据 |
+| M0.7 | `packages/app/src/cli.ts` + `packages/app/src/cordis-host.ts` + `packages/app/src/entry-composition.ts` | Cordis Host 装载 fixed Kernel 和显式列出的 fake/template/memory/ui plugins；当前 `serve --mode fake` 入口可启动、推进、steer、重启恢复和 replay，并挂载最小 UI | 使用当前实际入口运行全部 MVP 场景；验证注册顺序、重复 owner/未声明 capability 失败；记录 Journal、checkpoint、attention、context injection 和 UI 状态证据 |
 | M0.8 | owner + reviewer | 删除未使用抽象；文档、测试、实现 owner 一致 | 只读 review；无 P0/P1；重跑受影响验证 |
 
 ### 3.4 MVP 必须保留的最小数据
@@ -138,7 +145,7 @@ MVP 只保留满足恢复和审计的字段：
 - [ ] Pipeline Observation 能完整展示每层节点、状态、输入/输出引用和 evidence；drawer/递归返回只读，不提供隐式消费或控制动作。
 - [ ] Operator Console 能显示 running、waiting、error、stopped、stale、disconnected；不使用假进度掩盖未知状态。
 - [ ] UI 只通过各自的 typed projection/command ports 消费状态或发出命令（Organ、Task Interaction、Pipeline Observation），不直接依赖 Journal、DSH Session 或 DSH WebUI shell。
-- [ ] fake replay 与实际 standalone 入口结果一致。
+- [ ] fake replay 与实际独立的 standalone/run 入口结果一致。
 - [ ] 五类 agent 均由标准模板协议启动；模板、skill、tool capability、policy digest 可追溯，不能通过 prompt 或 task customization 越权。
 - [ ] Agent Template、Agent Driver、Agent Runtime 和 Harness Node Orchestrator 的 owner/替换边界明确；fake Driver 不伪装成 DSH，策略不能绕过固定 gate。
 - [ ] Cordis Host 能按 manifest/依赖装载 fixed Kernel 和 extension plugins；重复 owner、未声明 capability、错误 dispose 和 provider readiness 失败均可见。
@@ -161,8 +168,8 @@ MVP 关闭后仍不得宣称 DSH 接通、真实模型可用或生产可部署�
 - Product truth：所有状态来自 `OrganUiProjectionPort`；loading、stale、disconnected、unknown 和 error 必须可见，不得用 shimmer、假进度或折叠摘要掩盖。
 - Required states：empty、ready、running、partial、waiting、degraded、error、permission、cancelled、stopped、stale、disconnected；健康摘要另有 healthy/degraded/attention/unhealthy/unknown，不和任务生命周期合并。
 - Supported widths：至少验证常规桌面宽度和窄窗口；窄窗口优先保留状态、主动作和错误，不保证所有 inspector 同时展开。
-- Incumbent stack：当前未定；MVP 不引入 DSH WebUI shell、第二套 router 或第二套 design system。先使用语义 HTML/CSS 和 `packages/ui/kit` 的最小 owner。
-- Evidence：实际 standalone route + 真实 Journal/replay 内容；截图/录屏仅作视觉证据，必须同时保留 command、projection、Journal 和操作结果证据；验证键盘焦点、缩放/重排、暗色模式、错误态、断线态和文案扩展。
+- Incumbent stack：当前未定；MVP 不引入 DSH WebUI shell、第二套 router 或第二套 design system。当前最小 owner 是 `docs/ui` 入口；target/planned `packages/ui/kit` 不是当前实现。
+- Evidence：实际 `serve --mode fake` route + 真实 Journal/replay 内容；截图/录屏仅作视觉证据，必须同时保留 command、projection、Journal 和操作结果证据；验证键盘焦点、缩放/重排、暗色模式、错误态、断线态和文案扩展。
 
 ### 3.6.1 UI 开案顺序
 
@@ -180,7 +187,7 @@ UI 必须分两道门：
 在不改变 HumanAgent 既有领域语义、生命周期 owner 和控制真相的前提下，接入一个真实 DSH adapter；允许 M1-1 在 `packages/contracts` 补充协议无关的 Provider-neutral contract，但不得引入 DSH/RCC 类型，完成一条真实执行链：
 
 ```text
-HumanAgent standalone
+HumanAgent standalone（Milestone 1 target/planned）
   → ExecutionRuntimePort
   → DSH adapter
   → DSH session/agent/tool/model
@@ -196,7 +203,7 @@ HumanAgent standalone
 - 复核 DSH public entrypoints、session 创建/恢复、事件、工具、取消和 session log。
 - 实现 `packages/adapters/provider` 的 binding、协议 codec、provider readiness 和外部 stop/settle 映射；实现 `packages/adapters/dsh` + Cordis bridge 的 session mapping、event mapping、DSH stop controller、evidence reader 和 DSH capability mapping。DSH bridge 消费 Provider readiness，不重复拥有它。
 - 将 DSH capability probe 接入 `OrganHealthProbePort`；只报告真实可证明的 session/model/tool/取消能力，不把 DSH debug 状态当健康真相。
-- 评估 `dsh-client-ui-primitives`；只有公开版本、MIT license、token 兼容和实际 bundle 证据齐备后，才允许作为 `packages/ui/kit` 的实现依赖。
+- 评估 `dsh-client-ui-primitives`；只有公开版本、MIT license、token 兼容和实际 bundle 证据齐备后，才允许作为 target/planned `packages/ui/kit` 的实现依赖。
 - 只支持一个 DSH execution profile、两种协议、三个独立且受限的 ProviderBinding（Responses 的 `cc`、`cc-sol` 与 Anthropic 的 `goaichat`）和一个代表性工具。
 - 保留 DSH Session Log 为执行证据；不让 DSH session ID 替代高层 ID。
 - 真实同入口验证 start、resume、tool result、error、requestStop、settle。
@@ -323,7 +330,7 @@ stop/settle 的阶段必须停在 `capability-unavailable`、`health-blocked` �
 
 - 多 Task/多 Organ 调度；每个任务保留独立 scope、epoch、Journal 和恢复责任。
 - 并发限制、背压、资源配额和 operation cancellation；控制面不进入业务 payload。
-- standalone/daemon/worker 的正式组装入口和配置 schema。
+- Milestone 3 target/planned：standalone/daemon/worker 的正式组装入口和配置 schema。
 - HumanAgent/DSH 的独立安装、专用 profile、lock、兼容矩阵和 staged plugin update。
 - 安全边界：身份、授权、文件/进程/远端 operation 权限、敏感资产访问。
 - 结构化日志、metrics、trace、Attention UI/通知接缝；观测不成为控制真源。
@@ -375,7 +382,7 @@ Astra review 必须审查当前候选，不审查口头计划；无 PASS receipt
   ↓
 Git/语言/包管理器基线
   ↓
-MVP contracts → core → Journal → runtime → fake/memory → Cordis Host → ui projection/shell → standalone
+MVP contracts → core → Journal → runtime → fake/memory → Cordis Host → ui projection/docs-ui shell → serve --mode fake
   ↓
 MVP closeout review
   ↓
