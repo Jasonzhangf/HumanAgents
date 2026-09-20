@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/agent-loop",
+    "noEmitOnError": true
+  },
+  "include": [
+    "**/*.ts",
+    "../../../packages/runtime/src/agent-loop/**/*.ts",
+    "../../../packages/runtime/src/node-modules.d.ts",
+    "../../../packages/runtime/src/nodes/errors.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/core/src/**/*.ts"
+  ]
+}
