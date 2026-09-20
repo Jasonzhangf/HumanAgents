@@ -20,6 +20,7 @@ function plugin(input: {
   readonly provides?: readonly string[];
   readonly consumes?: readonly string[];
   readonly dependencies?: readonly string[];
+  readonly permissions?: readonly string[];
   readonly register?: HarnessPlugin['register'];
   readonly start?: HarnessPlugin['start'];
   readonly dispose?: HarnessPlugin['dispose'];
@@ -34,7 +35,7 @@ function plugin(input: {
       dependencies: input.dependencies ?? ['humanagent.harness-kernel'],
       provides: input.provides ?? [],
       consumes: input.consumes ?? ['harness.kernel'],
-      permissions: [],
+      permissions: input.permissions ?? [],
       digest: `test:${input.id}`,
     },
     register: input.register ?? ((context) => {
@@ -58,7 +59,7 @@ function driver(capabilities: AgentCapabilities): AgentDriver {
   } as unknown as AgentDriver;
 }
 
-test('Cordis host orders manifests deterministically and rejects duplicate owners and undeclared capabilities', () => {
+test('Cordis host orders manifests deterministically and rejects duplicate owners and undeclared capabilities or permissions', () => {
   const ordered = new CordisHost([
     plugin({ id: 'plugin-b', provides: ['cap.b'] }),
     plugin({ id: 'plugin-a', provides: ['cap.a'] }),
@@ -72,6 +73,19 @@ test('Cordis host orders manifests deterministically and rejects duplicate owner
   assert.throws(
     () => new CordisHost([plugin({ id: 'undeclared', register: (context) => context.registerCapability('not-declared') })]),
     (error: unknown) => error instanceof CordisHostError && error.code === 'plugin-capability-undeclared',
+  );
+  const declaredPermission = new CordisHost([plugin({
+    id: 'declared-permission',
+    permissions: ['workspace.read'],
+    register: (context) => context.registerPermission('workspace.read'),
+  })]);
+  assert.deepEqual(declaredPermission.snapshot().pluginIds, [
+    'humanagent.harness-kernel',
+    'declared-permission',
+  ]);
+  assert.throws(
+    () => new CordisHost([plugin({ id: 'undeclared-permission', register: (context) => context.registerPermission('not-declared') })]),
+    (error: unknown) => error instanceof CordisHostError && error.code === 'plugin-permission-undeclared',
   );
   assert.throws(
     () => new CordisHost([plugin({ id: 'humanagent.harness-kernel' })]),

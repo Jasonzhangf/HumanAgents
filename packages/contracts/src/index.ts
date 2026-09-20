@@ -219,6 +219,7 @@ export interface HarnessPluginManifest {
 export interface HarnessPlugin { readonly manifest: HarnessPluginManifest; register(context: HarnessPluginContext): void; start?(): Promise<void>; dispose?(): Promise<void>; }
 export interface HarnessPluginContext {
   registerCapability(name: string): void;
+  registerPermission(name: string): void;
   registerAgentDriver(driver: AgentDriver): void;
   registerExecutionRuntimePort(port: ExecutionRuntimePort): void;
   registerMemoryOperations(port: MemoryOperationsPort): void;

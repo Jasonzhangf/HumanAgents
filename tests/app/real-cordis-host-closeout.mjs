@@ -33,8 +33,8 @@ const RECEIPT_PATH = resolve(
   process.env.HUMANAGENT_CORDIS_RECEIPT_PATH ?? 'dist/receipts/cordis-host-closeout.json',
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
-const IMPLEMENTATION_COMMIT = '86dbfd0d9956bb0b83bc86db7c0fbbb898cbbc5d';
-const IMPLEMENTATION_TREE = 'dddbe8c21c30176ea0164ba131160a448f1ffae8';
+const IMPLEMENTATION_COMMIT = git(['rev-parse', 'HEAD']);
+const IMPLEMENTATION_TREE = git(['rev-parse', 'HEAD^{tree}']);
 const IMPLEMENTATION_PATHS = [
   'packages/app/src/cordis-host.ts',
   'packages/app/src/cli.ts',
@@ -312,7 +312,7 @@ async function run() {
   if (git(['rev-parse', `${IMPLEMENTATION_COMMIT}^{tree}`]) !== IMPLEMENTATION_TREE) {
     throw new Error(`implementation commit tree changed: ${IMPLEMENTATION_COMMIT}`);
   }
-  execFileSync('git', ['diff', '--quiet', IMPLEMENTATION_COMMIT, 'HEAD', '--', ...IMPLEMENTATION_PATHS]);
+  execFileSync('git', ['diff', '--quiet', 'HEAD', '--', ...IMPLEMENTATION_PATHS]);
   const root = await mkdtemp(join(tmpdir(), 'humanagent-cordis-closeout-'));
   const serve = startServe(root);
   const record = {
