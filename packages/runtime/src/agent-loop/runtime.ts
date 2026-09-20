@@ -34,6 +34,7 @@ import {
 import {
   validateAgentLoopBudget,
   validateAgentLoopCheckpoint,
+  validateAgentLoopScopeRef,
   validateModeCapabilityProfile,
 } from '../../../contracts/src/agent-loop.js';
 import { RuntimeError } from '../nodes/errors.js';
@@ -115,9 +116,13 @@ function sameCheckpoint(left: AgentLoopCheckpointRef, right: AgentLoopCheckpoint
 }
 
 function sameScope(left: ScopeRef, right: ScopeRef): boolean {
-  return left.organId.value === right.organId.value
+  return left.organId.scope === right.organId.scope
+    && left.organId.value === right.organId.value
+    && left.taskId?.scope === right.taskId?.scope
     && left.taskId?.value === right.taskId?.value
+    && left.cycleId?.scope === right.cycleId?.scope
     && left.cycleId?.value === right.cycleId?.value
+    && left.operationId?.scope === right.operationId?.scope
     && left.operationId?.value === right.operationId?.value;
 }
 
@@ -165,6 +170,7 @@ export class AgentLoopRuntime {
     if (request.profiles.length === 0) throw new AgentLoopRuntimeError('invalid-state', 'at least one mode profile is required');
     try {
       validateAgentLoopBudget(request.budget);
+      validateAgentLoopScopeRef(request.scope, 'runtime scope');
       for (const profile of request.profiles) validateModeCapabilityProfile(profile);
     } catch (error) {
       throw new AgentLoopRuntimeError('invalid-state', error instanceof Error ? error.message : 'invalid agent loop configuration');
@@ -250,6 +256,11 @@ export class AgentLoopRuntime {
     this.requireActor(input.actor);
     if (this.modeState.mode !== 'observation') throw new AgentLoopRuntimeError('invalid-state', 'observation scope requires observation mode');
     if (this.observationScope) throw new AgentLoopRuntimeError('conflict', 'an observation scope is already open');
+    try {
+      validateAgentLoopScopeRef(input.scope);
+    } catch (error) {
+      throw new AgentLoopRuntimeError('invalid-state', error instanceof Error ? error.message : 'invalid observation scope');
+    }
     if (!sameScope(input.scope, this.request.scope)) throw new AgentLoopRuntimeError('conflict', 'observation scope is outside the runtime scope');
     this.assertBudget('observationScopes', 1);
     const profile = this.requireProfile('observation');
@@ -291,6 +302,11 @@ export class AgentLoopRuntime {
     this.requireActor(actor);
     if (!this.observationScope || this.observationScope.observationScopeId !== observationScopeId) {
       throw new AgentLoopRuntimeError('invalid-state', `unknown observation scope: ${observationScopeId}`);
+    }
+    if (this.inboxState.watermark !== this.checkpoint.eventWatermark.sequence
+      || this.deltaState.watermark.sequence !== this.checkpoint.eventWatermark.sequence
+      || !sameCheckpoint(this.deltaState.checkpoint, this.checkpoint)) {
+      throw new AgentLoopRuntimeError('conflict', 'cannot close observation scope with pending observation events');
     }
     const closed = this.observationScope;
     this.observationScope = undefined;

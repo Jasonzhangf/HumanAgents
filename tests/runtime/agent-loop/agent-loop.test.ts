@@ -349,6 +349,48 @@ test('runtime loop validates profiles and budgets before issuing a lease', () =>
   );
 });
 
+test('runtime loop validates scope identity and rejects close with pending observation events', () => {
+  assert.throws(
+    () => new AgentLoopRuntime({
+      ...createRuntimeRequest(),
+      scope: {
+        ...scope,
+        organId: { scope: 'task', value: 'malformed-organ' },
+      } as unknown as ScopeRef,
+    }),
+    /runtime scope organ id is invalid/,
+  );
+
+  const runtime = createRuntime();
+  const currentActor = actor(runtime);
+  assert.throws(
+    () => runtime.openObservationScope({
+      actor: currentActor,
+      kind: 'task',
+      scope: {
+        ...scope,
+        taskId: { scope: 'cycle', value: 'malformed-task' },
+      } as unknown as ScopeRef,
+      readableRefs: [],
+      capabilities: ['read-task'],
+    }),
+    /observation scope task id is invalid/,
+  );
+  runtime.openObservationScope({
+    actor: currentActor,
+    kind: 'task',
+    scope,
+    readableRefs: ['task:state'],
+    capabilities: ['read-task'],
+  });
+  runtime.mergeObservationBatch(currentActor, batch(runtime));
+  assert.throws(
+    () => runtime.closeObservationScope(currentActor),
+    /pending observation events/,
+  );
+  assert.equal(runtime.snapshot().observationScope?.observationScopeId, runtime.snapshot().modeState.observationScopeId);
+});
+
 test('runtime loop authorizes scope kind even when no capability is requested', () => {
   const runtime = createRuntime();
   assert.throws(

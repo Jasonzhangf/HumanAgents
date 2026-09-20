@@ -204,8 +204,8 @@ function sameCheckpointId(left: CheckpointId, right: CheckpointId): boolean {
   return left.scope === right.scope && left.value === right.value;
 }
 
-function validateScopeRef(input: ScopeRef): void {
-  if (input.organId.scope !== 'organ' || !input.organId.value.trim()) throw new ContractError('observation scope organ id is invalid');
+export function validateAgentLoopScopeRef(input: ScopeRef, label = 'observation scope'): void {
+  if (input.organId.scope !== 'organ' || !input.organId.value.trim()) throw new ContractError(`${label} organ id is invalid`);
   const optional = [
     ['task', input.taskId],
     ['cycle', input.cycleId],
@@ -213,7 +213,7 @@ function validateScopeRef(input: ScopeRef): void {
   ] as const;
   for (const [kind, value] of optional) {
     if (value !== undefined && (value.scope !== kind || !value.value.trim())) {
-      throw new ContractError(`observation scope ${kind} id is invalid`);
+      throw new ContractError(`${label} ${kind} id is invalid`);
     }
   }
 }
@@ -347,7 +347,7 @@ export function validateObservationScope(input: ObservationScope): void {
   nonEmpty(input.agentRuntimeId, 'observation scope runtimeId');
   positiveSafeInteger(input.executionEpoch, 'observation scope executionEpoch');
   validateAgentLoopCheckpointRef(input.checkpoint, 'observation scope checkpoint');
-  validateScopeRef(input.scope);
+  validateAgentLoopScopeRef(input.scope);
   assertMember(input.kind, OBSERVATION_SCOPE_KINDS, 'observation scope kind');
   uniqueRefs(input.readableRefs, 'observation readableRefs');
   uniqueRefs(input.capabilities, 'observation capabilities');
