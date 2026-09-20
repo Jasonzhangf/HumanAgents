@@ -1,0 +1,120 @@
+{
+  "kind": "humanagent.agent-template",
+  "templateApiVersion": 1,
+  "roleId": "memory",
+  "templateVersion": "1.1.0",
+  "extends": {
+    "roleId": "_base",
+    "version": "1.0.0"
+  },
+  "capabilityRefs": [
+    "memory.search",
+    "memory.ask",
+    "task.history",
+    "session.history",
+    "recurrence",
+    "novelty"
+  ],
+  "skillRefs": [
+    "history-search",
+    "novelty-review",
+    "recurrence-review"
+  ],
+  "toolCapabilityRefs": [
+    "memory.search",
+    "memory.ask",
+    "task.history",
+    "session.history"
+  ],
+  "promptSegmentRefs": [
+    "common/observation.md",
+    "common/orchestration.md",
+    "common/checkpoint.md",
+    "common/context-replacement.md",
+    "common/interruption.md",
+    "common/control-boundaries.md",
+    "memory/v1.1.0/prompts/identity.md",
+    "memory/v1.1.0/prompts/mission.md",
+    "memory/v1.1.0/prompts/input-output.md",
+    "memory/v1.1.0/prompts/failure.md",
+    "memory/v1.1.0/prompts/boundaries.md"
+  ],
+  "inputSchemaRef": "memory/v1.1.0/schemas/input.json",
+  "outputSchemaRef": "memory/v1.1.0/schemas/output.json",
+  "policyRef": "memory/v1.1.0/policy.json",
+  "observationProjectionRef": "memory/v1.1.0/observation.json",
+  "testFixtureRefs": [
+    "memory/v1.1.0/fixtures/positive.json",
+    "memory/v1.1.0/fixtures/negative.json"
+  ],
+  "memoryContextPolicy": {
+    "allowedScopes": [
+      "task",
+      "organ",
+      "approved-global"
+    ],
+    "allowedLayers": [
+      "current",
+      "task-recent",
+      "related",
+      "approved-long-term",
+      "raw"
+    ],
+    "maxTokenBudget": 8192,
+    "required": false
+  },
+  "driverRequirements": {
+    "allowedDriverKinds": [
+      "fake",
+      "dsh"
+    ],
+    "requiredCapabilities": []
+  },
+  "modeCapabilityProfile": {
+    "observation": {
+      "profileId": "builtin/memory/observation@1.1.0",
+      "role": "memory",
+      "mode": "observation",
+      "observationScopes": [
+        "self",
+        "task",
+        "memory",
+        "evidence"
+      ],
+      "observationCapabilities": [
+        "read-history",
+        "read-session",
+        "read-memory-source"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "plan-memory-curation",
+        "propose-skill-candidate"
+      ],
+      "capabilityDigest": "sha256:e59f3ce2942b7955405b1a1d153bf09a571f99443ce1e0699bd37108536acb69"
+    },
+    "orchestration": {
+      "profileId": "builtin/memory/orchestration@1.1.0",
+      "role": "memory",
+      "mode": "orchestration",
+      "observationScopes": [
+        "self",
+        "task",
+        "memory",
+        "evidence"
+      ],
+      "observationCapabilities": [
+        "read-history",
+        "read-session",
+        "read-memory-source"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "plan-memory-curation",
+        "propose-skill-candidate"
+      ],
+      "capabilityDigest": "sha256:351f89b0d60384b27e2b1563a1891ea9c05ab35d6082a44a1a0442bdbecdc9ef"
+    }
+  },
+  "digest": "fnv1a:cc40bed2"
+}

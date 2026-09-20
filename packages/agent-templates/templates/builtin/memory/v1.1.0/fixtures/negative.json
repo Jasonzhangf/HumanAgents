@@ -1,0 +1,5 @@
+{
+  "fixture": "memory-negative",
+  "description": "Cross-scope reads, direct approval, task mutation, or fabricated recall must be rejected.",
+  "expected": "rejected"
+}

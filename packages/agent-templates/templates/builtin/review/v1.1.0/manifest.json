@@ -1,0 +1,115 @@
+{
+  "kind": "humanagent.agent-template",
+  "templateApiVersion": 1,
+  "roleId": "review",
+  "templateVersion": "1.1.0",
+  "extends": {
+    "roleId": "_base",
+    "version": "1.0.0"
+  },
+  "capabilityRefs": [
+    "audit.read",
+    "architecture.review",
+    "baseline.review",
+    "quality.review",
+    "security.review",
+    "delivery.review"
+  ],
+  "skillRefs": [
+    "audit-standards",
+    "evidence-review"
+  ],
+  "toolCapabilityRefs": [
+    "read.audit",
+    "test.audit",
+    "result.audit"
+  ],
+  "promptSegmentRefs": [
+    "common/observation.md",
+    "common/orchestration.md",
+    "common/checkpoint.md",
+    "common/context-replacement.md",
+    "common/interruption.md",
+    "common/control-boundaries.md",
+    "review/v1.1.0/prompts/identity.md",
+    "review/v1.1.0/prompts/mission.md",
+    "review/v1.1.0/prompts/input-output.md",
+    "review/v1.1.0/prompts/failure.md",
+    "review/v1.1.0/prompts/boundaries.md"
+  ],
+  "inputSchemaRef": "review/v1.1.0/schemas/input.json",
+  "outputSchemaRef": "review/v1.1.0/schemas/output.json",
+  "policyRef": "review/v1.1.0/policy.json",
+  "observationProjectionRef": "review/v1.1.0/observation.json",
+  "testFixtureRefs": [
+    "review/v1.1.0/fixtures/positive.json",
+    "review/v1.1.0/fixtures/negative.json"
+  ],
+  "memoryContextPolicy": {
+    "allowedScopes": [
+      "task",
+      "organ",
+      "approved-global"
+    ],
+    "allowedLayers": [
+      "current",
+      "task-recent",
+      "related",
+      "approved-long-term"
+    ],
+    "maxTokenBudget": 8192,
+    "required": false
+  },
+  "driverRequirements": {
+    "allowedDriverKinds": [
+      "fake",
+      "dsh"
+    ],
+    "requiredCapabilities": []
+  },
+  "modeCapabilityProfile": {
+    "observation": {
+      "profileId": "builtin/review/observation@1.1.0",
+      "role": "review",
+      "mode": "observation",
+      "observationScopes": [
+        "self",
+        "task",
+        "evidence"
+      ],
+      "observationCapabilities": [
+        "read-candidate",
+        "read-acceptance",
+        "read-evidence"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "plan-review-checks",
+        "request-remediation"
+      ],
+      "capabilityDigest": "sha256:978af914094a40b588b71a75f8d3ec5ae3588a338266b2df22495bc4a5ccaf4a"
+    },
+    "orchestration": {
+      "profileId": "builtin/review/orchestration@1.1.0",
+      "role": "review",
+      "mode": "orchestration",
+      "observationScopes": [
+        "self",
+        "task",
+        "evidence"
+      ],
+      "observationCapabilities": [
+        "read-candidate",
+        "read-acceptance",
+        "read-evidence"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "plan-review-checks",
+        "request-remediation"
+      ],
+      "capabilityDigest": "sha256:f557486e28d25586c0ab37f613df0dafb74ff949c22338acf54cdad9603ce66f"
+    }
+  },
+  "digest": "fnv1a:7d606cd3"
+}

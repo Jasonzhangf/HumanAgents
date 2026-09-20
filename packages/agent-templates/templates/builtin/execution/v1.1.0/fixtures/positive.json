@@ -1,0 +1,5 @@
+{
+  "fixture": "execution-positive",
+  "description": "A bounded assignment with authorized tools returns a result with artifact and evidence refs.",
+  "expected": "accepted"
+}

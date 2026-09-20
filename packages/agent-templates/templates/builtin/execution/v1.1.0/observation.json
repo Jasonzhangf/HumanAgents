@@ -1,0 +1,20 @@
+{
+  "kind": "humanagent.agent-observation-projection",
+  "projectionRef": "builtin/execution@1.1.0",
+  "readOnly": true,
+  "fields": [
+    { "name": "assignmentRef", "source": "assignment.id" },
+    { "name": "runtimeBindingRef", "source": "runtime.binding" },
+    { "name": "toolIntents", "source": "agent.tool-intents" },
+    { "name": "operationRefs", "source": "operation.refs" },
+    { "name": "artifactRefs", "source": "result.artifacts" },
+    { "name": "evidenceRefs", "source": "result.evidence" },
+    { "name": "resultStatus", "source": "result.status" }
+  ],
+  "forbiddenActions": [
+    "change-objective",
+    "spawn-agent",
+    "modify-control-plane",
+    "merge"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/memory/1.1.0/input",
+  "title": "Memory Analysis Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operationId",
+    "bindingRef",
+    "projectKey",
+    "scope",
+    "sourceRefs",
+    "sourceDigests",
+    "observation",
+    "requestedKind",
+    "executionEpoch",
+    "trigger"
+  ],
+  "properties": {
+    "operationId": { "type": "string", "minLength": 1 },
+    "bindingRef": { "type": "string", "minLength": 1 },
+    "projectKey": { "type": "string", "minLength": 1 },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "organId"],
+      "properties": {
+        "kind": { "enum": ["task", "organ", "approved-global"] },
+        "organId": { "type": "string", "minLength": 1 },
+        "taskId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "taskId": { "type": "string", "minLength": 1 },
+    "sessionRef": { "type": "string", "minLength": 1 },
+    "sourceRefs": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "sourceDigests": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "observation": { "type": "string", "minLength": 1 },
+    "requestedKind": { "enum": ["episodic", "semantic", "procedural"] },
+    "executionEpoch": { "type": "integer", "minimum": 1 },
+    "trigger": { "enum": ["blocked", "rewind", "completion", "explicit-submission"] }
+  }
+}

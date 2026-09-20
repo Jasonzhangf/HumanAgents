@@ -1,0 +1,5 @@
+{
+  "fixture": "execution-negative",
+  "description": "Objective changes, unbound tools, missing evidence, or self-declared success must be rejected.",
+  "expected": "rejected"
+}

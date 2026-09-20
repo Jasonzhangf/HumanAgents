@@ -23,3 +23,4 @@ export * from './ui-runtime/coordinator.js';
 export * from './explicit-brain/index.js';
 export * from './communication/index.js';
 export * from './health/index.js';
+export * from './agent-loop/index.js';

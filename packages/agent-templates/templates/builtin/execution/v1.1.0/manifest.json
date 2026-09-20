@@ -1,0 +1,110 @@
+{
+  "kind": "humanagent.agent-template",
+  "templateApiVersion": 1,
+  "roleId": "execution",
+  "templateVersion": "1.1.0",
+  "extends": {
+    "roleId": "_base",
+    "version": "1.0.0"
+  },
+  "capabilityRefs": [
+    "worker.execute",
+    "search",
+    "coding",
+    "test",
+    "build"
+  ],
+  "skillRefs": [
+    "single-capability-worker"
+  ],
+  "toolCapabilityRefs": [
+    "search",
+    "coding",
+    "test",
+    "build"
+  ],
+  "promptSegmentRefs": [
+    "common/observation.md",
+    "common/orchestration.md",
+    "common/checkpoint.md",
+    "common/context-replacement.md",
+    "common/interruption.md",
+    "common/control-boundaries.md",
+    "execution/v1.1.0/prompts/identity.md",
+    "execution/v1.1.0/prompts/mission.md",
+    "execution/v1.1.0/prompts/input-output.md",
+    "execution/v1.1.0/prompts/failure.md",
+    "execution/v1.1.0/prompts/boundaries.md"
+  ],
+  "inputSchemaRef": "execution/v1.1.0/schemas/input.json",
+  "outputSchemaRef": "execution/v1.1.0/schemas/output.json",
+  "policyRef": "execution/v1.1.0/policy.json",
+  "observationProjectionRef": "execution/v1.1.0/observation.json",
+  "testFixtureRefs": [
+    "execution/v1.1.0/fixtures/positive.json",
+    "execution/v1.1.0/fixtures/negative.json"
+  ],
+  "memoryContextPolicy": {
+    "allowedScopes": [
+      "task",
+      "organ"
+    ],
+    "allowedLayers": [
+      "current",
+      "task-recent",
+      "related"
+    ],
+    "maxTokenBudget": 4096,
+    "required": false
+  },
+  "driverRequirements": {
+    "allowedDriverKinds": [
+      "fake",
+      "dsh"
+    ],
+    "requiredCapabilities": []
+  },
+  "modeCapabilityProfile": {
+    "observation": {
+      "profileId": "builtin/execution/observation@1.1.0",
+      "role": "execution",
+      "mode": "observation",
+      "observationScopes": [
+        "self",
+        "task",
+        "evidence"
+      ],
+      "observationCapabilities": [
+        "read-assignment",
+        "read-evidence",
+        "read-own-session"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "plan-own-tool-steps"
+      ],
+      "capabilityDigest": "sha256:59d2de489bb7f8b77b75c129ed577dbf4d2c4130e8a9d439fd828a9646a1391c"
+    },
+    "orchestration": {
+      "profileId": "builtin/execution/orchestration@1.1.0",
+      "role": "execution",
+      "mode": "orchestration",
+      "observationScopes": [
+        "self",
+        "task",
+        "evidence"
+      ],
+      "observationCapabilities": [
+        "read-assignment",
+        "read-evidence",
+        "read-own-session"
+      ],
+      "orchestrationScope": "local",
+      "orchestrationCapabilities": [
+        "plan-own-tool-steps"
+      ],
+      "capabilityDigest": "sha256:1a004a769e07c96f059f3a88ef8af646a0c66f9f4d79be2d6336403e573e8b80"
+    }
+  },
+  "digest": "fnv1a:3611088f"
+}

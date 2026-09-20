@@ -1,0 +1,5 @@
+{
+  "fixture": "review-negative",
+  "description": "Candidate mutation, remediation, merge, missing evidence, or health claims must be rejected.",
+  "expected": "rejected"
+}

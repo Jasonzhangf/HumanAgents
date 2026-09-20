@@ -3,10 +3,14 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
   ContractError, assertAgentRuntimeId, assertBusinessPayload, assertCapabilities, assertCheckpointLink, assertContextBudget, assertExecutionEpoch,
+  assertAgentLoopCheckpointLink,
   assertNotExpired, assertPermissionRevisionMatches, assertProviderBindingMatch, assertProviderEventEpoch, assertProviderExecutionIdentityMatch, assertProviderReadinessBinding,
   assertScopeAcl,
   assertSameScope, assertScope, checkProviderEventEpoch, checkScopeAcl, consumerKey, id, occurrenceIdempotencyKey, runtimeId,
   validateAgentCloseReceipt, validateAgentDispatchReceipt, validateAgentDriverReceipt, validateAgentObservationEvent, validateAgentReconcileResult,
+  validateAgentLoopBudget, validateAgentLoopBudgetUsage, validateAgentLoopCheckpoint, validateAgentLoopCheckpointRef, validateAgentLoopEventWatermark,
+  validateAgentModeState, validateAgentModeTransition, validateContextReplacement, validateContextView,
+  validateModeCapabilityProfile, validateModeLease, validateObservationBatch, validateObservationDelta, validateObservationScope,
   validateAgentRequestEnvelope, validateAgentResult, validateAgentSettleReceipt, validateAgentStopReceipt,
   validateAcpDriverBinding, validateAcpServerBinding, validateAgentMessageEnvelope, validateAgentProviderBinding, validateAgentRequestControl,
   validateCheckpointClosureRecord, validateCheckpointReentryRecord, validateControlProbeRecord, validateControlWatchdogPolicy, validateInteractionClosure,
@@ -22,6 +26,8 @@ import {
   validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
   validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
   type AgentDriverV1, type AgentRequestEnvelope, type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
+  type AgentLoopBudget, type AgentLoopBudgetUsage, type AgentLoopCheckpoint, type AgentModeState, type AgentModeTransition,
+  type ContextReplacement, type ModeCapabilityProfile, type ModeLease, type ObservationBatch, type ObservationDelta, type ObservationScope,
   type CheckpointClosureRecord, type CheckpointReentryRecord, type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation,
   type ExecutionBinding, type ExecutionRuntimePort, type GoalRecord, type HarnessPluginContext, type MemoryOperationsPort, type NoveltyResult,
   type MemoryActorContext, type MemoryCurationResult, type MemoryForgettingPlan, type MemoryPromotionReceipt, type MemoryQueryRequest,
@@ -236,6 +242,188 @@ test('rejects broken checkpoint predecessor chains', () => {
     assert.throws(() => assertCheckpointLink({ ...checkpoint(seq, null), id: id('checkpoint', 'invalid-current') }, null), ContractError);
     assert.throws(() => assertCheckpointLink(checkpoint(2, first.id), { ...first, seq }), ContractError);
   }
+});
+
+test('agent loop contracts validate control-plane identities and reject broken links', () => {
+  const checkpointRef = { checkpointId: id('checkpoint', 'loop-cp-1'), digest: 'sha256:cp-1' };
+  const first: AgentLoopCheckpoint = {
+    checkpointId: checkpointRef.checkpointId,
+    sequence: 1,
+    predecessor: null,
+    digest: checkpointRef.digest,
+    executionEpoch: 1,
+    eventWatermark: { streamId: 'loop-events', sequence: 1 },
+    observationScopeId: 'observation-a',
+    contextViewRef: 'context://view-a',
+  };
+  const second: AgentLoopCheckpoint = {
+    ...first,
+    checkpointId: id('checkpoint', 'loop-cp-2'),
+    sequence: 2,
+    predecessor: checkpointRef,
+    digest: 'sha256:cp-2',
+    eventWatermark: { streamId: 'loop-events', sequence: 2 },
+    contextViewRef: 'context://view-b',
+  };
+  assert.doesNotThrow(() => validateAgentLoopCheckpoint(first));
+  assert.doesNotThrow(() => validateAgentLoopCheckpoint(second, first));
+  assert.throws(() => validateAgentLoopCheckpoint(second), ContractError);
+  assert.doesNotThrow(() => assertAgentLoopCheckpointLink(second, first));
+  assert.throws(() => assertAgentLoopCheckpointLink({ ...second, predecessor: { ...checkpointRef, digest: 'sha256:wrong' } }, first), ContractError);
+  assert.throws(() => assertAgentLoopCheckpointLink({ ...second, sequence: 3 }, first), ContractError);
+  assert.throws(() => validateAgentLoopCheckpoint({ ...first, predecessor: checkpointRef }), ContractError);
+  assert.throws(() => validateAgentLoopCheckpoint({ ...second, predecessor: { checkpointId: second.checkpointId, digest: second.digest } }), ContractError);
+  assert.throws(() => validateAgentLoopCheckpoint({ ...first, eventWatermark: { streamId: 'loop-events', sequence: -1 } }), ContractError);
+
+  const profile: ModeCapabilityProfile = {
+    profileId: 'execution-observation',
+    role: 'execution',
+    mode: 'observation',
+    observationScopes: ['self', 'task', 'evidence'],
+    observationCapabilities: ['read-assignment', 'read-evidence'],
+    orchestrationScope: 'local',
+    orchestrationCapabilities: ['schedule-self'],
+    capabilityDigest: 'sha256:profile-a',
+  };
+  assert.doesNotThrow(() => validateModeCapabilityProfile(profile));
+  assert.throws(() => validateModeCapabilityProfile({ ...profile, role: 'execution', orchestrationScope: 'project' }), ContractError);
+
+  const state: AgentModeState = {
+    agentRuntimeId: 'runtime-a',
+    mode: 'observation',
+    executionEpoch: 1,
+    checkpoint: checkpointRef,
+    observationScopeId: 'observation-a',
+    contextViewRef: 'context://view-a',
+    leaseId: 'lease-a',
+    transitionSeq: 1,
+  };
+  assert.doesNotThrow(() => validateAgentModeState(state));
+
+  const lease: ModeLease = {
+    leaseId: 'lease-a',
+    agentRuntimeId: 'runtime-a',
+    role: 'execution',
+    mode: 'observation',
+    profileId: profile.profileId,
+    executionEpoch: 1,
+    checkpoint: checkpointRef,
+    observationScopeId: 'observation-a',
+    permissionRevision: 'permission-r1',
+    capabilityDigest: profile.capabilityDigest,
+    state: 'active',
+    issuedAt: '2026-09-19T00:00:00Z',
+    expiresAt: '2099-01-01T00:00:00Z',
+  };
+  assert.doesNotThrow(() => validateModeLease(lease));
+  assert.throws(() => validateModeLease({ ...lease, expiresAt: lease.issuedAt }), ContractError);
+
+  const transition: AgentModeTransition = {
+    transitionId: 'transition-a',
+    fromMode: 'observation',
+    toMode: 'orchestration',
+    executionEpoch: 1,
+    baseCheckpoint: checkpointRef,
+    successorCheckpointId: second.checkpointId,
+    contextReplacementId: 'replacement-a',
+    leaseId: 'lease-a',
+    transitionSeq: 2,
+    reason: 'observation-complete',
+  };
+  assert.doesNotThrow(() => validateAgentModeTransition(transition));
+  assert.throws(() => validateAgentModeTransition({ ...transition, toMode: 'observation' }), ContractError);
+
+  const observationScope: ObservationScope = {
+    observationScopeId: 'observation-a',
+    agentRuntimeId: 'runtime-a',
+    executionEpoch: 1,
+    checkpoint: checkpointRef,
+    kind: 'task',
+    scope,
+    readableRefs: ['task://a'],
+    capabilities: ['read-assignment'],
+    openedAt: '2026-09-19T00:00:00Z',
+  };
+  assert.doesNotThrow(() => validateObservationScope(observationScope));
+  assert.throws(() => validateObservationScope({
+    ...observationScope,
+    scope: { ...scope, organId: { scope: 'task', value: 'organ-a' } } as never,
+  }), ContractError);
+  const batch: ObservationBatch = {
+    batchId: 'batch-a',
+    observationScopeId: 'observation-a',
+    executionEpoch: 1,
+    baseCheckpoint: checkpointRef,
+    eventClass: 'observation',
+    priority: 'normal',
+    watermark: { streamId: 'loop-events', sequence: 2 },
+    eventIds: ['event-a'],
+    eventSequences: [2],
+    correlationRefs: ['assignment-a'],
+    idempotencyKey: 'batch-key-a',
+  };
+  assert.doesNotThrow(() => validateObservationBatch(batch));
+  assert.throws(() => validateObservationBatch({ ...batch, eventIds: ['event-a', 'event-a'] }), ContractError);
+  assert.throws(() => validateObservationBatch({ ...batch, eventIds: ['event-a', 'event-b'], eventSequences: [1, 3], watermark: { streamId: 'loop-events', sequence: 3 } }), ContractError);
+  assert.throws(() => validateObservationBatch({ ...batch, eventClass: 'control' as never }), ContractError);
+
+  const delta: ObservationDelta = {
+    deltaId: 'delta-a',
+    idempotencyKey: 'delta-key-a',
+    deltaDigest: 'sha256:delta-a',
+    observationScopeId: 'observation-a',
+    executionEpoch: 1,
+    baseCheckpoint: checkpointRef,
+    watermark: { streamId: 'loop-events', sequence: 3 },
+    observationRefs: ['event-a'],
+    eventSequences: [3],
+    summaryRef: 'asset://observation-a',
+  };
+  assert.doesNotThrow(() => validateObservationDelta(delta));
+  assert.throws(() => validateObservationDelta({ ...delta, observationRefs: [] }), ContractError);
+
+  const view = {
+    contextViewRef: 'context://view-a',
+    executionEpoch: 1,
+    checkpoint: checkpointRef,
+    contextDigest: 'sha256:context-a',
+    activeRefs: ['event-a'],
+    omittedRefs: ['event-b'],
+  };
+  assert.doesNotThrow(() => validateContextView(view));
+  assert.throws(() => validateContextView({ ...view, omittedRefs: ['event-a'] }), ContractError);
+
+  const replacement: ContextReplacement = {
+    replacementId: 'replacement-a',
+    executionEpoch: 1,
+    baseCheckpoint: checkpointRef,
+    successorCheckpoint: { checkpointId: second.checkpointId, digest: second.digest },
+    fromContextViewRef: 'context://view-a',
+    toContextViewRef: 'context://view-b',
+    toContextDigest: 'sha256:context-b',
+    deltaIds: ['delta-a'],
+    reason: 'observation',
+    replacementDigest: 'sha256:replacement-a',
+  };
+  assert.doesNotThrow(() => validateContextReplacement(replacement));
+  assert.throws(() => validateContextReplacement({ ...replacement, deltaIds: [] }), ContractError);
+  assert.throws(() => validateContextReplacement({ ...replacement, fromContextViewRef: replacement.toContextViewRef }), ContractError);
+
+  const budget: AgentLoopBudget = {
+    maxModeTransitions: 2,
+    maxObservationScopes: 2,
+    maxContextReplacements: 1,
+    maxDeferredEvents: 1,
+  };
+  const usage: AgentLoopBudgetUsage = {
+    modeTransitions: 1,
+    observationScopes: 1,
+    contextReplacements: 0,
+    deferredEvents: 0,
+  };
+  assert.doesNotThrow(() => validateAgentLoopBudget(budget));
+  assert.doesNotThrow(() => validateAgentLoopBudgetUsage(usage));
+  assert.throws(() => validateAgentLoopBudget({ ...budget, maxModeTransitions: -1 }), ContractError);
 });
 
 test('rejects undeclared capabilities and over-budget context', () => {

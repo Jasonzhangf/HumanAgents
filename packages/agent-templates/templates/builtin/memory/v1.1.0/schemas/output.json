@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "humanagent://agent-templates/memory/1.1.0/output",
+  "title": "Memory Analysis Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["curation", "liveContextMutated", "promptSnapshot"],
+  "properties": {
+    "curation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "auditPrompt",
+        "sourceRefs",
+        "outcome",
+        "matchedMemoryIds",
+        "conflictRefs",
+        "explanation",
+        "nextAction"
+      ],
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1 },
+        "auditPrompt": { "type": "object" },
+        "sourceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "outcome": { "enum": ["candidate", "duplicate", "conflict", "no-op", "attention"] },
+        "candidateId": { "type": "string", "minLength": 1 },
+        "matchedMemoryIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "conflictRefs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "explanation": { "type": "string", "minLength": 1 },
+        "nextAction": { "enum": ["review", "supersede-review", "retry-analysis", "none", "attention"] }
+      }
+    },
+    "submission": { "type": "object" },
+    "liveContextMutated": { "const": false },
+    "promptSnapshot": { "type": "object" }
+  }
+}

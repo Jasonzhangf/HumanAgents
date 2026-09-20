@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { AgentTemplateError } from './errors.js';
 import {
   AGENT_ROLE_IDS,
@@ -5,6 +6,8 @@ import {
   type AgentRole,
   type AgentTemplateLoadInput,
   type AgentTemplateManifest,
+  type AgentModeCapabilityProfile,
+  type AgentModeCapabilityProfiles,
   type AgentTemplateOwner,
   type AgentTemplateRegistry,
   type AgentTemplateValidation,
@@ -136,6 +139,22 @@ const ROLE_TOOLS: Readonly<Record<AgentRole, readonly string[]>> = {
 
 const MEMORY_SCOPES: readonly MemoryContextScope[] = ['task', 'organ', 'approved-global'];
 const MEMORY_LAYERS: readonly MemoryContextLayer[] = ['current', 'task-recent', 'related', 'approved-long-term', 'raw'];
+const OBSERVATION_SCOPES = ['self', 'task', 'project', 'evidence', 'memory'] as const;
+const ORCHESTRATION_SCOPES = ['local', 'project'] as const;
+const MODE_OBSERVATION_CAPABILITIES: Readonly<Record<AgentRole, readonly string[]>> = {
+  interaction: ['read-input', 'read-task-state', 'read-related-memory'],
+  orchestration: ['read-project-projection', 'read-worker-session', 'read-evidence', 'read-memory-projection'],
+  execution: ['read-assignment', 'read-evidence', 'read-own-session'],
+  review: ['read-candidate', 'read-acceptance', 'read-evidence'],
+  memory: ['read-history', 'read-session', 'read-memory-source'],
+};
+const MODE_ORCHESTRATION_CAPABILITIES: Readonly<Record<AgentRole, readonly string[]>> = {
+  interaction: ['route-input', 'ask-user', 'submit-confirmed-requirement'],
+  orchestration: ['create-phase', 'create-assignment', 'request-review', 'request-merge'],
+  execution: ['plan-own-tool-steps'],
+  review: ['plan-review-checks', 'request-remediation'],
+  memory: ['plan-memory-curation', 'propose-skill-candidate'],
+};
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const INTERACTION_1_0_PERMISSIONS = ['task.read', 'task.propose'] as const;
 const INTERACTION_1_1_PERMISSIONS = [
@@ -206,8 +225,8 @@ function assertPromptSegmentRef(value: string, roleId: AgentRole): void {
   ) {
     throw new AgentTemplateError('prompt segment ref must be a safe package-relative Markdown file');
   }
-  if (segments[0] !== roleId) {
-    throw new AgentTemplateError(`prompt segment ref must stay within the ${roleId} role directory`);
+  if (segments[0] !== roleId && segments[0] !== 'common') {
+    throw new AgentTemplateError(`prompt segment ref must stay within the ${roleId} role directory or common directory`);
   }
 }
 
@@ -280,6 +299,11 @@ export function digestPromptSegments(promptSegmentRefs: readonly string[]): stri
   return `fnv1a:${fnv1a(stableStringify(promptSegmentRefs))}`;
 }
 
+export function digestModeCapabilityProfile(profile: AgentModeCapabilityProfile): string {
+  const { capabilityDigest: _capabilityDigest, ...content } = profile;
+  return `sha256:${createHash('sha256').update(stableStringify(content), 'utf8').digest('hex')}`;
+}
+
 function assertMemoryPolicy(policy: MemoryContextPolicy): void {
   assertSubset(policy.allowedScopes, MEMORY_SCOPES, 'memory scope');
   assertSubset(policy.allowedLayers, MEMORY_LAYERS, 'memory context layer');
@@ -289,6 +313,45 @@ function assertMemoryPolicy(policy: MemoryContextPolicy): void {
   if (policy.allowedLayers.length === 0) throw new AgentTemplateError('memory context policy requires at least one layer');
   if (!Number.isSafeInteger(policy.maxTokenBudget) || policy.maxTokenBudget < 1) {
     throw new AgentTemplateError('memory context token budget must be a positive safe integer');
+  }
+}
+
+function assertModeCapabilityProfile(roleId: AgentRole, profile: AgentModeCapabilityProfile): void {
+  assertNonEmpty(profile.profileId, 'mode capability profile id');
+  if (profile.role !== roleId) throw new AgentTemplateError('mode capability profile role must match the template role');
+  if (profile.mode !== 'observation' && profile.mode !== 'orchestration') {
+    throw new AgentTemplateError(`invalid mode capability profile mode: ${profile.mode}`);
+  }
+  assertUnique(profile.observationScopes, 'observation scope');
+  for (const scope of profile.observationScopes) {
+    if (!OBSERVATION_SCOPES.includes(scope as never)) throw new AgentTemplateError(`invalid observation scope: ${scope}`);
+  }
+  assertUnique(profile.observationCapabilities, 'observation capability');
+  assertUnique(profile.orchestrationCapabilities, 'orchestration capability');
+  for (const capability of profile.observationCapabilities) assertNonEmpty(capability, 'observation capability');
+  for (const capability of profile.orchestrationCapabilities) assertNonEmpty(capability, 'orchestration capability');
+  if (!ORCHESTRATION_SCOPES.includes(profile.orchestrationScope)) {
+    throw new AgentTemplateError(`invalid orchestration scope: ${profile.orchestrationScope}`);
+  }
+  if (roleId !== 'orchestration' && profile.orchestrationScope === 'project') {
+    throw new AgentTemplateError('project orchestration requires the orchestration role');
+  }
+  assertSubset(profile.observationCapabilities, MODE_OBSERVATION_CAPABILITIES[roleId], 'mode observation capability');
+  assertSubset(profile.orchestrationCapabilities, MODE_ORCHESTRATION_CAPABILITIES[roleId], 'mode orchestration capability');
+  if (profile.capabilityDigest !== digestModeCapabilityProfile(profile)) throw new AgentTemplateError('mode capability digest does not match its locked content');
+}
+
+function assertModeCapabilityProfiles(roleId: AgentRole, profiles: AgentModeCapabilityProfiles): void {
+  assertModeCapabilityProfile(roleId, profiles.observation);
+  assertModeCapabilityProfile(roleId, profiles.orchestration);
+  if (profiles.observation.mode !== 'observation') {
+    throw new AgentTemplateError('observation capability profile must use observation mode');
+  }
+  if (profiles.orchestration.mode !== 'orchestration') {
+    throw new AgentTemplateError('orchestration capability profile must use orchestration mode');
+  }
+  if (profiles.observation.profileId === profiles.orchestration.profileId) {
+    throw new AgentTemplateError('mode capability profiles require distinct ids');
   }
 }
 
@@ -330,6 +393,7 @@ export function validateAgentTemplate(
   assertSubset(manifest.capabilityRefs, roleCapabilities(manifest.roleId, manifest.templateVersion), 'capability');
   assertSubset(manifest.skillRefs, roleSkills(manifest.roleId, manifest.templateVersion), 'skill');
   assertSubset(manifest.toolCapabilityRefs, roleTools(manifest.roleId, manifest.templateVersion), 'tool capability');
+  assertModeCapabilityProfiles(manifest.roleId, manifest.modeCapabilityProfile);
   assertDeclared(manifest.capabilityRefs, registry.capabilities, 'capability');
   assertDeclared(manifest.skillRefs, registry.skills, 'skill');
   assertDeclared(manifest.toolCapabilityRefs, registry.toolCapabilities, 'tool capability');
@@ -359,6 +423,20 @@ export function compileAgentTemplate(
     toolCapabilityRefs: [...validation.toolCapabilityRefs],
     promptSegmentRefs: [...validation.manifest.promptSegmentRefs],
     promptSegmentDigest: digestPromptSegments(validation.manifest.promptSegmentRefs),
+    modeCapabilityProfile: {
+      observation: {
+        ...validation.manifest.modeCapabilityProfile.observation,
+        observationScopes: [...validation.manifest.modeCapabilityProfile.observation.observationScopes],
+        observationCapabilities: [...validation.manifest.modeCapabilityProfile.observation.observationCapabilities],
+        orchestrationCapabilities: [...validation.manifest.modeCapabilityProfile.observation.orchestrationCapabilities],
+      },
+      orchestration: {
+        ...validation.manifest.modeCapabilityProfile.orchestration,
+        observationScopes: [...validation.manifest.modeCapabilityProfile.orchestration.observationScopes],
+        observationCapabilities: [...validation.manifest.modeCapabilityProfile.orchestration.observationCapabilities],
+        orchestrationCapabilities: [...validation.manifest.modeCapabilityProfile.orchestration.orchestrationCapabilities],
+      },
+    },
     inputSchemaRef: validation.manifest.inputSchemaRef,
     outputSchemaRef: validation.manifest.outputSchemaRef,
     policyRef: validation.manifest.policyRef,
@@ -397,6 +475,20 @@ export function loadAgentTemplate(
     skillRefs: [...template.skillRefs],
     toolCapabilityRefs: [...template.toolCapabilityRefs],
     promptSegmentRefs: [...template.promptSegmentRefs],
+    modeCapabilityProfile: {
+      observation: {
+        ...template.modeCapabilityProfile.observation,
+        observationScopes: [...template.modeCapabilityProfile.observation.observationScopes],
+        observationCapabilities: [...template.modeCapabilityProfile.observation.observationCapabilities],
+        orchestrationCapabilities: [...template.modeCapabilityProfile.observation.orchestrationCapabilities],
+      },
+      orchestration: {
+        ...template.modeCapabilityProfile.orchestration,
+        observationScopes: [...template.modeCapabilityProfile.orchestration.observationScopes],
+        observationCapabilities: [...template.modeCapabilityProfile.orchestration.observationCapabilities],
+        orchestrationCapabilities: [...template.modeCapabilityProfile.orchestration.orchestrationCapabilities],
+      },
+    },
     memoryContextPolicy: {
       allowedScopes: [...template.memoryContextPolicy.allowedScopes],
       allowedLayers: [...template.memoryContextPolicy.allowedLayers],
