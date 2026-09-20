@@ -518,6 +518,7 @@ test('checkpoint links allow operation-bearing stops after business checkpoints 
   const registered: { drivers: AgentDriver[]; runtimePorts: ExecutionRuntimePort[]; memory: MemoryOperationsPort[]; context: AgentMemoryContextInjectionPort[] } = { drivers: [], runtimePorts: [], memory: [], context: [] };
   const context: HarnessPluginContext = {
     registerCapability: () => undefined,
+    registerPermission: () => undefined,
     registerAgentDriver: (driver) => registered.drivers.push(driver),
     registerExecutionRuntimePort: (port) => registered.runtimePorts.push(port),
     registerMemoryOperations: (port) => registered.memory.push(port),

@@ -220,6 +220,7 @@ export class HarnessPluginRegistry {
   contextFor(plugin: HarnessPlugin): HarnessPluginContext {
     const ownerId = plugin.manifest.pluginId;
     const declared = new Set(plugin.manifest.provides);
+    const declaredPermissions = new Set(plugin.manifest.permissions);
     const registerCapability = (capability: string): void => {
       if (!declared.has(capability)) throw fail('plugin-capability-undeclared', `plugin ${ownerId} registered undeclared capability: ${capability}`, ownerId, 'register', 'declare-capability-in-manifest');
       if (this.capabilityOwners.get(capability) !== ownerId) throw fail('plugin-capability-owner-mismatch', `plugin ${ownerId} does not own capability: ${capability}`, ownerId, 'register', 'retain-one-capability-owner');
@@ -227,6 +228,10 @@ export class HarnessPluginRegistry {
     };
     return {
       registerCapability,
+      registerPermission: (permission) => {
+        nonEmpty(permission, 'plugin permission', ownerId, 'register');
+        if (!declaredPermissions.has(permission)) throw fail('plugin-permission-undeclared', `plugin ${ownerId} registered undeclared permission: ${permission}`, ownerId, 'register', 'declare-permission-in-manifest');
+      },
       registerAgentDriver: (driver) => {
         registerCapability('agent.driver');
         nonEmpty(driver.kind, 'agent driver kind', ownerId, 'register');
