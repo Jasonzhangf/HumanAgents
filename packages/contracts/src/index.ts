@@ -203,6 +203,7 @@ export interface HarnessPluginContext {
 }
 
 export type MemoryNamespace = 'project' | 'global';
+export const MEMORY_SCOPE_COMPATIBILITY_VERSION = 1 as const;
 export type CanonicalMemoryScope =
   | {
       readonly namespace: 'project';
@@ -217,6 +218,15 @@ export type CanonicalMemoryScope =
       readonly sourceOrganId?: OrganId;
     };
 export interface MemoryScope { readonly kind: 'task' | 'organ' | 'approved-global'; readonly taskId?: TaskId; readonly organId: OrganId; }
+export interface CanonicalMemoryScopeCompatibility {
+  readonly compatibilityVersion: typeof MEMORY_SCOPE_COMPATIBILITY_VERSION;
+  readonly scope: CanonicalMemoryScope;
+}
+export interface LegacyMemoryScopeCompatibility {
+  readonly compatibilityVersion: typeof MEMORY_SCOPE_COMPATIBILITY_VERSION;
+  readonly scope: MemoryScope;
+  readonly projectKey: string;
+}
 export type ContextLayer = 'current' | 'task-recent' | 'related' | 'approved-long-term' | 'raw';
 export interface AgentMemoryContextRequest { readonly agentRuntimeId: string; readonly roleId: string; readonly taskId: TaskId; readonly scope: MemoryScope; readonly layers: readonly ContextLayer[]; readonly query?: string; readonly tokenBudget: number; readonly executionEpoch: number; readonly evidenceRequired: boolean; }
 export interface AgentMemoryContextEntry { readonly layer: ContextLayer; readonly summary: string; readonly sourceRef: string; readonly sourceDigest: string; readonly scope: string; readonly tokenCost: number; }

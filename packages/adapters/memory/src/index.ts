@@ -15,6 +15,8 @@ import {
   validateMemorySubmission,
   validateCanonicalMemoryScope,
   validateEpisodicMemorySource,
+  canonicalMemoryScopeToLegacy,
+  MEMORY_SCOPE_COMPATIBILITY_VERSION,
   type AgentMemoryContext,
   type AgentMemoryContextInjectionPort,
   type AgentMemoryContextRequest,
@@ -1106,16 +1108,6 @@ function visible(record: RecordEntry, scope: MemoryScope): boolean { return scop
 function tokens(text: string): number { return text.trim() ? text.trim().split(/\s+/u).length : 0; }
 function stable(value: string): string { let hash = 0; for (const char of value) hash = Math.imul(hash ^ char.charCodeAt(0), 31); return `memory:${(hash >>> 0).toString(16).padStart(8, '0')}`; }
 function nonEmpty(value: string, label: string): string { if (!value.trim()) throw new ContractError(`${label} must be non-empty`); return value; }
-function scopeFromCanonical(scope: CanonicalMemoryScope): MemoryScope {
-  if (scope.namespace === 'project') {
-    return {
-      kind: scope.taskId === undefined ? 'organ' : 'task',
-      organId: scope.organId,
-      ...(scope.taskId === undefined ? {} : { taskId: scope.taskId }),
-    };
-  }
-  return { kind: 'approved-global', organId: { scope: 'organ', value: 'global' } };
-}
 function digestText(text: string): string {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
 }
@@ -1332,17 +1324,11 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
             `memory rebuild journal envelope is invalid: ${journalRecord.seq}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
-        const expectedKind = memoryScope.namespace === 'project'
-          ? memoryScope.taskId === undefined ? 'organ' : 'task'
-          : 'approved-global';
-        const canonicalScope = memoryScope.namespace === 'project'
-          ? {
-              kind: memoryScope.taskId === undefined ? 'organ' as const : 'task' as const,
-              organId: memoryScope.organId,
-              ...(memoryScope.taskId === undefined ? {} : { taskId: memoryScope.taskId }),
-            }
-          : { kind: 'approved-global' as const, organId: { scope: 'organ' as const, value: 'global' } };
-        if (input.scope.kind !== expectedKind || scopeKey(canonicalScope) !== scopeKey(input.scope)) {
+        const canonicalScope = canonicalMemoryScopeToLegacy({
+          compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+          scope: memoryScope,
+        });
+        if (scopeKey(canonicalScope) !== scopeKey(input.scope)) {
           throw new ContractError(`memory rebuild journal scope does not match the requested scope: ${journalRecord.seq}`);
         }
         if (memoryScope.namespace === 'global') {
@@ -1397,7 +1383,10 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
         }
 
         const record: RecordEntry = {
-          scope: scopeFromCanonical(memoryScope),
+          scope: canonicalMemoryScopeToLegacy({
+            compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+            scope: memoryScope,
+          }),
           sourceRef: memorySource.sourceRef,
           sourceDigest: memorySource.sourceDigest,
           text: source.text,

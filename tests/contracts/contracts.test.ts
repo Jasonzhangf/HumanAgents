@@ -16,6 +16,7 @@ import {
   validateCheckpointClosureRecord, validateCheckpointReentryRecord, validateControlProbeRecord, validateControlWatchdogPolicy, validateInteractionClosure,
   validateEventConsumerCursor, validateEventConsumerReceipt, validateEventHandlerCommit, validateEventRetryObligation, validateExecutionBinding,
   validateGoalRecord, validateOccurrence, validateProviderBinding, validateProviderCapabilities,
+  MEMORY_SCOPE_COMPATIBILITY_VERSION, canonicalMemoryScopeToLegacy, legacyMemoryScopeToCanonical,
   validateCanonicalMemoryScope, validateMemoryActor, validateMemoryBinding, validateMemoryCurationResult, validateMemoryFollowUpRequest,
   validateMemoryForgettingPlan, validateMemoryForgettingRequest, validateMemoryPromotionReceipt, validateMemoryQueryRequest, validateMemoryRecallRequest,
   validateMemoryReviewReceipt, validateMemorySubmission, validateProjectSourceUpdateProposal,
@@ -1054,10 +1055,47 @@ test('watchdog, goal, schedule, occurrence, reminder, and lease invariants rejec
 });
 
 test('memory contracts keep canonical scope, provenance, review, and promotion boundaries explicit', () => {
-  validateCanonicalMemoryScope({ namespace: 'project', projectKey: 'project-a', organId: organ, taskId: task });
-  validateCanonicalMemoryScope({ namespace: 'global', globalId: 'global', sourceProjectKey: 'project-a', sourceOrganId: organ });
+  const projectScope = { namespace: 'project', projectKey: 'project-a', organId: organ, taskId: task } as const;
+  const globalScope = { namespace: 'global', globalId: 'global', sourceProjectKey: 'project-a', sourceOrganId: organ } as const;
+  validateCanonicalMemoryScope(projectScope);
+  validateCanonicalMemoryScope(globalScope);
   assert.throws(() => validateCanonicalMemoryScope({ namespace: 'global', globalId: 'organ-a' } as never), ContractError);
   assert.throws(() => validateCanonicalMemoryScope({ namespace: 'project', projectKey: '', organId: organ }), ContractError);
+  assert.throws(() => validateCanonicalMemoryScope({ kind: 'organ', organId: organ } as never), ContractError);
+  assert.throws(() => validateCanonicalMemoryScope({ kind: 'approved-global', organId: organ } as never), ContractError);
+
+  assert.deepEqual(canonicalMemoryScopeToLegacy({
+    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+    scope: projectScope,
+  }), { kind: 'task', organId: organ, taskId: task });
+  assert.deepEqual(canonicalMemoryScopeToLegacy({
+    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+    scope: globalScope,
+  }), { kind: 'approved-global', organId: id('organ', 'global') });
+  assert.deepEqual(legacyMemoryScopeToCanonical({
+    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+    scope: { kind: 'task', organId: organ, taskId: task },
+    projectKey: 'project-a',
+  }), projectScope);
+  assert.deepEqual(legacyMemoryScopeToCanonical({
+    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+    scope: { kind: 'organ', organId: organ },
+    projectKey: 'project-a',
+  }), { namespace: 'project', projectKey: 'project-a', organId: organ });
+  assert.throws(() => legacyMemoryScopeToCanonical({
+    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+    scope: { kind: 'approved-global', organId: id('organ', 'global') },
+    projectKey: 'project-a',
+  }), ContractError);
+  assert.throws(() => legacyMemoryScopeToCanonical({
+    compatibilityVersion: MEMORY_SCOPE_COMPATIBILITY_VERSION,
+    scope: { kind: 'organ', organId: organ },
+    projectKey: '',
+  }), ContractError);
+  assert.throws(() => canonicalMemoryScopeToLegacy({
+    compatibilityVersion: 2 as never,
+    scope: projectScope,
+  }), ContractError);
 
   validateMemoryBinding({ kind: 'task', taskId: task, assignmentId: 'assignment-a', executionEpoch: 1, bindingRef: 'binding-a' });
   validateMemoryBinding({ kind: 'interaction', interactionScopeId: 'interaction-a', bindingRef: 'binding-a' });
