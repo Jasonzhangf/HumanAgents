@@ -4,8 +4,23 @@ import { mkdtemp, appendFile, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { JsonlOrganJournal, JournalCommitConflictError, JournalIntegrityError } from '../../../packages/adapters/jsonl/src/index.js';
+import {
+  createJsonlEventPublicationJournal,
+  JsonlOrganJournal,
+  JournalCommitConflictError,
+  JournalIntegrityError,
+} from '../../../packages/adapters/jsonl/src/index.js';
 import { id, type Checkpoint, type ScopeRef } from '@humanagent/contracts';
+import {
+  OperationEventPublicationError,
+  publishOperationEvent,
+  queryOperationEvents,
+  replayOperationEventNotifications,
+  type EventRecord,
+  type OperationEventNotificationAck,
+  type OperationEventNotificationPort,
+  type TrustedEventPublisher,
+} from '../../../packages/runtime/src/events/index.js';
 
 const organ = id('organ', 'organ-a'); const task = id('task', 'task-a'); const cycle = id('cycle', 'cycle-a');
 const checkpoint = (seq: number, previousCheckpointId: Checkpoint['previousCheckpointId']): Checkpoint => ({ id: id('checkpoint', `cp-${seq}`), scope: { organId: organ, taskId: task }, cycleId: cycle, seq, previousCheckpointId, directiveRevision: 1, executionEpoch: 1, outcome: 'waiting', summary: `cp-${seq}`, recoveryStateRef: { evidenceId: id('evidence', `ev-${seq}`), kind: 'operation', source: 'test', locator: `state-${seq}`, scope: { organId: organ, taskId: task } }, evidenceRefs: [], next: { kind: 'wait', ref: 'condition' } });
@@ -293,4 +308,168 @@ test('recovery appends a root checkpoint for a new operation chain after another
   assert.equal(verified.valid, true);
   assert.equal(recovered.checkpoint!.seq, 1);
   assert.equal(recovered.checkpoint!.previousCheckpointId, null);
+});
+
+test('operation event publication commits before notification and survives restart replay', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-operation-event-'));
+  const filePath = join(root, 'events.jsonl');
+  const operation = id('operation', 'operation-publication');
+  const scope = { organId: organ, taskId: task, cycleId: cycle, operationId: operation };
+  const streamId = 'operation-events:task-a';
+  const occurredAt = '2026-09-20T12:00:00.000Z';
+  const publisherId = 'operation-publisher';
+  const publisher: TrustedEventPublisher = {
+    publisherId,
+    kind: 'harness',
+    ownerId: 'operation-owner',
+    scope: { organId: organ },
+    allowedClasses: ['control'],
+    capabilities: ['event.publish.control'],
+  };
+  const journal = createJsonlEventPublicationJournal({ filePath });
+  const notifications: string[] = [];
+  let failNotification = true;
+  const notification: OperationEventNotificationPort = {
+    async notify(input: { readonly event: EventRecord }): Promise<OperationEventNotificationAck> {
+      notifications.push(input.event.messageId);
+      if (failNotification) throw new Error('notification transport failed');
+      return { ackRef: `ack:${input.event.messageId}`, acknowledgedAt: occurredAt };
+    },
+  };
+  const ports = {
+    journal,
+    publishers: {
+      async resolvePublisher(publisherIdValue: string): Promise<TrustedEventPublisher | null> {
+        return publisherIdValue === publisher.publisherId ? publisher : null;
+      },
+    },
+  };
+  const event = {
+    eventId: 'operation-publication-event',
+    schemaVersion: 1 as const,
+    kind: 'operation.started' as const,
+    operationId: operation,
+    taskId: task,
+    executionEpoch: 2,
+    status: 'running' as const,
+    occurredAt,
+    evidenceRefs: [{
+      evidenceId: id('evidence', 'operation-publication-evidence'),
+      kind: 'operation' as const,
+      source: 'journal-test',
+      locator: 'operation-publication/evidence',
+      scope,
+    }],
+  };
+
+  try {
+    await assert.rejects(
+      () => publishOperationEvent(ports, notification, {
+        publisherId,
+        streamId,
+        scope,
+        event,
+        currentEpoch: 2,
+      }),
+      (error: unknown) => (error as OperationEventPublicationError).code === 'notification-failed',
+    );
+    assert.deepEqual(notifications, ['operation-publication-event']);
+
+    const restarted = createJsonlEventPublicationJournal({ filePath });
+    const restartedPorts = {
+      ...ports,
+      journal: restarted,
+    };
+    const queried = await queryOperationEvents(restartedPorts, {
+      streamId,
+      operationId: operation,
+      limit: 10,
+    });
+    assert.equal(queried.length, 1);
+
+    failNotification = false;
+    notifications.length = 0;
+    const replayed = await replayOperationEventNotifications(
+      restartedPorts,
+      notification,
+      { streamId, operationId: operation, limit: 10, currentEpoch: 2 },
+    );
+    assert.equal(replayed.length, 1);
+    assert.deepEqual(notifications, ['operation-publication-event']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('operation event publication ignores checkpoint and ordinary journal records during replay', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-operation-event-mixed-'));
+  const filePath = join(root, 'events.jsonl');
+  const operation = id('operation', 'operation-publication-mixed');
+  const scope = { organId: organ, taskId: task, cycleId: cycle, operationId: operation };
+  const journal = createJsonlEventPublicationJournal({ filePath });
+  const publisher: TrustedEventPublisher = {
+    publisherId: 'operation-publisher',
+    kind: 'harness',
+    ownerId: 'operation-owner',
+    scope: { organId: organ },
+    allowedClasses: ['control'],
+    capabilities: ['event.publish.control'],
+  };
+  const event = {
+    eventId: 'operation-publication-mixed-event',
+    schemaVersion: 1 as const,
+    kind: 'operation.completed' as const,
+    operationId: operation,
+    taskId: task,
+    executionEpoch: 1,
+    status: 'succeeded' as const,
+    occurredAt: '2026-09-20T12:00:00.000Z',
+    outputRef: 'artifact://operation/mixed',
+    outputDigest: 'sha256:mixed',
+    evidenceRefs: [],
+  };
+  try {
+    const baseJournal = new JsonlOrganJournal(filePath);
+    await baseJournal.append({
+      kind: 'checkpoint',
+      scope: { organId: organ, taskId: task },
+      checkpoint: checkpoint(1, null),
+    });
+    await baseJournal.append({
+      kind: 'event',
+      scope: { organId: organ, taskId: task },
+      payload: { observed: true },
+    });
+    const ports = {
+      journal,
+      publishers: {
+        async resolvePublisher(publisherId: string): Promise<TrustedEventPublisher | null> {
+          return publisherId === publisher.publisherId ? publisher : null;
+        },
+      },
+    };
+    const notification: OperationEventNotificationPort = {
+      async notify(input: { readonly event: EventRecord }): Promise<OperationEventNotificationAck> {
+        return { ackRef: `ack:${input.event.messageId}`, acknowledgedAt: event.occurredAt };
+      },
+    };
+    await publishOperationEvent(ports, notification, {
+      publisherId: publisher.publisherId,
+      streamId: 'operation-events:task-a',
+      scope,
+      event,
+      currentEpoch: 1,
+    });
+    const restarted = createJsonlEventPublicationJournal({ filePath });
+    const records = await queryOperationEvents({ journal: restarted }, {
+      streamId: 'operation-events:task-a',
+      operationId: operation,
+      limit: 10,
+    });
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.operation?.outputRef, event.outputRef);
+    assert.equal(records[0]?.operation?.outputDigest, event.outputDigest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
