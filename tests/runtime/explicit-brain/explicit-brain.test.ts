@@ -112,6 +112,9 @@ function binding(overrides: Partial<ExplicitBrainRuntimeBinding> = {}): Explicit
       'runtime.read',
       'queue.read',
       'resource.read',
+      'workspace.read',
+      'agent.read',
+      'agent.message',
       'bug.read',
       'bug.report',
       'channel.read',
@@ -132,6 +135,11 @@ function binding(overrides: Partial<ExplicitBrainRuntimeBinding> = {}): Explicit
       'runtime.status',
       'queue.inspect',
       'resource.query',
+      'workspace.list',
+      'file.read',
+      'file.search',
+      'agent.query',
+      'agent.message',
       'bug.query',
       'bug.inspect',
       'channel.query',
@@ -237,9 +245,61 @@ test('1.1.0 interaction template loads versioned prompt segments without changin
     skills: [...manifest.skillRefs],
     toolCapabilities: [...manifest.toolCapabilityRefs],
   });
+  assert.deepEqual(manifest.builtInTools, ['checkpoint.inspect']);
+  assert.equal(manifest.builtInTools.includes('checkpoint.reenter'), false);
   for (const segment of ['identity', 'mission', 'input-output', 'failure', 'boundaries']) {
     const profile = await readFile(join(root, 'builtin', 'interaction', 'profiles', 'explicit-brain', `${segment}.md`), 'utf8');
     assert.ok(profile.trim().length > 0);
+  }
+});
+
+test('explicit brain admits read-only workspace and typed agent communication tools', () => {
+  const registry = createExplicitBrainToolRegistry(capabilityDigest);
+  const cases = [
+    ['workspace.list', { scopeRef: 'scope:workspace-a' }],
+    ['file.read', { pathRef: 'workspace:README.md' }],
+    ['file.search', { query: 'checkpoint', scopeRef: 'scope:workspace-a', limit: 5 }],
+    ['agent.query', { agentRef: 'agent:orchestration-a' }],
+    ['agent.message', { recipientRef: 'agent:orchestration-a', messageRef: 'message:requirement-a', messageClass: 'control' }],
+  ] as const;
+  for (const [toolRef, args] of cases) {
+    assert.equal(admitToolIntent({
+      registry,
+      binding: binding(),
+      intent: intent(toolRef, args),
+      currentEpoch: 4,
+      currentPermissionRevision: 'permission-r1',
+      argumentsDigest: digestArguments,
+    }).toolRef, toolRef);
+  }
+  for (const [toolRef, args] of [
+    ['file.search', { scopeRef: 'scope:workspace-a', limit: 5 }],
+    ['agent.message', { recipientRef: 'agent:orchestration-a', messageRef: 'message:a', messageClass: 'invalid' }],
+  ] as const) {
+    assert.throws(
+      () => admitToolIntent({
+        registry,
+        binding: binding(),
+        intent: intent(toolRef, args),
+        currentEpoch: 4,
+        currentPermissionRevision: 'permission-r1',
+        argumentsDigest: digestArguments,
+      }),
+      (error: unknown) => error instanceof ExplicitBrainAdmissionError && error.code === 'invalid-arguments',
+    );
+  }
+  for (const toolRef of ['file.write', 'file.edit', 'file.delete', 'shell.exec']) {
+    assert.throws(
+      () => admitToolIntent({
+        registry,
+        binding: binding(),
+        intent: intent(toolRef),
+        currentEpoch: 4,
+        currentPermissionRevision: 'permission-r1',
+        argumentsDigest: digestArguments,
+      }),
+      (error: unknown) => error instanceof ExplicitBrainAdmissionError && error.code === 'runtime-only-capability',
+    );
   }
 });
 

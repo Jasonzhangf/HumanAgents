@@ -133,6 +133,7 @@ function template(overrides: Partial<AgentTemplateManifest> = {}): AgentTemplate
     capabilityRefs: ['worker.execute', 'test'],
     skillRefs: ['single-capability-worker'],
     toolCapabilityRefs: ['test'],
+    builtInTools: [],
     promptSegmentRefs: ['execution/identity.md', 'execution/contract.md'],
     modeCapabilityProfile: modeCapabilityProfile('execution'),
     inputSchemaRef: 'execution/schemas/input.json',
@@ -337,6 +338,22 @@ test('code search Gateway is exposed to orchestration only and is prompt-preferr
   assert.match(promptContent, /优先调用 `code\.search` Gateway/);
   assert.match(promptContent, /scope-too-large/);
   assert.match(promptContent, /不得伪造 Gateway 成功/);
+});
+
+test('checkpoint built-ins are role-scoped and re-entry remains Harness-owned', async () => {
+  const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const expected = {
+    interaction: ['checkpoint.inspect'],
+    orchestration: ['checkpoint.inspect', 'checkpoint.recall', 'checkpoint.save', 'checkpoint.record-dead-end'],
+    execution: ['checkpoint.inspect', 'checkpoint.save', 'checkpoint.record-dead-end'],
+    review: ['checkpoint.inspect'],
+    memory: ['checkpoint.inspect', 'checkpoint.recall'],
+  } as const;
+  for (const roleId of AGENT_ROLE_IDS) {
+    const manifest = await loadBuiltinAgentTemplate(templateRoot, roleId, '1.1.0');
+    assert.deepEqual(manifest.builtInTools, expected[roleId]);
+    assert.equal(manifest.builtInTools.includes('checkpoint.reenter'), false);
+  }
 });
 
 test('interaction 1.1.0 exposes only its versioned model-facing tools', () => {

@@ -24,6 +24,9 @@
     "test.audit",
     "result.audit"
   ],
+  "builtInTools": [
+    "checkpoint.inspect"
+  ],
   "promptSegmentRefs": [
     "common/observation.md",
     "common/orchestration.md",
@@ -111,5 +114,5 @@
       "capabilityDigest": "sha256:f557486e28d25586c0ab37f613df0dafb74ff949c22338acf54cdad9603ce66f"
     }
   },
-  "digest": "fnv1a:7d606cd3"
+  "digest": "fnv1a:9ac2d6df"
 }

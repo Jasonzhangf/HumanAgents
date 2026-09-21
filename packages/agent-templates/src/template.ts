@@ -4,6 +4,7 @@ import {
   AGENT_ROLE_IDS,
   AGENT_TEMPLATE_API_VERSION,
   type AgentRole,
+  type AgentBuiltInTool,
   type AgentTemplateLoadInput,
   type AgentTemplateManifest,
   type AgentModeCapabilityProfile,
@@ -31,6 +32,11 @@ const INTERACTION_1_1_CAPABILITIES = [
   'runtime.status',
   'queue.inspect',
   'resource.query',
+  'workspace.list',
+  'file.read',
+  'file.search',
+  'agent.query',
+  'agent.message',
   'bug.query',
   'bug.inspect',
   'channel.query',
@@ -98,6 +104,11 @@ const INTERACTION_1_1_TOOLS = [
   'runtime.status',
   'queue.inspect',
   'resource.query',
+  'workspace.list',
+  'file.read',
+  'file.search',
+  'agent.query',
+  'agent.message',
   'bug.query',
   'bug.inspect',
   'channel.query',
@@ -137,6 +148,21 @@ const ROLE_TOOLS: Readonly<Record<AgentRole, readonly string[]>> = {
   memory: ['memory.search', 'memory.ask', 'task.history', 'session.history'],
 };
 
+const ROLE_BUILT_IN_TOOLS: Readonly<Record<AgentRole, readonly AgentBuiltInTool[]>> = {
+  interaction: ['checkpoint.inspect'],
+  orchestration: ['checkpoint.inspect', 'checkpoint.recall', 'checkpoint.save', 'checkpoint.record-dead-end'],
+  execution: ['checkpoint.inspect', 'checkpoint.save', 'checkpoint.record-dead-end'],
+  review: ['checkpoint.inspect'],
+  memory: ['checkpoint.inspect', 'checkpoint.recall'],
+};
+const ALL_BUILT_IN_TOOLS: readonly AgentBuiltInTool[] = [
+  'checkpoint.inspect',
+  'checkpoint.recall',
+  'checkpoint.save',
+  'checkpoint.record-dead-end',
+  'checkpoint.reenter',
+];
+
 const MEMORY_SCOPES: readonly MemoryContextScope[] = ['task', 'organ', 'approved-global'];
 const MEMORY_LAYERS: readonly MemoryContextLayer[] = ['current', 'task-recent', 'related', 'approved-long-term', 'raw'];
 const OBSERVATION_SCOPES = ['self', 'task', 'project', 'evidence', 'memory'] as const;
@@ -163,6 +189,9 @@ const INTERACTION_1_1_PERMISSIONS = [
   'runtime.read',
   'queue.read',
   'resource.read',
+  'workspace.read',
+  'agent.read',
+  'agent.message',
   'bug.read',
   'bug.report',
   'bug.propose-update',
@@ -272,6 +301,10 @@ export function builtinAgentTemplateRegistry(
     skills: [...roleSkills(roleId, templateVersion)],
     toolCapabilities: [...roleTools(roleId, templateVersion)],
   };
+}
+
+function roleBuiltInTools(roleId: AgentRole): readonly AgentBuiltInTool[] {
+  return ROLE_BUILT_IN_TOOLS[roleId];
 }
 
 function stableStringify(value: unknown): string {
@@ -385,14 +418,18 @@ export function validateAgentTemplate(
   for (const ref of manifest.capabilityRefs) assertSafeRef(ref, 'capability ref');
   for (const ref of manifest.skillRefs) assertSafeRef(ref, 'skill ref');
   for (const ref of manifest.toolCapabilityRefs) assertSafeRef(ref, 'tool capability ref');
+  for (const tool of manifest.builtInTools) assertSafeRef(tool, 'built-in tool ref');
 
   assertUnique(manifest.capabilityRefs, 'capability ref');
   assertUnique(manifest.skillRefs, 'skill ref');
   assertUnique(manifest.toolCapabilityRefs, 'tool capability ref');
+  assertUnique(manifest.builtInTools, 'built-in tool ref');
   assertUnique(manifest.testFixtureRefs, 'test fixture ref');
   assertSubset(manifest.capabilityRefs, roleCapabilities(manifest.roleId, manifest.templateVersion), 'capability');
   assertSubset(manifest.skillRefs, roleSkills(manifest.roleId, manifest.templateVersion), 'skill');
   assertSubset(manifest.toolCapabilityRefs, roleTools(manifest.roleId, manifest.templateVersion), 'tool capability');
+  assertSubset(manifest.builtInTools, roleBuiltInTools(manifest.roleId), 'built-in tool');
+  assertSubset(manifest.builtInTools, ALL_BUILT_IN_TOOLS, 'built-in tool');
   assertModeCapabilityProfiles(manifest.roleId, manifest.modeCapabilityProfile);
   assertDeclared(manifest.capabilityRefs, registry.capabilities, 'capability');
   assertDeclared(manifest.skillRefs, registry.skills, 'skill');
@@ -407,6 +444,7 @@ export function validateAgentTemplate(
     capabilityRefs: [...manifest.capabilityRefs],
     skillRefs: [...manifest.skillRefs],
     toolCapabilityRefs: [...manifest.toolCapabilityRefs],
+    builtInTools: [...manifest.builtInTools],
   };
 }
 
@@ -421,6 +459,7 @@ export function compileAgentTemplate(
     capabilityRefs: [...validation.capabilityRefs],
     skillRefs: [...validation.skillRefs],
     toolCapabilityRefs: [...validation.toolCapabilityRefs],
+    builtInTools: [...validation.manifest.builtInTools],
     promptSegmentRefs: [...validation.manifest.promptSegmentRefs],
     promptSegmentDigest: digestPromptSegments(validation.manifest.promptSegmentRefs),
     modeCapabilityProfile: {
@@ -474,6 +513,7 @@ export function loadAgentTemplate(
     capabilityRefs: [...template.capabilityRefs],
     skillRefs: [...template.skillRefs],
     toolCapabilityRefs: [...template.toolCapabilityRefs],
+    builtInTools: [...template.builtInTools],
     promptSegmentRefs: [...template.promptSegmentRefs],
     modeCapabilityProfile: {
       observation: {

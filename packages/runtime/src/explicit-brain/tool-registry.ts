@@ -79,6 +79,11 @@ const TOOL_PERMISSIONS: Readonly<Record<ExplicitBrainModelTool, string>> = {
   'runtime.status': 'runtime.read',
   'queue.inspect': 'queue.read',
   'resource.query': 'resource.read',
+  'workspace.list': 'workspace.read',
+  'file.read': 'workspace.read',
+  'file.search': 'workspace.read',
+  'agent.query': 'agent.read',
+  'agent.message': 'agent.message',
   'bug.query': 'bug.read',
   'bug.inspect': 'bug.read',
   'channel.query': 'channel.read',
@@ -202,6 +207,32 @@ function validateToolArguments(toolRef: ExplicitBrainModelTool, args: Readonly<R
   }
   if (toolRef === 'runtime.status' || toolRef === 'queue.inspect' || toolRef === 'resource.query') {
     assertString(args.scopeRef, `${toolRef} scopeRef`);
+    return;
+  }
+  if (toolRef === 'workspace.list') {
+    assertString(args.scopeRef ?? args.pathRef, 'workspace.list scopeRef or pathRef');
+    return;
+  }
+  if (toolRef === 'file.read') {
+    assertString(args.pathRef, 'file.read pathRef');
+    return;
+  }
+  if (toolRef === 'file.search') {
+    assertString(args.query, 'file.search query');
+    assertString(args.scopeRef, 'file.search scopeRef');
+    assertPositiveLimit(args.limit);
+    return;
+  }
+  if (toolRef === 'agent.query') {
+    assertString(args.agentRef ?? args.scopeRef, 'agent.query agentRef or scopeRef');
+    return;
+  }
+  if (toolRef === 'agent.message') {
+    assertString(args.recipientRef, 'agent.message recipientRef');
+    assertString(args.messageRef, 'agent.message messageRef');
+    if (!['control', 'data', 'observation'].includes(String(args.messageClass))) {
+      throw new ExplicitBrainAdmissionError('invalid-arguments', 'agent.message messageClass is invalid');
+    }
     return;
   }
   if (toolRef === 'bug.query') {

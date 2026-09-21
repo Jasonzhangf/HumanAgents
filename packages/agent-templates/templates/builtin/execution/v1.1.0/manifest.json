@@ -14,6 +14,11 @@
     "test",
     "build"
   ],
+  "builtInTools": [
+    "checkpoint.inspect",
+    "checkpoint.save",
+    "checkpoint.record-dead-end"
+  ],
   "skillRefs": [
     "single-capability-worker"
   ],
@@ -106,5 +111,5 @@
       "capabilityDigest": "sha256:1a004a769e07c96f059f3a88ef8af646a0c66f9f4d79be2d6336403e573e8b80"
     }
   },
-  "digest": "fnv1a:3611088f"
+  "digest": "fnv1a:cecb3908"
 }

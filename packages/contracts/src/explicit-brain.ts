@@ -18,6 +18,11 @@ export const EXPLICIT_BRAIN_MODEL_TOOLS = [
   'runtime.status',
   'queue.inspect',
   'resource.query',
+  'workspace.list',
+  'file.read',
+  'file.search',
+  'agent.query',
+  'agent.message',
   'bug.query',
   'bug.inspect',
   'channel.query',
@@ -67,6 +72,10 @@ export const EXPLICIT_BRAIN_FORBIDDEN_TOOLS = [
   'memory.approve',
   'memory.promote',
   'skill.publish',
+  'file.write',
+  'file.edit',
+  'file.delete',
+  'shell.exec',
 ] as const;
 
 export const EXPLICIT_BRAIN_SKILLS = [
