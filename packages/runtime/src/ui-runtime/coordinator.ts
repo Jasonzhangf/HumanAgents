@@ -16,6 +16,7 @@ import {
   type ProviderError,
   type ProviderEvent,
   type ScopeRef,
+  type Task,
   type TaskId,
 } from '../../../contracts/src/index.js';
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
@@ -34,6 +35,8 @@ import type { AgentHookStage } from '../agent-io/events.js';
 import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
+import type { OrchestrationManager } from '../orchestration/manager.js';
+import type { AgentRuntimePoolManager } from '../orchestration/runtime-pool.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
@@ -257,6 +260,16 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
+  readonly createTaskAssembly?: (input: {
+    readonly task: Task;
+    readonly scope: ScopeRef;
+    readonly checkpointJournal: TaskCheckpointStore;
+  }) => RuntimeTaskAssembly;
+}
+
+export interface RuntimeTaskAssembly {
+  readonly orchestration: OrchestrationManager;
+  readonly runtimePool: AgentRuntimePoolManager;
 }
 
 export interface RuntimeCheckpointBoundary {
@@ -289,6 +302,7 @@ interface TaskRecord {
   driver?: RuntimeExecutionDriver;
   composition?: RuntimeExecutionComposition;
   checkpointBoundary?: ContextCheckpointBoundary;
+  taskAssembly?: RuntimeTaskAssembly;
   events: RuntimeTaskEvent[];
   checkpoint?: Checkpoint;
   checkpointSeq: number;
@@ -748,6 +762,7 @@ export class RuntimeTaskCoordinator {
     record.checkpointSeq = 0;
     record.composition = undefined;
     record.checkpointBoundary = undefined;
+    record.taskAssembly = undefined;
     record.nextStep = '等待 Provider 事件';
     record.allowedActions = ['stop'];
     record.error = undefined;
@@ -981,6 +996,19 @@ export class RuntimeTaskCoordinator {
     return { replay, unsubscribe };
   }
 
+  taskAssembly(taskId: TaskId): RuntimeTaskAssembly {
+    const assembly = this.requireTask(taskId).taskAssembly;
+    if (!assembly) {
+      throw new RuntimeTaskControlError(
+        'task.assembly.missing',
+        RUNTIME_OWNER,
+        `task ${taskId.value} has no live orchestration assembly`,
+        'start the task through a serve composition that binds orchestration ports',
+      );
+    }
+    return assembly;
+  }
+
   attentionAudit(): { readonly published: readonly Attention[]; readonly resolved: readonly Attention[] } {
     return { published: this.publishedAttentions, resolved: this.resolvedAttentions };
   }
@@ -1006,6 +1034,21 @@ export class RuntimeTaskCoordinator {
         this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
       );
       record.checkpointBoundary = checkpointBoundary;
+      if (this.options.createTaskAssembly) {
+        record.taskAssembly = this.options.createTaskAssembly({
+          task: {
+            id: record.taskId,
+            organId: this.options.organId,
+            title: record.title,
+            directive: record.directive,
+            directiveRevision: record.directiveRevision,
+            state: record.state,
+            memoryScope: 'task',
+          },
+          scope,
+          checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+        });
+      }
       driver = this.options.createDriver({
         runtimeId,
         taskId: record.taskId,

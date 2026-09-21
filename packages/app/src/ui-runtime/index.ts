@@ -25,6 +25,7 @@ import {
   UiRuntimeService,
   type TaskCheckpointStore,
   type UiRuntimeMemoryComposition,
+  type UiRuntimeServiceOptions,
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 
@@ -48,6 +49,7 @@ export interface UiRuntimeLaunchOptions {
   readonly portNumber?: number;
   readonly projectKey?: string;
   readonly memory: UiRuntimeMemoryComposition;
+  readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -141,6 +143,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     closurePort: journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     memory: options.memory,
+    ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
   });
   await service.hydrate();
   const server = await startUiRuntimeServer({

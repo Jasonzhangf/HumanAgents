@@ -49,6 +49,8 @@ import {
 import { createCordisHost } from './cordis-host.js';
 import { runSupervisorStartup } from './supervisor/supervisor.js';
 import { join } from 'node:path';
+import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
+import { createDeterministicServeOrchestrationPorts } from './serve-orchestration.js';
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -624,6 +626,8 @@ export async function main(args: readonly string[]): Promise<void> {
     const cordisHost = createCordisHost(plugins);
     cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
+    let serveRuntime: ServeRuntimeComposition | undefined;
+    const orchestrationPorts = mode === 'fake' ? createDeterministicServeOrchestrationPorts() : undefined;
     const supervisor = await runSupervisorStartup(paths, [
       {
         name: 'cordis-host',
@@ -641,6 +645,25 @@ export async function main(args: readonly string[]): Promise<void> {
           }
         },
         dispose: async () => { await cordisHost.dispose(); },
+      },
+      {
+        name: 'serve-runtime',
+        ownerId: 'humanagent.app.serve-runtime',
+        nextAction: 'repair the serve runtime composition before retrying',
+        start: async () => {
+          serveRuntime = createServeRuntimeComposition({
+            eventBusPorts: memoryRuntime.ports,
+            feedbackPorts: {
+              journal: memoryRuntime.ports.journal,
+              publishers: memoryRuntime.ports.publishers,
+            },
+            feedbackPublisherId: 'serve-orchestration-publisher',
+            ...(orchestrationPorts === undefined ? {} : orchestrationPorts),
+          });
+        },
+        dispose: async () => {
+          if (serveRuntime) await serveRuntime.dispose();
+        },
       },
       {
         name: 'ui-runtime',
@@ -677,6 +700,11 @@ export async function main(args: readonly string[]): Promise<void> {
                   await memoryRuntime.consume();
                 },
               },
+            },
+            runtimeComposition: {
+              ...(orchestrationPorts === undefined ? {} : {
+                createTaskAssembly: serveRuntime!.createTaskAssembly,
+              }),
             },
             host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
             portNumber,

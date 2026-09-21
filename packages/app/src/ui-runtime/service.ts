@@ -79,6 +79,7 @@ import {
   type RuntimeExecutionDriverInput,
   type RuntimeExplicitBrainJournalState,
   type RuntimeExecutionCapabilities,
+  type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
 import {
@@ -175,6 +176,13 @@ export interface UiRuntimeServiceOptions {
   readonly now?: () => Date;
   readonly projectKey?: string;
   readonly memory: UiRuntimeMemoryComposition;
+  readonly runtimeComposition?: {
+    readonly createTaskAssembly?: (input: {
+      readonly task: import('../../../contracts/src/index.js').Task;
+      readonly scope: import('../../../contracts/src/index.js').ScopeRef;
+      readonly checkpointJournal: TaskCheckpointStore;
+    }) => RuntimeTaskAssembly;
+  };
 }
 
 export interface ExplicitBrainReceipt {
@@ -374,6 +382,11 @@ export class UiRuntimeService {
       taskIdPrefix: randomUUID(),
       now: options.now,
       createDriver: (input) => this.createMemoryBoundDriver(input),
+      ...(options.runtimeComposition === undefined ? {} : {
+        ...(options.runtimeComposition.createTaskAssembly === undefined ? {} : {
+          createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!(input),
+        }),
+      }),
       ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
     });
   }
@@ -693,6 +706,14 @@ export class UiRuntimeService {
 
   executionCapabilities(): RuntimeExecutionCapabilities {
     return this.coordinator.executionCapabilities();
+  }
+
+  runtimeComposition(): UiRuntimeServiceOptions['runtimeComposition'] {
+    return this.options.runtimeComposition;
+  }
+
+  taskAssembly(taskId: TaskId): RuntimeTaskAssembly {
+    return this.coordinator.taskAssembly(taskId);
   }
 
   listTasks(): RuntimeTaskListProjection {
