@@ -960,6 +960,39 @@ test('CLI defaults to serve and accepts a provider without a mode', async () => 
   }
 });
 
+test('CLI rejects invalid legacy mode and conflicting provider selections', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-provider-mode-errors-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const assertServeError = (args: readonly string[], expected: { readonly message: string; readonly nextAction: string }): void => {
+    assert.throws(() => execFileSync(process.execPath, [
+      cli,
+      'serve',
+      ...args,
+      '--workspace',
+      workspace,
+      '--control-root',
+      controlRoot,
+      '--json',
+    ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+      const parsed = JSON.parse(error.stderr);
+      assert.equal(parsed.error.code, 'provider.invalid');
+      assert.equal(parsed.error.ownerId, 'humanagent.config');
+      assert.equal(parsed.error.message, expected.message);
+      assert.equal(parsed.error.nextAction, expected.nextAction);
+      return true;
+    });
+  };
+
+  assertServeError(['--mode', 'fak'], {
+    message: 'unknown legacy mode: fak',
+    nextAction: 'choose fake or rcc for --mode, or omit the deprecated option',
+  });
+  assertServeError(['--mode', 'fake', '--provider', 'rcc'], {
+    message: 'conflicting provider options: --mode fake and --provider rcc',
+    nextAction: 'use one provider selection, or make --mode and --provider agree',
+  });
+});
+
 test('CLI binds RCC identity to the configured transport endpoint', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-provider-endpoint-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
