@@ -1,5 +1,8 @@
 import type { ToolRegistration } from '../../contracts/src/index.js';
 import {
+  CODE_SEARCH_ROUTE_ID,
+  CodeSearchRoute,
+  codeSearchRegistration,
   DeterministicInspectRoute,
   DETERMINISTIC_INSPECT_ROUTE_VERSION,
   DETERMINISTIC_INSPECT_TOOL_NAME,
@@ -12,6 +15,7 @@ import { ToolExecutionGateway, ToolRegistry, type GatewayOptions, type Operation
 
 export interface ToolExecutionGatewayAssemblyInput extends Omit<GatewayOptions, 'registry' | 'executor' | 'verifier'> {
   readonly route?: DeterministicInspectRoute;
+  readonly codeSearchRoute?: CodeSearchRoute;
 }
 
 export function deterministicInspectRegistration(): ToolRegistration {
@@ -36,10 +40,15 @@ export function deterministicInspectRegistration(): ToolRegistration {
 export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyInput): ToolExecutionGateway {
   const route = input.route ?? new DeterministicInspectRoute();
   const registry = new ToolRegistry();
-  registry.load([deterministicInspectRegistration()]);
+  registry.load([
+    deterministicInspectRegistration(),
+    ...(input.codeSearchRoute ? [codeSearchRegistration()] : []),
+  ]);
   const executor: OperationExecutorPort = {
     async execute(request) {
-      const observation = await route.execute({
+      const selectedRoute = request.route.routeId === CODE_SEARCH_ROUTE_ID ? input.codeSearchRoute : route;
+      if (!selectedRoute) throw new Error('code search route is not assembled');
+      const observation = await selectedRoute.execute({
         intent: request.intent,
         effectiveScope: request.route.effectiveScope,
       });
@@ -71,7 +80,9 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
   };
   const verifier: OperationVerifierPort = {
     async verify(request) {
-      const result = await route.verify({
+      const selectedRoute = request.route.routeId === CODE_SEARCH_ROUTE_ID ? input.codeSearchRoute : route;
+      if (!selectedRoute) throw new Error('code search route is not assembled');
+      const result = await selectedRoute.verify({
         intent: request.intent,
         effectiveScope: request.route.effectiveScope,
         observation: {

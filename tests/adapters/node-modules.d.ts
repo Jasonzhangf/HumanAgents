@@ -73,6 +73,7 @@ declare module "node:crypto" {
   }
 
   export function createHash(algorithm: string): Hash;
+  export function randomUUID(): string;
 }
 
 declare module "node:fs/promises" {
@@ -85,6 +86,11 @@ declare module "node:fs/promises" {
     isDirectory(): boolean;
     isFile(): boolean;
   }
+  interface Stats {
+    isFile(): boolean;
+  }
+
+  function lstat(path: string | URL): Promise<Stats>;
 
   function readFile(
     path: string | URL | FileHandle,
@@ -124,6 +130,9 @@ declare module "node:os" {
 declare module "node:path" {
   export function dirname(path: string): string;
   export function join(...paths: string[]): string;
+  export function relative(from: string, to: string): string;
+  export function resolve(...paths: string[]): string;
+  export const sep: string;
 }
 
 declare module "node:events" {

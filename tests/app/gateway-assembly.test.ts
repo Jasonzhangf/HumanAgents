@@ -5,7 +5,9 @@ import {
   createToolExecutionGateway,
 } from '../../packages/app/src/index.js';
 import { DeterministicInspectRoute } from '../../packages/adapters/operations/src/index.js';
-import { id, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope } from '../../packages/contracts/src/index.js';
+import { CodeSearchRoute, type CodeSearchArtifactStore } from '../../packages/adapters/operations/src/index.js';
+import { id, type CodeSearchReport, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope } from '../../packages/contracts/src/index.js';
+import { type CodeSearchFileContent, type CodeSearchFileList, type CodeSearchFunctions } from '../../packages/runtime/src/hand/index.js';
 import type { OperationJournalPort } from '../../packages/runtime/src/gateway/index.js';
 
 const organ = id('organ', 'app-gateway-organ');
@@ -82,6 +84,67 @@ test('app assembly registers the deterministic operations route in the execution
   assert.equal(submitted.operation.route?.routeId, 'deterministic-inspect');
   assert.equal(result.status, 'succeeded');
   assert.equal(result.result?.outputRef, 'artifact://operations/inspect/app-gateway-operation');
+});
+
+test('app assembly exposes code.search as one gateway operation over multiple internal function calls', async () => {
+  const searchOperation = id('operation', 'app-code-search-operation');
+  const searchScope: Scope = { organId: organ, taskId: task, cycleId: cycle };
+  const searchIntent: OperationIntent = {
+    operationId: searchOperation,
+    taskId: task,
+    cycleId: cycle,
+    requestedBy: 'app-gateway-test',
+    intentRevision: 'revision-1',
+    kind: 'inspect',
+    toolName: 'code.search',
+    inputRef: 'artifact://input/code-search',
+    inputDigest: 'sha256:code-search-input',
+    requestedScope: searchScope,
+    idempotencyKey: 'app-code-search-idempotency',
+    expectedOutput: { schemaRef: 'schema://code.search.report/v1', requiredEvidenceKinds: ['tool'] },
+  };
+  const request = {
+    serviceId: 'code.search' as const,
+    contractVersion: '1.0.0' as const,
+    workspaceRef: 'workspace://fixture',
+    path: 'src',
+    query: 'needle',
+    queryKind: 'literal' as const,
+  };
+  const reports = new Map<string, CodeSearchReport>();
+  class CodeSearchStore implements CodeSearchArtifactStore {
+    async readRequest() { return request; }
+    async writeReport(input: Parameters<CodeSearchArtifactStore['writeReport']>[0]) {
+      const outputRef = `artifact://code-search/${input.operationId.value}`;
+      const outputDigest = `sha256:report-${input.operationId.value}`;
+      reports.set(outputRef, input.report);
+      return { outputRef, outputDigest };
+    }
+    async readReport(input: Parameters<CodeSearchArtifactStore['readReport']>[0]) {
+      const report = reports.get(input.outputRef);
+      if (!report) throw new Error('missing code search report');
+      return report;
+    }
+  }
+  class Functions implements CodeSearchFunctions {
+    calls = 0;
+    async findFiles(): Promise<CodeSearchFileList> { this.calls += 1; return { paths: ['src/a.ts', 'src/b.ts'], complete: true, unresolvedPaths: [] }; }
+    async readFile(input: { readonly workspaceRef: string; readonly path: string }): Promise<CodeSearchFileContent> { this.calls += 1; return { path: input.path, content: input.path.endsWith('a.ts') ? 'needle' : 'other' }; }
+  }
+  const functions = new Functions();
+  const hand = createHandOperationRuntime({
+    codeSearchRoute: new CodeSearchRoute({ functions, artifacts: new CodeSearchStore(), now: () => '2026-09-20T00:00:00.000Z' }),
+    permissions: { async readGrant() { return { scope: searchScope, revoked: false, evidenceRefs: [evidence('code-search-permission')] }; } },
+    taskBoundaries: { async readBoundary() { return { scope: searchScope, evidenceRefs: [evidence('code-search-boundary')] }; } },
+    journal,
+    now: () => new Date('2026-09-20T00:00:00.000Z'),
+  });
+
+  const result = await hand.execute({ intent: searchIntent });
+  assert.equal(result.operation.status, 'succeeded');
+  assert.equal(result.operation.route?.routeId, 'code-search');
+  assert.equal(result.operation.result?.outputRef, 'artifact://code-search/app-code-search-operation');
+  assert.equal(functions.calls, 3);
 });
 
 test('app assembly exposes Hand as a thin semantic-intent boundary', async () => {

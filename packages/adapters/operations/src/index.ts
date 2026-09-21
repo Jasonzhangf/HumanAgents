@@ -8,6 +8,10 @@ export {
   LegacyInternalRouteAdapter,
   legacyOutputRef,
 } from './legacy-route.js';
+export { WorkspaceCodeSearchFunctions } from './code-search-functions.js';
+export type { WorkspaceCodeSearchFunctionsOptions } from './code-search-functions.js';
+export { CODE_SEARCH_ROUTE_ID, CODE_SEARCH_ROUTE_VERSION, CODE_SEARCH_TOOL_NAME, CodeSearchRoute, codeSearchRegistration } from './code-search-route.js';
+export type { CodeSearchArtifactStore, CodeSearchRouteOptions } from './code-search-route.js';
 export {
   OPERATIONS_ADAPTER_OWNER,
   OperationAdapterError,
