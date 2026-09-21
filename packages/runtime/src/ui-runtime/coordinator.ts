@@ -318,8 +318,8 @@ interface TaskRecord {
   running: boolean;
   stopping: boolean;
   postCommitRecoveryPending?: boolean;
-  executionReady?: Promise<void>;
-  resolveExecutionReady?: () => void;
+  executionReady?: Promise<boolean>;
+  resolveExecutionReady?: (ready: boolean) => void;
 }
 
 interface OperationRecord {
@@ -765,7 +765,7 @@ export class RuntimeTaskCoordinator {
 
     record.running = true;
     record.stopping = false;
-    record.executionReady = new Promise<void>((resolve) => {
+    record.executionReady = new Promise<boolean>((resolve) => {
       record.resolveExecutionReady = resolve;
     });
     record.state = 'running';
@@ -810,7 +810,10 @@ export class RuntimeTaskCoordinator {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
     }
     record.stopping = true;
-    await record.executionReady;
+    const executionReady = await record.executionReady;
+    if (!executionReady) {
+      throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
+    }
     if (!record.running || !record.runtime || !record.driver || !record.composition || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
     }
@@ -1088,7 +1091,7 @@ export class RuntimeTaskCoordinator {
           async execute(input): Promise<WorkResult> {
             await composition!.start();
             await composition!.submit(prompt);
-            record.resolveExecutionReady?.();
+            record.resolveExecutionReady?.(true);
             record.resolveExecutionReady = undefined;
             if (record.stopping || record.postCommitRecoveryPending) {
               return {
@@ -1313,7 +1316,7 @@ export class RuntimeTaskCoordinator {
         }
         await composition.start();
         await composition.submit(prompt);
-        record.resolveExecutionReady?.();
+        record.resolveExecutionReady?.(true);
         record.resolveExecutionReady = undefined;
         if (record.stopping || record.postCommitRecoveryPending) return;
         for await (const observation of composition.observe()) {
@@ -1355,6 +1358,10 @@ export class RuntimeTaskCoordinator {
     } catch (error) {
       if (record.postCommitRecoveryPending) return;
       const startupFailureBeforeReady = record.resolveExecutionReady !== undefined;
+      if (startupFailureBeforeReady) {
+        record.resolveExecutionReady?.(false);
+        record.resolveExecutionReady = undefined;
+      }
       if (record.stopping && !startupFailureBeforeReady) return;
       if (record.state === 'stopped' || runtime?.snapshot().state === 'stopped') {
         this.finalize(record, 'stopped');
@@ -1512,7 +1519,7 @@ export class RuntimeTaskCoordinator {
       );
       this.finalize(record, outcome);
     } finally {
-      record.resolveExecutionReady?.();
+      record.resolveExecutionReady?.(false);
       record.resolveExecutionReady = undefined;
       this.activeExecutions.delete(operation.operationId.value);
     }

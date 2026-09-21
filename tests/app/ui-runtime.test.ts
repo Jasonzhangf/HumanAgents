@@ -2106,6 +2106,43 @@ test('journal replay preserves the confirmed requirement orchestration mode', as
   await rm(root, { recursive: true, force: true });
 });
 
+test('stop does not wait forever when orchestration fails before provider readiness', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-orchestration-startup-failure-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal,
+    closurePort: journal,
+    memory: testMemory('project-ui-orchestration-startup-failure'),
+    runtimeComposition: {
+      createTaskAssembly() {
+        throw new Error('orchestration assembly failed before provider readiness');
+      },
+    },
+  });
+  const task = service.createTask({ title: 'orchestration startup failure' });
+  service.startExecution(task.taskId, { prompt: 'start orchestration', orchestrate: true });
+  let stopError: unknown;
+  let stopSettled = false;
+  void service.stop(task.taskId).catch((error: unknown) => {
+    stopError = error;
+  }).finally(() => {
+    stopSettled = true;
+  });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
+  await waitFor(() => assert.equal(stopSettled, true));
+  if (!(stopError instanceof UiRuntimeApiError)) throw new Error('expected stop to fail after orchestration startup failure');
+  assert.equal(stopError.code, 'task.not.running');
+  await rm(root, { recursive: true, force: true });
+});
+
 test('restart restores a failed task error owner and next action from the app journal', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-failure-restart-'));
   const base = new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
