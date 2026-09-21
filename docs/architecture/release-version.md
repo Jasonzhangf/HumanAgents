@@ -1,8 +1,9 @@
 # Release version baseline
 
-- Current release version: `0.1.1`
-- Canonical source: repository root `package.json` `version` field.
-- Synchronized package metadata: `packages/app`, `packages/config`, and `packages/contracts`.
+- Current release version: `0.1.0001`
+- HumanAgent release source: repository root `package.json` `releaseVersion` field.
+- npm package source: repository root `package.json` `version` field; it remains SemVer-valid.
+- Synchronized release metadata: `packages/app`, `packages/config`, and `packages/contracts`.
 - Version bump owner: `scripts/bump-release-version.mjs`.
 - Release build owner: `scripts/release-build.mjs`.
 - Every release build must run the checkpointed `typecheck → compile → regression → ci → package → package-smoke` chain.

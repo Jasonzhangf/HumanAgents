@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +10,7 @@ import { runStages } from '../../scripts/checkpoint-runner.mjs';
 import { checkpointStages } from '../../scripts/checkpoint-stages.mjs';
 import { digest, treeDigest } from '../../scripts/digests.mjs';
 import { assemblePackage } from '../../scripts/package-assembly.mjs';
-import { bumpReleaseVersion, configuredReleaseVersion, validateReleaseVersion } from '../../scripts/release-version.mjs';
+import { bumpReleaseVersion, configuredPackageVersion, configuredReleaseVersion, packageVersionForRelease, validateReleaseVersion } from '../../scripts/release-version.mjs';
 
 const node = process.execPath;
 const command = (source) => [node, '-e', source];
@@ -90,11 +91,16 @@ test('migration target digests bind installed bundle bytes and verifier maps', a
 
 test('release versions are path-safe semantic versions', () => {
   assert.equal(validateReleaseVersion('0.1.0'), '0.1.0');
-  assert.equal(configuredReleaseVersion({}, repositoryRoot.pathname), '0.1.0');
-  assert.equal(configuredReleaseVersion({ HUMANAGENT_RELEASE_VERSION: '9.9.9' }, repositoryRoot.pathname), '9.9.9');
-  assert.equal(bumpReleaseVersion('0.1.0', 'patch'), '0.1.1');
-  assert.equal(bumpReleaseVersion('0.1.0', 'minor'), '0.2.0');
-  assert.equal(bumpReleaseVersion('0.1.0', 'major'), '1.0.0');
+  const packageJson = JSON.parse(readFileSync(new URL('package.json', repositoryRoot), 'utf8'));
+  assert.equal(configuredReleaseVersion({}, repositoryRoot.pathname), packageJson.releaseVersion);
+  assert.equal(configuredPackageVersion(repositoryRoot.pathname), packageJson.version);
+  assert.equal(configuredReleaseVersion({ HUMANAGENT_RELEASE_VERSION: '9.9.0009' }, repositoryRoot.pathname), '9.9.0009');
+  assert.equal(packageVersionForRelease('0.1.0001'), '0.1.1');
+  assert.equal(bumpReleaseVersion('0.1.0', 'patch'), '0.1.0001');
+  assert.equal(bumpReleaseVersion('0.1.0001', 'patch'), '0.1.0002');
+  assert.equal(bumpReleaseVersion('0.1.0001', 'minor'), '0.2.0001');
+  assert.equal(bumpReleaseVersion('0.1.0001', 'major'), '1.0.0001');
+  assert.throws(() => bumpReleaseVersion('0.1.9999', 'patch'), /sequence exhausted/);
   assert.throws(() => bumpReleaseVersion('0.1.0-alpha.1'), /cannot bump a prerelease/);
   assert.throws(() => bumpReleaseVersion('0.1.0', 'invalid'), /release bump kind/);
   assert.throws(() => validateReleaseVersion('../escape'), /valid semantic version/);
@@ -362,13 +368,18 @@ test('assembled CLI bin remains executable', async () => {
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'agent-templates', 'templates', 'builtin', 'prompt-registry.json'), '{}\n', 'utf8');
   await writeFile(join(fixtureValue.projectRoot, 'dist', 'app', 'placeholder.txt'), 'runtime\n', 'utf8');
   await writeFile(join(fixtureValue.projectRoot, 'packages', 'contracts', 'dist', 'index.js'), 'export const id = (scope, value) => ({ scope, value });\n', 'utf8');
-  const result = await assemblePackage({ projectRoot: fixtureValue.projectRoot, releaseRoot, version: '0.1.0' });
+  const result = await assemblePackage({ projectRoot: fixtureValue.projectRoot, releaseRoot, version: '0.1.1', releaseVersion: '0.1.0001' });
   const mode = (await stat(join(result.packageRoot, 'bin', 'humanagent.mjs'))).mode;
   assert.equal(mode & 0o111, 0o111);
   assert.equal((await stat(join(result.packageRoot, 'runtime', 'agent-templates', 'templates', 'builtin', 'prompt-registry.json'))).isFile(), true);
   const contractsPackage = JSON.parse(await readFile(join(result.packageRoot, 'runtime', 'node_modules', '@humanagent', 'contracts', 'package.json'), 'utf8'));
   assert.equal(contractsPackage.name, '@humanagent/contracts');
+  assert.equal(contractsPackage.version, '0.1.1');
+  assert.equal(contractsPackage.releaseVersion, '0.1.0001');
   assert.equal(contractsPackage.exports['.'], './dist/index.js');
+  const cliPackage = JSON.parse(await readFile(join(result.packageRoot, 'package.json'), 'utf8'));
+  assert.equal(cliPackage.version, '0.1.1');
+  assert.equal(cliPackage.releaseVersion, '0.1.0001');
 });
 
 async function releaseFixture() {
