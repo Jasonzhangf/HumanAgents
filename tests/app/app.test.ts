@@ -1036,7 +1036,7 @@ test('CLI binds RCC identity to the configured transport endpoint', async () => 
   }
 });
 
-test('CLI serve composes rooted memory and keeps it across process restart', async () => {
+test('CLI serve takes over the previous owner and keeps rooted memory across restart', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -1154,16 +1154,26 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
     ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
     let duplicateStderr = '';
     duplicate.stderr.on('data', (chunk: Uint8Array) => { duplicateStderr += String(chunk); });
-    const duplicateExit = await new Promise<number | null>((resolve, reject) => {
+    const duplicateLaunch = await new Promise<{ readonly url: string }>((resolve, reject) => {
+      let output = '';
+      const timeout = setTimeout(() => reject(new Error(`takeover serve startup timed out: ${output}; stderr=${duplicateStderr}`)), 5_000);
+      duplicate.stdout.on('data', (chunk: Uint8Array) => {
+        output += String(chunk);
+        try {
+          const parsed = JSON.parse(output.trim()) as { readonly url?: string };
+          if (!parsed.url) return;
+          clearTimeout(timeout);
+          resolve({ url: parsed.url });
+        } catch {
+          // Wait for the complete startup object.
+        }
+      });
       duplicate.once('error', reject);
-      duplicate.once('exit', resolve);
+      duplicate.once('exit', (code) => reject(new Error(`takeover serve exited before startup (${String(code)}): ${output}; stderr=${duplicateStderr}`)));
     });
-    assert.equal(duplicateExit, 1);
-    const duplicateFailure = JSON.parse(duplicateStderr.trim()) as { readonly error?: { readonly code?: string; readonly ownerId?: string } };
-    assert.equal(duplicateFailure.error?.code, 'daemon-lease-owned');
-    assert.equal(duplicateFailure.error?.ownerId, 'humanagent.app.serve');
+    assert.match(duplicateLaunch.url, /^http:\/\/127\.0\.0\.1:/);
 
-    const created = await fetch(`${first.url}/api/tasks`, {
+    const created = await fetch(`${duplicateLaunch.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'rooted memory before restart' }),
@@ -1171,6 +1181,8 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
     taskId = task.taskId.value;
+    duplicate.kill('SIGTERM');
+    if (duplicate.exitCode === null) await new Promise<void>((resolve) => duplicate.once('exit', () => resolve()));
   } finally {
     await stop(first);
   }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -379,3 +379,102 @@ test('real child-process crash leaves a stale owner that cannot commit after tak
   await freshLock.release();
   await takeover.release();
 });
+
+async function startLeaseChild(paths: RuntimePaths, behavior: 'exit-on-term' | 'ignore-term'): Promise<{ readonly pid: number; readonly leaseId: string }> {
+  const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
+  const script = `
+    import { resolveRuntimePaths } from ${JSON.stringify(new URL('../../../packages/config/src/index.js', import.meta.url).href)};
+    import { acquireDaemonLease } from ${JSON.stringify(supervisorModule)};
+    const paths = await resolveRuntimePaths({ controlRoot: ${JSON.stringify(paths.controlRoot)}, workspace: ${JSON.stringify(paths.workspaceCwd)} });
+    const lease = await acquireDaemonLease(paths);
+    console.log(JSON.stringify({ pid: process.pid, leaseId: lease.record.leaseId }));
+    process.on('SIGTERM', ${behavior === 'exit-on-term' ? '() => process.exit(0)' : '() => {}'});
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const line = await new Promise<string>((resolve, reject) => {
+    let output = '';
+      child.stdout.on('data', (chunk: unknown) => {
+      output += String(chunk);
+      const newline = output.indexOf('\n');
+      if (newline >= 0) resolve(output.slice(0, newline));
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => reject(new Error(`lease child exited before ready: ${code}`)));
+  });
+  return JSON.parse(line) as { readonly pid: number; readonly leaseId: string };
+}
+
+test('hm startup gracefully takes over a live daemon and records the new generation', async () => {
+  const paths = await fixture();
+  const child = await startLeaseChild(paths, 'exit-on-term');
+  try {
+    const startup = await runSupervisorStartup(paths, [], {
+      lease: {
+        ownerId: 'humanagent.app.serve',
+        takeover: { reason: 'new hm serve process takes over the previous daemon', stop: { gracefulTimeoutMs: 500, forceTimeoutMs: 500 } },
+      },
+    });
+    assert.equal(startup.lease.record.generation, 2);
+    assert.equal(startup.lease.record.takeover?.previousLeaseId, child.leaseId);
+    assert.equal(startup.lease.record.takeover?.termination, 'graceful');
+    assert.equal(startup.lease.record.takeover?.gracefulStopError, undefined);
+    await startup.dispose();
+  } finally {
+    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+  }
+});
+
+test('hm startup force-stops a daemon that ignores graceful stop', async () => {
+  const paths = await fixture();
+  const child = await startLeaseChild(paths, 'ignore-term');
+  try {
+    const startup = await runSupervisorStartup(paths, [], {
+      lease: {
+        ownerId: 'humanagent.app.serve',
+        takeover: { reason: 'new hm serve process takes over an unresponsive daemon', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 500, pollIntervalMs: 5 } },
+      },
+    });
+    assert.equal(startup.lease.record.generation, 2);
+    assert.equal(startup.lease.record.takeover?.previousLeaseId, child.leaseId);
+    assert.equal(startup.lease.record.takeover?.termination, 'forced');
+    await startup.dispose();
+  } finally {
+    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+  }
+});
+
+test('hm startup refuses to signal a live PID whose process identity was reused', async () => {
+  const paths = await fixture();
+  const child = await startLeaseChild(paths, 'ignore-term');
+  try {
+    const leasePath = daemonLeasePath(paths);
+    const raw = JSON.parse(await readFile(leasePath, 'utf8')) as Record<string, unknown>;
+    await writeFile(leasePath, JSON.stringify({ ...raw, acquiredAt: '2000-01-01T00:00:00.000Z' }) + '\n', 'utf8');
+    await assert.rejects(
+      () => runSupervisorStartup(paths, [], {
+        lease: {
+          ownerId: 'humanagent.app.serve',
+          takeover: { reason: 'reject reused pid', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 30, pollIntervalMs: 5 } },
+        },
+      }),
+      (error: any) => error.code === 'daemon-takeover.identity-mismatch',
+    );
+    assert.equal(processIsAliveForTest(child.pid), true);
+  } finally {
+    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+  }
+});
+
+function processIsAliveForTest(pid: number): boolean {
+  try {
+    (process as unknown as { kill(pid: number, signal: 0): void }).kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as { code?: string }).code === 'EPERM';
+  }
+}
+
+function killForTest(pid: number, signal: 'SIGKILL'): void {
+  (process as unknown as { kill(pid: number, signal: 'SIGKILL'): void }).kill(pid, signal);
+}

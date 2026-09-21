@@ -19,4 +19,5 @@ export type {
   SupervisorStage,
   SupervisorTakeoverOptions,
   SupervisorTakeoverRecord,
+  SupervisorTakeoverStopOptions,
 } from './supervisor.js';

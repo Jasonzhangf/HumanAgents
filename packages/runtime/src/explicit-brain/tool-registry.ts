@@ -64,6 +64,60 @@ export interface ExplicitBrainRuntimeBinding {
   readonly capabilities: readonly string[];
 }
 
+export interface ExplicitBrainWorkspaceToolPort {
+  authorize(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly toolRef: 'workspace.list' | 'file.read' | 'file.search';
+    readonly scopeRef: string;
+    readonly pathRef?: string;
+  }): void;
+  list(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly scopeRef: string;
+    readonly pathRef?: string;
+  }): Promise<unknown>;
+  read(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly scopeRef: string;
+    readonly pathRef: string;
+  }): Promise<unknown>;
+  search(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly scopeRef: string;
+    readonly query: string;
+    readonly limit: number;
+  }): Promise<unknown>;
+}
+
+export interface ExplicitBrainAgentToolPort {
+  authorizeQuery(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly agentRef?: string;
+    readonly scopeRef?: string;
+  }): void;
+  authorizeMessage(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly recipientRef: string;
+    readonly messageClass: 'control' | 'data' | 'observation';
+  }): void;
+  query(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly agentRef?: string;
+    readonly scopeRef?: string;
+  }): Promise<unknown>;
+  message(input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly recipientRef: string;
+    readonly messageRef: string;
+    readonly messageClass: 'control' | 'data' | 'observation';
+  }): Promise<unknown>;
+}
+
+export interface ExplicitBrainOperationalToolPorts {
+  readonly workspace: ExplicitBrainWorkspaceToolPort;
+  readonly agent: ExplicitBrainAgentToolPort;
+}
+
 export interface ExplicitBrainAdmissionReceipt {
   readonly admitted: true;
   readonly toolRef: ExplicitBrainModelTool;
@@ -215,6 +269,7 @@ function validateToolArguments(toolRef: ExplicitBrainModelTool, args: Readonly<R
   }
   if (toolRef === 'file.read') {
     assertString(args.pathRef, 'file.read pathRef');
+    assertString(args.scopeRef, 'file.read scopeRef');
     return;
   }
   if (toolRef === 'file.search') {
@@ -374,6 +429,7 @@ export function admitToolIntent(input: {
   readonly currentEpoch: number;
   readonly currentPermissionRevision: string;
   readonly argumentsDigest: (args: Readonly<Record<string, unknown>>) => string;
+  readonly operationalPorts?: ExplicitBrainOperationalToolPorts;
 }): ExplicitBrainAdmissionReceipt {
   assertRuntimeBinding(input.binding);
   if (input.registry.capabilityDigest !== input.binding.capabilityDigest) {
@@ -403,6 +459,7 @@ export function admitToolIntent(input: {
     throw new ExplicitBrainAdmissionError('permission-denied', 'tool intent permission revision is stale');
   }
   validateToolArgumentsAtBoundary(capability.toolRef, input.intent.arguments);
+  assertOperationalAuthorization(input, capability.toolRef);
   const expectedDigest = input.argumentsDigest(input.intent.arguments);
   if (!/^sha256:[0-9a-f]{64}$/.test(expectedDigest)) {
     throw new ExplicitBrainAdmissionError('invalid-runtime-binding', 'arguments digest calculator must return a SHA-256 digest');
@@ -421,4 +478,52 @@ export function admitToolIntent(input: {
     executionEpoch: input.binding.executionEpoch,
     argumentsDigest: expectedDigest,
   };
+}
+
+function assertOperationalAuthorization(
+  input: {
+    readonly binding: ExplicitBrainRuntimeBinding;
+    readonly intent: ToolIntent;
+    readonly operationalPorts?: ExplicitBrainOperationalToolPorts;
+  },
+  toolRef: ExplicitBrainModelTool,
+): void {
+  if (!['workspace.list', 'file.read', 'file.search', 'agent.query', 'agent.message'].includes(toolRef)) return;
+  if (input.operationalPorts === undefined) {
+    throw new ExplicitBrainAdmissionError(
+      'permission-denied',
+      `tool requires a scoped execution owner: ${toolRef}`,
+    );
+  }
+  const args = input.intent.arguments;
+  try {
+    if (toolRef === 'workspace.list' || toolRef === 'file.read' || toolRef === 'file.search') {
+      input.operationalPorts.workspace.authorize({
+        binding: input.binding,
+        toolRef,
+        scopeRef: String(args.scopeRef ?? args.pathRef),
+        ...(args.pathRef === undefined ? {} : { pathRef: String(args.pathRef) }),
+      });
+      return;
+    }
+    if (toolRef === 'agent.query') {
+      input.operationalPorts.agent.authorizeQuery({
+        binding: input.binding,
+        ...(args.agentRef === undefined ? {} : { agentRef: String(args.agentRef) }),
+        ...(args.scopeRef === undefined ? {} : { scopeRef: String(args.scopeRef) }),
+      });
+      return;
+    }
+    input.operationalPorts.agent.authorizeMessage({
+      binding: input.binding,
+      recipientRef: String(args.recipientRef),
+      messageClass: args.messageClass as 'control' | 'data' | 'observation',
+    });
+  } catch (error) {
+    if (error instanceof ExplicitBrainAdmissionError) throw error;
+    throw new ExplicitBrainAdmissionError(
+      'permission-denied',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }

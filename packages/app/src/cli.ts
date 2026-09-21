@@ -928,7 +928,15 @@ export async function main(args: readonly string[]): Promise<void> {
           if (runtime) await runtime.server.close();
         },
       },
-    ], { lease: { ownerId: 'humanagent.app.serve' } });
+    ], {
+      lease: {
+        ownerId: 'humanagent.app.serve',
+        takeover: {
+          reason: 'new hm serve process takes over the previous daemon',
+          stop: {},
+        },
+      },
+    });
     if (!runtime || supervisor === undefined) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
     boundPortNumber = runtime.server.port;
     await supervisor.lease.setControlEndpoint({ host, port: runtime.server.port });

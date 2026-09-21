@@ -13,6 +13,7 @@ import {
   admitToolIntent,
   type ExplicitBrainAdmissionReceipt,
   type ExplicitBrainRuntimeBinding,
+  type ExplicitBrainOperationalToolPorts,
   type ExplicitBrainToolRegistry,
 } from './tool-registry.js';
 import type { DecisionTracePort } from './attention.js';
@@ -115,6 +116,7 @@ export class ExplicitBrainDecisionExecutor<TResult> {
     readonly currentEpoch: number;
     readonly currentPermissionRevision: string;
     readonly argumentsDigest: (args: Readonly<Record<string, unknown>>) => string;
+    readonly operationalPorts?: ExplicitBrainOperationalToolPorts;
   }) {}
 
   async execute(decision: InteractionDecision): Promise<readonly ExplicitBrainExecutionResult<TResult>[]> {
@@ -146,6 +148,7 @@ export class ExplicitBrainDecisionExecutor<TResult> {
         currentEpoch: this.input.currentEpoch,
         currentPermissionRevision: this.input.currentPermissionRevision,
         argumentsDigest: this.input.argumentsDigest,
+        ...(this.input.operationalPorts === undefined ? {} : { operationalPorts: this.input.operationalPorts }),
       });
     } catch (error) {
       const admission = admissionFromError(error);
