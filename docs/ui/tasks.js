@@ -165,6 +165,7 @@ function renderTasks() {
     } else {
       for (const row of groupRows) {
         const item = element('article', undefined, 'task-row')
+        const checkboxHitArea = element('label', undefined, 'task-row-check')
         const checkbox = element('input')
         checkbox.type = 'checkbox'
         checkbox.checked = selectedTaskIds.has(row.taskId.value)
@@ -174,6 +175,7 @@ function renderTasks() {
           else selectedTaskIds.delete(row.taskId.value)
           renderBulkActions()
         })
+        checkboxHitArea.append(checkbox)
         const link = element('a', undefined, 'task-row-link')
         link.href = row.state === 'waiting' || row.state === 'blocked'
           ? taskDetailHref(row.taskId.value)
@@ -193,7 +195,7 @@ function renderTasks() {
         remove.type = 'button'
         remove.addEventListener('click', () => void deleteTask(row))
         actions.append(edit, remove)
-        item.append(checkbox, link, actions)
+        item.append(checkboxHitArea, link, actions)
         panel.append(item)
       }
     }
