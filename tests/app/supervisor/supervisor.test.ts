@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, resolveRuntimePaths, type RuntimePaths } from '../../../packages/config/src/index.js';
 import { SessionStore } from '../../../packages/app/src/session-store.js';
+import { AppLifecycleError } from '../../../packages/app/src/errors.js';
 import {
   acquireDaemonLease,
   daemonLeasePath,
@@ -188,6 +189,25 @@ test('startup dispose remains retryable when lease release fails', async () => {
   const receipt = await startup.dispose();
   assert.equal(releaseCalls, 2);
   assert.ok(receipt.lease.disposedAt);
+});
+
+test('startup dispose does not infer a lease handoff without a newer durable owner', async () => {
+  const paths = await fixture();
+  const startup = await runSupervisorStartup(paths, []);
+  Object.defineProperty(startup.lease, 'release', {
+    value: async () => {
+      throw new AppLifecycleError(
+        'daemon-lease-transition-in-progress',
+        'another daemon lease transition is already in progress',
+        'wait for the daemon lease transition to finish',
+      );
+    },
+  });
+
+  await assert.rejects(() => startup.dispose(), (error: any) => {
+    assert.equal(error.code, 'daemon-lease-transition-in-progress');
+    return true;
+  });
 });
 
 test('partial startup failure cleans up reverse and keeps owner/next-action failure receipt', async () => {

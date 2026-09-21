@@ -635,6 +635,24 @@ function isExpectedLeaseHandoff(error: unknown): boolean {
     && (error.code === 'daemon-lease-transition-in-progress' || error.code === 'daemon-lease-stale');
 }
 
+async function waitForLeaseHandoff(paths: RuntimePaths, previous: SupervisorLeaseRecord): Promise<boolean> {
+  const deadline = Date.now() + DEFAULT_GRACEFUL_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const current = await readLeaseRecord(paths);
+    if (
+      current !== undefined
+      && current.leaseId !== previous.leaseId
+      && current.generation > previous.generation
+      && current.disposedAt === undefined
+      && processIsAlive(current.pid)
+    ) {
+      return true;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, DEFAULT_STOP_POLL_INTERVAL_MS));
+  }
+  return false;
+}
+
 async function failAndCleanup(paths: RuntimePaths, lease: SupervisorLease, error: unknown, started: readonly SupervisorStage[]): Promise<{ readonly error: unknown; readonly receipt: SupervisorFailureReceipt }> {
   const failingStage = started.at(-1);
   const failure = failureRecordFor(error, failingStage);
@@ -736,7 +754,7 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
         try {
           released = await lease.release();
         } catch (error) {
-          if (!isExpectedLeaseHandoff(error)) throw error;
+          if (!isExpectedLeaseHandoff(error) || !(await waitForLeaseHandoff(paths, lease.record))) throw error;
           // A new serve owner has already fenced this process. Its lease is the
           // durable owner now; stopping stages remains successful even though
           // the old lease can no longer be marked disposed.
