@@ -94,6 +94,11 @@ function memoryEntryContent(current: string, kind: 'project-fact' | 'project-exp
   return current.endsWith('\n') ? `${current}${entry.slice(1)}` : `${current}${entry}`;
 }
 
+function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
+  const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
+  return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
+}
+
 async function writeMemoryEntryPatchArtifact(
   artifactsRoot: string,
   patchRef: string,
@@ -1238,6 +1243,7 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
 
 test('CLI serve launch reports the live Cordis plugin composition', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-cordis-composition-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const child = spawn(process.execPath, [
     cli,
@@ -1255,6 +1261,7 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
   child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
   try {
     const launch = await new Promise<{
+      readonly url: string;
       readonly plugins: readonly string[];
       readonly composition: {
         readonly complete: boolean;
@@ -1267,15 +1274,16 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
         output += String(chunk);
         try {
           const parsed = JSON.parse(output.trim()) as {
+            readonly url?: string;
             readonly plugins?: readonly string[];
             readonly composition?: {
               readonly complete: boolean;
               readonly components: readonly { readonly component: string; readonly state: string }[];
             };
           };
-          if (parsed.plugins && parsed.composition) {
+          if (parsed.url && parsed.plugins && parsed.composition) {
             clearTimeout(timeout);
-            resolve({ plugins: parsed.plugins, composition: parsed.composition });
+            resolve({ url: parsed.url, plugins: parsed.plugins, composition: parsed.composition });
           }
         } catch {
           // The CLI may print partial JSON while the process is starting.
@@ -1299,6 +1307,28 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
     for (const component of ['cordis-host', 'fixed-harness-kernel', 'fake-plugin', 'template-plugin', 'memory-plugin', 'ui-plugin']) {
       assert.equal(launch.composition.components.find((candidate) => candidate.component === component)?.state, 'composed');
     }
+    const args = { scopeRef: `scope:workspace:${paths.projectKey}`, pathRef: '.' };
+    const explicitDecisionResponse = await fetch(`${launch.url}/api/explicit/decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decisionId: 'decision:cli-explicit-runtime',
+        interactionId: 'interaction:cli-explicit-runtime',
+        kind: 'intent',
+        selectedAction: 'answer',
+        summary: 'list the configured project workspace',
+        evidenceRefs: [],
+        toolIntents: [{
+          toolIntentId: 'intent:cli-workspace-list',
+          toolRef: 'workspace.list',
+          arguments: args,
+          argumentsDigest: explicitArgumentsDigest(args),
+          reasonRefs: [],
+          selectedBecause: 'serve composition owns the workspace binding',
+        }],
+      }),
+    });
+    assert.equal(explicitDecisionResponse.status, 200);
   } finally {
     child.kill('SIGTERM');
     if (child.exitCode === null) {

@@ -921,6 +921,7 @@ export async function main(args: readonly string[]): Promise<void> {
             },
             host,
             portNumber: boundPortNumber,
+            projectKey: paths.projectKey,
             workspaceRoot: paths.workspaceCwd,
             restart: requestRestart,
             identity: () => {
@@ -984,6 +985,7 @@ export async function main(args: readonly string[]): Promise<void> {
       uiRoot,
       checkpointRoot,
       memoryRoot,
+      projectKey: paths.projectKey,
       eventJournal: join(paths.journalRoot, 'events.jsonl'),
       supervisor: {
         leasePath: join(paths.projectRoot, 'daemon', 'lease.json'),
