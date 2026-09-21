@@ -3,8 +3,8 @@
 状态：`CANDIDATE / PENDING REVIEW`
 日期：2026-09-20
 审计基线提交：`df70180808a3833bd74de0b9e4a9894870913131`
-审计范围：基线提交加当前 live-composition-closeout 候选工作树；最终候选
-提交和树在 review 前回填。
+审计候选提交：`c6803314ecfdde803973ed4d1abc7ae19ad63f6e`
+审计候选树：`1401381dbe1b20645b96595cf87a238cb45bb736`
 
 ## 0. Scope and Method
 
