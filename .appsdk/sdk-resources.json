@@ -1,5 +1,5 @@
 {
-  "bundle_digest": "sha256:926d3704ef7a823d41dbca53c0f27757de15e78b61e61756a83f0d2506f998bb",
+  "bundle_digest": "sha256:c85e1ede7532e71012cd4ca799e546ccf699b70684ad9b80dad8fb8fc08dd31e",
   "manifest_digest": "sha256:c0e3756d3d801912d91e0df0d24ef8ad473a627ca593d6c0c5d7657c0b358c33",
   "resources": [
     {
@@ -16,13 +16,13 @@
     },
     {
       "class": "contracts",
-      "digest": "sha256:eab85ce8330f2a781064a33f6a7d3e4ef046684258819bdb108c68b93eece1ac",
+      "digest": "sha256:f089f7ecd0f7b7e8871a0fd663b76314f98656d9b57c2efc925f5cf0c846d7b5",
       "path": ".appsdk/contracts/communication/communication-request.schema.json",
       "source": "contracts/communication/communication-request.schema.json"
     },
     {
       "class": "contracts",
-      "digest": "sha256:77b4abfbb9df9ab7c5059c7002bf588e0dfee365a16484dea2c1372762221773",
+      "digest": "sha256:f8e9e29a2737078aafa1834020f069bbceb5980b04449639589807ee2b1b65a2",
       "path": ".appsdk/contracts/communication/communication-event.schema.json",
       "source": "contracts/communication/communication-event.schema.json"
     },
@@ -352,13 +352,13 @@
     },
     {
       "class": "rules",
-      "digest": "sha256:3db5406d07c093d42cde78133da17dfcb4aa96ff1e51eaca216b42a83128a460",
+      "digest": "sha256:1060221ab9b0c67ac3b288d4e4d3b111b98f01aed25552d380a7b57b845d2073",
       "path": ".appsdk/rules/appsdk-project-governance.md",
       "source": "skills/appsdk-project-governance/SKILL.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:3db5406d07c093d42cde78133da17dfcb4aa96ff1e51eaca216b42a83128a460",
+      "digest": "sha256:1060221ab9b0c67ac3b288d4e4d3b111b98f01aed25552d380a7b57b845d2073",
       "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
       "source": "skills/appsdk-project-governance/SKILL.md"
     },
@@ -376,13 +376,13 @@
     },
     {
       "class": "skills",
-      "digest": "sha256:d833e5f66601fb10bc229be827fb252f09e14102841a50c181472f633b6b32a2",
+      "digest": "sha256:5bbbcba8996bf7e23d3583fe138eb0423e3d7af461533f25de75c5edd8c822f0",
       "path": ".appsdk/skills/appsdk-project-governance/references/bootstrap-migration.md",
       "source": "skills/appsdk-project-governance/references/bootstrap-migration.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:0132cdc37e316566227e897efa5b2573e32e0eb7fc2ccea39256c793380d4aa8",
+      "digest": "sha256:1b87b75ade594fa6bd656070a97f1c790e2f9dbb1151e3b7d893da0ee69bef3c",
       "path": ".appsdk/skills/appsdk-project-governance/references/command-surface.md",
       "source": "skills/appsdk-project-governance/references/command-surface.md"
     },
@@ -400,13 +400,13 @@
     },
     {
       "class": "skills",
-      "digest": "sha256:bac11f8a0d0421e48e2ffdb95271b1fe84dac80a98a483526895b54d8f9a7806",
+      "digest": "sha256:c42a196dc15f641c463b968dffd22abca84b3e9d92befebcd00851d00c978237",
       "path": ".appsdk/skills/appsdk-project-governance/references/goal-prompt.md",
       "source": "skills/appsdk-project-governance/references/goal-prompt.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:09fe60302ff0ce4ab3baf8793df591e49fc6a0359188587bc53271bf2c758e39",
+      "digest": "sha256:042b1d850f20247efd943623f8e7678ea41b3a6e27da2da76b1ca1b7d36e283e",
       "path": ".appsdk/skills/appsdk-project-governance/references/init-prompts.md",
       "source": "skills/appsdk-project-governance/references/init-prompts.md"
     },
@@ -424,13 +424,13 @@
     },
     {
       "class": "skills",
-      "digest": "sha256:40f8e4abf480da743160765bb7b9c409247ce3927d482be84d99549668a2dcbd",
+      "digest": "sha256:766041b11eb56af79929d2756d5cd5193ecdf396f52cd3355fa2295cd2edea44",
       "path": ".appsdk/skills/appsdk-project-governance/references/state-paths.md",
       "source": "skills/appsdk-project-governance/references/state-paths.md"
     },
     {
       "class": "skills",
-      "digest": "sha256:80a2bf6bcd38573bdfb0c91af940c52358201789f053eb4713de80fc28fc22e2",
+      "digest": "sha256:6a8c2f280df976032f1c7761072af114b3d1901ac9d07e013cfd86a64cca5c5b",
       "path": ".appsdk/skills/appsdk-project-governance/references/subagents-config.md",
       "source": "skills/appsdk-project-governance/references/subagents-config.md"
     },

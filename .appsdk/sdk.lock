@@ -1,6 +1,6 @@
 {
   "binary_ref": "project-sdk",
-  "bundle_digest": "sha256:926d3704ef7a823d41dbca53c0f27757de15e78b61e61756a83f0d2506f998bb",
+  "bundle_digest": "sha256:c85e1ede7532e71012cd4ca799e546ccf699b70684ad9b80dad8fb8fc08dd31e",
   "bundle_manifest_digest": "sha256:c0e3756d3d801912d91e0df0d24ef8ad473a627ca593d6c0c5d7657c0b358c33",
   "bundle_resources": {
     "contracts": [
@@ -89,7 +89,7 @@
   "compiler_digest": "sha256:94e2d909a4674f009a41de8e9fb582ec011c6e60d6132f260241f7353cfd019c",
   "contract_schema": 1,
   "digest": "sha256:94e2d909a4674f009a41de8e9fb582ec011c6e60d6132f260241f7353cfd019c",
-  "previous_bundle_digest": "sha256:28fdd46b018e57a93c9505133c872f66b53a3ebebc2ce53bd69b8af22e0cd773",
+  "previous_bundle_digest": "sha256:2da7349b9e56b9b17b629bde116c11097070d74631ce6d42d9154233d8f0fd1f",
   "sdk": "appsdk",
   "version": "0.1.7"
 }

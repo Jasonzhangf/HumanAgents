@@ -108,7 +108,7 @@ Ordinary peer initialization, after the project already has
 ```bash
 cd /abs/path/project
 collab context
-# only if collab context says unregistered:
+# if the project is unregistered:
 appsdk init .
 collab context
 ```
@@ -116,7 +116,8 @@ collab context
 The peer must observe its own identity, liveness, presence, transport and
 worker role. Do not run a second `collab init`, do not promote itself, do not
 register a long-horizon goal, and do not fabricate a worker role from
-`appsdk init` output.
+`appsdk init` output. Execution work requires the same `appsdk bug intake`
+contract and returned `issue_id`; read-only conversation does not.
 
 Long-horizon master scheduling is a separate, master-only step. Create the
 plan file first, then register and verify:
@@ -256,6 +257,29 @@ regenerated; missing SDK-owned fields are refilled. Project identity, module
 ownership, build, and protection boundaries are carried forward.
 The new reset record has `mode: "fresh_init"` and proves the reset operation
 only. It does not inherit old PASS, review, delivery, or freeze claims.
+
+Before choosing this route, install the reviewed current AppSDK and Collab
+versions globally and use only those installed binaries and Skills for the
+inventory. Do not read, replay, or interpret old local control history to make
+the old baseline compatible. The current version is the only reset baseline:
+missing SDK-owned fields are refilled, legacy SDK pins/migration witnesses are
+ignored, and old local control state is removed only through the canonical
+owner.
+
+The replacement order is:
+
+1. Install the reviewed AppSDK and Collab binaries/Skills.
+2. Inspect with the newly installed commands and record the exact old control
+   roots and owner.
+3. Retire or migrate Collab through the Collab owner.
+4. Reset AppSDK through the AppSDK owner in a clean non-main worktree.
+5. Validate the new baseline only. Do not import old PASS, receipts, review,
+   install, restart, or delivery evidence.
+
+If a legacy user-local Collab binary pair is proven by its own version
+response, remove only that verified pair after the canonical pair is
+installed. Never remove `~/.appsdk`, `~/.collab`, project `.agent-collab/`, or
+business source as part of binary cleanup.
 
 The lower-level `appsdk reset-governance --discard-legacy` command remains
 available and uses the same transactional reset owner. Neither command
