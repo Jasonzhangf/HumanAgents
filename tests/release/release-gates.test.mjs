@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,11 +91,13 @@ test('migration target digests bind installed bundle bytes and verifier maps', a
 
 test('release versions are path-safe semantic versions', () => {
   assert.equal(validateReleaseVersion('0.1.0'), '0.1.0');
-  assert.equal(configuredReleaseVersion({}, repositoryRoot.pathname), '0.1.0');
-  assert.equal(configuredReleaseVersion({ HUMANAGENT_RELEASE_VERSION: '9.9.9' }, repositoryRoot.pathname), '9.9.9');
-  assert.equal(bumpReleaseVersion('0.1.0', 'patch'), '0.1.1');
-  assert.equal(bumpReleaseVersion('0.1.0', 'minor'), '0.2.0');
-  assert.equal(bumpReleaseVersion('0.1.0', 'major'), '1.0.0');
+  const configuredVersion = JSON.parse(readFileSync(new URL('package.json', repositoryRoot), 'utf8')).version;
+  assert.equal(configuredReleaseVersion({}, repositoryRoot.pathname), configuredVersion);
+  assert.equal(configuredReleaseVersion({ HUMANAGENT_RELEASE_VERSION: '9.9.0009' }, repositoryRoot.pathname), '9.9.0009');
+  assert.equal(bumpReleaseVersion('0.1.0', 'patch'), '0.1.0001');
+  assert.equal(bumpReleaseVersion('0.1.0001', 'patch'), '0.1.0002');
+  assert.equal(bumpReleaseVersion('0.1.0001', 'minor'), '0.2.0001');
+  assert.equal(bumpReleaseVersion('0.1.0001', 'major'), '1.0.0001');
   assert.throws(() => bumpReleaseVersion('0.1.0-alpha.1'), /cannot bump a prerelease/);
   assert.throws(() => bumpReleaseVersion('0.1.0', 'invalid'), /release bump kind/);
   assert.throws(() => validateReleaseVersion('../escape'), /valid semantic version/);

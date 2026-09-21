@@ -1,6 +1,6 @@
 # Release version baseline
 
-- Current release version: `0.1.1`
+- Current release version: `0.1.0001`
 - Canonical source: repository root `package.json` `version` field.
 - Synchronized package metadata: `packages/app`, `packages/config`, and `packages/contracts`.
 - Version bump owner: `scripts/bump-release-version.mjs`.
