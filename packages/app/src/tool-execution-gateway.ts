@@ -3,6 +3,9 @@ import {
   CODE_SEARCH_ROUTE_ID,
   CodeSearchRoute,
   codeSearchRegistration,
+  WEB_SEARCH_ROUTE_ID,
+  WebSearchRoute,
+  webSearchRegistration,
   DeterministicInspectRoute,
   DETERMINISTIC_INSPECT_ROUTE_VERSION,
   DETERMINISTIC_INSPECT_TOOL_NAME,
@@ -10,12 +13,14 @@ import {
   failureEvidence,
   operationFailure,
 } from '../../adapters/operations/src/index.js';
+import type { CancellableOperationRoute } from '../../adapters/operations/src/index.js';
 import { HandOperationRuntime } from '../../runtime/src/hand/index.js';
-import { ToolExecutionGateway, ToolRegistry, type GatewayOptions, type OperationExecutorPort, type OperationVerifierPort } from '../../runtime/src/gateway/index.js';
+import { ToolExecutionGateway, ToolRegistry, type GatewayOptions, type OperationExecutorPort, type OperationStopSettlementPort, type OperationVerifierPort } from '../../runtime/src/gateway/index.js';
 
 export interface ToolExecutionGatewayAssemblyInput extends Omit<GatewayOptions, 'registry' | 'executor' | 'verifier'> {
   readonly route?: DeterministicInspectRoute;
   readonly codeSearchRoute?: CodeSearchRoute;
+  readonly webSearchRoute?: WebSearchRoute;
 }
 
 export function deterministicInspectRegistration(): ToolRegistration {
@@ -43,14 +48,21 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
   registry.load([
     deterministicInspectRegistration(),
     ...(input.codeSearchRoute ? [codeSearchRegistration()] : []),
+    ...(input.webSearchRoute ? [webSearchRegistration()] : []),
   ]);
+  const selectedRoute = (routeId: string): (DeterministicInspectRoute | CodeSearchRoute | WebSearchRoute | undefined) => {
+    if (routeId === CODE_SEARCH_ROUTE_ID) return input.codeSearchRoute;
+    if (routeId === WEB_SEARCH_ROUTE_ID) return input.webSearchRoute;
+    return route;
+  };
   const executor: OperationExecutorPort = {
     async execute(request) {
-      const selectedRoute = request.route.routeId === CODE_SEARCH_ROUTE_ID ? input.codeSearchRoute : route;
-      if (!selectedRoute) throw new Error('code search route is not assembled');
-      const observation = await selectedRoute.execute({
+      const selected = selectedRoute(request.route.routeId);
+      if (!selected) throw new Error(`route ${request.route.routeId} is not assembled`);
+      const observation = await selected.execute({
         intent: request.intent,
         effectiveScope: request.route.effectiveScope,
+        executionEpoch: request.lease.executionEpoch,
       });
       if (observation.operationId.scope !== request.intent.operationId.scope
         || observation.operationId.value !== request.intent.operationId.value) {
@@ -63,7 +75,7 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
           observedAt: new Date().toISOString(),
           impact: 'the gateway cannot trust the adapter observation for this operation',
           protectiveAction: 'reject the mismatched observation before verification',
-          nextAction: { kind: 'recover', ref: 'deterministic-inspect' },
+          nextAction: { kind: 'recover', ref: request.route.routeId },
           evidenceRefs: [failureEvidence(request.intent.operationId, request.route.effectiveScope, 'operation-id-mismatch')],
         }));
       }
@@ -80,9 +92,9 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
   };
   const verifier: OperationVerifierPort = {
     async verify(request) {
-      const selectedRoute = request.route.routeId === CODE_SEARCH_ROUTE_ID ? input.codeSearchRoute : route;
-      if (!selectedRoute) throw new Error('code search route is not assembled');
-      const result = await selectedRoute.verify({
+      const selected = selectedRoute(request.route.routeId);
+      if (!selected) throw new Error(`route ${request.route.routeId} is not assembled`);
+      const result = await selected.verify({
         intent: request.intent,
         effectiveScope: request.route.effectiveScope,
         observation: {
@@ -103,7 +115,7 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
           observedAt: new Date().toISOString(),
           impact: 'the gateway cannot trust the adapter verification for this operation',
           protectiveAction: 'reject the mismatched verification before terminal settlement',
-          nextAction: { kind: 'recover', ref: 'deterministic-inspect' },
+          nextAction: { kind: 'recover', ref: request.route.routeId },
           evidenceRefs: [failureEvidence(request.intent.operationId, request.route.effectiveScope, 'verification-operation-id-mismatch')],
         }));
       }
@@ -116,12 +128,34 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
       };
     },
   };
+  const stopSettlement: OperationStopSettlementPort = input.stopSettlement ?? {
+    async settle(request) {
+      const selected = selectedRoute(request.route.routeId);
+      if (selected && isCancellableRoute(selected)) return selected.stop(request);
+      return {
+        receiptId: `route-stop-unavailable-${request.intent.operationId.value}-${request.executionEpoch}`,
+        operationId: request.intent.operationId,
+        taskId: request.intent.taskId,
+        executionEpoch: request.executionEpoch,
+        owner: request.owner,
+        ...(request.lease?.leaseId ? { leaseId: request.lease.leaseId } : {}),
+        stopped: false,
+        sideEffectState: 'possible' as const,
+        evidenceRefs: [failureEvidence(request.intent.operationId, request.route.effectiveScope, 'route-stop-unavailable')],
+      };
+    },
+  };
   return new ToolExecutionGateway({
     ...input,
     registry,
     executor,
+    stopSettlement,
     verifier,
   });
+}
+
+function isCancellableRoute(route: DeterministicInspectRoute | CodeSearchRoute | WebSearchRoute): route is (CodeSearchRoute | WebSearchRoute) & CancellableOperationRoute {
+  return typeof (route as Partial<CancellableOperationRoute>).stop === 'function';
 }
 
 /**

@@ -167,7 +167,7 @@ class StopSettlement implements OperationStopSettlementPort {
 
   async settle(input: Parameters<OperationStopSettlementPort['settle']>[0]) {
     this.requests.push(input);
-    return this.receipt ?? {
+    return {
       receiptId: 'stop-receipt-g3',
       operationId: input.intent.operationId,
       taskId: input.intent.taskId,
@@ -177,6 +177,7 @@ class StopSettlement implements OperationStopSettlementPort {
       stopped: true,
       sideEffectState: 'none' as const,
       evidenceRefs: [evidence('stop-settlement')],
+      ...(this.receipt ?? {}),
     };
   }
 }
@@ -342,6 +343,38 @@ test('in-flight execution can be cancelled and settled without waiting for execu
   release();
   assert.equal((await running).status, 'cancelled');
   assert.equal(context.gateway.get(operation).status, 'cancelled');
+});
+
+test('stop failure fences late execution events and preserves reconcile_required', async () => {
+  const executor = new Executor();
+  let started!: () => void;
+  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  let release!: () => void;
+  const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+  const originalExecute = executor.execute.bind(executor);
+  executor.execute = async (input) => {
+    started();
+    await releasePromise;
+    return originalExecute(input);
+  };
+  const stopSettlement = new StopSettlement();
+  const context = setup({ executor, stopSettlement });
+  await context.gateway.submit(intent({ idempotencyKey: 'late-event-fence' }));
+  const running = context.gateway.execute(operation);
+  await startedPromise;
+  await context.gateway.requestCancel(operation);
+  stopSettlement.receipt = {
+    receiptId: 'stop-receipt-late-event', operationId: operation, taskId: task, executionEpoch: 1, owner: 'operations-adapter',
+    stopped: false, sideEffectState: 'possible', evidenceRefs: [evidence('stop-late-event')],
+  };
+  const blocked = await context.gateway.settleCancellation(operation);
+  assert.equal(blocked.status, 'reconcile_required');
+  const committedAfterStop = context.journal.committed.length;
+  release();
+  const late = await running;
+  assert.equal(late.status, 'reconcile_required');
+  assert.equal(context.journal.committed.length, committedAfterStop);
+  assert.equal(context.journal.committed.some((event) => event.kind === 'operation.completed'), false);
 });
 
 test('scope widening and missing route are rejected before acceptance', async () => {
@@ -705,6 +738,10 @@ test('trusted stop settlement reaches cancelled and positive reconcile', async (
   assert.equal(blocked.status, 'reconcile_required');
   assert.equal(blocked.reconcile?.sideEffectState, 'possible');
   assert.equal(reconcile.journal.committed.at(-1)?.kind, 'operation.reconcile_required');
+  const recovered = await reconcile.gateway.resolveReconcile(operation, { outcome: 'cancelled', evidenceRefs: [evidence('reconcile-cancelled')] });
+  assert.equal(recovered.status, 'cancelled');
+  assert.equal(recovered.result?.status, 'cancelled');
+  assert.equal(reconcile.journal.committed.at(-1)?.kind, 'operation.cancelled');
 });
 
 test('pre-execution cancellation settles without fabricating a lease', async () => {

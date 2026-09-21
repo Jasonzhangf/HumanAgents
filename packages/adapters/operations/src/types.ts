@@ -7,10 +7,12 @@ import type {
   OperationResult,
   Scope,
 } from '../../../contracts/src/index.js';
+import type { OperationStopSettlementReceipt, OperationStopSettlementRequest } from '../../../runtime/src/gateway/ports.js';
 
 export interface OperationExecutionRequest {
   readonly intent: OperationIntent;
   readonly effectiveScope: Scope;
+  readonly executionEpoch: number;
 }
 
 export interface OperationExecutionObservation {
@@ -32,6 +34,10 @@ export interface OperationVerificationRequest {
 
 export interface OperationVerifierPort {
   verify(input: OperationVerificationRequest): Promise<OperationResult>;
+}
+
+export interface CancellableOperationRoute {
+  stop(input: OperationStopSettlementRequest): Promise<OperationStopSettlementReceipt>;
 }
 
 export interface LegacyInternalExecutionContext {

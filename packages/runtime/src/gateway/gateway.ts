@@ -73,6 +73,7 @@ interface OperationRecord {
   failure?: OperationFailure;
   blocked?: OperationBlockedState;
   reconcile?: OperationReconcileState;
+  executionInvalidated?: boolean;
 }
 
 interface PendingSubmission {
@@ -206,7 +207,7 @@ export class ToolExecutionGateway {
     const outcome = await this.executePrepared(prepared.record, prepared.lease);
     return this.withOperationLock(operationId, async () => {
       const record = this.requireOperation(operationId);
-      if (record.status === 'cancel_requested' || record.status === 'cancelled') {
+      if (this.shouldIgnoreLateOutcome(record)) {
         return this.snapshot(record);
       }
       return this.applyHandOutcome(record, outcome);
@@ -274,7 +275,7 @@ export class ToolExecutionGateway {
     const outcome = await this.executePrepared(recovery.record, recovery.lease);
     return this.withOperationLock(operationId, async () => {
       const record = this.requireOperation(operationId);
-      if (record.status === 'cancel_requested' || record.status === 'cancelled') {
+      if (this.shouldIgnoreLateOutcome(record)) {
         return this.snapshot(record);
       }
       return this.applyHandOutcome(record, outcome);
@@ -321,6 +322,7 @@ export class ToolExecutionGateway {
         ...(record.lease ? { lease: record.lease } : {}),
       });
       this.assertStopSettlementReceipt(record, receipt);
+      record.executionInvalidated = true;
       const settlement = {
         stopped: receipt.stopped,
         sideEffectState: receipt.sideEffectState,
@@ -328,7 +330,7 @@ export class ToolExecutionGateway {
       };
       const decision = planOperationCancellation(record.status, settlement);
       if (decision.status === 'reconcile_required') {
-        await this.transition(record, 'reconcile_required', 'operation.reconcile_required', settlement.evidenceRefs);
+        await this.transition(record, 'reconcile_required', 'operation.reconcile_required', settlement.evidenceRefs, undefined, undefined, record.executionEpoch, undefined, true);
         record.reconcile = {
           owner: record.registration.owner,
           reason: decision.reason,
@@ -349,14 +351,14 @@ export class ToolExecutionGateway {
           settlement.evidenceRefs,
           { kind: 'recover', ref: 'reconcile' },
         );
-        await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure);
+        await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure, record.executionEpoch, undefined, true);
         record.failure = failure;
         record.result = this.failedResult(record, failure, 'cancellation-failed');
         record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
         return this.snapshot(record);
       }
 
-      await this.transition(record, 'cancelled', 'operation.cancelled', settlement.evidenceRefs, resultRef(record.intent.operationId));
+      await this.transition(record, 'cancelled', 'operation.cancelled', settlement.evidenceRefs, resultRef(record.intent.operationId), undefined, record.executionEpoch, undefined, true);
       record.result = this.cancelledResult(record, settlement.evidenceRefs);
       record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
       return this.snapshot(record);
@@ -379,7 +381,7 @@ export class ToolExecutionGateway {
           );
         }
         const sideEffectState = record.reconcile.sideEffectState;
-        await this.transition(record, 'blocked', 'operation.blocked', input.evidenceRefs);
+        await this.transition(record, 'blocked', 'operation.blocked', input.evidenceRefs, undefined, undefined, record.executionEpoch, undefined, record.executionInvalidated === true);
         record.reconcile = undefined;
         record.blocked = {
           blockedAfter: 'reconcile',
@@ -393,9 +395,10 @@ export class ToolExecutionGateway {
       }
 
       if (decision.status === 'cancelled') {
-        await this.transition(record, 'cancelled', 'operation.cancelled', input.evidenceRefs, resultRef(record.intent.operationId));
+        await this.transition(record, 'cancelled', 'operation.cancelled', input.evidenceRefs, resultRef(record.intent.operationId), undefined, record.executionEpoch, undefined, record.executionInvalidated === true);
         record.result = this.cancelledResult(record, input.evidenceRefs);
         record.reconcile = undefined;
+        record.lease = record.lease ? { ...record.lease, state: 'released' } : undefined;
         return this.snapshot(record);
       }
 
@@ -407,7 +410,7 @@ export class ToolExecutionGateway {
         input.evidenceRefs,
         { kind: 'recover', ref: 'reconcile' },
       );
-      await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure);
+      await this.transition(record, 'failed', 'operation.failed', failure.evidenceRefs, undefined, failure, record.executionEpoch, undefined, record.executionInvalidated === true);
       record.failure = failure;
       record.result = this.failedResult(record, failure, 'reconcile-failed');
       record.reconcile = undefined;
@@ -639,6 +642,14 @@ export class ToolExecutionGateway {
     return this.snapshot(record);
   }
 
+  private shouldIgnoreLateOutcome(record: OperationRecord): boolean {
+    if (record.status === 'cancel_requested' || record.status === 'cancelled') return true;
+    if (record.status === 'failed') return record.result !== undefined;
+    if (record.status === 'blocked') return record.blocked !== undefined;
+    if (record.status === 'reconcile_required') return record.reconcile !== undefined;
+    return false;
+  }
+
   private async transition(
     record: OperationRecord,
     to: OperationStatus,
@@ -648,6 +659,7 @@ export class ToolExecutionGateway {
     failure?: OperationFailure,
     executionEpoch = record.executionEpoch,
     afterCommit?: () => void,
+    allowInvalidated = false,
   ): Promise<void> {
     assertTransitionOperationStatus(record.status, to);
     await this.emit({
@@ -659,12 +671,13 @@ export class ToolExecutionGateway {
       evidenceRefs,
       ...(result ? { resultRef: result } : {}),
       ...(failure ? { failure } : {}),
-    }, afterCommit);
+    }, afterCommit, allowInvalidated);
   }
 
   private async emit(
     input: Omit<OperationEvent, 'eventId' | 'schemaVersion' | 'occurredAt'>,
     afterCommit?: () => void,
+    allowInvalidated = false,
   ): Promise<void> {
     const event: OperationEvent = {
       eventId: `runtime-gateway-event-${randomUUID()}`,
@@ -674,6 +687,7 @@ export class ToolExecutionGateway {
     };
     validateOperationEvent(event);
     const current = this.operations.get(operationKey(event.operationId));
+    if (current?.executionInvalidated && !allowInvalidated) return;
     const settlingCancellation = current?.status === 'cancel_requested'
       && ['cancelled', 'reconcile_required', 'failed'].includes(event.status);
     if (current && (current.status === 'cancel_requested' || current.status === 'cancelled')

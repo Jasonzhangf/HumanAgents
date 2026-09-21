@@ -1,6 +1,7 @@
 export type ScopeKind = 'organ' | 'task' | 'cycle' | 'operation' | 'checkpoint' | 'evidence';
 
 export * from './hand-services.js';
+export * from './web-search.js';
 
 export interface ScopedId<K extends ScopeKind = ScopeKind> {
   readonly scope: K;

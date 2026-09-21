@@ -76,9 +76,14 @@ declare module "node:crypto" {
   export function randomUUID(): string;
 }
 
+declare module "node:fs" {
+  export const constants: { readonly O_RDONLY: number; readonly O_NOFOLLOW: number; readonly O_DIRECTORY: number };
+}
+
 declare module "node:fs/promises" {
   interface FileHandle {
     writeFile(data: string | Uint8Array): Promise<void>;
+    stat(): Promise<Stats>;
     close(): Promise<void>;
   }
   interface Dirent {
@@ -88,9 +93,12 @@ declare module "node:fs/promises" {
   }
   interface Stats {
     isFile(): boolean;
+    readonly dev: number;
+    readonly ino: number;
   }
 
   function lstat(path: string | URL): Promise<Stats>;
+  function stat(path: string | URL): Promise<Stats>;
 
   function readFile(
     path: string | URL | FileHandle,
@@ -113,8 +121,9 @@ declare module "node:fs/promises" {
   ): Promise<string | undefined>;
   function symlink(target: string | URL, path: string | URL, type?: string): Promise<void>;
   function mkdtemp(prefix: string): Promise<string>;
-  function open(path: string | URL, flags?: string): Promise<FileHandle>;
+  function open(path: string | URL, flags?: string | number): Promise<FileHandle>;
   function readdir(path: string | URL, options: { withFileTypes: true }): Promise<Dirent[]>;
+  function rename(oldPath: string | URL, newPath: string | URL): Promise<void>;
   function rm(path: string | URL, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 }
 

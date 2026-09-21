@@ -8,8 +8,9 @@ import {
   type OperationResult,
 } from '../../../contracts/src/index.js';
 import { CodeSearchService, type CodeSearchFunctions } from '../../../runtime/src/hand/index.js';
+import type { OperationStopSettlementReceipt, OperationStopSettlementRequest } from '../../../runtime/src/gateway/ports.js';
 import { OperationAdapterError, failureEvidence, operationFailure } from './errors.js';
-import type { OperationExecutionObservation, OperationExecutionRequest, OperationExecutorPort, OperationVerificationRequest, OperationVerifierPort } from './types.js';
+import type { CancellableOperationRoute, OperationExecutionObservation, OperationExecutionRequest, OperationExecutorPort, OperationVerificationRequest, OperationVerifierPort } from './types.js';
 
 export const CODE_SEARCH_TOOL_NAME = 'code.search';
 export const CODE_SEARCH_ROUTE_ID = 'code-search';
@@ -25,20 +26,49 @@ export interface CodeSearchRouteOptions {
   readonly functions: CodeSearchFunctions;
   readonly artifacts: CodeSearchArtifactStore;
   readonly now?: () => string;
+  readonly stopDrainTimeoutMs?: number;
 }
 
-export class CodeSearchRoute implements OperationExecutorPort, OperationVerifierPort {
+interface ActiveCodeSearch {
+  readonly executionEpoch: number;
+  readonly controller: AbortController;
+  readonly completion: Promise<OperationExecutionObservation>;
+}
+
+export class CodeSearchRoute implements OperationExecutorPort, OperationVerifierPort, CancellableOperationRoute {
   readonly routeId = CODE_SEARCH_ROUTE_ID;
   readonly routeVersion = CODE_SEARCH_ROUTE_VERSION;
   readonly mode = 'gateway' as const;
   readonly toolName = CODE_SEARCH_TOOL_NAME;
   private readonly service: CodeSearchService;
+  private readonly active = new Map<string, ActiveCodeSearch>();
 
   constructor(private readonly options: CodeSearchRouteOptions) { this.service = new CodeSearchService({ functions: options.functions }); }
 
   async execute(input: OperationExecutionRequest): Promise<OperationExecutionObservation> {
+    const controller = new AbortController();
+    const completion = this.executeOnce(input, controller.signal);
+    const key = input.intent.operationId.value;
+    this.active.set(key, { executionEpoch: input.executionEpoch, controller, completion });
+    try { return await completion; }
+    finally { if (this.active.get(key)?.completion === completion) this.active.delete(key); }
+  }
+
+  async stop(input: OperationStopSettlementRequest): Promise<OperationStopSettlementReceipt> {
+    const active = this.active.get(input.intent.operationId.value);
+    if (active && active.executionEpoch !== input.executionEpoch) throw new Error('code search execution epoch does not match stop request');
+    if (active) {
+      active.controller.abort();
+      const drained = await this.waitForDrain(active.completion);
+      return this.stopReceipt(input, drained);
+    }
+    return this.stopReceipt(input, true);
+  }
+
+  private async executeOnce(input: OperationExecutionRequest, signal: AbortSignal): Promise<OperationExecutionObservation> {
     const request = await this.readRequest(input, 'execution');
-    const report = await this.service.execute(request);
+    const report = await this.service.execute(request, { signal });
+    if (signal.aborted) throw Object.assign(new Error('code search execution aborted'), { name: 'AbortError' });
     const artifact = await this.options.artifacts.writeReport({ operationId: input.intent.operationId, report });
     return {
       operationId: input.intent.operationId,
@@ -48,6 +78,28 @@ export class CodeSearchRoute implements OperationExecutorPort, OperationVerifier
         codeSearchEvidence(input, 'input', input.intent.inputDigest),
         codeSearchEvidence(input, report.status === 'succeeded' ? 'report' : 'report-failed', artifact.outputDigest),
       ],
+    };
+  }
+
+  private async waitForDrain(completion: Promise<OperationExecutionObservation>): Promise<boolean> {
+    const timeoutMs = this.options.stopDrainTimeoutMs ?? 1_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    try { return await Promise.race([completion.then(() => true, () => true), timeout]); }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+
+  private stopReceipt(input: OperationStopSettlementRequest, stopped: boolean): OperationStopSettlementReceipt {
+    return {
+      receiptId: `code-search-stop-${input.intent.operationId.value}-${input.executionEpoch}`,
+      operationId: input.intent.operationId,
+      taskId: input.intent.taskId,
+      executionEpoch: input.executionEpoch,
+      owner: input.owner,
+      ...(input.lease?.leaseId ? { leaseId: input.lease.leaseId } : {}),
+      stopped,
+      sideEffectState: stopped ? 'none' : 'possible',
+      evidenceRefs: [failureEvidence(input.intent.operationId, input.route.effectiveScope, stopped ? 'code-search-stopped' : 'code-search-stop-unconfirmed')],
     };
   }
 
