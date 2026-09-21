@@ -137,7 +137,7 @@ Task cancel: cancel-requested → stopping → cancelled | unknown/waiting-recon
 目标文件建议：
 
 ```text
-~/.humanagent/project/<project-key>/goals/<goalId>/goal.md
+~/.humanagent/sessions/<project-key>/goals/<goalId>/goal.md
 ```
 
 Markdown 是人可读目标载体，不是状态真源；Journal 保存 accepted revision、digest、subscription、occurrence、reminder 和完成事实。

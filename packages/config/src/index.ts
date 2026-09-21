@@ -73,6 +73,8 @@ export interface InternalConfig {
 export interface RuntimePaths {
   readonly controlRoot: string;
   readonly agentCwd: string;
+  readonly mainRoot: string;
+  readonly mainSessionsRoot: string;
   readonly workspaceCwd: string;
   readonly projectKey: string;
   readonly projectRoot: string;
@@ -607,7 +609,7 @@ function defaultInternalToml(): string {
     'schemaVersion = 1',
     'controlRoot = "~/.humanagent"',
     'agentCwd = "~/.humanagent"',
-    'sessionRoot = "~/.humanagent/project"',
+    'sessionRoot = "~/.humanagent/sessions"',
     'pluginManifest = "~/.humanagent/plugins/manifest.json"',
     'releaseChannel = "stable"',
     'configPolicy = "internal-overrides-user"',
@@ -680,11 +682,13 @@ export async function resolveRuntimePaths(options: { readonly workspace: string;
   return {
     controlRoot,
     agentCwd: controlRoot,
+    mainRoot: join(controlRoot, 'main'),
+    mainSessionsRoot: join(controlRoot, 'main', 'sessions'),
     workspaceCwd,
     projectKey,
     projectRoot,
     projectManifest: join(projectRoot, 'project.json'),
-    sessionsRoot: join(projectRoot, 'sessions'),
+    sessionsRoot: projectRoot,
     journalRoot: join(projectRoot, 'journal'),
     checkpointsRoot: join(projectRoot, 'checkpoints'),
     indexRoot: join(projectRoot, 'index'),
@@ -721,7 +725,7 @@ export async function ensureControlLayout(paths: RuntimePaths): Promise<void> {
   const rootPrefix = normalize(paths.controlRoot).endsWith(sep) ? normalize(paths.controlRoot) : `${normalize(paths.controlRoot)}${sep}`;
   if (!normalize(paths.projectRoot).startsWith(rootPrefix)) fail('path-policy', 'project storage escaped control root');
   const directories = [
-    paths.projectRoot, paths.sessionsRoot, paths.journalRoot, paths.checkpointsRoot, paths.indexRoot,
+    paths.mainRoot, paths.mainSessionsRoot, paths.projectRoot, paths.sessionsRoot, paths.journalRoot, paths.checkpointsRoot, paths.indexRoot,
     paths.artifactsRoot, paths.memoryRoot, join(paths.memoryRoot, 'project'), join(paths.memoryRoot, 'tasks'),
     paths.userRoot, paths.globalMemoryRoot, join(paths.globalMemoryRoot, 'index'), join(paths.globalMemoryRoot, 'artifacts'),
     join(paths.globalMemoryRoot, 'summaries'), paths.locksRoot, paths.runNotesRoot, join(paths.controlRoot, 'plugins'),

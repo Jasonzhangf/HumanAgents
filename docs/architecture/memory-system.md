@@ -60,7 +60,7 @@ supersede / expire / archive / index rebuild
 │   ├── L1/ L2/              生成的详情投影
 │   ├── L3/
 │   └── index.sqlite         可删除、可重建的查询投影
-└── project/<project-key>/
+└── sessions/<project-key>/
     ├── journal/             HumanAgent Organ Journal（唯一生命周期真源）
     └── memory/
         ├── plan.jsonl       project-memory 项目记忆事件源
@@ -77,7 +77,7 @@ supersede / expire / archive / index rebuild
 
 这里有两个不同层次，不能互相冒充：`packages/adapters/jsonl` 的 Organ Journal 记录 Task/Cycle/Operation/Checkpoint、source provenance 和 Harness 控制事实；`project-memory` 的四类 JSONL 是 Memory Operations Backend 的记忆事件源。后者由 Memory adapter 通过统一接口访问，不能由 Agent、UI 或 CLI 在 workspace 旁路写入。candidate、review、promotion、supersede 和 expiry 必须同时有可校验的 Organ Journal operation/evidence 引用；记忆内容本身由 project-memory backend 的 append-only 事件保存，Index、详情 Markdown、SQLite、摘要和语义投影只能重建。
 
-当前 `project-memory` CLI 的默认输出可能落在 workspace `memory/` 或 `~/.local/share/project-memory/`。这不是 HumanAgent 的可接受运行时路径。接入时由 `packages/config` 解析并锁定 `controlRoot`，Memory adapter 只允许使用 `~/.humanagent/memory/global` 或 `~/.humanagent/project/<project-key>/memory`；若 backend 不能接受该 root，能力必须报告 `unavailable`，不得静默回退到默认路径。
+当前 `project-memory` CLI 的默认输出可能落在 workspace `memory/` 或 `~/.local/share/project-memory/`。这不是 HumanAgent 的可接受运行时路径。接入时由 `packages/config` 解析并锁定 `controlRoot`，Memory adapter 只允许使用 `~/.humanagent/memory/global` 或 `~/.humanagent/sessions/<project-key>/memory`；若 backend 不能接受该 root，能力必须报告 `unavailable`，不得静默回退到默认路径。
 
 | namespace | 可保存内容 | 默认可见范围 | 升级到 global |
 |---|---|---|---|

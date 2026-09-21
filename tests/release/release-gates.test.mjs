@@ -9,7 +9,7 @@ import { runStages } from '../../scripts/checkpoint-runner.mjs';
 import { checkpointStages } from '../../scripts/checkpoint-stages.mjs';
 import { digest, treeDigest } from '../../scripts/digests.mjs';
 import { assemblePackage } from '../../scripts/package-assembly.mjs';
-import { validateReleaseVersion } from '../../scripts/release-version.mjs';
+import { bumpReleaseVersion, configuredReleaseVersion, validateReleaseVersion } from '../../scripts/release-version.mjs';
 
 const node = process.execPath;
 const command = (source) => [node, '-e', source];
@@ -90,6 +90,13 @@ test('migration target digests bind installed bundle bytes and verifier maps', a
 
 test('release versions are path-safe semantic versions', () => {
   assert.equal(validateReleaseVersion('0.1.0'), '0.1.0');
+  assert.equal(configuredReleaseVersion({}, repositoryRoot.pathname), '0.1.0');
+  assert.equal(configuredReleaseVersion({ HUMANAGENT_RELEASE_VERSION: '9.9.9' }, repositoryRoot.pathname), '9.9.9');
+  assert.equal(bumpReleaseVersion('0.1.0', 'patch'), '0.1.1');
+  assert.equal(bumpReleaseVersion('0.1.0', 'minor'), '0.2.0');
+  assert.equal(bumpReleaseVersion('0.1.0', 'major'), '1.0.0');
+  assert.throws(() => bumpReleaseVersion('0.1.0-alpha.1'), /cannot bump a prerelease/);
+  assert.throws(() => bumpReleaseVersion('0.1.0', 'invalid'), /release bump kind/);
   assert.throws(() => validateReleaseVersion('../escape'), /valid semantic version/);
   assert.throws(() => validateReleaseVersion('1.0.0/other'), /valid semantic version/);
 });

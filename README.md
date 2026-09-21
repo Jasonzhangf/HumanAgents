@@ -80,9 +80,22 @@ pnpm release:check
 pnpm run smoke
 ```
 
+全局安装后不需要从仓库目录启动。任意目录执行：
+
+```sh
+humanagent serve --mode fake --workspace /absolute/project
+```
+
+命令输出的 loopback URL 就是 WebUI 入口；`/` 是状态入口，
+`/interaction.html` 是显式对话入口。页面提交首条业务输入后会创建显式 Agent
+session，写入 `~/.humanagent/main/sessions/explicit-brain.jsonl`。对项目执行的
+session 仍写入 `~/.humanagent/sessions/<project-key>/<session-id>.jsonl`；启动目录
+只作为 workspace，不改变这两个持久化位置。
+
 `pnpm build` 使用 `~/.humanagent/build/checkpoints/build/<project-key>/manifest.json` 保存 `typecheck → compile` 的 stage checkpoint；`pnpm run ci` 使用独立的 `.../checkpoints/ci/<project-key>/manifest.json`；`pnpm build:release` 使用独立的 `.../checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke`。三条链共享 `~/.humanagent/build/locks/<project-key>/.run.lock`，不会并发改写同一工作树的编译产物。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
 
-`serve` 启动本地 HumanAgent Runtime API 和 `docs/ui`。`fake` 只使用固定 replay；
+`serve` 启动本地 HumanAgent Runtime API 和打包内置 UI（源码开发时才回退到
+`docs/ui`）。`fake` 只使用固定 replay；
 `rcc` 通过同一个 Runtime API 连接 RCC v3 `127.0.0.1:4444`，失败会显式投影
 owner 和 next action，不会回退到 fake。`dsh` 在当前阶段保持关闭。
 RCC 是透明代理，本阶段 MVP验收覆盖两个入口协议：
@@ -96,6 +109,11 @@ mismatch。
 绑定非 loopback 地址会让任意可达客户端创建任务、发起执行和执行 stop，因此
 server 会拒绝启动而不是静默暴露控制面。
 `pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。
+
+标准 release 使用 `pnpm build:release`：它要求 clean worktree，自动递增 patch
+版本，同步架构版本记录并提交版本变更，然后执行 checkpointed
+`typecheck → compile → regression → ci → package → package-smoke`。普通
+`pnpm build` 不递增版本；`pnpm build:release:gate` 只运行不 bump 的底层 gate。
 
 日常入口：
 
