@@ -386,7 +386,7 @@ test('compile checkpoint owns every raw build output and excludes release output
     'dist/tests-acp',
     'packages/contracts/dist',
   ]);
-  assert.deepEqual(regression.command, ['pnpm', 'run', 'test:compiled']);
+  assert.deepEqual(regression.command, ['pnpm', 'run', 'test:compiled:services']);
 });
 
 test('assembled CLI bin remains executable', async () => {
