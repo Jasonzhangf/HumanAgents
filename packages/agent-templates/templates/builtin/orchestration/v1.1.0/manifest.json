@@ -27,7 +27,8 @@
     "queue.query",
     "resource.query",
     "assignment.create",
-    "result.submit"
+    "result.submit",
+    "code.search"
   ],
   "promptSegmentRefs": [
     "common/observation.md",
@@ -126,5 +127,5 @@
       "capabilityDigest": "sha256:84ae7f91dda578ad1fe493779c04bba90c89c0d8288977a21c93907e7e3e219b"
     }
   },
-  "digest": "fnv1a:31d9b167"
+  "digest": "fnv1a:d9d9d424"
 }
