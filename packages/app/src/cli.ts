@@ -345,8 +345,26 @@ function resolveServeProvider(
   configured: ProviderConfig | undefined,
 ): { readonly provider: ServeProvider; readonly providerIdOverride?: string } {
   const requested = option(args, '--provider');
-  if (requested === 'fake' || requested === 'rcc') return { provider: requested };
   const legacyMode = option(args, '--mode');
+  if (legacyMode !== undefined && legacyMode !== 'fake' && legacyMode !== 'rcc') {
+    throw new AppLifecycleError(
+      'provider.invalid',
+      `unknown legacy mode: ${legacyMode}`,
+      'choose fake or rcc for --mode, or omit the deprecated option',
+      'humanagent.config',
+    );
+  }
+  if (requested === 'fake' || requested === 'rcc') {
+    if (legacyMode !== undefined && requested !== legacyMode) {
+      throw new AppLifecycleError(
+        'provider.invalid',
+        `conflicting provider options: --mode ${legacyMode} and --provider ${requested}`,
+        'use one provider selection, or make --mode and --provider agree',
+        'humanagent.config',
+      );
+    }
+    return { provider: requested };
+  }
   if (legacyMode === 'fake' || legacyMode === 'rcc') {
     return {
       provider: legacyMode,
