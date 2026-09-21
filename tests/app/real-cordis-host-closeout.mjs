@@ -212,7 +212,7 @@ function assertLaunch(launch) {
       throw new Error(`composition component ${component} was not composed: ${JSON.stringify(observed)}`);
     }
   }
-  if (JSON.stringify(launch.supervisor?.stages) !== JSON.stringify(['cordis-host', 'ui-runtime'])) {
+  if (JSON.stringify(launch.supervisor?.stages) !== JSON.stringify(['cordis-host', 'serve-runtime', 'ui-runtime'])) {
     throw new Error(`unexpected supervisor stages: ${JSON.stringify(launch.supervisor?.stages)}`);
   }
 }
