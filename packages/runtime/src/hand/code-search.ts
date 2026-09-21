@@ -11,8 +11,8 @@ export interface CodeSearchFileList { readonly paths: readonly string[]; readonl
 export interface CodeSearchFileContent { readonly path: string; readonly content: string; }
 /** Internal function harness. Hand exposes only code.search, never these calls. */
 export interface CodeSearchFunctions {
-  findFiles(input: Pick<CodeSearchRequest, 'workspaceRef' | 'path'> & { readonly maxFiles: number }): Promise<CodeSearchFileList>;
-  readFile(input: { readonly workspaceRef: string; readonly path: string }): Promise<CodeSearchFileContent>;
+  findFiles(input: Pick<CodeSearchRequest, 'workspaceRef' | 'path'> & { readonly maxFiles: number; readonly signal?: AbortSignal }): Promise<CodeSearchFileList>;
+  readFile(input: { readonly workspaceRef: string; readonly path: string; readonly signal?: AbortSignal }): Promise<CodeSearchFileContent>;
 }
 
 export class CodeSearchHarnessError extends Error {
@@ -32,15 +32,17 @@ export class CodeSearchService {
     if (!Number.isSafeInteger(this.maxFiles) || this.maxFiles < 1) throw new Error('maxFiles must be a positive safe integer');
   }
 
-  async execute(input: CodeSearchRequest): Promise<CodeSearchReport> {
+  async execute(input: CodeSearchRequest, options: { readonly signal?: AbortSignal } = {}): Promise<CodeSearchReport> {
     try { validateCodeSearchRequest(input); }
     catch (error) { return this.failedReport(input, { code: 'invalid-request', message: error instanceof Error ? error.message : 'invalid code search request' }); }
     let files: CodeSearchFileList;
     try {
-      files = await this.options.functions.findFiles({ workspaceRef: input.workspaceRef, path: input.path, maxFiles: this.maxFiles });
+      files = await this.options.functions.findFiles({ workspaceRef: input.workspaceRef, path: input.path, maxFiles: this.maxFiles, signal: options.signal });
     } catch (error) {
+      if (options.signal?.aborted) throw abortError();
       return this.failedReport(input, this.failureFrom(error, input.path, 'path-not-found'));
     }
+    if (options.signal?.aborted) throw abortError();
     if (files.discoveryTruncated === true || files.paths.length > this.maxFiles) {
       return {
         ...this.baseReport(input, [], files.paths.length, 0, 0, false, false, files.unresolvedPaths, files.pathTree),
@@ -64,21 +66,28 @@ export class CodeSearchService {
     const paths = [...files.paths].sort();
     const results: Array<{ readonly path: string; readonly matches: readonly CodeSearchMatch[]; readonly matchesFound: number; readonly read: boolean }> = [];
     let nextIndex = 0;
+    let fatalError: unknown;
     const worker = async (): Promise<void> => {
       while (true) {
+        if (options.signal?.aborted || fatalError !== undefined) return;
         const index = nextIndex;
         nextIndex += 1;
         if (index >= paths.length) return;
         const path = paths[index]!;
         try {
-          const content = await this.options.functions.readFile({ workspaceRef: input.workspaceRef, path });
+          const content = await this.options.functions.readFile({ workspaceRef: input.workspaceRef, path, signal: options.signal });
           results[index] = this.searchFile(input, content);
-        } catch {
+        } catch (error) {
+          if (options.signal?.aborted) { fatalError ??= abortError(); return; }
+          if (error instanceof CodeSearchHarnessError && (error.code === 'path-escape' || error.code === 'path-not-found')) { fatalError ??= error; return; }
           results[index] = { path, matches: [], matchesFound: 0, read: false };
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(this.readConcurrency, paths.length) }, () => worker()));
+    if (options.signal?.aborted) throw abortError();
+    if (fatalError instanceof Error && fatalError.name === 'AbortError') throw fatalError;
+    if (fatalError instanceof CodeSearchHarnessError) return this.failedReport(input, this.failureFrom(fatalError, input.path, fatalError.code));
     for (const result of results) {
       if (!result.read) { unresolvedPaths.push(result.path); continue; }
       filesSearched += 1;
@@ -144,3 +153,5 @@ export class CodeSearchService {
     return { code: fallbackCode, message: error instanceof Error ? error.message : 'code search harness failed', path: fallbackPath };
   }
 }
+
+function abortError(): Error { return Object.assign(new Error('code search execution aborted'), { name: 'AbortError' }); }

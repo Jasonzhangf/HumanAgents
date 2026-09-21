@@ -9,6 +9,7 @@ declare module 'node:crypto' {
 
 declare module 'node:fs' {
   export function existsSync(path: string): boolean;
+  export const constants: { readonly O_RDONLY: number; readonly O_NOFOLLOW: number; readonly O_DIRECTORY: number };
 }
 
 declare module 'node:path' {
@@ -77,6 +78,7 @@ declare module 'node:fs/promises' {
   export interface FileHandle {
     writeFile(data: string | Uint8Array, encoding?: string): Promise<void>;
     sync(): Promise<void>;
+    stat(): Promise<Stats>;
     close(): Promise<void>;
   }
   export interface Dirent {
@@ -84,13 +86,15 @@ declare module 'node:fs/promises' {
     isDirectory(): boolean;
     isFile(): boolean;
   }
+  export interface Stats { readonly dev: number; readonly ino: number; }
   export function appendFile(path: string, data: string, encoding?: string): Promise<void>;
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
-  export function open(path: string, flags: string): Promise<FileHandle>;
-  export function readFile(path: string, encoding: 'utf8'): Promise<string>;
+  export function open(path: string | URL, flags: string | number): Promise<FileHandle>;
+  export function readFile(path: string | URL | FileHandle, encoding: 'utf8'): Promise<string>;
   export function readFile(path: string): Promise<Uint8Array>;
   export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
   export function lstat(path: string): Promise<{ isFile(): boolean; isSymbolicLink(): boolean }>;
+  export function stat(path: string): Promise<Stats>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function truncate(path: string, length: number): Promise<void>;

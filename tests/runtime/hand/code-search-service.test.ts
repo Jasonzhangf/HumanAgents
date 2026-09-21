@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { type CodeSearchFileContent, type CodeSearchFileList, type CodeSearchFunctions, CodeSearchService, runCodeSearchBenchmark } from '../../../packages/runtime/src/hand/index.js';
+import { CodeSearchHarnessError, type CodeSearchFileContent, type CodeSearchFileList, type CodeSearchFunctions, CodeSearchService, runCodeSearchBenchmark } from '../../../packages/runtime/src/hand/index.js';
 import { CODE_SEARCH_CONTRACT_VERSION, CODE_SEARCH_SERVICE_ID, type CodeSearchPathTreeNode, type CodeSearchRequest } from '../../../packages/contracts/src/index.js';
 
 class FixtureFunctions implements CodeSearchFunctions {
@@ -24,5 +24,30 @@ test('code.search reports a bounded result set without lying about total matches
 test('code.search returns partial success and strict failure distinctly when a file cannot be read', async () => { const functions = new FixtureFunctions({ 'ok.ts': 'needle', 'broken.ts': 'needle' }, new Set(['broken.ts'])); const partial = await service(functions).execute(request()); assert.equal(partial.status, 'succeeded'); assert.equal(partial.searchComplete, false); assert.deepEqual(partial.unresolvedPaths, ['broken.ts']); assert.equal(partial.matchesFound, 1); const strict = await service(functions).execute(request({ requireComplete: true })); assert.equal(strict.status, 'failed'); assert.equal(strict.failure?.code, 'search-incomplete'); assert.equal(strict.searchComplete, false); assert.deepEqual(strict.unresolvedPaths, ['broken.ts']); });
 test('code.search invalid scope is a stable structured failure', async () => { const report = await service(new FixtureFunctions({})).execute(request({ path: '../outside' })); assert.equal(report.status, 'failed'); assert.equal(report.failure?.code, 'invalid-request'); assert.equal(report.summary, 'search path must stay inside the workspace'); assert.equal(report.unresolvedPaths.length, 0); });
 test('code.search invalid regex is returned as a report instead of escaping the service contract', async () => { const report = await service(new FixtureFunctions({ 'src/a.ts': 'needle' })).execute(request({ query: '[', queryKind: 'regex' })); assert.equal(report.status, 'failed'); assert.equal(report.failure?.code, 'invalid-request'); assert.equal(report.summary, 'invalid search expression'); });
+test('code.search preserves a read-time workspace boundary failure instead of reporting partial success', async () => {
+  const functions: CodeSearchFunctions = {
+    async findFiles() { return { paths: ['swapped.ts'], complete: true, unresolvedPaths: [] }; },
+    async readFile() { throw new CodeSearchHarnessError('path-escape', 'search path resolves through a symbolic link', 'swapped.ts'); },
+  };
+  const report = await service(functions).execute(request());
+  assert.equal(report.status, 'failed');
+  assert.equal(report.failure?.code, 'path-escape');
+  assert.deepEqual(report.unresolvedPaths, ['swapped.ts']);
+});
+test('code.search cannot turn reads that finish after abort into a success report', async () => {
+  let reads = 0;
+  let release!: () => void;
+  const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+  const functions: CodeSearchFunctions = {
+    async findFiles() { return { paths: ['a.ts', 'b.ts'], complete: true, unresolvedPaths: [] }; },
+    async readFile(input) { reads += 1; if (reads === 2) await releasePromise; return { path: input.path, content: 'needle' }; },
+  };
+  const controller = new AbortController();
+  const executing = service(functions).execute(request(), { signal: controller.signal });
+  while (reads < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  release();
+  await assert.rejects(() => executing, /aborted/);
+});
 test('code.search returns a path tree before reporting scope-too-large and reads no files', async () => { const functions = new FixtureFunctions({ 'a.ts': 'needle', 'b.ts': 'needle', 'c.ts': 'needle' }); const report = await new CodeSearchService({ functions, maxFiles: 2 }).execute(request()); assert.equal(report.status, 'failed'); assert.equal(report.failure?.code, 'scope-too-large'); assert.equal(report.filesDiscovered, 3); assert.equal(report.filesSearched, 0); assert.equal(report.summary, 'search scope contains at least 3 files; maximum is 2'); assert.deepEqual(functions.reads, []); assert.equal(report.pathTree?.path, '.'); assert.equal(report.pathTree?.fileCount, 3); });
 test('code.search benchmark is the reusable self-check for the public service contract', async () => { const result = await runCodeSearchBenchmark(service(new FixtureFunctions({ 'src/a.ts': 'needle', 'src/b.ts': 'other' })), [{ caseId: 'complete-hit', request: request({ path: 'src' }), assert: (report) => report.status === 'succeeded' && report.searchComplete && report.matchesFound === 1 ? [] : ['complete hit failed'] }, { caseId: 'complete-miss', request: request({ path: 'src', query: 'missing' }), assert: (report) => report.status === 'succeeded' && report.searchComplete && report.matchesFound === 0 ? [] : ['complete miss failed'] }]); assert.equal(result.total, 2); assert.equal(result.passed, 2); assert.equal(result.failed, 0); assert.ok(result.totalDurationMs >= 0); assert.ok(result.cases.every((item) => item.durationMs >= 0)); });

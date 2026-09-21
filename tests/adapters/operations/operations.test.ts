@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,6 +25,7 @@ const cycleId = id('cycle', 'cycle-a');
 const operationId = id('operation', 'operation-a');
 const requestedScope: Scope = { organId, taskId, cycleId, operationId };
 const effectiveScope: Scope = { organId, taskId, cycleId, operationId };
+const canonicalTmpdir = tmpdir().replace(/^\/var(?=\/|$)/, '/private/var');
 
 function intent(overrides: Partial<OperationIntent> = {}): OperationIntent {
   return {
@@ -48,11 +49,11 @@ function intent(overrides: Partial<OperationIntent> = {}): OperationIntent {
 }
 
 function request(overrides: Partial<OperationIntent> = {}, scope: Scope = effectiveScope): OperationExecutionRequest {
-  return { intent: intent(overrides), effectiveScope: scope };
+  return { intent: intent(overrides), effectiveScope: scope, executionEpoch: 1 };
 }
 
 test('filesystem code search returns a bounded path tree relative to the requested directory', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-code-search-'));
+  const root = await mkdtemp(join(canonicalTmpdir, 'humanagent-code-search-'));
   try {
     await mkdir(join(root, 'src', 'nested'), { recursive: true });
     await writeFile(join(root, 'src', 'a.ts'), 'needle', 'utf8');
@@ -73,6 +74,42 @@ test('filesystem code search returns a bounded path tree relative to the request
     assert.deepEqual(file.pathTree, { path: 'src/a.ts', kind: 'file', fileCount: 1, children: [], truncated: false });
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('filesystem code search rejects symlinked roots and files instead of reading outside the workspace', async () => {
+  const root = await mkdtemp(join(canonicalTmpdir, 'humanagent-code-search-symlink-'));
+  const outside = await mkdtemp(join(canonicalTmpdir, 'humanagent-code-search-outside-'));
+  try {
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(outside, 'secret.ts'), 'outside', 'utf8');
+    await symlink(outside, join(root, 'linked-dir'));
+    await symlink(join(outside, 'secret.ts'), join(root, 'src', 'linked.ts'));
+    const rootAlias = join(canonicalTmpdir, 'humanagent-code-search-root-alias');
+    await symlink(root, rootAlias);
+    const functions = new WorkspaceCodeSearchFunctions({ workspaceRef: 'workspace://fixture', workspaceRoot: root });
+    await assert.rejects(() => functions.findFiles({ workspaceRef: 'workspace://fixture', path: 'linked-dir', maxFiles: 10 }), (error: unknown) => error instanceof Error && error.message.includes('symbolic link'));
+    await assert.rejects(() => functions.readFile({ workspaceRef: 'workspace://fixture', path: 'src/linked.ts' }), (error: unknown) => error instanceof Error && error.message.includes('symbolic link'));
+    await assert.rejects(() => new WorkspaceCodeSearchFunctions({ workspaceRef: 'workspace://fixture', workspaceRoot: rootAlias }).findFiles({ workspaceRef: 'workspace://fixture', path: '.', maxFiles: 10 }), (error: unknown) => error instanceof Error && error.message.includes('workspace root'));
+    await rm(rootAlias, { force: true });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('filesystem code search rejects a workspace root replacement after it has been bound', async () => {
+  const root = await mkdtemp(join(canonicalTmpdir, 'humanagent-code-search-root-race-'));
+  const movedRoot = `${root}-moved`;
+  try {
+    const functions = new WorkspaceCodeSearchFunctions({ workspaceRef: 'workspace://fixture', workspaceRoot: root });
+    await functions.findFiles({ workspaceRef: 'workspace://fixture', path: '.', maxFiles: 10 });
+    await rename(root, movedRoot);
+    await mkdir(root);
+    await assert.rejects(() => functions.findFiles({ workspaceRef: 'workspace://fixture', path: '.', maxFiles: 10 }), (error: unknown) => error instanceof Error && error.message.includes('workspace root changed'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(movedRoot, { recursive: true, force: true });
   }
 });
 
