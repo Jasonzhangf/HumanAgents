@@ -191,6 +191,19 @@ test('terminal replay does not re-enter the semantic route', async () => {
   assert.equal(context.route.calls, 1);
 });
 
+test('concurrent replay does not start a second gateway execution or throw', async () => {
+  const context = setup();
+  const [first, second] = await Promise.all([
+    context.hand.execute({ intent: intent() }),
+    context.hand.execute({ intent: intent() }),
+  ]);
+
+  assert.equal(first.operation.status, 'succeeded');
+  assert.equal(second.submission.decision, 'replay');
+  assert.equal(second.operation.status, 'accepted');
+  assert.equal(context.route.calls, 1);
+});
+
 test('blocked replay is returned to the orchestrator and is not silently retried', async () => {
   const route = new SemanticRoute();
   route.outcome = 'blocked';

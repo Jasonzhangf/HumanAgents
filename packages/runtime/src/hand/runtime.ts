@@ -38,7 +38,7 @@ export class HandOperationRuntime {
   async execute(input: HandOperationRequest): Promise<HandOperationResult> {
     validateOperationIntent(input.intent);
     const submission = await this.gateway.submit(input.intent);
-    if (!canStart(submission.operation.status)) {
+    if (submission.decision !== 'new' || !canStart(submission.operation.status)) {
       return { submission, operation: submission.operation };
     }
     const operation = await this.gateway.execute(input.intent.operationId);
