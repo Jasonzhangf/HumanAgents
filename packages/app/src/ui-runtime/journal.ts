@@ -178,6 +178,9 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     requireRecordObject(state, 'intake', filePath, line);
     requireRecordObject(state, 'inbox', filePath, line);
     requireRecordObject(state, 'confirmationLedger', filePath, line);
+    if (state.decisionTraces !== undefined && !Array.isArray(state.decisionTraces)) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: state.decisionTraces must be an array`);
+    }
     return record as unknown as UiRuntimeJournalRecord;
   }
   if (kind === 'interaction.closure') {

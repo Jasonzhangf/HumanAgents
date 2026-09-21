@@ -14,7 +14,7 @@ import {
   type ExplicitBrainRuntimeBinding,
   type ExplicitBrainWorkspaceToolPort,
 } from '../../runtime/src/explicit-brain/index.js';
-import type { RuntimeTaskSnapshot } from '../../runtime/src/ui-runtime/coordinator.js';
+import type { DecisionTracePort } from '../../runtime/src/explicit-brain/attention.js';
 
 const CAPABILITY_DIGEST = `sha256:${createHash('sha256').update(EXPLICIT_BRAIN_MODEL_TOOLS.join('|')).digest('hex')}`;
 
@@ -26,12 +26,21 @@ function digestArguments(args: Readonly<Record<string, unknown>>): string {
 export interface ExplicitBrainRuntimeOptions {
   readonly workspaceRoot: string;
   readonly projectKey: string;
-  readonly tasks: () => readonly RuntimeTaskSnapshot[];
+  readonly traces: DecisionTracePort;
+  readonly agentTargets?: readonly ExplicitBrainAgentTarget[];
+  readonly queryAgent?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly sendAgentMessage?: (input: {
     readonly recipientRef: string;
     readonly messageRef: string;
     readonly messageClass: 'control' | 'data' | 'observation';
   }) => Promise<unknown>;
+}
+
+export interface ExplicitBrainAgentTarget {
+  readonly agentRef: string;
+  readonly scopeRef: string;
+  readonly queryable: boolean;
+  readonly messageClasses: readonly ('control' | 'data' | 'observation')[];
 }
 
 export interface ExplicitBrainRuntime {
@@ -79,25 +88,33 @@ function createWorkspacePort(options: ExplicitBrainRuntimeOptions): ExplicitBrai
 }
 
 function createAgentPort(options: ExplicitBrainRuntimeOptions): ExplicitBrainAgentToolPort {
-  const interactionScopeId = `runtime:${options.projectKey}`;
+  function targetFor(input: { readonly agentRef?: string; readonly scopeRef?: string }): ExplicitBrainAgentTarget {
+    const target = options.agentTargets?.find((candidate) => (
+      (input.agentRef === undefined || candidate.agentRef === input.agentRef)
+      && (input.scopeRef === undefined || candidate.scopeRef === input.scopeRef)
+    ));
+    if (target === undefined) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent target is not registered for this runtime');
+    }
+    return target;
+  }
   return {
     authorizeQuery(input) {
-      if (input.scopeRef !== undefined && input.scopeRef !== interactionScopeId) {
-        throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent scope is not registered: ${input.scopeRef}`);
-      }
+      const target = targetFor(input);
+      if (!target.queryable) throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent query is not authorized: ${target.agentRef}`);
+      if (options.queryAgent === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent query port is not configured');
     },
     authorizeMessage(input) {
-      if (options.sendAgentMessage === undefined) {
-        throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent communication port is not configured');
+      const target = targetFor({ agentRef: input.recipientRef });
+      if (options.sendAgentMessage === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent communication port is not configured');
+      if (!target.messageClasses.includes(input.messageClass)) {
+        throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent message class is not authorized: ${input.messageClass}`);
       }
-      if (!input.recipientRef.trim()) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent recipient identity is required');
     },
     async query(input) {
-      return {
-        agentRef: input.agentRef,
-        scopeRef: input.scopeRef ?? interactionScopeId,
-        tasks: options.tasks().map((task) => ({ taskId: task.taskId.value, state: task.state, currentNode: task.currentNode })),
-      };
+      const target = targetFor(input);
+      if (options.queryAgent === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent query port is not configured');
+      return options.queryAgent({ agentRef: target.agentRef, scopeRef: target.scopeRef });
     },
     async message(input) {
       if (options.sendAgentMessage === undefined) {
@@ -131,11 +148,7 @@ export function createExplicitBrainRuntime(options: ExplicitBrainRuntimeOptions)
     registry: createExplicitBrainToolRegistry(CAPABILITY_DIGEST),
     binding,
     operationalPorts: ports,
-    traces: {
-      append: (record) => record,
-      query: () => [],
-      recordToolDecision: (record) => record,
-    },
+    traces: options.traces,
     handler: {
       async execute() {
         throw new ExplicitBrainOperationalToolError('unsupported-tool', 'explicit brain tool is not connected to a runtime owner');

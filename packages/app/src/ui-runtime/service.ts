@@ -95,7 +95,8 @@ import {
   OrganHealthError,
   healthEvidenceRefs,
 } from '../../../runtime/src/health/index.js';
-import { ExplicitBrainDecisionError } from '../../../runtime/src/explicit-brain/index.js';
+import { DecisionTraceJournal, ExplicitBrainDecisionError } from '../../../runtime/src/explicit-brain/index.js';
+import type { ExplicitBrainAgentTarget } from '../explicit-brain-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
@@ -186,6 +187,8 @@ export interface UiRuntimeServiceOptions {
     readonly messageRef: string;
     readonly messageClass: 'control' | 'data' | 'observation';
   }) => Promise<unknown>;
+  readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
+  readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: {
     readonly createTaskAssembly?: (input: {
@@ -348,11 +351,20 @@ export class UiRuntimeService {
   private readonly healthManager: OrganHealthManager;
   private readonly memoryContexts = new Map<string, BoundMemoryContext>();
   private readonly explicitBrainRuntime?: ExplicitBrainRuntime;
+  private readonly explicitBrainTraceRecords: import('../../../contracts/src/index.js').DecisionTraceRecord[] = [];
+  private readonly explicitBrainTraceJournal: DecisionTraceJournal;
   private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
+    this.explicitBrainTraceJournal = new DecisionTraceJournal({
+      load: () => this.explicitBrainTraceRecords,
+      persist: (record) => {
+        this.explicitBrainTraceRecords.push(structuredClone(record));
+        this.persistExplicitBrainState();
+      },
+    });
     this.memoryInjection = new MemoryContextCapture(this.memory.backend);
     this.healthManager = new OrganHealthManager({
       organId: options.organId,
@@ -416,7 +428,9 @@ export class UiRuntimeService {
       this.explicitBrainRuntime = createExplicitBrainRuntime({
         workspaceRoot: options.workspaceRoot,
         projectKey: options.projectKey,
-        tasks: () => this.coordinator.taskSnapshots(),
+        traces: this.explicitBrainTraceJournal,
+        ...(options.explicitBrainAgentTargets === undefined ? {} : { agentTargets: options.explicitBrainAgentTargets }),
+        ...(options.explicitBrainAgentQuery === undefined ? {} : { queryAgent: options.explicitBrainAgentQuery }),
         ...(options.explicitBrainAgentMessage === undefined ? {} : { sendAgentMessage: options.explicitBrainAgentMessage }),
       });
     }
@@ -1081,6 +1095,8 @@ export class UiRuntimeService {
     this.requirementInbox.restoreState(restored.inbox);
     this.confirmationLedger.restoreState(restored.confirmationLedger);
     this.requirementSubmissions.restoreSubmittedReceipts(restored.submittedSubmissions ?? []);
+    this.explicitBrainTraceRecords.length = 0;
+    this.explicitBrainTraceRecords.push(...(restored.decisionTraces ?? []).map((record) => structuredClone(record)));
     this.dispatchLedger.clear();
     for (const entry of restored.dispatchLedger ?? []) {
       this.dispatchLedger.set(entry.draftId, structuredClone(entry));
@@ -1315,6 +1331,7 @@ export class UiRuntimeService {
         confirmationLedger: this.confirmationLedger.exportState(),
         dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
         submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
+        decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
       },
     });
   }

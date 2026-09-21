@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createExplicitBrainRuntime } from '../../packages/app/src/explicit-brain-runtime.js';
+import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
 
 function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -19,7 +20,7 @@ test('application explicit brain runtime dispatches a read-only workspace tool t
   const runtime = createExplicitBrainRuntime({
     workspaceRoot,
     projectKey: 'project-a',
-    tasks: () => [],
+    traces: new DecisionTraceStore(),
   });
   const args = { scopeRef: 'scope:workspace:project-a', pathRef: 'src/README.md' };
   const [result] = await runtime.execute({
@@ -43,7 +44,7 @@ test('application explicit brain runtime dispatches a read-only workspace tool t
 
 test('application explicit brain runtime rejects a workspace scope outside its binding', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-scope-'));
-  const runtime = createExplicitBrainRuntime({ workspaceRoot: await realpath(root), projectKey: 'project-a', tasks: () => [] });
+  const runtime = createExplicitBrainRuntime({ workspaceRoot: await realpath(root), projectKey: 'project-a', traces: new DecisionTraceStore() });
   const args = { scopeRef: 'scope:workspace:other-project', pathRef: 'README.md' };
   await assert.rejects(
     () => runtime.execute({
@@ -63,5 +64,73 @@ test('application explicit brain runtime rejects a workspace scope outside its b
       }],
     }),
     /workspace scope is not registered/,
+  );
+});
+
+test('application explicit brain runtime requires registered agent identity and preserves decision traces', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-agent-'));
+  const persisted: import('../../packages/contracts/src/index.js').DecisionTraceRecord[] = [];
+  const traces = new DecisionTraceJournal({
+    load: () => persisted,
+    persist: (record) => persisted.push(record),
+  });
+  const queried: Array<{ readonly agentRef: string; readonly scopeRef: string }> = [];
+  const runtime = createExplicitBrainRuntime({
+    workspaceRoot: await realpath(root),
+    projectKey: 'project-a',
+    traces,
+    agentTargets: [{
+      agentRef: 'agent:orchestration-a',
+      scopeRef: 'scope:task-a',
+      queryable: true,
+      messageClasses: ['control'],
+    }],
+    queryAgent: async (input) => {
+      queried.push(input);
+      return { state: 'idle' };
+    },
+    sendAgentMessage: async (input) => ({ delivered: input.recipientRef }),
+  });
+  const args = { agentRef: 'agent:orchestration-a', scopeRef: 'scope:task-a' };
+  const [result] = await runtime.execute({
+    decisionId: 'decision:agent-query',
+    interactionId: 'interaction:agent-query',
+    kind: 'intent',
+    selectedAction: 'answer',
+    summary: 'query the registered orchestrator',
+    evidenceRefs: [],
+    toolIntents: [{
+      toolIntentId: 'intent:agent-query',
+      toolRef: 'agent.query',
+      arguments: args,
+      argumentsDigest: digest(args),
+      reasonRefs: [],
+      selectedBecause: 'the registered orchestrator owns task state',
+    }],
+  });
+  assert.deepEqual(result, { state: 'idle' });
+  assert.deepEqual(queried, [{ agentRef: 'agent:orchestration-a', scopeRef: 'scope:task-a' }]);
+  assert.equal(persisted.length, 1);
+
+  const recreated = new DecisionTraceJournal({ load: () => persisted, persist: (record) => persisted.push(record) });
+  assert.equal(recreated.query({ interactionRef: 'interaction:agent-query' }).length, 1);
+  await assert.rejects(
+    () => runtime.execute({
+      decisionId: 'decision:unknown-agent',
+      interactionId: 'interaction:unknown-agent',
+      kind: 'intent',
+      selectedAction: 'answer',
+      summary: 'query an unregistered agent',
+      evidenceRefs: [],
+      toolIntents: [{
+        toolIntentId: 'intent:unknown-agent',
+        toolRef: 'agent.query',
+        arguments: { agentRef: 'agent:unknown' },
+        argumentsDigest: digest({ agentRef: 'agent:unknown' }),
+        reasonRefs: [],
+        selectedBecause: 'test',
+      }],
+    }),
+    /agent target is not registered/,
   );
 });
