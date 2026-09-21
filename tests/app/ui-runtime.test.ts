@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -2065,6 +2065,82 @@ test('task snapshot keeps the stored directive instead of substituting the execu
     journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
   });
   assert.equal(restarted.taskSnapshot(task.taskId).directive, 'directive objective');
+});
+
+test('journal replay preserves the confirmed requirement orchestration mode', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-orchestration-replay-'));
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const journal = new UiRuntimeJournal(journalPath);
+  const coordinator = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal,
+  });
+  const task = coordinator.createTask({ title: 'orchestrated task', directive: 'confirmed requirement' });
+  const operationId = id('operation', 'ui-operation-orchestration-replay');
+  const cycleId = id('cycle', 'ui-cycle-orchestration-replay');
+  journal.append({
+    kind: 'operation.started',
+    operationId,
+    taskId: task.taskId,
+    cycleId,
+    scope: { organId, taskId: task.taskId, cycleId, operationId },
+    executionEpoch: 1,
+    operationCounter: 1,
+    cycleCounter: 1,
+    startedAt: '2026-09-20T00:00:00.000Z',
+    input: 'confirmed requirement',
+    orchestrated: true,
+  });
+
+  const restarted = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (taskId, cycle) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal: new UiRuntimeJournal(journalPath),
+  });
+  assert.equal(restarted.taskSnapshot(task.taskId).orchestrated, true);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('stop does not wait forever when orchestration fails before provider readiness', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-orchestration-startup-failure-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal,
+    closurePort: journal,
+    memory: testMemory('project-ui-orchestration-startup-failure'),
+    runtimeComposition: {
+      createTaskAssembly() {
+        throw new Error('orchestration assembly failed before provider readiness');
+      },
+    },
+  });
+  const task = service.createTask({ title: 'orchestration startup failure' });
+  service.startExecution(task.taskId, { prompt: 'start orchestration', orchestrate: true });
+  let stopError: unknown;
+  let stopSettled = false;
+  void service.stop(task.taskId).catch((error: unknown) => {
+    stopError = error;
+  }).finally(() => {
+    stopSettled = true;
+  });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
+  await waitFor(() => assert.equal(stopSettled, true));
+  if (!(stopError instanceof UiRuntimeApiError)) throw new Error('expected stop to fail after orchestration startup failure');
+  assert.equal(stopError.code, 'task.not.running');
+  await rm(root, { recursive: true, force: true });
 });
 
 test('restart restores a failed task error owner and next action from the app journal', async () => {

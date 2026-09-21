@@ -2,9 +2,9 @@
 
 状态：`CANDIDATE / PENDING REVIEW`
 日期：2026-09-20
-审计基线提交：`df70180808a3833bd74de0b9e4a9894870913131`
-审计候选提交：`c6803314ecfdde803973ed4d1abc7ae19ad63f6e`
-审计候选树：`1401381dbe1b20645b96595cf87a238cb45bb736`
+审计基线提交：`d3b1f7f9ae14d9f7bda2d38b4eac6835be6ab3c3`
+审计候选提交：`8cc8505`（完整 SHA：`8cc850541123f066d43a73540e64f63a9dd2f05f`）
+审计候选树：`6d2a6e5f6f378d33e80cf6cf746746e75a8f2668`
 
 ## 0. Scope and Method
 
@@ -198,9 +198,9 @@ task-assembly factory into the fake UI runtime
 (`packages/app/src/serve-orchestration.ts:31-99`,
 `packages/app/src/cli.ts:625-725`). The composition replay dispatches through
 worker result, review, feedback, and merge to `merged`; the confirmed
-requirement path still starts direct provider execution and does not yet call
-`OrchestrationManager.planStage/dispatch`. RCC serve keeps the
-single-provider path. The task-coordinator EventBus capability remains
+requirement path now calls `OrchestrationManager.planStage/dispatch` after
+implicit admission. RCC serve keeps the single-provider path. The
+task-coordinator EventBus capability remains
 unavailable because the coordinator still publishes its own normalized runtime
 events rather than using the EventBus owner.
 
@@ -334,7 +334,7 @@ checkpoint that produced it.
 |---|---|---|
 | `serve` uses in-memory Attention while headless uses durable JSONL Attention. | `MISSING_EDGE`, `MISSING_EVIDENCE` | `packages/app/src/ui-runtime/index.ts:103-141`; `packages/app/src/attention-journal.ts:16-52` |
 | `serve` acquires the daemon lease through `runSupervisorStartup`. | `LIVE` | `packages/app/src/cli.ts:627-689`; `packages/app/src/supervisor/supervisor.ts:365-491` |
-| M3 assembly and orchestration are live only on the fake serve branch; RCC serve remains single-provider until real agent ports are bound. | `PARTIAL` | `packages/app/src/serve-runtime.ts:119-178`; `packages/app/src/cli.ts:625-725`; `tests/app/serve-runtime.test.ts` |
+| M3 assembly and orchestration are live on the fake serve branch, including the confirmed-requirement admission edge; RCC serve remains single-provider until real agent ports are bound. | `PARTIAL` | `packages/app/src/serve-runtime.ts:119-178`; `packages/app/src/ui-runtime/service.ts:1150-1160`; `tests/app/serve-runtime.test.ts` |
 | `HarnessNodeRuntime` is implemented and tested but not live. | `MISSING_EDGE` | `packages/runtime/src/nodes/node-runtime.ts:87-230`; no `serve` import |
 | EventBus is absent from the UI task-coordinator capability projection but present in the serve memory-boundary path. | `PARTIAL`, `MISSING_EDGE` for the task-coordinator surface | `packages/runtime/src/ui-runtime/coordinator.ts:440-455`; `packages/app/src/cli.ts:664-679`; `packages/app/src/memory-runtime.ts:680-695`, `936-944` |
 | The composed memory analysis event handler is consumed by `serve` after checkpoint boundary publication. | `LIVE` | `packages/app/src/cli.ts:664-679`; `packages/app/src/memory-runtime.ts:936-944` |
@@ -352,10 +352,11 @@ the edge always goes from epoch `n` facts to epoch `n+1` context.
 ### A. Orphan Requirement
 
 The serve composition now connects supervisor startup, durable memory-boundary
-delivery, and task-scoped M3 assembly construction. Its direct composition
-replay closes M3 worker/review/merge feedback, but the confirmed requirement
-dispatch path still enters direct provider execution. RCC serve intentionally
-does not claim multi-agent dispatch because its ports are not provider-backed.
+delivery, task-scoped M3 assembly construction, and the confirmed-requirement
+admission edge. Its live-like fake replay closes provider-backed execution,
+M3 worker/review/merge feedback, and checkpoint settlement. RCC serve
+intentionally does not claim multi-agent dispatch because its ports are not
+provider-backed.
 The task-coordinator EventBus capability remains unavailable and is a separate
 follow-up boundary.
 
@@ -363,7 +364,7 @@ follow-up boundary.
 
 `M3Assembly`, `OrchestrationManager`, and deterministic fake ports now have a
 serve composition edge and an end-to-end dispatch test. The confirmed
-requirement → orchestration edge remains open. `HarnessNodeRuntime` is
+requirement → orchestration edge is closed for fake serve only. `HarnessNodeRuntime` is
 composed and strategy-checked but not yet the execution owner of the M3
 assignment graph. The EventBus is partially live through the memory-boundary
 and M3 feedback paths, while the task-coordinator capability still reports it
@@ -372,8 +373,8 @@ unavailable.
 ### C. Unverified Implementation
 
 The serve composition has M3 worker/review/merge closure coverage in
-`tests/app/serve-runtime.test.ts`; the confirmed requirement path does not yet
-have a live M3 dispatch replay. The node runtime remains composition-level
+`tests/app/serve-runtime.test.ts`, including a confirmed-requirement
+admission-to-dispatch replay. The node runtime remains composition-level
 evidence only. The memory-boundary EventBus path has live-entry coverage in
 `tests/app/app.test.ts:1187-1296`.
 
@@ -432,9 +433,10 @@ epoch-scoped: `checkpoint_n -> memory_n -> context_n+1`.
 
 The live UI runtime must not be described as a complete provider-neutral
 orchestration architecture while its task capability projection reports
-`eventBus: unavailable` and the confirmed-requirement path does not invoke
-M3 plan/dispatch. The serve composition, daemon lease, and memory analysis
-boundary are now present, but the end-to-end requirement edge remains open.
+`eventBus: unavailable` and RCC has no provider-backed M3 ports. The fake
+serve composition, daemon lease, memory analysis boundary, and
+confirmed-requirement-to-M3 edge are now present; the RCC and UI EventBus
+edges remain open.
 
 ## 5. Minimal Migration Plan
 
@@ -465,11 +467,11 @@ evidence, edge, necessary node, then architecture refactor.
    for disposable projections if the authoritative Journal already covers the
    facts.
 
-6. **Bind M3 orchestration and node runtime only if required by the current
-   architecture contract.**
-   If the product path requires multi-step orchestration, connect the existing
-   `M3Assembly` and `HarnessNodeRuntime`; otherwise record them as non-product
-   capability surfaces and do not force them into the main path.
+6. **Bind provider-backed M3 only where its ports are real.**
+   Keep fake serve's confirmed-requirement M3 edge as the current acceptance
+   path. Connect RCC execution/review/merge ports only after provider-backed
+   implementations and their replay evidence exist; do not use a direct
+   provider fallback to claim orchestration.
 
 7. **Unify memory scope semantics.**
    Add the canonical `project|global` scope binding to the live execution
