@@ -98,29 +98,38 @@ function createAgentPort(options: ExplicitBrainRuntimeOptions): ExplicitBrainAge
     }
     return target;
   }
+  function authorizeQuery(input: { readonly agentRef?: string; readonly scopeRef?: string }): ExplicitBrainAgentTarget {
+    const target = targetFor(input);
+    if (!target.queryable) throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent query is not authorized: ${target.agentRef}`);
+    if (options.queryAgent === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent query port is not configured');
+    return target;
+  }
+  function authorizeMessage(input: { readonly recipientRef: string; readonly messageClass: 'control' | 'data' | 'observation' }): ExplicitBrainAgentTarget {
+    const target = targetFor({ agentRef: input.recipientRef });
+    if (options.sendAgentMessage === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent communication port is not configured');
+    if (!target.messageClasses.includes(input.messageClass)) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent message class is not authorized: ${input.messageClass}`);
+    }
+    return target;
+  }
   return {
     authorizeQuery(input) {
-      const target = targetFor(input);
-      if (!target.queryable) throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent query is not authorized: ${target.agentRef}`);
-      if (options.queryAgent === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent query port is not configured');
+      authorizeQuery(input);
     },
     authorizeMessage(input) {
-      const target = targetFor({ agentRef: input.recipientRef });
-      if (options.sendAgentMessage === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent communication port is not configured');
-      if (!target.messageClasses.includes(input.messageClass)) {
-        throw new ExplicitBrainOperationalToolError('unsupported-tool', `agent message class is not authorized: ${input.messageClass}`);
-      }
+      authorizeMessage(input);
     },
     async query(input) {
-      const target = targetFor(input);
-      if (options.queryAgent === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent query port is not configured');
-      return options.queryAgent({ agentRef: target.agentRef, scopeRef: target.scopeRef });
+      const queryAgent = options.queryAgent;
+      if (queryAgent === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent query port is not configured');
+      const target = authorizeQuery(input);
+      return queryAgent({ agentRef: target.agentRef, scopeRef: target.scopeRef });
     },
     async message(input) {
-      if (options.sendAgentMessage === undefined) {
-        throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent communication port is not configured');
-      }
-      return options.sendAgentMessage(input);
+      const sendAgentMessage = options.sendAgentMessage;
+      if (sendAgentMessage === undefined) throw new ExplicitBrainOperationalToolError('unsupported-tool', 'agent communication port is not configured');
+      authorizeMessage(input);
+      return sendAgentMessage(input);
     },
   };
 }

@@ -146,6 +146,15 @@ test('application explicit brain runtime requires registered agent identity and 
   assert.deepEqual(result, { state: 'idle' });
   assert.deepEqual(queried, [{ agentRef: 'agent:orchestration-a', scopeRef: 'scope:task-a' }]);
   assert.equal(persisted.length, 1);
+  await assert.rejects(
+    () => runtime.ports.agent.message({
+      binding: runtime.binding,
+      recipientRef: 'agent:unknown',
+      messageRef: 'message:unknown',
+      messageClass: 'control',
+    }),
+    /agent target is not registered/,
+  );
 
   const recreated = new DecisionTraceJournal({ load: () => persisted, persist: (record) => persisted.push(record) });
   assert.equal(recreated.query({ interactionRef: 'interaction:agent-query' }).length, 1);
