@@ -374,7 +374,12 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       return;
     }
     if (path === '/api/explicit/dispatch-next' && method === 'POST') {
-      writeJson(response, 202, await service.dispatchNextExplicitRequirement());
+      const dispatched = await service.dispatchNextExplicitRequirement();
+      writeJson(response, 202, {
+        ...dispatched,
+        taskId: dispatched.taskId.value,
+        operationId: dispatched.operationId.value,
+      });
       return;
     }
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
