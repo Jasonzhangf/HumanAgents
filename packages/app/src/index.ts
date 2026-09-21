@@ -128,7 +128,7 @@ export {
 } from './checkpoint-journal.js';
 export { createJsonlEventJournal, publishJsonlOperationEvent } from './event-journal.js';
 export type { JsonlEventJournal, JsonlOperationEventPublicationInput } from './event-journal.js';
-export { createToolExecutionGateway, deterministicInspectRegistration } from './tool-execution-gateway.js';
+export { createHandOperationRuntime, createToolExecutionGateway, deterministicInspectRegistration } from './tool-execution-gateway.js';
 export type { ToolExecutionGatewayAssemblyInput } from './tool-execution-gateway.js';
 export { composeMemoryRuntime } from './memory-runtime.js';
 export type { MemoryRuntime, MemoryRuntimeInput } from './memory-runtime.js';

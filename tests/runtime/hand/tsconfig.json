@@ -1,0 +1,19 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/hand",
+    "noEmitOnError": true
+  },
+  "include": [
+    "node-modules.d.ts",
+    "**/*.ts",
+    "../../../packages/runtime/src/hand/**/*.ts",
+    "../../../packages/runtime/src/gateway/**/*.ts",
+    "../../../packages/runtime/src/nodes/errors.ts",
+    "../../../packages/runtime/src/node-modules.d.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/core/src/**/*.ts"
+  ]
+}

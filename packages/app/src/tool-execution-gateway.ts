@@ -7,6 +7,7 @@ import {
   failureEvidence,
   operationFailure,
 } from '../../adapters/operations/src/index.js';
+import { HandOperationRuntime } from '../../runtime/src/hand/index.js';
 import { ToolExecutionGateway, ToolRegistry, type GatewayOptions, type OperationExecutorPort, type OperationVerifierPort } from '../../runtime/src/gateway/index.js';
 
 export interface ToolExecutionGatewayAssemblyInput extends Omit<GatewayOptions, 'registry' | 'executor' | 'verifier'> {
@@ -110,4 +111,12 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
     executor,
     verifier,
   });
+}
+
+/**
+ * App-level seam from an implicit-brain operation intent to the semantic
+ * virtual-tool gateway. Hand owns no route lifecycle or duplicate state.
+ */
+export function createHandOperationRuntime(input: ToolExecutionGatewayAssemblyInput): HandOperationRuntime {
+  return new HandOperationRuntime(createToolExecutionGateway(input));
 }

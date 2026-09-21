@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  createHandOperationRuntime,
   createToolExecutionGateway,
 } from '../../packages/app/src/index.js';
 import { DeterministicInspectRoute } from '../../packages/adapters/operations/src/index.js';
@@ -81,6 +82,28 @@ test('app assembly registers the deterministic operations route in the execution
   assert.equal(submitted.operation.route?.routeId, 'deterministic-inspect');
   assert.equal(result.status, 'succeeded');
   assert.equal(result.result?.outputRef, 'artifact://operations/inspect/app-gateway-operation');
+});
+
+test('app assembly exposes Hand as a thin semantic-intent boundary', async () => {
+  const hand = createHandOperationRuntime({
+    permissions: {
+      async readGrant() {
+        return { scope, revoked: false, evidenceRefs: [evidence('hand-permission')] };
+      },
+    },
+    taskBoundaries: {
+      async readBoundary() {
+        return { scope, evidenceRefs: [evidence('hand-boundary')] };
+      },
+    },
+    journal,
+    now: () => new Date('2026-09-20T00:00:00.000Z'),
+  });
+
+  const result = await hand.execute({ intent: intent() });
+
+  assert.equal(result.operation.status, 'succeeded');
+  assert.equal(result.operation.route?.routeId, 'deterministic-inspect');
 });
 
 test('app assembly rejects an adapter observation with a different operation identity', async () => {
