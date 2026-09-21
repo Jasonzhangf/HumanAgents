@@ -131,7 +131,7 @@ const INTERACTION_1_1_TOOLS = [
 
 const ROLE_TOOLS: Readonly<Record<AgentRole, readonly string[]>> = {
   interaction: [...INTERACTION_1_0_TOOLS, ...INTERACTION_1_1_TOOLS.filter((tool) => !INTERACTION_1_0_TOOLS.includes(tool as never))],
-  orchestration: ['task.query', 'queue.query', 'resource.query', 'assignment.create', 'result.submit'],
+  orchestration: ['task.query', 'queue.query', 'resource.query', 'assignment.create', 'result.submit', 'code.search'],
   execution: ['search', 'coding', 'test', 'build'],
   review: ['read.audit', 'test.audit', 'result.audit'],
   memory: ['memory.search', 'memory.ask', 'task.history', 'session.history'],

@@ -319,6 +319,26 @@ test('builtin roles resolve all external markdown prompt segments', async () => 
   }
 });
 
+test('code search Gateway is exposed to orchestration only and is prompt-preferred', async () => {
+  const templateRoot = join(cwd(), 'packages', 'agent-templates', 'templates');
+  const orchestration = await loadBuiltinAgentTemplate(templateRoot, 'orchestration', '1.1.0');
+  assert.ok(orchestration.toolCapabilityRefs.includes('code.search'));
+  assert.deepEqual(
+    builtinAgentTemplateRegistry('execution', '1.1.0').toolCapabilities,
+    ['search', 'coding', 'test', 'build'],
+  );
+  for (const roleId of ['interaction', 'execution', 'review', 'memory'] as const) {
+    const manifest = await loadBuiltinAgentTemplate(templateRoot, roleId, '1.1.0');
+    assert.equal(manifest.toolCapabilityRefs.includes('code.search'), false, `${roleId} must not receive code.search`);
+  }
+
+  const prompt = await loadBuiltinPromptSegments('orchestration', templateRoot, '1.1.0');
+  const promptContent = prompt.segments.map((segment) => segment.content).join('\n');
+  assert.match(promptContent, /优先调用 `code\.search` Gateway/);
+  assert.match(promptContent, /scope-too-large/);
+  assert.match(promptContent, /不得伪造 Gateway 成功/);
+});
+
 test('interaction 1.1.0 exposes only its versioned model-facing tools', () => {
   const current = builtinAgentTemplateRegistry('interaction', '1.1.0');
   assert.equal(current.toolCapabilities.includes('input.receive'), false);
