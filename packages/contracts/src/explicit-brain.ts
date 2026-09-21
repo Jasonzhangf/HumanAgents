@@ -210,6 +210,31 @@ export interface InteractionDecision {
   readonly toolIntents: readonly ToolIntent[];
 }
 
+const INTERACTION_DECISION_KINDS = [
+  'input-classification',
+  'task-match',
+  'intent',
+  'attention-triage',
+  'priority-proposal',
+  'route-selection',
+  'notification-policy',
+  'memory-trigger',
+] as const;
+
+const INTERACTION_DECISION_ACTIONS = [
+  'answer',
+  'ask-user',
+  'create-attention',
+  'update-attention',
+  'submit-requirement',
+  'submit-trigger',
+  'report-bug',
+  'request-memory',
+  'notify',
+  'wait',
+  'reject',
+] as const;
+
 export interface RequirementSubmitArguments {
   readonly interactionId: string;
   readonly draftId: string;
@@ -506,6 +531,34 @@ export function validateToolIntent(input: ToolIntent): void {
   nonEmpty(input.selectedBecause, 'tool selectedBecause');
   if (!(EXPLICIT_BRAIN_MODEL_TOOLS as readonly string[]).includes(input.toolRef)) {
     throw new ContractError(`tool is not registered for explicit brain: ${input.toolRef}`);
+  }
+}
+
+export function validateInteractionDecision(input: unknown): asserts input is InteractionDecision {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ContractError('interaction decision must be an object');
+  }
+  const value = input as Record<string, unknown>;
+  nonEmpty(typeof value.decisionId === 'string' ? value.decisionId : undefined, 'decisionId');
+  nonEmpty(typeof value.interactionId === 'string' ? value.interactionId : undefined, 'interactionId');
+  if (!INTERACTION_DECISION_KINDS.includes(value.kind as typeof INTERACTION_DECISION_KINDS[number])) {
+    throw new ContractError('interaction decision kind is invalid');
+  }
+  if (!INTERACTION_DECISION_ACTIONS.includes(value.selectedAction as typeof INTERACTION_DECISION_ACTIONS[number])) {
+    throw new ContractError('interaction decision selectedAction is invalid');
+  }
+  nonEmpty(typeof value.summary === 'string' ? value.summary : undefined, 'decision summary');
+  if (!Array.isArray(value.evidenceRefs) || value.evidenceRefs.some((ref) => typeof ref !== 'string' || !ref.trim())) {
+    throw new ContractError('interaction decision evidenceRefs must be a string array');
+  }
+  if (!Array.isArray(value.toolIntents)) {
+    throw new ContractError('interaction decision toolIntents must be an array');
+  }
+  for (const candidate of value.toolIntents) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new ContractError('interaction decision toolIntents entries must be objects');
+    }
+    validateToolIntent(candidate as ToolIntent);
   }
 }
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,6 +68,11 @@ const binding: ProviderBinding = {
   configDigest: 'sha256:ui-test-config',
   capabilityDigest: 'sha256:ui-test-capability',
 };
+
+function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
+  const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
+  return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
+}
 
 function appendCheckpoint(store: FileCheckpointStore, checkpoint: Checkpoint): Promise<unknown> {
   return store.append({ ownerId: 'app-test', commitId: checkpointCommitId(checkpoint), checkpoint });
@@ -1532,9 +1538,31 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: 'project-ui-explicit-http',
+    workspaceRoot: root,
     memory: testMemory('project-ui-explicit-http'),
   });
   try {
+    const malformedDecisionResponse = await fetch(`${runtime.server.url}/api/explicit/decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        toolIntents: [{
+          toolIntentId: 'intent:malformed-decision',
+          toolRef: 'workspace.list',
+          arguments: { scopeRef: 'scope:workspace:project-ui-explicit-http', pathRef: '.' },
+          argumentsDigest: explicitArgumentsDigest({ scopeRef: 'scope:workspace:project-ui-explicit-http', pathRef: '.' }),
+          reasonRefs: [],
+          selectedBecause: 'test',
+        }],
+      }),
+    });
+    assert.equal(malformedDecisionResponse.status, 400);
+    const malformedDecision = await malformedDecisionResponse.json() as { readonly error: { readonly code: string } };
+    assert.equal(malformedDecision.error.code, 'request.invalid-field');
+    const initialJournal = await readFile(join(root, 'checkpoints', 'fake', 'ui-runtime-journal.jsonl'), 'utf8').catch(() => '');
+    assert.equal(initialJournal.includes('malformed-decision'), false);
+
     const inputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
