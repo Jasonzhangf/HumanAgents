@@ -1,5 +1,6 @@
 import { mkdir, open as openFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import type { RuntimePaths } from '../../../config/src/index.js';
 import { AppLifecycleError } from '../errors.js';
@@ -311,9 +312,19 @@ async function writeLeaseRecord(paths: RuntimePaths, record: SupervisorLeaseReco
 function processIsAlive(pid: number): boolean {
   try {
     (process as unknown as { kill(pid: number, signal: number): void }).kill(pid, 0);
-    return true;
   } catch (error) {
     return (error as { code?: string }).code === 'EPERM';
+  }
+  try {
+    const state = execFileSync('/bin/ps', ['-o', 'state=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim();
+    return state.length > 0 && !state.startsWith('Z');
+  } catch {
+    // If process state cannot be inspected, keep the conservative kill(0)
+    // result and let the identity endpoint guard the signal path.
+    return true;
   }
 }
 
@@ -354,7 +365,11 @@ interface TakeoverTerminationReceipt {
   readonly gracefulStopError?: string;
 }
 
-async function stopActiveDaemon(existing: SupervisorLeaseRecord, options: SupervisorTakeoverStopOptions): Promise<TakeoverTerminationReceipt> {
+async function stopActiveDaemon(
+  existing: SupervisorLeaseRecord,
+  options: SupervisorTakeoverStopOptions,
+  onGracefulSignal?: () => Promise<void>,
+): Promise<TakeoverTerminationReceipt> {
   const pid = existing.pid;
   const gracefulTimeoutMs = assertStopTimeout(options.gracefulTimeoutMs, 'gracefulTimeoutMs', DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
   const forceTimeoutMs = assertStopTimeout(options.forceTimeoutMs, 'forceTimeoutMs', DEFAULT_FORCE_STOP_TIMEOUT_MS);
@@ -369,6 +384,14 @@ async function stopActiveDaemon(existing: SupervisorLeaseRecord, options: Superv
       gracefulStopError = error instanceof Error ? error.message : String(error);
     }
   }
+  if (gracefulStopError !== undefined) {
+    throw supervisorError(
+      'daemon-takeover.failed',
+      `graceful daemon stop failed: ${gracefulStopError}`,
+      'inspect the exact daemon PID and retry takeover after confirming the active owner is reachable',
+    );
+  }
+  await onGracefulSignal?.();
   if (await waitForProcessExit(pid, gracefulTimeoutMs, pollIntervalMs)) {
     return {
       termination: 'graceful',
@@ -563,19 +586,53 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
         ? options.takeover.stop !== undefined || !processIsAlive(existing.pid)
         : await options.takeover.allowed(existing);
       if (!allowed) throw leaseOwnedError(existing);
-      const termination = options.takeover.stop === undefined
-        ? undefined
-        : await stopActiveDaemon(existing, options.takeover.stop);
-      const record = newLeaseRecord(paths, existing.generation + 1, {
-        ownerId: options.ownerId,
+      let replacement: SupervisorLeaseRecord | undefined;
+      const writeReplacement = async (): Promise<void> => {
+        if (replacement !== undefined) return;
+        replacement = newLeaseRecord(paths, existing.generation + 1, {
+          ownerId: options.ownerId,
+          takeover: {
+            previousLeaseId: existing.leaseId,
+            previousGeneration: existing.generation,
+            reason: options.takeover!.reason,
+            detectedAt: new Date().toISOString(),
+          },
+        });
+        await writeLeaseRecord(paths, replacement);
+      };
+      let termination: TakeoverTerminationReceipt | undefined;
+      try {
+        termination = options.takeover.stop === undefined
+          ? undefined
+          : await stopActiveDaemon(existing, options.takeover.stop, writeReplacement);
+      } catch (error) {
+        if (replacement !== undefined) {
+          const failure = {
+            phase: 'daemon-takeover.stop',
+            ownerId: options.ownerId ?? 'supervisor',
+            errorCode: error instanceof AppLifecycleError ? error.code : 'daemon-takeover.failed',
+            nextAction: error instanceof AppLifecycleError
+              ? error.nextAction
+              : 'inspect the previous daemon and retry takeover after confirming the replacement owner is stopped',
+            message: error instanceof Error ? error.message : String(error),
+            occurredAt: new Date().toISOString(),
+          } satisfies SupervisorFailureRecord;
+          await writeLeaseRecord(paths, {
+            ...replacement,
+            failure,
+            disposedAt: new Date().toISOString(),
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
+      if (replacement === undefined) await writeReplacement();
+      const record = {
+        ...replacement!,
         takeover: {
-          previousLeaseId: existing.leaseId,
-          previousGeneration: existing.generation,
-          reason: options.takeover.reason,
-          detectedAt: new Date().toISOString(),
+          ...replacement!.takeover!,
           ...(termination === undefined ? {} : termination),
         },
-      });
+      };
       await writeLeaseRecord(paths, record);
       return createLease(paths, record);
     }
@@ -587,6 +644,35 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
 
 export async function readDaemonLease(paths: RuntimePaths): Promise<SupervisorLeaseRecord | undefined> {
   return readLeaseRecord(paths);
+}
+
+/**
+ * A transition guard only proves that another owner is changing the lease.
+ * The old owner may treat its lease-release race as an expected takeover only
+ * after the replacement lease is durable and still owned by a live process.
+ */
+export async function isDaemonLeaseHandoffCommitted(paths: RuntimePaths, previous: SupervisorLeaseRecord): Promise<boolean> {
+  const current = await readLeaseRecord(paths);
+  return current !== undefined
+    && current.leaseId !== previous.leaseId
+    && current.generation > previous.generation
+    && current.processStartToken !== previous.processStartToken
+    && current.disposedAt === undefined
+    && processIsAlive(current.pid);
+}
+
+export async function waitForDaemonLeaseHandoff(
+  paths: RuntimePaths,
+  previous: SupervisorLeaseRecord,
+  timeoutMs = DEFAULT_GRACEFUL_STOP_TIMEOUT_MS,
+  pollIntervalMs = DEFAULT_STOP_POLL_INTERVAL_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (await isDaemonLeaseHandoffCommitted(paths, previous)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, Math.max(1, deadline - Date.now()))));
+  }
 }
 
 function failureRecordFor(error: unknown, failingStage: SupervisorStage | undefined): SupervisorFailureRecord {

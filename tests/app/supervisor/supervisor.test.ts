@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, resolveRuntimePaths, type RuntimePaths } from '../../../packages/config/src/index.js';
 import { SessionStore } from '../../../packages/app/src/session-store.js';
+import { AppLifecycleError } from '../../../packages/app/src/errors.js';
 import {
   acquireDaemonLease,
   daemonLeasePath,
+  isDaemonLeaseHandoffCommitted,
   readDaemonLease,
   runSupervisorStartup,
 } from '../../../packages/app/src/supervisor/index.js';
@@ -188,6 +190,44 @@ test('startup dispose remains retryable when lease release fails', async () => {
   const receipt = await startup.dispose();
   assert.equal(releaseCalls, 2);
   assert.ok(receipt.lease.disposedAt);
+});
+
+test('startup dispose does not infer a lease handoff without a newer durable owner', async () => {
+  const paths = await fixture();
+  const startup = await runSupervisorStartup(paths, []);
+  Object.defineProperty(startup.lease, 'release', {
+    value: async () => {
+      throw new AppLifecycleError(
+        'daemon-lease-transition-in-progress',
+        'another daemon lease transition is already in progress',
+        'wait for the daemon lease transition to finish',
+      );
+    },
+  });
+
+  await assert.rejects(() => startup.dispose(), (error: any) => {
+    assert.equal(error.code, 'daemon-lease-transition-in-progress');
+    return true;
+  });
+});
+
+test('lease transition is not a handoff receipt until the newer live lease is durable', async () => {
+  const paths = await fixture();
+  const first = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve' });
+  const previous = first.record;
+
+  assert.equal(await isDaemonLeaseHandoffCommitted(paths, previous), false);
+  const current = JSON.parse(await readFile(daemonLeasePath(paths), 'utf8')) as Record<string, unknown>;
+  await writeFile(daemonLeasePath(paths), JSON.stringify({
+    ...current,
+    leaseId: 'replacement-lease',
+    generation: previous.generation + 1,
+    processStartToken: 'node:replacement',
+    pid: process.pid,
+    disposedAt: undefined,
+  }) + '\n', 'utf8');
+
+  assert.equal(await isDaemonLeaseHandoffCommitted(paths, previous), true);
 });
 
 test('partial startup failure cleans up reverse and keeps owner/next-action failure receipt', async () => {
@@ -461,6 +501,39 @@ test('hm startup force-stops a daemon that ignores graceful stop', async () => {
     assert.equal(startup.lease.record.takeover?.termination, 'forced');
     await startup.dispose();
   } finally {
+    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+  }
+});
+
+test('hm startup does not publish a replacement lease when graceful signaling is denied', async () => {
+  const paths = await fixture();
+  const child = await startLeaseChild(paths, 'ignore-term');
+  const processWithKill = process as unknown as {
+    kill: (pid: number, signal: number | string) => void;
+  };
+  const originalKill = processWithKill.kill;
+  processWithKill.kill = (pid, signal) => {
+    if (pid === child.pid && signal === 'SIGTERM') {
+      const error = Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+      throw error;
+    }
+    return originalKill(pid, signal);
+  };
+  try {
+    await assert.rejects(
+      () => runSupervisorStartup(paths, [], {
+        lease: {
+          ownerId: 'humanagent.app.serve',
+          takeover: { reason: 'signal permission failure', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 30, pollIntervalMs: 5 } },
+        },
+      }),
+      (error: any) => error.code === 'daemon-takeover.failed',
+    );
+    const lease = await readDaemonLease(paths);
+    assert.equal(lease?.leaseId, child.leaseId);
+    assert.equal(lease?.disposedAt, undefined);
+  } finally {
+    processWithKill.kill = originalKill;
     if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
   }
 });
