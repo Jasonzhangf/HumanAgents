@@ -37,6 +37,7 @@ import {
   ExplicitBrainAdmissionError,
   ExplicitBrainMemoryToolError,
   ExplicitBrainMemoryToolExecutor,
+  ExplicitBrainOperationalToolExecutor,
   ExplicitBrainRouterError,
   MemoryOperationProjection,
   MemoryOperationProjectionError,
@@ -51,6 +52,7 @@ import {
   stableBugSubmissionId,
   submitMemorySaveCandidate,
   type ExplicitBrainRuntimeBinding,
+  type ExplicitBrainOperationalToolPorts,
   type GitBugPort,
   type NotificationPort,
   type RequirementSubmitReceipt,
@@ -112,6 +114,9 @@ function binding(overrides: Partial<ExplicitBrainRuntimeBinding> = {}): Explicit
       'runtime.read',
       'queue.read',
       'resource.read',
+      'workspace.read',
+      'agent.read',
+      'agent.message',
       'bug.read',
       'bug.report',
       'channel.read',
@@ -132,6 +137,11 @@ function binding(overrides: Partial<ExplicitBrainRuntimeBinding> = {}): Explicit
       'runtime.status',
       'queue.inspect',
       'resource.query',
+      'workspace.list',
+      'file.read',
+      'file.search',
+      'agent.query',
+      'agent.message',
       'bug.query',
       'bug.inspect',
       'channel.query',
@@ -179,6 +189,33 @@ function argumentsDigest(args: Readonly<Record<string, unknown>>): string {
 }
 
 const digestArguments = argumentsDigest;
+
+const operationalPorts: ExplicitBrainOperationalToolPorts = {
+  workspace: {
+    authorize(input) {
+      if (input.scopeRef !== 'scope:workspace-a' || (input.pathRef !== undefined && input.pathRef !== 'workspace:README.md')) {
+        throw new ExplicitBrainAdmissionError('scope-mismatch', 'workspace scope is not bound to this interaction');
+      }
+    },
+    async list() { return { entries: [] }; },
+    async read() { return { pathRef: 'workspace:README.md', content: 'read-only' }; },
+    async search() { return { matches: [] }; },
+  },
+  agent: {
+    authorizeQuery(input) {
+      if (input.agentRef !== 'agent:orchestration-a' && input.scopeRef !== 'scope:organ-a/interaction-a') {
+        throw new ExplicitBrainAdmissionError('permission-denied', 'agent query is not registered for this interaction');
+      }
+    },
+    authorizeMessage(input) {
+      if (input.recipientRef !== 'agent:orchestration-a' || input.messageClass !== 'control') {
+        throw new ExplicitBrainAdmissionError('permission-denied', 'agent message is not allowed by the collaboration ACL');
+      }
+    },
+    async query() { return { agentRef: 'agent:orchestration-a', state: 'idle' }; },
+    async message() { return { status: 'accepted', messageRef: 'message:requirement-a' }; },
+  },
+};
 
 function intent(toolRef: string, args: Readonly<Record<string, unknown>> = {}): ToolIntent {
   return {
@@ -237,10 +274,132 @@ test('1.1.0 interaction template loads versioned prompt segments without changin
     skills: [...manifest.skillRefs],
     toolCapabilities: [...manifest.toolCapabilityRefs],
   });
+  assert.deepEqual(manifest.builtInTools, ['checkpoint.inspect']);
+  assert.equal(manifest.builtInTools.includes('checkpoint.reenter'), false);
   for (const segment of ['identity', 'mission', 'input-output', 'failure', 'boundaries']) {
     const profile = await readFile(join(root, 'builtin', 'interaction', 'profiles', 'explicit-brain', `${segment}.md`), 'utf8');
     assert.ok(profile.trim().length > 0);
   }
+});
+
+test('explicit brain admits read-only workspace and typed agent communication tools', () => {
+  const registry = createExplicitBrainToolRegistry(capabilityDigest);
+  const cases = [
+    ['workspace.list', { scopeRef: 'scope:workspace-a' }],
+    ['file.read', { scopeRef: 'scope:workspace-a', pathRef: 'workspace:README.md' }],
+    ['file.search', { query: 'checkpoint', scopeRef: 'scope:workspace-a', limit: 5 }],
+    ['agent.query', { agentRef: 'agent:orchestration-a' }],
+    ['agent.message', { recipientRef: 'agent:orchestration-a', messageRef: 'message:requirement-a', messageClass: 'control' }],
+  ] as const;
+  for (const [toolRef, args] of cases) {
+    assert.equal(admitToolIntent({
+      registry,
+      binding: binding(),
+      intent: intent(toolRef, args),
+      currentEpoch: 4,
+      currentPermissionRevision: 'permission-r1',
+      argumentsDigest: digestArguments,
+      operationalPorts,
+    }).toolRef, toolRef);
+  }
+  for (const [toolRef, args] of [
+    ['file.search', { scopeRef: 'scope:workspace-a', limit: 5 }],
+    ['agent.message', { recipientRef: 'agent:orchestration-a', messageRef: 'message:a', messageClass: 'invalid' }],
+  ] as const) {
+    assert.throws(
+      () => admitToolIntent({
+        registry,
+        binding: binding(),
+        intent: intent(toolRef, args),
+        currentEpoch: 4,
+        currentPermissionRevision: 'permission-r1',
+        argumentsDigest: digestArguments,
+        operationalPorts,
+      }),
+      (error: unknown) => error instanceof ExplicitBrainAdmissionError && error.code === 'invalid-arguments',
+    );
+  }
+  assert.throws(
+    () => admitToolIntent({
+      registry,
+      binding: binding(),
+      intent: intent('file.read', { scopeRef: 'scope:workspace-a', pathRef: '/etc/passwd' }),
+      currentEpoch: 4,
+      currentPermissionRevision: 'permission-r1',
+      argumentsDigest: digestArguments,
+      operationalPorts,
+    }),
+    (error: unknown) => error instanceof ExplicitBrainAdmissionError && error.code === 'scope-mismatch',
+  );
+  assert.throws(
+    () => admitToolIntent({
+      registry,
+      binding: binding(),
+      intent: intent('agent.message', {
+        recipientRef: 'agent:unregistered',
+        messageRef: 'message:requirement-a',
+        messageClass: 'control',
+      }),
+      currentEpoch: 4,
+      currentPermissionRevision: 'permission-r1',
+      argumentsDigest: digestArguments,
+      operationalPorts,
+    }),
+    (error: unknown) => error instanceof ExplicitBrainAdmissionError && error.code === 'permission-denied',
+  );
+  for (const toolRef of ['file.write', 'file.edit', 'file.delete', 'shell.exec']) {
+    assert.throws(
+      () => admitToolIntent({
+        registry,
+        binding: binding(),
+        intent: intent(toolRef),
+        currentEpoch: 4,
+        currentPermissionRevision: 'permission-r1',
+        argumentsDigest: digestArguments,
+      }),
+      (error: unknown) => error instanceof ExplicitBrainAdmissionError && error.code === 'runtime-only-capability',
+    );
+  }
+});
+
+test('operational tool owner routes admitted workspace and agent calls through scoped ports', async () => {
+  const registry = createExplicitBrainToolRegistry(capabilityDigest);
+  const runtimeBinding = binding();
+  const executor = new ExplicitBrainOperationalToolExecutor({
+    binding: runtimeBinding,
+    ports: operationalPorts,
+  });
+  const invoke = async (toolRef: string, args: Readonly<Record<string, unknown>>) => {
+    const modelIntent = intent(toolRef, args);
+    const receipt = admitToolIntent({
+      registry,
+      binding: runtimeBinding,
+      intent: modelIntent,
+      currentEpoch: runtimeBinding.executionEpoch,
+      currentPermissionRevision: runtimeBinding.permissionRevision,
+      argumentsDigest: digestArguments,
+      operationalPorts,
+    });
+    return executor.execute(modelIntent, receipt);
+  };
+  assert.deepEqual(await invoke('workspace.list', { scopeRef: 'scope:workspace-a' }), { entries: [] });
+  assert.deepEqual(await invoke('file.read', { scopeRef: 'scope:workspace-a', pathRef: 'workspace:README.md' }), {
+    pathRef: 'workspace:README.md',
+    content: 'read-only',
+  });
+  assert.deepEqual(await invoke('file.search', { query: 'checkpoint', scopeRef: 'scope:workspace-a', limit: 5 }), { matches: [] });
+  assert.deepEqual(await invoke('agent.query', { agentRef: 'agent:orchestration-a' }), {
+    agentRef: 'agent:orchestration-a',
+    state: 'idle',
+  });
+  assert.deepEqual(await invoke('agent.message', {
+    recipientRef: 'agent:orchestration-a',
+    messageRef: 'message:requirement-a',
+    messageClass: 'control',
+  }), {
+    status: 'accepted',
+    messageRef: 'message:requirement-a',
+  });
 });
 
 test('tool admission requires one-to-one registry, capability, permission, epoch and arguments', () => {
@@ -435,6 +594,41 @@ test('tool admission requires one-to-one registry, capability, permission, epoch
       `${toolRef} must reject incomplete arguments`,
     );
   }
+});
+
+test('framework executor dispatches operational tools to their scoped owner', async () => {
+  const executor = new ExplicitBrainDecisionExecutor<unknown>({
+    registry: createExplicitBrainToolRegistry(capabilityDigest),
+    binding: binding(),
+    traces: new DecisionTraceStore(),
+    operationalPorts,
+    handler: {
+      async execute() {
+        throw new Error('operational tools must not fall through to the generic handler');
+      },
+    },
+    context: {
+      scopeRef: 'scope:organ-a',
+      runtimeBindingRef: 'binding-explicit-brain',
+      ownerRef: 'runtime-explicit-brain',
+      createdAt: '2026-09-17T00:00:00.000Z',
+      inputDigest: 'sha256:interaction-input',
+      argumentsRef: (toolIntent) => `arguments:${toolIntent.toolIntentId}`,
+    },
+    currentEpoch: 4,
+    currentPermissionRevision: 'permission-r1',
+    argumentsDigest: digestArguments,
+  });
+  const [result] = await executor.execute({
+    decisionId: 'decision-operational-dispatch',
+    interactionId: 'interaction-a',
+    kind: 'intent',
+    selectedAction: 'answer',
+    summary: 'inspect a workspace through the scoped owner',
+    evidenceRefs: [],
+    toolIntents: [intent('workspace.list', { scopeRef: 'scope:workspace-a' })],
+  });
+  assert.deepEqual(result?.result, { entries: [] });
 });
 
 test('framework executor records accepted and denied tool decisions without trusting the model to record', async () => {

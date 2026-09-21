@@ -18,6 +18,11 @@ export const EXPLICIT_BRAIN_MODEL_TOOLS = [
   'runtime.status',
   'queue.inspect',
   'resource.query',
+  'workspace.list',
+  'file.read',
+  'file.search',
+  'agent.query',
+  'agent.message',
   'bug.query',
   'bug.inspect',
   'channel.query',
@@ -67,6 +72,10 @@ export const EXPLICIT_BRAIN_FORBIDDEN_TOOLS = [
   'memory.approve',
   'memory.promote',
   'skill.publish',
+  'file.write',
+  'file.edit',
+  'file.delete',
+  'shell.exec',
 ] as const;
 
 export const EXPLICIT_BRAIN_SKILLS = [
@@ -200,6 +209,31 @@ export interface InteractionDecision {
   readonly evidenceRefs: readonly string[];
   readonly toolIntents: readonly ToolIntent[];
 }
+
+const INTERACTION_DECISION_KINDS = [
+  'input-classification',
+  'task-match',
+  'intent',
+  'attention-triage',
+  'priority-proposal',
+  'route-selection',
+  'notification-policy',
+  'memory-trigger',
+] as const;
+
+const INTERACTION_DECISION_ACTIONS = [
+  'answer',
+  'ask-user',
+  'create-attention',
+  'update-attention',
+  'submit-requirement',
+  'submit-trigger',
+  'report-bug',
+  'request-memory',
+  'notify',
+  'wait',
+  'reject',
+] as const;
 
 export interface RequirementSubmitArguments {
   readonly interactionId: string;
@@ -491,12 +525,50 @@ function validTime(value: string, label: string): void {
 }
 
 export function validateToolIntent(input: ToolIntent): void {
-  nonEmpty(input.toolIntentId, 'toolIntentId');
-  nonEmpty(input.toolRef, 'toolRef');
-  nonEmpty(input.argumentsDigest, 'tool arguments digest');
-  nonEmpty(input.selectedBecause, 'tool selectedBecause');
-  if (!(EXPLICIT_BRAIN_MODEL_TOOLS as readonly string[]).includes(input.toolRef)) {
-    throw new ContractError(`tool is not registered for explicit brain: ${input.toolRef}`);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ContractError('tool intent must be an object');
+  }
+  const value = input as unknown as Record<string, unknown>;
+  nonEmpty(typeof value.toolIntentId === 'string' ? value.toolIntentId : undefined, 'toolIntentId');
+  nonEmpty(typeof value.toolRef === 'string' ? value.toolRef : undefined, 'toolRef');
+  nonEmpty(typeof value.argumentsDigest === 'string' ? value.argumentsDigest : undefined, 'tool arguments digest');
+  nonEmpty(typeof value.selectedBecause === 'string' ? value.selectedBecause : undefined, 'tool selectedBecause');
+  if (!value.arguments || typeof value.arguments !== 'object' || Array.isArray(value.arguments)) {
+    throw new ContractError('tool arguments must be an object');
+  }
+  if (!Array.isArray(value.reasonRefs) || value.reasonRefs.some((ref) => typeof ref !== 'string' || !ref.trim())) {
+    throw new ContractError('tool reasonRefs must be a string array');
+  }
+  if (!(EXPLICIT_BRAIN_MODEL_TOOLS as readonly string[]).includes(String(value.toolRef))) {
+    throw new ContractError(`tool is not registered for explicit brain: ${String(value.toolRef)}`);
+  }
+}
+
+export function validateInteractionDecision(input: unknown): asserts input is InteractionDecision {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ContractError('interaction decision must be an object');
+  }
+  const value = input as Record<string, unknown>;
+  nonEmpty(typeof value.decisionId === 'string' ? value.decisionId : undefined, 'decisionId');
+  nonEmpty(typeof value.interactionId === 'string' ? value.interactionId : undefined, 'interactionId');
+  if (!INTERACTION_DECISION_KINDS.includes(value.kind as typeof INTERACTION_DECISION_KINDS[number])) {
+    throw new ContractError('interaction decision kind is invalid');
+  }
+  if (!INTERACTION_DECISION_ACTIONS.includes(value.selectedAction as typeof INTERACTION_DECISION_ACTIONS[number])) {
+    throw new ContractError('interaction decision selectedAction is invalid');
+  }
+  nonEmpty(typeof value.summary === 'string' ? value.summary : undefined, 'decision summary');
+  if (!Array.isArray(value.evidenceRefs) || value.evidenceRefs.some((ref) => typeof ref !== 'string' || !ref.trim())) {
+    throw new ContractError('interaction decision evidenceRefs must be a string array');
+  }
+  if (!Array.isArray(value.toolIntents)) {
+    throw new ContractError('interaction decision toolIntents must be an array');
+  }
+  for (const candidate of value.toolIntents) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new ContractError('interaction decision toolIntents entries must be objects');
+    }
+    validateToolIntent(candidate as ToolIntent);
   }
 }
 

@@ -94,6 +94,11 @@ function memoryEntryContent(current: string, kind: 'project-fact' | 'project-exp
   return current.endsWith('\n') ? `${current}${entry.slice(1)}` : `${current}${entry}`;
 }
 
+function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
+  const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
+  return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
+}
+
 async function writeMemoryEntryPatchArtifact(
   artifactsRoot: string,
   patchRef: string,
@@ -1036,7 +1041,7 @@ test('CLI binds RCC identity to the configured transport endpoint', async () => 
   }
 });
 
-test('CLI serve composes rooted memory and keeps it across process restart', async () => {
+test('CLI serve takes over the previous owner and keeps rooted memory across restart', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
@@ -1154,16 +1159,26 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
     ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
     let duplicateStderr = '';
     duplicate.stderr.on('data', (chunk: Uint8Array) => { duplicateStderr += String(chunk); });
-    const duplicateExit = await new Promise<number | null>((resolve, reject) => {
+    const duplicateLaunch = await new Promise<{ readonly url: string }>((resolve, reject) => {
+      let output = '';
+      const timeout = setTimeout(() => reject(new Error(`takeover serve startup timed out: ${output}; stderr=${duplicateStderr}`)), 5_000);
+      duplicate.stdout.on('data', (chunk: Uint8Array) => {
+        output += String(chunk);
+        try {
+          const parsed = JSON.parse(output.trim()) as { readonly url?: string };
+          if (!parsed.url) return;
+          clearTimeout(timeout);
+          resolve({ url: parsed.url });
+        } catch {
+          // Wait for the complete startup object.
+        }
+      });
       duplicate.once('error', reject);
-      duplicate.once('exit', resolve);
+      duplicate.once('exit', (code) => reject(new Error(`takeover serve exited before startup (${String(code)}): ${output}; stderr=${duplicateStderr}`)));
     });
-    assert.equal(duplicateExit, 1);
-    const duplicateFailure = JSON.parse(duplicateStderr.trim()) as { readonly error?: { readonly code?: string; readonly ownerId?: string } };
-    assert.equal(duplicateFailure.error?.code, 'daemon-lease-owned');
-    assert.equal(duplicateFailure.error?.ownerId, 'humanagent.app.serve');
+    assert.match(duplicateLaunch.url, /^http:\/\/127\.0\.0\.1:/);
 
-    const created = await fetch(`${first.url}/api/tasks`, {
+    const created = await fetch(`${duplicateLaunch.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'rooted memory before restart' }),
@@ -1171,6 +1186,8 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
     taskId = task.taskId.value;
+    duplicate.kill('SIGTERM');
+    if (duplicate.exitCode === null) await new Promise<void>((resolve) => duplicate.once('exit', () => resolve()));
   } finally {
     await stop(first);
   }
@@ -1226,6 +1243,7 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
 
 test('CLI serve launch reports the live Cordis plugin composition', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-cordis-composition-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const child = spawn(process.execPath, [
     cli,
@@ -1243,6 +1261,7 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
   child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
   try {
     const launch = await new Promise<{
+      readonly url: string;
       readonly plugins: readonly string[];
       readonly composition: {
         readonly complete: boolean;
@@ -1255,15 +1274,16 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
         output += String(chunk);
         try {
           const parsed = JSON.parse(output.trim()) as {
+            readonly url?: string;
             readonly plugins?: readonly string[];
             readonly composition?: {
               readonly complete: boolean;
               readonly components: readonly { readonly component: string; readonly state: string }[];
             };
           };
-          if (parsed.plugins && parsed.composition) {
+          if (parsed.url && parsed.plugins && parsed.composition) {
             clearTimeout(timeout);
-            resolve({ plugins: parsed.plugins, composition: parsed.composition });
+            resolve({ url: parsed.url, plugins: parsed.plugins, composition: parsed.composition });
           }
         } catch {
           // The CLI may print partial JSON while the process is starting.
@@ -1287,6 +1307,28 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
     for (const component of ['cordis-host', 'fixed-harness-kernel', 'fake-plugin', 'template-plugin', 'memory-plugin', 'ui-plugin']) {
       assert.equal(launch.composition.components.find((candidate) => candidate.component === component)?.state, 'composed');
     }
+    const args = { scopeRef: `scope:workspace:${paths.projectKey}`, pathRef: '.' };
+    const explicitDecisionResponse = await fetch(`${launch.url}/api/explicit/decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decisionId: 'decision:cli-explicit-runtime',
+        interactionId: 'interaction:cli-explicit-runtime',
+        kind: 'intent',
+        selectedAction: 'answer',
+        summary: 'list the configured project workspace',
+        evidenceRefs: [],
+        toolIntents: [{
+          toolIntentId: 'intent:cli-workspace-list',
+          toolRef: 'workspace.list',
+          arguments: args,
+          argumentsDigest: explicitArgumentsDigest(args),
+          reasonRefs: [],
+          selectedBecause: 'serve composition owns the workspace binding',
+        }],
+      }),
+    });
+    assert.equal(explicitDecisionResponse.status, 200);
   } finally {
     child.kill('SIGTERM');
     if (child.exitCode === null) {

@@ -5,6 +5,7 @@ import type { RuntimePaths } from '../../../config/src/index.js';
 import { AppLifecycleError } from '../errors.js';
 
 const LEASE_SCHEMA_VERSION = 1 as const;
+const PROCESS_START_TOKEN = `node:${randomUUID()}`;
 
 export interface SupervisorFailureRecord {
   readonly phase: string;
@@ -26,6 +27,8 @@ export interface SupervisorTakeoverRecord {
   readonly previousGeneration: number;
   readonly reason: string;
   readonly detectedAt: string;
+  readonly termination?: 'graceful' | 'forced';
+  readonly gracefulStopError?: string;
 }
 
 export interface SupervisorLeaseRecord {
@@ -74,6 +77,13 @@ export interface SupervisorLease {
 export interface SupervisorTakeoverOptions {
   readonly reason: string;
   readonly allowed?: (record: SupervisorLeaseRecord) => boolean | Promise<boolean>;
+  readonly stop?: SupervisorTakeoverStopOptions;
+}
+
+export interface SupervisorTakeoverStopOptions {
+  readonly gracefulTimeoutMs?: number;
+  readonly forceTimeoutMs?: number;
+  readonly pollIntervalMs?: number;
 }
 
 export interface AcquireDaemonLeaseOptions {
@@ -128,6 +138,7 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
     || typeof value.ownerId !== 'string'
     || !value.ownerId
     || !Number.isSafeInteger(value.pid)
+    || (value.pid ?? 0) < 1
     || typeof value.processStartToken !== 'string'
     || !value.processStartToken
     || typeof value.acquiredAt !== 'string'
@@ -163,6 +174,8 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
       || typeof takeover.reason !== 'string'
       || typeof takeover.detectedAt !== 'string'
       || !Number.isSafeInteger(takeover.previousGeneration)
+      || (takeover.termination !== undefined && takeover.termination !== 'graceful' && takeover.termination !== 'forced')
+      || (takeover.gracefulStopError !== undefined && typeof takeover.gracefulStopError !== 'string')
     ) {
       throw supervisorError('daemon-lease-corrupt', 'daemon lease takeover record is invalid', 'inspect and repair the daemon lease');
     }
@@ -304,6 +317,91 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
+const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 2_000;
+const DEFAULT_FORCE_STOP_TIMEOUT_MS = 1_000;
+const DEFAULT_STOP_POLL_INTERVAL_MS = 25;
+
+function assertStopTimeout(value: number | undefined, label: string, fallback: number): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 0) {
+    throw supervisorError('daemon-takeover.invalid-timeout', `${label} must be a non-negative safe integer`, 'repair the daemon takeover timeout configuration');
+  }
+  return resolved;
+}
+
+function signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
+  if (pid < 1 || pid === process.pid) {
+    throw supervisorError(
+      'daemon-takeover.self-protection',
+      'refusing to terminate an invalid PID or the current HumanAgent process during daemon takeover',
+      'inspect the daemon lease because its PID is not a positive process identity owned by the active daemon',
+    );
+  }
+  (process as unknown as { kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void }).kill(pid, signal);
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number, pollIntervalMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processIsAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, Math.max(1, deadline - Date.now()))));
+  }
+  return true;
+}
+
+interface TakeoverTerminationReceipt {
+  readonly termination: 'graceful' | 'forced';
+  readonly gracefulStopError?: string;
+}
+
+async function stopActiveDaemon(existing: SupervisorLeaseRecord, options: SupervisorTakeoverStopOptions): Promise<TakeoverTerminationReceipt> {
+  const pid = existing.pid;
+  const gracefulTimeoutMs = assertStopTimeout(options.gracefulTimeoutMs, 'gracefulTimeoutMs', DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
+  const forceTimeoutMs = assertStopTimeout(options.forceTimeoutMs, 'forceTimeoutMs', DEFAULT_FORCE_STOP_TIMEOUT_MS);
+  const pollIntervalMs = assertStopTimeout(options.pollIntervalMs, 'pollIntervalMs', DEFAULT_STOP_POLL_INTERVAL_MS);
+  let gracefulStopError: string | undefined;
+
+  await assertTakeoverProcessIdentity(existing);
+  try {
+    signalProcess(pid, 'SIGTERM');
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ESRCH') {
+      gracefulStopError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (await waitForProcessExit(pid, gracefulTimeoutMs, pollIntervalMs)) {
+    return {
+      termination: 'graceful',
+      ...(gracefulStopError === undefined ? {} : { gracefulStopError }),
+    };
+  }
+
+  await assertTakeoverProcessIdentity(existing);
+  try {
+    signalProcess(pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ESRCH') {
+      const forceError = error instanceof Error ? error.message : String(error);
+      throw supervisorError(
+        'daemon-takeover.failed',
+        `graceful daemon stop timed out${gracefulStopError ? ` (${gracefulStopError})` : ''}; force stop failed: ${forceError}`,
+        'inspect the exact daemon PID and terminate it before retrying HumanAgent startup',
+      );
+    }
+  }
+  if (await waitForProcessExit(pid, forceTimeoutMs, pollIntervalMs)) {
+    return {
+      termination: 'forced',
+      ...(gracefulStopError === undefined ? {} : { gracefulStopError }),
+    };
+  }
+  throw supervisorError(
+    'daemon-takeover.failed',
+    `daemon PID ${pid} did not exit after graceful stop and SIGKILL`,
+    'inspect the exact daemon PID and terminate it before retrying HumanAgent startup',
+  );
+}
+
 function leaseOwnedError(record: SupervisorLeaseRecord): AppLifecycleError {
   return supervisorError(
     'daemon-lease-owned',
@@ -320,10 +418,68 @@ function newLeaseRecord(paths: RuntimePaths, generation: number, options: { read
     generation,
     ownerId: options.ownerId ?? 'supervisor',
     pid: process.pid,
-    processStartToken: randomUUID(),
+    processStartToken: PROCESS_START_TOKEN,
     acquiredAt: new Date().toISOString(),
     ...(options.takeover === undefined ? {} : { takeover: options.takeover }),
   };
+}
+
+function controlEndpointUrl(endpoint: SupervisorControlEndpoint): string {
+  const host = endpoint.host.includes(':') ? `[${endpoint.host}]` : endpoint.host;
+  return `http://${host}:${endpoint.port}/api/runtime/identity`;
+}
+
+async function assertTakeoverProcessIdentity(existing: SupervisorLeaseRecord): Promise<void> {
+  if (!processIsAlive(existing.pid)) return;
+  if (existing.controlEndpoint === undefined) {
+    throw supervisorError(
+      'daemon-takeover.identity-mismatch',
+      `cannot prove that PID ${existing.pid} is the daemon recorded by lease ${existing.leaseId}: control endpoint is missing`,
+      'start the daemon with the current HumanAgent runtime so takeover identity can be verified before signaling',
+      existing.ownerId,
+    );
+  }
+  let response: Response;
+  try {
+    response = await fetch(controlEndpointUrl(existing.controlEndpoint), {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(500),
+    });
+  } catch (error) {
+    throw supervisorError(
+      'daemon-takeover.identity-mismatch',
+      `cannot verify daemon PID ${existing.pid} through its control endpoint: ${error instanceof Error ? error.message : String(error)}`,
+      'confirm that the recorded daemon is serving its loopback identity endpoint before retrying takeover',
+      existing.ownerId,
+    );
+  }
+  let value: unknown;
+  try {
+    value = await response.json() as unknown;
+  } catch {
+    throw supervisorError(
+      'daemon-takeover.identity-mismatch',
+      `daemon PID ${existing.pid} returned an invalid identity response`,
+      'upgrade the active daemon and retry takeover after its identity endpoint returns JSON',
+      existing.ownerId,
+    );
+  }
+  const identity = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  if (
+    !response.ok
+    || identity?.leaseId !== existing.leaseId
+    || identity.generation !== existing.generation
+    || identity.pid !== existing.pid
+    || identity.processStartToken !== existing.processStartToken
+  ) {
+    throw supervisorError(
+      'daemon-takeover.identity-mismatch',
+      `control endpoint identity does not match lease ${existing.leaseId} for PID ${existing.pid}`,
+      'inspect the active daemon lease and stop the verified owner before retrying takeover',
+      existing.ownerId,
+    );
+  }
 }
 
 async function assertLeaseActive(paths: RuntimePaths, expected: SupervisorLeaseRecord): Promise<SupervisorLeaseRecord> {
@@ -404,9 +560,12 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
     if (existing && !existing.disposedAt) {
       if (!options.takeover) throw leaseOwnedError(existing);
       const allowed = options.takeover.allowed === undefined
-        ? !processIsAlive(existing.pid)
+        ? options.takeover.stop !== undefined || !processIsAlive(existing.pid)
         : await options.takeover.allowed(existing);
       if (!allowed) throw leaseOwnedError(existing);
+      const termination = options.takeover.stop === undefined
+        ? undefined
+        : await stopActiveDaemon(existing, options.takeover.stop);
       const record = newLeaseRecord(paths, existing.generation + 1, {
         ownerId: options.ownerId,
         takeover: {
@@ -414,6 +573,7 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
           previousGeneration: existing.generation,
           reason: options.takeover.reason,
           detectedAt: new Date().toISOString(),
+          ...(termination === undefined ? {} : termination),
         },
       });
       await writeLeaseRecord(paths, record);

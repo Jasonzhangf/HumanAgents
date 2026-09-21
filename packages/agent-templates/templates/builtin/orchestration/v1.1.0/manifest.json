@@ -30,6 +30,12 @@
     "result.submit",
     "code.search"
   ],
+  "builtInTools": [
+    "checkpoint.inspect",
+    "checkpoint.recall",
+    "checkpoint.save",
+    "checkpoint.record-dead-end"
+  ],
   "promptSegmentRefs": [
     "common/observation.md",
     "common/orchestration.md",
@@ -127,5 +133,5 @@
       "capabilityDigest": "sha256:84ae7f91dda578ad1fe493779c04bba90c89c0d8288977a21c93907e7e3e219b"
     }
   },
-  "digest": "fnv1a:d9d9d424"
+  "digest": "fnv1a:b1652094"
 }

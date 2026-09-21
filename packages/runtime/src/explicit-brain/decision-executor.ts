@@ -13,8 +13,10 @@ import {
   admitToolIntent,
   type ExplicitBrainAdmissionReceipt,
   type ExplicitBrainRuntimeBinding,
+  type ExplicitBrainOperationalToolPorts,
   type ExplicitBrainToolRegistry,
 } from './tool-registry.js';
+import { ExplicitBrainOperationalToolExecutor } from './operational-tools.js';
 import type { DecisionTracePort } from './attention.js';
 
 export interface ExplicitBrainDecisionTraceContext {
@@ -105,7 +107,17 @@ function isHandlerResult<TResult>(value: TResult | ExplicitBrainHandlerResult<TR
   return typeof value === 'object' && value !== null && 'value' in value;
 }
 
+function isOperationalTool(toolRef: ToolIntent['toolRef']): boolean {
+  return toolRef === 'workspace.list'
+    || toolRef === 'file.read'
+    || toolRef === 'file.search'
+    || toolRef === 'agent.query'
+    || toolRef === 'agent.message';
+}
+
 export class ExplicitBrainDecisionExecutor<TResult> {
+  private readonly operationalExecutor?: ExplicitBrainOperationalToolExecutor<TResult>;
+
   constructor(private readonly input: {
     readonly registry: ExplicitBrainToolRegistry;
     readonly binding: ExplicitBrainRuntimeBinding;
@@ -115,7 +127,15 @@ export class ExplicitBrainDecisionExecutor<TResult> {
     readonly currentEpoch: number;
     readonly currentPermissionRevision: string;
     readonly argumentsDigest: (args: Readonly<Record<string, unknown>>) => string;
-  }) {}
+    readonly operationalPorts?: ExplicitBrainOperationalToolPorts;
+  }) {
+    if (input.operationalPorts !== undefined) {
+      this.operationalExecutor = new ExplicitBrainOperationalToolExecutor<TResult>({
+        binding: input.binding,
+        ports: input.operationalPorts,
+      });
+    }
+  }
 
   async execute(decision: InteractionDecision): Promise<readonly ExplicitBrainExecutionResult<TResult>[]> {
     if (decision.toolIntents.length === 0) {
@@ -146,6 +166,7 @@ export class ExplicitBrainDecisionExecutor<TResult> {
         currentEpoch: this.input.currentEpoch,
         currentPermissionRevision: this.input.currentPermissionRevision,
         argumentsDigest: this.input.argumentsDigest,
+        ...(this.input.operationalPorts === undefined ? {} : { operationalPorts: this.input.operationalPorts }),
       });
     } catch (error) {
       const admission = admissionFromError(error);
@@ -160,7 +181,9 @@ export class ExplicitBrainDecisionExecutor<TResult> {
 
     let handlerResult: TResult | ExplicitBrainHandlerResult<TResult>;
     try {
-      handlerResult = await this.input.handler.execute(intent, receipt);
+      handlerResult = this.operationalExecutor !== undefined && isOperationalTool(intent.toolRef)
+        ? await this.operationalExecutor.execute(intent, receipt)
+        : await this.input.handler.execute(intent, receipt);
     } catch (error) {
       const trace = this.appendTrace(decision, intent, 'rejected', receipt, error instanceof Error ? error.message : String(error));
       throw new ExplicitBrainDecisionError({

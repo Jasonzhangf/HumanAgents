@@ -29,6 +29,7 @@ import {
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
+import type { ExplicitBrainAgentTarget } from '../explicit-brain-runtime.js';
 
 export interface RccModeConfig {
   readonly binding: ProviderBinding;
@@ -50,12 +51,26 @@ export interface UiRuntimeLaunchOptions {
   readonly host?: string;
   readonly portNumber?: number;
   readonly projectKey?: string;
+  readonly workspaceRoot?: string;
+  readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
+  readonly explicitBrainAgentMessage?: (input: {
+    readonly recipientRef: string;
+    readonly messageRef: string;
+    readonly messageClass: 'control' | 'data' | 'observation';
+  }) => Promise<unknown>;
+  readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
   readonly restart?: (input: {
     readonly leaseId: string;
     readonly generation: number;
   }) => DaemonRestartReceipt;
+  readonly identity?: () => {
+    readonly leaseId: string;
+    readonly generation: number;
+    readonly pid: number;
+    readonly processStartToken: string;
+  };
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -151,6 +166,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     journal,
     closurePort: interactionJournal ?? journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
+    ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+    ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),
+    ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),
+    ...(options.explicitBrainAgentTargets === undefined ? {} : { explicitBrainAgentTargets: options.explicitBrainAgentTargets }),
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
@@ -162,6 +181,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     host: options.host,
     port: options.portNumber,
     ...(options.restart === undefined ? {} : { restart: options.restart }),
+    ...(options.identity === undefined ? {} : { identity: options.identity }),
   });
   return { service, server };
 }

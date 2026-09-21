@@ -26,6 +26,10 @@
     "task.history",
     "session.history"
   ],
+  "builtInTools": [
+    "checkpoint.inspect",
+    "checkpoint.recall"
+  ],
   "promptSegmentRefs": [
     "common/observation.md",
     "common/orchestration.md",
@@ -116,5 +120,5 @@
       "capabilityDigest": "sha256:351f89b0d60384b27e2b1563a1891ea9c05ab35d6082a44a1a0442bdbecdc9ef"
     }
   },
-  "digest": "fnv1a:cc40bed2"
+  "digest": "fnv1a:810e4deb"
 }

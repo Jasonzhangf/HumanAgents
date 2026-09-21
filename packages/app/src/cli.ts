@@ -921,14 +921,41 @@ export async function main(args: readonly string[]): Promise<void> {
             },
             host,
             portNumber: boundPortNumber,
+            projectKey: paths.projectKey,
+            workspaceRoot: paths.workspaceCwd,
             restart: requestRestart,
+            identity: () => {
+              if (supervisor === undefined) {
+                throw new AppLifecycleError(
+                  'daemon-identity.owner-not-ready',
+                  'serve owner has not completed startup',
+                  'wait for the original serve CLI to report ready and retry identity inspection',
+                  'humanagent.app.serve',
+                );
+              }
+              const activeLease = supervisor.lease.record;
+              return {
+                leaseId: activeLease.leaseId,
+                generation: activeLease.generation,
+                pid: activeLease.pid,
+                processStartToken: activeLease.processStartToken,
+              };
+            },
           });
         },
         dispose: async () => {
           if (runtime) await runtime.server.close();
         },
       },
-    ], { lease: { ownerId: 'humanagent.app.serve' } });
+    ], {
+      lease: {
+        ownerId: 'humanagent.app.serve',
+        takeover: {
+          reason: 'new hm serve process takes over the previous daemon',
+          stop: {},
+        },
+      },
+    });
     if (!runtime || supervisor === undefined) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
     boundPortNumber = runtime.server.port;
     await supervisor.lease.setControlEndpoint({ host, port: runtime.server.port });
@@ -958,6 +985,7 @@ export async function main(args: readonly string[]): Promise<void> {
       uiRoot,
       checkpointRoot,
       memoryRoot,
+      projectKey: paths.projectKey,
       eventJournal: join(paths.journalRoot, 'events.jsonl'),
       supervisor: {
         leasePath: join(paths.projectRoot, 'daemon', 'lease.json'),

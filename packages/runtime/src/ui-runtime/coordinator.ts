@@ -8,6 +8,7 @@ import {
   type AgentOutput,
   type Checkpoint,
   type CycleId,
+  type DecisionTraceRecord,
   type EvidenceRef,
   type LifecycleState,
   type NextAction,
@@ -198,6 +199,7 @@ export interface RuntimeExplicitBrainJournalState {
     readonly executionEpoch: number;
   }[];
   readonly submittedSubmissions: readonly PersistedSubmittedReceipt[];
+  readonly decisionTraces?: readonly DecisionTraceRecord[];
 }
 
 export type RuntimeTaskJournalRecord =

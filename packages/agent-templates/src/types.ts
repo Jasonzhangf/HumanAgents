@@ -2,6 +2,12 @@ export const AGENT_TEMPLATE_API_VERSION = 1;
 
 export const AGENT_ROLE_IDS = ['interaction', 'orchestration', 'execution', 'review', 'memory'] as const;
 export type AgentRole = (typeof AGENT_ROLE_IDS)[number];
+export type AgentBuiltInTool =
+  | 'checkpoint.inspect'
+  | 'checkpoint.recall'
+  | 'checkpoint.save'
+  | 'checkpoint.record-dead-end'
+  | 'checkpoint.reenter';
 
 export type MemoryContextScope = 'task' | 'organ' | 'approved-global';
 export type MemoryContextLayer = 'current' | 'task-recent' | 'related' | 'approved-long-term' | 'raw';
@@ -37,6 +43,7 @@ export interface AgentTemplateManifest {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
+  readonly builtInTools: readonly AgentBuiltInTool[];
   readonly promptSegmentRefs: readonly string[];
   readonly modeCapabilityProfile: AgentModeCapabilityProfiles;
   readonly inputSchemaRef: string;
@@ -67,6 +74,7 @@ export interface CompiledAgentTemplate {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
+  readonly builtInTools: readonly AgentBuiltInTool[];
   readonly promptSegmentRefs: readonly string[];
   readonly promptSegmentDigest: string;
   readonly modeCapabilityProfile: AgentModeCapabilityProfiles;
@@ -130,4 +138,5 @@ export interface AgentTemplateValidation {
   readonly capabilityRefs: readonly string[];
   readonly skillRefs: readonly string[];
   readonly toolCapabilityRefs: readonly string[];
+  readonly builtInTools: readonly AgentBuiltInTool[];
 }

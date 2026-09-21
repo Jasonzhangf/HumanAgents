@@ -13,6 +13,11 @@
     "runtime.status",
     "queue.inspect",
     "resource.query",
+    "workspace.list",
+    "file.read",
+    "file.search",
+    "agent.query",
+    "agent.message",
     "bug.query",
     "bug.inspect",
     "channel.query",
@@ -60,6 +65,11 @@
     "runtime.status",
     "queue.inspect",
     "resource.query",
+    "workspace.list",
+    "file.read",
+    "file.search",
+    "agent.query",
+    "agent.message",
     "bug.query",
     "bug.inspect",
     "channel.query",
@@ -89,6 +99,9 @@
     "bug.propose-update",
     "bug.resolve",
     "bug.reopen"
+  ],
+  "builtInTools": [
+    "checkpoint.inspect"
   ],
   "promptSegmentRefs": [
     "common/observation.md",
@@ -180,5 +193,5 @@
       "capabilityDigest": "sha256:f480ee7510d6ead321b5ea2046521b801077a6ee725b70cc3b7241b4b0c87427"
     }
   },
-  "digest": "fnv1a:2aa89329"
+  "digest": "fnv1a:dbe3526d"
 }

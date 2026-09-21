@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
-import { id, type TaskId } from '../../../contracts/src/index.js';
+import { id, validateInteractionDecision, type TaskId } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
@@ -20,6 +20,12 @@ export interface UiRuntimeServerOptions {
     readonly leaseId: string;
     readonly generation: number;
   }) => DaemonRestartReceipt;
+  readonly identity?: () => {
+    readonly leaseId: string;
+    readonly generation: number;
+    readonly pid: number;
+    readonly processStartToken: string;
+  };
 }
 
 export interface UiRuntimeServer {
@@ -160,7 +166,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   }
   const service = options.service;
   const server = createServer((request, response) => {
-    void handleRequest(request, response, service, options.uiRoot, options.restart);
+    void handleRequest(request, response, service, options.uiRoot, options.restart, options.identity);
   });
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -188,6 +194,7 @@ async function handleRequest(
   service: UiRuntimeService,
   uiRoot: string,
   restart?: UiRuntimeServerOptions['restart'],
+  identity?: UiRuntimeServerOptions['identity'],
 ): Promise<void> {
   const method = request.method ?? 'GET';
   const url = new URL(request.url ?? '/', 'http://localhost');
@@ -195,6 +202,19 @@ async function handleRequest(
   try {
     if (path === '/api/runtime/status' && method === 'GET') {
       writeJson(response, 200, service.status());
+      return;
+    }
+    if (path === '/api/runtime/identity' && method === 'GET') {
+      if (identity === undefined) {
+        throw new UiRuntimeApiError(
+          'daemon-identity.unsupported',
+          APP_OWNER,
+          'this runtime is not hosted by a supervisor with an identity endpoint',
+          'request identity from the original humanagent serve owner',
+          501,
+        );
+      }
+      writeJson(response, 200, identity());
       return;
     }
     if (path === '/api/runtime/restart' && method === 'POST') {
@@ -344,6 +364,22 @@ async function handleRequest(
         channel,
       }, inputRevision);
       writeJson(response, 201, { interactionId });
+      return;
+    }
+    if (path === '/api/explicit/decision' && method === 'POST') {
+      const body = await readBody(request);
+      try {
+        validateInteractionDecision(body);
+      } catch (error) {
+        throw new UiRuntimeApiError(
+          'request.invalid-field',
+          APP_OWNER,
+          error instanceof Error ? error.message : String(error),
+          'provide a complete typed explicit brain decision',
+          400,
+        );
+      }
+      writeJson(response, 200, await service.executeExplicitDecision(body));
       return;
     }
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
