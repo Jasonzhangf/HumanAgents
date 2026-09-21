@@ -64,9 +64,7 @@ export class ExplicitBrainOperationalToolExecutor<TResult = unknown> {
     const { binding, ports } = this.options;
     switch (intent.toolRef) {
       case 'workspace.list': {
-        const scopeRef = args.scopeRef === undefined
-          ? stringArgument(args, 'pathRef')
-          : stringArgument(args, 'scopeRef');
+        const scopeRef = stringArgument(args, 'scopeRef');
         const pathRef = args.pathRef === undefined ? undefined : stringArgument(args, 'pathRef');
         ports.workspace.authorize({ binding, toolRef: 'workspace.list', scopeRef, ...(pathRef === undefined ? {} : { pathRef }) });
         return ports.workspace.list({

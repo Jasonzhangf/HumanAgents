@@ -264,7 +264,7 @@ function validateToolArguments(toolRef: ExplicitBrainModelTool, args: Readonly<R
     return;
   }
   if (toolRef === 'workspace.list') {
-    assertString(args.scopeRef ?? args.pathRef, 'workspace.list scopeRef or pathRef');
+    assertString(args.scopeRef, 'workspace.list scopeRef');
     return;
   }
   if (toolRef === 'file.read') {
@@ -501,7 +501,7 @@ function assertOperationalAuthorization(
       input.operationalPorts.workspace.authorize({
         binding: input.binding,
         toolRef,
-        scopeRef: String(args.scopeRef ?? args.pathRef),
+        scopeRef: String(args.scopeRef),
         ...(args.pathRef === undefined ? {} : { pathRef: String(args.pathRef) }),
       });
       return;

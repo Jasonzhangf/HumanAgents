@@ -67,6 +67,41 @@ test('application explicit brain runtime rejects a workspace scope outside its b
   );
 });
 
+test('application explicit brain runtime lists a path within its registered workspace scope', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-list-'));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src', 'README.md'), 'workspace list\n', 'utf8');
+  const runtime = createExplicitBrainRuntime({
+    workspaceRoot: await realpath(root),
+    projectKey: 'project-a',
+    traces: new DecisionTraceStore(),
+  });
+  const args = { scopeRef: 'scope:workspace:project-a', pathRef: 'src' };
+  const [result] = await runtime.execute({
+    decisionId: 'decision:app-runtime-list',
+    interactionId: 'interaction:app-runtime-list',
+    kind: 'intent',
+    selectedAction: 'answer',
+    summary: 'list workspace evidence',
+    evidenceRefs: [],
+    toolIntents: [{
+      toolIntentId: 'intent:workspace-list',
+      toolRef: 'workspace.list',
+      arguments: args,
+      argumentsDigest: digest(args),
+      reasonRefs: [],
+      selectedBecause: 'workspace evidence is required',
+    }],
+  });
+  assert.deepEqual(
+    {
+      paths: (result as { readonly paths: readonly string[] }).paths,
+      complete: (result as { readonly complete: boolean }).complete,
+    },
+    { paths: ['src/README.md'], complete: true },
+  );
+});
+
 test('application explicit brain runtime requires registered agent identity and preserves decision traces', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-agent-'));
   const persisted: import('../../packages/contracts/src/index.js').DecisionTraceRecord[] = [];
