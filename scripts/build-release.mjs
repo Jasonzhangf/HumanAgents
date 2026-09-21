@@ -12,8 +12,9 @@ function option(args, name, fallback) {
   return index === -1 ? fallback : args[index + 1];
 }
 
-const projectRoot = resolve(option(process.argv.slice(2), '--project-root', process.cwd()));
-const releaseVersion = process.env.HUMANAGENT_RELEASE_VERSION || configuredReleaseVersion();
+const args = process.argv.slice(2);
+const projectRoot = resolve(option(args, '--project-root', process.cwd()));
+const releaseVersion = option(args, '--release-version', process.env.HUMANAGENT_RELEASE_VERSION || configuredReleaseVersion());
 const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: projectRoot, encoding: 'utf8' }).trim();
 if (dirty && process.env.HUMANAGENT_ALLOW_DIRTY_RELEASE !== '1') {
   throw new Error('release source is dirty; commit or use HUMANAGENT_ALLOW_DIRTY_RELEASE=1 for a local candidate');
