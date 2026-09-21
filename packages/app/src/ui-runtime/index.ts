@@ -42,6 +42,7 @@ export interface UiRuntimeLaunchOptions {
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
   readonly checkpointRoot: string;
+  readonly interactionRoot?: string;
   readonly evidenceRoot: string;
   readonly uiRoot: string;
   readonly providerState?: string;
@@ -129,6 +130,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
+  const interactionJournal = options.interactionRoot
+    ? new UiRuntimeJournal(join(options.interactionRoot, 'sessions', 'explicit-brain.jsonl'))
+    : undefined;
   const checkpointStoreFor = (taskId: TaskId, cycleId: CycleId): TaskCheckpointStore => new FileCheckpointStore(join(modeRoot, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`));
   const service = new UiRuntimeService({
     mode: options.mode,
@@ -140,8 +144,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     providerState,
     providerError,
     journal,
-    closurePort: journal,
+    closurePort: interactionJournal ?? journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
+    ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
   });

@@ -173,6 +173,7 @@ export interface UiRuntimeServiceOptions {
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;
+  readonly interactionJournal?: UiRuntimeJournal;
   readonly closurePort: CheckpointClosurePort;
   readonly now?: () => Date;
   readonly projectKey?: string;
@@ -975,7 +976,7 @@ export class UiRuntimeService {
 
   async hydrate(): Promise<void> {
     await this.coordinator.hydrate();
-    const records = this.options.journal?.replay() ?? [];
+    const records = (this.options.interactionJournal ?? this.options.journal)?.replay() ?? [];
     const state = records
       .filter((record): record is Extract<typeof record, { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
       .at(-1)?.state;
@@ -1211,7 +1212,7 @@ export class UiRuntimeService {
   }
 
   private persistExplicitBrainState(): void {
-    this.options.journal?.append({
+    (this.options.interactionJournal ?? this.options.journal)?.append({
       kind: 'explicit-brain.state',
       state: {
         intake: this.explicitIntake.exportState(),

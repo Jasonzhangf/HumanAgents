@@ -15,7 +15,8 @@ control plane / explicit Agent cwd
   ├── config.toml         用户 Agent roster 和策略
   ├── user/               全局用户画像
   ├── memory/global/      已批准的跨项目知识
-  └── project/<project-key>/  每个 workspace 的 session、任务历史和项目记忆
+  ├── main/sessions/         显式 Agent 的长期对话 session
+  └── sessions/<project-key>/ 每个 workspace 的执行 session、任务历史和项目记忆
 
 execution workspace
   当前命令 cwd 或 --workspace
@@ -53,7 +54,7 @@ macOS 示例：
 ### 2.3 Project storage（仍位于 control root）
 
 ```text
-~/.humanagent/project/<project-key>/
+~/.humanagent/sessions/<project-key>/
   project.json                  canonical path 和 project identity
   config.toml                   可选项目覆盖，只能缩小用户权限
   sessions/
@@ -87,7 +88,7 @@ authoring → parse → validate → compile → load
 built-in defaults
   → internal.toml
   → ~/.humanagent/config.toml
-  → project/<project-key>/config.toml
+  → sessions/<project-key>/config.toml
   → 本次 CLI 显式 workspace/profile 参数
 ```
 
@@ -101,7 +102,7 @@ CLI 只能设置用户可覆盖字段。以下字段永远来自 internal 层：
 schemaVersion = 1
 controlRoot = "~/.humanagent"
 agentCwd = "~/.humanagent"
-sessionRoot = "~/.humanagent/project"
+sessionRoot = "~/.humanagent/sessions"
 pluginManifest = "~/.humanagent/plugins/manifest.json"
 releaseChannel = "stable"
 configPolicy = "internal-overrides-user"
@@ -240,7 +241,7 @@ MVP 的 `run` 完成 create/opening/ready 后交还宿主，session 保持 `read
 ### 6.2 项目位置
 
 ```text
-~/.humanagent/project/<project-key>/memory/
+~/.humanagent/sessions/<project-key>/memory/
   project/journal.jsonl
   project/index/
   project/artifacts/
@@ -264,6 +265,11 @@ MVP 的 `run` 完成 create/opening/ready 后交还宿主，session 保持 `read
 可见性从窄到宽：`task-local → project → approved-global → user-profile`。Agent context injection 只接受 scope、role、layer、budget 和 source digest；L4 原始细节默认不注入。Index 可删除后重建，任何摘要不能替代 session/domain recovery state。
 
 ## 7. Release 链条
+
+当前 release version 的唯一规则见 [`release-version.md`](release-version.md)。标准
+release build 使用 `pnpm build:release`：它要求 clean worktree，自动 bump patch
+version，同步 package metadata 和本架构记录，提交版本变更，然后执行完整的
+checkpointed regression/release chain。它不是普通 `pnpm build` 的别名。
 
 ```text
 clean candidate
@@ -312,7 +318,23 @@ humanagent resume --workspace /tmp/another-workspace --session <session-id>
 restart → session list/resume → checkpoint recall
 ```
 
-卸载只移除本次安装 prefix 中的 CLI；不得删除 `~/.humanagent/project`、user profile 或 memory。数据清理必须有独立命令和明确 target。
+显式对话始终属于显式 Agent，不使用项目执行 session。启动 `serve` 后打开命令
+输出的 loopback URL，或直接访问 `/interaction.html`；页面首条业务输入会创建并
+持久化显式交互到：
+
+```text
+~/.humanagent/main/sessions/explicit-brain.jsonl
+```
+
+项目任务 session 则写入：
+
+```text
+~/.humanagent/sessions/<project-key>/<session-id>.jsonl
+```
+
+卸载只移除本次安装 prefix 中的 CLI；不得删除 `~/.humanagent/main`、
+`~/.humanagent/sessions`、user profile 或 memory。数据清理必须有独立命令和明确
+target。
 
 ## 8. MVP 实现边界和验收
 

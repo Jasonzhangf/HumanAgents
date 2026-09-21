@@ -25,6 +25,11 @@ test('resolves all persistence below control root and keeps workspace separate',
   const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
   await ensureControlLayout(paths);
   assert.equal(paths.agentCwd, paths.controlRoot);
+  assert.equal(paths.mainRoot, join(paths.controlRoot, 'main'));
+  assert.equal(paths.mainSessionsRoot, join(paths.controlRoot, 'main', 'sessions'));
+  assert.equal(paths.projectRoot, join(paths.controlRoot, 'sessions', paths.projectKey));
+  assert.equal(paths.sessionsRoot, paths.projectRoot);
+  assert.equal(paths.projectRoot === paths.workspaceCwd, false);
   assert.equal(paths.projectRoot.startsWith(paths.controlRoot), true);
   assert.equal(paths.workspaceCwd, await realpath(workspace));
   assert.equal(paths.projectKey, (await realpath(workspace)).replaceAll('/', '-') || '-');

@@ -48,7 +48,9 @@ import {
 } from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
 import { runSupervisorStartup } from './supervisor/supervisor.js';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
 
@@ -72,6 +74,38 @@ function requiredPrompt(value: string | undefined): string {
     );
   }
   return value;
+}
+
+function packageVersion(): string {
+  const configured = process.env.HUMANAGENT_RELEASE_VERSION?.trim();
+  if (configured) return configured;
+  let current = dirname(fileURLToPath(import.meta.url));
+  for (let index = 0; index < 8; index += 1) {
+    const packagePath = join(current, 'package.json');
+    if (existsSync(packagePath)) {
+      try {
+        const value = JSON.parse(readFileSync(packagePath, 'utf8')) as { version?: unknown };
+        if (typeof value.version === 'string' && value.version.trim()) return value.version;
+      } catch {
+        // Continue walking; a package.json outside the runtime root is not authoritative.
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return '0.1.0';
+}
+
+function defaultUiRoot(): string {
+  const configured = process.env.HUMANAGENT_UI_ROOT?.trim();
+  if (configured) return configured;
+  const moduleRoot = dirname(fileURLToPath(import.meta.url));
+  const packaged = join(moduleRoot, '../../ui');
+  if (existsSync(join(packaged, 'index.html'))) return packaged;
+  const source = join(moduleRoot, '../../../../docs/ui');
+  if (existsSync(join(source, 'index.html'))) return source;
+  return join(process.cwd(), 'docs', 'ui');
 }
 
 function fakeScenario(args: readonly string[]): FakeExecutionScenario | undefined {
@@ -334,7 +368,7 @@ export async function main(args: readonly string[]): Promise<void> {
   const workspace = option(args, '--workspace') ?? process.cwd();
   const controlRoot = option(args, '--control-root');
   if (command === '--version' || command === 'version') {
-    console.log('0.1.0');
+    console.log(packageVersion());
     return;
   }
   if (command === 'init' || command === 'doctor') {
@@ -575,7 +609,7 @@ export async function main(args: readonly string[]): Promise<void> {
       throw new Error('serve --protocol must be responses, openai, or anthropic');
     }
     const binding = providerBindingFromOptions(args, protocol, mode);
-    const uiRoot = option(args, '--ui-root') ?? join(process.cwd(), 'docs', 'ui');
+    const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 0;
@@ -700,6 +734,7 @@ export async function main(args: readonly string[]): Promise<void> {
             binding,
             port: cordisHost.getExecutionRuntimePort(),
             checkpointRoot,
+            interactionRoot: paths.mainRoot,
             evidenceRoot,
             uiRoot,
             memory: {
