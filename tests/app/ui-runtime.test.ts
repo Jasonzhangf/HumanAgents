@@ -1315,7 +1315,7 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
   assert.equal(dispatched.taskId.value.startsWith('ui-task-'), true);
   assert.equal(dispatched.executionEpoch, 1);
   await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'succeeded'));
-  assert.equal(service.taskDashboard(dispatched.taskId).input, 'asset://requirements/explicit-brain');
+  assert.equal(service.taskDashboard(dispatched.taskId).input, 'summarize the current task evidence');
   assert.match(service.taskDashboard(dispatched.taskId).output, /fake replay/);
   const events = service.eventsSince(dispatched.operationId);
   assert.deepEqual(events.map((event) => event.kind), [

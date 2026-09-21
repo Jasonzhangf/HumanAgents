@@ -1205,7 +1205,7 @@ export class UiRuntimeService {
             directive: admitted.classified.envelope.normalizedInput,
           });
       const started = this.coordinator.startExecution(task.taskId, {
-        prompt: admitted.classified.envelope.payloadRef,
+        prompt: admitted.classified.envelope.normalizedInput,
         ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
       });
       this.dispatchLedger.set(consumed.draftId, {
