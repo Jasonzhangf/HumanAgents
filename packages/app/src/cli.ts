@@ -50,7 +50,7 @@ import { createCordisHost } from './cordis-host.js';
 import { runSupervisorStartup } from './supervisor/supervisor.js';
 import { join } from 'node:path';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
-import { createDeterministicServeOrchestrationPorts } from './serve-orchestration.js';
+import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -310,6 +310,22 @@ function providerBindingFromOptions(
     configDigest: option(args, '--config-digest') ?? (fake ? 'sha256:fake-ui-config' : 'sha256:ui-runtime-config'),
     capabilityDigest: option(args, '--capability-digest') ?? (fake ? 'sha256:fake-ui-capability' : 'sha256:ui-runtime-capability'),
   };
+}
+
+function servePromptSegments(
+  configuration: LoadedConfiguration,
+  role: 'execution' | 'review',
+): readonly string[] {
+  const loaded = configuration.promptCatalog[role];
+  if (!loaded || loaded.segments.length === 0) {
+    throw new AppLifecycleError(
+      'serve.agent-prompt.missing',
+      `serve ${role} agent prompt segments are not loaded`,
+      'restore the locked builtin agent template resources before starting RCC orchestration',
+      'humanagent.app.serve-orchestration',
+    );
+  }
+  return loaded.segments.map((segment) => segment.content);
 }
 
 export async function main(args: readonly string[]): Promise<void> {
@@ -627,7 +643,16 @@ export async function main(args: readonly string[]): Promise<void> {
     cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     let serveRuntime: ServeRuntimeComposition | undefined;
-    const orchestrationPorts = mode === 'fake' ? createDeterministicServeOrchestrationPorts() : undefined;
+    const orchestrationPorts = mode === 'fake'
+      ? createDeterministicServeOrchestrationPorts()
+      : createRccServeOrchestrationPorts({
+          port,
+          binding,
+          promptSegments: {
+            execution: servePromptSegments(configuration, 'execution'),
+            review: servePromptSegments(configuration, 'review'),
+          },
+        });
     const supervisor = await runSupervisorStartup(paths, [
       {
         name: 'cordis-host',

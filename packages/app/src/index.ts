@@ -135,8 +135,8 @@ export type { MemoryRuntime, MemoryRuntimeInput } from './memory-runtime.js';
 export { createM3Assembly } from './m3-assembly.js';
 export type { M3Assembly, M3AssemblyOptions } from './m3-assembly.js';
 export { createServeRuntimeComposition, serveRuntimeOwnerId } from './serve-runtime.js';
-export { createDeterministicServeOrchestrationPorts } from './serve-orchestration.js';
-export type { ServeOrchestrationPorts } from './serve-orchestration.js';
+export { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
+export type { ProviderServeOrchestrationOptions, ServeOrchestrationPorts } from './serve-orchestration.js';
 export type {
   ServeAgentIoOwner,
   ServeEventBusOwner,
