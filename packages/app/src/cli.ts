@@ -47,8 +47,10 @@ import {
   serveCompositionManifestMatches,
 } from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
-import { runSupervisorStartup } from './supervisor/supervisor.js';
+import { runSupervisorStartup, type SupervisorStartup } from './supervisor/supervisor.js';
+import { requestDaemonRestart } from './supervisor/restart-client.js';
 import { existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
@@ -125,7 +127,7 @@ function fakeScenario(args: readonly string[]): FakeExecutionScenario | undefine
   return value;
 }
 
-function loopbackHost(value: string): string {
+function loopbackHost(value: string): '127.0.0.1' | '::1' {
   if (value !== '127.0.0.1' && value !== '::1') {
     throw new Error('serve --host must be a loopback address (127.0.0.1 or ::1) until the control API has authentication');
   }
@@ -416,6 +418,7 @@ function helpText(): string {
     '  --provider <name>        provider（默认读取 ~/.humanagent/config.toml）',
     '  --port <number>          WebUI 端口（默认 10086）',
     '  --protocol <name>        responses、openai 或 anthropic',
+    '  humanagent restart       请求原 serve owner 重启；当前 CLI 只观察，不接管显示',
     '  --help                   显示帮助',
     '  --json                   以机器可读 JSON 输出错误',
     '',
@@ -677,6 +680,13 @@ export async function main(args: readonly string[]): Promise<void> {
     }
     throw new Error('usage: humanagent session list|inspect --session <id> --workspace <path>');
   }
+  if (command === 'restart') {
+    const paths = await resolveRuntimePaths({ workspace, controlRoot });
+    await ensureControlLayout(paths);
+    const receipt = await requestDaemonRestart(paths);
+    console.log(JSON.stringify({ command, ...receipt }, null, 2));
+    return;
+  }
   if (command === 'serve') {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
@@ -694,6 +704,8 @@ export async function main(args: readonly string[]): Promise<void> {
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
+    let boundPortNumber = portNumber;
+    const host = loopbackHost(option(args, '--host') ?? '127.0.0.1');
     const memoryRoot = paths.memoryRoot;
     const memoryRuntime = await composeMemoryRuntime({
       paths,
@@ -758,6 +770,67 @@ export async function main(args: readonly string[]): Promise<void> {
     cordisHost.assertLoadedPlugins(SERVE_COMPOSITION_PLUGINS[mode].map((plugin) => plugin.pluginId));
     let runtime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
     let serveRuntime: ServeRuntimeComposition | undefined;
+    let supervisor: SupervisorStartup | undefined;
+    let restartInFlight: { readonly requestId: string; readonly receipt: {
+      readonly requestId: string;
+      readonly acceptedAt: string;
+      readonly ownerId: 'humanagent.app.serve';
+      readonly leaseId: string;
+      readonly generation: number;
+      readonly observerOnly: true;
+    }; readonly operation: Promise<void> } | undefined;
+    const requestRestart = (input: { readonly leaseId: string; readonly generation: number }) => {
+      if (supervisor === undefined) {
+        throw new AppLifecycleError(
+          'daemon-restart.owner-not-ready',
+          'serve owner has not completed startup',
+          'wait for the original serve CLI to report ready and retry restart',
+          'humanagent.app.serve',
+        );
+      }
+      const activeLease = supervisor.lease.record;
+      if (input.leaseId !== activeLease.leaseId || input.generation !== activeLease.generation) {
+        throw new AppLifecycleError(
+          'daemon-restart.owner-fence',
+          'restart request does not match the active serve owner lease',
+          'read the current daemon lease and retry from the active serve owner',
+          'humanagent.app.serve',
+        );
+      }
+      if (restartInFlight !== undefined) return restartInFlight.receipt;
+      const requestId = randomUUID();
+      const receipt = {
+        requestId,
+        acceptedAt: new Date().toISOString(),
+        ownerId: 'humanagent.app.serve' as const,
+        leaseId: activeLease.leaseId,
+        generation: activeLease.generation,
+        observerOnly: true as const,
+      };
+      const operation = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          void (async () => {
+            console.log(JSON.stringify({ event: 'restart.stopping', ...receipt }, null, 2));
+            try {
+              const restarted = await supervisor!.restart();
+              if (!runtime) throw new AppLifecycleError('daemon-restart.runtime-missing', 'serve restart completed without a UI runtime', 'inspect the original serve CLI startup failure', 'humanagent.app.serve');
+              await supervisor!.lease.setControlEndpoint({ host, port: runtime.server.port });
+              console.log(JSON.stringify({ event: 'restart.ready', ...receipt, readyAt: restarted.readyAt, url: runtime.server.url }, null, 2));
+            } catch (error) {
+              console.error(JSON.stringify({ event: 'restart.failed', ...receipt, error: cliErrorPayload(error) }, null, 2));
+            } finally {
+              resolve();
+            }
+          })();
+        }, 0);
+      });
+      restartInFlight = { requestId, receipt, operation };
+      void operation.finally(() => {
+        if (restartInFlight?.requestId === requestId) restartInFlight = undefined;
+      });
+      console.log(JSON.stringify({ event: 'restart.accepted', ...receipt }, null, 2));
+      return receipt;
+    };
     const orchestrationPorts = mode === 'fake'
       ? createDeterministicServeOrchestrationPorts()
       : createRccServeOrchestrationPorts({
@@ -767,7 +840,7 @@ export async function main(args: readonly string[]): Promise<void> {
               review: servePromptSegments(configuration, 'review'),
             },
         });
-    const supervisor = await runSupervisorStartup(paths, [
+    supervisor = await runSupervisorStartup(paths, [
       {
         name: 'cordis-host',
         ownerId: 'humanagent.app.cordis-host',
@@ -846,8 +919,9 @@ export async function main(args: readonly string[]): Promise<void> {
                 createTaskAssembly: serveRuntime!.createTaskAssembly,
               }),
             },
-            host: loopbackHost(option(args, '--host') ?? '127.0.0.1'),
-            portNumber,
+            host,
+            portNumber: boundPortNumber,
+            restart: requestRestart,
           });
         },
         dispose: async () => {
@@ -855,12 +929,14 @@ export async function main(args: readonly string[]): Promise<void> {
         },
       },
     ], { lease: { ownerId: 'humanagent.app.serve' } });
-    if (!runtime) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
+    if (!runtime || supervisor === undefined) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
+    boundPortNumber = runtime.server.port;
+    await supervisor.lease.setControlEndpoint({ host, port: runtime.server.port });
     let shuttingDown = false;
     const shutdown = (): void => {
       if (shuttingDown) return;
       shuttingDown = true;
-      void supervisor.dispose().catch((error: unknown) => {
+      void supervisor!.dispose().catch((error: unknown) => {
         console.error(formatCliError(error, process.argv.slice(2)));
         process.exitCode = 1;
       });
@@ -885,6 +961,7 @@ export async function main(args: readonly string[]): Promise<void> {
       eventJournal: join(paths.journalRoot, 'events.jsonl'),
       supervisor: {
         leasePath: join(paths.projectRoot, 'daemon', 'lease.json'),
+        controlEndpoint: supervisor.lease.record.controlEndpoint,
         readyAt: supervisor.readyAt,
         stages: supervisor.stages,
       },

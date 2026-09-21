@@ -28,6 +28,7 @@ import {
   type UiRuntimeServiceOptions,
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
+import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
 
 export interface RccModeConfig {
   readonly binding: ProviderBinding;
@@ -51,6 +52,10 @@ export interface UiRuntimeLaunchOptions {
   readonly projectKey?: string;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
+  readonly restart?: (input: {
+    readonly leaseId: string;
+    readonly generation: number;
+  }) => DaemonRestartReceipt;
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -156,6 +161,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,
+    ...(options.restart === undefined ? {} : { restart: options.restart }),
   });
   return { service, server };
 }

@@ -133,6 +133,44 @@ test('startup dispose releases staged resources in reverse order', async () => {
   await next.release();
 });
 
+test('restart reuses the active owner lease and restarts stages without takeover', async () => {
+  const paths = await fixture();
+  const events: string[] = [];
+  const startup = await runSupervisorStartup(paths, [
+    {
+      name: 'stage-a',
+      ownerId: 'owner-a',
+      start: async () => { events.push('start:a'); },
+      dispose: async () => { events.push('dispose:a'); },
+    },
+    {
+      name: 'stage-b',
+      ownerId: 'owner-b',
+      start: async () => { events.push('start:b'); },
+      dispose: async () => { events.push('dispose:b'); },
+    },
+  ], { lease: { ownerId: 'humanagent.app.serve' } });
+  const leaseId = startup.lease.record.leaseId;
+  const generation = startup.lease.record.generation;
+
+  await startup.lease.setControlEndpoint({ host: '127.0.0.1', port: 10086 });
+  const restarted = await startup.restart();
+
+  assert.equal(restarted.leaseId, leaseId);
+  assert.equal(restarted.generation, generation);
+  assert.deepEqual(events, [
+    'start:a', 'start:b',
+    'dispose:b', 'dispose:a',
+    'start:a', 'start:b',
+  ]);
+  const lease = await readDaemonLease(paths);
+  assert.equal(lease?.leaseId, leaseId);
+  assert.equal(lease?.generation, generation);
+  assert.deepEqual(lease?.controlEndpoint, { host: '127.0.0.1', port: 10086 });
+  assert.equal(lease?.disposedAt, undefined);
+  await startup.dispose();
+});
+
 test('startup dispose remains retryable when lease release fails', async () => {
   const paths = await fixture();
   const startup = await runSupervisorStartup(paths, []);

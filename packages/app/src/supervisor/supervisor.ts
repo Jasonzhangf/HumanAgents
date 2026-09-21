@@ -38,8 +38,14 @@ export interface SupervisorLeaseRecord {
   readonly acquiredAt: string;
   readonly readyAt?: string;
   readonly disposedAt?: string;
+  readonly controlEndpoint?: SupervisorControlEndpoint;
   readonly takeover?: SupervisorTakeoverRecord;
   readonly failure?: SupervisorFailureRecord;
+}
+
+export interface SupervisorControlEndpoint {
+  readonly host: '127.0.0.1' | '::1';
+  readonly port: number;
 }
 
 export interface SupervisorFailureReceipt extends SupervisorFailureRecord {
@@ -61,6 +67,7 @@ export interface SupervisorLease {
   refresh(): Promise<SupervisorLeaseRecord>;
   assertActive(): Promise<void>;
   markReady(): Promise<SupervisorLeaseRecord>;
+  setControlEndpoint(endpoint: SupervisorControlEndpoint): Promise<SupervisorLeaseRecord>;
   release(input?: { readonly failure?: SupervisorFailureRecord }): Promise<SupervisorLeaseRecord>;
 }
 
@@ -91,7 +98,16 @@ export interface SupervisorStartup {
   readonly lease: SupervisorLease;
   readonly readyAt: string;
   readonly stages: readonly string[];
+  restart(): Promise<SupervisorRestartReceipt>;
   dispose(): Promise<SupervisorDisposeReceipt>;
+}
+
+export interface SupervisorRestartReceipt {
+  readonly leaseId: string;
+  readonly generation: number;
+  readonly readyAt: string;
+  readonly restartedAt: string;
+  readonly stages: readonly string[];
 }
 
 function supervisorError(code: string, message: string, nextAction: string, ownerId = 'supervisor'): AppLifecycleError {
@@ -126,6 +142,18 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
   for (const key of ['readyAt', 'disposedAt'] as const) {
     if (value[key] !== undefined && typeof value[key] !== 'string') {
       throw supervisorError('daemon-lease-corrupt', `daemon lease field ${key} is invalid`, 'inspect and repair the daemon lease');
+    }
+  }
+  if (value.controlEndpoint !== undefined) {
+    const endpoint = value.controlEndpoint;
+    if (
+      endpoint.host !== '127.0.0.1'
+      && endpoint.host !== '::1'
+      || !Number.isSafeInteger(endpoint.port)
+      || endpoint.port < 1
+      || endpoint.port > 65535
+    ) {
+      throw supervisorError('daemon-lease-corrupt', 'daemon lease control endpoint is invalid', 'inspect and repair the daemon lease');
     }
   }
   if (value.takeover !== undefined) {
@@ -347,7 +375,13 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       record = await assertLeaseActive(paths, record);
     },
     async markReady() {
-      return update((current) => ({ ...current, readyAt: current.readyAt ?? new Date().toISOString() }));
+      return update((current) => ({ ...current, readyAt: new Date().toISOString() }));
+    },
+    async setControlEndpoint(endpoint) {
+      if (!Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) {
+        throw supervisorError('daemon-control.endpoint-invalid', 'daemon control endpoint port is invalid', 'bind the owner control endpoint to a valid loopback port');
+      }
+      return update((current) => ({ ...current, controlEndpoint: endpoint }));
     },
     async release(input) {
       if (released) return record;
@@ -466,11 +500,67 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
     }
     await lease.markReady();
     let disposeReceipt: SupervisorDisposeReceipt | undefined;
+    let restarting: Promise<SupervisorRestartReceipt> | undefined;
     const startup: SupervisorStartup = {
       paths,
       lease,
       readyAt: lease.record.readyAt ?? new Date().toISOString(),
       stages: stages.map((stage) => stage.name),
+      async restart() {
+        if (disposeReceipt !== undefined) {
+          throw supervisorError('supervisor-restart.disposed', 'cannot restart a disposed supervisor', 'start a new owner after confirming the previous owner is stopped');
+        }
+        if (restarting !== undefined) return restarting;
+        restarting = (async () => {
+          const cleanup = await disposeStagesReverse(started);
+          started.length = 0;
+          if (cleanup.cleanupFailure !== undefined) {
+            const failure = new AppLifecycleError(
+              'supervisor-restart.cleanup-failed',
+              `supervisor restart cleanup failed: ${cleanup.cleanupFailure.message}`,
+              'repair the failed stage disposal before retrying restart',
+              cleanup.cleanupFailure.ownerId,
+            );
+            const released = await lease.release({ failure: failureRecordFor(failure, undefined) });
+            disposeReceipt = {
+              lease: released,
+              disposedStages: cleanup.disposedStages,
+              releasedAt: released.disposedAt ?? new Date().toISOString(),
+              cleanupFailure: cleanup.cleanupFailure,
+            };
+            throw failure;
+          }
+          try {
+            for (const stage of stages) {
+              started.push(stage);
+              await stage.start();
+            }
+            const ready = await lease.markReady();
+            return {
+              leaseId: ready.leaseId,
+              generation: ready.generation,
+              readyAt: ready.readyAt ?? new Date().toISOString(),
+              restartedAt: new Date().toISOString(),
+              stages: stages.map((stage) => stage.name),
+            };
+          } catch (error) {
+            const failure = await failAndCleanup(paths, lease, error, started);
+            const released = lease.record;
+            disposeReceipt = {
+              lease: released,
+              disposedStages: failure.receipt.disposedStages,
+              releasedAt: released.disposedAt ?? new Date().toISOString(),
+              ...(failure.receipt.cleanupFailure === undefined ? {} : { cleanupFailure: failure.receipt.cleanupFailure }),
+            };
+            throw failure.error;
+          }
+        })();
+        try {
+          return await restarting;
+        } finally {
+          restarting = undefined;
+        }
+      },
       async dispose() {
         if (disposeReceipt !== undefined) return disposeReceipt;
         const cleanup = await disposeStagesReverse(started);

@@ -2715,6 +2715,53 @@ test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
   }
 });
 
+test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-control-'));
+  const received: Array<{ readonly leaseId: string; readonly generation: number }> = [];
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: buildFakeExecutionPort(binding),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: testMemory('project-ui-restart-control'),
+    restart: (input) => {
+      received.push(input);
+      return {
+        requestId: 'restart-request-1',
+        acceptedAt: '2026-09-21T00:00:00.000Z',
+        ownerId: 'humanagent.app.serve',
+        leaseId: input.leaseId,
+        generation: input.generation,
+        observerOnly: true,
+      };
+    },
+  });
+  try {
+    const response = await fetch(`${runtime.server.url}/api/runtime/restart`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ leaseId: 'lease-1', generation: 7 }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), {
+      requestId: 'restart-request-1',
+      acceptedAt: '2026-09-21T00:00:00.000Z',
+      ownerId: 'humanagent.app.serve',
+      leaseId: 'lease-1',
+      generation: 7,
+      observerOnly: true,
+    });
+    assert.deepEqual(received, [{ leaseId: 'lease-1', generation: 7 }]);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
 test('ui runtime server rejects static files that resolve outside the UI root through symlinks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-static-root-'));
   const uiRoot = join(root, 'ui');

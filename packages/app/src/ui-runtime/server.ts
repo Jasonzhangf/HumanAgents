@@ -6,6 +6,8 @@ import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
 import type { RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
+import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
+import { AppLifecycleError } from '../errors.js';
 
 const APP_OWNER = 'humanagent.app';
 
@@ -14,6 +16,10 @@ export interface UiRuntimeServerOptions {
   readonly uiRoot: string;
   readonly host?: string;
   readonly port?: number;
+  readonly restart?: (input: {
+    readonly leaseId: string;
+    readonly generation: number;
+  }) => DaemonRestartReceipt;
 }
 
 export interface UiRuntimeServer {
@@ -40,6 +46,17 @@ function writeJson(response: ServerResponse, status: number, body: unknown): voi
 function writeError(response: ServerResponse, error: unknown): void {
   if (error instanceof UiRuntimeApiError) {
     writeJson(response, error.httpStatus, { error: error.toBody() });
+    return;
+  }
+  if (error instanceof AppLifecycleError) {
+    writeJson(response, 409, {
+      error: {
+        code: error.code,
+        ownerId: error.ownerId,
+        message: error.message,
+        nextAction: error.nextAction,
+      },
+    });
     return;
   }
   writeJson(response, 500, {
@@ -143,7 +160,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   }
   const service = options.service;
   const server = createServer((request, response) => {
-    void handleRequest(request, response, service, options.uiRoot);
+    void handleRequest(request, response, service, options.uiRoot, options.restart);
   });
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -165,13 +182,35 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   };
 }
 
-async function handleRequest(request: IncomingMessage, response: ServerResponse, service: UiRuntimeService, uiRoot: string): Promise<void> {
+async function handleRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  service: UiRuntimeService,
+  uiRoot: string,
+  restart?: UiRuntimeServerOptions['restart'],
+): Promise<void> {
   const method = request.method ?? 'GET';
   const url = new URL(request.url ?? '/', 'http://localhost');
   const path = url.pathname;
   try {
     if (path === '/api/runtime/status' && method === 'GET') {
       writeJson(response, 200, service.status());
+      return;
+    }
+    if (path === '/api/runtime/restart' && method === 'POST') {
+      if (restart === undefined) {
+        throw new UiRuntimeApiError(
+          'daemon-restart.unsupported',
+          APP_OWNER,
+          'this runtime is not hosted by a restart-capable serve owner',
+          'request restart from the original humanagent serve owner',
+          501,
+        );
+      }
+      const body = await readBody(request);
+      const leaseId = requireString(body, 'leaseId');
+      const generation = requirePositiveInteger(body, 'generation');
+      writeJson(response, 202, restart({ leaseId, generation }));
       return;
     }
     if (path === '/api/health/probe' && method === 'GET') {
