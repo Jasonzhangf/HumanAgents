@@ -921,6 +921,7 @@ export async function main(args: readonly string[]): Promise<void> {
             },
             host,
             portNumber: boundPortNumber,
+            workspaceRoot: paths.workspaceCwd,
             restart: requestRestart,
             identity: () => {
               if (supervisor === undefined) {

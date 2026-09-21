@@ -50,6 +50,7 @@ export interface UiRuntimeLaunchOptions {
   readonly host?: string;
   readonly portNumber?: number;
   readonly projectKey?: string;
+  readonly workspaceRoot?: string;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
   readonly restart?: (input: {
@@ -157,6 +158,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     journal,
     closurePort: interactionJournal ?? journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
+    ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
-import { id, type TaskId } from '../../../contracts/src/index.js';
+import { id, type InteractionDecision, type TaskId } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
@@ -364,6 +364,14 @@ async function handleRequest(
         channel,
       }, inputRevision);
       writeJson(response, 201, { interactionId });
+      return;
+    }
+    if (path === '/api/explicit/decision' && method === 'POST') {
+      const body = await readBody(request);
+      if (!Array.isArray(body.toolIntents)) {
+        throw new UiRuntimeApiError('request.missing-field', APP_OWNER, 'request field toolIntents is required', 'provide a typed explicit brain decision');
+      }
+      writeJson(response, 200, await service.executeExplicitDecision(body as unknown as InteractionDecision));
       return;
     }
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);

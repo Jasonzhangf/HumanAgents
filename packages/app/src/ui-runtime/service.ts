@@ -33,6 +33,7 @@ import {
   type ProviderCloseResult,
   type StopRequestReceipt,
   type TaskId,
+  type InteractionDecision,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
@@ -94,6 +95,7 @@ import {
   OrganHealthError,
   healthEvidenceRefs,
 } from '../../../runtime/src/health/index.js';
+import { ExplicitBrainDecisionError } from '../../../runtime/src/explicit-brain/index.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
@@ -125,6 +127,7 @@ import type { RuntimeObservationNodeInput, RuntimeTaskSnapshotInput } from '../.
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
 import type { ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
+import { createExplicitBrainRuntime, type ExplicitBrainRuntime } from '../explicit-brain-runtime.js';
 
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
@@ -177,6 +180,12 @@ export interface UiRuntimeServiceOptions {
   readonly closurePort: CheckpointClosurePort;
   readonly now?: () => Date;
   readonly projectKey?: string;
+  readonly workspaceRoot?: string;
+  readonly explicitBrainAgentMessage?: (input: {
+    readonly recipientRef: string;
+    readonly messageRef: string;
+    readonly messageClass: 'control' | 'data' | 'observation';
+  }) => Promise<unknown>;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: {
     readonly createTaskAssembly?: (input: {
@@ -248,6 +257,15 @@ function apiError(error: unknown): UiRuntimeApiError {
       error.code === 'confirmation-required' || error.code === 'confirmation-stale'
         ? 'confirm the current requirement draft'
         : 'inspect the explicit brain route or submission',
+      409,
+    );
+  }
+  if (error instanceof ExplicitBrainDecisionError) {
+    return new UiRuntimeApiError(
+      'explicit-brain.decision-rejected',
+      'humanagent.runtime.explicit-brain',
+      error.message,
+      'inspect the explicit brain tool admission and scoped runtime owner',
       409,
     );
   }
@@ -329,6 +347,7 @@ export class UiRuntimeService {
   private readonly memoryInteraction: MemoryInteractionPort;
   private readonly healthManager: OrganHealthManager;
   private readonly memoryContexts = new Map<string, BoundMemoryContext>();
+  private readonly explicitBrainRuntime?: ExplicitBrainRuntime;
   private dispatchTail: Promise<void> = Promise.resolve();
   private connected = true;
 
@@ -393,6 +412,31 @@ export class UiRuntimeService {
       }),
       ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
     });
+    if (options.workspaceRoot !== undefined && options.projectKey !== undefined) {
+      this.explicitBrainRuntime = createExplicitBrainRuntime({
+        workspaceRoot: options.workspaceRoot,
+        projectKey: options.projectKey,
+        tasks: () => this.coordinator.taskSnapshots(),
+        ...(options.explicitBrainAgentMessage === undefined ? {} : { sendAgentMessage: options.explicitBrainAgentMessage }),
+      });
+    }
+  }
+
+  async executeExplicitDecision(decision: InteractionDecision): Promise<readonly unknown[]> {
+    if (this.explicitBrainRuntime === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.runtime-unavailable',
+        'humanagent.runtime.explicit-brain',
+        'explicit brain operational tools are not connected to a workspace runtime',
+        'start the UI runtime with a project workspace binding',
+        503,
+      );
+    }
+    try {
+      return await this.explicitBrainRuntime.execute(decision);
+    } catch (error) {
+      throw apiError(error);
+    }
   }
 
   memoryContextReceipt(operationId: OperationId): MemoryContextReceipt {
