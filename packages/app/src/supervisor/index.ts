@@ -1,8 +1,10 @@
 export {
   acquireDaemonLease,
   daemonLeasePath,
+  isDaemonLeaseHandoffCommitted,
   readDaemonLease,
   runSupervisorStartup,
+  waitForDaemonLeaseHandoff,
 } from './supervisor.js';
 export type {
   AcquireDaemonLeaseOptions,

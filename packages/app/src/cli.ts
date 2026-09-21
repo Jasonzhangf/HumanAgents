@@ -47,7 +47,7 @@ import {
   serveCompositionManifestMatches,
 } from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
-import { runSupervisorStartup, type SupervisorStartup } from './supervisor/supervisor.js';
+import { runSupervisorStartup, waitForDaemonLeaseHandoff, type SupervisorStartup } from './supervisor/supervisor.js';
 import { requestDaemonRestart } from './supervisor/restart-client.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -963,11 +963,15 @@ export async function main(args: readonly string[]): Promise<void> {
     const shutdown = (): void => {
       if (shuttingDown) return;
       shuttingDown = true;
-      void supervisor!.dispose().catch((error: unknown) => {
-        // A newer serve owner holds the transition guard while this process is
-        // stopping. The old owner must exit cleanly; the new owner reports the
-        // takeover result. Other disposal errors remain visible and non-zero.
-        if (error instanceof AppLifecycleError && error.code === 'daemon-lease-transition-in-progress') return;
+      const previousLease = supervisor!.lease.record;
+      void supervisor!.dispose().catch(async (error: unknown) => {
+        // A transition guard alone is not a handoff receipt. Suppress this
+        // expected race only after the replacement lease is durable and live.
+        if (
+          error instanceof AppLifecycleError
+          && error.code === 'daemon-lease-transition-in-progress'
+          && await waitForDaemonLeaseHandoff(paths, previousLease)
+        ) return;
         console.error(formatCliError(error, process.argv.slice(2)));
         process.exitCode = 1;
       });

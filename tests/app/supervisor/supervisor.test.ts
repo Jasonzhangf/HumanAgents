@@ -10,6 +10,7 @@ import { AppLifecycleError } from '../../../packages/app/src/errors.js';
 import {
   acquireDaemonLease,
   daemonLeasePath,
+  isDaemonLeaseHandoffCommitted,
   readDaemonLease,
   runSupervisorStartup,
 } from '../../../packages/app/src/supervisor/index.js';
@@ -208,6 +209,25 @@ test('startup dispose does not infer a lease handoff without a newer durable own
     assert.equal(error.code, 'daemon-lease-transition-in-progress');
     return true;
   });
+});
+
+test('lease transition is not a handoff receipt until the newer live lease is durable', async () => {
+  const paths = await fixture();
+  const first = await acquireDaemonLease(paths, { ownerId: 'humanagent.app.serve' });
+  const previous = first.record;
+
+  assert.equal(await isDaemonLeaseHandoffCommitted(paths, previous), false);
+  const current = JSON.parse(await readFile(daemonLeasePath(paths), 'utf8')) as Record<string, unknown>;
+  await writeFile(daemonLeasePath(paths), JSON.stringify({
+    ...current,
+    leaseId: 'replacement-lease',
+    generation: previous.generation + 1,
+    processStartToken: 'node:replacement',
+    pid: process.pid,
+    disposedAt: undefined,
+  }) + '\n', 'utf8');
+
+  assert.equal(await isDaemonLeaseHandoffCommitted(paths, previous), true);
 });
 
 test('partial startup failure cleans up reverse and keeps owner/next-action failure receipt', async () => {
