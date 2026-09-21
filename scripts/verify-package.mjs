@@ -19,7 +19,7 @@ const hm = join(prefix, 'node_modules', '.bin', 'hm');
 await access(hm);
 execFileSync(hm, ['--help'], { stdio: 'inherit' });
 execFileSync(cli, ['doctor', '--workspace', workspace, '--control-root', controlRoot], { stdio: 'inherit' });
-const runArgs = ['run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'package-smoke', '--prompt', 'package smoke'];
+const runArgs = ['run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'package-smoke', '--prompt', 'package smoke', '--json'];
 execFileSync(cli, runArgs, { stdio: 'inherit' });
 let lifecycleError = '';
 try {
