@@ -29,7 +29,19 @@ function renderBulkActions() {
   main.querySelector('[data-bulk-actions]')?.remove()
   const bar = element('section', undefined, 'bulk-actions')
   bar.dataset.bulkActions = ''
-  const label = element('span', `${selectedTaskIds.size} 项已选择`, 'section-meta')
+  const selectAll = element('input')
+  selectAll.type = 'checkbox'
+  selectAll.checked = rows.length > 0 && selectedTaskIds.size === rows.length
+  selectAll.indeterminate = selectedTaskIds.size > 0 && selectedTaskIds.size < rows.length
+  selectAll.setAttribute('aria-label', '选择全部任务')
+  selectAll.addEventListener('change', () => {
+    if (selectAll.checked) rows.forEach((row) => selectedTaskIds.add(row.taskId.value))
+    else selectedTaskIds.clear()
+    renderTasks()
+    renderBulkActions()
+  })
+  const label = element('label', undefined, 'bulk-select-all')
+  label.append(selectAll, element('span', `${selectedTaskIds.size} 项已选择`))
   const stop = element('button', '停止选中', 'button')
   stop.type = 'button'
   stop.disabled = selectedTaskIds.size === 0
@@ -52,7 +64,9 @@ function renderBulkActions() {
     renderTasks()
   })
   bar.append(label, stop, remove, clear)
-  main.append(bar)
+  const groups = main.querySelector('[data-task-groups]')
+  if (groups) groups.before(bar)
+  else main.append(bar)
 }
 
 async function runBulkAction(action) {

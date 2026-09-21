@@ -748,7 +748,7 @@ export class RuntimeTaskCoordinator {
 
   updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
     const record = this.requireTask(taskId);
-    if (record.running || record.stopping) {
+    if (record.stopping || record.state === 'running' || record.state === 'settling') {
       throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be edited', 'stop the current execution first');
     }
     const title = input.title?.trim() ?? record.title;
@@ -774,7 +774,7 @@ export class RuntimeTaskCoordinator {
 
   deleteTask(taskId: TaskId): { readonly taskId: TaskId; readonly deleted: true } {
     const record = this.requireTask(taskId);
-    if (record.running || record.stopping) {
+    if (record.stopping || record.state === 'running' || record.state === 'settling') {
       throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be deleted', 'stop the current execution first');
     }
     const deletedAt = this.now().toISOString();
