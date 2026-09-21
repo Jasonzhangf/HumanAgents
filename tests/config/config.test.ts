@@ -35,6 +35,14 @@ test('resolves all persistence below control root and keeps workspace separate',
   assert.equal(paths.projectKey, (await realpath(workspace)).replaceAll('/', '-') || '-');
   const loaded = await loadConfiguration(paths);
   assert.equal(loaded.agentRoster.length, 2);
+  assert.equal(JSON.stringify(loaded.effective.provider), JSON.stringify({
+    provider: 'rcc',
+    binding: 'rcc-entry',
+    protocol: 'responses',
+    model: 'MiniMax-M3',
+    route: 'default',
+    baseUrl: 'http://127.0.0.1:4444',
+  }));
 });
 
 test('resolves an explicitly declared cwd-named local Skill source', async () => {
@@ -469,6 +477,49 @@ test('validates DSH execution config and keeps it user-owned', async () => {
     projectError = error;
   }
   assert.equal(String(projectError).includes('project execution config contains unsupported key: dsh'), true);
+});
+
+test('validates a global provider separately from the agent driver and rejects unsupported providers', () => {
+  const agents = [{
+    agentId: 'interaction-default',
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef: 'fake',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  }];
+  const valid = validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    provider: {
+      provider: 'rcc',
+      binding: 'rcc-entry',
+      protocol: 'responses',
+      model: 'MiniMax-M3',
+      route: 'default',
+      baseUrl: 'http://127.0.0.1:4444',
+    },
+  });
+  assert.equal(valid.provider?.provider, 'rcc');
+  assert.equal(valid.provider?.baseUrl, 'http://127.0.0.1:4444');
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    provider: { provider: 'dsh', binding: 'dsh', protocol: 'responses', model: 'x', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
+  }), /unknown provider: dsh/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    provider: { provider: 'fake', binding: 'fake', protocol: 'responses', model: 'x', route: 'default', baseUrl: 'fake:replay' },
+  }), /unknown provider: fake/);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    provider: { provider: 'rcc', binding: 'rcc', protocol: 'custom', model: 'x', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
+  }), /unsupported provider protocol: custom/);
 });
 
 test('rejects misspelled user and project configuration keys', async () => {

@@ -148,6 +148,25 @@ maxConcurrentTasks = 1
 stopTimeoutMs = 30000
 ```
 
+### 3.3 全局 provider
+
+provider 是执行后端，不是 HumanAgent 的运行模式。默认用户配置由首次初始化写入
+RCC provider：
+
+```toml
+[provider]
+provider = "rcc"
+binding = "rcc-entry"
+protocol = "responses"
+model = "MiniMax-M3"
+route = "default"
+baseUrl = "http://127.0.0.1:4444"
+```
+
+因此人类只需在项目目录运行 `humanagent`（或 `hm`），不需要填写 `--mode`，也不
+需要把 RCC 写成 mode。`--provider rcc`、`--protocol`、`--model` 和 `--route` 是
+高级覆盖项；`fake` 只用于内部测试注入，不是产品模式。
+
 Agent roster 是显式白名单。每个 `agentId`、role、template、driver、skills、tools、permissions 和 memory scope 都必须通过对应模板及 internal capability ceiling；未知 agent、重复 id、越权 tool 或不能满足 template 的 driver 直接使 config 无效。
 
 ## 4. 启动链条

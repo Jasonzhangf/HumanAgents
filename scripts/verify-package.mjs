@@ -15,6 +15,9 @@ const controlRoot = join(root, 'control');
 await mkdir(workspace, { recursive: true });
 execFileSync('npm', ['install', '--prefix', prefix, '--ignore-scripts', packagePath], { stdio: 'inherit' });
 const cli = join(prefix, 'node_modules', '.bin', 'humanagent');
+const hm = join(prefix, 'node_modules', '.bin', 'hm');
+await access(hm);
+execFileSync(hm, ['--help'], { stdio: 'inherit' });
 execFileSync(cli, ['doctor', '--workspace', workspace, '--control-root', controlRoot], { stdio: 'inherit' });
 const runArgs = ['run', '--workspace', workspace, '--control-root', controlRoot, '--plan', 'default', '--session', 'package-smoke', '--prompt', 'package smoke'];
 execFileSync(cli, runArgs, { stdio: 'inherit' });
@@ -29,7 +32,7 @@ if (!lifecycleError.includes('"code":"session-exists"') || !lifecycleError.inclu
 }
 execFileSync(cli, ['session', 'inspect', '--workspace', workspace, '--control-root', controlRoot, '--session', 'package-smoke'], { stdio: 'inherit' });
 
-const serve = spawn(cli, ['serve', '--mode', 'fake', '--workspace', workspace, '--control-root', controlRoot, '--port', '0'], {
+const serve = spawn(cli, ['serve', '--provider', 'fake', '--workspace', workspace, '--control-root', controlRoot, '--port', '0'], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'pipe'],
 });
