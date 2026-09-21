@@ -1263,13 +1263,36 @@ export class RuntimeTaskCoordinator {
         });
         if (record.stopping || record.postCommitRecoveryPending) return;
         if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
-          const problem = dispatched.issue;
-          throw new RuntimeTaskControlError(
-            'orchestration.dispatch.failed',
-            problem?.ownerId ?? RUNTIME_OWNER,
-            problem?.reason ?? `orchestration dispatch ended as ${dispatched.status}`,
-            problem ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}` : 'inspect orchestration assignment',
-          );
+          if (!closure) {
+            const problem = dispatched.issue;
+            throw new RuntimeTaskControlError(
+              'orchestration.dispatch.failed',
+              problem?.ownerId ?? RUNTIME_OWNER,
+              problem?.reason ?? `orchestration dispatch ended as ${dispatched.status}`,
+              problem ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}` : 'inspect orchestration assignment',
+            );
+          }
+          if (closure.state === 'succeeded') {
+            const problem = dispatched.issue;
+            const evidenceRefs = [...closure.evidenceRefs, ...(problem?.evidenceRefs ?? [])];
+            record.error = {
+              code: problem?.code ?? 'orchestration.dispatch.failed',
+              ownerId: problem?.ownerId ?? RUNTIME_OWNER,
+              message: problem?.reason ?? `orchestration dispatch ended as ${dispatched.status}`,
+              retryable: dispatched.status === 'retryable',
+              nextAction: problem
+                ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}`
+                : 'inspect orchestration assignment',
+              evidenceRefs,
+            };
+            closure = {
+              ...closure,
+              state: 'blocked',
+              evidenceRefs,
+              nextAction: problem?.nextAction ?? { kind: 'recover', ref: `assignment.${assignment.assignmentId}` },
+              conditionRef: problem?.conditionRef ?? `assignment.${assignment.assignmentId}`,
+            };
+          }
         }
         if (!closure) throw new RuntimeTaskControlError('orchestration.execution.closure.missing', RUNTIME_OWNER, 'orchestration completed without a provider closure', 'inspect the execution agent result');
       } else {
