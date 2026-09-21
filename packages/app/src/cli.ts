@@ -964,6 +964,10 @@ export async function main(args: readonly string[]): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       void supervisor!.dispose().catch((error: unknown) => {
+        // A newer serve owner holds the transition guard while this process is
+        // stopping. The old owner must exit cleanly; the new owner reports the
+        // takeover result. Other disposal errors remain visible and non-zero.
+        if (error instanceof AppLifecycleError && error.code === 'daemon-lease-transition-in-progress') return;
         console.error(formatCliError(error, process.argv.slice(2)));
         process.exitCode = 1;
       });

@@ -1,5 +1,6 @@
 import { mkdir, open as openFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import type { RuntimePaths } from '../../../config/src/index.js';
 import { AppLifecycleError } from '../errors.js';
@@ -62,8 +63,6 @@ export interface SupervisorDisposeReceipt {
   readonly disposedStages: readonly string[];
   readonly releasedAt: string;
   readonly cleanupFailure?: SupervisorCleanupFailure;
-  /** The lease was replaced by a newer owner while this owner was stopping. */
-  readonly leaseHandoff?: true;
 }
 
 export interface SupervisorLease {
@@ -313,9 +312,19 @@ async function writeLeaseRecord(paths: RuntimePaths, record: SupervisorLeaseReco
 function processIsAlive(pid: number): boolean {
   try {
     (process as unknown as { kill(pid: number, signal: number): void }).kill(pid, 0);
-    return true;
   } catch (error) {
     return (error as { code?: string }).code === 'EPERM';
+  }
+  try {
+    const state = execFileSync('/bin/ps', ['-o', 'state=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim();
+    return state.length > 0 && !state.startsWith('Z');
+  } catch {
+    // If process state cannot be inspected, keep the conservative kill(0)
+    // result and let the identity endpoint guard the signal path.
+    return true;
   }
 }
 
@@ -630,29 +639,6 @@ async function disposeStagesReverse(stages: readonly SupervisorStage[]): Promise
   return { disposedStages, cleanupFailure };
 }
 
-function isExpectedLeaseHandoff(error: unknown): boolean {
-  return error instanceof AppLifecycleError
-    && (error.code === 'daemon-lease-transition-in-progress' || error.code === 'daemon-lease-stale');
-}
-
-async function waitForLeaseHandoff(paths: RuntimePaths, previous: SupervisorLeaseRecord): Promise<boolean> {
-  const deadline = Date.now() + DEFAULT_GRACEFUL_STOP_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const current = await readLeaseRecord(paths);
-    if (
-      current !== undefined
-      && current.leaseId !== previous.leaseId
-      && current.generation > previous.generation
-      && current.disposedAt === undefined
-      && processIsAlive(current.pid)
-    ) {
-      return true;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, DEFAULT_STOP_POLL_INTERVAL_MS));
-  }
-  return false;
-}
-
 async function failAndCleanup(paths: RuntimePaths, lease: SupervisorLease, error: unknown, started: readonly SupervisorStage[]): Promise<{ readonly error: unknown; readonly receipt: SupervisorFailureReceipt }> {
   const failingStage = started.at(-1);
   const failure = failureRecordFor(error, failingStage);
@@ -749,24 +735,12 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
       async dispose() {
         if (disposeReceipt !== undefined) return disposeReceipt;
         const cleanup = await disposeStagesReverse(started);
-        let released: SupervisorLeaseRecord;
-        let leaseHandoff = false;
-        try {
-          released = await lease.release();
-        } catch (error) {
-          if (!isExpectedLeaseHandoff(error) || !(await waitForLeaseHandoff(paths, lease.record))) throw error;
-          // A new serve owner has already fenced this process. Its lease is the
-          // durable owner now; stopping stages remains successful even though
-          // the old lease can no longer be marked disposed.
-          released = lease.record;
-          leaseHandoff = true;
-        }
+        const released = await lease.release();
         disposeReceipt = {
           lease: released,
           disposedStages: cleanup.disposedStages,
           releasedAt: released.disposedAt ?? new Date().toISOString(),
           ...(cleanup.cleanupFailure === undefined ? {} : { cleanupFailure: cleanup.cleanupFailure }),
-          ...(leaseHandoff ? { leaseHandoff: true as const } : {}),
         };
         return disposeReceipt;
       },
