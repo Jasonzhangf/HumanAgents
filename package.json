@@ -19,7 +19,7 @@
     "build:tests": "tsc -p tests/config/tsconfig.json && tsc -p tests/app/tsconfig.json && tsc -p tests/adapters/memory/tsconfig.json",
     "build:operations": "tsc -p packages/adapters/operations/tsconfig.json && tsc -p tests/adapters/operations/tsconfig.json",
     "build:gateway": "tsc -p tests/runtime/gateway/tsconfig.json",
-    "test:hand": "pnpm build:hand && node --test dist/tests/runtime/hand/tests/runtime/hand/hand-runtime.test.js",
+    "test:hand": "pnpm build:hand && node --test dist/tests/runtime/hand/tests/runtime/hand/hand-runtime.test.js dist/tests/runtime/hand/tests/runtime/hand/code-search-service.test.js",
     "build:raw": "node scripts/clean-build.mjs && pnpm build:contracts && pnpm build:config && pnpm build:app && pnpm build:runtime && pnpm build:operations && pnpm build:gateway && pnpm build:acp && pnpm build:tests",
     "build": "node scripts/run-build.mjs",
     "build:release": "node scripts/build-release.mjs",
