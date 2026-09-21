@@ -11,6 +11,10 @@ export const AGENT_DRIVER_REFS = ['fake', 'dsh'] as const;
 export type AgentDriverRef = (typeof AGENT_DRIVER_REFS)[number];
 export const AGENT_ROLES = ['interaction', 'orchestration', 'execution', 'review', 'memory'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
+export const PROVIDER_PROTOCOLS = ['responses', 'openai', 'anthropic'] as const;
+export type ProviderProtocol = (typeof PROVIDER_PROTOCOLS)[number];
+export const PROVIDERS = ['rcc'] as const;
+export type ProviderId = (typeof PROVIDERS)[number];
 
 export interface AgentConfig {
   readonly agentId: string;
@@ -38,9 +42,19 @@ export interface DshExecutionConfig {
   readonly shutdownTimeoutMs?: number;
 }
 
+export interface ProviderConfig {
+  readonly provider: ProviderId;
+  readonly binding: string;
+  readonly protocol: ProviderProtocol;
+  readonly model: string;
+  readonly route: string;
+  readonly baseUrl: string;
+}
+
 export interface UserConfig {
   readonly schemaVersion: number;
   readonly agents: readonly AgentConfig[];
+  readonly provider?: ProviderConfig;
   readonly project?: {
     readonly defaultAgent?: string;
     readonly reviewRequired?: boolean;
@@ -427,6 +441,27 @@ function validateDshExecution(value: unknown, label: string): DshExecutionConfig
   };
 }
 
+function validateProviderConfig(value: unknown): ProviderConfig {
+  const provider = asRecord(value, 'provider');
+  rejectUnknownKeys(provider, ['provider', 'binding', 'protocol', 'model', 'route', 'baseUrl'], 'provider config');
+  const providerId = asString(provider.provider, 'provider.provider');
+  if (!(PROVIDERS as readonly string[]).includes(providerId)) {
+    fail('config-capability', `unknown provider: ${providerId}`, 'choose the configured RCC provider');
+  }
+  const protocol = asString(provider.protocol, 'provider.protocol');
+  if (!(PROVIDER_PROTOCOLS as readonly string[]).includes(protocol)) {
+    fail('config-invalid', `unsupported provider protocol: ${protocol}`, 'choose responses, openai, or anthropic');
+  }
+  return {
+    provider: providerId as ProviderId,
+    binding: asString(provider.binding, 'provider.binding'),
+    protocol: protocol as ProviderProtocol,
+    model: asString(provider.model, 'provider.model'),
+    route: asString(provider.route, 'provider.route'),
+    baseUrl: asString(provider.baseUrl, 'provider.baseUrl'),
+  };
+}
+
 function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']> {
   const memory = asRecord(value, 'memory');
   rejectUnknownKeys(memory, ['update', 'audit'], 'memory config');
@@ -447,10 +482,11 @@ function validateMemoryConfig(value: unknown): NonNullable<UserConfig['memory']>
 
 export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   for (const key of INTERNAL_CONFIG_KEYS) if (key in value) fail('config-policy', `user config cannot define internal key: ${key}`);
-  rejectUnknownKeys(value, ['schemaVersion', 'agents', 'project', 'memory', 'execution'], 'user config');
+  rejectUnknownKeys(value, ['schemaVersion', 'agents', 'provider', 'project', 'memory', 'execution'], 'user config');
   if (value.schemaVersion !== CONFIG_SCHEMA_VERSION) fail('config-version', `unsupported user config schema: ${String(value.schemaVersion)}`);
   if (!Array.isArray(value.agents) || value.agents.length === 0) fail('config-invalid', 'at least one agent is required');
   const agents = value.agents.map(validateAgent);
+  const provider = value.provider === undefined ? undefined : validateProviderConfig(value.provider);
   const ids = new Set<string>();
   let memoryRoleCount = 0;
   for (const agent of agents) {
@@ -471,6 +507,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   return {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     agents,
+    ...(provider === undefined ? {} : { provider }),
     ...(project === undefined ? {} : { project: {
       ...(project.defaultAgent === undefined ? {} : { defaultAgent: asString(project.defaultAgent, 'project.defaultAgent') }),
       ...(project.reviewRequired === undefined ? {} : { reviewRequired: project.reviewRequired === true || project.reviewRequired === false ? project.reviewRequired : fail('config-invalid', 'project.reviewRequired must be boolean') }),
@@ -620,6 +657,14 @@ function defaultInternalToml(): string {
 function defaultUserToml(): string {
   return [
     'schemaVersion = 1',
+    '',
+    '[provider]',
+    'provider = "rcc"',
+    'binding = "rcc-entry"',
+    'protocol = "responses"',
+    'model = "MiniMax-M3"',
+    'route = "default"',
+    'baseUrl = "http://127.0.0.1:4444"',
     '',
     '[[agents]]',
     'agentId = "interaction-default"',
@@ -841,6 +886,7 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
   const effective: UserConfig = {
     schemaVersion: user.schemaVersion,
     agents: [...user.agents],
+    ...(user.provider === undefined ? {} : { provider: user.provider }),
     project: { ...user.project, ...projectOverride?.project },
     memory: projectOverride?.memory ?? user.memory,
     execution: { ...user.execution, ...projectOverride?.execution },

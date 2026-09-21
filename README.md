@@ -43,7 +43,7 @@ checkpoint、DSH session log 和 UI 截图见
 计划见
 [`docs/goals/real-single-dsh-agent-plan.md`](docs/goals/real-single-dsh-agent-plan.md)。
 
-UI Provider Loop 已接入 Runtime API、fake/RCC mode、SSE projection 和标准
+UI Provider Loop 已接入 Runtime API、fake/RCC provider、SSE projection 和标准
 stop 收拢；`56840b3d62d1d9db943e4d5376ff3febe99d979c` 已通过独立 review
 （PASS，P0/P1 = 0），当前证据和计划见
 [`docs/evidence/ui-provider-loop/`](docs/evidence/ui-provider-loop/) 与
@@ -52,11 +52,9 @@ stop 收拢；`56840b3d62d1d9db943e4d5376ff3febe99d979c` 已通过独立 review
 
 ## 本地启动与增量编译
 
-当前可执行组装入口是 `packages/app/src/cli.ts`；构建后
-`serve --mode fake` 通过 `packages/app/src/cordis-host.ts` 组合 fake provider、
-memory 和 UI plugins。`packages/app/standalone/`、`packages/app/cordis-host/`
-与 `humanagent start` 仅作为 Milestone 1 target/planned 形态，不是当前路径或
-命令。
+当前可执行组装入口是 `packages/app/src/cli.ts`；构建后默认启动入口会从全局
+`~/.humanagent/config.toml` 读取 provider，默认使用 RCC。fake 只保留给内部测试，
+不属于人类运行模式。
 
 ```sh
 pnpm run build
@@ -66,15 +64,8 @@ pnpm run run -- --workspace /absolute/project --plan default
 pnpm run resume -- --workspace /absolute/project --session <session-id>
 node dist/app/app/src/cli.js session list --workspace /absolute/project
 node dist/app/app/src/cli.js session inspect --workspace /absolute/project --session <session-id>
-node dist/app/app/src/cli.js serve --mode fake --workspace /absolute/project
-node dist/app/app/src/cli.js serve --mode rcc --workspace /absolute/project \
-  --binding rcc-entry --provider rcc --protocol responses \
-  --model MiniMax-M3 --route default \
-  --rcc-base-url http://127.0.0.1:4444
-node dist/app/app/src/cli.js serve --mode rcc --workspace /absolute/project \
-  --binding rcc-openai-entry --provider rcc --protocol openai \
-  --model MiniMax-M3 --route default \
-  --rcc-base-url http://127.0.0.1:4444
+node dist/app/app/src/cli.js --workspace /absolute/project
+node dist/app/app/src/cli.js serve --workspace /absolute/project --protocol openai
 pnpm build:release
 pnpm release:check
 pnpm run smoke
@@ -83,7 +74,7 @@ pnpm run smoke
 全局安装后不需要从仓库目录启动。任意目录执行：
 
 ```sh
-humanagent serve --mode fake --workspace /absolute/project
+humanagent --workspace /absolute/project
 ```
 
 命令输出的 loopback URL 就是 WebUI 入口；`/` 是状态入口，
@@ -95,8 +86,8 @@ session 仍写入 `~/.humanagent/sessions/<project-key>/<session-id>.jsonl`；�
 `pnpm build` 使用 `~/.humanagent/build/checkpoints/build/<project-key>/manifest.json` 保存 `typecheck → compile` 的 stage checkpoint；`pnpm run ci` 使用独立的 `.../checkpoints/ci/<project-key>/manifest.json`；`pnpm build:release` 使用独立的 `.../checkpoints/<project-key>/manifest.json` 保存 `typecheck → compile → regression → ci → package → package-smoke`。三条链共享 `~/.humanagent/build/locks/<project-key>/.run.lock`，不会并发改写同一工作树的编译产物。输入、依赖和已声明输出 evidence 未变的 PASS stage 复用；输出被篡改或首个 stage 失败时，从该 stage 及其下游继续。dirty worktree 只允许生成 local candidate，不能通过 release check。
 
 `serve` 启动本地 HumanAgent Runtime API 和打包内置 UI（源码开发时才回退到
-`docs/ui`）。`fake` 只使用固定 replay；
-`rcc` 通过同一个 Runtime API 连接 RCC v3 `127.0.0.1:4444`，失败会显式投影
+`docs/ui`）。默认 provider 来自 `~/.humanagent/config.toml` 的 `[provider]`，
+初始配置为 RCC `127.0.0.1:4444`。RCC 通过同一个 Runtime API 连接，失败会显式投影
 owner 和 next action，不会回退到 fake。`dsh` 在当前阶段保持关闭。
 RCC 是透明代理，本阶段 MVP验收覆盖两个入口协议：
 `responses -> /v1/responses` 和 `openai -> /v1/chat/completions`；
@@ -105,6 +96,8 @@ Loop 验收范围。`providerId` 和 `--route` 都只是 HumanAgent 本地 bindi
 入口标签，不代表 RCC 最终上游 Provider 身份，也不会写入 RCC 请求体作为
 route selector；RCC 最终选择的 model 与请求 model 不同不构成 binding
 mismatch。
+默认端口是 `10001`；可用 `--port` 覆盖。`hm` 是 `humanagent` 的同一全局入口。
+内部测试可使用 `serve --provider fake --port 0`，但不应写入普通用户启动脚本。
 `serve --host` 只接受 loopback（`127.0.0.1` 或 `::1`）：控制 API 目前没有鉴权，
 绑定非 loopback 地址会让任意可达客户端创建任务、发起执行和执行 stop，因此
 server 会拒绝启动而不是静默暴露控制面。

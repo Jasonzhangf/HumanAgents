@@ -53,6 +53,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
+import type { ProviderConfig } from '../../config/src/index.js';
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -247,6 +248,7 @@ export function memoryDriverFactory(input: {
 }
 
 type UiProviderProtocol = 'responses' | 'openai' | 'anthropic';
+type ServeProvider = 'fake' | 'rcc';
 
 function servePlugins(mode: 'fake' | 'rcc', input: {
   readonly memory: Parameters<typeof startUiRuntime>[0]['memory'];
@@ -329,21 +331,77 @@ function servePlugins(mode: 'fake' | 'rcc', input: {
   ];
 }
 
+const DEFAULT_RCC_PROVIDER: ProviderConfig = {
+  provider: 'rcc',
+  binding: 'rcc-entry',
+  protocol: 'responses',
+  model: 'MiniMax-M3',
+  route: 'default',
+  baseUrl: 'http://127.0.0.1:4444',
+};
+
+function resolveServeProvider(
+  args: readonly string[],
+  configured: ProviderConfig | undefined,
+): { readonly provider: ServeProvider; readonly providerIdOverride?: string } {
+  const requested = option(args, '--provider');
+  if (requested === 'fake' || requested === 'rcc') return { provider: requested };
+  const legacyMode = option(args, '--mode');
+  if (legacyMode === 'fake' || legacyMode === 'rcc') {
+    return {
+      provider: legacyMode,
+      ...(requested === undefined ? {} : { providerIdOverride: requested }),
+    };
+  }
+  if (requested !== undefined) {
+    throw new AppLifecycleError(
+      'provider.invalid',
+      `unknown provider: ${requested}`,
+      'choose a configured provider such as rcc, or use fake only for internal tests',
+      'humanagent.config',
+    );
+  }
+  return { provider: configured?.provider ?? 'rcc' };
+}
+
 function providerBindingFromOptions(
   args: readonly string[],
+  configured: ProviderConfig | undefined,
   protocol: UiProviderProtocol,
-  mode: 'fake' | 'rcc',
+  provider: ServeProvider,
+  providerIdOverride?: string,
 ): ProviderBinding & { readonly protocol: UiProviderProtocol } {
-  const fake = mode === 'fake';
+  const fake = provider === 'fake';
+  const defaults = configured ?? DEFAULT_RCC_PROVIDER;
   return {
-    bindingId: fake ? (option(args, '--binding') ?? 'fake-default') : required(option(args, '--binding'), '--binding'),
-    providerId: fake ? (option(args, '--provider') ?? 'fake-provider') : required(option(args, '--provider'), '--provider'),
+    bindingId: option(args, '--binding') ?? (fake ? 'fake-default' : defaults.binding),
+    providerId: providerIdOverride ?? (fake ? 'fake-provider' : defaults.provider),
     protocol,
     endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : 'rcc-v3:127.0.0.1:4444'),
-    modelRef: fake ? (option(args, '--model') ?? 'fake.model') : required(option(args, '--model'), '--model'),
+    modelRef: option(args, '--model') ?? (fake ? 'fake.model' : defaults.model),
     configDigest: option(args, '--config-digest') ?? (fake ? 'sha256:fake-ui-config' : 'sha256:ui-runtime-config'),
     capabilityDigest: option(args, '--capability-digest') ?? (fake ? 'sha256:fake-ui-capability' : 'sha256:ui-runtime-capability'),
   };
+}
+
+function helpText(): string {
+  return [
+    'HumanAgent',
+    '',
+    '用法：humanagent [serve 选项]',
+    '',
+    '默认启动 WebUI，workspace 为当前目录，端口为 10001。',
+    '',
+    '常用选项：',
+    '  --workspace <path>       项目 workspace（默认当前目录）',
+    '  --provider <name>        provider（默认读取 ~/.humanagent/config.toml）',
+    '  --port <number>          WebUI 端口（默认 10001）',
+    '  --protocol <name>        responses、openai 或 anthropic',
+    '  --help                   显示帮助',
+    '  --json                   以机器可读 JSON 输出错误',
+    '',
+    '内部测试 provider fake 仅供测试，不是人类运行模式。',
+  ].join('\n');
 }
 
 function servePromptSegments(
@@ -364,7 +422,14 @@ function servePromptSegments(
 
 export async function main(args: readonly string[]): Promise<void> {
   configureBuiltinPromptRoot();
-  const command = args[0] ?? 'help';
+  const requestedCommand = args[0];
+  if (requestedCommand === '--help' || requestedCommand === '-h' || requestedCommand === 'help') {
+    console.log(helpText());
+    return;
+  }
+  const command = requestedCommand === undefined || requestedCommand.startsWith('-')
+    ? 'serve'
+    : requestedCommand;
   const workspace = option(args, '--workspace') ?? process.cwd();
   const controlRoot = option(args, '--control-root');
   if (command === '--version' || command === 'version') {
@@ -594,25 +659,21 @@ export async function main(args: readonly string[]): Promise<void> {
     throw new Error('usage: humanagent session list|inspect --session <id> --workspace <path>');
   }
   if (command === 'serve') {
-    const mode = option(args, '--mode');
-    if (mode === undefined) {
-      throw new AppLifecycleError('execution.mode.required', 'serve requires an explicit --mode', 'choose --mode fake or --mode rcc', 'humanagent.app');
-    }
-    if (mode !== 'fake' && mode !== 'rcc') {
-      throw new Error('serve --mode must be fake or rcc (dsh is not open in this phase)');
-    }
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
     const configuration = await loadConfiguration(paths);
-    const protocol = (option(args, '--protocol') ?? 'responses') as UiProviderProtocol;
+    const configuredProvider = configuration.effective.provider ?? DEFAULT_RCC_PROVIDER;
+    const selected = resolveServeProvider(args, configuration.effective.provider);
+    const mode = selected.provider;
+    const protocol = (option(args, '--protocol') ?? configuredProvider.protocol) as UiProviderProtocol;
     if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
       throw new Error('serve --protocol must be responses, openai, or anthropic');
     }
-    const binding = providerBindingFromOptions(args, protocol, mode);
+    const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, selected.providerIdOverride);
     const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
-    const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 0;
+    const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10001;
     const memoryRoot = paths.memoryRoot;
     const memoryRuntime = await composeMemoryRuntime({
       paths,
@@ -646,8 +707,8 @@ export async function main(args: readonly string[]): Promise<void> {
     const port = mode === 'rcc'
       ? buildRccExecutionPort({
           binding,
-          routeRef: required(option(args, '--route'), '--route'),
-          baseUrl: option(args, '--rcc-base-url') ?? 'http://127.0.0.1:4444',
+          routeRef: option(args, '--route') ?? configuredProvider.route,
+          baseUrl: option(args, '--rcc-base-url') ?? configuredProvider.baseUrl,
           maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
         }, evidenceRoot)
       : createFakeExecutionPort(
@@ -780,7 +841,7 @@ export async function main(args: readonly string[]): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       void supervisor.dispose().catch((error: unknown) => {
-        console.error(formatCliError(error));
+        console.error(formatCliError(error, process.argv.slice(2)));
         process.exitCode = 1;
       });
     };
@@ -789,6 +850,8 @@ export async function main(args: readonly string[]): Promise<void> {
     signalProcess.once('SIGINT', shutdown);
     console.log(JSON.stringify({
       command,
+      provider: mode,
+      // Kept for the current UI runtime projection; it is not a user configuration concept.
       mode,
       driverRef: mode,
       url: runtime.server.url,
@@ -809,26 +872,50 @@ export async function main(args: readonly string[]): Promise<void> {
     }, null, 2));
     return;
   }
-  throw new Error('usage: humanagent init|doctor|run|resume|session|serve --workspace <path> [--plan <name>] [--session <id>]');
+  throw new AppLifecycleError(
+    'cli.command.invalid',
+    `unknown command: ${command}`,
+    'run humanagent --help to see available commands',
+    'humanagent.cli',
+  );
 }
 
-export function formatCliError(error: unknown): string {
+interface CliErrorPayload {
+  readonly code: string;
+  readonly ownerId: string;
+  readonly nextAction: string;
+  readonly message: string;
+}
+
+function cliErrorPayload(error: unknown): CliErrorPayload {
   if (error instanceof AppLifecycleError || error instanceof ConfigurationError) {
-    return JSON.stringify({ error: { code: error.code, ownerId: error.ownerId, nextAction: error.nextAction, message: error.message } });
+    return { code: error.code, ownerId: error.ownerId, nextAction: error.nextAction, message: error.message };
   }
-  return JSON.stringify({
-    error: {
-      code: 'host-error',
-      ownerId: 'host',
-      nextAction: 'inspect the host error and retry after correcting the runtime environment',
-      message: error instanceof Error ? error.message : String(error),
-    },
-  });
+  return {
+    code: 'host-error',
+    ownerId: 'host',
+    nextAction: 'inspect the host error and retry after correcting the runtime environment',
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+export function formatCliError(error: unknown, args: readonly string[] = []): string {
+  const payload = cliErrorPayload(error);
+  if (args.includes('--json')) return JSON.stringify({ error: payload });
+  return [
+    'HumanAgent 无法完成请求',
+    '',
+    `原因：${payload.message}`,
+    `错误：${payload.code}`,
+    `归属：${payload.ownerId}`,
+    '',
+    `下一步：${payload.nextAction}`,
+  ].join('\n');
 }
 
 if (import.meta.url === 'file://' + process.argv[1]) {
   main(process.argv.slice(2)).catch((error: unknown) => {
-    console.error(formatCliError(error));
+    console.error(formatCliError(error, process.argv.slice(2)));
     process.exitCode = 1;
   });
 }

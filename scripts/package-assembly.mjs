@@ -26,7 +26,10 @@ export async function assemblePackage({ projectRoot, releaseRoot, version, relea
     releaseVersion,
     private: false,
     type: 'module',
-    bin: { humanagent: './bin/humanagent.mjs' },
+    bin: {
+      humanagent: './bin/humanagent.mjs',
+      hm: './bin/humanagent.mjs',
+    },
     files: ['bin', 'runtime'],
   };
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify(packageJson, null, 2) + '\n', 'utf8');
@@ -42,7 +45,7 @@ export async function assemblePackage({ projectRoot, releaseRoot, version, relea
     "process.env.HUMANAGENT_UI_ROOT = join(packageRoot, 'runtime', 'ui');",
     "import { formatCliError, main } from '../runtime/app/src/cli.js';",
     'main(process.argv.slice(2)).catch((error) => {',
-    '  console.error(formatCliError(error));',
+    '  console.error(formatCliError(error, process.argv.slice(2)));',
     '  process.exitCode = 1;',
     '});',
     '',

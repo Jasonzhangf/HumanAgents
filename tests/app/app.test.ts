@@ -840,7 +840,7 @@ test('CLI config failures preserve structured owner and next action evidence', a
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   await writeFile(join(controlRoot, 'config.toml'), 'misspelled = true\n', 'utf8');
-  assert.throws(() => execFileSync(process.execPath, [join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'), 'doctor', '--workspace', workspace, '--control-root', controlRoot], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+  assert.throws(() => execFileSync(process.execPath, [join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'), 'doctor', '--workspace', workspace, '--control-root', controlRoot, '--json'], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
     const parsed = JSON.parse(error.stderr);
     assert.equal(parsed.error.code, 'config-invalid');
     assert.equal(parsed.error.ownerId, 'config-loader');
@@ -874,16 +874,16 @@ test('CLI host failures remain structured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-app-cli-host-error-'));
   const workspace = join(root, 'workspace');
   await mkdir(workspace);
-  assert.throws(() => execFileSync(process.execPath, [join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'), 'unknown', '--workspace', workspace], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
+  assert.throws(() => execFileSync(process.execPath, [join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'), 'unknown', '--workspace', workspace, '--json'], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
     const parsed = JSON.parse(error.stderr);
-    assert.equal(parsed.error.code, 'host-error');
-    assert.equal(parsed.error.ownerId, 'host');
+    assert.equal(parsed.error.code, 'cli.command.invalid');
+    assert.equal(parsed.error.ownerId, 'humanagent.cli');
     assert.equal(typeof parsed.error.nextAction, 'string');
     return true;
   });
 });
 
-test('CLI entry rejects implicit fake mode and uses one typed invalid-prompt error', async () => {
+test('CLI entry uses one typed invalid-prompt error', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-errors-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   assert.throws(() => execFileSync(process.execPath, [
@@ -899,6 +899,7 @@ test('CLI entry rejects implicit fake mode and uses one typed invalid-prompt err
     workspace,
     '--control-root',
     controlRoot,
+    '--json',
   ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
     const parsed = JSON.parse(error.stderr);
     assert.deepEqual(parsed.error, {
@@ -909,21 +910,48 @@ test('CLI entry rejects implicit fake mode and uses one typed invalid-prompt err
     });
     return true;
   });
-  assert.throws(() => execFileSync(process.execPath, [
+});
+
+test('CLI defaults to serve and accepts a provider without a mode', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-provider-default-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const child = spawn(process.execPath, [
     cli,
-    'serve',
+    '--provider',
+    'fake',
     '--workspace',
     workspace,
     '--control-root',
     controlRoot,
     '--port',
     '0',
-  ], { encoding: 'utf8', stdio: 'pipe' }), (error: any) => {
-    const parsed = JSON.parse(error.stderr);
-    assert.equal(parsed.error.code, 'execution.mode.required');
-    assert.equal(parsed.error.ownerId, 'humanagent.app');
-    return true;
-  });
+  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Uint8Array) => { output += String(chunk); });
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  try {
+    const launch = await new Promise<{ readonly provider?: string; readonly url?: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${stderr}`)), 5_000);
+      child.stdout.on('data', () => {
+        try {
+          const parsed = JSON.parse(output.trim()) as { readonly provider?: string; readonly url?: string };
+          if (!parsed.url) return;
+          clearTimeout(timeout);
+          resolve(parsed);
+        } catch {
+          // Wait for the complete startup object.
+        }
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => reject(new Error(`serve exited before startup (${String(code)}): ${stderr}`)));
+    });
+    assert.equal(launch.provider, 'fake');
+    assert.match(launch.url ?? '', /^http:\/\/127\.0\.0\.1:/);
+  } finally {
+    child.kill('SIGTERM');
+    if (child.exitCode === null) await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  }
 });
 
 test('CLI serve composes rooted memory and keeps it across process restart', async () => {
@@ -955,7 +983,7 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
       workspace,
       '--control-root',
       controlRoot,
-      '--mode',
+      '--provider',
       'fake',
       '--port',
       '0',
@@ -1040,6 +1068,7 @@ test('CLI serve composes rooted memory and keeps it across process restart', asy
       'fake',
       '--port',
       '0',
+      '--json',
     ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
     let duplicateStderr = '';
     duplicate.stderr.on('data', (chunk: Uint8Array) => { duplicateStderr += String(chunk); });
@@ -3162,6 +3191,7 @@ async function runStandaloneEntry(input: {
       input.scenario,
       '--fake-step-delay-ms',
       '0',
+      '--json',
     ], { encoding: 'utf8', stdio: 'pipe' });
     return { exit: 0, output: JSON.parse(stdout) as EntryRunOutput };
   } catch (error) {
@@ -3203,6 +3233,7 @@ async function runServeEntry(input: {
     input.scenario,
     '--fake-step-delay-ms',
     '0',
+    '--json',
   ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
   let serveStderr = '';
   serve.stderr.on('data', (chunk: Uint8Array) => {
