@@ -423,6 +423,10 @@ function servePromptSegments(
 export async function main(args: readonly string[]): Promise<void> {
   configureBuiltinPromptRoot();
   const requestedCommand = args[0];
+  if (requestedCommand === '--version' || requestedCommand === '-v' || requestedCommand === 'version') {
+    console.log(packageVersion());
+    return;
+  }
   if (requestedCommand === '--help' || requestedCommand === '-h' || requestedCommand === 'help') {
     console.log(helpText());
     return;
@@ -432,10 +436,6 @@ export async function main(args: readonly string[]): Promise<void> {
     : requestedCommand;
   const workspace = option(args, '--workspace') ?? process.cwd();
   const controlRoot = option(args, '--control-root');
-  if (command === '--version' || command === 'version') {
-    console.log(packageVersion());
-    return;
-  }
   if (command === 'init' || command === 'doctor') {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);

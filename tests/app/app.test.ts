@@ -883,6 +883,12 @@ test('CLI host failures remain structured', async () => {
   });
 });
 
+test('CLI version exits before default serve routing', async () => {
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const output = execFileSync(process.execPath, [cli, '--version'], { encoding: 'utf8', stdio: 'pipe' });
+  assert.match(output.trim(), /^\d+\.\d+\.\d+$/);
+});
+
 test('CLI entry uses one typed invalid-prompt error', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-errors-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
