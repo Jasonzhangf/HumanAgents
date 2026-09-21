@@ -1,25 +1,30 @@
 # Hand 基础服务与自检边界
 
-状态：`MVP-IMPLEMENTATION`
-范围：Hand 的高层 Coding Service、Function Harness、自检与 Memory Agent 边界
+状态：`MVP-IMPLEMENTATION / TASK-GATEWAY-DESIGN-REVISION`
+范围：Hand Task Gateway 的服务契约、Function Harness、自检与 Memory Agent 边界
+
+完整的任务级设计、模型路由、recipe、递归状态机和动态服务注册见
+[`hand-task-gateway.md`](hand-task-gateway.md)。本文保留 `code.search` 的具体服务契约，作为第一条已实现服务的实现基线；不得再把 Hand 解释为只有一个搜索 route 的薄 wrapper。
 
 ## 1. 在线职责
 
-Hand 对外提供的是能减少主 Agent 连续工具调用的高层服务，不是原子工具目录。
+Hand 对外提供的是能减少主 Agent 连续工具调用的高层任务服务，不是原子工具目录，也不只是一次 operation 的委任入口。一个服务可以内部调用多个函数、多个 operation、多个模型轮次，并在最终交付前完成验证和失败收拢。
 
 ```text
 编排 Agent
-  → Hand / code.search
+  → Hand Task Gateway / semantic service
+  → route snapshot + task state machine
   → Operation Gateway
-  → CodeSearchRoute
-  → Function Harness: findFiles → readFile → aggregate
+  → route / Function Harness / model executor
   → verifier
-  → 完整报告 artifact
+  → 完整任务报告 artifact
 ```
 
 Hand 不对外暴露 `read_file`、`grep`、`list_files`、`diff` 或 `apply_patch`。这些是服务内部可以使用的函数。只有把多个步骤、范围控制、结果汇总和完整性判断封装成一个可复现服务，才有资格注册为 Hand service。
 
-第一条基础服务是 `code.search@1.0.0`。高层输入使用 `CodeSearchRequest`，结果使用 `CodeSearchReport`，并固定区分：
+第一条基础服务是 `code.search@1.0.0`。它验证了 Hand 服务必须同时拥有高层输入契约、内部 function harness、范围控制、完整性报告、失败分类、route 注册和 verifier。后续 `code.edit`、`code.test`、`code.build` 和 `git.workflow` 必须满足同一资格线，不能只注册一个模型工具名。
+
+`code.search` 高层输入使用 `CodeSearchRequest`，结果使用 `CodeSearchReport`，并固定区分：
 
 - `matchesFound`：实际发现的匹配总数；
 - `matches`：返回的匹配集合，受 `maxResults` 限制；
@@ -40,7 +45,7 @@ Hand 不对外暴露 `read_file`、`grep`、`list_files`、`diff` 或 `apply_pat
 
 `runCodeSearchBenchmark` 是服务级回放入口。耗时只作为观测数据，不作为正确性补偿；正确性以固定报告断言为准。性能筛选另行记录首结果、完整结果和总耗时，不能因为超时把不完整结果包装成成功。
 
-服务有界并发读取，但不接受无界 workspace 扫描：默认最多准入 20,000 个候选文件。内部 discovery 发现第 20,001 个候选时立即早停，先返回受深度/节点数限制的 `pathTree`，同时以 `scope-too-large` 明确报告范围过大，且不读取文件；上层根据 tree 把 `path` 收窄到源码目录或具体模块后重试。这样大仓库仍可搜索，历史 worktree、控制面和生成物混在根目录时也不会把 Hand 变成长时间后台扫描。
+服务有界并发读取，但不接受无界 workspace 扫描：默认最多准入 20,000 个候选文件。内部 discovery 发现第 20,001 个候选时立即早停，先返回受深度/节点数限制的 `pathTree`，同时以 `scope-too-large` 明确报告范围过大，且不读取文件；上层根据 tree 把 `path` 收窄到源码目录或具体模块后重试。这样大仓库仍可搜索，历史 worktree、控制面和生成物混在根目录时也不会把 Hand 变成长时间后台扫描。`pathTree` 是本次报告的 bounded 结果，不是 Harness 的权威持久化 artifact；完整报告和恢复事实仍由 Task Journal/`~/.humanagent` 保存。
 
 ## 3. Memory Agent 边界
 
