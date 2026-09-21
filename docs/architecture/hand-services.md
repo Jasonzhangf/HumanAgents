@@ -1,6 +1,6 @@
 # Hand 基础服务与自检边界
 
-状态：`MVP-IMPLEMENTATION`  
+状态：`MVP-IMPLEMENTATION`
 范围：Hand 的高层 Coding Service、Function Harness、自检与 Memory Agent 边界
 
 ## 1. 在线职责
