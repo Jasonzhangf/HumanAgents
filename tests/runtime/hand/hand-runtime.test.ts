@@ -200,7 +200,7 @@ test('concurrent replay does not start a second gateway execution or throw', asy
 
   assert.equal(first.operation.status, 'succeeded');
   assert.equal(second.submission.decision, 'replay');
-  assert.equal(second.operation.status, 'accepted');
+  assert.equal(second.operation.status, 'succeeded');
   assert.equal(context.route.calls, 1);
 });
 

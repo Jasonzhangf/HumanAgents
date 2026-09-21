@@ -100,6 +100,7 @@ export class ToolExecutionGateway {
   private readonly leaseDurationMs: number;
   private readonly hand: HandRuntime;
   private readonly operations = new Map<string, OperationRecord>();
+  private readonly executions = new Map<string, Promise<OperationSnapshot>>();
   private readonly idempotency = new Map<string, { readonly namespaceKey: string; readonly fingerprintKey: string; readonly operationId: string }>();
   private readonly pendingSubmissions = new Map<string, PendingSubmission>();
   private readonly operationLocks = new Map<string, Promise<void>>();
@@ -166,6 +167,19 @@ export class ToolExecutionGateway {
   }
 
   async execute(operationId: OperationIntent['operationId']): Promise<OperationSnapshot> {
+    const key = operationKey(operationId);
+    const existing = this.executions.get(key);
+    if (existing) return existing;
+    const execution = this.executeOnce(operationId);
+    this.executions.set(key, execution);
+    try {
+      return await execution;
+    } finally {
+      if (this.executions.get(key) === execution) this.executions.delete(key);
+    }
+  }
+
+  private async executeOnce(operationId: OperationIntent['operationId']): Promise<OperationSnapshot> {
     const prepared = await this.withOperationLock(operationId, async () => {
       const record = this.requireOperation(operationId);
       if (record.status === 'accepted') {

@@ -281,7 +281,9 @@ test('post-commit publish failure keeps accepted operation and idempotency stabl
   assert.equal(replay.operation.status, 'accepted');
   assert.equal(context.journal.committed.length, 1);
   assert.equal(context.journal.published.length, 0);
-  assert.equal(context.executor.requests.length, 0);
+  const result = await context.gateway.execute(operation);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(context.executor.requests.length, 1);
 });
 
 test('concurrent execute leases and invokes executor once', async () => {
@@ -306,10 +308,10 @@ test('concurrent execute leases and invokes executor once', async () => {
 
   const results = await resultsPromise;
   assert.equal(results[0]?.status, 'fulfilled');
-  assert.equal(results[1]?.status, 'rejected');
-  if (results[1]?.status === 'rejected') {
-    assert.ok(results[1].reason instanceof GatewayError);
-    assert.equal(results[1].reason.code, 'invalid-state');
+  assert.equal(results[1]?.status, 'fulfilled');
+  if (results[0]?.status === 'fulfilled' && results[1]?.status === 'fulfilled') {
+    assert.equal(results[0].value.status, 'succeeded');
+    assert.equal(results[1].value.status, 'succeeded');
   }
   assert.equal(context.executor.requests.length, 1);
   assert.equal(
