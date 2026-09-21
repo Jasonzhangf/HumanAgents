@@ -107,6 +107,36 @@ test('release versions are path-safe semantic versions', () => {
   assert.throws(() => validateReleaseVersion('1.0.0/other'), /valid semantic version/);
 });
 
+test('release bump preserves the split npm and HumanAgent version sources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-release-bump-'));
+  const packagePaths = ['package.json', 'packages/app/package.json', 'packages/config/package.json', 'packages/contracts/package.json'];
+  for (const relativePath of packagePaths) {
+    const path = join(root, relativePath);
+    await mkdir(join(path, '..'), { recursive: true });
+    await writeFile(path, JSON.stringify({ name: relativePath, version: '0.1.1', releaseVersion: '0.1.0001' }) + '\n', 'utf8');
+  }
+  await mkdir(join(root, 'docs', 'architecture'), { recursive: true });
+  await writeFile(join(root, 'docs', 'architecture', 'release-version.md'), 'old source wording\n', 'utf8');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HumanAgent Test'], { cwd: root });
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: root });
+
+  execFileSync(node, ['scripts/bump-release-version.mjs', '--project-root', root], {
+    cwd: repositoryRoot.pathname,
+    encoding: 'utf8',
+  });
+
+  const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  assert.equal(packageJson.version, '0.1.2');
+  assert.equal(packageJson.releaseVersion, '0.1.0002');
+  const architecture = await readFile(join(root, 'docs', 'architecture', 'release-version.md'), 'utf8');
+  assert.match(architecture, /HumanAgent release source:.*releaseVersion/);
+  assert.match(architecture, /npm package source:.*version/);
+  assert.doesNotMatch(architecture, /Canonical source:.*version/);
+});
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-release-'));
   const projectRoot = join(root, 'project');
