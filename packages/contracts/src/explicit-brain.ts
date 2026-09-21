@@ -525,12 +525,22 @@ function validTime(value: string, label: string): void {
 }
 
 export function validateToolIntent(input: ToolIntent): void {
-  nonEmpty(input.toolIntentId, 'toolIntentId');
-  nonEmpty(input.toolRef, 'toolRef');
-  nonEmpty(input.argumentsDigest, 'tool arguments digest');
-  nonEmpty(input.selectedBecause, 'tool selectedBecause');
-  if (!(EXPLICIT_BRAIN_MODEL_TOOLS as readonly string[]).includes(input.toolRef)) {
-    throw new ContractError(`tool is not registered for explicit brain: ${input.toolRef}`);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ContractError('tool intent must be an object');
+  }
+  const value = input as unknown as Record<string, unknown>;
+  nonEmpty(typeof value.toolIntentId === 'string' ? value.toolIntentId : undefined, 'toolIntentId');
+  nonEmpty(typeof value.toolRef === 'string' ? value.toolRef : undefined, 'toolRef');
+  nonEmpty(typeof value.argumentsDigest === 'string' ? value.argumentsDigest : undefined, 'tool arguments digest');
+  nonEmpty(typeof value.selectedBecause === 'string' ? value.selectedBecause : undefined, 'tool selectedBecause');
+  if (!value.arguments || typeof value.arguments !== 'object' || Array.isArray(value.arguments)) {
+    throw new ContractError('tool arguments must be an object');
+  }
+  if (!Array.isArray(value.reasonRefs) || value.reasonRefs.some((ref) => typeof ref !== 'string' || !ref.trim())) {
+    throw new ContractError('tool reasonRefs must be a string array');
+  }
+  if (!(EXPLICIT_BRAIN_MODEL_TOOLS as readonly string[]).includes(String(value.toolRef))) {
+    throw new ContractError(`tool is not registered for explicit brain: ${String(value.toolRef)}`);
   }
 }
 

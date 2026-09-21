@@ -1563,6 +1563,27 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     const initialJournal = await readFile(join(root, 'checkpoints', 'fake', 'ui-runtime-journal.jsonl'), 'utf8').catch(() => '');
     assert.equal(initialJournal.includes('malformed-decision'), false);
 
+    const malformedToolResponse = await fetch(`${runtime.server.url}/api/explicit/decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decisionId: 'decision:malformed-tool',
+        interactionId: 'interaction:malformed-tool',
+        kind: 'intent',
+        selectedAction: 'answer',
+        summary: 'reject malformed tool input',
+        evidenceRefs: [],
+        toolIntents: [{
+          toolIntentId: 'intent:malformed-tool',
+          toolRef: 'workspace.list',
+          arguments: { scopeRef: 'scope:workspace:project-ui-explicit-http', pathRef: '.' },
+          argumentsDigest: explicitArgumentsDigest({ scopeRef: 'scope:workspace:project-ui-explicit-http', pathRef: '.' }),
+          selectedBecause: 'test',
+        }],
+      }),
+    });
+    assert.equal(malformedToolResponse.status, 400);
+
     const inputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
