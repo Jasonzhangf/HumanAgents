@@ -2,7 +2,7 @@
 
 状态：`IN_PROGRESS`
 
-基线：`df70180808a3833bd74de0b9e4a9894870913131`（`origin/main`）
+基线：`d3b1f7f9ae14d9f7bda2d38b4eac6835be6ab3c3`（`origin/main`）
 
 ## 目标
 
@@ -29,7 +29,7 @@ confirmed requirement
 - `serve` 已调用 `runSupervisorStartup`，并获取和释放 daemon lease；该项从“未接入”改为“已接入，待 live 回放验证”。
 - `serve` 已在 checkpoint boundary 调用 memory boundary publisher，并消费 memory handler；该项从“完全未接入”改为“直接消费路径已接入，EventBus 驱动路径仍待闭合”。
 - UI Runtime 的 `eventBus` capability 仍明确为 `unavailable`。
-- fake `serve` 已具备独立 execution/review/merge ports 和 task-scoped M3 assembly 工厂；当前 confirmed-requirement dispatch 仍走单 Provider 路径，RCC `serve` 也保留单 Provider 路径。
+- fake `serve` 已具备独立 execution/review/merge ports 和 task-scoped M3 assembly 工厂；本候选已把 confirmed-requirement dispatch 接到该编排链，RCC `serve` 仍保留单 Provider 路径。
 - 旧的 UI runtime journal、Attention port、memory scope 和 live orchestration projection 需要以当前代码为准重新核对。
 
 ## 阶段与完成条件
@@ -65,7 +65,7 @@ confirmed requirement
 
 ### G2：M3 orchestration live entry
 
-范围：先完成 fake `serve` 的 M3 composition 和真实 manager dispatch replay；下一步再把 confirmed-requirement dispatch owner 接到该 assembly，建立独立 worker、review、merge typed ports，为 RCC provider-backed ports保留明确边界。
+范围：完成 fake `serve` 的 M3 composition、confirmed-requirement dispatch owner 和真实 manager dispatch replay；建立独立 worker、review、merge typed ports，为 RCC provider-backed ports 保留明确边界。
 
 完成条件：
 
@@ -74,7 +74,8 @@ confirmed requirement
 - execution agent、review agent、merge coordinator 都有独立 owner 和权限边界。
 - 每个 stage 的 success/waiting/blocked/failed/cancelled 都有 checkpoint、owner 和 next action。
 - worker feedback 能返回 orchestration，并能发布到 EventBus/UI projection。
-- M3 composition test 可以完成一条 task binding → plan → dispatch → result → review → feedback → merge 回放；confirmed requirement → orchestration 的 live edge 尚未完成，不用 capability/status 字段冒充完成。
+- M3 composition test 可以完成一条 task binding → plan → dispatch → result → review → feedback → merge 回放；confirmed requirement → orchestration 有 fake `serve` live-like replay，必须通过 implicit admission 后才允许进入。
+- provider-backed execution 的失败、waiting、blocked、cancelled 路径不能静默回到 direct provider；未绑定编排端口时必须显式失败。
 
 非目标：本阶段不实现动态 Cordis、RALPH 或长期 schedule。
 
