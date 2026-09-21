@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   id,
@@ -11,6 +14,7 @@ import {
   DeterministicInspectRoute,
   LegacyInternalRouteAdapter,
   OperationAdapterError,
+  WorkspaceCodeSearchFunctions,
   type LegacyInternalExecutionContext,
   type OperationExecutionRequest,
 } from '../../../packages/adapters/operations/src/index.js';
@@ -46,6 +50,31 @@ function intent(overrides: Partial<OperationIntent> = {}): OperationIntent {
 function request(overrides: Partial<OperationIntent> = {}, scope: Scope = effectiveScope): OperationExecutionRequest {
   return { intent: intent(overrides), effectiveScope: scope };
 }
+
+test('filesystem code search returns a bounded path tree relative to the requested directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-code-search-'));
+  try {
+    await mkdir(join(root, 'src', 'nested'), { recursive: true });
+    await writeFile(join(root, 'src', 'a.ts'), 'needle', 'utf8');
+    await writeFile(join(root, 'src', 'nested', 'b.ts'), 'other', 'utf8');
+    const functions = new WorkspaceCodeSearchFunctions({ workspaceRef: 'workspace://fixture', workspaceRoot: root });
+    const complete = await functions.findFiles({ workspaceRef: 'workspace://fixture', path: 'src', maxFiles: 10 });
+    assert.deepEqual(complete.paths, ['src/a.ts', 'src/nested/b.ts']);
+    assert.equal(complete.pathTree?.path, 'src');
+    assert.deepEqual(complete.pathTree?.children.map((child) => child.path), ['src/a.ts', 'src/nested']);
+    assert.equal(complete.pathTree?.children[1]?.children[0]?.path, 'src/nested/b.ts');
+
+    const limited = await functions.findFiles({ workspaceRef: 'workspace://fixture', path: 'src', maxFiles: 1 });
+    assert.equal(limited.discoveryTruncated, true);
+    assert.equal(limited.pathTree?.path, 'src');
+    assert.equal(limited.pathTree?.truncated, true);
+
+    const file = await functions.findFiles({ workspaceRef: 'workspace://fixture', path: 'src/a.ts', maxFiles: 10 });
+    assert.deepEqual(file.pathTree, { path: 'src/a.ts', kind: 'file', fileCount: 1, children: [], truncated: false });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('deterministic inspect returns repeatable artifact and evidence refs without external side effects', async () => {
   const route = new DeterministicInspectRoute({ now: () => '2026-09-20T00:00:00.000Z' });

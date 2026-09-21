@@ -73,11 +73,13 @@ interface MutablePathTreeNode {
 function pathTree(rootPath: string, paths: readonly string[], truncated = false): CodeSearchPathTreeNode {
   if (paths.length === 1 && paths[0] === rootPath) return { path: rootPath, kind: 'file', fileCount: 1, children: [], truncated: false };
   const root: MutablePathTreeNode = { path: rootPath, kind: 'directory', fileCount: paths.length, children: [], childrenByPath: new Map(), truncated };
+  const rootPrefix = rootPath === '.' ? '' : `${rootPath.replace(/\/$/, '')}/`;
   for (const path of paths) {
-    const parts = path.split('/');
+    const relativePath = path === rootPath ? '' : path.startsWith(rootPrefix) ? path.slice(rootPrefix.length) : path;
+    const parts = relativePath ? relativePath.split('/') : [];
     let current = root;
     for (let depth = 0; depth < Math.min(parts.length, PATH_TREE_MAX_DEPTH); depth += 1) {
-      const childPath = parts.slice(0, depth + 1).join('/');
+      const childPath = rootPath === '.' ? parts.slice(0, depth + 1).join('/') : `${rootPath}/${parts.slice(0, depth + 1).join('/')}`;
       let child = current.childrenByPath.get(childPath);
       if (!child) {
         if (current.children.length >= PATH_TREE_MAX_CHILDREN) { current.truncated = true; break; }

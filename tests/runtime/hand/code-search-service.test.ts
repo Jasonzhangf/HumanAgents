@@ -16,6 +16,7 @@ test('code.search recursively searches files and returns complete evidence field
   const functions = new FixtureFunctions({ 'src/a.ts': 'before\nneedle here\nafter', 'src/b.ts': 'none', 'src/nested/c.ts': 'needle twice\nneedle again' });
   const report = await service(functions).execute(request({ path: 'src' }));
   assert.equal(report.status, 'succeeded'); assert.equal(report.searchComplete, true); assert.equal(report.filesDiscovered, 3); assert.equal(report.filesSearched, 3); assert.equal(report.matchesFound, 3);
+  assert.equal(report.pathTree, undefined);
   assert.deepEqual(report.matches.map((match) => `${match.path}:${match.line}`), ['src/a.ts:2', 'src/nested/c.ts:1', 'src/nested/c.ts:2']); assert.deepEqual(report.matches[0]?.contextBefore, ['before']); assert.deepEqual(report.matches[0]?.contextAfter, ['after']); assert.deepEqual(functions.reads, ['src/a.ts', 'src/b.ts', 'src/nested/c.ts']);
 });
 test('code.search distinguishes symbol matches from substring matches', async () => { const report = await service(new FixtureFunctions({ 'src/a.ts': 'foobar\nfoo\nfooBar' })).execute(request({ query: 'foo', queryKind: 'symbol' })); assert.equal(report.status, 'succeeded'); assert.equal(report.matchesFound, 1); assert.equal(report.matches[0]?.line, 2); });

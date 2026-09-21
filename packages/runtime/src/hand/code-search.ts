@@ -90,7 +90,7 @@ export class CodeSearchService {
     const uniqueUnresolvedPaths = [...new Set(unresolvedPaths)].sort();
     const searchComplete = files.complete && uniqueUnresolvedPaths.length === 0;
     const resultsTruncated = matchesFound > matches.length;
-    const base = this.baseReport(input, matches, files.paths.length, filesSearched, matchesFound, resultsTruncated, searchComplete, uniqueUnresolvedPaths, files.pathTree);
+    const base = this.baseReport(input, matches, files.paths.length, filesSearched, matchesFound, resultsTruncated, searchComplete, uniqueUnresolvedPaths);
     if (input.requireComplete === true && !searchComplete) {
       return { ...base, status: 'failed', summary: `search incomplete: ${uniqueUnresolvedPaths.length} path(s) unresolved`, failure: {
         code: 'search-incomplete', message: 'the requested search scope was not fully inspected',
