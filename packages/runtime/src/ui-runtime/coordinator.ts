@@ -685,6 +685,7 @@ export class RuntimeTaskCoordinator {
   private readonly journal?: RuntimeTaskJournalPort;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly operations = new Map<string, OperationRecord>();
+  private readonly deletedTaskIds = new Set<string>();
   private readonly publishedAttentions: Attention[] = [];
   private readonly resolvedAttentions: Attention[] = [];
   private taskCounter = 0;
@@ -778,6 +779,7 @@ export class RuntimeTaskCoordinator {
     }
     const deletedAt = this.now().toISOString();
     this.journal?.append({ kind: 'task.deleted', taskId, deletedAt });
+    this.deletedTaskIds.add(taskId.value);
     this.tasks.delete(taskId.value);
     return { taskId, deleted: true };
   }
@@ -1889,6 +1891,7 @@ export class RuntimeTaskCoordinator {
           break;
         }
         case 'task.deleted': {
+          this.deletedTaskIds.add(record.taskId.value);
           this.tasks.delete(record.taskId.value);
           break;
         }
@@ -1904,6 +1907,7 @@ export class RuntimeTaskCoordinator {
           };
           this.operations.set(record.operationId.value, operation);
           this.scopes.set(record.operationId.value, record.scope);
+          if (this.deletedTaskIds.has(record.taskId.value)) break;
           const task = this.tasks.get(record.taskId.value);
           if (task) {
             task.operationId = record.operationId;
@@ -1934,6 +1938,7 @@ export class RuntimeTaskCoordinator {
           }
           const task = this.tasks.get(operation.taskId.value);
           if (!task) {
+            if (this.deletedTaskIds.has(operation.taskId.value)) break;
             throw new RuntimeTaskControlError(
               'journal.corrupt',
               RUNTIME_OWNER,

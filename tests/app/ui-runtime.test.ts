@@ -2987,6 +2987,14 @@ test('runtime task API supports update, delete, and grouped task actions', async
       body: JSON.stringify({ title: 'editable task', directive: 'initial directive' }),
     })));
     const tasks = await Promise.all(created.map(async (response) => await response.json() as { readonly taskId: { readonly value: string } }));
+    const executedResponse = await fetch(`${runtime.server.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'executed task', directive: 'executed directive' }),
+    });
+    const executed = await executedResponse.json() as { readonly taskId: { readonly value: string } };
+    runtime.service.startExecution(id('task', executed.taskId.value), { prompt: 'complete before delete' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(id('task', executed.taskId.value)).state, 'succeeded'));
     const updated = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(tasks[0]!.taskId.value)}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -3008,12 +3016,30 @@ test('runtime task API supports update, delete, and grouped task actions', async
     const deleted = await fetch(`${runtime.server.url}/api/tasks/bulk`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'delete', taskIds: tasks.map((task) => task.taskId.value) }),
+      body: JSON.stringify({ action: 'delete', taskIds: [...tasks.map((task) => task.taskId.value), executed.taskId.value] }),
     });
     assert.equal(deleted.status, 200);
-    assert.deepEqual((await deleted.json()).results.map((result: { readonly state: string }) => result.state), ['succeeded', 'succeeded']);
+    assert.deepEqual((await deleted.json()).results.map((result: { readonly state: string }) => result.state), ['succeeded', 'succeeded', 'succeeded']);
     const listed = await fetch(`${runtime.server.url}/api/tasks`);
     assert.equal((await listed.json()).counts.total, 0);
+    const restarted = await startUiRuntime({
+      mode: 'fake',
+      organId,
+      binding,
+      port: buildFakeExecutionPort(binding),
+      checkpointRoot: join(root, 'checkpoints'),
+      evidenceRoot: join(root, 'evidence'),
+      uiRoot: join(process.cwd(), 'docs', 'ui'),
+      providerState: 'ready',
+      portNumber: 0,
+      memory: testMemory('project-ui-task-crud'),
+    });
+    try {
+      const afterRestart = await fetch(`${restarted.server.url}/api/tasks`);
+      assert.equal((await afterRestart.json()).counts.total, 0);
+    } finally {
+      await restarted.server.close();
+    }
   } finally {
     await runtime.server.close();
   }
