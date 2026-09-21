@@ -1177,6 +1177,14 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
       duplicate.once('exit', (code) => reject(new Error(`takeover serve exited before startup (${String(code)}): ${output}; stderr=${duplicateStderr}`)));
     });
     assert.match(duplicateLaunch.url, /^http:\/\/127\.0\.0\.1:/);
+    const originalExitCode = await new Promise<number | null>((resolve) => {
+      if (first.process.exitCode !== null) {
+        resolve(first.process.exitCode);
+        return;
+      }
+      first.process.once('exit', (code) => resolve(code));
+    });
+    assert.equal(originalExitCode, 0);
 
     const created = await fetch(`${duplicateLaunch.url}/api/tasks`, {
       method: 'POST',

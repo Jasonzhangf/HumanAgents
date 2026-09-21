@@ -62,6 +62,8 @@ export interface SupervisorDisposeReceipt {
   readonly disposedStages: readonly string[];
   readonly releasedAt: string;
   readonly cleanupFailure?: SupervisorCleanupFailure;
+  /** The lease was replaced by a newer owner while this owner was stopping. */
+  readonly leaseHandoff?: true;
 }
 
 export interface SupervisorLease {
@@ -628,6 +630,11 @@ async function disposeStagesReverse(stages: readonly SupervisorStage[]): Promise
   return { disposedStages, cleanupFailure };
 }
 
+function isExpectedLeaseHandoff(error: unknown): boolean {
+  return error instanceof AppLifecycleError
+    && (error.code === 'daemon-lease-transition-in-progress' || error.code === 'daemon-lease-stale');
+}
+
 async function failAndCleanup(paths: RuntimePaths, lease: SupervisorLease, error: unknown, started: readonly SupervisorStage[]): Promise<{ readonly error: unknown; readonly receipt: SupervisorFailureReceipt }> {
   const failingStage = started.at(-1);
   const failure = failureRecordFor(error, failingStage);
@@ -724,12 +731,24 @@ export async function runSupervisorStartup(paths: RuntimePaths, stages: readonly
       async dispose() {
         if (disposeReceipt !== undefined) return disposeReceipt;
         const cleanup = await disposeStagesReverse(started);
-        const released = await lease.release();
+        let released: SupervisorLeaseRecord;
+        let leaseHandoff = false;
+        try {
+          released = await lease.release();
+        } catch (error) {
+          if (!isExpectedLeaseHandoff(error)) throw error;
+          // A new serve owner has already fenced this process. Its lease is the
+          // durable owner now; stopping stages remains successful even though
+          // the old lease can no longer be marked disposed.
+          released = lease.record;
+          leaseHandoff = true;
+        }
         disposeReceipt = {
           lease: released,
           disposedStages: cleanup.disposedStages,
           releasedAt: released.disposedAt ?? new Date().toISOString(),
           ...(cleanup.cleanupFailure === undefined ? {} : { cleanupFailure: cleanup.cleanupFailure }),
+          ...(leaseHandoff ? { leaseHandoff: true as const } : {}),
         };
         return disposeReceipt;
       },
