@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { bumpReleaseVersion, configuredReleaseVersion } from './release-version.mjs';
+import { bumpReleaseVersion, configuredReleaseVersion, packageVersionForRelease } from './release-version.mjs';
 
 function option(args, name, fallback) {
   const index = args.indexOf(name);
@@ -25,7 +25,8 @@ const packagePaths = [
 for (const relativePath of packagePaths) {
   const path = join(projectRoot, relativePath);
   const packageJson = JSON.parse(await readFile(path, 'utf8'));
-  packageJson.version = next;
+  packageJson.version = packageVersionForRelease(next);
+  packageJson.releaseVersion = next;
   await writeFile(path, JSON.stringify(packageJson, null, 2) + '\n', 'utf8');
 }
 

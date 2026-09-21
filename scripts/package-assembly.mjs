@@ -1,9 +1,9 @@
-import { chmod, cp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { treeDigest } from './digests.mjs';
 
-export async function assemblePackage({ projectRoot, releaseRoot, version }) {
+export async function assemblePackage({ projectRoot, releaseRoot, version, releaseVersion = version }) {
   const packageRoot = join(releaseRoot, 'package');
   await rm(packageRoot, { recursive: true, force: true });
   await mkdir(join(packageRoot, 'bin'), { recursive: true });
@@ -16,12 +16,14 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
   await writeFile(join(contractsRoot, 'package.json'), JSON.stringify({
     name: '@humanagent/contracts',
     version,
+    releaseVersion,
     type: 'module',
     exports: { '.': './dist/index.js' },
   }, null, 2) + '\n', 'utf8');
   const packageJson = {
     name: 'humanagent-cli',
     version,
+    releaseVersion,
     private: false,
     type: 'module',
     bin: { humanagent: './bin/humanagent.mjs' },
@@ -35,7 +37,7 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
     "import { fileURLToPath } from 'node:url';",
     "const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');",
     "const packageJson = JSON.parse(await import('node:fs/promises').then(({ readFile }) => readFile(join(packageRoot, 'package.json'), 'utf8')));",
-    "process.env.HUMANAGENT_RELEASE_VERSION = packageJson.version;",
+    "process.env.HUMANAGENT_RELEASE_VERSION = packageJson.releaseVersion || packageJson.version;",
     "process.env.HUMANAGENT_TEMPLATE_ROOT = join(packageRoot, 'runtime', 'agent-templates', 'templates');",
     "process.env.HUMANAGENT_UI_ROOT = join(packageRoot, 'runtime', 'ui');",
     "import { formatCliError, main } from '../runtime/app/src/cli.js';",
@@ -47,5 +49,8 @@ export async function assemblePackage({ projectRoot, releaseRoot, version }) {
   ].join('\n'), 'utf8');
   await chmod(binPath, 0o755);
   const packed = execFileSync('npm', ['pack', '--ignore-scripts', '--pack-destination', releaseRoot], { cwd: packageRoot, encoding: 'utf8' }).trim();
-  return { packageRoot, packagePath: join(releaseRoot, packed.split('\n').at(-1)), artifactDigest };
+  const packedPath = join(releaseRoot, packed.split('\n').at(-1));
+  const packagePath = join(releaseRoot, `humanagent-cli-${releaseVersion}.tgz`);
+  if (packedPath !== packagePath) await rename(packedPath, packagePath);
+  return { packageRoot, packagePath, artifactDigest };
 }
