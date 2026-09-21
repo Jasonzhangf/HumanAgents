@@ -3363,6 +3363,10 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
   const retryResult = await service.retryStop(task.taskId);
   assert.equal(retryResult.state, 'settling');
   assert.throws(
+    () => service.deleteTask(task.taskId),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
+  );
+  assert.throws(
     () => service.startExecution(task.taskId, { prompt: 'should reject' }),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
   );
@@ -3609,6 +3613,7 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
       && event.terminalPhase === 'final'),
     true,
   );
+  assert.deepEqual(service.deleteTask(task.taskId), { taskId: task.taskId.value, deleted: true });
   const checkpointJournal = await readFile(
     join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
     'utf8',
