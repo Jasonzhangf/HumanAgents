@@ -61,6 +61,8 @@ export interface ServeRuntimeComposition {
     readonly task: Task;
     readonly scope: Parameters<typeof createM3Assembly>[0]['scope'];
     readonly checkpointJournal: CheckpointJournalPort;
+    readonly executionAgent?: ExecutionAgentPort;
+    readonly maxAttempts?: number;
   }): M3Assembly;
   dispose(): Promise<void>;
 }
@@ -166,7 +168,7 @@ export function createServeRuntimeComposition(
     agentIo,
     eventBus,
     runtimePool,
-    createTaskAssembly({ task, scope, checkpointJournal }) {
+    createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
       if (!input.executionAgent || !input.reviewAgent || !input.mergeCoordinator) {
         throw new AppLifecycleError(
           'serve.m3.ports-missing',
@@ -180,7 +182,7 @@ export function createServeRuntimeComposition(
         task,
         scope,
         runtimePool,
-        executionAgent: input.executionAgent,
+        executionAgent: executionAgent ?? input.executionAgent,
         reviewAgent: input.reviewAgent,
         mergeCoordinator: input.mergeCoordinator,
         feedbackPorts: {
@@ -189,6 +191,7 @@ export function createServeRuntimeComposition(
         },
         feedbackPublisherId: input.feedbackPublisherId,
         checkpointJournal,
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
         ...(input.now === undefined ? {} : { now: input.now }),
       });
     },

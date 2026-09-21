@@ -124,6 +124,7 @@ import { projectMemoryInteraction, projectTaskDetail } from '../../../ui/project
 import type { RuntimeObservationNodeInput, RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
+import type { ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
 
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
@@ -181,6 +182,8 @@ export interface UiRuntimeServiceOptions {
       readonly task: import('../../../contracts/src/index.js').Task;
       readonly scope: import('../../../contracts/src/index.js').ScopeRef;
       readonly checkpointJournal: TaskCheckpointStore;
+      readonly executionAgent?: ExecutionAgentPort;
+      readonly maxAttempts?: number;
     }) => RuntimeTaskAssembly;
   };
 }
@@ -887,7 +890,7 @@ export class UiRuntimeService {
     }
   }
 
-  startExecution(taskId: TaskId, input: { readonly prompt: string }): { readonly operationId: OperationId; readonly executionEpoch: number } {
+  startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): { readonly operationId: OperationId; readonly executionEpoch: number } {
     try {
       const status = this.status();
       if (status.state !== 'ready' && status.state !== 'degraded') {
@@ -1151,6 +1154,7 @@ export class UiRuntimeService {
           });
       const started = this.coordinator.startExecution(task.taskId, {
         prompt: admitted.classified.envelope.payloadRef,
+        ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
       });
       this.dispatchLedger.set(consumed.draftId, {
         draftId: consumed.draftId,

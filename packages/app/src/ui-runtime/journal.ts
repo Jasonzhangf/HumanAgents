@@ -139,6 +139,9 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     requirePositiveInteger(record, 'operationCounter', filePath, line);
     requirePositiveInteger(record, 'cycleCounter', filePath, line);
     requireRecordString(record, 'input', filePath, line);
+    if (record.orchestrated !== undefined && typeof record.orchestrated !== 'boolean') {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: orchestrated must be a boolean`);
+    }
     return record as unknown as UiRuntimeJournalRecord;
   }
   if (kind === 'operation.event') {

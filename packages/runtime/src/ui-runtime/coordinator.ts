@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   id,
   type AgentDriver,
@@ -18,6 +19,8 @@ import {
   type ScopeRef,
   type Task,
   type TaskId,
+  type WorkAssignment,
+  type WorkResult,
 } from '../../../contracts/src/index.js';
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
@@ -36,7 +39,7 @@ import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
-import type { AgentRuntimePoolManager } from '../orchestration/runtime-pool.js';
+import type { AgentRuntimePoolManager, ExecutionAgentPort } from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
@@ -99,6 +102,7 @@ export interface RuntimeTaskSnapshot {
   readonly currentNode: string;
   readonly operationId?: string;
   readonly executionEpoch?: number;
+  readonly orchestrated: boolean;
   readonly allowedActions: readonly string[];
   readonly recentEvents: readonly RuntimeTaskEvent[];
   readonly events: readonly RuntimeTaskEvent[];
@@ -217,6 +221,7 @@ export type RuntimeTaskJournalRecord =
       readonly cycleCounter: number;
       readonly startedAt: string;
       readonly input: string;
+      readonly orchestrated?: boolean;
     }
   | {
       readonly kind: 'operation.event';
@@ -264,6 +269,8 @@ export interface RuntimeTaskCoordinatorOptions {
     readonly task: Task;
     readonly scope: ScopeRef;
     readonly checkpointJournal: TaskCheckpointStore;
+    readonly executionAgent?: ExecutionAgentPort;
+    readonly maxAttempts?: number;
   }) => RuntimeTaskAssembly;
 }
 
@@ -307,11 +314,12 @@ interface TaskRecord {
   checkpoint?: Checkpoint;
   checkpointSeq: number;
   error?: RuntimeTaskError;
+  orchestrated: boolean;
   running: boolean;
   stopping: boolean;
   postCommitRecoveryPending?: boolean;
-  executionReady?: Promise<void>;
-  resolveExecutionReady?: () => void;
+  executionReady?: Promise<boolean>;
+  resolveExecutionReady?: (ready: boolean) => void;
 }
 
 interface OperationRecord {
@@ -703,6 +711,7 @@ export class RuntimeTaskCoordinator {
       allowedActions: ['start'],
       events: [],
       checkpointSeq: 0,
+      orchestrated: false,
       running: false,
       stopping: false,
     };
@@ -727,7 +736,7 @@ export class RuntimeTaskCoordinator {
     return this.snapshot(this.requireTask(taskId));
   }
 
-  startExecution(taskId: TaskId, input: { readonly prompt: string }): { readonly operationId: OperationId; readonly executionEpoch: number } {
+  startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): { readonly operationId: OperationId; readonly executionEpoch: number } {
     const record = this.requireTask(taskId);
     if (record.running) throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'task already has a running execution', 'stop the current execution first');
     if (!record.allowedActions.includes('start')) {
@@ -735,6 +744,14 @@ export class RuntimeTaskCoordinator {
     }
     const prompt = input.prompt.trim();
     if (!prompt) throw new RuntimeTaskControlError('execution.input.required', RUNTIME_OWNER, 'execution input is required', 'provide a non-empty prompt');
+    if (input.orchestrate === true && !this.options.createTaskAssembly) {
+      throw new RuntimeTaskControlError(
+        'orchestration.unavailable',
+        RUNTIME_OWNER,
+        'orchestration was requested but no task assembly is bound',
+        'bind execution, review, and merge orchestration ports before dispatching a confirmed requirement',
+      );
+    }
     this.operationCounter += 1;
     this.cycleCounter += 1;
     const operationId = id('operation', `ui-operation-${this.operationCounter}`);
@@ -748,7 +765,7 @@ export class RuntimeTaskCoordinator {
 
     record.running = true;
     record.stopping = false;
-    record.executionReady = new Promise<void>((resolve) => {
+    record.executionReady = new Promise<boolean>((resolve) => {
       record.resolveExecutionReady = resolve;
     });
     record.state = 'running';
@@ -766,6 +783,7 @@ export class RuntimeTaskCoordinator {
     record.nextStep = '等待 Provider 事件';
     record.allowedActions = ['stop'];
     record.error = undefined;
+    record.orchestrated = input.orchestrate === true;
     record.updatedAt = this.now().toISOString();
     this.journal?.append({
       kind: 'operation.started',
@@ -778,6 +796,7 @@ export class RuntimeTaskCoordinator {
       cycleCounter: this.cycleCounter,
       startedAt: record.updatedAt,
       input: prompt,
+      ...(record.orchestrated ? { orchestrated: true } : {}),
     });
     this.pushEvent(record, operation, 'execution.started', 'running', 'execution started', []);
 
@@ -791,7 +810,10 @@ export class RuntimeTaskCoordinator {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'task has no running execution to stop', 'start an execution first');
     }
     record.stopping = true;
-    await record.executionReady;
+    const executionReady = await record.executionReady;
+    if (!executionReady) {
+      throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
+    }
     if (!record.running || !record.runtime || !record.driver || !record.composition || !record.operationId || !record.executionEpoch) {
       throw new RuntimeTaskControlError('task.not.running', RUNTIME_OWNER, 'execution ended before stop control could start', 'start an execution first');
     }
@@ -1034,21 +1056,6 @@ export class RuntimeTaskCoordinator {
         this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
       );
       record.checkpointBoundary = checkpointBoundary;
-      if (this.options.createTaskAssembly) {
-        record.taskAssembly = this.options.createTaskAssembly({
-          task: {
-            id: record.taskId,
-            organId: this.options.organId,
-            title: record.title,
-            directive: record.directive,
-            directiveRevision: record.directiveRevision,
-            state: record.state,
-            memoryScope: 'task',
-          },
-          scope,
-          checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
-        });
-      }
       driver = this.options.createDriver({
         runtimeId,
         taskId: record.taskId,
@@ -1075,34 +1082,272 @@ export class RuntimeTaskCoordinator {
       record.composition = composition;
       record.driver = driver;
       record.runtime = runtime;
-      await composition.start();
-      await composition.submit(prompt);
-      record.resolveExecutionReady?.();
-      record.resolveExecutionReady = undefined;
-      if (record.stopping || record.postCommitRecoveryPending) return;
-      for await (const observation of composition.observe()) {
-        if (record.postCommitRecoveryPending) return;
-        if (!observation.accepted) {
-          this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
-          continue;
+      let closure: AgentRuntimeClosure | undefined;
+      if (record.orchestrated && this.options.createTaskAssembly) {
+        const outputRef = `operation://${operation.operationId.value}/output`;
+        const outputDigest = (): string => `sha256:${createHash('sha256').update(record.output).digest('hex')}`;
+        const coordinator = this;
+        const providerExecutionAgent: ExecutionAgentPort = {
+          async execute(input): Promise<WorkResult> {
+            await composition!.start();
+            await composition!.submit(prompt);
+            record.resolveExecutionReady?.(true);
+            record.resolveExecutionReady = undefined;
+            if (record.stopping || record.postCommitRecoveryPending) {
+              return {
+                taskId: input.assignment.taskId,
+                pipelineNodeId: input.assignment.pipelineNodeId,
+                agentId: input.agentId,
+                assignmentId: input.assignment.assignmentId,
+                attempt: input.assignment.attempt,
+                executionEpoch: input.assignment.executionEpoch,
+                inputRevision: input.assignment.inputRevision,
+                producedArtifactRefs: [],
+                producedArtifactDigests: [],
+                status: 'cancelled',
+                summary: 'provider execution was stopped before observation completed',
+                outputRefs: [],
+                evidenceRefs: [],
+                nextAction: 'settle',
+              };
+            }
+            for await (const observation of composition!.observe()) {
+              if (record.postCommitRecoveryPending) return {
+                taskId: input.assignment.taskId,
+                pipelineNodeId: input.assignment.pipelineNodeId,
+                agentId: input.agentId,
+                assignmentId: input.assignment.assignmentId,
+                attempt: input.assignment.attempt,
+                executionEpoch: input.assignment.executionEpoch,
+                inputRevision: input.assignment.inputRevision,
+                producedArtifactRefs: [],
+                producedArtifactDigests: [],
+                status: 'blocked',
+                summary: 'provider execution reached post-commit recovery',
+                outputRefs: [],
+                evidenceRefs: [],
+                nextAction: 'attention',
+                conditionRef: `operation://${operation.operationId.value}/recovery`,
+              };
+              if (!observation.accepted) {
+                coordinator.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+                continue;
+              }
+              const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
+              if (!event.providerEvent) continue;
+              coordinator.recordProviderEvent(record, operation, event.providerEvent);
+            }
+            if (record.postCommitRecoveryPending) {
+              return {
+                taskId: input.assignment.taskId,
+                pipelineNodeId: input.assignment.pipelineNodeId,
+                agentId: input.agentId,
+                assignmentId: input.assignment.assignmentId,
+                attempt: input.assignment.attempt,
+                executionEpoch: input.assignment.executionEpoch,
+                inputRevision: input.assignment.inputRevision,
+                producedArtifactRefs: [],
+                producedArtifactDigests: [],
+                status: 'blocked',
+                summary: 'provider execution reached post-commit recovery',
+                outputRefs: [],
+                evidenceRefs: [],
+                nextAction: 'attention',
+                conditionRef: `operation://${operation.operationId.value}/recovery`,
+              };
+            }
+            if (runtime!.snapshot().state === 'stopped' || record.stopping) {
+              closure = runtime!.snapshot().closure;
+              return {
+                taskId: input.assignment.taskId,
+                pipelineNodeId: input.assignment.pipelineNodeId,
+                agentId: input.agentId,
+                assignmentId: input.assignment.assignmentId,
+                attempt: input.assignment.attempt,
+                executionEpoch: input.assignment.executionEpoch,
+                inputRevision: input.assignment.inputRevision,
+                producedArtifactRefs: [],
+                producedArtifactDigests: [],
+                status: 'cancelled',
+                summary: 'provider execution was stopped during observation',
+                outputRefs: [],
+                evidenceRefs: closure?.evidenceRefs ?? [],
+                nextAction: 'settle',
+              };
+            }
+            coordinator.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
+            record.state = 'settling';
+            record.currentState = '收拢中';
+            record.nextStep = '等待编排审查和 checkpoint';
+            record.allowedActions = [];
+            closure = await composition!.settle();
+            const status: WorkResult['status'] = closure.state === 'succeeded'
+              ? 'succeeded'
+              : closure.state === 'waiting'
+                ? 'incomplete'
+                : closure.state === 'blocked'
+                  ? 'blocked'
+                  : closure.state === 'failed' || closure.state === 'unknown'
+                    ? 'failed'
+                    : 'cancelled';
+            const nextAction: WorkResult['nextAction'] = closure.state === 'succeeded'
+              ? 'review'
+              : closure.state === 'waiting'
+                ? 'wait'
+                : closure.state === 'blocked' || closure.state === 'failed' || closure.state === 'unknown'
+                  ? 'attention'
+                  : 'settle';
+            return {
+              taskId: input.assignment.taskId,
+              pipelineNodeId: input.assignment.pipelineNodeId,
+              agentId: input.agentId,
+              assignmentId: input.assignment.assignmentId,
+              attempt: input.assignment.attempt,
+              executionEpoch: input.assignment.executionEpoch,
+              inputRevision: input.assignment.inputRevision,
+              producedArtifactRefs: [outputRef],
+              producedArtifactDigests: [outputDigest()],
+              status,
+              summary: `provider execution ${closure.state}`,
+              outputRefs: [outputRef],
+              evidenceRefs: closure.evidenceRefs,
+              nextAction,
+              ...(nextAction === 'wait'
+                ? { conditionRef: closure.conditionRef ?? `operation://${operation.operationId.value}/waiting` }
+                : {}),
+              ...(status === 'failed'
+                ? { failureRef: closure.failureRef ?? `operation://${operation.operationId.value}/failed` }
+                : {}),
+            };
+          },
+        };
+        record.taskAssembly = this.options.createTaskAssembly({
+          task: {
+            id: record.taskId,
+            organId: this.options.organId,
+            title: record.title,
+            directive: record.directive,
+            directiveRevision: record.directiveRevision,
+            state: record.state,
+            memoryScope: 'task',
+          },
+          scope,
+          checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+          executionAgent: providerExecutionAgent,
+          maxAttempts: 1,
+        });
+        const stageNodeId = `stage-${operation.operationId.value}`;
+        const assignment: WorkAssignment = {
+          assignmentId: `assignment-${operation.operationId.value}`,
+          taskId: record.taskId,
+          pipelineNodeId: stageNodeId,
+          attempt: 1,
+          executionEpoch: operation.executionEpoch,
+          inputRevision: record.directiveRevision,
+          objective: prompt,
+          targetRefs: [outputRef],
+          expectedOutputRefs: [outputRef],
+          acceptanceCriteriaDigest: `sha256:${createHash('sha256').update(`${record.directive}\n${prompt}`).digest('hex')}`,
+          successCriteria: ['provider execution settles successfully'],
+          failureCriteria: ['provider execution fails'],
+          incompleteCriteria: ['provider execution requires waiting or recovery'],
+          requiredCapabilities: ['provider.execution'],
+          mergeGate: 'required',
+        };
+        record.currentNode = 'orchestration.plan';
+        record.nextStep = '编排执行、审查并合并';
+        record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
+        const dispatched = await record.taskAssembly.orchestration.dispatch({
+          stageNodeId,
+          assignment,
+          agentId: 'humanagent.provider-execution',
+          scope,
+          reviewKinds: ['quality'],
+        });
+        if (record.stopping || record.postCommitRecoveryPending) return;
+        if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {
+          if (!closure) {
+            const problem = dispatched.issue;
+            throw new RuntimeTaskControlError(
+              'orchestration.dispatch.failed',
+              problem?.ownerId ?? RUNTIME_OWNER,
+              problem?.reason ?? `orchestration dispatch ended as ${dispatched.status}`,
+              problem ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}` : 'inspect orchestration assignment',
+            );
+          }
+          if (closure.state === 'succeeded') {
+            const problem = dispatched.issue;
+            const evidenceRefs = [...closure.evidenceRefs, ...(problem?.evidenceRefs ?? [])];
+            record.error = {
+              code: problem?.code ?? 'orchestration.dispatch.failed',
+              ownerId: problem?.ownerId ?? RUNTIME_OWNER,
+              message: problem?.reason ?? `orchestration dispatch ended as ${dispatched.status}`,
+              retryable: dispatched.status === 'retryable',
+              nextAction: problem
+                ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}`
+                : 'inspect orchestration assignment',
+              evidenceRefs,
+            };
+            closure = {
+              ...closure,
+              state: 'blocked',
+              evidenceRefs,
+              nextAction: problem?.nextAction ?? { kind: 'recover', ref: `assignment.${assignment.assignmentId}` },
+              conditionRef: problem?.conditionRef ?? `assignment.${assignment.assignmentId}`,
+            };
+          }
         }
-        const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
-        if (!event.providerEvent) continue;
-        this.recordProviderEvent(record, operation, event.providerEvent);
+        if (!closure) throw new RuntimeTaskControlError('orchestration.execution.closure.missing', RUNTIME_OWNER, 'orchestration completed without a provider closure', 'inspect the execution agent result');
+      } else {
+        if (this.options.createTaskAssembly) {
+          record.taskAssembly = this.options.createTaskAssembly({
+            task: {
+              id: record.taskId,
+              organId: this.options.organId,
+              title: record.title,
+              directive: record.directive,
+              directiveRevision: record.directiveRevision,
+              state: record.state,
+              memoryScope: 'task',
+            },
+            scope,
+            checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+          });
+        }
+        await composition.start();
+        await composition.submit(prompt);
+        record.resolveExecutionReady?.(true);
+        record.resolveExecutionReady = undefined;
+        if (record.stopping || record.postCommitRecoveryPending) return;
+        for await (const observation of composition.observe()) {
+          if (record.postCommitRecoveryPending) return;
+          if (!observation.accepted) {
+            this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+            continue;
+          }
+          const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
+          if (!event.providerEvent) continue;
+          this.recordProviderEvent(record, operation, event.providerEvent);
+        }
+        if (record.postCommitRecoveryPending) return;
+        if (runtime.snapshot().state === 'stopped') {
+          this.finalize(record, 'stopped');
+          return;
+        }
+        if (record.stopping) return;
+        this.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
+        record.state = 'settling';
+        record.running = false;
+        record.currentState = '收拢中';
+        record.nextStep = '等待 checkpoint';
+        record.allowedActions = [];
+        closure = await composition.settle();
       }
-      if (record.postCommitRecoveryPending) return;
-      if (runtime.snapshot().state === 'stopped') {
-        this.finalize(record, 'stopped');
-        return;
-      }
-      if (record.stopping) return;
-      this.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
-      record.state = 'settling';
+      if (record.postCommitRecoveryPending || !closure) return;
       record.running = false;
       record.currentState = '收拢中';
       record.nextStep = '等待 checkpoint';
       record.allowedActions = [];
-      const closure = await composition.settle();
       await this.commitBusinessCheckpoint(record, scope, closure.state);
       const close = await this.closeForExecution(operation.operationId, driver, closure.evidenceRefs);
       if (close.state !== 'closed') {
@@ -1113,6 +1358,10 @@ export class RuntimeTaskCoordinator {
     } catch (error) {
       if (record.postCommitRecoveryPending) return;
       const startupFailureBeforeReady = record.resolveExecutionReady !== undefined;
+      if (startupFailureBeforeReady) {
+        record.resolveExecutionReady?.(false);
+        record.resolveExecutionReady = undefined;
+      }
       if (record.stopping && !startupFailureBeforeReady) return;
       if (record.state === 'stopped' || runtime?.snapshot().state === 'stopped') {
         this.finalize(record, 'stopped');
@@ -1270,7 +1519,7 @@ export class RuntimeTaskCoordinator {
       );
       this.finalize(record, outcome);
     } finally {
-      record.resolveExecutionReady?.();
+      record.resolveExecutionReady?.(false);
       record.resolveExecutionReady = undefined;
       this.activeExecutions.delete(operation.operationId.value);
     }
@@ -1573,6 +1822,7 @@ export class RuntimeTaskCoordinator {
             allowedActions: ['start'],
             events: [],
             checkpointSeq: 0,
+            orchestrated: false,
             running: false,
             stopping: false,
           });
@@ -1595,6 +1845,7 @@ export class RuntimeTaskCoordinator {
             task.operationId = record.operationId;
             task.executionEpoch = record.executionEpoch;
             task.input = record.input;
+            task.orchestrated = record.orchestrated === true;
             task.updatedAt = record.startedAt;
           }
           break;
@@ -1738,6 +1989,7 @@ export class RuntimeTaskCoordinator {
       currentNode: record.currentNode,
       operationId: record.operationId?.value,
       executionEpoch: record.executionEpoch,
+      orchestrated: record.orchestrated,
       allowedActions: record.allowedActions,
       recentEvents: record.events.slice(-20),
       events: record.events,
