@@ -25,7 +25,15 @@ export interface CodeSearchMatch {
   readonly contextAfter: readonly string[];
 }
 
-export type CodeSearchFailureCode = 'invalid-request' | 'path-not-found' | 'path-escape' | 'read-failed' | 'search-incomplete';
+export interface CodeSearchPathTreeNode {
+  readonly path: string;
+  readonly kind: 'directory' | 'file';
+  readonly fileCount: number;
+  readonly children: readonly CodeSearchPathTreeNode[];
+  readonly truncated: boolean;
+}
+
+export type CodeSearchFailureCode = 'invalid-request' | 'path-not-found' | 'path-escape' | 'read-failed' | 'search-incomplete' | 'scope-too-large';
 export interface CodeSearchFailure {
   readonly code: CodeSearchFailureCode;
   readonly message: string;
@@ -47,6 +55,8 @@ export interface CodeSearchReport {
   readonly resultsTruncated: boolean;
   readonly searchComplete: boolean;
   readonly unresolvedPaths: readonly string[];
+  /** Bounded path tree returned when the requested scope is too large. */
+  readonly pathTree?: CodeSearchPathTreeNode;
   readonly summary: string;
   readonly failure?: CodeSearchFailure;
 }

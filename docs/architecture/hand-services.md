@@ -40,6 +40,8 @@ Hand 不对外暴露 `read_file`、`grep`、`list_files`、`diff` 或 `apply_pat
 
 `runCodeSearchBenchmark` 是服务级回放入口。耗时只作为观测数据，不作为正确性补偿；正确性以固定报告断言为准。性能筛选另行记录首结果、完整结果和总耗时，不能因为超时把不完整结果包装成成功。
 
+服务有界并发读取，但不接受无界 workspace 扫描：默认最多准入 20,000 个候选文件。内部 discovery 发现第 20,001 个候选时立即早停，先返回受深度/节点数限制的 `pathTree`，同时以 `scope-too-large` 明确报告范围过大，且不读取文件；上层根据 tree 把 `path` 收窄到源码目录或具体模块后重试。这样大仓库仍可搜索，历史 worktree、控制面和生成物混在根目录时也不会把 Hand 变成长时间后台扫描。
+
 ## 3. Memory Agent 边界
 
 基础服务在线运行不依赖 Memory Agent。没有记忆服务时，`code.search` 的契约、自检、harness、verifier、注册和失败报告仍必须完整可用。
