@@ -41,6 +41,7 @@ import {
   RuntimeTaskCoordinator,
   type RuntimeCheckpointBoundary,
   type RuntimeCheckpointBoundaryPort,
+  type RuntimeTaskJournalRecord,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import {
   FileCheckpointStore,
@@ -2086,6 +2087,9 @@ test('task snapshot keeps the stored directive instead of substituting the execu
   });
   const task = coordinator.createTask({ title: 'directive title', directive: 'directive objective' });
 
+  coordinator.updateTask(task.taskId, { title: 'renamed title' });
+  assert.equal(coordinator.taskSnapshot(task.taskId).directiveRevision, 1);
+
   assert.equal(coordinator.taskSnapshot(task.taskId).directive, 'directive objective');
   assert.equal(coordinator.taskSnapshot(task.taskId).directiveRevision, 1);
   assert.equal(coordinator.taskSnapshot(task.taskId).input, '');
@@ -2098,6 +2102,63 @@ test('task snapshot keeps the stored directive instead of substituting the execu
     journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
   });
   assert.equal(restarted.taskSnapshot(task.taskId).directive, 'directive objective');
+});
+
+test('task CRUD journal records replay and do not mutate live state when append fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-task-crud-journal-'));
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const journal = new UiRuntimeJournal(journalPath);
+  const coordinator = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal,
+  });
+  const task = coordinator.createTask({ title: 'before edit', directive: 'before directive' });
+  coordinator.updateTask(task.taskId, { title: 'after edit', directive: 'after directive' });
+  const afterUpdate = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (taskId, cycle) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal: new UiRuntimeJournal(journalPath),
+  });
+  assert.equal(afterUpdate.taskSnapshot(task.taskId).title, 'after edit');
+  assert.equal(afterUpdate.taskSnapshot(task.taskId).directiveRevision, 2);
+  afterUpdate.deleteTask(task.taskId);
+  const afterDelete = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (taskId, cycle) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal: new UiRuntimeJournal(journalPath),
+  });
+  assert.deepEqual(afterDelete.taskSnapshots(), []);
+
+  let appendCount = 0;
+  const failingRecords: RuntimeTaskJournalRecord[] = [];
+  const failingJournal = {
+    append(record: RuntimeTaskJournalRecord): void {
+      appendCount += 1;
+      if (appendCount > 1) throw new Error('forced journal append failure');
+      failingRecords.push(record);
+    },
+    replay(): readonly RuntimeTaskJournalRecord[] { return failingRecords; },
+  };
+  const guarded = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (taskId, cycle) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal: failingJournal,
+  });
+  const guardedTask = guarded.createTask({ title: 'stable title', directive: 'stable directive' });
+  assert.throws(() => guarded.updateTask(guardedTask.taskId, { title: 'uncommitted title' }), /forced journal append failure/);
+  assert.equal(guarded.taskSnapshot(guardedTask.taskId).title, 'stable title');
+  assert.throws(() => guarded.deleteTask(guardedTask.taskId), /forced journal append failure/);
+  assert.equal(guarded.taskSnapshots().length, 1);
+  await rm(root, { recursive: true, force: true });
 });
 
 test('journal replay preserves the confirmed requirement orchestration mode', async () => {
@@ -2900,6 +2961,59 @@ test('runtime API task detail uses the task-detail projection surface', async ()
     assert.equal(body.title, 'task detail surface');
     assert.match(body.output?.summary ?? '', /fake replay:/);
     assert.deepEqual(body.output?.artifacts, []);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('runtime task API supports update, delete, and grouped task actions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-task-crud-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: buildFakeExecutionPort(binding),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: testMemory('project-ui-task-crud'),
+  });
+  try {
+    const created = await Promise.all([1, 2].map(() => fetch(`${runtime.server.url}/api/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'editable task', directive: 'initial directive' }),
+    })));
+    const tasks = await Promise.all(created.map(async (response) => await response.json() as { readonly taskId: { readonly value: string } }));
+    const updated = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(tasks[0]!.taskId.value)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'renamed task' }),
+    });
+    assert.equal(updated.status, 200);
+    const detail = await updated.json() as { readonly title: string; readonly directive: string };
+    assert.equal(detail.title, 'renamed task');
+    assert.equal(detail.directive, 'initial directive');
+
+    const stopped = await fetch(`${runtime.server.url}/api/tasks/bulk`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'stop', taskIds: [tasks[0]!.taskId.value] }),
+    });
+    assert.equal(stopped.status, 200);
+    assert.equal((await stopped.json()).results[0].state, 'failed');
+
+    const deleted = await fetch(`${runtime.server.url}/api/tasks/bulk`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'delete', taskIds: tasks.map((task) => task.taskId.value) }),
+    });
+    assert.equal(deleted.status, 200);
+    assert.deepEqual((await deleted.json()).results.map((result: { readonly state: string }) => result.state), ['succeeded', 'succeeded']);
+    const listed = await fetch(`${runtime.server.url}/api/tasks`);
+    assert.equal((await listed.json()).counts.total, 0);
   } finally {
     await runtime.server.close();
   }

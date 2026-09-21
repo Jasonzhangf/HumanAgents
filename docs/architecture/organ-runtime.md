@@ -163,7 +163,7 @@ Organ / Task Pipeline / Operations
 
 ### 显式 Brain：把感知变成可处理的需求
 
-显式 Brain 控制眼、耳、喉、鼻等感知和输入器官的接入，但不在感知入口执行深层任务推理。它承担输入理解和确认前的交互编排；它不在用户确认前向后台派发。流程固定为：
+显式 Brain 控制眼、耳、喉、鼻等感知和输入器官的接入，但不在感知入口执行深层任务推理。它承担输入理解和交互编排。新建任务表单的提交本身就是用户确认，因此整理、确认和派发在同一次创建操作内闭环；已有任务的目标、范围或处理方式变更才需要单独确认。流程固定为：
 
 ```text
 input.received
@@ -171,7 +171,7 @@ input.received
   → status.lookup
   → intent.query
   → explicit.brain.feedback
-  → user.confirm
+  → user.submit (new task) / user.confirm (existing task change)
   → requirement.dispatch
   → FIFO RequirementInbox
 ```
@@ -182,9 +182,9 @@ input.received
 2. 对原始输入做去重、归并、基本清洗和来源标注。
 3. 根据在线/历史任务、当前状态、最近节点和相关 Organ 摘要，形成待确认的意图草稿。
 4. 向人反馈匹配依据、状态影响和整理结果，询问“追加、变更、新建，还是只查询状态”。
-5. 只有用户确认后，才把草稿固化为可派发的 `RequirementEnvelope`，按到达顺序写入 FIFO `RequirementInbox`。
+5. 新建任务在用户提交表单时把草稿固化为可派发的 `RequirementEnvelope`；已有任务变更在用户确认后固化；两者都按到达顺序写入 FIFO `RequirementInbox`。
 
-显式 Brain 的整理是表层需求整理，不等于任务分类完成，也不等于已经创建执行任务。确认前只能存在显式层的草稿和交互状态；它可以发现已有任务关联线索，但不能绕过用户确认、潜意识的分类和资源准入。
+显式 Brain 的整理是表层需求整理，不等于任务分类完成，也不等于已经创建执行任务。新建任务的用户提交是创建意图的确认；已有任务在用户确认前只能存在显式层的草稿和交互状态。显式 Brain 不能绕过潜意识的分类和资源准入。
 
 `RequirementDraft` 和 `RequirementEnvelope` 的规范字段定义见 [`agent-flows.md`](agent-flows.md)；本节只规定它们的领域不变量：Envelope 只能由确认结果产生，FIFO 只接收 Envelope，控制命令不能混入业务需求队列。
 

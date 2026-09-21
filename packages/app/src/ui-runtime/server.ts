@@ -309,6 +309,19 @@ async function handleRequest(
       writeJson(response, 201, created);
       return;
     }
+    if (path === '/api/tasks/bulk' && method === 'POST') {
+      const body = await readBody(request);
+      const action = requireString(body, 'action');
+      if (action !== 'delete' && action !== 'stop') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field action must be delete or stop', 'provide a supported bulk task action');
+      }
+      const taskIds = requireStringArray(body, 'taskIds');
+      if (taskIds.length === 0) {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field taskIds must not be empty', 'select at least one task');
+      }
+      writeJson(response, 200, await service.bulkTaskAction(taskIds.map((taskId) => id('task', taskId)), action));
+      return;
+    }
     if (path === '/api/explicit/inputs' && method === 'POST') {
       const body = await readBody(request);
       const channel = requireString(body, 'channel');
@@ -460,6 +473,28 @@ async function handleRequest(
       return;
     }
     const taskDetail = /^\/api\/tasks\/([^/]+)$/.exec(path);
+    if (taskDetail && method === 'PATCH') {
+      const body = await readBody(request);
+      if (body.directive !== undefined) {
+        throw new UiRuntimeApiError(
+          'task.directive.edit.requires-explicit-brain',
+          APP_OWNER,
+          'task directive changes must go through the explicit brain interaction',
+          'open the task interaction and confirm the proposed change',
+          409,
+        );
+      }
+      const title = body.title === undefined ? undefined : requireString(body, 'title');
+      if (title === undefined) {
+        throw new UiRuntimeApiError('request.missing-field', APP_OWNER, 'task update requires title', 'provide a task title to update');
+      }
+      writeJson(response, 200, service.updateTask(id('task', decodeURIComponent(taskDetail[1]!)), { title }));
+      return;
+    }
+    if (taskDetail && method === 'DELETE') {
+      writeJson(response, 200, service.deleteTask(id('task', decodeURIComponent(taskDetail[1]!))));
+      return;
+    }
     if (taskDetail && method === 'GET') {
       writeJson(response, 200, service.taskDetail(id('task', decodeURIComponent(taskDetail[1]!))));
       return;

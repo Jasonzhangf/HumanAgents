@@ -40,6 +40,15 @@ export function createRuntimeApi(options = {}) {
     status: () => request('/api/runtime/status'),
     dashboard: () => request('/api/dashboard'),
     listTasks: () => request('/api/tasks'),
+    updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+    deleteTask: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' }),
+    bulkTaskAction: (taskIds, action) => request('/api/tasks/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ taskIds, action }),
+    }),
     createTask: (input) => request('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
     receiveExplicitInput: (input) => request('/api/explicit/inputs', {
       method: 'POST',

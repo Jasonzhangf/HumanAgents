@@ -104,4 +104,4 @@ export function taskDetailHref(taskId) {
   return `./task.html?task=${encodeURIComponent(taskId)}`
 }
 
-export { element, formatTime, stateTone, clearNode }
+export { clearNode, element, formatTime, queryParam, stateTone }

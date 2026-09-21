@@ -1052,7 +1052,9 @@ test('new task UI sends one natural-language input to the explicit brain', async
   assert.equal(source.includes('api.receiveExplicitInput'), true);
   assert.equal(source.includes('提交给显式大脑'), true);
   assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
-  assert.equal(source.includes('确认并提交后台'), true);
+  assert.equal(source.includes('确认并提交后台'), false);
+  assert.equal(source.includes('api.beginExplicitMatching(received.interactionId)'), true);
+  assert.equal(source.includes('ui:creation:'), true);
   assert.equal(source.includes('matchedTasks: currentTaskId'), true);
   assert.equal(source.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
   assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), true);

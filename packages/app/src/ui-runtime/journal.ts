@@ -125,6 +125,19 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     requirePositiveInteger(record, 'taskCounter', filePath, line);
     return record as unknown as UiRuntimeJournalRecord;
   }
+  if (kind === 'task.updated') {
+    requireScopedId(record, 'taskId', 'task', filePath, line);
+    requireRecordString(record, 'title', filePath, line);
+    requireRecordString(record, 'directive', filePath, line);
+    requirePositiveInteger(record, 'directiveRevision', filePath, line);
+    requireRecordString(record, 'updatedAt', filePath, line);
+    return record as unknown as UiRuntimeJournalRecord;
+  }
+  if (kind === 'task.deleted') {
+    requireScopedId(record, 'taskId', 'task', filePath, line);
+    requireRecordString(record, 'deletedAt', filePath, line);
+    return record as unknown as UiRuntimeJournalRecord;
+  }
   if (kind === 'operation.started') {
     requireScopedId(record, 'operationId', 'operation', filePath, line);
     requireScopedId(record, 'taskId', 'task', filePath, line);

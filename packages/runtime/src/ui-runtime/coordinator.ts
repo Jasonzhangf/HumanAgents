@@ -211,6 +211,19 @@ export type RuntimeTaskJournalRecord =
       readonly taskCounter: number;
     }
   | {
+      readonly kind: 'task.updated';
+      readonly taskId: TaskId;
+      readonly title: string;
+      readonly directive: string;
+      readonly directiveRevision: number;
+      readonly updatedAt: string;
+    }
+  | {
+      readonly kind: 'task.deleted';
+      readonly taskId: TaskId;
+      readonly deletedAt: string;
+    }
+  | {
       readonly kind: 'operation.started';
       readonly operationId: OperationId;
       readonly taskId: TaskId;
@@ -730,6 +743,43 @@ export class RuntimeTaskCoordinator {
 
   taskSnapshots(): readonly RuntimeTaskSnapshot[] {
     return [...this.tasks.values()].map((record) => this.snapshot(record));
+  }
+
+  updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
+    const record = this.requireTask(taskId);
+    if (record.running || record.stopping) {
+      throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be edited', 'stop the current execution first');
+    }
+    const title = input.title?.trim() ?? record.title;
+    const directive = input.directive?.trim() ?? record.directive;
+    if (!title) throw new RuntimeTaskControlError('task.title.required', RUNTIME_OWNER, 'task title cannot be empty', 'provide a task title');
+    if (!directive) throw new RuntimeTaskControlError('task.directive.required', RUNTIME_OWNER, 'task directive cannot be empty', 'provide a task directive');
+    const updatedAt = this.now().toISOString();
+    const directiveRevision = directive === record.directive ? record.directiveRevision : record.directiveRevision + 1;
+    this.journal?.append({
+      kind: 'task.updated',
+      taskId,
+      title,
+      directive,
+      directiveRevision,
+      updatedAt,
+    });
+    record.title = title;
+    record.directive = directive;
+    record.directiveRevision = directiveRevision;
+    record.updatedAt = updatedAt;
+    return this.snapshot(record);
+  }
+
+  deleteTask(taskId: TaskId): { readonly taskId: TaskId; readonly deleted: true } {
+    const record = this.requireTask(taskId);
+    if (record.running || record.stopping) {
+      throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'running tasks cannot be deleted', 'stop the current execution first');
+    }
+    const deletedAt = this.now().toISOString();
+    this.journal?.append({ kind: 'task.deleted', taskId, deletedAt });
+    this.tasks.delete(taskId.value);
+    return { taskId, deleted: true };
   }
 
   taskSnapshot(taskId: TaskId): RuntimeTaskSnapshot {
@@ -1826,6 +1876,20 @@ export class RuntimeTaskCoordinator {
             running: false,
             stopping: false,
           });
+          break;
+        }
+        case 'task.updated': {
+          const task = this.tasks.get(record.taskId.value);
+          if (task) {
+            task.title = record.title;
+            task.directive = record.directive;
+            task.directiveRevision = record.directiveRevision;
+            task.updatedAt = record.updatedAt;
+          }
+          break;
+        }
+        case 'task.deleted': {
+          this.tasks.delete(record.taskId.value);
           break;
         }
         case 'operation.started': {

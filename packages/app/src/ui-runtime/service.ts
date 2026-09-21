@@ -708,6 +708,57 @@ export class UiRuntimeService {
     return this.coordinator.createTask(input);
   }
 
+  updateTask(taskId: TaskId, input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshotInput {
+    try {
+      return this.coordinator.updateTask(taskId, input);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  deleteTask(taskId: TaskId): { readonly taskId: string; readonly deleted: true } {
+    try {
+      return { taskId: this.coordinator.deleteTask(taskId).taskId.value, deleted: true };
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async bulkTaskAction(taskIds: readonly TaskId[], action: 'delete' | 'stop'): Promise<{
+    readonly action: 'delete' | 'stop';
+    readonly results: readonly {
+      readonly taskId: string;
+      readonly state: 'succeeded' | 'failed';
+      readonly error?: { readonly code: string; readonly ownerId: string; readonly message: string; readonly nextAction: string };
+    }[];
+  }> {
+    const results: {
+      readonly taskId: string;
+      readonly state: 'succeeded' | 'failed';
+      readonly error?: { readonly code: string; readonly ownerId: string; readonly message: string; readonly nextAction: string };
+    }[] = [];
+    for (const taskId of taskIds) {
+      try {
+        if (action === 'delete') this.deleteTask(taskId);
+        else await this.stop(taskId);
+        results.push({ taskId: taskId.value, state: 'succeeded' });
+      } catch (error) {
+        const projected = apiError(error);
+        results.push({
+          taskId: taskId.value,
+          state: 'failed',
+          error: {
+            code: projected.code,
+            ownerId: projected.ownerId,
+            message: projected.message,
+            nextAction: projected.nextAction,
+          },
+        });
+      }
+    }
+    return { action, results };
+  }
+
   executionCapabilities(): RuntimeExecutionCapabilities {
     return this.coordinator.executionCapabilities();
   }

@@ -61,7 +61,40 @@ function renderCreate() {
         rawInput,
         inputRevision: 1,
       })
-      window.location.href = `./task.html?interaction=${encodeURIComponent(received.interactionId)}#task-interaction`
+      let snapshot = await api.inspectExplicitInteraction(received.interactionId)
+      await api.beginExplicitMatching(received.interactionId)
+      await api.recordExplicitMatch(received.interactionId, {
+        normalizedInput: snapshot.rawInput,
+        matchedTasks: [],
+        knownFacts: [],
+      })
+      snapshot = await api.inspectExplicitInteraction(received.interactionId)
+      await api.proposeExplicitRequirement(received.interactionId, {
+        proposedIntent: 'create',
+        proposal: snapshot.draft?.normalizedInput || rawInput,
+        decisionRefs: [],
+      })
+      snapshot = await api.inspectExplicitInteraction(received.interactionId)
+      if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
+        feedback.textContent = `显式大脑当前状态：${snapshot.state}。${snapshot.nextAction}`
+        return
+      }
+      feedback.textContent = '显式大脑已整理输入，正在提交后台…'
+      await api.confirmExplicitRequirement(received.interactionId, {
+        draftId: snapshot.draft.draftId,
+        inputRevision: snapshot.draft.inputRevision,
+        confirmationRef: `ui:creation:${received.interactionId}`,
+        confirmedBy: 'human:operator',
+        confirmedAt: new Date().toISOString(),
+        payloadRef: `asset://requirements/${received.interactionId}`,
+      })
+      const dispatched = await api.dispatchNextExplicitRequirement()
+      if (dispatched.requirement?.draftId !== snapshot.draft.draftId) {
+        feedback.textContent = '任务已确认，队列前还有其他任务；请从任务列表查看。'
+        window.location.href = './tasks.html'
+        return
+      }
+      window.location.href = taskDashboardHref(dispatched.taskId)
     } catch (error) {
       feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
     }
@@ -108,11 +141,8 @@ async function renderInteraction(interactionId, currentTaskId) {
       element('p', snapshot.draft?.proposal || snapshot.rawInput),
     )
     if (snapshot.state === 'awaiting-confirmation' && snapshot.draft) {
-      feedback.textContent = '已整理完成。确认后才会提交到后台。'
-      const confirm = element('button', '确认并提交后台', 'button button--primary')
-      confirm.type = 'button'
-      confirm.addEventListener('click', async () => {
-        confirm.disabled = true
+      const submit = async (button) => {
+        if (button) button.disabled = true
         feedback.textContent = '正在确认并提交…'
         try {
           await api.confirmExplicitRequirement(interactionId, {
@@ -131,10 +161,14 @@ async function renderInteraction(interactionId, currentTaskId) {
           taskId = dispatched.taskId
           window.location.href = taskDashboardHref(taskId)
         } catch (error) {
-          confirm.disabled = false
+          if (button) button.disabled = false
           feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
         }
-      })
+      }
+      feedback.textContent = '已整理完成。只有改变已有任务目标时才需要再次确认。'
+      const confirm = element('button', '按此方案继续', 'button button--primary')
+      confirm.type = 'button'
+      confirm.addEventListener('click', () => void submit(confirm))
       actions.append(confirm)
     } else {
       feedback.textContent = `当前状态：${snapshot.state}。${snapshot.nextAction}`
