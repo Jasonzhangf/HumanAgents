@@ -3,8 +3,8 @@
 状态：`CANDIDATE / PENDING REVIEW`
 日期：2026-09-20
 审计基线提交：`d3b1f7f9ae14d9f7bda2d38b4eac6835be6ab3c3`
-审计候选提交：`c3b43cb`（完整 SHA：`c3b43cbf997a818c28fad7ebe7267ae72032a391`）
-审计候选树：`a7c96caaa437977d2eb3e63dc1363c6c19a44521`
+审计候选提交：`4148caa`（完整 SHA：`4148caa2949d90c85312959d44042944313dd249`）
+审计候选树：`b3677f6a97a01863fed5fbf982bffb7380bb90ec`
 
 ## 0. Scope and Method
 
