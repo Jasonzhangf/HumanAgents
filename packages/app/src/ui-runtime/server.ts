@@ -20,6 +20,12 @@ export interface UiRuntimeServerOptions {
     readonly leaseId: string;
     readonly generation: number;
   }) => DaemonRestartReceipt;
+  readonly identity?: () => {
+    readonly leaseId: string;
+    readonly generation: number;
+    readonly pid: number;
+    readonly processStartToken: string;
+  };
 }
 
 export interface UiRuntimeServer {
@@ -160,7 +166,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   }
   const service = options.service;
   const server = createServer((request, response) => {
-    void handleRequest(request, response, service, options.uiRoot, options.restart);
+    void handleRequest(request, response, service, options.uiRoot, options.restart, options.identity);
   });
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -188,6 +194,7 @@ async function handleRequest(
   service: UiRuntimeService,
   uiRoot: string,
   restart?: UiRuntimeServerOptions['restart'],
+  identity?: UiRuntimeServerOptions['identity'],
 ): Promise<void> {
   const method = request.method ?? 'GET';
   const url = new URL(request.url ?? '/', 'http://localhost');
@@ -195,6 +202,19 @@ async function handleRequest(
   try {
     if (path === '/api/runtime/status' && method === 'GET') {
       writeJson(response, 200, service.status());
+      return;
+    }
+    if (path === '/api/runtime/identity' && method === 'GET') {
+      if (identity === undefined) {
+        throw new UiRuntimeApiError(
+          'daemon-identity.unsupported',
+          APP_OWNER,
+          'this runtime is not hosted by a supervisor with an identity endpoint',
+          'request identity from the original humanagent serve owner',
+          501,
+        );
+      }
+      writeJson(response, 200, identity());
       return;
     }
     if (path === '/api/runtime/restart' && method === 'POST') {

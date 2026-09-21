@@ -56,6 +56,12 @@ export interface UiRuntimeLaunchOptions {
     readonly leaseId: string;
     readonly generation: number;
   }) => DaemonRestartReceipt;
+  readonly identity?: () => {
+    readonly leaseId: string;
+    readonly generation: number;
+    readonly pid: number;
+    readonly processStartToken: string;
+  };
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -162,6 +168,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     host: options.host,
     port: options.portNumber,
     ...(options.restart === undefined ? {} : { restart: options.restart }),
+    ...(options.identity === undefined ? {} : { identity: options.identity }),
   });
   return { service, server };
 }

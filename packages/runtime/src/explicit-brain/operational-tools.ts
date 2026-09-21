@@ -52,13 +52,13 @@ export interface ExplicitBrainOperationalToolExecutorOptions {
  * Ports own containment, registration, ACL, and the actual side effect/query.
  * Model arguments never supply binding or authorization identity.
  */
-export class ExplicitBrainOperationalToolExecutor {
+export class ExplicitBrainOperationalToolExecutor<TResult = unknown> {
   constructor(private readonly options: ExplicitBrainOperationalToolExecutorOptions) {}
 
   async execute(
     intent: ToolIntent,
     receipt: ExplicitBrainAdmissionReceipt,
-  ): Promise<ExplicitBrainOperationalToolResult> {
+  ): Promise<TResult> {
     this.assertAdmissionReceipt(intent, receipt);
     const args = record(intent.arguments);
     const { binding, ports } = this.options;
@@ -73,13 +73,13 @@ export class ExplicitBrainOperationalToolExecutor {
           binding,
           scopeRef,
           ...(pathRef === undefined ? {} : { pathRef }),
-        });
+        }) as Promise<TResult>;
       }
       case 'file.read': {
         const scopeRef = stringArgument(args, 'scopeRef');
         const pathRef = stringArgument(args, 'pathRef');
         ports.workspace.authorize({ binding, toolRef: 'file.read', scopeRef, pathRef });
-        return ports.workspace.read({ binding, scopeRef, pathRef });
+        return ports.workspace.read({ binding, scopeRef, pathRef }) as Promise<TResult>;
       }
       case 'file.search': {
         const scopeRef = stringArgument(args, 'scopeRef');
@@ -91,7 +91,7 @@ export class ExplicitBrainOperationalToolExecutor {
           scopeRef,
           query,
           limit,
-        });
+        }) as Promise<TResult>;
       }
       case 'agent.query': {
         const agentRef = args.agentRef === undefined ? undefined : stringArgument(args, 'agentRef');
@@ -101,7 +101,7 @@ export class ExplicitBrainOperationalToolExecutor {
           binding,
           ...(agentRef === undefined ? {} : { agentRef }),
           ...(scopeRef === undefined ? {} : { scopeRef }),
-        });
+        }) as Promise<TResult>;
       }
       case 'agent.message': {
         const recipientRef = stringArgument(args, 'recipientRef');
@@ -113,7 +113,7 @@ export class ExplicitBrainOperationalToolExecutor {
           recipientRef,
           messageRef,
           messageClass,
-        });
+        }) as Promise<TResult>;
       }
       default:
         throw new ExplicitBrainOperationalToolError(

@@ -922,6 +922,23 @@ export async function main(args: readonly string[]): Promise<void> {
             host,
             portNumber: boundPortNumber,
             restart: requestRestart,
+            identity: () => {
+              if (supervisor === undefined) {
+                throw new AppLifecycleError(
+                  'daemon-identity.owner-not-ready',
+                  'serve owner has not completed startup',
+                  'wait for the original serve CLI to report ready and retry identity inspection',
+                  'humanagent.app.serve',
+                );
+              }
+              const activeLease = supervisor.lease.record;
+              return {
+                leaseId: activeLease.leaseId,
+                generation: activeLease.generation,
+                pid: activeLease.pid,
+                processStartToken: activeLease.processStartToken,
+              };
+            },
           });
         },
         dispose: async () => {

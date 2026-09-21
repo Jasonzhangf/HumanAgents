@@ -383,10 +383,31 @@ test('real child-process crash leaves a stale owner that cannot commit after tak
 async function startLeaseChild(paths: RuntimePaths, behavior: 'exit-on-term' | 'ignore-term'): Promise<{ readonly pid: number; readonly leaseId: string }> {
   const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
   const script = `
+    import { createServer } from 'node:http';
     import { resolveRuntimePaths } from ${JSON.stringify(new URL('../../../packages/config/src/index.js', import.meta.url).href)};
     import { acquireDaemonLease } from ${JSON.stringify(supervisorModule)};
     const paths = await resolveRuntimePaths({ controlRoot: ${JSON.stringify(paths.controlRoot)}, workspace: ${JSON.stringify(paths.workspaceCwd)} });
     const lease = await acquireDaemonLease(paths);
+    const identityServer = createServer((request, response) => {
+      if (request.method !== 'GET' || request.url !== '/api/runtime/identity') {
+        response.writeHead(404).end();
+        return;
+      }
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({
+        leaseId: lease.record.leaseId,
+        generation: lease.record.generation,
+        pid: lease.record.pid,
+        processStartToken: lease.record.processStartToken,
+      }));
+    });
+    await new Promise((resolve, reject) => {
+      identityServer.once('error', reject);
+      identityServer.listen(0, '127.0.0.1', resolve);
+    });
+    const address = identityServer.address();
+    if (!address || typeof address === 'string') throw new Error('identity server did not bind');
+    await lease.setControlEndpoint({ host: '127.0.0.1', port: address.port });
     console.log(JSON.stringify({ pid: process.pid, leaseId: lease.record.leaseId }));
     process.on('SIGTERM', ${behavior === 'exit-on-term' ? '() => process.exit(0)' : '() => {}'});
     setInterval(() => {}, 1000);
@@ -450,7 +471,7 @@ test('hm startup refuses to signal a live PID whose process identity was reused'
   try {
     const leasePath = daemonLeasePath(paths);
     const raw = JSON.parse(await readFile(leasePath, 'utf8')) as Record<string, unknown>;
-    await writeFile(leasePath, JSON.stringify({ ...raw, acquiredAt: '2000-01-01T00:00:00.000Z' }) + '\n', 'utf8');
+    await writeFile(leasePath, JSON.stringify({ ...raw, processStartToken: 'node:reused-pid' }) + '\n', 'utf8');
     await assert.rejects(
       () => runSupervisorStartup(paths, [], {
         lease: {

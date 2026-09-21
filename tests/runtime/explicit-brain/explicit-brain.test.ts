@@ -596,6 +596,41 @@ test('tool admission requires one-to-one registry, capability, permission, epoch
   }
 });
 
+test('framework executor dispatches operational tools to their scoped owner', async () => {
+  const executor = new ExplicitBrainDecisionExecutor<unknown>({
+    registry: createExplicitBrainToolRegistry(capabilityDigest),
+    binding: binding(),
+    traces: new DecisionTraceStore(),
+    operationalPorts,
+    handler: {
+      async execute() {
+        throw new Error('operational tools must not fall through to the generic handler');
+      },
+    },
+    context: {
+      scopeRef: 'scope:organ-a',
+      runtimeBindingRef: 'binding-explicit-brain',
+      ownerRef: 'runtime-explicit-brain',
+      createdAt: '2026-09-17T00:00:00.000Z',
+      inputDigest: 'sha256:interaction-input',
+      argumentsRef: (toolIntent) => `arguments:${toolIntent.toolIntentId}`,
+    },
+    currentEpoch: 4,
+    currentPermissionRevision: 'permission-r1',
+    argumentsDigest: digestArguments,
+  });
+  const [result] = await executor.execute({
+    decisionId: 'decision-operational-dispatch',
+    interactionId: 'interaction-a',
+    kind: 'intent',
+    selectedAction: 'answer',
+    summary: 'inspect a workspace through the scoped owner',
+    evidenceRefs: [],
+    toolIntents: [intent('workspace.list', { scopeRef: 'scope:workspace-a' })],
+  });
+  assert.deepEqual(result?.result, { entries: [] });
+});
+
 test('framework executor records accepted and denied tool decisions without trusting the model to record', async () => {
   const traces = new DecisionTraceStore();
   const executed: string[] = [];
