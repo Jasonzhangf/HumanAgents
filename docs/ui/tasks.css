@@ -69,6 +69,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-height: 44px;
   margin-inline-end: auto;
   color: var(--muted);
   font-size: 13px;
@@ -87,7 +88,7 @@
 }
 
 .bulk-actions .button {
-  min-height: 34px;
+  min-height: 44px;
   padding: 6px 10px;
   font-size: 12px;
 }
@@ -120,7 +121,7 @@
 }
 
 .task-row {
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: 14px;
   min-height: 78px;
   padding: 13px 0;
@@ -161,7 +162,7 @@
 }
 
 .task-row-actions .button {
-  min-height: 32px;
+  min-height: 44px;
   padding: 5px 9px;
   font-size: 12px;
 }
@@ -172,6 +173,17 @@
 
 .task-row:hover {
   background: var(--surface-soft);
+}
+
+.task-row-check {
+  display: inline-flex;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 .task-row:hover .task-row-actions .button--quiet,
@@ -237,7 +249,7 @@
   }
 
   .task-row {
-    grid-template-columns: 20px minmax(0, 1fr);
+    grid-template-columns: 44px minmax(0, 1fr);
     align-items: start;
     gap: 10px;
     padding-block: 15px;
