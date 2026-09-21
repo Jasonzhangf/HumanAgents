@@ -18,4 +18,8 @@ const next = bumpReleaseVersion(current, kind);
 execFileSync(process.execPath, ['scripts/bump-release-version.mjs', '--project-root', projectRoot, '--kind', kind], { cwd: projectRoot, stdio: 'inherit' });
 execFileSync('git', ['add', 'package.json', 'packages/app/package.json', 'packages/config/package.json', 'packages/contracts/package.json', 'docs/architecture/release-version.md'], { cwd: projectRoot, stdio: 'inherit' });
 execFileSync('git', ['commit', '-m', `chore(release): bump version to ${next}`], { cwd: projectRoot, stdio: 'inherit' });
-execFileSync(process.execPath, ['scripts/build-release.mjs', '--project-root', projectRoot], { cwd: projectRoot, stdio: 'inherit' });
+execFileSync(process.execPath, ['scripts/build-release.mjs', '--project-root', projectRoot], {
+  cwd: projectRoot,
+  stdio: 'inherit',
+  env: { ...process.env, HUMANAGENT_RELEASE_VERSION: next },
+});

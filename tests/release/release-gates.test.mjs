@@ -91,6 +91,7 @@ test('migration target digests bind installed bundle bytes and verifier maps', a
 test('release versions are path-safe semantic versions', () => {
   assert.equal(validateReleaseVersion('0.1.0'), '0.1.0');
   assert.equal(configuredReleaseVersion({}, repositoryRoot.pathname), '0.1.0');
+  assert.equal(configuredReleaseVersion({ HUMANAGENT_RELEASE_VERSION: '9.9.9' }, repositoryRoot.pathname), '9.9.9');
   assert.equal(bumpReleaseVersion('0.1.0', 'patch'), '0.1.1');
   assert.equal(bumpReleaseVersion('0.1.0', 'minor'), '0.2.0');
   assert.equal(bumpReleaseVersion('0.1.0', 'major'), '1.0.0');
