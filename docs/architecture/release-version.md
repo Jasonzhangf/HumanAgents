@@ -1,6 +1,6 @@
 # Release version baseline
 
-- Current release version: `0.1.0002`
+- Current release version: `0.1.0003`
 - HumanAgent release source: repository root `package.json` `releaseVersion` field.
 - npm package source: repository root `package.json` `version` field; it remains SemVer-valid.
 - Synchronized release metadata: `packages/app`, `packages/config`, and `packages/contracts`.
