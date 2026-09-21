@@ -960,6 +960,49 @@ test('CLI defaults to serve and accepts a provider without a mode', async () => 
   }
 });
 
+test('CLI binds RCC identity to the configured transport endpoint', async () => {
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-provider-endpoint-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const child = spawn(process.execPath, [
+    cli,
+    '--provider',
+    'rcc',
+    '--rcc-base-url',
+    'http://127.0.0.1:5555/',
+    '--workspace',
+    workspace,
+    '--control-root',
+    controlRoot,
+    '--port',
+    '0',
+  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Uint8Array) => { output += String(chunk); });
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  try {
+    const launch = await new Promise<{ readonly endpointRef?: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${stderr}`)), 5_000);
+      child.stdout.on('data', () => {
+        try {
+          const parsed = JSON.parse(output.trim()) as { readonly endpointRef?: string };
+          if (!parsed.endpointRef) return;
+          clearTimeout(timeout);
+          resolve(parsed);
+        } catch {
+          // Wait for the complete startup object.
+        }
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => reject(new Error(`serve exited before startup (${String(code)}): ${stderr}`)));
+    });
+    assert.equal(launch.endpointRef, 'rcc-v3:127.0.0.1:5555');
+  } finally {
+    child.kill('SIGTERM');
+    if (child.exitCode === null) await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  }
+});
+
 test('CLI serve composes rooted memory and keeps it across process restart', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-memory-root-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

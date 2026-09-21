@@ -369,6 +369,7 @@ function providerBindingFromOptions(
   configured: ProviderConfig | undefined,
   protocol: UiProviderProtocol,
   provider: ServeProvider,
+  baseUrl: string,
   providerIdOverride?: string,
 ): ProviderBinding & { readonly protocol: UiProviderProtocol } {
   const fake = provider === 'fake';
@@ -377,7 +378,7 @@ function providerBindingFromOptions(
     bindingId: option(args, '--binding') ?? (fake ? 'fake-default' : defaults.binding),
     providerId: providerIdOverride ?? (fake ? 'fake-provider' : defaults.provider),
     protocol,
-    endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : 'rcc-v3:127.0.0.1:4444'),
+    endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : `rcc-v3:${baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`),
     modelRef: option(args, '--model') ?? (fake ? 'fake.model' : defaults.model),
     configDigest: option(args, '--config-digest') ?? (fake ? 'sha256:fake-ui-config' : 'sha256:ui-runtime-config'),
     capabilityDigest: option(args, '--capability-digest') ?? (fake ? 'sha256:fake-ui-capability' : 'sha256:ui-runtime-capability'),
@@ -669,7 +670,8 @@ export async function main(args: readonly string[]): Promise<void> {
     if (protocol !== 'responses' && protocol !== 'openai' && protocol !== 'anthropic') {
       throw new Error('serve --protocol must be responses, openai, or anthropic');
     }
-    const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, selected.providerIdOverride);
+    const baseUrl = option(args, '--rcc-base-url') ?? configuredProvider.baseUrl;
+    const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, baseUrl, selected.providerIdOverride);
     const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
@@ -708,7 +710,7 @@ export async function main(args: readonly string[]): Promise<void> {
       ? buildRccExecutionPort({
           binding,
           routeRef: option(args, '--route') ?? configuredProvider.route,
-          baseUrl: option(args, '--rcc-base-url') ?? configuredProvider.baseUrl,
+          baseUrl,
           maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
         }, evidenceRoot)
       : createFakeExecutionPort(
@@ -857,6 +859,7 @@ export async function main(args: readonly string[]): Promise<void> {
       url: runtime.server.url,
       bindingId: binding.bindingId,
       providerId: binding.providerId,
+      endpointRef: binding.endpointRef,
       protocol: binding.protocol,
       uiRoot,
       checkpointRoot,
