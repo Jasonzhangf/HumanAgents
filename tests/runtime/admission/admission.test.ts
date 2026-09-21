@@ -3,11 +3,14 @@ import test from 'node:test';
 import { ContractError, id, type RequirementEnvelope, type TaskId } from '../../../packages/contracts/src/index.js';
 import {
   AdmissionError,
+  RequirementAdmissionError,
+  admitRequirement,
   appendTaskRevision,
   checkAdmission,
   classifyRequirement,
   decideOrchestrationRuntimePool,
   type AdmissionCheckInput,
+  type RequirementAdmissionInput,
 } from '../../../packages/runtime/src/admission/index.js';
 
 const task: TaskId = id('task', 'task-a');
@@ -40,6 +43,33 @@ function admissionCheck(overrides: Partial<AdmissionCheckInput> = {}): Admission
     ownerId: 'runtime-coordinator',
     ...overrides,
   };
+}
+
+function requirementAdmission(overrides: Partial<RequirementAdmissionInput> = {}): RequirementAdmissionInput {
+  return {
+    envelope: envelope(),
+    queue: { kind: 'execution', concurrencyLimit: 2, maxBacklog: 5 },
+    registeredQueues: ['interactive', 'execution', 'research', 'maintenance'],
+    queueLoad: { running: 0, queued: 0 },
+    requiredCapabilities: ['provider.execution'],
+    availableCapabilities: ['provider.execution'],
+    health: 'healthy',
+    requiredInputRefs: ['asset://requirements/requirement-a'],
+    providedInputRefs: ['asset://requirements/requirement-a'],
+    checkpoint: { recoverable: true },
+    ownerId: 'runtime-coordinator',
+    ...overrides,
+  };
+}
+
+function captureAdmissionError(run: () => unknown): RequirementAdmissionError {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof RequirementAdmissionError) return error;
+    throw error;
+  }
+  throw new Error('expected requirement admission to fail');
 }
 
 test('classifies confirmed envelopes into explicitly registered queues only', () => {
@@ -135,6 +165,33 @@ test('rejects control fields leaking through business payloads', () => {
   assert.throws(
     () => checkAdmission(admissionCheck({ businessPayload: { answer: 'ok', steer: true } })),
     ContractError,
+  );
+});
+
+test('confirmed requirements yield no admission receipt until classification and admission pass', () => {
+  const admitted = admitRequirement(requirementAdmission());
+  assert.equal(admitted.classified.queue, 'execution');
+  assert.equal(admitted.decision.status, 'admitted');
+  assert.equal(admitted.decision.ownerId, 'runtime-coordinator');
+
+  const blocked = captureAdmissionError(() => admitRequirement(requirementAdmission({
+    availableCapabilities: [],
+    health: 'unhealthy',
+  })));
+  assert.equal(blocked.decision.status, 'blocked');
+  assert.equal(blocked.decision.condition, 'capability.provider.execution');
+  assert.equal(blocked.decision.ownerId, 'runtime-coordinator');
+
+  const waiting = captureAdmissionError(() => admitRequirement(requirementAdmission({ health: 'attention' })));
+  assert.equal(waiting.decision.status, 'waiting');
+  assert.equal(waiting.decision.condition, 'health.attention');
+
+  assert.throws(
+    () => admitRequirement(requirementAdmission({
+      queue: { kind: 'execution', concurrencyLimit: 2, maxBacklog: 5 },
+      registeredQueues: ['research'],
+    })),
+    AdmissionError,
   );
 });
 
