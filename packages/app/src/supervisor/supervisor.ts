@@ -384,6 +384,13 @@ async function stopActiveDaemon(
       gracefulStopError = error instanceof Error ? error.message : String(error);
     }
   }
+  if (gracefulStopError !== undefined) {
+    throw supervisorError(
+      'daemon-takeover.failed',
+      `graceful daemon stop failed: ${gracefulStopError}`,
+      'inspect the exact daemon PID and retry takeover after confirming the active owner is reachable',
+    );
+  }
   await onGracefulSignal?.();
   if (await waitForProcessExit(pid, gracefulTimeoutMs, pollIntervalMs)) {
     return {

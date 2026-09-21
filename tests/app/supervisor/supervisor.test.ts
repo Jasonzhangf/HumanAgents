@@ -505,6 +505,39 @@ test('hm startup force-stops a daemon that ignores graceful stop', async () => {
   }
 });
 
+test('hm startup does not publish a replacement lease when graceful signaling is denied', async () => {
+  const paths = await fixture();
+  const child = await startLeaseChild(paths, 'ignore-term');
+  const processWithKill = process as unknown as {
+    kill: (pid: number, signal: number | string) => void;
+  };
+  const originalKill = processWithKill.kill;
+  processWithKill.kill = (pid, signal) => {
+    if (pid === child.pid && signal === 'SIGTERM') {
+      const error = Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+      throw error;
+    }
+    return originalKill(pid, signal);
+  };
+  try {
+    await assert.rejects(
+      () => runSupervisorStartup(paths, [], {
+        lease: {
+          ownerId: 'humanagent.app.serve',
+          takeover: { reason: 'signal permission failure', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 30, pollIntervalMs: 5 } },
+        },
+      }),
+      (error: any) => error.code === 'daemon-takeover.failed',
+    );
+    const lease = await readDaemonLease(paths);
+    assert.equal(lease?.leaseId, child.leaseId);
+    assert.equal(lease?.disposedAt, undefined);
+  } finally {
+    processWithKill.kill = originalKill;
+    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+  }
+});
+
 test('hm startup refuses to signal a live PID whose process identity was reused', async () => {
   const paths = await fixture();
   const child = await startLeaseChild(paths, 'ignore-term');
