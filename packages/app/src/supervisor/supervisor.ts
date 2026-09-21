@@ -138,6 +138,7 @@ function validateLeaseRecord(value: Partial<SupervisorLeaseRecord>): void {
     || typeof value.ownerId !== 'string'
     || !value.ownerId
     || !Number.isSafeInteger(value.pid)
+    || (value.pid ?? 0) < 1
     || typeof value.processStartToken !== 'string'
     || !value.processStartToken
     || typeof value.acquiredAt !== 'string'
@@ -329,11 +330,11 @@ function assertStopTimeout(value: number | undefined, label: string, fallback: n
 }
 
 function signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
-  if (pid === process.pid) {
+  if (pid < 1 || pid === process.pid) {
     throw supervisorError(
       'daemon-takeover.self-protection',
-      'refusing to terminate the current HumanAgent process during daemon takeover',
-      'inspect the daemon lease because its PID points to the current process',
+      'refusing to terminate an invalid PID or the current HumanAgent process during daemon takeover',
+      'inspect the daemon lease because its PID is not a positive process identity owned by the active daemon',
     );
   }
   (process as unknown as { kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void }).kill(pid, signal);

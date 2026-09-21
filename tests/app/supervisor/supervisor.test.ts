@@ -487,6 +487,24 @@ test('hm startup refuses to signal a live PID whose process identity was reused'
   }
 });
 
+test('lease validation rejects process-group PID values before takeover can signal', async () => {
+  for (const pid of [0, -1]) {
+    const paths = await fixture();
+    await acquireDaemonLease(paths);
+    const raw = JSON.parse(await readFile(daemonLeasePath(paths), 'utf8')) as Record<string, unknown>;
+    await writeFile(daemonLeasePath(paths), JSON.stringify({ ...raw, pid }) + '\n', 'utf8');
+    await assert.rejects(
+      () => acquireDaemonLease(paths, {
+        takeover: {
+          reason: 'reject process-group pid',
+          stop: { gracefulTimeoutMs: 1, forceTimeoutMs: 1, pollIntervalMs: 1 },
+        },
+      }),
+      (error: any) => error.code === 'daemon-lease-corrupt',
+    );
+  }
+});
+
 function processIsAliveForTest(pid: number): boolean {
   try {
     (process as unknown as { kill(pid: number, signal: 0): void }).kill(pid, 0);
