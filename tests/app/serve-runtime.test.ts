@@ -421,7 +421,7 @@ test('confirmed requirement preserves non-success provider closures through orch
   }
 });
 
-test('RCC orchestration ports exercise execution and review agents with separate identities', async () => {
+test('RCC orchestration ports provide review and merge agents for the live execution owner', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-agent-task'),
     organId: id('organ', 'humanagent-ui'),

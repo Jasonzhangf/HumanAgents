@@ -33,6 +33,17 @@ import { AppLifecycleError } from './errors.js';
 
 const OWNER = 'humanagent.app.serve-runtime';
 
+const unboundExecutionAgent: ExecutionAgentPort = {
+  async execute(): Promise<never> {
+    throw new AppLifecycleError(
+      'serve.m3.execution-agent.missing',
+      'M3 orchestration has no execution agent bound for this task assembly',
+      'bind an execution agent before dispatching an orchestration assignment',
+      OWNER,
+    );
+  },
+};
+
 export interface ServeAgentIoOwner {
   readonly ownerId: 'humanagent.runtime.agent-io';
   readonly budgetStore: AgentIoRestartBudgetStore;
@@ -169,11 +180,11 @@ export function createServeRuntimeComposition(
     eventBus,
     runtimePool,
     createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
-      if ((!input.executionAgent && !executionAgent) || !input.reviewAgent || !input.mergeCoordinator) {
+      if (!input.reviewAgent || !input.mergeCoordinator) {
         throw new AppLifecycleError(
           'serve.m3.ports-missing',
-          `M3 task ${task.id.value} cannot be composed without execution, review, and merge ports`,
-          'bind the M3 execution, review, and merge owners before creating task-scoped orchestration',
+          `M3 task ${task.id.value} cannot be composed without review and merge ports`,
+          'bind the M3 review and merge owners before creating task-scoped orchestration',
           OWNER,
         );
       }
@@ -182,7 +193,7 @@ export function createServeRuntimeComposition(
         task,
         scope,
         runtimePool,
-        executionAgent: executionAgent ?? input.executionAgent!,
+        executionAgent: executionAgent ?? input.executionAgent ?? unboundExecutionAgent,
         reviewAgent: input.reviewAgent,
         mergeCoordinator: input.mergeCoordinator,
         feedbackPorts: {

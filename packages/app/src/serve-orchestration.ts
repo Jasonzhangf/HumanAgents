@@ -141,7 +141,7 @@ function eventSummary(events: readonly AgentEvent[], fallback: string): string {
 }
 
 function providerPrompt(
-  role: 'execution' | 'review',
+  role: 'review',
   segments: readonly string[],
   body: string,
 ): string {
@@ -152,7 +152,7 @@ function providerPrompt(
 }
 
 async function runProviderAgent(input: {
-  readonly role: 'execution' | 'review';
+  readonly role: 'review';
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
   readonly taskId: Parameters<ExecutionAgentPort['execute']>[0]['assignment']['taskId'];
