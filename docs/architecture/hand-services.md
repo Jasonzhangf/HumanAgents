@@ -6,6 +6,8 @@
 完整的任务级设计、模型路由、recipe、递归状态机和动态服务注册见
 [`hand-task-gateway.md`](hand-task-gateway.md)。本文保留 `code.search` 的具体服务契约，作为第一条已实现服务的实现基线；不得再把 Hand 解释为只有一个搜索 route 的薄 wrapper。
 
+服务注册和 Gateway 注册是两个关联但独立的控制面对象：服务定义语义契约，Gateway 定义可选的工具、特殊小模型、通用 subagent、provider/model binding 和 verifier。三种 Gateway 统一实现 Custom Gateway Adapter；自定义 Gateway 必须先注册、校验、benchmark、review，再和服务版本一起原子激活；不能通过运行时目录扫描或模型名称临时挂载。
+
 ## 1. 在线职责
 
 Hand 对外提供的是能减少主 Agent 连续工具调用的高层任务服务，不是原子工具目录，也不只是一次 operation 的委任入口。一个服务可以内部调用多个函数、多个 operation、多个模型轮次，并在最终交付前完成验证和失败收拢。
@@ -23,6 +25,8 @@ Hand 对外提供的是能减少主 Agent 连续工具调用的高层任务服�
 Hand 不对外暴露 `read_file`、`grep`、`list_files`、`diff` 或 `apply_patch`。这些是服务内部可以使用的函数。只有把多个步骤、范围控制、结果汇总和完整性判断封装成一个可复现服务，才有资格注册为 Hand service。
 
 第一条基础服务是 `code.search@1.0.0`。它验证了 Hand 服务必须同时拥有高层输入契约、内部 function harness、范围控制、完整性报告、失败分类、route 注册和 verifier。后续 `code.edit`、`code.test`、`code.build` 和 `git.workflow` 必须满足同一资格线，不能只注册一个模型工具名。
+
+Gateway 类型必须显式标注为 `tool`、`specialized-model` 或 `subagent`。需要独立推理 Agent 的服务可以在 `subagent` Gateway 中分别绑定 planner、executor、repairer 的 `providerRef + modelRef`；`specialized-model` Gateway 则绑定一个固定语义的小模型。`tool` Gateway 不需要模型。三者都通过同一个 Adapter 返回 proposal、operation intent、observation 或 error。这些引用属于 typed control，不进入任务 goal 或模型业务报告；运行中的 Task 固定绑定快照，provider/model 不可用时必须按注册策略显式失败或阻塞，不能静默改用默认模型。
 
 `code.search` 高层输入使用 `CodeSearchRequest`，结果使用 `CodeSearchReport`，并固定区分：
 

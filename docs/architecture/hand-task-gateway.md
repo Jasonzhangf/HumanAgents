@@ -55,9 +55,13 @@ type HandTaskControl = {
   readonly requestedBy: string
   readonly assignmentId: string
   readonly executionEpoch: string
+  readonly gatewaySelector: 'default' | 'fast' | 'daily' | 'deep' | { readonly gatewayRef: string }
   readonly registryDigest: string
   readonly serviceVersion: string
   readonly routeVersion: string
+  readonly gatewayId: string
+  readonly gatewayVersion: string
+  readonly agentBindingDigest: string
 }
 
 type HandTaskRequest = {
@@ -92,7 +96,7 @@ type HandTaskReport = {
 
 ## 4. 服务注册与动态路由
 
-服务是可挂载、可版本化、可替换的抽象语义。运行时不扫描目录猜测服务；服务必须经过 authoring → validate → compile → load，形成不可变注册快照。
+服务是可挂载、可版本化、可替换的抽象语义；Gateway 是承载服务的可替换执行入口。两者分开注册：服务定义“做什么”，Gateway 定义“由哪个执行器/推理 Agent、哪个 provider/model 和哪些 Harness 完成”。运行时不扫描目录猜测服务或 Gateway；两者都必须经过 authoring → validate → compile → load，形成不可变注册快照。
 
 ```ts
 type HandTaskServiceRegistration = {
@@ -100,6 +104,7 @@ type HandTaskServiceRegistration = {
   readonly contractVersion: string
   readonly routeVersion: string
   readonly owner: string
+  readonly gatewayRef: string
   readonly plannerPolicy: {
     readonly initial: 'none' | 'fast' | 'advanced'
     readonly onFailure: 'none' | 'after-budget' | 'always'
@@ -123,22 +128,220 @@ type HandTaskServiceRegistration = {
 }
 ```
 
+### Custom Gateway 注册
+
+内置 Gateway 和自定义 Gateway 使用同一个受控端口。自定义 Gateway 可以直接挂一个推理 Agent，但不能绕过 Task Gateway 的状态机、Operation Gateway 的副作用生命周期或 TaskCompletionGate：
+
+```ts
+type HandGatewayRegistration = {
+  readonly gatewayId: string
+  readonly gatewayVersion: string
+  readonly kind: 'builtin' | 'custom'
+  readonly type: 'tool' | 'specialized-model' | 'subagent'
+  readonly taskMode: 'service-bound' | 'generic'
+  readonly owner: string
+  readonly contractVersion: string
+  readonly taskTypes: readonly string[]
+  readonly capabilities: readonly ('plan' | 'execute' | 'repair' | 'reconcile')[]
+  readonly adapterRef: string
+  readonly adapterVersion: string
+  readonly modelBinding?: HandModelBinding
+  readonly agentBindings: {
+    readonly planner?: HandAgentBinding
+    readonly executor?: HandAgentBinding
+    readonly repairer?: HandAgentBinding
+  }
+  readonly functionBindings: readonly string[]
+  readonly operationKinds: readonly ('inspect' | 'apply' | 'run' | 'verify')[]
+  readonly operationVerifierRef: string
+  readonly healthCheckRef: string
+  readonly benchmarkRef: string
+  readonly digest: string
+}
+
+type HandModelBinding = {
+  readonly providerRef: string
+  readonly modelRef: string
+  readonly protocol: 'responses' | 'anthropic' | 'custom'
+  readonly capabilityProfile: string
+  readonly allowedFunctionBindings: readonly string[]
+}
+
+type HandAgentBinding = HandModelBinding & {
+  readonly agentRef: string
+}
+```
+
+Gateway 类型的最低语义是：
+
+| Gateway type | 用途 | provider/model | 允许范围 |
+|---|---|---|---|
+| `tool` | 确定性的工具或 Function Harness，处理一个可验证的 operation | 不需要 | 注册的 operation/function bindings |
+| `specialized-model` | 固定语义的特殊小模型，例如搜索、分类、解析或结构化转换模型 | `modelBinding` 必须配置 | 固定 service contract、声明的 function bindings 和 verifier |
+| `subagent` | 直接挂载一个可多轮执行的通用推理 Agent，完成一个完整 Hand task | planner/executor/repairer binding 按策略配置 | 注册的 task scope、function bindings 和 verifier |
+
+`subagent + taskMode=generic` 可以承载用户没有单独抽象成 `code.search`/`code.build` 的常规任务，但仍必须提交完整的 `HandTaskRequest`，接受 scope、权限、取消、reconcile 和 TaskCompletionGate 约束。它不是一个可以执行任意 shell 或任意 provider call 的后门；没有对应 capability 或 verifier 时，注册阶段失败。
+
+三种类型只在注册时做不同的 capability/binding 校验，运行时使用同一个 Custom Gateway Adapter 接口：
+
+```ts
+type HandGatewayAdapter = {
+  readonly describe: () => HandGatewayRegistration
+  readonly admit: (input: HandTaskInput, control: HandTaskControl) => Promise<GatewayAdmission>
+  readonly invoke: (request: GatewayInvocation) => Promise<GatewayStepResult>
+  readonly reconcile: (request: GatewayOperationReference) => Promise<GatewayStepResult>
+  readonly stop: (request: GatewayOperationReference) => Promise<GatewayStopResult>
+}
+
+type GatewayInvocation = {
+  readonly invocationId: string
+  readonly taskId: string
+  readonly assignmentId: string
+  readonly executionEpoch: string
+  readonly nodeId?: string
+  readonly phase: 'planning' | 'executing' | 'repairing'
+  readonly planRevision?: string
+  readonly attempt?: number
+  readonly operationIdentity?: string
+  readonly operationKind: 'inspect' | 'apply' | 'run' | 'verify'
+  readonly inputRefs: readonly string[]
+  readonly control: HandTaskControl
+}
+
+type GatewayOperationReference =
+  | {
+      readonly invocationId: string
+      readonly taskId: string
+      readonly assignmentId: string
+      readonly executionEpoch: string
+      readonly phase: 'planning'
+    }
+  | {
+      readonly invocationId: string
+      readonly taskId: string
+      readonly assignmentId: string
+      readonly executionEpoch: string
+      readonly planRevision: string
+      readonly attempt: number
+      readonly operationIdentity: string
+      readonly phase: 'executing' | 'repairing'
+    }
+
+type GatewayStepResult = {
+  readonly proposal?: unknown
+  readonly operationIntents: readonly string[]
+  readonly observations: readonly string[]
+  readonly effectState: 'none' | 'known' | 'unknown'
+  readonly error?: { readonly code: string; readonly message: string }
+}
+```
+
+`invocationId` 由 Harness 分配并持久化；`phase=planning` 可以没有 `nodeId`、`planRevision`、`attempt` 或 `operationIdentity`，但可以通过 planning 引用调用 `stop/reconcile`；`phase=executing/repairing` 必须带已提交的 `planRevision + attempt + operationIdentity`。`stop` 的返回只表示 stop request 已被接受还是已经 settle；只有带有 effect state 的 settle evidence 才能驱动 `cancelled` 或 reconcile 状态。这样 planning、重试、repair、stop 和 reconcile 都复用同一 invocation/operation identity，不另建副作用状态机，也不为 planning 伪造 operation identity。
+
+`tool` 通常在 `invoke` 中调用 Function Harness；`specialized-model` 通常由一个固定 model binding 完成受限语义转换；`subagent` 可以在多次 `invoke` 中使用 planner/executor/repairer 和注册的函数。三者都只能返回 typed proposal、operation intent、observation 或 error，不能直接修改 Task 状态、写 Journal terminal event 或绕过 verifier。新增自定义机制只需实现 Adapter、提交 Registration 和 benchmark，不需要新增一套 Gateway 协议。
+
+用户配置通过逻辑 profile 使用 `subagent`，不需要在每次任务里填写真实模型名：
+
+```ts
+type HandGatewayDefaults = {
+  readonly defaultProfile: 'fast' | 'daily' | 'deep'
+  readonly profiles: {
+    readonly fast: HandGatewayProfile
+    readonly daily: HandGatewayProfile
+    readonly deep: HandGatewayProfile
+  }
+}
+
+type HandGatewayProfile = {
+  readonly profileRef: string
+  readonly gatewayRef: string
+  readonly gatewayType: 'tool' | 'specialized-model' | 'subagent'
+  readonly bindingRef: string
+  readonly effectiveBindingDigest: string
+  readonly capabilityProfile: string
+  readonly allowedTaskModes: readonly ('service-bound' | 'generic')[]
+}
+
+type HandGatewayProfileSpec = {
+  readonly profileRef: string
+  readonly gatewayRef: string
+  readonly gatewayType: 'tool' | 'specialized-model' | 'subagent'
+  readonly providerRef?: string
+  readonly modelRef?: string
+  readonly roleBindings?: {
+    readonly planner?: { readonly providerRef: string; readonly modelRef: string }
+    readonly executor?: { readonly providerRef: string; readonly modelRef: string }
+    readonly repairer?: { readonly providerRef: string; readonly modelRef: string }
+  }
+  readonly capabilityProfile: string
+  readonly allowedTaskModes: readonly ('service-bound' | 'generic')[]
+}
+```
+
+解析规则固定为：
+
+```text
+gatewaySelector = explicit gatewayRef
+  → resolve that registered Gateway/version
+
+gatewaySelector = fast | daily | deep
+  → resolve the user's corresponding profile
+
+gatewaySelector = default
+  → resolve userConfig.defaultProfile
+  → initial default is daily, unless user config changes it
+```
+
+profile alias 只是一层稳定的控制面引用，不是模型名称。用户可以在 profile spec 中把 `fast` 配成低延迟模型，把 `daily` 配成日常模型，把 `deep` 配成高推理消耗模型；profile spec 必须先与目标 Gateway 的 binding、task mode、capability 和 verifier 编译成有效的 `bindingRef + effectiveBindingDigest`，再进入 active profile。active profile 只引用已审查的有效 binding，不直接覆盖 Gateway 注册里的 binding。修改 profile 只影响新 Task，运行中的 Task 继续使用原 `gatewayVersion + agentBindingDigest`。profile 缺失、provider/model 不可用或 capability 不匹配时必须显式 `blocked`/`failed`，禁止静默回退到另一个 profile。
+
+`providerRef` 和 `modelRef` 是控制面引用，不是凭据，也不是模型业务输入。Provider 的 endpoint、凭据、可用性和协议细节仍由对应 provider adapter/外部配置真源解析；注册表只保存经过权限校验的引用和 capability profile，不复制 secret。这样不同 Gateway 可以独立选择 provider/model，例如：
+
+```text
+code.search@1
+  → builtin-search-gateway@1
+      → function harness / fast model
+
+code.coding@1
+  → custom-coding-gateway@3
+      → planner:  agent-a / provider-x / model-reasoning
+      → executor: agent-a / provider-x / model-reasoning
+      → repairer: agent-b / provider-y / model-repair
+```
+
+Custom Gateway 至少必须实现以下受控能力边界：
+
+```text
+admit(input, control)
+  → proposePlan / executeNode / repairPlan
+  → return typed proposal + operation intents + observations
+  → reconcile(operation identity)
+  → stop/settle
+```
+
+它返回计划、operation intent、观察结果和模型错误，但不能直接提交 Task 状态、成功事实、route snapshot 或 Journal terminal event。所有副作用仍由 Operation Gateway 执行并验证；推理 Agent 只拥有注册声明的 function bindings 和 task scope。
+
+服务的 `verifierRef` 是语义验收的 owner，Gateway 的 `operationVerifierRef` 只负责 operation 级结果验证；Gateway verifier 的结果供 TaskCompletionGate 消费，但不能替代 Service verifier。编译时必须证明 Gateway 的 operationKinds 覆盖 Service 要求、operation verifier 能产出 Service verifier 所需 evidence，且两者的输入/输出 schema 兼容；职责不兼容时禁止 compile/activate。
+
+注册 Gateway 时必须验证：task contract/schema、生命周期端口、provider/model 引用可解析、Agent capability 与 allowed functions、operation verifier 与 service verifier 的兼容性、health check、失败/取消/reconcile 能力、无 secret 入库，以及 benchmark/replay 证据。自定义 Gateway 缺少必要能力时注册失败，不静默降级为内置 Gateway。
+
+注册校验按类型固定：`tool` 必须声明可执行的 function/operation binding 且不得要求 model binding；`specialized-model` 必须声明一个 `modelBinding`、固定输入输出 schema 和 verifier；`subagent` 必须为实际启用的 planner/executor/repairer 角色提供 agent binding，并声明是否允许 `generic` task mode。`fast`、`daily`、`deep` 默认 profile 指向 `subagent` Gateway；用户也可以显式把 profile 指向通过同一契约验证的 `specialized-model` Gateway，但不能把缺少完整 task 生命周期的模型直接当作 subagent 使用。Provider/model 只在 Task admission 时解析和绑定；当前版本不允许 Task 执行中切换 provider/model。配置变化只影响新 Task，正在运行的 Task 若绑定的 provider/model 暂时不可用则进入 `blocked`/`failed`，不会临时改用另一个 profile。
+
 `maxAttempts` 按 `taskId + nodeId + planRevision + executionEpoch` 计数，只有一次真实 executor operation 产生不可接受结果后递增；重启恢复、读取旧 observation 和等待 retry 不递增。repair 创建新的 `planRevision`，不会删除或重置旧 revision 的计数；新 revision 有独立计数，但旧计数仍保留在 Journal 中。`maxRepairs` 按 Task 计数，repair 失败或耗尽后进入 `failed`，不得再次自动递归。
 
 动态修改不能直接替换正在运行的服务：
 
 ```text
-authoring candidate
-  → schema/policy validation
-  → compile deterministic snapshot
-  → benchmark and regression
+service/gateway authoring candidate
+  → contract/capability/provider validation
+  → compile deterministic service + gateway snapshot
+  → benchmark and regression replay
   → independent review / Astra gate
-  → activate registry snapshot
+  → atomically activate registry snapshot
 ```
 
-每个 Task 在 admission 时绑定 `registryDigest`、`serviceVersion` 和 `routeVersion`。运行中的 Task 始终使用原快照；新版本只影响新的 Task 或经过明确迁移的 Task。Task Gateway 每次创建 operation intent 时，都从该快照解析 `serviceVersion + routeVersion + operationKind`，并把同一绑定交给 Operation Gateway 的 route lease、executor 和 verifier；Operation Gateway 拒绝当前 registry 中不存在该版本的 resolve。旧版本实例或可重载的不可变快照，必须在所有绑定它的 Task、operation、blocked/reconcile obligation 和取消收拢责任关闭前保持可用；仅进入 reconcile 不能释放旧版本。不能只在 Journal 里记录 digest 而改用当前实现。
+每个 Task 在 admission 时绑定 `registryDigest`、`serviceVersion`、`routeVersion`、`gatewayVersion` 和 `agentBindingDigest`。运行中的 Task 始终使用原快照；新版本只影响新的 Task 或经过明确迁移的 Task。Task Gateway 每次创建 operation intent 时，都从该快照解析 `serviceVersion + routeVersion + gatewayVersion + operationKind`，并把同一绑定交给 Operation Gateway 的 route lease、executor 和 verifier；Operation Gateway 拒绝当前 registry 中不存在该版本的 resolve。旧版本实例或可重载的不可变快照，必须在所有绑定它的 Task、operation、blocked/reconcile obligation 和取消收拢责任关闭前保持可用；仅进入 reconcile 不能释放旧版本。不能只在 Journal 里记录 digest 而改用当前实现。
 
-路由更新的控制事实属于 registry owner，不进入 Agent prompt、request payload 或普通日志。动态路由只能通过受控的 register/activate operation 修改，失败必须保留原注册快照。
+路由更新的控制事实属于 registry owner，不进入 Agent prompt、request payload 或普通日志。动态路由只能通过受控的 register/activate operation 修改，失败必须保留原注册快照。服务版本和 Gateway 版本必须作为同一 registry snapshot 原子激活，不能让一个 Task 使用新服务契约配旧 Gateway，或反过来。
 
 ## 5. 统一执行 DAG 与状态机
 
@@ -182,9 +385,10 @@ Plan 编译必须拒绝未知节点、环、缺失依赖、重复 node id 和没
 | `admitted` | 当前 registry snapshot 可解析 | `route-bound` | runtime：registry/service/route binding |
 | `admitted` | route 暂不可用但可恢复 | `blocked` | core/runtime：恢复责任和 retry obligation |
 | `admitted` | route 不存在或权限拒绝 | `failed` | core：不可恢复根因 |
-| `route-bound` | recipe 必需且存在、fingerprint 匹配 | `plan-ready` | runtime：recipe digest/revision |
+| `route-bound` | recipe 存在、workspace fingerprint、gatewayVersion 和 agentBindingDigest 均匹配 | `plan-ready` | runtime：recipe digest/revision |
 | `route-bound` | recipe 缺失或 stale | `planning` | runtime：planning obligation、source fingerprint |
 | `blocked` | 原因消除且 obligation/epoch 仍匹配 | `route-bound`、`plan-ready` 或 `executing` | runtime：消费 obligation；不得更换 registry snapshot |
+| `blocked` | repair obligation 可恢复且 repairer 可用 | `escalating` | core/runtime：保留原 escalation reason 和相关计数；不得回到普通 executor |
 | `blocked` | cancel obligation 已 settle | `cancelled` | core/operation owner：停止和副作用收拢证据 |
 | `blocked` | 恢复责任被明确关闭或不可恢复 | `failed` | core：保留首次根因和恢复失败证据 |
 | `planning` | plan schema/scope/dependency 验证通过 | `plan-ready` | runtime：plan revision/digest |
@@ -199,6 +403,7 @@ Plan 编译必须拒绝未知节点、环、缺失依赖、重复 node id 和没
 | `retry-waiting` | obligation 可恢复且 lease/epoch 匹配 | `executing` | runtime：新的 operation identity；不复用 failed operation |
 | `retry-waiting` | route/资源仍不可用 | `blocked` | runtime：下一次唤醒条件 |
 | `escalating` | repair 预算可用且 repairer 可用 | `repairing` | core/runtime：repair count、原因、旧 plan ref |
+| `escalating` | repairer 暂时不可用但可恢复 | `blocked` | core/runtime：repair obligation、原始升级原因、唤醒条件 |
 | `escalating` | repair 预算耗尽或不可恢复 | `failed` | core：首次根因、预算耗尽、全部证据 |
 | `repairing` | 新 plan/recipe revision 验证通过 | `plan-ready` | runtime：新 revision；旧 revision 不覆盖 |
 | `repairing` | repairer 失败/非法输出 | `failed` | core：repair failure、原始根因 |
@@ -267,12 +472,13 @@ nextAction
 
 ```text
 Task Gateway admission
-  → model capability/health/permission check
-  → bind planner/executor/repairer provider
-  → freeze binding for current attempt
+  → resolve service + custom gateway snapshot
+  → provider/model capability/health/permission check
+  → bind planner/executor/repairer agent profiles
+  → freeze gateway + binding digest for current attempt
 ```
 
-如果模型不可用，不允许静默降级到另一个模型。只有注册策略明确允许的下一类模型才能被选择，并且要记录新的 binding、原因和 execution epoch。
+如果 provider 或模型不可用，不允许静默降级到另一个 provider/model。唯一的 binding 在 admission 提交前完成解析、健康检查和权限检查；Task 一旦进入 `route-bound`，不能更换 provider/model 或通过新 epoch 绕过原有 attempt。绑定的 provider/model 暂时不可用时进入 `blocked`，明确不可恢复时进入 `failed`；不能伪造由默认模型完成。
 
 ## 7. Recipe 与流程记忆
 
@@ -285,6 +491,8 @@ type TaskRecipe = {
   readonly workspaceFingerprint: string
   readonly sourceRevision?: string
   readonly routeVersion: string
+  readonly gatewayVersion: string
+  readonly agentBindingDigest: string
   readonly stages: readonly {
     readonly stageId: string
     readonly operationRef: string
@@ -303,14 +511,14 @@ Recipe activation 只允许 Organ Journal 提交以下有序事实：
 
 ```text
 candidate artifact persisted
-  → candidate validated against exact workspace fingerprint/source revision
+  → candidate validated against exact workspace fingerprint/source revision/gateway binding
   → first execution observations persisted
   → required verification passed
   → active-recipe pointer compare-and-set(candidate digest, fingerprint)
   → task records recipe activation and continues
 ```
 
-恢复时按 Journal 重放：候选 artifact 已存在但没有验证事实则继续验证；验证存在但没有 activation pointer 则重新做 fingerprint/verification 后尝试 compare-and-set；pointer 已激活但 Task 成功记录缺失则恢复 Task，而不是重复 build。fingerprint 至少覆盖项目配置、锁文件、构建入口、相关源码 revision 和 route/recipe contract version。并发初始化只有一个匹配 fingerprint 的 candidate 能激活；source 变化时 candidate 变为 stale。
+恢复时按 Journal 重放：候选 artifact 已存在但没有验证事实则继续验证；验证存在但没有 activation pointer 则重新做 workspace fingerprint、gatewayVersion、agentBindingDigest 和 required verification 后尝试 compare-and-set；pointer 已激活但 Task 成功记录缺失则恢复 Task，而不是重复 build。fingerprint 至少覆盖项目配置、锁文件、构建入口、相关源码 revision、route/recipe contract version、gatewayVersion 和 agentBindingDigest。并发初始化只有一个完整匹配的 candidate 能激活；source 或 Gateway binding 变化时 candidate 变为 stale。
 
 Task 的恢复提交顺序同样由 Journal 约束：
 
@@ -416,7 +624,7 @@ retry accepted ≠ retry delivered
 
 1. 统计服务历史中的成功率、失败类型、重试次数、耗时和 recipe 漂移；
 2. 发现可抽象为新 semantic service 的重复编排任务；
-3. 生成 service/route/harness/verifier/benchmark candidate；
+3. 生成 service/Gateway/agent-binding/harness/verifier/benchmark candidate；
 4. 经过 benchmark、回归、权限检查和独立 review 后提出 activate。
 
 Memory Agent 不能直接修改 active registry、当前 Task 的 route snapshot、recipe revision 或成功状态。服务升级必须回到 authoring → validate → compile → review → activate 流程。
@@ -433,8 +641,8 @@ Memory Agent 不能直接修改 active registry、当前 Task 的 route snapshot
 
 - 生产 Agent → Hand Task Gateway 的真实 dispatcher；
 - `code.edit`、`code.test`、`code.build`、`git.workflow` 的具体 route；
-- build recipe store 和动态 service registry 的 live composition；
-- 高级/快速模型的真实 planner/executor/repairer 路由；
+- build recipe store、custom Gateway registry 和动态 service/Gateway live composition；
+- provider/model 独立配置以及高级/快速模型的真实 planner/executor/repairer 路由；
 - 多轮 provider tool call 到 Hand task report 的 live replay。
 
 这些是后续实现任务，必须分别提供 contract、route、verifier、focused benchmark、failure replay 和 live composition 证据。
@@ -444,6 +652,7 @@ Memory Agent 不能直接修改 active registry、当前 Task 的 route snapshot
 ```text
 task contract
   → service registration
+  → custom gateway + provider/model binding registration
   → deterministic compile/load
   → admission and snapshot pinning
   → planner/executor route
