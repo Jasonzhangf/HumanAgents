@@ -391,12 +391,12 @@ function helpText(): string {
     '',
     '用法：humanagent [serve 选项]',
     '',
-    '默认启动 WebUI，workspace 为当前目录，端口为 10001。',
+    '默认启动 WebUI，workspace 为当前目录，端口为 10086。',
     '',
     '常用选项：',
     '  --workspace <path>       项目 workspace（默认当前目录）',
     '  --provider <name>        provider（默认读取 ~/.humanagent/config.toml）',
-    '  --port <number>          WebUI 端口（默认 10001）',
+    '  --port <number>          WebUI 端口（默认 10086）',
     '  --protocol <name>        responses、openai 或 anthropic',
     '  --help                   显示帮助',
     '  --json                   以机器可读 JSON 输出错误',
@@ -675,7 +675,7 @@ export async function main(args: readonly string[]): Promise<void> {
     const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
-    const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10001;
+    const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
     const memoryRoot = paths.memoryRoot;
     const memoryRuntime = await composeMemoryRuntime({
       paths,
