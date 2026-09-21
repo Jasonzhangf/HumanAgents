@@ -1597,6 +1597,39 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     assert.equal(stale.error.code, 'ExplicitIntakeError');
     assert.equal(stale.error.ownerId, 'explicit-intake');
 
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/matching`, { method: 'POST' });
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/match`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ normalizedInput: 'route through HTTP', matchedTasks: [], knownFacts: [] }),
+    });
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/proposal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ proposedIntent: 'create', proposal: 'create the HTTP dispatch task', decisionRefs: [] }),
+    });
+    const proposedResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}`);
+    const proposed = await proposedResponse.json() as { readonly draft?: { readonly draftId: string; readonly inputRevision: number } };
+    assert.ok(proposed.draft);
+    const confirmationResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/confirmation`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: proposed.draft!.draftId,
+        inputRevision: proposed.draft!.inputRevision,
+        confirmationRef: 'confirmation:http-dispatch',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-09-17T00:00:00.000Z',
+        payloadRef: 'asset://requirements/http-dispatch',
+      }),
+    });
+    assert.equal(confirmationResponse.status, 200);
+    const dispatchResponse = await fetch(`${runtime.server.url}/api/explicit/dispatch-next`, { method: 'POST' });
+    assert.equal(dispatchResponse.status, 202);
+    const dispatched = await dispatchResponse.json() as { readonly taskId: unknown; readonly operationId: unknown };
+    assert.equal(typeof dispatched.taskId, 'string');
+    assert.equal(typeof dispatched.operationId, 'string');
+
     const controlResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
