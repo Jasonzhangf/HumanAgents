@@ -263,13 +263,18 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
       const status: ReviewResult['status'] = provider.settlement.state !== 'succeeded'
         ? provider.settlement.state === 'failed' || provider.settlement.state === 'unknown' ? 'failed' : 'inconclusive'
         : marker ?? 'inconclusive';
-      const findings = status === 'failed'
+      const findings = status !== 'passed'
         ? [{
             findingId: `finding-${request.reviewAssignment.assignmentId}`,
             severity: 'important' as const,
             locationRef: request.reviewAssignment.subjectRefs[0] ?? 'review://subject',
-            problem: eventSummary(provider.events, 'provider review failed'),
-            expected: 'review must pass the assigned acceptance criteria',
+            problem: eventSummary(
+              provider.events,
+              status === 'failed'
+                ? 'provider review failed'
+                : 'provider review did not return an unambiguous HUMANAGENT_REVIEW marker',
+            ),
+            expected: 'review must pass the assigned acceptance criteria and return one unambiguous review marker',
             evidenceRefs,
           }]
         : [];

@@ -563,6 +563,8 @@ test('RCC review agent remains inconclusive when the model omits its review mark
     scope,
   });
   assert.equal(review.status, 'inconclusive');
+  assert.equal(review.findings.length, 1);
+  assert.match(review.findings[0]!.expected, /unambiguous review marker/);
 });
 
 test('RCC review agent remains inconclusive when review markers conflict', async () => {
@@ -619,6 +621,7 @@ test('RCC review agent remains inconclusive when review markers conflict', async
     scope,
   });
   assert.equal(review.status, 'inconclusive');
+  assert.equal(review.findings.length, 1);
 });
 
 test('RCC ports reach the runtime review and Harness merge gates with provider artifacts', async () => {
