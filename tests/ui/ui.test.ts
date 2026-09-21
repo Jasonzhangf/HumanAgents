@@ -1043,3 +1043,26 @@ test('task detail UI consumes typed task-detail projection fields', async () => 
   assert.equal(source.includes('detail.output?.artifacts'), true);
   assert.equal(source.includes('detail.observationRef'), true);
 });
+
+test('new task UI sends one natural-language input to the explicit brain', async () => {
+  const source = await readFile('docs/ui/task.js', 'utf8');
+  assert.equal(source.includes('title.required'), false);
+  assert.equal(source.includes('title.value'), false);
+  assert.equal(source.includes('api.createTask'), false);
+  assert.equal(source.includes('api.receiveExplicitInput'), true);
+  assert.equal(source.includes('提交给显式大脑'), true);
+  assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
+  assert.equal(source.includes('确认并提交后台'), true);
+  assert.equal(source.includes('matchedTasks: currentTaskId'), true);
+  assert.equal(source.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
+  assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), true);
+});
+
+test('runtime task dashboard is observational and has no second execution-input form', async () => {
+  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
+  assert.equal(source.includes('本次执行输入'), false);
+  assert.equal(source.includes('promptInput'), false);
+  assert.equal(source.includes('api.startExecution'), false);
+  assert.equal(source.includes('taskDetailHref(taskId)'), true);
+  assert.equal(source.includes('进入显式大脑'), true);
+});

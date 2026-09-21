@@ -8,6 +8,7 @@ import {
   observationHref,
   renderRuntimeStatus,
   stateTone,
+  taskDetailHref,
   taskIdFromQuery,
 } from './runtime-shell.js'
 
@@ -21,7 +22,6 @@ const { main, status } = makePageShell(
 
 let dashboard
 let stream
-let promptInput
 let actionStatus
 
 function renderDashboard() {
@@ -55,18 +55,9 @@ function renderDashboard() {
   main.append(facts)
 
   const execution = element('section', undefined, 'section')
-  execution.append(element('h2', '执行操作'))
+  execution.append(element('h2', '任务控制'))
   const panel = element('div', undefined, 'panel')
-  const form = element('form', undefined, 'form-grid')
-  const label = element('label', '本次执行输入')
-  promptInput = element('textarea')
-  promptInput.required = true
-  promptInput.placeholder = '输入要交给 Provider 的请求'
-  label.append(promptInput)
   const actions = element('div', undefined, 'actions')
-  const startButton = element('button', `发起 ${dashboard.mode} 执行`, 'button button--primary')
-  startButton.type = 'submit'
-  startButton.disabled = !dashboard.allowedActions.includes('start')
   const stopButton = element('button', 'Stop / 收拢', 'button button--danger')
   stopButton.type = 'button'
   stopButton.disabled = !dashboard.allowedActions.includes('stop')
@@ -75,16 +66,19 @@ function renderDashboard() {
   retryStopButton.type = 'button'
   retryStopButton.disabled = !dashboard.allowedActions.includes('retry-stop')
   retryStopButton.addEventListener('click', () => void retryStopExecution())
-  actions.append(startButton, stopButton, retryStopButton)
-  actionStatus = element('p', '等待操作。', 'muted')
+  if (dashboard.allowedActions.includes('stop')) actions.append(stopButton)
+  if (dashboard.allowedActions.includes('retry-stop')) actions.append(retryStopButton)
+  if (dashboard.allowedActions.includes('start')) {
+    const detailLink = element('a', '进入显式大脑', 'button button--primary')
+    detailLink.href = `${taskDetailHref(taskId)}#task-interaction`
+    actions.append(detailLink)
+  }
+  actionStatus = element('p', dashboard.allowedActions.includes('start')
+    ? '任务尚未提交给后台，请先进入显式大脑整理并确认。'
+    : '看板只负责观察运行状态；需要改变任务时进入显式大脑。', 'muted')
   actionStatus.setAttribute('role', 'status')
   actionStatus.setAttribute('aria-live', 'polite')
-  form.append(label, actions, actionStatus)
-  form.addEventListener('submit', (event) => {
-    event.preventDefault()
-    void startExecution()
-  })
-  panel.append(form)
+  panel.append(actions, actionStatus)
   execution.append(panel)
   main.append(execution)
 
@@ -117,24 +111,6 @@ function renderDashboard() {
 async function refresh() {
   dashboard = await api.taskDashboard(taskId)
   renderDashboard()
-}
-
-async function startExecution() {
-  const prompt = promptInput.value.trim()
-  if (!prompt) {
-    actionStatus.textContent = '请输入非空执行输入。'
-    promptInput.focus()
-    return
-  }
-  try {
-    actionStatus.textContent = '正在发起执行…'
-    const started = await api.startExecution(taskId, { mode: dashboard.mode, prompt })
-    actionStatus.textContent = `operation=${started.operationId} · epoch=${started.executionEpoch}`
-    await refresh()
-    subscribe(started.operationId)
-  } catch (error) {
-    actionStatus.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
-  }
 }
 
 async function stopExecution() {

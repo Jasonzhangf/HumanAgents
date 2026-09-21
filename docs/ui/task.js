@@ -6,6 +6,7 @@ import {
   loadRuntimeStatus,
   makePageShell,
   observationHref,
+  queryParam,
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
@@ -13,12 +14,13 @@ import {
 } from './runtime-shell.js'
 
 const requestedTask = taskIdFromQuery(false)
-const isNew = requestedTask === 'new' || !requestedTask
+const requestedInteraction = queryParam('interaction')
+const isNew = (requestedTask === 'new' || !requestedTask) && !requestedInteraction
 const { main, status } = makePageShell(
   'Task List',
   'Task',
-  isNew ? '新建任务' : '任务详情',
-  '创建或选择 Task，然后进入真实 Runtime 执行。',
+  isNew ? '新建任务' : requestedInteraction ? '确认任务' : '任务详情',
+  isNew ? '用一句话告诉显式大脑你要完成什么。' : requestedInteraction ? '显式大脑会先整理，再由你确认是否提交后台。' : '查看任务状态和处理结果。',
 )
 
 let taskId = requestedTask
@@ -38,34 +40,108 @@ function readable(value, placeholder = '暂无信息') {
 function renderCreate() {
   const panel = element('section', undefined, 'panel')
   const form = element('form', undefined, 'form-grid')
-  const titleLabel = element('label', '任务标题')
-  const title = element('input')
-  title.required = true
-  title.placeholder = '例如：验证 Provider 执行'
-  titleLabel.append(title)
-  const directiveLabel = element('label', '任务目标')
+  const directiveLabel = element('label', '你要完成什么？')
   const directive = element('textarea')
-  directive.placeholder = '说明这次任务要验证或完成什么'
+  directive.required = true
+  directive.placeholder = '直接描述目标、背景和限制，不需要填写标题或执行指令。'
   directiveLabel.append(directive)
-  const button = element('button', '创建 Task', 'button button--primary')
+  const button = element('button', '提交给显式大脑', 'button button--primary')
   button.type = 'submit'
-  const feedback = element('p', '创建后进入 Task Dashboard 发起 fake 或 rcc 执行。', 'muted')
+  const feedback = element('p', '显式大脑会整理输入、补齐任务信息，并在需要时向你确认。', 'muted')
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
-  form.append(titleLabel, directiveLabel, button, feedback)
+  form.append(directiveLabel, button, feedback)
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
     try {
-      feedback.textContent = '正在创建 Task…'
-      const created = await api.createTask({ title: title.value.trim(), directive: directive.value.trim() })
-      taskId = created.taskId.value
-      window.location.href = taskDashboardHref(taskId)
+      const rawInput = directive.value.trim()
+      feedback.textContent = '正在交给显式大脑整理…'
+      const received = await api.receiveExplicitInput({
+        sourceRef: 'ui:new-task',
+        rawInput,
+        inputRevision: 1,
+      })
+      window.location.href = `./task.html?interaction=${encodeURIComponent(received.interactionId)}#task-interaction`
     } catch (error) {
       feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
     }
   })
   panel.append(form)
   main.append(panel)
+}
+
+async function renderInteraction(interactionId, currentTaskId) {
+  clearNode(main)
+  const panel = element('section', undefined, 'panel')
+  panel.append(element('p', '显式大脑', 'eyebrow'), element('h2', '先确认这次要处理的事'))
+  const feedback = element('p', '正在整理你的输入…', 'muted')
+  feedback.setAttribute('role', 'status')
+  feedback.setAttribute('aria-live', 'polite')
+  const body = element('div', undefined, 'form-grid')
+  const actions = element('div', undefined, 'actions')
+  panel.append(feedback, body, actions)
+  main.append(panel)
+
+  try {
+    let snapshot = await api.inspectExplicitInteraction(interactionId)
+    if (snapshot.state === 'received' || snapshot.state === 'matching') {
+      if (snapshot.state === 'received') await api.beginExplicitMatching(interactionId)
+      await api.recordExplicitMatch(interactionId, {
+        normalizedInput: snapshot.rawInput,
+        matchedTasks: currentTaskId ? [{ taskId: currentTaskId, relation: 'current', status: detail?.state || 'created' }] : [],
+        knownFacts: [],
+      })
+      snapshot = await api.inspectExplicitInteraction(interactionId)
+    }
+    if (snapshot.state === 'awaiting-intent' && snapshot.draft) {
+      await api.proposeExplicitRequirement(interactionId, {
+        proposedIntent: currentTaskId ? 'append' : 'create',
+        proposal: snapshot.draft.normalizedInput,
+        decisionRefs: [],
+      })
+      snapshot = await api.inspectExplicitInteraction(interactionId)
+    }
+    body.append(
+      element('p', '你的输入', 'eyebrow'),
+      element('p', snapshot.rawInput),
+      element('p', '整理后的任务', 'eyebrow'),
+      element('p', snapshot.draft?.proposal || snapshot.rawInput),
+    )
+    if (snapshot.state === 'awaiting-confirmation' && snapshot.draft) {
+      feedback.textContent = '已整理完成。确认后才会提交到后台。'
+      const confirm = element('button', '确认并提交后台', 'button button--primary')
+      confirm.type = 'button'
+      confirm.addEventListener('click', async () => {
+        confirm.disabled = true
+        feedback.textContent = '正在确认并提交…'
+        try {
+          await api.confirmExplicitRequirement(interactionId, {
+            draftId: snapshot.draft.draftId,
+            inputRevision: snapshot.draft.inputRevision,
+            confirmationRef: `ui:confirmation:${interactionId}`,
+            confirmedBy: 'human:operator',
+            confirmedAt: new Date().toISOString(),
+            payloadRef: `asset://requirements/${interactionId}`,
+          })
+          const dispatched = await api.dispatchNextExplicitRequirement()
+          if (dispatched.requirement?.draftId !== snapshot.draft.draftId) {
+            feedback.textContent = '已确认，但队列前还有其他任务；当前任务仍在等待派发。'
+            return
+          }
+          taskId = dispatched.taskId
+          window.location.href = taskDashboardHref(taskId)
+        } catch (error) {
+          confirm.disabled = false
+          feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+        }
+      })
+      actions.append(confirm)
+    } else {
+      feedback.textContent = `当前状态：${snapshot.state}。${snapshot.nextAction}`
+    }
+  } catch (error) {
+    feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+  }
 }
 
 function renderTask() {
@@ -111,6 +187,22 @@ async function load() {
   renderRuntimeStatus(status, runtimeStatus, error)
   if (isNew) {
     renderCreate()
+    return
+  }
+  if (requestedInteraction) {
+    if (taskId) detail = await api.taskDetail(taskId)
+    await renderInteraction(requestedInteraction, taskId)
+    return
+  }
+  if (taskId && window.location.hash === '#task-interaction') {
+    detail = await api.taskDetail(taskId)
+    const received = await api.receiveExplicitInput({
+      sourceRef: `ui:task:${taskId}`,
+      rawInput: detail.priorInput || detail.title,
+      inputRevision: 1,
+    })
+    window.history.replaceState(null, '', `./task.html?task=${encodeURIComponent(taskId)}&interaction=${encodeURIComponent(received.interactionId)}#task-interaction`)
+    await renderInteraction(received.interactionId, taskId)
     return
   }
   detail = await api.taskDetail(taskId)
