@@ -17,7 +17,7 @@ import type {
 } from '../../runtime/src/orchestration/index.js';
 
 export interface ServeOrchestrationPorts {
-  readonly executionAgent: ExecutionAgentPort;
+  readonly executionAgent?: ExecutionAgentPort;
   readonly reviewAgent: ReviewAgentPort;
   readonly mergeCoordinator: MergeCoordinatorPort;
 }
@@ -25,10 +25,7 @@ export interface ServeOrchestrationPorts {
 export interface ProviderServeOrchestrationOptions {
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
-  readonly promptSegments: {
-    readonly execution: readonly string[];
-    readonly review: readonly string[];
-  };
+  readonly promptSegments: { readonly review: readonly string[] };
 }
 
 function evidence(scope: ScopeRef, label: string): EvidenceRef {
@@ -143,25 +140,6 @@ function eventSummary(events: readonly AgentEvent[], fallback: string): string {
   return summaries.at(-1) ?? fallback;
 }
 
-function providerArtifacts(events: readonly AgentEvent[]): {
-  readonly refs: readonly string[];
-  readonly digests: readonly string[];
-} {
-  const refs: string[] = [];
-  const digests: string[] = [];
-  for (const event of events) {
-    const outputRefs = (event as AgentEvent & { readonly providerEvent?: { readonly outputRefs?: readonly string[] } }).providerEvent?.outputRefs;
-    if (!outputRefs || outputRefs.length === 0) continue;
-    const digest = event.evidenceRefs.find((ref) => ref.digest)?.digest;
-    if (!digest) continue;
-    for (const outputRef of outputRefs) {
-      refs.push(outputRef);
-      digests.push(digest);
-    }
-  }
-  return { refs, digests };
-}
-
 function providerPrompt(
   role: 'execution' | 'review',
   segments: readonly string[],
@@ -241,30 +219,6 @@ async function runProviderAgent(input: {
   return { events, settlement };
 }
 
-function workStatus(state: ProviderSettlement['state']): WorkResult['status'] {
-  switch (state) {
-    case 'succeeded': return 'succeeded';
-    case 'waiting': return 'incomplete';
-    case 'blocked': return 'blocked';
-    case 'failed':
-    case 'unknown': return 'failed';
-    case 'cancelled':
-    case 'stopped': return 'cancelled';
-  }
-}
-
-function workNextAction(state: ProviderSettlement['state']): WorkResult['nextAction'] {
-  switch (state) {
-    case 'succeeded': return 'review';
-    case 'waiting': return 'wait';
-    case 'blocked':
-    case 'failed':
-    case 'unknown': return 'attention';
-    case 'cancelled':
-    case 'stopped': return 'settle';
-  }
-}
-
 function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inconclusive' | undefined {
   const markers = events.flatMap((event) => [...(event.summary ?? '').matchAll(/HUMANAGENT_REVIEW\s*:\s*(passed|failed|inconclusive)/gi)].map((match) => match[1].toLowerCase() as 'passed' | 'failed' | 'inconclusive'));
   if (markers.length === 0 || new Set(markers).size > 1) return undefined;
@@ -277,98 +231,6 @@ function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inc
  * Merge remains Harness-owned and never becomes a model tool call.
  */
 export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrationOptions): ServeOrchestrationPorts {
-  const executionAgent: ExecutionAgentPort = {
-    async execute(request): Promise<WorkResult> {
-      const prompt = providerPrompt(
-        'execution',
-        input.promptSegments.execution,
-        JSON.stringify({
-          role: 'execution',
-          objective: request.assignment.objective,
-          targetRefs: request.assignment.targetRefs,
-          expectedOutputRefs: request.assignment.expectedOutputRefs,
-          successCriteria: request.assignment.successCriteria,
-          failureCriteria: request.assignment.failureCriteria,
-          incompleteCriteria: request.assignment.incompleteCriteria,
-          instruction: 'perform the assigned work and return a concise result; do not claim an artifact you did not produce',
-        }),
-      );
-      const provider = await runProviderAgent({
-        role: 'execution',
-        port: input.port,
-        binding: input.binding,
-        taskId: request.assignment.taskId,
-        assignmentId: request.assignment.assignmentId,
-        attempt: request.assignment.attempt,
-        executionEpoch: request.assignment.executionEpoch,
-        scope: request.scope,
-        inputRefs: request.assignment.targetRefs,
-        prompt,
-      });
-      const state = provider.settlement.state;
-      const status = workStatus(state);
-      const nextAction = workNextAction(state);
-      const evidenceRefs = uniqueEvidence(provider.events, provider.settlement, request.scope);
-      const summary = eventSummary(provider.events, `provider execution ${state}`);
-      const artifacts = providerArtifacts(provider.events);
-      const result: WorkResult = {
-        taskId: request.assignment.taskId,
-        pipelineNodeId: request.assignment.pipelineNodeId,
-        agentId: request.agentId,
-        assignmentId: request.assignment.assignmentId,
-        attempt: request.assignment.attempt,
-        executionEpoch: request.assignment.executionEpoch,
-        inputRevision: request.assignment.inputRevision,
-        producedArtifactRefs: [...artifacts.refs],
-        producedArtifactDigests: [...artifacts.digests],
-        status,
-        summary,
-        outputRefs: status === 'succeeded' ? [...artifacts.refs] : [],
-        evidenceRefs,
-        nextAction,
-        ...(nextAction === 'wait' ? { conditionRef: `provider://${request.assignment.assignmentId}/waiting` } : {}),
-        ...(status === 'failed' ? { failureRef: `provider://${request.assignment.assignmentId}/failed` } : {}),
-      };
-      if (status === 'succeeded' && artifacts.refs.length === 0) {
-        return {
-          ...result,
-          status: 'incomplete',
-          nextAction: 'wait',
-          conditionRef: `provider://${request.assignment.assignmentId}/artifact-materialization`,
-          summary: 'provider execution succeeded but no provider output artifact evidence was materialized',
-          outputRefs: [],
-        };
-      }
-      if (status === 'succeeded') {
-        const expected = new Set(request.assignment.expectedOutputRefs);
-        const observed = new Set(artifacts.refs);
-        if (expected.size !== observed.size || ![...expected].every((ref) => observed.has(ref))) {
-          return {
-            ...result,
-            status: 'incomplete',
-            nextAction: 'wait',
-            conditionRef: `provider://${request.assignment.assignmentId}/output-contract`,
-            summary: 'provider output references do not satisfy the assignment output contract',
-          };
-        }
-      }
-      if (request.assignment.expectedArtifactDigests && status === 'succeeded') {
-        const expected = request.assignment.expectedArtifactDigests;
-        if (expected.length !== artifacts.digests.length || expected.some((digest, index) => digest !== artifacts.digests[index])) {
-          return {
-            ...result,
-            status: 'failed',
-            nextAction: 'attention',
-            failureRef: `provider://${request.assignment.assignmentId}/artifact-digest-mismatch`,
-            summary: 'provider output artifact digest does not satisfy the assignment contract',
-            outputRefs: [],
-          };
-        }
-      }
-      return result;
-    },
-  };
-
   const reviewAgent: ReviewAgentPort = {
     async review(request): Promise<ReviewResult> {
       const prompt = providerPrompt(
@@ -458,5 +320,5 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
       };
     },
   };
-  return { executionAgent, reviewAgent, mergeCoordinator };
+  return { reviewAgent, mergeCoordinator };
 }

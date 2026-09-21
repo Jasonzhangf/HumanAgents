@@ -169,7 +169,7 @@ export function createServeRuntimeComposition(
     eventBus,
     runtimePool,
     createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
-      if (!input.executionAgent || !input.reviewAgent || !input.mergeCoordinator) {
+      if ((!input.executionAgent && !executionAgent) || !input.reviewAgent || !input.mergeCoordinator) {
         throw new AppLifecycleError(
           'serve.m3.ports-missing',
           `M3 task ${task.id.value} cannot be composed without execution, review, and merge ports`,
@@ -182,7 +182,7 @@ export function createServeRuntimeComposition(
         task,
         scope,
         runtimePool,
-        executionAgent: executionAgent ?? input.executionAgent,
+        executionAgent: executionAgent ?? input.executionAgent!,
         reviewAgent: input.reviewAgent,
         mergeCoordinator: input.mergeCoordinator,
         feedbackPorts: {

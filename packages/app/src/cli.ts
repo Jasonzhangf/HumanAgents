@@ -314,7 +314,7 @@ function providerBindingFromOptions(
 
 function servePromptSegments(
   configuration: LoadedConfiguration,
-  role: 'execution' | 'review',
+  role: 'review',
 ): readonly string[] {
   const loaded = configuration.promptCatalog[role];
   if (!loaded || loaded.segments.length === 0) {
@@ -646,12 +646,11 @@ export async function main(args: readonly string[]): Promise<void> {
     const orchestrationPorts = mode === 'fake'
       ? createDeterministicServeOrchestrationPorts()
       : createRccServeOrchestrationPorts({
-          port,
-          binding,
-          promptSegments: {
-            execution: servePromptSegments(configuration, 'execution'),
-            review: servePromptSegments(configuration, 'review'),
-          },
+            port,
+            binding,
+            promptSegments: {
+              review: servePromptSegments(configuration, 'review'),
+            },
         });
     const supervisor = await runSupervisorStartup(paths, [
       {

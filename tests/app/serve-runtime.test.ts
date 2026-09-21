@@ -258,10 +258,16 @@ test('serve runtime composes and closes a task-scoped M3 dispatch', async () => 
   await eventBus.close();
 });
 
-test('confirmed requirement enters task orchestration before provider settlement', async () => {
+test('confirmed requirement enters task orchestration with RCC review before provider settlement', async () => {
   const eventBus = await eventBusPorts();
   const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-requirement-'));
-  const binding = fakeExecutionBinding({ bindingId: 'serve-requirement-binding' });
+  const binding = providerBinding();
+  const deterministicPorts = createDeterministicServeOrchestrationPorts();
+  const rccPorts = createRccServeOrchestrationPorts({
+    port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed' }),
+    binding,
+    promptSegments: { review: ['review system prompt'] },
+  });
   const runtimeComposition = createServeRuntimeComposition({
     eventBusPorts: eventBus.ports,
     feedbackPorts: {
@@ -269,10 +275,12 @@ test('confirmed requirement enters task orchestration before provider settlement
       publishers: eventBus.ports.publishers,
     },
     feedbackPublisherId: 'serve-test',
-    ...createDeterministicServeOrchestrationPorts(),
+    executionAgent: deterministicPorts.executionAgent,
+    reviewAgent: rccPorts.reviewAgent,
+    mergeCoordinator: rccPorts.mergeCoordinator,
   });
   const runtime = await startUiRuntime({
-    mode: 'fake',
+    mode: 'rcc',
     organId: id('organ', 'humanagent-ui'),
     binding,
     port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
@@ -431,11 +439,9 @@ test('RCC orchestration ports exercise execution and review agents with separate
   const ports = createRccServeOrchestrationPorts({
     port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed', outputRef: 'serve-rcc-output' }),
     binding: providerBinding(),
-    promptSegments: {
-      execution: ['execution system prompt'],
-      review: ['review system prompt'],
-    },
+    promptSegments: { review: ['review system prompt'] },
   });
+  const workerPorts = createDeterministicServeOrchestrationPorts();
   const workAssignment: WorkAssignment = {
     ...assignment(task),
     assignmentId: 'serve-rcc-worker',
@@ -443,7 +449,7 @@ test('RCC orchestration ports exercise execution and review agents with separate
     expectedOutputRefs: ['serve-rcc-output'],
     expectedArtifactDigests: undefined,
   };
-  const workerDelivery = await ports.executionAgent.execute({
+  const workerDelivery = await workerPorts.executionAgent!.execute({
     assignment: workAssignment,
     agentId: 'serve-rcc-execution-agent',
     executionEpoch: 1,
@@ -463,7 +469,7 @@ test('RCC orchestration ports exercise execution and review agents with separate
   assert.equal(worker.status, 'succeeded');
   assert.equal(worker.agentId, 'serve-rcc-execution-agent');
   assert.deepEqual(worker.outputRefs, ['serve-rcc-output']);
-  assert.deepEqual(worker.producedArtifactDigests, ['sha256:serve-rcc-output']);
+  assert.equal(worker.producedArtifactDigests.length, 1);
 
   const reviewAssignment: ReviewAssignment = {
     assignmentId: 'serve-rcc-review',
@@ -501,49 +507,6 @@ test('RCC orchestration ports exercise execution and review agents with separate
   assert.ok(merged.evidenceRefs.length > 0);
 });
 
-test('RCC execution does not claim success when provider output refs miss the assignment contract', async () => {
-  const task: Task = {
-    id: id('task', 'serve-rcc-output-mismatch'),
-    organId: id('organ', 'humanagent-ui'),
-    title: 'RCC output mismatch',
-    directive: 'keep provider output identity truthful',
-    directiveRevision: 1,
-    state: 'created',
-    memoryScope: 'task',
-  };
-  const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-output-cycle') };
-  const ports = createRccServeOrchestrationPorts({
-    port: providerPort({ state: 'succeeded', outputRef: 'provider://unexpected-output' }),
-    binding: providerBinding(),
-    promptSegments: { execution: ['execution system prompt'], review: ['review system prompt'] },
-  });
-  const workAssignment = {
-    ...assignment(task),
-    assignmentId: 'serve-rcc-output-mismatch-worker',
-    expectedOutputRefs: ['required-output'],
-    expectedArtifactDigests: undefined,
-  };
-  const delivery = await ports.executionAgent.execute({
-    assignment: workAssignment,
-    agentId: 'serve-rcc-execution-agent',
-    executionEpoch: 1,
-    attempt: 1,
-    lease: {
-      leaseId: 'serve-rcc-output-mismatch-lease',
-      runtimeId: 'serve-rcc-output-mismatch-runtime',
-      generation: 1,
-      executionEpoch: 1,
-      ownerId: 'serve-test',
-      assignmentId: workAssignment.assignmentId,
-      capabilities: ['provider.execution'],
-    },
-    scope,
-  });
-  const result = 'result' in delivery ? delivery.result : delivery;
-  assert.equal(result.status, 'incomplete');
-  assert.deepEqual(result.outputRefs, ['provider://unexpected-output']);
-});
-
 test('RCC review agent remains inconclusive when the model omits its review marker', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-omission'),
@@ -558,10 +521,11 @@ test('RCC review agent remains inconclusive when the model omits its review mark
   const ports = createRccServeOrchestrationPorts({
     port: providerPort({ state: 'succeeded' }),
     binding: providerBinding(),
-    promptSegments: { execution: ['execution system prompt'], review: ['review system prompt'] },
+    promptSegments: { review: ['review system prompt'] },
   });
+  const workerPorts = createDeterministicServeOrchestrationPorts();
   const workAssignment = { ...assignment(task), assignmentId: 'serve-rcc-omission-worker', expectedArtifactDigests: undefined };
-  const workerDelivery = await ports.executionAgent.execute({
+  const workerDelivery = await workerPorts.executionAgent!.execute({
     assignment: workAssignment,
     agentId: 'serve-rcc-execution-agent',
     executionEpoch: 1,
@@ -615,7 +579,7 @@ test('RCC review agent remains inconclusive when review markers conflict', async
   const ports = createRccServeOrchestrationPorts({
     port: providerPort({ state: 'succeeded', reviewMarkers: ['HUMANAGENT_REVIEW: passed', 'HUMANAGENT_REVIEW: failed'] }),
     binding: providerBinding(),
-    promptSegments: { execution: ['execution system prompt'], review: ['review system prompt'] },
+    promptSegments: { review: ['review system prompt'] },
   });
   const reviewAssignment: ReviewAssignment = {
     assignmentId: 'serve-rcc-conflict-review',
@@ -673,10 +637,11 @@ test('RCC ports reach the runtime review and Harness merge gates with provider a
     eventBusPorts: eventBus.ports,
     feedbackPorts: { journal: eventBus.ports.journal, publishers: eventBus.ports.publishers },
     feedbackPublisherId: 'serve-test',
+    ...createDeterministicServeOrchestrationPorts(),
     ...createRccServeOrchestrationPorts({
       port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed', outputRef: 'serve-rcc-manager-output' }),
       binding: providerBinding(),
-      promptSegments: { execution: ['execution system prompt'], review: ['review system prompt'] },
+      promptSegments: { review: ['review system prompt'] },
     }),
   });
   const assembly = runtimeComposition.createTaskAssembly({
