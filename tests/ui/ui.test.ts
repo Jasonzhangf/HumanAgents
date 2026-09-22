@@ -717,6 +717,39 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('createRuntimeApi'), true);
 });
 
+test('observation page reads only typed pipeline fields and owns no node-order table', async () => {
+  const page = await readFile('docs/ui/observation.js', 'utf8');
+
+  // Field names must match the typed contract: `ownerAgentRole`, `toolSteps`, top-level `handoffs`.
+  assert.equal(page.includes('ownerAgentRole'), true);
+  assert.equal(page.includes('node.toolSteps'), true);
+  assert.equal(page.includes('projection.handoffs'), true);
+  assert.equal(page.includes('projection.selectedNode'), true);
+  assert.equal(page.includes('fromRoleDisplay'), true);
+  assert.equal(page.includes('carrySummary'), true);
+  assert.equal(page.includes('notCarried'), true);
+  assert.equal(page.includes('evidenceRefs'), true);
+
+  // The old producerless field names and the second node-order table are gone.
+  for (const stale of [
+    'node.toolCalls',
+    'toolName',
+    'node.handoffs',
+    'node.inputRefs',
+    'node.outputRefs',
+    'fromAgent ',
+    'notReturned',
+    'export const PIPELINE_ROWS',
+    'PIPELINE_ORDER',
+  ]) {
+    assert.equal(page.includes(stale), false, `observation.js must not keep ${stale}`);
+  }
+
+  // Attribution comes from the typed field only, and the row comes from the projection.
+  assert.equal(page.includes("const role = node.ownerAgentRole"), true);
+  assert.equal(page.includes('node.row'), true);
+});
+
 test('UI index is an explicit historical handoff, not a fake runtime console', async () => {
   const html = await readFile('docs/ui/index.html', 'utf8');
   const readme = await readFile('docs/ui/README.md', 'utf8');

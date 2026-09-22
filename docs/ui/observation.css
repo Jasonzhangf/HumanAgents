@@ -571,6 +571,12 @@ dd[data-empty="true"] {
   font-size: 13px;
 }
 
+.handoff-route {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .drawer-enter {
   justify-self: start;
 }

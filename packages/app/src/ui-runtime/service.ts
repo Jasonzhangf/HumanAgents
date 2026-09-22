@@ -17,6 +17,7 @@ import {
   type AgentStartRequest,
   type CycleId,
   type ExecutionRuntimePort,
+  type EvidenceRef,
   type MemoryActorContext,
   type CanonicalMemoryScope,
   type MemoryComparisonView,
@@ -104,9 +105,7 @@ import {
   ProviderAdapterError,
 } from '../../../adapters/provider/src/index.js';
 import {
-  RuntimeProjectionError,
   type RuntimeDashboardProjection,
-  type RuntimeObservationProjection,
   type RuntimeSseEvent,
   type RuntimeStatusProjection,
   type RuntimeTaskDashboardProjection,
@@ -118,13 +117,24 @@ import {
 } from '../../../ui/contracts/runtime.js';
 import {
   projectRuntimeDashboard,
-  projectRuntimeObservation,
   projectRuntimeStatus,
   projectRuntimeTaskDashboard,
   projectRuntimeTaskList,
 } from '../../../ui/projection/runtime.js';
-import { projectMemoryInteraction, projectTaskDetail } from '../../../ui/projection/index.js';
-import type { RuntimeObservationNodeInput, RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
+import {
+  projectMemoryInteraction,
+  projectPipelineObservation,
+  projectTaskDetail,
+  type ObservationAgentFrameSource,
+  type ObservationHandoffSource,
+  type ObservationNodeSource,
+  type ObservationNodeToolStepSource,
+  type ObservationScopeSource,
+} from '../../../ui/projection/index.js';
+import { UiProjectionError, type PipelineObservationProjection } from '../../../ui/contracts/models.js';
+import type { RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
+import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/nodes/node-registry.js';
+import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
 import type { ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
@@ -231,10 +241,222 @@ export interface MemoryContextPending {
   readonly nextAction: string;
 }
 
-function observationNodeState(state: string): RuntimeTaskSnapshot['state'] {
+function observationNodeState(state: string): LifecycleState {
   if (LIFECYCLE_STATES.has(state)) return state as RuntimeTaskSnapshot['state'];
-  if (state === 'model' || state === 'output' || state === 'tool') return 'succeeded';
   return 'unknown';
+}
+
+/** A pipeline node plus whether the runtime actually reported a fact for it. */
+interface ObservationNodeFacts {
+  readonly node: Omit<ObservationNodeSource, 'childScopeRef'>;
+  readonly projected: boolean;
+}
+
+/**
+ * Observation facts are derived from `RuntimeTaskSnapshot` only. A node the runtime reports no fact
+ * for stays `created` with an explicit unprojected summary and zero evidence: the observation
+ * surface never invents queue depth, admission outcome, memory curation or tool content.
+ */
+function observationNodeFacts(
+  definition: PipelineNodeDefinition,
+  task: RuntimeTaskSnapshot,
+  toolSteps: readonly ObservationNodeToolStepSource[],
+): ObservationNodeFacts {
+  const inputRef = `task://${task.taskId.value}/input`;
+  const base = {
+    nodeId: definition.nodeId,
+    title: definition.title,
+    kind: definition.kind,
+    owner: agentIdForRole(definition.ownerRole),
+    ownerAgentRole: definition.ownerRole,
+    iteration: task.executionEpoch ?? 1,
+    updatedAt: task.updatedAt,
+    inputRefs: [] as readonly string[],
+    outputRefs: [] as readonly string[],
+    evidenceRefs: task.events.flatMap((event) => event.evidenceRefs),
+  };
+  const unprojected = {
+    ...base,
+    state: 'created' as const,
+    summary: `运行时尚未投影「${definition.title}」的事实。`,
+    inputRefs: [] as readonly string[],
+    outputRefs: [] as readonly string[],
+    evidenceRefs: [] as readonly EvidenceRef[],
+  };
+  switch (definition.nodeId) {
+    case 'sensory.inbox':
+      return task.input
+        ? { node: { ...base, state: 'succeeded', summary: task.input, inputRefs: [inputRef] }, projected: true }
+        : { node: unprojected, projected: false };
+    case 'explicit.normalize':
+      return task.input
+        ? {
+          node: { ...base, state: 'succeeded', summary: task.directive, inputRefs: [inputRef], outputRefs: [`task://${task.taskId.value}/directive@${task.directiveRevision}`] },
+          projected: true,
+        }
+        : { node: unprojected, projected: false };
+    case 'task.correlate-or-create':
+      return task.input
+        ? {
+          node: { ...base, state: 'succeeded', summary: `已关联任务 ${task.taskId.value}`, outputRefs: [`task://${task.taskId.value}`] },
+          projected: true,
+        }
+        : { node: unprojected, projected: false };
+    case 'resource.admission':
+      return task.state === 'created'
+        ? { node: unprojected, projected: false }
+        : { node: { ...base, state: 'succeeded', summary: `任务状态 ${task.state}，已越过准入` }, projected: true };
+    case 'pipeline.execute':
+      return task.operationId === undefined
+        ? { node: unprojected, projected: false }
+        : {
+          node: {
+            ...base,
+            state: task.state,
+            summary: task.output || task.currentState,
+            inputRefs: [`operation://${task.operationId}/input`],
+            outputRefs: task.output ? [`operation://${task.operationId}/output`] : [],
+            evidenceRefs: task.events.flatMap((event) => event.evidenceRefs).slice(-5),
+            toolSteps,
+          },
+          projected: true,
+        };
+    case 'settle':
+      return task.checkpoint
+        ? {
+          node: {
+            ...base,
+            state: observationNodeState(task.checkpoint.outcome),
+            summary: task.checkpoint.summary,
+            outputRefs: [`checkpoint://${task.checkpoint.checkpointId}`],
+            evidenceRefs: task.checkpoint.evidenceRefs,
+          },
+          projected: true,
+        }
+        : { node: unprojected, projected: false };
+    case 'task.output':
+      return task.output
+        ? {
+          node: { ...base, state: task.state, summary: task.output, outputRefs: [`task://${task.taskId.value}/output`] },
+          projected: true,
+        }
+        : { node: unprojected, projected: false };
+    case 'memory.agent':
+      return task.orchestrated && task.state !== 'created'
+        ? {
+          node: { ...base, state: task.state, summary: '由任务编排在 checkpoint 之后唤起的经验整理请求已发出。' },
+          projected: true,
+        }
+        : { node: unprojected, projected: false };
+    default:
+      // The four routing queues and implicit classification have no runtime observable yet.
+      return { node: unprojected, projected: false };
+  }
+}
+
+function agentIdForRole(role: AgentRoleDisplay): string {
+  return `agent-${role}`;
+}
+
+/**
+ * One ownership frame per registry owner role. Frames carry no invented state: a frame declares which
+ * agent owns which nodes, the display string states exactly where the ownership comes from, and the
+ * iteration is the round counter of the nodes it owns (`executionEpoch`, `1` before any execution).
+ */
+function agentFrames(roles: readonly AgentRoleDisplay[], iteration: number): ObservationAgentFrameSource[] {
+  return [...new Set(roles)].map((role) => ({
+    agentId: agentIdForRole(role),
+    role,
+    stateDisplay: '归属来自流水线注册表',
+    iteration,
+  }));
+}
+
+/**
+ * The node the runtime reports as current, translated to the registry node that carries the same
+ * fact. `provider.tool`/`provider.model` are provider sub-steps of `pipeline.execute`.
+ */
+function currentNodeOfPipeline(task: RuntimeTaskSnapshot): string | undefined {
+  switch (task.currentNode) {
+    case 'input.received':
+      return 'sensory.inbox';
+    case 'provider.execute':
+    case 'provider.tool':
+    case 'provider.model':
+    case 'orchestration.plan':
+      return 'pipeline.execute';
+    case 'checkpoint.commit':
+      return 'settle';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Handoffs only exist between agents whose downstream node already carries a runtime fact, and they
+ * carry the evidence the upstream node projected.
+ */
+function observationHandoffs(
+  nodes: readonly ObservationNodeSource[],
+  projectedNodeIds: ReadonlySet<string>,
+): ObservationHandoffSource[] {
+  const byNodeId = new Map(nodes.map((node) => [node.nodeId, node]));
+  const handoff = (handoffId: string, fromNodeId: string, toNodeId: string): ObservationHandoffSource => {
+    const from = byNodeId.get(fromNodeId);
+    const to = byNodeId.get(toNodeId);
+    return {
+      handoffId,
+      fromNodeId,
+      toNodeId,
+      carrySummary: from?.summary ?? '',
+      payloadPreview: `${fromNodeId} → ${toNodeId}：携带 ${from?.evidenceRefs.length ?? 0} 条 evidence`,
+      notCarried: `${fromNodeId} 未投影的事实不传递给 ${toNodeId}`,
+      occurredAt: from?.updatedAt,
+    };
+  };
+  const carried = (nodeId: string): boolean => projectedNodeIds.has(nodeId);
+  const handoffs: ObservationHandoffSource[] = [];
+  if (carried('explicit.normalize') && carried('sensory.inbox')) {
+    handoffs.push(handoff(`handoff-sensory-inbox-to-normalize`, 'sensory.inbox', 'explicit.normalize'));
+  }
+  if (carried('explicit.normalize') && carried('pipeline.execute')) {
+    handoffs.push(handoff(`handoff-normalize-to-pipeline`, 'explicit.normalize', 'pipeline.execute'));
+  }
+  if (carried('pipeline.execute') && carried('settle')) {
+    handoffs.push(handoff(`handoff-pipeline-to-settle`, 'pipeline.execute', 'settle'));
+  }
+  if (carried('settle') && carried('task.output')) {
+    handoffs.push(handoff(`handoff-settle-to-output`, 'settle', 'task.output'));
+  }
+  if (carried('settle') && carried('memory.agent')) {
+    handoffs.push(handoff(`handoff-settle-to-memory`, 'settle', 'memory.agent'));
+  }
+  return handoffs;
+}
+
+/**
+ * Tool-call history from `provider.tool` events only: the step id, the owner that reported the call,
+ * its status and the returned content. Model-private reasoning is never part of an event, so it can
+ * never reach this projection.
+ */
+function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolStepSource[] {
+  return task.events
+    .filter((event) => event.kind === 'provider.tool')
+    .flatMap((event) => {
+      const stepId = event.evidenceRefs[0]?.locator ?? event.eventId;
+      const name = event.ownerId ?? event.evidenceRefs[0]?.source ?? '未标注工具';
+      const returned = event.summary.trim() || event.evidenceRefs.map((ref) => ref.locator).join(', ');
+      if (!stepId.trim() || !name.trim() || !returned.trim()) return [];
+      return [{
+        stepId,
+        name,
+        status: event.state === 'succeeded' || event.state === 'failed' || event.state === 'blocked' || event.state === 'cancelled'
+          ? event.state
+          : 'unknown',
+        returned,
+        occurredAt: event.occurredAt,
+      }];
+    });
 }
 
 function apiError(error: unknown): UiRuntimeApiError {
@@ -914,11 +1136,11 @@ export class UiRuntimeService {
     }
   }
 
-  observation(taskId: TaskId, selectedNodeId?: string, scopeRef?: string): RuntimeObservationProjection {
+  observation(taskId: TaskId, selectedNodeId?: string, scopeRef?: string): PipelineObservationProjection {
     try {
       const task = this.coordinator.taskSnapshot(taskId);
       const rootScopeRef = `task://${taskId.value}/observation`;
-      const providerScopeRef = `${rootScopeRef}/provider.execute`;
+      const providerScopeRef = `${rootScopeRef}/pipeline.execute`;
       if (scopeRef !== undefined && scopeRef !== rootScopeRef && scopeRef !== providerScopeRef) {
         throw new UiRuntimeApiError(
           'observation.scope.not-found',
@@ -929,72 +1151,78 @@ export class UiRuntimeService {
         );
       }
       const inProviderScope = scopeRef === providerScopeRef;
-      const nodes: RuntimeObservationNodeInput[] = inProviderScope
-        ? task.events.map((event) => ({
-            nodeId: `event-${event.seq}`,
-            title: `${event.kind} #${event.seq}`,
-            kind: 'event',
-            state: observationNodeState(event.state),
-            owner: event.ownerId ?? 'humanagent.provider-adapter',
-            summary: event.summary,
-            inputRefs: [],
-            outputRefs: event.kind === 'provider.output' ? event.evidenceRefs.map((ref) => ref.locator) : [],
-            evidenceRefs: event.evidenceRefs,
-          }))
-        : [
-            {
-              nodeId: 'input.received',
-              title: '输入',
-              kind: 'interaction',
-              state: task.input ? 'succeeded' : 'created',
-              owner: APP_OWNER,
-              summary: task.input || '等待输入',
-              inputRefs: task.input ? [`task://${taskId.value}/input`] : [],
-              outputRefs: [],
-              evidenceRefs: [],
-            },
-            {
-              nodeId: 'provider.execute',
-              title: 'Provider 执行',
-              kind: 'execution',
-              state: task.state,
-              owner: 'humanagent.provider-adapter',
-              summary: task.output || task.currentState,
-              inputRefs: task.operationId ? [`operation://${task.operationId}/input`] : [],
-              outputRefs: task.output ? [`operation://${task.operationId ?? 'none'}/output`] : [],
-              evidenceRefs: task.events.flatMap((event) => event.evidenceRefs).slice(-5),
-              childScopeRef: providerScopeRef,
-            },
-            {
-              nodeId: 'checkpoint.commit',
-              title: 'Checkpoint',
-              kind: 'orchestration',
-              state: task.checkpoint ? observationNodeState(task.checkpoint.outcome) : 'created',
-              owner: RUNTIME_OWNER,
-              summary: task.checkpoint?.summary ?? '尚未提交 checkpoint',
-              inputRefs: [],
-              outputRefs: task.checkpoint ? [`checkpoint://${task.checkpoint.checkpointId}`] : [],
-              evidenceRefs: task.checkpoint?.evidenceRefs ?? [],
-            },
-          ];
-      return projectRuntimeObservation({
-        mode: this.mode,
-        taskId,
-        scopeRef: inProviderScope ? providerScopeRef : rootScopeRef,
-        title: inProviderScope ? 'Provider 执行事件' : '任务处理流水',
-        summary: inProviderScope
-          ? 'Provider 执行期间的规范化事件，不包含原始 transport frame。'
-          : '从输入到 Provider 执行和 checkpoint 的只读记录。',
-        projectionSeq: String(task.events.length),
-        breadcrumbs: inProviderScope
-          ? [{ ref: `task://${taskId.value}`, title: task.title }, { ref: rootScopeRef, title: '任务处理流水' }]
-          : [{ ref: `task://${taskId.value}`, title: task.title }],
-        nodes,
+      const toolSteps = observationToolSteps(task);
+      const registry = nodeRegistry();
+      const projectedNodeIds = new Set<string>();
+      const nodes: ObservationNodeSource[] = registry.map((definition) => {
+        const facts = observationNodeFacts(definition, task, toolSteps);
+        if (facts.projected) projectedNodeIds.add(definition.nodeId);
+        return definition.nodeId === 'pipeline.execute'
+          ? { ...facts.node, childScopeRef: providerScopeRef }
+          : facts.node;
+      });
+      const providerNodes: ObservationNodeSource[] = task.events.map((event) => ({
+        nodeId: `event-${event.seq}`,
+        title: `${event.kind} #${event.seq}`,
+        kind: 'provider.event',
+        state: observationNodeState(event.state),
+        owner: agentIdForRole('execution'),
+        ownerAgentRole: 'execution',
+        summary: event.summary,
+        inputRefs: [],
+        outputRefs: event.kind === 'provider.output' ? event.evidenceRefs.map((ref) => ref.locator) : [],
+        evidenceRefs: event.evidenceRefs,
+        updatedAt: event.occurredAt,
+      }));
+      const scopes: Record<string, ObservationScopeSource> = {
+        [rootScopeRef]: {
+          scopeRef: rootScopeRef,
+          title: '任务处理流水',
+          summary: '十三个流水线节点的只读记录；无运行时事实的节点保持未投影。',
+          projectionSeq: String(task.events.length),
+          currentNodeId: currentNodeOfPipeline(task),
+          agents: agentFrames(registry.map((definition) => definition.ownerRole), task.executionEpoch ?? 1),
+          handoffs: observationHandoffs(nodes, projectedNodeIds),
+          nodes,
+        },
+        [providerScopeRef]: {
+          scopeRef: providerScopeRef,
+          title: '流水线执行事件',
+          summary: 'Provider 执行期间的规范化事件，不包含原始 transport frame。',
+          projectionSeq: String(task.events.length),
+          agents: agentFrames(['execution'], task.executionEpoch ?? 1),
+          nodes: providerNodes,
+        },
+      };
+      return projectPipelineObservation({
+        source: {
+          state: task.state === 'failed' || task.state === 'blocked'
+            ? 'error'
+            : task.state === 'running' || task.state === 'settling'
+              ? 'running'
+              : task.state === 'stale'
+                ? 'stale'
+                : task.state === 'waiting'
+                  ? 'waiting'
+                  : 'ready',
+          label: task.currentState,
+          detail: task.nextStep,
+          updatedAt: task.updatedAt,
+        },
+        scopes,
+        scopeStack: inProviderScope ? [rootScopeRef, providerScopeRef] : [rootScopeRef],
         selectedNodeId,
       });
     } catch (error) {
-      if (error instanceof RuntimeProjectionError) {
-        throw new UiRuntimeApiError('observation.node.not-found', APP_OWNER, error.message, 'select an existing observation node', 404);
+      if (error instanceof UiProjectionError) {
+        const unknownScope = error.message.startsWith('unknown observation scope');
+        throw new UiRuntimeApiError(
+          unknownScope ? 'observation.scope.not-found' : 'observation.node.not-found',
+          APP_OWNER,
+          error.message,
+          unknownScope ? 'select an existing observation scope' : 'select an existing observation node',
+          404,
+        );
       }
       throw apiError(error);
     }

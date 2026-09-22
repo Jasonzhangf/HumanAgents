@@ -1,11 +1,8 @@
 import type { EvidenceRef, LifecycleState, TaskId } from '@humanagent/contracts';
 import {
-  RuntimeProjectionError,
   type RuntimeDashboardProjection,
   type RuntimeMode,
   type RuntimeModeStatus,
-  type RuntimeObservationNodeProjection,
-  type RuntimeObservationProjection,
   type RuntimeRecentFailureProjection,
   type RuntimeRecentInputProjection,
   type RuntimeRecentOutputProjection,
@@ -33,13 +30,6 @@ const STATE_LABELS: Record<LifecycleState, string> = {
   unknown: '未知',
   stale: '过期',
 };
-
-const OBSERVATION_KEYBOARD_RULES = [
-  'nodes are buttons',
-  'drawer focus moves to selected node',
-  'drawer close returns focus to trigger',
-  'breadcrumb return keeps the path visible',
-] as const;
 
 export interface RuntimeStatusInput {
   readonly mode: RuntimeMode;
@@ -78,31 +68,6 @@ export interface RuntimeDashboardInput {
 export interface RuntimeTaskListInput {
   readonly mode: RuntimeMode;
   readonly tasks: readonly RuntimeTaskSnapshotInput[];
-}
-
-export interface RuntimeObservationNodeInput {
-  readonly nodeId: string;
-  readonly title: string;
-  readonly kind: string;
-  readonly state: LifecycleState;
-  readonly owner: string;
-  readonly summary: string;
-  readonly inputRefs: readonly string[];
-  readonly outputRefs: readonly string[];
-  readonly evidenceRefs: readonly EvidenceRef[];
-  readonly childScopeRef?: string;
-}
-
-export interface RuntimeObservationInput {
-  readonly mode: RuntimeMode;
-  readonly taskId: TaskId;
-  readonly scopeRef: string;
-  readonly title: string;
-  readonly summary: string;
-  readonly projectionSeq: string;
-  readonly breadcrumbs: readonly { readonly ref: string; readonly title: string }[];
-  readonly nodes: readonly RuntimeObservationNodeInput[];
-  readonly selectedNodeId?: string;
 }
 
 function stateLabel(state: LifecycleState): string {
@@ -244,48 +209,3 @@ export function projectRuntimeTaskDashboard(source: RuntimeTaskSnapshotInput, mo
     observationRef: `task://${source.taskId.value}/observation`,
   };
 }
-
-function toObservationNode(source: RuntimeObservationNodeInput): RuntimeObservationNodeProjection {
-  return {
-    nodeId: source.nodeId,
-    title: source.title,
-    kind: source.kind,
-    kindDisplay: source.kind,
-    state: source.state,
-    stateDisplay: stateLabel(source.state),
-    owner: source.owner,
-    summary: source.summary,
-    inputRefs: source.inputRefs,
-    outputRefs: source.outputRefs,
-    evidenceRefs: source.evidenceRefs,
-    childScopeRef: source.childScopeRef,
-  };
-}
-
-export function projectRuntimeObservation(input: RuntimeObservationInput): RuntimeObservationProjection {
-  const nodes = input.nodes.map(toObservationNode);
-  let selectedNode: RuntimeObservationNodeProjection | undefined;
-  if (input.selectedNodeId) {
-    selectedNode = nodes.find((node) => node.nodeId === input.selectedNodeId);
-    if (!selectedNode) throw new RuntimeProjectionError(`unknown observation node ${input.selectedNodeId}`);
-  }
-  return {
-    surface: 'runtime-observation',
-    mode: input.mode,
-    taskId: input.taskId,
-    scopeRef: input.scopeRef,
-    title: input.title,
-    summary: input.summary,
-    projectionSeq: input.projectionSeq,
-    breadcrumbs: input.breadcrumbs,
-    canReturn: input.breadcrumbs.length > 1,
-    nodes,
-    selectedNode,
-  };
-}
-
-export const RUNTIME_OBSERVATION_RULES = {
-  keyboardFocus: OBSERVATION_KEYBOARD_RULES,
-  mobileOrder: 'single-column' as const,
-  drawer: 'read-only-modal' as const,
-};
