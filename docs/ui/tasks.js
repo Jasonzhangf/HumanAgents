@@ -153,6 +153,76 @@ function visibleGroups() {
   ]
 }
 
+function unknown(text) {
+  const node = element('span', text, 'row-unknown')
+  node.dataset.empty = 'true'
+  return node
+}
+
+function cell(label, className, value) {
+  const wrapper = element('div', undefined, `task-cell ${className}`)
+  wrapper.append(element('span', label, 'task-cell-label'))
+  wrapper.append(value === undefined || value === null || value === '' ? unknown('尚未投影') : element('span', value, 'task-cell-value'))
+  return wrapper
+}
+
+function renderRuntimeRow(row) {
+  const item = element('article', undefined, 'task-row')
+  item.setAttribute('role', 'row')
+  const checkboxHitArea = element('label', undefined, 'task-row-check')
+  const checkbox = element('input')
+  checkbox.type = 'checkbox'
+  checkbox.checked = selectedTaskIds.has(row.taskId.value)
+  checkbox.setAttribute('aria-label', `选择任务 ${row.title}`)
+  checkbox.addEventListener('change', () => {
+    if (checkbox.checked) selectedTaskIds.add(row.taskId.value)
+    else selectedTaskIds.delete(row.taskId.value)
+    renderBulkActions()
+  })
+  checkboxHitArea.append(checkbox)
+
+  const link = element('a', undefined, 'task-row-link')
+  link.href = row.state === 'waiting' || row.state === 'blocked'
+    ? taskDetailHref(row.taskId.value)
+    : taskDashboardHref(row.taskId.value)
+
+  const title = element('div', undefined, 'task-cell task-cell--title')
+  title.append(element('span', '任务', 'task-cell-label'))
+  const titleValue = element('span', undefined, 'task-cell-value')
+  titleValue.append(element('strong', row.title), element('small', row.currentState || '状态未投影'))
+  title.append(titleValue)
+  link.append(title)
+
+  const chip = element('span', row.stateLabel, 'state-chip')
+  chip.dataset.tone = stateTone(row.state)
+  const stateCell = element('div', undefined, 'task-cell task-cell--status')
+  stateCell.append(element('span', '状态', 'task-cell-label'), chip)
+  link.append(stateCell)
+
+  link.append(cell('负责 agent', 'task-cell--owner', row.agent ?? row.owner ?? row.agentId))
+  link.append(cell('当前节点', 'task-cell--node', row.currentNode ?? row.currentNodeId ?? row.nodeId))
+  link.append(cell('正在处理', 'task-cell--work', row.currentWork ?? row.currentState))
+  const round = row.round ?? row.executionEpoch
+  link.append(cell('第几轮', 'task-cell--round', round === undefined || round === null ? undefined : `第 ${round} 轮`))
+  link.append(cell('进度', 'task-cell--progress', row.progress ?? row.nextStep))
+
+  const timeCell = element('div', undefined, 'task-cell task-cell--time')
+  timeCell.append(element('span', '最近更新', 'task-cell-label'), element('time', formatTime(row.updatedAt)))
+  link.append(timeCell)
+
+  const actions = element('div', undefined, 'task-row-actions')
+  actions.setAttribute('role', 'cell')
+  const edit = element('button', '编辑', 'button button--quiet')
+  edit.type = 'button'
+  edit.addEventListener('click', () => void editTask(row))
+  const remove = element('button', '删除', 'button button--quiet')
+  remove.type = 'button'
+  remove.addEventListener('click', () => void deleteTask(row))
+  actions.append(edit, remove)
+  item.append(checkboxHitArea, link, actions)
+  return item
+}
+
 function renderTasks() {
   const groups = element('section', undefined, 'stack')
   for (const [, title, groupRows, emptyText] of visibleGroups()) {
@@ -160,44 +230,19 @@ function renderTasks() {
     const head = element('header', undefined, 'section-head')
     head.append(element('h2', title), element('span', `${groupRows.length} 项`, 'section-meta'))
     const panel = element('div', undefined, 'panel')
+    panel.setAttribute('role', 'table')
+    panel.setAttribute('aria-label', title)
     if (groupRows.length === 0) {
       panel.append(element('p', emptyText, 'empty'))
     } else {
-      for (const row of groupRows) {
-        const item = element('article', undefined, 'task-row')
-        const checkboxHitArea = element('label', undefined, 'task-row-check')
-        const checkbox = element('input')
-        checkbox.type = 'checkbox'
-        checkbox.checked = selectedTaskIds.has(row.taskId.value)
-        checkbox.setAttribute('aria-label', `选择任务 ${row.title}`)
-        checkbox.addEventListener('change', () => {
-          if (checkbox.checked) selectedTaskIds.add(row.taskId.value)
-          else selectedTaskIds.delete(row.taskId.value)
-          renderBulkActions()
-        })
-        checkboxHitArea.append(checkbox)
-        const link = element('a', undefined, 'task-row-link')
-        link.href = row.state === 'waiting' || row.state === 'blocked'
-          ? taskDetailHref(row.taskId.value)
-          : taskDashboardHref(row.taskId.value)
-        const copy = element('div')
-        copy.append(element('h3', row.title), element('p', row.currentState))
-        const next = element('div')
-        const chip = element('span', row.stateLabel, 'state-chip')
-        chip.dataset.tone = stateTone(row.state)
-        next.append(chip, element('p', `下一步：${row.nextStep}`))
-        link.append(copy, next, element('time', formatTime(row.updatedAt)))
-        const actions = element('div', undefined, 'task-row-actions')
-        const edit = element('button', '编辑', 'button button--quiet')
-        edit.type = 'button'
-        edit.addEventListener('click', () => void editTask(row))
-        const remove = element('button', '删除', 'button button--quiet')
-        remove.type = 'button'
-        remove.addEventListener('click', () => void deleteTask(row))
-        actions.append(edit, remove)
-        item.append(checkboxHitArea, link, actions)
-        panel.append(item)
+      const header = element('div', undefined, 'task-row task-row--head')
+      header.setAttribute('role', 'row')
+      header.setAttribute('aria-hidden', 'true')
+      for (const label of ['任务', '状态', '负责 agent', '当前节点', '正在处理', '第几轮', '进度', '最近更新', '操作']) {
+        header.append(element('span', label, 'task-cell-label'))
       }
+      panel.append(header)
+      for (const row of groupRows) panel.append(renderRuntimeRow(row))
     }
     section.append(head, panel)
     groups.append(section)
