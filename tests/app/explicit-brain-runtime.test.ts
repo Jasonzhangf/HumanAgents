@@ -209,7 +209,21 @@ test('provider explicit brain interpreter loads the interaction template and val
             normalizedInput: '整理启动步骤',
             knownFacts: ['README exists'],
             intent: 'create',
-            proposal: '创建任务并整理启动步骤',
+            proposal: {
+              revision: 1,
+              intent: 'create',
+              title: '整理启动步骤',
+              objective: '整理项目启动步骤',
+              deliverable: '可执行的启动步骤清单',
+              owner: null,
+              ownerNote: '运行时将在确认后决定执行 owner。',
+              deliveryConditions: ['启动步骤完整并有证据'],
+              evidenceRefs: ['README'],
+              blockingGaps: [],
+              lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
+              requiresUserConfirmation: true,
+              confirmationPrompt: '是否确认并提交该需求？',
+            },
             decisionRefs: ['decision:provider-test'],
           }),
         },
@@ -231,4 +245,41 @@ test('provider explicit brain interpreter loads the interaction template and val
   if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
   assert.equal(result.normalizedInput, '整理启动步骤');
   assert.equal(result.intent, 'create');
+  assert.match(result.proposal, /可执行的启动步骤清单/);
+  assert.equal(result.proposal.includes('awaiting-user-confirmation'), false);
+
+  const arbitraryProposal = createProviderExplicitBrainInterpreter({
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new FakeReplayExecutionRuntimePort({
+      binding,
+      stepDelayMs: 0,
+      replay: [
+        {
+          kind: 'output',
+          state: 'output',
+          summary: JSON.stringify({
+            kind: 'requirement',
+            normalizedInput: '整理启动步骤',
+            knownFacts: [],
+            intent: 'create',
+            proposal: { objective: '未经过 typed contract 的任意对象' },
+            decisionRefs: [],
+          }),
+        },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ],
+    }),
+  });
+  await assert.rejects(
+    () => arbitraryProposal.interpret({
+      interactionId: 'interaction-arbitrary-proposal',
+      inputRevision: 1,
+      sourceRef: 'ui:new-task',
+      rawInput: '帮我整理启动步骤',
+      clarifications: [],
+      taskCandidates: [],
+    }),
+    /does not match the structured proposal contract/,
+  );
 });

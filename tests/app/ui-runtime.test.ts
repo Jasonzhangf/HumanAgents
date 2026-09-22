@@ -60,7 +60,10 @@ import {
 } from '../../packages/app/src/ui-runtime/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
-import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
+import {
+  createProviderExplicitBrainInterpreter,
+  type ExplicitBrainInputInterpreter,
+} from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
 const binding: ProviderBinding = {
@@ -2294,6 +2297,98 @@ test('explicit brain interprets create, query, append, change, and clarification
     () => service.dispatchNextExplicitRequirement(),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.inbox.empty',
   );
+});
+
+test('explicit brain persists a live-shaped structured provider proposal after successful settlement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-live-proposal-'));
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const providerOutput = JSON.stringify({
+    interactionId: 'interaction-live-shaped',
+    inputRevision: 1,
+    sourceRef: 'ui:live-shaped',
+    kind: 'requirement',
+    intent: 'create',
+    matchedTaskId: null,
+    selectedAction: 'draft-requirement-and-hold-for-confirmation',
+    normalizedInput: '创建需求：梳理项目集成状态并等待确认。',
+    summary: '输入归一为一条待确认的需求草稿。',
+    knownFacts: ['没有可匹配的既有任务。'],
+    evidenceRefs: ['sourceRef:ui:live-shaped'],
+    needsUserInput: true,
+    needsToolResult: false,
+    decisionRefs: ['mission:business-requirement-becomes-draft-and-proposal'],
+    proposal: {
+      revision: 1,
+      intent: 'create',
+      title: '项目集成状态梳理',
+      objective: '梳理项目当前集成状态，并等待用户确认后再进入后台执行。',
+      deliverable: '三条集成链路的现状、风险和证据清单',
+      owner: null,
+      ownerNote: '不选择 worker、provider、runtime 或资源实例。',
+      deliveryConditions: ['三条链路逐条列出', '每条风险附带证据引用'],
+      evidenceRefs: [],
+      blockingGaps: ['缺少三条链路的只读投影来源'],
+      lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
+      requiresUserConfirmation: true,
+      confirmationPrompt: '是否确认当前草稿并提交后台执行？',
+    },
+  });
+  class SettlementTrackingPort extends FakeReplayExecutionRuntimePort {
+    settleCalls = 0;
+
+    override async settle(input: Parameters<ExecutionRuntimePort['settle']>[0]): Promise<ProviderSettlement> {
+      this.settleCalls += 1;
+      return super.settle(input);
+    }
+  }
+  const port = new SettlementTrackingPort({
+    binding,
+    stepDelayMs: 0,
+    replay: [
+      { kind: 'output', state: 'output', summary: providerOutput },
+      { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+    ],
+  });
+  const interpreter = createProviderExplicitBrainInterpreter({
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port,
+  });
+  const service = serviceFor(
+    root,
+    port,
+    'rcc',
+    'ready',
+    new UiRuntimeJournal(journalPath),
+    undefined,
+    undefined,
+    undefined,
+    interpreter,
+  );
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:live-shaped',
+    rawInput: '整理项目集成状态',
+    channel: 'business',
+  });
+
+  const interpreted = await service.interpretExplicitInput({ interactionId });
+  assert.equal(port.settleCalls, 1);
+  assert.equal(interpreted.state, 'awaiting-confirmation');
+  assert.match(interpreted.draft?.proposal ?? '', /项目集成状态梳理/);
+  assert.match(interpreted.draft?.proposal ?? '', /三条集成链路的现状、风险和证据清单/);
+  assert.equal(interpreted.draft?.proposal.includes('draft -> awaiting-user-confirmation'), false);
+
+  const restored = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 0 }),
+    'rcc',
+    'ready',
+    new UiRuntimeJournal(journalPath),
+  );
+  await restored.hydrate();
+  const persisted = await restored.inspectExplicitInteraction(interactionId);
+  assert.equal(persisted.state, 'awaiting-confirmation');
+  assert.equal(persisted.draft?.proposal, interpreted.draft?.proposal);
 });
 
 test('explicit brain rejects create interpretations that also select an existing task', async () => {

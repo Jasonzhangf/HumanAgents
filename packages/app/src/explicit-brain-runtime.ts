@@ -104,6 +104,56 @@ export interface ExplicitBrainInputInterpreter {
   interpret(input: ExplicitBrainInterpretationInput): Promise<ExplicitBrainInterpretation>;
 }
 
+const STRUCTURED_REQUIREMENT_PROPOSAL_FIELDS = [
+  'blockingGaps',
+  'confirmationPrompt',
+  'deliverable',
+  'deliveryConditions',
+  'evidenceRefs',
+  'intent',
+  'lifecycle',
+  'objective',
+  'owner',
+  'ownerNote',
+  'requiresUserConfirmation',
+  'revision',
+  'title',
+] as const;
+
+interface StructuredRequirementProposal {
+  readonly revision: number;
+  readonly intent: RequirementIntent;
+  readonly title: string;
+  readonly objective: string;
+  readonly deliverable: string;
+  readonly owner: null;
+  readonly ownerNote: string;
+  readonly deliveryConditions: readonly string[];
+  readonly evidenceRefs: readonly string[];
+  readonly blockingGaps: readonly string[];
+  readonly lifecycle: string;
+  readonly requiresUserConfirmation: true;
+  readonly confirmationPrompt: string;
+}
+
+function structuredProposalContract(inputRevision: number): string {
+  return JSON.stringify({
+    revision: inputRevision,
+    intent: 'create | append | change',
+    title: 'non-empty string',
+    objective: 'non-empty string',
+    deliverable: 'non-empty string',
+    owner: null,
+    ownerNote: 'non-empty string',
+    deliveryConditions: ['non-empty string'],
+    evidenceRefs: ['string'],
+    blockingGaps: ['string'],
+    lifecycle: 'non-empty string',
+    requiresUserConfirmation: true,
+    confirmationPrompt: 'non-empty string',
+  });
+}
+
 function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegments: readonly string[]): string {
   return [
     ...promptSegments,
@@ -114,12 +164,90 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
     'For clarification, ask one concrete question and do not invent a task match.',
     'All variants require normalizedInput, knownFacts string array, and decisionRefs string array.',
-    'Requirement also requires proposal. Status-query requires answer. Clarification requires question.',
+    `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
+    'The proposal intent must equal the top-level intent. Do not select an owner. Status-query requires answer. Clarification requires question.',
     JSON.stringify(input),
   ].join('\n\n');
 }
 
-function parseInterpreterOutput(output: string): ExplicitBrainInterpretation {
+function nonEmptyString(record: Record<string, unknown>, field: string): string {
+  const value = record[field];
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', `requirement proposal ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function stringArray(record: Record<string, unknown>, field: string): readonly string[] {
+  const value = record[field];
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string' && entry.trim())) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', `requirement proposal ${field} must be a string array`);
+  }
+  return value;
+}
+
+function parseStructuredRequirementProposal(
+  value: unknown,
+  intent: RequirementIntent,
+  inputRevision: number,
+): StructuredRequirementProposal {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal must be a structured object');
+  }
+  const record = value as Record<string, unknown>;
+  const actualFields = Object.keys(record).sort();
+  if (actualFields.length !== STRUCTURED_REQUIREMENT_PROPOSAL_FIELDS.length
+    || actualFields.some((field, index) => field !== STRUCTURED_REQUIREMENT_PROPOSAL_FIELDS[index])) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal does not match the structured proposal contract');
+  }
+  if (record.revision !== inputRevision) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal revision does not match the current input');
+  }
+  if (record.intent !== intent) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal intent does not match the interpreted intent');
+  }
+  if (record.owner !== null) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal cannot select an execution owner');
+  }
+  if (record.requiresUserConfirmation !== true) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal must preserve explicit user confirmation');
+  }
+  return {
+    revision: inputRevision,
+    intent,
+    title: nonEmptyString(record, 'title'),
+    objective: nonEmptyString(record, 'objective'),
+    deliverable: nonEmptyString(record, 'deliverable'),
+    owner: null,
+    ownerNote: nonEmptyString(record, 'ownerNote'),
+    deliveryConditions: stringArray(record, 'deliveryConditions'),
+    evidenceRefs: stringArray(record, 'evidenceRefs'),
+    blockingGaps: stringArray(record, 'blockingGaps'),
+    lifecycle: nonEmptyString(record, 'lifecycle'),
+    requiresUserConfirmation: true,
+    confirmationPrompt: nonEmptyString(record, 'confirmationPrompt'),
+  };
+}
+
+function renderBusinessProposal(proposal: StructuredRequirementProposal): string {
+  const lines = [
+    proposal.title,
+    `目标：${proposal.objective}`,
+    `交付物：${proposal.deliverable}`,
+  ];
+  if (proposal.deliveryConditions.length > 0) {
+    lines.push('交付条件：', ...proposal.deliveryConditions.map((condition) => `- ${condition}`));
+  }
+  if (proposal.evidenceRefs.length > 0) {
+    lines.push('证据：', ...proposal.evidenceRefs.map((reference) => `- ${reference}`));
+  }
+  if (proposal.blockingGaps.length > 0) {
+    lines.push('当前缺口：', ...proposal.blockingGaps.map((gap) => `- ${gap}`));
+  }
+  return lines.join('\n');
+}
+
+function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretationInput): ExplicitBrainInterpretation {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output)?.[1];
   const candidate = fenced ?? output.slice(output.indexOf('{'), output.lastIndexOf('}') + 1);
   let value: unknown;
@@ -165,16 +293,16 @@ function parseInterpreterOutput(output: string): ExplicitBrainInterpretation {
     }
     return { kind, ...common, ...(matchedTaskId === undefined ? {} : { matchedTaskId }), answer: record.answer };
   }
-  if ((record.intent !== 'create' && record.intent !== 'append' && record.intent !== 'change')
-    || typeof record.proposal !== 'string' || !record.proposal.trim()) {
-    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement decision requires a typed intent and proposal');
+  if (record.intent !== 'create' && record.intent !== 'append' && record.intent !== 'change') {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement decision requires a typed intent');
   }
+  const proposal = parseStructuredRequirementProposal(record.proposal, record.intent, input.inputRevision);
   return {
     kind,
     ...common,
     ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
     intent: record.intent,
-    proposal: record.proposal,
+    proposal: renderBusinessProposal(proposal),
   };
 }
 
@@ -225,7 +353,7 @@ export function createProviderExplicitBrainInterpreter(input: {
       if (closure.state !== 'succeeded') {
         throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
       }
-      return parseInterpreterOutput(output.join(''));
+      return parseInterpreterOutput(output.join(''), request);
     },
   };
 }
