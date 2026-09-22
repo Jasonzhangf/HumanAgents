@@ -134,6 +134,62 @@ export type AgentRoleDisplay =
   | 'review'
   | 'memory';
 
+export type PipelineNodeToolStepStatus = 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+
+export interface PipelineNodeToolStepProjection {
+  readonly stepId: string;
+  readonly name: string;
+  readonly status: PipelineNodeToolStepStatus;
+  readonly statusDisplay: string;
+  readonly returned: string;
+  readonly occurredAt?: string;
+}
+
+export interface PipelineNodeActivityProjection {
+  readonly activityRef: string;
+  readonly summary: string;
+  readonly occurredAt?: string;
+}
+
+export interface PipelineNodeProjection {
+  readonly nodeId: string;
+  readonly title: string;
+  readonly kindDisplay: string;
+  readonly ownerAgentRole: AgentRoleDisplay | 'unknown';
+  readonly roleDisplay: string;
+  readonly stateDisplay: string;
+  readonly iteration: number;
+  readonly activity: readonly PipelineNodeActivityProjection[];
+  readonly summary: string;
+  readonly updatedAt?: string;
+  readonly toolSteps: readonly PipelineNodeToolStepProjection[];
+}
+
+export interface AgentOwnershipFrameProjection {
+  readonly agentId: string;
+  readonly role: AgentRoleDisplay | 'unknown';
+  readonly roleDisplay: string;
+  readonly stateDisplay: string;
+  readonly iteration: number;
+  readonly nodeIds: readonly string[];
+}
+
+export interface AgentHandoffProjection {
+  readonly handoffId: string;
+  readonly fromAgentId: string;
+  readonly fromRole: AgentRoleDisplay | 'unknown';
+  readonly fromRoleDisplay: string;
+  readonly toAgentId: string;
+  readonly toRole: AgentRoleDisplay | 'unknown';
+  readonly toRoleDisplay: string;
+  readonly fromNodeId: string;
+  readonly toNodeId: string;
+  readonly carrySummary: string;
+  readonly payloadPreview: string;
+  readonly notCarried: string;
+  readonly occurredAt?: string;
+}
+
 export interface AgentWorkCardProjection {
   readonly agentId: string;
   readonly role: AgentRoleDisplay;
@@ -331,6 +387,10 @@ export interface ObservationPresentationRules {
 }
 
 export interface PipelineObservationProjection {
+  readonly currentNode?: PipelineNodeProjection;
+  readonly nodes: readonly PipelineNodeProjection[];
+  readonly agentFrames: readonly AgentOwnershipFrameProjection[];
+  readonly handoffs: readonly AgentHandoffProjection[];
   readonly surface: 'observation';
   readonly state: UiSurfaceState;
   readonly data: UiDataSource;

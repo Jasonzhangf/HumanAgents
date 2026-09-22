@@ -26,6 +26,12 @@ import {
   type MemoryInteractionSurfaceProjection,
   type MemorySummaryProjection,
   type ObservationNodeDetailProjection,
+  type AgentHandoffProjection,
+  type AgentOwnershipFrameProjection,
+  type PipelineNodeActivityProjection,
+  type PipelineNodeProjection,
+  type PipelineNodeToolStepProjection,
+  type PipelineNodeToolStepStatus,
   type PipelineObservationProjection,
   type RecentInputProjection,
   type ExecutionStepKind,
@@ -326,14 +332,49 @@ export interface ObservationNodeSource {
   readonly state: LifecycleState;
   readonly summary: string;
   readonly owner: string;
+  readonly ownerAgentRole?: AgentRoleDisplay;
+  readonly iteration?: number;
   readonly updatedAt?: string;
   readonly inputRefs: readonly string[];
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly activity?: readonly ObservationNodeActivitySource[];
+  readonly toolSteps?: readonly ObservationNodeToolStepSource[];
   readonly childScopeRef?: string;
   readonly assignment?: AssignmentSource;
   readonly feedback?: readonly AgentFeedbackSource[];
   readonly reconcile?: AssignmentReconcileSource;
+}
+
+export interface ObservationNodeActivitySource {
+  readonly activityRef: string;
+  readonly summary: string;
+  readonly occurredAt?: string;
+}
+
+export interface ObservationNodeToolStepSource {
+  readonly stepId: string;
+  readonly name: string;
+  readonly status: PipelineNodeToolStepStatus;
+  readonly returned: string;
+  readonly occurredAt?: string;
+}
+
+export interface ObservationAgentFrameSource {
+  readonly agentId: string;
+  readonly role: AgentRoleDisplay;
+  readonly stateDisplay: string;
+  readonly iteration: number;
+}
+
+export interface ObservationHandoffSource {
+  readonly handoffId: string;
+  readonly fromNodeId: string;
+  readonly toNodeId: string;
+  readonly carrySummary: string;
+  readonly payloadPreview: string;
+  readonly notCarried: string;
+  readonly occurredAt?: string;
 }
 
 export interface ObservationScopeSource {
@@ -341,6 +382,9 @@ export interface ObservationScopeSource {
   readonly title: string;
   readonly summary: string;
   readonly projectionSeq: string;
+  readonly currentNodeId?: string;
+  readonly agents?: readonly ObservationAgentFrameSource[];
+  readonly handoffs?: readonly ObservationHandoffSource[];
   readonly nodes: readonly ObservationNodeSource[];
 }
 
@@ -705,22 +749,185 @@ function toObservationDetail(source: ObservationNodeSource): ObservationNodeDeta
   };
 }
 
+const TOOL_STEP_STATUS_LABELS: Record<PipelineNodeToolStepStatus, string> = {
+  running: '调用中',
+  succeeded: '已返回',
+  failed: '失败',
+  blocked: '受阻',
+  cancelled: '已取消',
+  unknown: '未知',
+};
+
+const TOOL_STEP_STATUSES: readonly PipelineNodeToolStepStatus[] = ['running', 'succeeded', 'failed', 'blocked', 'cancelled', 'unknown'];
+
+function isAgentRoleDisplay(value: unknown): value is AgentRoleDisplay {
+  return typeof value === 'string' && typeof (AGENT_ROLE_LABELS as Record<string, string | undefined>)[value] === 'string';
+}
+
+function isToolStepStatus(value: unknown): value is PipelineNodeToolStepStatus {
+  return typeof value === 'string' && (TOOL_STEP_STATUSES as readonly string[]).includes(value);
+}
+
+function requireToolStepStatus(value: string): PipelineNodeToolStepStatus {
+  if (!isToolStepStatus(value)) {
+    throw new UiProjectionError(`unknown tool step status ${String(value)}`);
+  }
+  return value;
+}
+
+function requireAgentRole(role: string): AgentRoleDisplay {
+  if (!isAgentRoleDisplay(role)) {
+    throw new UiProjectionError(`unknown agent role ${String(role)} in observation projection`);
+  }
+  return role;
+}
+
+function assertNonEmpty(value: string, label: string, ownerId: string): void {
+  if (value.trim().length === 0) throw new UiProjectionError(`${label} is required for ${ownerId}`);
+}
+
+function toPipelineNodeToolStep(source: ObservationNodeToolStepSource): PipelineNodeToolStepProjection {
+  const status = requireToolStepStatus(source.status);
+  assertNonEmpty(source.name, 'tool step name', source.stepId);
+  assertNonEmpty(source.returned, 'tool step returned content', source.stepId);
+  return {
+    stepId: source.stepId,
+    name: source.name,
+    status,
+    statusDisplay: TOOL_STEP_STATUS_LABELS[status],
+    returned: source.returned,
+    occurredAt: source.occurredAt,
+  };
+}
+
+function toPipelineNodeActivity(source: ObservationNodeActivitySource): PipelineNodeActivityProjection {
+  assertNonEmpty(source.activityRef, 'activity ref', 'observation node activity');
+  assertNonEmpty(source.summary, 'activity summary', source.activityRef);
+  return {
+    activityRef: source.activityRef,
+    summary: source.summary,
+    occurredAt: source.occurredAt,
+  };
+}
+
+function toPipelineNode(source: ObservationNodeSource, frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>): PipelineNodeProjection {
+  const frame = frameByAgentId.get(source.owner);
+  if (!frame) throw new UiProjectionError(`node ${source.nodeId} owner ${source.owner} has no declared agent frame`);
+  const role = requireAgentRole(frame.role);
+  if (source.ownerAgentRole !== undefined && source.ownerAgentRole !== role) {
+    throw new UiProjectionError(
+      `node ${source.nodeId} declares role ${source.ownerAgentRole} but owner ${source.owner} is ${role}`,
+    );
+  }
+  return {
+    nodeId: source.nodeId,
+    title: source.title,
+    kindDisplay: nodeKindLabel(source.kind),
+    ownerAgentRole: role,
+    roleDisplay: AGENT_ROLE_LABELS[role],
+    stateDisplay: stateLabel(source.state),
+    iteration: source.iteration ?? frame.iteration,
+    activity: (source.activity ?? []).map(toPipelineNodeActivity),
+    summary: source.summary,
+    updatedAt: source.updatedAt,
+    toolSteps: (source.toolSteps ?? []).map(toPipelineNodeToolStep),
+  };
+}
+
+function toAgentFrames(
+  declared: readonly ObservationAgentFrameSource[],
+  nodes: readonly ObservationNodeSource[],
+): AgentOwnershipFrameProjection[] {
+  const frames = declared.map((frame) => {
+    const role = requireAgentRole(frame.role);
+    return {
+      agentId: frame.agentId,
+      role,
+      roleDisplay: AGENT_ROLE_LABELS[role],
+      stateDisplay: frame.stateDisplay,
+      iteration: frame.iteration,
+      nodeIds: nodes.filter((node) => node.owner === frame.agentId).map((node) => node.nodeId),
+    };
+  });
+  const declaredFrames = new Set(frames.map((frame) => frame.agentId));
+  for (const node of nodes) {
+    if (!declaredFrames.has(node.owner)) {
+      throw new UiProjectionError(`node ${node.nodeId} owner ${node.owner} is not a declared agent frame`);
+    }
+  }
+  return frames;
+}
+
+function toHandoffs(
+  declared: readonly ObservationHandoffSource[],
+  nodes: readonly ObservationNodeSource[],
+  frames: readonly AgentOwnershipFrameProjection[],
+): AgentHandoffProjection[] {
+  const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
+  const frameByAgentId = new Map(frames.map((frame) => [frame.agentId, frame]));
+  return declared.map((handoff) => {
+    const fromNode = nodeById.get(handoff.fromNodeId);
+    if (!fromNode) throw new UiProjectionError(`handoff ${handoff.handoffId} references unknown from node ${handoff.fromNodeId}`);
+    const toNode = nodeById.get(handoff.toNodeId);
+    if (!toNode) throw new UiProjectionError(`handoff ${handoff.handoffId} references unknown to node ${handoff.toNodeId}`);
+    const fromFrame = frameByAgentId.get(fromNode.owner);
+    const toFrame = frameByAgentId.get(toNode.owner);
+    if (!fromFrame || !toFrame) {
+      throw new UiProjectionError(`handoff ${handoff.handoffId} endpoint has no declared agent frame`);
+    }
+    assertNonEmpty(handoff.carrySummary, 'handoff carry summary', handoff.handoffId);
+    assertNonEmpty(handoff.payloadPreview, 'handoff payload preview', handoff.handoffId);
+    assertNonEmpty(handoff.notCarried, 'handoff notCarried', handoff.handoffId);
+    return {
+      handoffId: handoff.handoffId,
+      fromAgentId: fromFrame.agentId,
+      fromRole: fromFrame.role,
+      fromRoleDisplay: fromFrame.roleDisplay,
+      toAgentId: toFrame.agentId,
+      toRole: toFrame.role,
+      toRoleDisplay: toFrame.roleDisplay,
+      fromNodeId: handoff.fromNodeId,
+      toNodeId: handoff.toNodeId,
+      carrySummary: handoff.carrySummary,
+      payloadPreview: handoff.payloadPreview,
+      notCarried: handoff.notCarried,
+      occurredAt: handoff.occurredAt,
+    };
+  });
+}
+
 export function projectPipelineObservation(input: PipelineObservationProjectionInput): PipelineObservationProjection {
   const currentRef = input.scopeStack[input.scopeStack.length - 1];
   if (!currentRef) throw new UiProjectionError('observation scope stack may not be empty');
   const scope = input.scopes[currentRef];
   if (!scope) throw new UiProjectionError(`unknown observation scope ${currentRef}`);
 
+  const frames = toAgentFrames(scope.agents ?? [], scope.nodes);
+  const frameByAgentId = new Map((scope.agents ?? []).map((frame) => [frame.agentId, frame]));
+  const nodes = scope.nodes.map((node) => toPipelineNode(node, frameByAgentId));
+  const handoffs = toHandoffs(scope.handoffs ?? [], scope.nodes, frames);
+
+  let currentNode: PipelineNodeProjection | undefined;
+  if (scope.currentNodeId !== undefined) {
+    currentNode = nodes.find((node) => node.nodeId === scope.currentNodeId);
+    if (!currentNode) throw new UiProjectionError(`unknown current observation node ${scope.currentNodeId}`);
+  }
+
   let selectedNode: ObservationNodeDetailProjection | undefined;
   if (input.selectedNodeId) {
     const node = scope.nodes.find((candidate) => candidate.nodeId === input.selectedNodeId);
-    if (node) selectedNode = toObservationDetail(node);
+    if (!node) throw new UiProjectionError(`unknown observation node ${input.selectedNodeId}`);
+    selectedNode = toObservationDetail(node);
   }
 
   return {
     surface: 'observation',
     state: input.source.state,
     data: input.source,
+    currentNode,
+    nodes,
+    agentFrames: frames,
+    handoffs,
     scope: {
       scopeRef: currentRef,
       title: scope.title,
