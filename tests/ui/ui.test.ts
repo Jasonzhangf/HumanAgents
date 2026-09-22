@@ -641,6 +641,11 @@ test('memory interaction surface keeps candidates behind explicit review', () =>
     value: 'review',
     state: 'candidate',
     evidenceRefs: [evidence('ev-skill')],
+    namespace: 'project',
+    projectKey: 'project-a',
+    taskId: 'task-a',
+    sourceRefs: ['journal://task-a/seq-19'],
+    sourceDigests: ['sha256:entry-1'],
   };
   const entry: MemoryEntrySource = {
     id: 'entry-1',
@@ -659,11 +664,16 @@ test('memory interaction surface keeps candidates behind explicit review', () =>
     skillCandidates: [candidate],
     inspectEnabled: true,
     compareEnabled: true,
+    analysis: { mode: 'model', state: 'succeeded', operationRef: 'memory-analysis:task-a' },
+    autoUpdate: false,
   });
   assert.deepEqual(projection.surface, 'memory-interaction');
   assert.deepEqual(projection.reviewRequired, true);
   assert.deepEqual(projection.skillCandidates[0].proposedRule, '覆盖范围变化需先复核受影响分片');
   assert.deepEqual(projection.indexState, 'ready');
+  assert.deepEqual(projection.analysis, { mode: 'model', state: 'succeeded', operationRef: 'memory-analysis:task-a' });
+  assert.equal(projection.autoUpdate, false);
+  assert.deepEqual(projection.skillCandidates[0].sourceRefs, ['journal://task-a/seq-19']);
 });
 
 test('command validation keeps observation read-only and decisions on explicit interaction surfaces', () => {
@@ -703,6 +713,7 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
     'docs/ui/task.js',
     'docs/ui/task-dashboard.js',
     'docs/ui/observation.js',
+    'docs/ui/memory.js',
     'docs/ui/runtime-api.js',
     'docs/ui/runtime-shell.js',
   ];
@@ -715,6 +726,8 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('steer'), false);
   assert.equal(source.includes('/api/runtime/status'), true);
   assert.equal(source.includes('createRuntimeApi'), true);
+  assert.equal(source.includes('/api/memory/summary'), true);
+  assert.equal(source.includes('/api/memory/review'), true);
 });
 
 test('UI index is an explicit historical handoff, not a fake runtime console', async () => {

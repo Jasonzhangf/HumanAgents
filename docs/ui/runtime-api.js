@@ -70,6 +70,15 @@ export function createRuntimeApi(options = {}) {
       body: JSON.stringify(confirmation),
     }),
     dispatchNextExplicitRequirement: () => request('/api/explicit/dispatch-next', { method: 'POST' }),
+    memorySummary: ({ namespace = 'project', query = '', limit = 20 } = {}) => {
+      const params = new URLSearchParams({ namespace, limit: String(limit) })
+      if (query.trim()) params.set('query', query.trim())
+      return request(`/api/memory/summary?${params}`)
+    },
+    reviewMemoryCandidate: (candidateId, decision, decisionReason) => request('/api/memory/review', {
+      method: 'POST',
+      body: JSON.stringify({ candidateId, decision, decisionReason }),
+    }),
     taskDetail: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     taskDashboard: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`),
     observation: (taskId, scopeRef, selectedNodeId) => {

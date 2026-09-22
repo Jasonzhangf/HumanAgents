@@ -4525,6 +4525,54 @@ test('memory driver factory stays absent when no memory-role agent is configured
   await rm(root, { recursive: true, force: true });
 });
 
+test('CLI serve binds the configured memory-role driver into its memory runtime', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-serve-memory-driver-');
+  await appendFile(join(controlRoot, 'config.toml'), [
+    '',
+    '[[agents]]',
+    'agentId = "memory-serve"',
+    'roleId = "memory"',
+    'templateRef = "builtin/memory@1.0.0"',
+    'driverRef = "fake"',
+    'skills = ["history-search", "novelty-review", "recurrence-review"]',
+    'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+    'permissions = ["memory.read", "memory.propose"]',
+    'memoryScopes = ["task", "organ", "approved-global"]',
+    'resourceClass = "background"',
+    '',
+  ].join('\n'), 'utf8');
+  const child = spawn(process.execPath, [
+    join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js'),
+    'serve', '--workspace', workspace, '--control-root', controlRoot, '--mode', 'fake', '--port', '0',
+  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+  try {
+    const launched = await new Promise<{ readonly memoryAnalysisMode?: string }>((resolve, reject) => {
+      let output = '';
+      const timeout = setTimeout(() => reject(new Error(`serve startup timed out: ${output}; stderr=${stderr}`)), 5_000);
+      child.stdout.on('data', (chunk: Uint8Array) => {
+        output += String(chunk);
+        try {
+          const parsed = JSON.parse(output.trim()) as { readonly memoryAnalysisMode?: string };
+          if (!parsed.memoryAnalysisMode) return;
+          clearTimeout(timeout);
+          resolve(parsed);
+        } catch {
+          // Wait for the complete startup JSON object.
+        }
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => reject(new Error(`serve exited before startup (${String(code)}): stderr=${stderr}`)));
+    });
+    assert.equal(launched.memoryAnalysisMode, 'model');
+  } finally {
+    child.kill('SIGTERM');
+    if (child.exitCode === null) await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('memory composition connects an injected memory driver to checkpoint analysis', async () => {
   const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-composition-driver-');
   await writeFile(join(workspace, 'AGENTS.md'), '# Composition project\n', 'utf8');
@@ -4607,6 +4655,19 @@ test('memory composition connects an injected memory driver to checkpoint analys
     assert.equal(typeof feedback[0]?.payload?.candidateId, 'string');
     assert.equal('operationId' in (feedback[0]?.payload ?? {}), false);
     assert.equal('nextAction' in (feedback[0]?.payload ?? {}), false);
+    const reviewState = await memory.reviewState();
+    assert.deepEqual(reviewState.analysis, {
+      mode: 'model',
+      state: 'succeeded',
+      operationRef: `memory-analysis:memory-binding:composition-driver:checkpoint-${result.checkpoint.id.value}`,
+    });
+    assert.equal(reviewState.autoUpdate, false);
+    assert.equal(reviewState.candidates.length, 1);
+    assert.equal(reviewState.candidates[0]?.candidateId, feedback[0]?.payload?.candidateId);
+    assert.equal(reviewState.candidates[0]?.namespace, 'project');
+    assert.equal(reviewState.candidates[0]?.projectKey, paths.projectKey);
+    assert.equal(reviewState.candidates[0]?.taskId, taskId.value);
+    assert.equal(reviewState.candidates[0]?.sourceRefs.length, 1);
     await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
   } finally {
     try {

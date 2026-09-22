@@ -97,6 +97,7 @@ import {
 } from '../../../runtime/src/health/index.js';
 import { DecisionTraceJournal, ExplicitBrainDecisionError } from '../../../runtime/src/explicit-brain/index.js';
 import type { ExplicitBrainAgentTarget } from '../explicit-brain-runtime.js';
+import type { MemoryReviewState } from '../memory-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
@@ -164,6 +165,7 @@ export interface UiRuntimeMemoryComposition {
   readonly interaction?: MemoryInteractionPort;
   readonly bindingRef?: string;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
+  readonly reviewState?: () => Promise<MemoryReviewState>;
 }
 
 export interface UiRuntimeServiceOptions {
@@ -562,6 +564,7 @@ export class UiRuntimeService {
     readonly limit?: number;
   } = {}) {
     try {
+      const reviewState = await this.memory.reviewState?.();
       const namespace = input.namespace ?? 'project';
       const query = input.query?.trim();
       const view = query
@@ -603,9 +606,25 @@ export class UiRuntimeService {
           digest: entry.sourceDigests[0] ?? '',
           evidenceRefs: [],
         })),
-        skillCandidates: [],
+        skillCandidates: (reviewState?.candidates ?? []).map((candidate) => ({
+          candidateId: candidate.candidateId,
+          pattern: `${candidate.category} · ${candidate.kind}`,
+          proposedRule: candidate.summary,
+          uniqueness: 'pending-review',
+          repeatability: 'observed',
+          value: candidate.namespace,
+          state: candidate.state,
+          evidenceRefs: [],
+          namespace: candidate.namespace,
+          projectKey: candidate.projectKey,
+          taskId: candidate.taskId,
+          sourceRefs: candidate.sourceRefs,
+          sourceDigests: candidate.sourceDigests,
+        })),
         inspectEnabled: true,
         compareEnabled: true,
+        analysis: reviewState?.analysis ?? { mode: 'deterministic', state: 'idle' },
+        autoUpdate: reviewState?.autoUpdate ?? false,
       });
     } catch (error) {
       throw apiError(error);

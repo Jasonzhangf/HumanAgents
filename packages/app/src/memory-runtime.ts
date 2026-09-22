@@ -93,6 +93,33 @@ export interface MemoryRuntimeEventConsumer {
   consume(input?: { readonly limit?: number }): Promise<Awaited<ReturnType<typeof consumeEvents>>>;
 }
 
+export interface MemoryAnalysisStatus {
+  readonly mode: 'model' | 'deterministic';
+  readonly state: 'idle' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'unknown';
+  readonly operationRef?: string;
+  readonly failureRef?: string;
+}
+
+export interface MemoryReviewCandidateState {
+  readonly candidateId: string;
+  readonly state: 'candidate' | 'approved' | 'rejected';
+  readonly namespace: 'project' | 'global';
+  readonly projectKey: string;
+  readonly taskId?: string;
+  readonly category: import('../../contracts/src/index.js').MemoryCandidateCategory;
+  readonly kind: import('../../contracts/src/index.js').MemoryKind;
+  readonly summary: string;
+  readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
+  readonly evidenceRefs: readonly string[];
+}
+
+export interface MemoryReviewState {
+  readonly analysis: MemoryAnalysisStatus;
+  readonly autoUpdate: boolean;
+  readonly candidates: readonly MemoryReviewCandidateState[];
+}
+
 export interface MemoryRuntime {
   readonly composition: MemoryComposition;
   readonly journal: JsonlEventJournal;
@@ -110,6 +137,7 @@ export interface MemoryRuntime {
   };
   readonly boundaryPublisher: MemoryRuntimeBoundaryPublisher;
   readonly consume: MemoryRuntimeEventConsumer['consume'];
+  readonly reviewState: () => Promise<MemoryReviewState>;
 }
 
 function sameScope(left: ScopeRef, right: ScopeRef): boolean {
@@ -648,6 +676,10 @@ function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPubli
 }
 
 export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<MemoryRuntime> {
+  let analysis: MemoryAnalysisStatus = {
+    mode: input.driver !== undefined || input.driverFor !== undefined ? 'model' : 'deterministic',
+    state: 'idle',
+  };
   const templateRoot = (globalThis as {
     readonly process?: { readonly env?: { readonly HUMANAGENT_TEMPLATE_ROOT?: string } };
   }).process?.env?.HUMANAGENT_TEMPLATE_ROOT;
@@ -864,6 +896,11 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
         const committed = await checkpointEvidence.readCommitted({ checkpoint });
         validateMemoryBoundary({ event, recordDigest, committed });
         await publishEvent(ports, { publisherId: PUBLISHER_ID, event });
+        analysis = {
+          mode: analysis.mode,
+          state: 'running',
+          operationRef: `memory-analysis:${input.binding.bindingRef}:${event.messageId}`,
+        };
       },
     },
     boundaryPublisher: {
@@ -931,16 +968,60 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
           committed,
         });
         await publishEvent(ports, { publisherId: PUBLISHER_ID, event: preparedEvent });
+        analysis = {
+          mode: analysis.mode,
+          state: 'running',
+          operationRef: `memory-analysis:${input.binding.bindingRef}:${preparedEvent.messageId}`,
+        };
       },
     },
-    consume: async (consumeInput = {}) => consumeEvents(
-      ports,
-      {
-        consumerKey: input.binding.bindingRef,
-        limit: consumeInput.limit ?? 10,
-      },
-      composition.eventHandler,
-      composition.barrierDriver,
-    ),
+    consume: async (consumeInput = {}) => {
+      const result = await consumeEvents(
+        ports,
+        {
+          consumerKey: input.binding.bindingRef,
+          limit: consumeInput.limit ?? 10,
+        },
+        composition.eventHandler,
+        composition.barrierDriver,
+      );
+      const terminal = result.committed.at(-1);
+      const retry = result.retries.at(-1);
+      const blocked = result.blocked.at(-1);
+      if (terminal !== undefined) {
+        analysis = terminal.disposition === 'applied'
+          ? { ...analysis, state: 'succeeded' }
+          : {
+              ...analysis,
+              state: 'failed',
+              ...(terminal.failureRef === undefined ? {} : { failureRef: terminal.failureRef }),
+            };
+      } else if (retry !== undefined) {
+        analysis = { ...analysis, state: 'waiting', failureRef: retry.failureRef };
+      } else if (blocked !== undefined) {
+        analysis = { ...analysis, state: 'unknown', failureRef: blocked.reason };
+      }
+      return result;
+    },
+    reviewState: async () => {
+      const snapshot = await composition.persistence.load();
+      return {
+        analysis: { ...analysis },
+        autoUpdate: input.autoUpdate,
+        candidates: (snapshot?.candidates ?? []).map((candidate) => ({
+          candidateId: candidate.candidateId ?? candidate.submission.submissionId,
+          state: candidate.state,
+          namespace: candidate.submission.desiredScope,
+          projectKey: candidate.submission.projectKey,
+          ...(candidate.submission.taskId === undefined ? {} : { taskId: candidate.submission.taskId.value }),
+          category: candidate.submission.candidateCategory,
+          kind: candidate.submission.requestedKind,
+          summary: candidate.submission.observation,
+          sourceRefs: [candidate.submission.contentRef],
+          sourceDigests: [candidate.submission.contentDigest],
+          evidenceRefs: [...candidate.submission.evidenceRefs],
+        })),
+      };
+    },
   };
 }

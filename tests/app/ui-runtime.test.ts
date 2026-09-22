@@ -410,6 +410,7 @@ test('memory interaction HTTP routes expose typed summary, query, inspect, compa
   };
   const memory = new DeterministicMemoryBackend();
   const coordinator = new MemoryCoordinator();
+  let reviewCandidateId: string | undefined;
   const runtime = await startUiRuntime({
     mode: 'fake',
     organId,
@@ -425,6 +426,28 @@ test('memory interaction HTTP routes expose typed summary, query, inspect, compa
       backend: memory,
       projectKey,
       roleId: 'review',
+      reviewState: async () => ({
+        analysis: {
+          mode: 'model',
+          state: 'failed',
+          operationRef: 'memory-analysis:test',
+          failureRef: 'memory-agent-analysis-unavailable',
+        },
+        autoUpdate: false,
+        candidates: reviewCandidateId === undefined ? [] : [{
+          candidateId: reviewCandidateId,
+          state: 'candidate',
+          namespace: 'project',
+          projectKey,
+          taskId: 'task-memory-review',
+          category: 'project-fact',
+          kind: 'semantic',
+          summary: 'memory interaction review candidate',
+          sourceRefs: ['journal://ui-memory-interaction/one'],
+          sourceDigests: ['sha256:ui-memory-interaction-one'],
+          evidenceRefs: ['journal://ui-memory-interaction/two'],
+        }],
+      }),
     },
   });
   try {
@@ -463,6 +486,12 @@ test('memory interaction HTTP routes expose typed summary, query, inspect, compa
     assert.equal(summaryBody.surface, 'memory-interaction');
     assert.equal(summaryBody.summary, '未指定过滤条件');
     assert.deepEqual(summaryBody.entries, []);
+    assert.deepEqual((summaryBody as unknown as { readonly analysis: unknown }).analysis, {
+      mode: 'model',
+      state: 'failed',
+      operationRef: 'memory-analysis:test',
+      failureRef: 'memory-agent-analysis-unavailable',
+    });
 
     const query = await fetch(`${runtime.server.url}/api/memory/query?query=approved&limit=5`);
     assert.equal(query.status, 200);
@@ -528,6 +557,44 @@ test('memory interaction HTTP routes expose typed summary, query, inspect, compa
     assert.equal(submitted.status, 'ready');
     const candidateId = submitted.status === 'ready' ? submitted.value.candidateId : undefined;
     if (!candidateId) throw new Error('expected memory interaction candidate');
+    reviewCandidateId = candidateId;
+
+    const reviewSummary = await fetch(`${runtime.server.url}/api/memory/summary`);
+    const reviewSummaryBody = await reviewSummary.json() as {
+      readonly autoUpdate: boolean;
+      readonly skillCandidates: readonly {
+        readonly candidateId: string;
+        readonly pattern: string;
+        readonly proposedRule: string;
+        readonly uniqueness: string;
+        readonly repeatability: string;
+        readonly value: string;
+        readonly state: string;
+        readonly evidenceRefs: readonly unknown[];
+        readonly namespace: string;
+        readonly projectKey: string;
+        readonly taskId?: string;
+        readonly sourceRefs: readonly string[];
+        readonly sourceDigests: readonly string[];
+      }[];
+    };
+    assert.equal(reviewSummary.status, 200);
+    assert.equal(reviewSummaryBody.autoUpdate, false);
+    assert.deepEqual(reviewSummaryBody.skillCandidates[0], {
+      candidateId,
+      pattern: 'project-fact · semantic',
+      proposedRule: 'memory interaction review candidate',
+      uniqueness: 'pending-review',
+      repeatability: 'observed',
+      value: 'project',
+      state: 'candidate',
+      evidenceRefs: [],
+      namespace: 'project',
+      projectKey,
+      taskId: 'task-memory-review',
+      sourceRefs: ['journal://ui-memory-interaction/one'],
+      sourceDigests: ['sha256:ui-memory-interaction-one'],
+    });
 
     await assert.rejects(
       () => memory.promoteCandidate({

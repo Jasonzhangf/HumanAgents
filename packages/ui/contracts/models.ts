@@ -429,6 +429,18 @@ export interface SkillCandidateProjection {
   readonly value: string;
   readonly state: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly namespace: 'project' | 'global';
+  readonly projectKey: string;
+  readonly taskId?: string;
+  readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
+}
+
+export interface MemoryAnalysisProjection {
+  readonly mode: 'model' | 'deterministic';
+  readonly state: 'idle' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'unknown';
+  readonly operationRef?: string;
+  readonly failureRef?: string;
 }
 
 export interface MemoryInteractionSurfaceProjection {
@@ -445,6 +457,8 @@ export interface MemoryInteractionSurfaceProjection {
   readonly reviewRequired: boolean;
   readonly inspectEnabled: boolean;
   readonly compareEnabled: boolean;
+  readonly analysis: MemoryAnalysisProjection;
+  readonly autoUpdate: boolean;
 }
 
 export type UiProjection =
