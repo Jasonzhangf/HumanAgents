@@ -214,7 +214,7 @@ interface DispatchLedgerEntry {
   readonly draftId: string;
   readonly taskId: TaskId;
   readonly operationId: OperationId;
-  readonly executionEpoch: number;
+  readonly executionEpoch?: number;
 }
 
 interface BoundMemoryContext {
@@ -1275,62 +1275,18 @@ export class UiRuntimeService {
         fifoSeq: consumed.fifoSeq,
       };
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
-      if (existingDispatch) {
-        dispatchEntry = existingDispatch;
-        this.watchExecutionForImplicitWakeup(existingDispatch.operationId);
-        await this.explicitIntake.markDraftDispatched(consumed.draftId);
-        this.persistExplicitBrainState();
-        const requirement = await this.requirementInbox.acknowledge({
-          consumerId: RUNTIME_OWNER,
-          requirementId: consumed.requirementId,
-        });
-        this.persistExplicitBrainState();
-        this.dispatchLedger.delete(consumed.draftId);
-        this.persistExplicitBrainState();
-        this.implicitConsumerRequirement = undefined;
-        return {
-          requirement,
-          taskId: existingDispatch.taskId,
-          operationId: existingDispatch.operationId,
-          executionEpoch: existingDispatch.executionEpoch,
+      if (existingDispatch) dispatchEntry = existingDispatch;
+      else {
+        this.classifyAndAdmitConfirmedRequirement(consumed);
+        dispatchEntry = {
+          draftId: consumed.draftId,
+          taskId: consumed.taskRef ?? id('task', `ui-task-implicit-${consumed.draftId}`),
+          operationId: id('operation', `ui-operation-implicit-${consumed.draftId}`),
         };
+        this.dispatchLedger.set(consumed.draftId, dispatchEntry);
+        this.persistExplicitBrainState();
       }
-      const admitted = this.classifyAndAdmitConfirmedRequirement(consumed);
-      const task = consumed.taskRef
-        ? this.coordinator.taskSnapshot(consumed.taskRef)
-        : this.coordinator.createTask({
-            title: admitted.classified.envelope.normalizedInput,
-            directive: admitted.classified.envelope.normalizedInput,
-          });
-      const execution = this.coordinator.startExecution(task.taskId, {
-        prompt: admitted.classified.envelope.normalizedInput,
-        ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
-      });
-      dispatchEntry = {
-        draftId: consumed.draftId,
-        taskId: task.taskId,
-        operationId: execution.operationId,
-        executionEpoch: execution.executionEpoch,
-      };
-      this.dispatchLedger.set(consumed.draftId, dispatchEntry);
-      this.persistExplicitBrainState();
-      this.watchExecutionForImplicitWakeup(execution.operationId);
-      await this.explicitIntake.markDraftDispatched(consumed.draftId);
-      this.persistExplicitBrainState();
-      const requirement = await this.requirementInbox.acknowledge({
-        consumerId: RUNTIME_OWNER,
-        requirementId: consumed.requirementId,
-      });
-      this.persistExplicitBrainState();
-      this.dispatchLedger.delete(consumed.draftId);
-      this.persistExplicitBrainState();
-      this.implicitConsumerRequirement = undefined;
-      return {
-        requirement,
-        taskId: task.taskId,
-        operationId: execution.operationId,
-        executionEpoch: execution.executionEpoch,
-      };
+      return await this.completePreparedDispatch(consumed, dispatchEntry);
     } catch (error) {
       if (consumed) {
         this.requirementInbox.restoreAcknowledged({
@@ -1343,6 +1299,58 @@ export class UiRuntimeService {
     } finally {
       release();
     }
+  }
+
+  private async completePreparedDispatch(
+    consumed: RequirementEnvelope,
+    prepared: DispatchLedgerEntry,
+  ): Promise<ExplicitBrainDispatchReceipt> {
+    const existingTask = this.coordinator.taskSnapshots().find((task) => task.taskId.value === prepared.taskId.value);
+    const task = existingTask ?? (consumed.taskRef
+      ? this.coordinator.taskSnapshot(consumed.taskRef)
+      : this.coordinator.createTask({
+          taskId: prepared.taskId,
+          title: consumed.normalizedInput,
+          directive: consumed.normalizedInput,
+        }));
+    const operationId = prepared.operationId;
+    let executionEpoch = prepared.executionEpoch;
+    if (executionEpoch === undefined) {
+      if (task.operationId === operationId.value && task.executionEpoch !== undefined) {
+        executionEpoch = task.executionEpoch;
+      } else {
+        const execution = this.coordinator.startExecution(task.taskId, {
+          prompt: consumed.normalizedInput,
+          ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+          operationId,
+        });
+        executionEpoch = execution.executionEpoch;
+      }
+      const started: DispatchLedgerEntry = {
+        ...prepared,
+        operationId,
+        executionEpoch,
+      };
+      this.dispatchLedger.set(consumed.draftId, started);
+      this.persistExplicitBrainState();
+    }
+    this.watchExecutionForImplicitWakeup(operationId);
+    await this.explicitIntake.markDraftDispatched(consumed.draftId);
+    this.persistExplicitBrainState();
+    const requirement = await this.requirementInbox.acknowledge({
+      consumerId: RUNTIME_OWNER,
+      requirementId: consumed.requirementId,
+    });
+    this.persistExplicitBrainState();
+    this.dispatchLedger.delete(consumed.draftId);
+    this.persistExplicitBrainState();
+    this.implicitConsumerRequirement = undefined;
+    return {
+      requirement,
+      taskId: task.taskId,
+      operationId,
+      executionEpoch,
+    };
   }
 
   private classifyAndAdmitConfirmedRequirement(envelope: RequirementEnvelope): RequirementAdmissionReceipt {

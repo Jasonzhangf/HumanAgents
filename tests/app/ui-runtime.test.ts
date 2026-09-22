@@ -198,9 +198,15 @@ class FailingInteractionClosurePort implements CheckpointClosurePort {
 
 class FailOnceProjectionJournal extends UiRuntimeJournal {
   failNextExplicitState = false;
+  explicitStatesBeforeFailure = 0;
 
   override append(record: Parameters<UiRuntimeJournal['append']>[0]): void {
     if (this.failNextExplicitState && record.kind === 'explicit-brain.state') {
+      if (this.explicitStatesBeforeFailure > 0) {
+        this.explicitStatesBeforeFailure -= 1;
+        super.append(record);
+        return;
+      }
       this.failNextExplicitState = false;
       throw new Error('projection journal unavailable');
     }
@@ -1587,12 +1593,13 @@ test('implicit consumer attaches to an existing running task and wakes pending w
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
-test('implicit dispatch persistence failure keeps the requirement visible and retryable', async () => {
+test('implicit dispatch intent survives a persistence failure and restart without duplicate provider start', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-persistence-'));
   const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
   const service = serviceFor(
     root,
-    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 20 }),
+    port,
     'fake',
     'ready',
     journal,
@@ -1624,16 +1631,28 @@ test('implicit dispatch persistence failure keeps the requirement visible and re
   });
 
   journal.failNextExplicitState = true;
+  journal.explicitStatesBeforeFailure = 1;
   service.startImplicitConsumer();
   await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
   assert.equal(service.status().implicitScheduling?.requirementId, 'requirement:draft-1:1');
   assert.equal(service.listTasks().counts.total, 1);
+  assert.equal(port.startPayloads.length, 1);
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 
-  service.markConnected();
-  await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
-  assert.equal(service.listTasks().counts.total, 1);
-  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+  const restarted = serviceFor(root, port);
+  await restarted.hydrate();
+  restarted.startImplicitConsumer();
+  await waitFor(() => {
+    const state = journal.replay()
+      .filter((record): record is Extract<ReturnType<UiRuntimeJournal['replay']>[number], { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
+      .at(-1)?.state;
+    assert.deepEqual(state?.inbox.pendingDraftIds, []);
+    assert.deepEqual(state?.dispatchLedger, []);
+  });
+  assert.equal(port.startPayloads.length, 1);
+  assert.equal(restarted.status().implicitScheduling, undefined);
+  assert.equal(restarted.listTasks().counts.total, 1);
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
 test('runtime restart hydrates dispatched state without starting the requirement twice', async () => {

@@ -196,7 +196,7 @@ export interface RuntimeExplicitBrainJournalState {
     readonly draftId: string;
     readonly taskId: TaskId;
     readonly operationId: OperationId;
-    readonly executionEpoch: number;
+    readonly executionEpoch?: number;
   }[];
   readonly submittedSubmissions: readonly PersistedSubmittedReceipt[];
   readonly decisionTraces?: readonly DecisionTraceRecord[];
@@ -707,14 +707,30 @@ export class RuntimeTaskCoordinator {
     return EXECUTION_CAPABILITIES;
   }
 
-  createTask(input: { readonly title?: string; readonly directive?: string }): RuntimeTaskSnapshot {
+  createTask(input: { readonly title?: string; readonly directive?: string; readonly taskId?: TaskId }): RuntimeTaskSnapshot {
+    const title = input.title?.trim() || `任务 ${this.taskCounter + 1}`;
+    const directive = input.directive?.trim() || input.title?.trim() || `任务 ${this.taskCounter + 1}`;
+    if (input.taskId) {
+      const existing = this.tasks.get(input.taskId.value);
+      if (existing) {
+        if (existing.title !== title || existing.directive !== directive) {
+          throw new RuntimeTaskControlError(
+            'task.identity.conflict',
+            RUNTIME_OWNER,
+            'requested task identity already belongs to different task content',
+            'inspect the durable requirement dispatch identity',
+          );
+        }
+        return this.snapshot(existing);
+      }
+    }
     this.taskCounter += 1;
-    const taskId = id('task', `ui-task-${this.taskIdPrefix}-${this.taskCounter}`);
+    const taskId = input.taskId ?? id('task', `ui-task-${this.taskIdPrefix}-${this.taskCounter}`);
     const timestamp = this.now().toISOString();
     const record: TaskRecord = {
       taskId,
-      title: input.title?.trim() || `任务 ${this.taskCounter}`,
-      directive: input.directive?.trim() || input.title?.trim() || `任务 ${this.taskCounter}`,
+      title,
+      directive,
       directiveRevision: 1,
       state: 'created',
       currentState: '已创建',
@@ -790,7 +806,11 @@ export class RuntimeTaskCoordinator {
     return this.snapshot(this.requireTask(taskId));
   }
 
-  startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): { readonly operationId: OperationId; readonly executionEpoch: number } {
+  startExecution(taskId: TaskId, input: {
+    readonly prompt: string;
+    readonly orchestrate?: boolean;
+    readonly operationId?: OperationId;
+  }): { readonly operationId: OperationId; readonly executionEpoch: number } {
     const record = this.requireTask(taskId);
     if (record.running) throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'task already has a running execution', 'stop the current execution first');
     if (!record.allowedActions.includes('start')) {
@@ -806,9 +826,17 @@ export class RuntimeTaskCoordinator {
         'bind execution, review, and merge orchestration ports before dispatching a confirmed requirement',
       );
     }
+    if (input.operationId && this.operations.has(input.operationId.value)) {
+      throw new RuntimeTaskControlError(
+        'operation.identity.conflict',
+        RUNTIME_OWNER,
+        'requested operation identity already belongs to an execution',
+        'inspect the durable requirement dispatch identity',
+      );
+    }
     this.operationCounter += 1;
     this.cycleCounter += 1;
-    const operationId = id('operation', `ui-operation-${this.operationCounter}`);
+    const operationId = input.operationId ?? id('operation', `ui-operation-${this.operationCounter}`);
     const cycleId = id('cycle', `ui-cycle-${this.cycleCounter}`);
     const executionEpoch = (record.executionEpoch ?? 0) + 1;
     const scope: ScopeRef = { organId: this.options.organId, taskId, cycleId, operationId };
