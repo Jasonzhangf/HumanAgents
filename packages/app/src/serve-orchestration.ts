@@ -10,6 +10,7 @@ import {
   type WorkResult,
 } from '../../contracts/src/index.js';
 import type { ReviewResult } from '../../runtime/src/review/index.js';
+import { assertReviewMaterial } from '../../runtime/src/orchestration/index.js';
 import type {
   ExecutionAgentPort,
   MergeCoordinatorPort,
@@ -135,9 +136,18 @@ function uniqueEvidence(events: readonly AgentEvent[], settlement: ProviderSettl
   return unique.length > 0 ? unique : [scopedEvidence(scope, 'no-provider-evidence')];
 }
 
+/**
+ * Provider output arrives as a stream of chunk summaries. The review text is
+ * their ordered concatenation: a verdict marker or an explanation may straddle
+ * a chunk boundary, so no single chunk is the reviewer's reply.
+ */
+function reviewerText(events: readonly AgentEvent[]): string {
+  return events.map((event) => event.summary ?? '').join('');
+}
+
 function eventSummary(events: readonly AgentEvent[], fallback: string): string {
-  const summaries = events.map((event) => event.summary).filter((summary): summary is string => Boolean(summary?.trim()));
-  return summaries.at(-1) ?? fallback;
+  const text = reviewerText(events);
+  return text.trim().length > 0 ? text : fallback;
 }
 
 function providerPrompt(
@@ -220,7 +230,7 @@ async function runProviderAgent(input: {
 }
 
 function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inconclusive' | undefined {
-  const markers = events.flatMap((event) => [...(event.summary ?? '').matchAll(/HUMANAGENT_REVIEW\s*:\s*(passed|failed|inconclusive)/gi)].map((match) => match[1].toLowerCase() as 'passed' | 'failed' | 'inconclusive'));
+  const markers = [...reviewerText(events).matchAll(/HUMANAGENT_REVIEW\s*:\s*(passed|failed|inconclusive)/gi)].map((match) => match[1].toLowerCase() as 'passed' | 'failed' | 'inconclusive');
   if (markers.length === 0 || new Set(markers).size > 1) return undefined;
   return markers[markers.length - 1];
 }
@@ -233,17 +243,20 @@ function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inc
 export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrationOptions): ServeOrchestrationPorts {
   const reviewAgent: ReviewAgentPort = {
     async review(request): Promise<ReviewResult> {
+      // Fail closed before the reviewer runs: a request without real
+      // acceptance criteria and subject bodies could only check identity.
+      const material = assertReviewMaterial(request.reviewMaterial);
       const prompt = providerPrompt(
         'review',
         input.promptSegments.review,
         JSON.stringify({
           role: 'review',
           reviewKind: request.reviewAssignment.reviewKind,
-          acceptanceCriteriaDigest: request.reviewAssignment.acceptanceCriteriaDigest,
-          subjectRefs: request.reviewAssignment.subjectRefs,
-          subjectDigests: request.reviewAssignment.subjectDigests,
-          workerResult: request.workerResult,
-          instruction: 'end with HUMANAGENT_REVIEW: passed, failed, or inconclusive',
+          acceptanceCriteria: material.acceptanceCriteria,
+          acceptanceCriteriaDigest: material.acceptanceCriteriaDigest,
+          subjects: material.subjects,
+          workerSummary: request.workerResult.summary,
+          instruction: 'Evaluate the acceptance criteria against each subject body below. The subject bodies are the artifact; a summary, ref, or digest is never a substitute for them. End with HUMANAGENT_REVIEW: passed, failed, or inconclusive',
         }),
       );
       const provider = await runProviderAgent({

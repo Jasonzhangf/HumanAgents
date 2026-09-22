@@ -11,6 +11,8 @@ import {
   AgentRuntimePoolManager,
   AssignmentGraph,
   OrchestrationManager,
+  acceptanceCriteriaContent,
+  digestOf,
   type ExecutionAgentInput,
   type ExecutionAgentPort,
   type MergeCoordinatorPort,
@@ -32,6 +34,10 @@ const runtimeBinding = {
   executionEpoch: 1,
 } as const;
 
+/** Produced subject body shared by the review fixtures in this file. */
+const artifactBody = 'reviewed artifact body';
+const artifactDigest = digestOf(artifactBody);
+
 function evidence(label: string): EvidenceRef {
   return {
     evidenceId: id('evidence', `evidence-${label}`),
@@ -43,6 +49,12 @@ function evidence(label: string): EvidenceRef {
 }
 
 function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
+  const criteria = {
+    objective: 'execute bounded work',
+    successCriteria: ['success-a'],
+    failureCriteria: ['failure-a'],
+    incompleteCriteria: ['incomplete-a'],
+  };
   return {
     assignmentId: 'assignment-a',
     taskId: task,
@@ -50,14 +62,14 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    objective: 'execute bounded work',
+    objective: criteria.objective,
     targetRefs: ['target-a'],
     expectedOutputRefs: ['output-a'],
-    expectedArtifactDigests: ['sha256:artifact-a'],
-    acceptanceCriteriaDigest: 'sha256:criteria-a',
-    successCriteria: ['success-a'],
-    failureCriteria: ['failure-a'],
-    incompleteCriteria: ['incomplete-a'],
+    expectedArtifactDigests: [artifactDigest],
+    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
+    successCriteria: [...criteria.successCriteria],
+    failureCriteria: [...criteria.failureCriteria],
+    incompleteCriteria: [...criteria.incompleteCriteria],
     requiredCapabilities: ['execute'],
     mergeGate: 'not-required',
     ...overrides,
@@ -75,7 +87,7 @@ function result(overrides: Partial<WorkResult> = {}): WorkResult {
     executionEpoch: base.executionEpoch,
     inputRevision: base.inputRevision,
     producedArtifactRefs: ['artifact-a'],
-    producedArtifactDigests: ['sha256:artifact-a'],
+    producedArtifactDigests: [artifactDigest],
     status: 'succeeded',
     summary: 'work completed',
     outputRefs: ['output-a'],
@@ -727,7 +739,8 @@ test('review failure creates a remediation assignment and merge cannot precede p
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'retryable');
   assert.equal(dispatched.remediation?.attempt, 2);
@@ -759,7 +772,8 @@ test('review result mismatch is rejected before graph state advances', async () 
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'blocked');
   assert.equal(dispatched.issue?.code, 'review-result-invalid');
@@ -792,7 +806,8 @@ test('merge-required work passes review before merge and records merged status',
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'merged');
   assert.equal(dispatched.assignment.status, 'merged');
@@ -851,7 +866,8 @@ test('duplicate dispatch returns recoverable progress while review is pending', 
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality' as const],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   };
 
   const firstDispatch = manager.dispatch(input);
@@ -1163,7 +1179,8 @@ test('dispatch is idempotent for terminal assignments and duplicate work results
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality' as const],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   };
   const first = await manager.dispatch(input);
   const repeated = await manager.dispatch(input);
@@ -1226,7 +1243,8 @@ test('review result id conflicts are rejected and merge gate uses persisted revi
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   const stored = manager.graph.get(assignment())?.reviewResults[0];
   assert.ok(stored);
@@ -1299,7 +1317,8 @@ test('blocked merge outcomes expose owner, reason, next action, and fallback evi
     agentId: 'agent-a',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: ['sha256:artifact-a'],
+    reviewSubjectDigests: [artifactDigest],
+    reviewSubjects: [{ ref: 'target-a', body: artifactBody }],
   });
   assert.equal(dispatched.status, 'blocked');
   assert.equal(dispatched.issue?.ownerId, 'orchestration-manager');

@@ -17,6 +17,7 @@ import {
 } from '../review/index.js';
 import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
+import { type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
 import { AgentRuntimePoolManager } from './runtime-pool.js';
 import type {
   AssignmentRecord,
@@ -531,6 +532,38 @@ export class OrchestrationManager {
       );
     }
 
+    let reviewMaterial: ReviewMaterial;
+    try {
+      // The produced body is carried by the result, the same way the subject
+      // digests already fall back to the result: the caller cannot know a
+      // body that only exists after the worker ran. A caller-supplied subject
+      // remains an explicit override.
+      const overrides = new Map((input.reviewSubjects ?? []).map((subject) => [subject.ref, subject.body]));
+      const subjects = input.assignment.targetRefs.map((ref, index) => ({
+        ref,
+        body: overrides.get(ref) ?? result.producedArtifactBodies?.[index] ?? '',
+      }));
+      reviewMaterial = resolveReviewMaterial({
+        workerAssignment: input.assignment,
+        workerResult: result,
+        subjects,
+      });
+    } catch (error) {
+      return this.blockedResult(
+        record,
+        issueFromUnknown(error, {
+          code: 'review-material-invalid',
+          ownerId: this.ownerId,
+          scope: input.scope,
+          conditionRef: 'orchestration.review.material',
+          evidenceRefs: result.evidenceRefs.length > 0
+            ? result.evidenceRefs
+            : [evidence(input.scope, 'orchestration.review.material')],
+        }),
+        input.scope,
+      );
+    }
+
     let reviewAssignments: readonly ReviewAssignment[];
     try {
       reviewAssignments = createReviewAssignments({
@@ -564,6 +597,7 @@ export class OrchestrationManager {
           reviewAssignment,
           workerAssignment: input.assignment,
           workerResult: result,
+          reviewMaterial,
           scope: input.scope,
         });
       } catch (error) {

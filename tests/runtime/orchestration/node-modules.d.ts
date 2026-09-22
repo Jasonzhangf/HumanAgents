@@ -15,3 +15,9 @@ declare module 'node:test' {
   const test: (name: string, fn: () => void | Promise<void>) => void;
   export default test;
 }
+
+declare module 'node:crypto' {
+  export function createHash(algorithm: 'sha256'): {
+    update(value: string): { digest(encoding: 'hex'): string };
+  };
+}

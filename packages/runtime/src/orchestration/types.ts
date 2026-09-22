@@ -6,6 +6,7 @@ import type {
   WorkAssignment,
   WorkResult,
 } from '../../../contracts/src/index.js';
+import type { ReviewMaterial } from './review-material.js';
 import type {
   ReviewAssignment,
   ReviewKind,
@@ -100,6 +101,12 @@ export interface ReviewAgentInput {
   readonly reviewAssignment: ReviewAssignment;
   readonly workerAssignment: WorkAssignment;
   readonly workerResult: WorkResult;
+  /**
+   * Verified acceptance criteria content and produced subject bodies. The
+   * reviewer evaluates this material instead of the worker summary or an
+   * evidence locator.
+   */
+  readonly reviewMaterial: ReviewMaterial;
   readonly scope: ScopeRef;
 }
 
@@ -227,6 +234,14 @@ export interface DispatchInput {
   readonly scope: ScopeRef;
   readonly reviewKinds?: readonly ReviewKind[];
   readonly reviewSubjectDigests?: readonly string[];
+  /**
+   * Produced subject bodies for the review gate. A missing, empty, or
+   * digest-drifted body blocks before the reviewer is invoked.
+   */
+  readonly reviewSubjects?: readonly {
+    readonly ref: string;
+    readonly body: string;
+  }[];
 }
 
 export interface OrchestrationDispatchResult {

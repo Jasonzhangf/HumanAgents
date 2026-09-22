@@ -40,7 +40,7 @@ import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
-import type { AgentRuntimePoolManager, ExecutionAgentPort } from '../orchestration/index.js';
+import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort } from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
@@ -1215,8 +1215,10 @@ export class RuntimeTaskCoordinator {
       let closure: AgentRuntimeClosure | undefined;
       if (record.orchestrated && this.options.createTaskAssembly) {
         const outputRef = `operation://${operation.operationId.value}/output`;
-        const outputDigest = (): string => `sha256:${createHash('sha256').update(record.output).digest('hex')}`;
         const coordinator = this;
+        // The review gate receives the text this execution actually produced,
+        // so an empty run blocks instead of passing on identity alone.
+        let producedOutput = '';
         const providerExecutionAgent: ExecutionAgentPort = {
           async execute(input): Promise<WorkResult> {
             await composition!.start();
@@ -1265,6 +1267,9 @@ export class RuntimeTaskCoordinator {
               }
               const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
               if (!event.providerEvent) continue;
+              if (event.providerEvent.kind === 'output' && event.providerEvent.summary) {
+                producedOutput = `${producedOutput}${event.providerEvent.summary}`;
+              }
               coordinator.recordProviderEvent(record, operation, event.providerEvent);
             }
             if (record.postCommitRecoveryPending) {
@@ -1336,7 +1341,10 @@ export class RuntimeTaskCoordinator {
               executionEpoch: input.assignment.executionEpoch,
               inputRevision: input.assignment.inputRevision,
               producedArtifactRefs: [outputRef],
-              producedArtifactDigests: [outputDigest()],
+              // The digest of what this attempt produced, not of shared
+              // mutable state that a later attempt may already have reset.
+              producedArtifactDigests: [digestOf(producedOutput)],
+              producedArtifactBodies: [producedOutput],
               status,
               summary: `provider execution ${closure.state}`,
               outputRefs: [outputRef],
@@ -1367,6 +1375,15 @@ export class RuntimeTaskCoordinator {
           maxAttempts: 1,
         });
         const stageNodeId = `stage-${operation.operationId.value}`;
+        // The acceptance criteria digest is derived from the criteria content
+        // itself, so the review gate can re-verify the content it receives
+        // instead of trusting a label.
+        const acceptanceCriteria = acceptanceCriteriaContent({
+          objective: prompt,
+          successCriteria: ['provider execution settles successfully'],
+          failureCriteria: ['provider execution fails'],
+          incompleteCriteria: ['provider execution requires waiting or recovery'],
+        });
         const assignment: WorkAssignment = {
           assignmentId: `assignment-${operation.operationId.value}`,
           taskId: record.taskId,
@@ -1377,7 +1394,7 @@ export class RuntimeTaskCoordinator {
           objective: prompt,
           targetRefs: [outputRef],
           expectedOutputRefs: [outputRef],
-          acceptanceCriteriaDigest: `sha256:${createHash('sha256').update(`${record.directive}\n${prompt}`).digest('hex')}`,
+          acceptanceCriteriaDigest: digestOf(acceptanceCriteria),
           successCriteria: ['provider execution settles successfully'],
           failureCriteria: ['provider execution fails'],
           incompleteCriteria: ['provider execution requires waiting or recovery'],
