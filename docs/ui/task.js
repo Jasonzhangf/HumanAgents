@@ -51,12 +51,34 @@ function renderCreate() {
   const feedback = element('p', '显式大脑会整理输入、补齐任务信息，并在需要时向你确认。', 'muted')
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
+  const diagnostics = element('details')
+  diagnostics.hidden = true
+  const diagnosticText = element('pre')
+  diagnostics.append(element('summary', '查看技术详情'), diagnosticText)
+  const restartPanel = element('div')
+  restartPanel.hidden = true
+  const restart = element('a', '重新填写新任务', 'button')
+  restart.href = './task.html?task=new'
+  restartPanel.append(restart, element('p', '重试或继续查看会保留当前输入；重新填写会打开新请求，不修改或取消当前请求。', 'muted'))
   let interactionId
-  form.append(directiveLabel, button, feedback)
+  let inFlight = false
+  form.append(directiveLabel, button, feedback, restartPanel, diagnostics)
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
+    if (inFlight) return
+    const rawInput = directive.value.trim()
+    if (!rawInput) {
+      feedback.textContent = '请先填写你要完成的任务或补充信息。'
+      return
+    }
+    inFlight = true
+    button.disabled = true
+    directive.readOnly = true
+    form.setAttribute('aria-busy', 'true')
+    diagnostics.hidden = true
+    restartPanel.hidden = true
+    button.textContent = '正在处理…'
     try {
-      const rawInput = directive.value.trim()
       feedback.textContent = '正在交给显式大脑整理…'
       if (!interactionId) {
         const received = await api.receiveExplicitInput({
@@ -73,23 +95,28 @@ function renderCreate() {
       if (snapshot.state === 'status-only') {
         feedback.textContent = snapshot.reply || snapshot.nextAction
         interactionId = undefined
+        directive.readOnly = false
+        button.textContent = '提交给显式大脑'
         return
       }
       if (snapshot.state === 'awaiting-clarification') {
         feedback.textContent = snapshot.reply || snapshot.nextAction
         directive.value = ''
         directive.placeholder = snapshot.reply || '请补充显式大脑需要的信息。'
+        directive.readOnly = false
         button.textContent = '回答并继续'
         return
       }
       if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
         feedback.textContent = `显式大脑当前状态：${snapshot.state}。${snapshot.nextAction}`
+        button.textContent = '继续查看本次提交'
         return
       }
       if (snapshot.draft.proposedIntent !== 'create') {
         const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
         if (!matchedTaskId) {
           feedback.textContent = '显式大脑没有返回需要确认的已有任务，无法继续。'
+          button.textContent = '重试本次提交'
           return
         }
         feedback.textContent = '显式大脑识别到已有任务变更，请先确认整理后的内容。'
@@ -108,7 +135,18 @@ function renderCreate() {
       feedback.textContent = '任务已确认，后台会继续分类、准入和执行。'
       window.location.href = './tasks.html'
     } catch (error) {
-      feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+      feedback.textContent = interactionId
+        ? '本次处理未完成。输入已保留并锁定，点击“重试本次提交”继续同一次请求。'
+        : '未能确认输入已接收。内容已保留，请重试提交。'
+      diagnosticText.textContent = [error.message, error.code, error.ownerId, error.nextAction, interactionId].filter(Boolean).join('\n')
+      diagnostics.hidden = false
+      directive.readOnly = Boolean(interactionId)
+      button.textContent = '重试本次提交'
+    } finally {
+      inFlight = false
+      button.disabled = false
+      restartPanel.hidden = !interactionId || !directive.readOnly
+      form.setAttribute('aria-busy', 'false')
     }
   })
   panel.append(form)

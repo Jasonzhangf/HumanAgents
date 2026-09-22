@@ -1302,6 +1302,99 @@ test('task clarification handler retries interpretation by typed state without r
   assert.deepEqual(calls, ['inspect', 'clarification', 'interpret', 'inspect', 'interpret']);
 });
 
+for (const clarification of [false, true]) test(`new task form blocks duplicate submissions and retries retained ${clarification ? 'clarification' : 'input'} after failure`, async () => {
+  const source = await readFile('docs/ui/task.js', 'utf8');
+  const createSource = source.slice(source.indexOf('function renderCreate()'), source.indexOf('async function renderInteraction'));
+  class Node {
+    children: Node[] = [];
+    textContent = '';
+    value = '';
+    disabled = false;
+    readOnly = false;
+    hidden = false;
+    href = '';
+    attrs: Record<string, string> = {};
+    handlers: Record<string, (event: { preventDefault(): void }) => Promise<void>> = {};
+    constructor(readonly tag: string, text = '') { this.textContent = text; }
+    append(...nodes: Node[]) { this.children.push(...nodes); }
+    setAttribute(key: string, value: string) { this.attrs[key] = value; }
+    addEventListener(type: string, handler: (event: { preventDefault(): void }) => Promise<void>) { this.handlers[type] = handler; }
+  }
+  const nodes: Node[] = [];
+  const element = (tag: string, text?: string) => { const node = new Node(tag, text); nodes.push(node); return node; };
+  const main = new Node('main');
+  let received = 0;
+  let advanced = 0;
+  let rejectInterpret!: (error: Error) => void;
+  const pending = new Promise<never>((_, reject) => { rejectInterpret = reject; });
+  const api = {
+    async receiveExplicitInput(input: { rawInput: string }) {
+      received += 1;
+      assert.equal(input.rawInput, '读取 README');
+      return { interactionId: 'interaction-ui-retry' };
+    },
+    async confirmExplicitRequirement(id: string) { assert.equal(id, 'interaction-ui-retry'); },
+  };
+  const advance = async (_api: unknown, input: { interactionId: string; clarificationAnswer: string }) => {
+    advanced += 1;
+    assert.equal(input.interactionId, 'interaction-ui-retry');
+    assert.equal(input.clarificationAnswer, '读取 README');
+    if (clarification && advanced === 1) return { state: 'awaiting-clarification', reply: '请补充范围' };
+    if (advanced === (clarification ? 2 : 1)) return pending;
+    if (advanced === (clarification ? 3 : 2)) return { state: 'matching', nextAction: '等待处理' };
+    return { state: 'awaiting-confirmation', draft: { proposedIntent: 'create', draftId: 'draft', inputRevision: 1 } };
+  };
+  const window = { location: { href: '' } };
+  new Function('element', 'main', 'api', 'advanceExplicitInteraction', 'window', `${createSource}; renderCreate()`)(element, main, api, advance, window);
+  const form = nodes.find(node => node.tag === 'form')!;
+  const textarea = nodes.find(node => node.tag === 'textarea')!;
+  const button = nodes.find(node => node.tag === 'button')!;
+  const feedback = nodes.find(node => node.attrs.role === 'status')!;
+  textarea.value = '读取 README';
+  const submit = () => form.handlers.submit!({ preventDefault() {} });
+  if (clarification) {
+    await submit();
+    assert.equal(textarea.value, '');
+    assert.equal(textarea.readOnly, false);
+    assert.equal(button.textContent, '回答并继续');
+    textarea.value = '读取 README';
+  }
+  const first = submit();
+  await Promise.resolve();
+  assert.equal(button.disabled, true);
+  assert.equal(textarea.readOnly, true);
+  await submit();
+  assert.equal(received, 1);
+  assert.equal(advanced, clarification ? 2 : 1);
+  rejectInterpret(new Error('requirement decision requires a typed intent'));
+  await first;
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, '重试本次提交');
+  assert.equal(textarea.value, '读取 README');
+  assert.equal(textarea.readOnly, true);
+  assert.equal(feedback.textContent.includes('重试'), true);
+  assert.equal(feedback.textContent.includes('typed intent'), false);
+  const diagnostics = nodes.find(node => node.tag === 'details')!;
+  assert.equal(diagnostics.hidden, false);
+  assert.equal(diagnostics.children.some(node => node.textContent.includes('typed intent')), true);
+  const restart = nodes.find(node => node.tag === 'a' && node.textContent === '重新填写新任务')!;
+  assert.equal(restart?.href, './task.html?task=new');
+  const restartPanel = nodes.find(node => node.children.includes(restart))!;
+  assert.equal(restartPanel.hidden, false);
+  assert.equal(restartPanel.children.some(node => node.textContent.includes('新请求')), true);
+  assert.equal(Object.keys(restart.handlers).length, 0);
+  assert.equal(received, 1);
+  await submit();
+  assert.equal(received, 1);
+  assert.equal(advanced, clarification ? 3 : 2);
+  assert.equal(button.textContent, '继续查看本次提交');
+  assert.equal(restartPanel.hidden, false);
+  assert.equal(textarea.readOnly, true);
+  await submit();
+  assert.equal(received, 1);
+  assert.equal(window.location.href, './tasks.html');
+});
+
 test('new task UI sends one natural-language input to the explicit brain', async () => {
   const source = await readFile('docs/ui/task.js', 'utf8');
   const flowSource = await readFile('docs/ui/explicit-interaction-flow.js', 'utf8');
