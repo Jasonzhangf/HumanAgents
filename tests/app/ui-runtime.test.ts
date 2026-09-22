@@ -199,12 +199,21 @@ class FailingInteractionClosurePort implements CheckpointClosurePort {
 class FailOnceProjectionJournal extends UiRuntimeJournal {
   failNextExplicitState = false;
   failNextOperationStarted = false;
+  failNextExecutionStarted = false;
   explicitStatesBeforeFailure = 0;
 
   override append(record: Parameters<UiRuntimeJournal['append']>[0]): void {
     if (this.failNextOperationStarted && record.kind === 'operation.started') {
       this.failNextOperationStarted = false;
       throw new Error('operation journal unavailable');
+    }
+    if (
+      this.failNextExecutionStarted
+      && record.kind === 'operation.event'
+      && record.event.kind === 'execution.started'
+    ) {
+      this.failNextExecutionStarted = false;
+      throw new Error('execution event journal unavailable');
     }
     if (this.failNextExplicitState && record.kind === 'explicit-brain.state') {
       if (this.explicitStatesBeforeFailure > 0) {
@@ -1722,6 +1731,68 @@ test('operation start journal failure retries from the durable dispatch intent w
   assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
+test('execution start event failure resumes the committed operation intent before acknowledging the requirement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-execution-start-failure-'));
+  const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:implicit-execution-start-failure',
+    rawInput: 'resume the committed operation intent before dispatch',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'resume the committed operation intent before dispatch',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create execution event journal retry work',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-execution-start-failure',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-execution-start-failure',
+  });
+
+  journal.failNextExecutionStarted = true;
+  service.startImplicitConsumer();
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
+  assert.equal(service.listTasks().counts.total, 1);
+  assert.equal(service.listTasks().counts.running, 0);
+  assert.equal(port.startPayloads.length, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+
+  service.markConnected();
+  await waitFor(() => assert.equal(port.startPayloads.length, 1));
+  await waitFor(() => {
+    const state = journal.replay()
+      .filter((record): record is Extract<ReturnType<UiRuntimeJournal['replay']>[number], { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
+      .at(-1)?.state;
+    assert.deepEqual(state?.inbox.pendingDraftIds, []);
+    assert.deepEqual(state?.dispatchLedger, []);
+  });
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+
+  const restarted = serviceFor(root, port);
+  await restarted.hydrate();
+  await assert.rejects(
+    () => restarted.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.inbox.empty',
+  );
+  assert.equal(port.startPayloads.length, 1);
+  assert.equal(restarted.listTasks().counts.total, 1);
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
 test('runtime restart hydrates dispatched state without starting the requirement twice', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-restart-'));
   const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
@@ -2616,6 +2687,22 @@ test('journal replay preserves the confirmed requirement orchestration mode', as
     input: 'confirmed requirement',
     orchestrated: true,
   });
+  journal.append({
+    kind: 'operation.event',
+    operationId,
+    event: {
+      eventId: `${operationId.value}-1`,
+      seq: 1,
+      occurredAt: '2026-09-20T00:00:00.001Z',
+      taskId: task.taskId,
+      operationId: operationId.value,
+      executionEpoch: 1,
+      kind: 'execution.started',
+      state: 'running',
+      summary: 'execution started',
+      evidenceRefs: [],
+    },
+  });
 
   const restarted = new RuntimeTaskCoordinator({
     organId,
@@ -3100,6 +3187,22 @@ test('hydration restores a business predecessor for an operation-scoped stopped 
       cycleCounter: 1,
       startedAt: createdAt,
       input: 'hydrate stopped predecessor',
+    }),
+    JSON.stringify({
+      kind: 'operation.event',
+      operationId,
+      event: {
+        eventId: `${operationId.value}-1`,
+        seq: 1,
+        occurredAt: createdAt,
+        taskId,
+        operationId: operationId.value,
+        executionEpoch: 1,
+        kind: 'execution.started',
+        state: 'running',
+        summary: 'execution started',
+        evidenceRefs: [],
+      },
     }),
   ].join('\n')}\n`, 'utf8');
 

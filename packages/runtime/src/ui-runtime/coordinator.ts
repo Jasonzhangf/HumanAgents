@@ -341,6 +341,8 @@ interface OperationRecord {
   readonly operationId: OperationId;
   readonly taskId: TaskId;
   readonly executionEpoch: number;
+  readonly input: string;
+  readonly orchestrated: boolean;
   readonly events: RuntimeTaskEvent[];
   seq: number;
 }
@@ -826,41 +828,81 @@ export class RuntimeTaskCoordinator {
         'bind execution, review, and merge orchestration ports before dispatching a confirmed requirement',
       );
     }
-    if (input.operationId && this.operations.has(input.operationId.value)) {
-      throw new RuntimeTaskControlError(
-        'operation.identity.conflict',
-        RUNTIME_OWNER,
-        'requested operation identity already belongs to an execution',
-        'inspect the durable requirement dispatch identity',
-      );
+    const expectedExecutionEpoch = (record.executionEpoch ?? 0) + 1;
+    let operation = input.operationId ? this.operations.get(input.operationId.value) : undefined;
+    let scope = operation ? this.scopes.get(operation.operationId.value) : undefined;
+    if (operation) {
+      if (
+        operation.events.length > 0
+        || operation.taskId.value !== taskId.value
+        || operation.executionEpoch !== expectedExecutionEpoch
+        || operation.input !== prompt
+        || operation.orchestrated !== (input.orchestrate === true)
+        || !scope
+      ) {
+        throw new RuntimeTaskControlError(
+          'operation.identity.conflict',
+          RUNTIME_OWNER,
+          'requested operation identity already belongs to an execution',
+          'inspect the durable requirement dispatch identity',
+        );
+      }
+    } else {
+      const operationCounter = this.operationCounter + 1;
+      const cycleCounter = this.cycleCounter + 1;
+      const operationId = input.operationId ?? id('operation', `ui-operation-${operationCounter}`);
+      const cycleId = id('cycle', `ui-cycle-${cycleCounter}`);
+      const executionEpoch = expectedExecutionEpoch;
+      scope = { organId: this.options.organId, taskId, cycleId, operationId };
+      const startedAt = this.now().toISOString();
+      operation = {
+        operationId,
+        taskId,
+        executionEpoch,
+        input: prompt,
+        orchestrated: input.orchestrate === true,
+        events: [],
+        seq: 0,
+      };
+      this.journal?.append({
+        kind: 'operation.started',
+        operationId,
+        taskId,
+        cycleId,
+        scope,
+        executionEpoch,
+        operationCounter,
+        cycleCounter,
+        startedAt,
+        input: prompt,
+        ...(operation.orchestrated ? { orchestrated: true } : {}),
+      });
+      this.operationCounter = operationCounter;
+      this.cycleCounter = cycleCounter;
+      this.operations.set(operationId.value, operation);
+      this.scopes.set(operationId.value, scope);
     }
-    const operationCounter = this.operationCounter + 1;
-    const cycleCounter = this.cycleCounter + 1;
-    const operationId = input.operationId ?? id('operation', `ui-operation-${operationCounter}`);
-    const cycleId = id('cycle', `ui-cycle-${cycleCounter}`);
-    const executionEpoch = (record.executionEpoch ?? 0) + 1;
-    const scope: ScopeRef = { organId: this.options.organId, taskId, cycleId, operationId };
-    const operation: OperationRecord = { operationId, taskId, executionEpoch, events: [], seq: 0 };
-    const startedAt = this.now().toISOString();
-    this.journal?.append({
-      kind: 'operation.started',
-      operationId,
-      taskId,
-      cycleId,
-      scope,
-      executionEpoch,
-      operationCounter,
-      cycleCounter,
-      startedAt,
-      input: prompt,
-      ...(input.orchestrate === true ? { orchestrated: true } : {}),
-    });
 
-    this.operationCounter = operationCounter;
-    this.cycleCounter = cycleCounter;
-    this.operations.set(operationId.value, operation);
-    this.scopes.set(operationId.value, scope);
-    this.activeExecutions.add(operationId.value);
+    const startedEvent: RuntimeTaskEvent = {
+      eventId: `${operation.operationId.value}-1`,
+      seq: 1,
+      occurredAt: this.now().toISOString(),
+      taskId,
+      operationId: operation.operationId.value,
+      executionEpoch: operation.executionEpoch,
+      kind: 'execution.started',
+      state: 'running',
+      summary: 'execution started',
+      evidenceRefs: [],
+    };
+    this.journal?.append({
+      kind: 'operation.event',
+      operationId: operation.operationId,
+      event: startedEvent,
+    });
+    operation.seq = startedEvent.seq;
+    operation.events.push(startedEvent);
+    this.activeExecutions.add(operation.operationId.value);
 
     record.running = true;
     record.stopping = false;
@@ -870,10 +912,10 @@ export class RuntimeTaskCoordinator {
     record.state = 'running';
     record.currentState = '运行中';
     record.currentNode = 'provider.execute';
-    record.input = prompt;
+    record.input = operation.input;
     record.output = '';
-    record.operationId = operationId;
-    record.executionEpoch = executionEpoch;
+    record.operationId = operation.operationId;
+    record.executionEpoch = operation.executionEpoch;
     record.checkpoint = undefined;
     record.checkpointSeq = 0;
     record.composition = undefined;
@@ -882,12 +924,13 @@ export class RuntimeTaskCoordinator {
     record.nextStep = '等待 Provider 事件';
     record.allowedActions = ['stop'];
     record.error = undefined;
-    record.orchestrated = input.orchestrate === true;
-    record.updatedAt = startedAt;
-    this.pushEvent(record, operation, 'execution.started', 'running', 'execution started', []);
+    record.orchestrated = operation.orchestrated;
+    record.events.push(startedEvent);
+    record.updatedAt = startedEvent.occurredAt;
+    this.listeners.emit(operation.operationId.value, startedEvent);
 
-    void this.runExecution(record, operation, scope, prompt);
-    return { operationId, executionEpoch };
+    void this.runExecution(record, operation, scope, operation.input);
+    return { operationId: operation.operationId, executionEpoch: operation.executionEpoch };
   }
 
   async stop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
@@ -1936,20 +1979,13 @@ export class RuntimeTaskCoordinator {
             operationId: record.operationId,
             taskId: record.taskId,
             executionEpoch: record.executionEpoch,
+            input: record.input,
+            orchestrated: record.orchestrated === true,
             events: [],
             seq: 0,
           };
           this.operations.set(record.operationId.value, operation);
           this.scopes.set(record.operationId.value, record.scope);
-          if (this.deletedTaskIds.has(record.taskId.value)) break;
-          const task = this.tasks.get(record.taskId.value);
-          if (task) {
-            task.operationId = record.operationId;
-            task.executionEpoch = record.executionEpoch;
-            task.input = record.input;
-            task.orchestrated = record.orchestrated === true;
-            task.updatedAt = record.startedAt;
-          }
           break;
         }
         case 'operation.event': {
@@ -1984,6 +2020,13 @@ export class RuntimeTaskCoordinator {
           operation.seq = Math.max(operation.seq, record.event.seq);
           task.events.push(record.event);
           task.updatedAt = record.event.occurredAt;
+          if (record.event.kind === 'execution.started') {
+            task.operationId = operation.operationId;
+            task.executionEpoch = operation.executionEpoch;
+            task.input = operation.input;
+            task.orchestrated = operation.orchestrated;
+            task.currentNode = 'provider.execute';
+          }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
           if (record.error) task.error = record.error;
           if (record.event.kind === 'provider.tool') task.currentNode = 'provider.tool';
