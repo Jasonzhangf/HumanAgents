@@ -233,6 +233,11 @@ export interface ExplicitBrainDispatchReceipt {
   readonly executionEpoch: number;
 }
 
+type ExplicitBrainDispatchAttempt =
+  | { readonly kind: 'dispatched'; readonly receipt: ExplicitBrainDispatchReceipt }
+  | { readonly kind: 'retired' }
+  | { readonly kind: 'empty' };
+
 interface DispatchLedgerEntry {
   readonly draftId: string;
   readonly taskId: TaskId;
@@ -1613,18 +1618,22 @@ export class UiRuntimeService {
   }
 
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
-    const dispatched = await this.dispatchNextExplicitRequirementInternal();
-    if (dispatched) return dispatched;
-    throw new UiRuntimeApiError(
-      'explicit-brain.inbox.empty',
-      RUNTIME_OWNER,
-      'requirement inbox has no pending entry',
-      'wait for a confirmed requirement',
-      409,
-    );
+    for (;;) {
+      const attempt = await this.dispatchNextExplicitRequirementInternal();
+      if (attempt.kind === 'dispatched') return attempt.receipt;
+      if (attempt.kind === 'empty') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.inbox.empty',
+          RUNTIME_OWNER,
+          'requirement inbox has no pending entry',
+          'wait for a confirmed requirement',
+          409,
+        );
+      }
+    }
   }
 
-  private async dispatchNextExplicitRequirementInternal(): Promise<ExplicitBrainDispatchReceipt | null> {
+  private async dispatchNextExplicitRequirementInternal(): Promise<ExplicitBrainDispatchAttempt> {
     let release!: () => void;
     const previous = this.dispatchTail;
     this.dispatchTail = new Promise<void>((resolve) => { release = resolve; });
@@ -1635,7 +1644,7 @@ export class UiRuntimeService {
     let retired = false;
     try {
       consumed = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
-      if (!consumed) return null;
+      if (!consumed) return { kind: 'empty' };
       this.implicitConsumerRequirement = {
         requirementId: consumed.requirementId,
         draftId: consumed.draftId,
@@ -1665,7 +1674,7 @@ export class UiRuntimeService {
           'inspect the retired requirement and resubmit against a current task',
           409,
         );
-        return null;
+        return { kind: 'retired' };
       }
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
       if (existingDispatch) dispatchEntry = existingDispatch;
@@ -1679,7 +1688,10 @@ export class UiRuntimeService {
         this.dispatchLedger.set(consumed.draftId, dispatchEntry);
         this.persistExplicitBrainState();
       }
-      return await this.completePreparedDispatch(consumed, dispatchEntry);
+      return {
+        kind: 'dispatched',
+        receipt: await this.completePreparedDispatch(consumed, dispatchEntry),
+      };
     } catch (error) {
       if (retired && inboxBeforeRetire) {
         this.requirementInbox.restoreState(inboxBeforeRetire);
@@ -1794,8 +1806,8 @@ export class UiRuntimeService {
   private async consumePendingRequirements(): Promise<void> {
     while (this.implicitConsumerEnabled) {
       try {
-        const dispatched = await this.dispatchNextExplicitRequirementInternal();
-        if (!dispatched) {
+        const attempt = await this.dispatchNextExplicitRequirementInternal();
+        if (attempt.kind === 'empty') {
           this.implicitConsumerIssue = undefined;
           this.implicitConsumerRequirement = undefined;
           return;
