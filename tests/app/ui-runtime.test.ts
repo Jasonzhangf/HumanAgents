@@ -198,11 +198,16 @@ class FailingInteractionClosurePort implements CheckpointClosurePort {
 
 class FailOnceProjectionJournal extends UiRuntimeJournal {
   failNextExplicitState = false;
+  failNextTaskCreated = false;
   failNextOperationStarted = false;
   failNextExecutionStarted = false;
   explicitStatesBeforeFailure = 0;
 
   override append(record: Parameters<UiRuntimeJournal['append']>[0]): void {
+    if (this.failNextTaskCreated && record.kind === 'task.created') {
+      this.failNextTaskCreated = false;
+      throw new Error('task journal unavailable');
+    }
     if (this.failNextOperationStarted && record.kind === 'operation.started') {
       this.failNextOperationStarted = false;
       throw new Error('operation journal unavailable');
@@ -1665,6 +1670,68 @@ test('implicit dispatch intent survives a persistence failure and restart withou
   });
   assert.equal(port.startPayloads.length, 1);
   assert.equal(restarted.status().implicitScheduling, undefined);
+  assert.equal(restarted.listTasks().counts.total, 1);
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
+test('task creation journal failure retries without publishing a ghost task and replays after restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-task-create-failure-'));
+  const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:implicit-task-create-failure',
+    rawInput: 'retry after the task creation journal recovers',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'retry after the task creation journal recovers',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create task journal retry work',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-task-create-failure',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-task-create-failure',
+  });
+
+  journal.failNextTaskCreated = true;
+  service.startImplicitConsumer();
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal(port.startPayloads.length, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+
+  service.markConnected();
+  await waitFor(() => assert.equal(port.startPayloads.length, 1));
+  await waitFor(() => {
+    const state = journal.replay()
+      .filter((record): record is Extract<ReturnType<UiRuntimeJournal['replay']>[number], { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
+      .at(-1)?.state;
+    assert.deepEqual(state?.inbox.pendingDraftIds, []);
+    assert.deepEqual(state?.dispatchLedger, []);
+  });
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+  assert.equal(journal.replay().filter((record) => record.kind === 'task.created').length, 1);
+
+  const restarted = serviceFor(root, port);
+  await restarted.hydrate();
+  await assert.rejects(
+    () => restarted.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.inbox.empty',
+  );
+  assert.equal(port.startPayloads.length, 1);
   assert.equal(restarted.listTasks().counts.total, 1);
   assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });

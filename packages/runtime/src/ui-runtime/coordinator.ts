@@ -726,8 +726,8 @@ export class RuntimeTaskCoordinator {
         return this.snapshot(existing);
       }
     }
-    this.taskCounter += 1;
-    const taskId = input.taskId ?? id('task', `ui-task-${this.taskIdPrefix}-${this.taskCounter}`);
+    const taskCounter = this.taskCounter + 1;
+    const taskId = input.taskId ?? id('task', `ui-task-${this.taskIdPrefix}-${taskCounter}`);
     const timestamp = this.now().toISOString();
     const record: TaskRecord = {
       taskId,
@@ -749,7 +749,6 @@ export class RuntimeTaskCoordinator {
       running: false,
       stopping: false,
     };
-    this.tasks.set(taskId.value, record);
     this.journal?.append({
       kind: 'task.created',
       taskId,
@@ -757,8 +756,10 @@ export class RuntimeTaskCoordinator {
       directive: record.directive,
       directiveRevision: record.directiveRevision,
       createdAt: record.createdAt,
-      taskCounter: this.taskCounter,
+      taskCounter,
     });
+    this.taskCounter = taskCounter;
+    this.tasks.set(taskId.value, record);
     return this.snapshot(record);
   }
 
