@@ -57,9 +57,7 @@ function renderCreate() {
     try {
       const rawInput = directive.value.trim()
       feedback.textContent = '正在交给显式大脑整理…'
-      if (interactionId) {
-        await api.answerExplicitClarification(interactionId, rawInput)
-      } else {
+      if (!interactionId) {
         const received = await api.receiveExplicitInput({
           sourceRef: 'ui:new-task',
           rawInput,
@@ -67,7 +65,13 @@ function renderCreate() {
         })
         interactionId = received.interactionId
       }
-      const snapshot = await api.interpretExplicitInput(interactionId)
+      let snapshot = await api.inspectExplicitInteraction(interactionId)
+      if (snapshot.state === 'awaiting-clarification') {
+        snapshot = await api.answerExplicitClarification(interactionId, rawInput)
+      }
+      if (snapshot.state === 'received' || snapshot.state === 'matching') {
+        snapshot = await api.interpretExplicitInput(interactionId)
+      }
       if (snapshot.state === 'status-only') {
         feedback.textContent = snapshot.reply || snapshot.nextAction
         interactionId = undefined

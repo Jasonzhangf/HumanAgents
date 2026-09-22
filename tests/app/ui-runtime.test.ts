@@ -1680,6 +1680,87 @@ test('explicit brain rejects create interpretations that also select an existing
   );
 });
 
+test('explicit brain retries matching with the same interaction after interpretation failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-interpret-retry-'));
+  const attempts = new Map<string, number>();
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        const attempt = (attempts.get(input.interactionId) ?? 0) + 1;
+        attempts.set(input.interactionId, attempt);
+        if (input.rawInput === '首次解释失败') {
+          if (attempt === 1) throw new Error('temporary provider failure');
+          return {
+            kind: 'requirement',
+            normalizedInput: '首次解释失败后重试',
+            knownFacts: [],
+            intent: 'create',
+            proposal: 'create:首次解释失败后重试',
+            decisionRefs: ['decision:test-interpret-retry'],
+          };
+        }
+        if (attempt === 1) return {
+          kind: 'clarification',
+          normalizedInput: input.rawInput,
+          knownFacts: [],
+          question: '请补充范围',
+          decisionRefs: ['decision:test-retry-clarification'],
+        };
+        if (attempt === 2) throw new Error('temporary provider failure after clarification');
+        return {
+          kind: 'requirement',
+          normalizedInput: '澄清后重试',
+          knownFacts: ['范围已补充'],
+          intent: 'create',
+          proposal: 'create:澄清后重试',
+          decisionRefs: ['decision:test-after-clarification-retry'],
+        };
+      },
+    },
+  );
+
+  const initialRetryId = await service.receiveExplicitInput({
+    sourceRef: 'ui:new-task',
+    rawInput: '首次解释失败',
+    channel: 'business',
+  });
+  await assert.rejects(() => service.interpretExplicitInput({ interactionId: initialRetryId }), /temporary provider failure/);
+  assert.equal((await service.inspectExplicitInteraction(initialRetryId)).state, 'matching');
+  const initialRetry = await service.interpretExplicitInput({ interactionId: initialRetryId });
+  assert.equal(initialRetry.interactionId, initialRetryId);
+  assert.equal(initialRetry.state, 'awaiting-confirmation');
+
+  const clarificationRetryId = await service.receiveExplicitInput({
+    sourceRef: 'ui:new-task',
+    rawInput: '先澄清再失败',
+    channel: 'business',
+  });
+  assert.equal(
+    (await service.interpretExplicitInput({ interactionId: clarificationRetryId })).state,
+    'awaiting-clarification',
+  );
+  assert.equal(
+    (await service.answerExplicitClarification({ interactionId: clarificationRetryId, answer: '只处理验收范围' })).state,
+    'matching',
+  );
+  await assert.rejects(
+    () => service.interpretExplicitInput({ interactionId: clarificationRetryId }),
+    /temporary provider failure after clarification/,
+  );
+  assert.equal((await service.inspectExplicitInteraction(clarificationRetryId)).state, 'matching');
+  const clarificationRetry = await service.interpretExplicitInput({ interactionId: clarificationRetryId });
+  assert.equal(clarificationRetry.interactionId, clarificationRetryId);
+  assert.equal(clarificationRetry.state, 'awaiting-confirmation');
+});
+
 test('explicit brain accepts a clarification answer over HTTP and re-enters interpretation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-clarification-http-'));
   let interpretationCount = 0;

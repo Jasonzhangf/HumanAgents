@@ -1056,11 +1056,16 @@ test('task detail UI consumes typed task-detail projection fields', async () => 
 
 test('new task UI sends one natural-language input to the explicit brain', async () => {
   const source = await readFile('docs/ui/task.js', 'utf8');
+  const createSource = source.slice(source.indexOf('function renderCreate()'), source.indexOf('async function renderInteraction'));
   assert.equal(source.includes('title.required'), false);
   assert.equal(source.includes('title.value'), false);
   assert.equal(source.includes('api.createTask'), false);
   assert.equal(source.includes('api.receiveExplicitInput'), true);
   assert.equal(source.includes('api.answerExplicitClarification'), true);
+  assert.equal(createSource.includes('let snapshot = await api.inspectExplicitInteraction(interactionId)'), true);
+  assert.equal(createSource.includes("snapshot.state === 'awaiting-clarification'"), true);
+  assert.ok(createSource.indexOf('api.inspectExplicitInteraction(interactionId)') < createSource.indexOf('api.answerExplicitClarification(interactionId, rawInput)'));
+  assert.equal(createSource.includes('if (interactionId) {\n        await api.answerExplicitClarification'), false);
   assert.equal(source.includes('提交给显式大脑'), true);
   assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
   assert.equal(source.includes('确认并提交后台'), false);
