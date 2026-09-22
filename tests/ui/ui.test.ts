@@ -496,6 +496,13 @@ test('observation projection supports recursion, drawer details, return, and rea
           owner: '任务编排',
           ownerAgentRole: 'orchestration',
           iteration: 1,
+          activity: [{ activityRef: 'activity:queue-execution', summary: '执行队列等待条件检查' }],
+          toolSteps: [{
+            stepId: 'step-queue-1',
+            name: 'humanagent.fake-provider',
+            status: 'succeeded',
+            returned: 'tool: fake://tool/queue-1',
+          }],
           inputRefs: ['requirement:184'],
           outputRefs: [],
           evidenceRefs: [evidence('ev-queue')],
@@ -528,6 +535,25 @@ test('observation projection supports recursion, drawer details, return, and rea
   assert.deepEqual(withDrawer.selectedNode?.inputs[0].ref, 'requirement:184');
   assert.deepEqual(withDrawer.selectedNode?.evidenceRefs[0].locator, 'evidence:ev-queue');
   assert.deepEqual(withDrawer.selectedNode?.feedback, []);
+  // The drawer panes read these typed fields; the detail projection must carry them from the same
+  // source `toPipelineNode` reads, never a second conversion of its own.
+  assert.deepEqual(withDrawer.selectedNode?.owner, '任务编排');
+  assert.deepEqual(withDrawer.selectedNode?.ownerAgentRole, 'orchestration');
+  assert.deepEqual(withDrawer.selectedNode?.roleDisplay, '任务编排');
+  assert.deepEqual(withDrawer.selectedNode?.iteration, 1);
+  assert.deepEqual(withDrawer.selectedNode?.activity, [{
+    activityRef: 'activity:queue-execution',
+    summary: '执行队列等待条件检查',
+    occurredAt: undefined,
+  }]);
+  assert.deepEqual(withDrawer.selectedNode?.toolSteps, [{
+    stepId: 'step-queue-1',
+    name: 'humanagent.fake-provider',
+    status: 'succeeded',
+    statusDisplay: '已返回',
+    returned: 'tool: fake://tool/queue-1',
+    occurredAt: undefined,
+  }]);
 
   const back = projectPipelineObservation(returnObservationScope(enteredInput));
   assert.deepEqual(back.scope.scopeRef, 'root');
@@ -630,6 +656,76 @@ test('observation drawer maps assignment, feedback, and reconcile while staying 
 function rootInput(source: typeof readySource, scopes: Record<string, ObservationScopeSource>, stack: readonly string[]): Parameters<typeof projectPipelineObservation>[0] {
   return { source, scopes, scopeStack: stack };
 }
+
+test('observation node detail carries the typed tool steps and owner role the drawer panes read', () => {
+  const scopes: Record<string, ObservationScopeSource> = {
+    root: {
+      scopeRef: 'root',
+      title: '任务处理流水',
+      summary: '两个节点：一个有工具调用，一个没有',
+      projectionSeq: 'seq-186',
+      agents: [{ agentId: '执行', role: 'execution', stateDisplay: '运行中', iteration: 2 }],
+      nodes: [
+        {
+          nodeId: 'pipeline.execute',
+          title: '执行流水线',
+          kind: 'execution',
+          state: 'running',
+          summary: '正在调用 provider 工具',
+          owner: '执行',
+          ownerAgentRole: 'execution',
+          inputRefs: [],
+          outputRefs: [],
+          evidenceRefs: [evidence('ev-execute-detail')],
+          activity: [{ activityRef: 'activity:execute-1', summary: 'provider 工具调用已返回' }],
+          toolSteps: [{
+            stepId: 'step-execute-1',
+            name: 'humanagent.fake-provider',
+            status: 'succeeded',
+            returned: 'tool: fake://tool/1',
+          }],
+        },
+        {
+          nodeId: 'sequential.queue',
+          title: '串行队列',
+          kind: 'orchestration',
+          state: 'created',
+          summary: '运行时尚未投影「串行队列」的事实。',
+          owner: '执行',
+          ownerAgentRole: 'execution',
+          iteration: 2,
+          inputRefs: [],
+          outputRefs: [],
+          evidenceRefs: [],
+        },
+      ],
+    },
+  };
+  const input = rootInput(readySource, scopes, ['root']);
+
+  const withTools = projectPipelineObservation(openObservationDrawer(input, 'pipeline.execute')).selectedNode;
+  if (!withTools) throw new Error('expected pipeline.execute drawer detail');
+  assert.equal(withTools.owner, '执行');
+  assert.equal(withTools.ownerAgentRole, 'execution');
+  assert.equal(withTools.roleDisplay, '执行');
+  assert.equal(withTools.iteration, 2);
+  assert.equal(withTools.activity.length, 1);
+  assert.equal(withTools.activity[0]?.activityRef, 'activity:execute-1');
+  assert.equal(withTools.toolSteps.length, 1);
+  assert.equal(withTools.toolSteps[0]?.stepId, 'step-execute-1');
+  assert.equal(withTools.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.equal(withTools.toolSteps[0]?.status, 'succeeded');
+  assert.equal(withTools.toolSteps[0]?.statusDisplay, '已返回');
+  assert.equal(withTools.toolSteps[0]?.returned, 'tool: fake://tool/1');
+
+  // A node the runtime reports no tool call for keeps the explicit empty history: the drawer must
+  // never fabricate a step to fill the pane.
+  const withoutTools = projectPipelineObservation(openObservationDrawer(input, 'sequential.queue')).selectedNode;
+  if (!withoutTools) throw new Error('expected sequential.queue drawer detail');
+  assert.deepEqual(withoutTools.toolSteps, []);
+  assert.deepEqual(withoutTools.activity, []);
+  assert.equal(withoutTools.ownerAgentRole, 'execution');
+});
 
 test('memory interaction surface keeps candidates behind explicit review', () => {
   const candidate: SkillCandidateSource = {

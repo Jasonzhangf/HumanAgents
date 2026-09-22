@@ -363,12 +363,18 @@ export interface ObservationNodeDetailProjection {
   readonly title: string;
   readonly kindDisplay: string;
   readonly stateDisplay: string;
+  /** Agent id that owns the node. The role label the drawer shows is `ownerAgentRole`/`roleDisplay`. */
   readonly owner: string;
+  readonly ownerAgentRole: AgentRoleDisplay;
+  readonly roleDisplay: string;
+  readonly iteration: number;
   readonly updatedAt?: string;
   readonly summary: string;
   readonly inputs: readonly NodePreviewProjection[];
   readonly outputs: readonly NodePreviewProjection[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly activity: readonly PipelineNodeActivityProjection[];
+  readonly toolSteps: readonly PipelineNodeToolStepProjection[];
   readonly childScopeRef?: string;
   readonly assignment?: AssignmentProjection;
   readonly feedback: readonly AgentFeedbackProjection[];

@@ -743,18 +743,42 @@ function toObservationNodeView(source: ObservationNodeSource) {
   };
 }
 
-function toObservationDetail(source: ObservationNodeSource): ObservationNodeDetailProjection {
+function requireNodeFrame(
+  source: ObservationNodeSource,
+  frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>,
+): { readonly frame: ObservationAgentFrameSource; readonly role: AgentRoleDisplay } {
+  const frame = frameByAgentId.get(source.owner);
+  if (!frame) throw new UiProjectionError(`node ${source.nodeId} owner ${source.owner} has no declared agent frame`);
+  const role = requireAgentRole(frame.role);
+  if (source.ownerAgentRole !== undefined && source.ownerAgentRole !== role) {
+    throw new UiProjectionError(
+      `node ${source.nodeId} declares role ${source.ownerAgentRole} but owner ${source.owner} is ${role}`,
+    );
+  }
+  return { frame, role };
+}
+
+function toObservationDetail(
+  source: ObservationNodeSource,
+  frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>,
+): ObservationNodeDetailProjection {
+  const { frame, role } = requireNodeFrame(source, frameByAgentId);
   return {
     nodeId: source.nodeId,
     title: source.title,
     kindDisplay: nodeKindLabel(source.kind),
     stateDisplay: stateLabel(source.state),
     owner: source.owner,
+    ownerAgentRole: role,
+    roleDisplay: AGENT_ROLE_LABELS[role],
+    iteration: source.iteration ?? frame.iteration,
     updatedAt: source.updatedAt,
     summary: source.summary,
     inputs: source.inputRefs.map((ref) => ({ ref, label: ref })),
     outputs: source.outputRefs.map((ref) => ({ ref, label: ref })),
     evidenceRefs: source.evidenceRefs,
+    activity: (source.activity ?? []).map(toPipelineNodeActivity),
+    toolSteps: (source.toolSteps ?? []).map(toPipelineNodeToolStep),
     childScopeRef: source.childScopeRef,
     assignment: source.assignment ? toAssignment(source.assignment) : undefined,
     feedback: (source.feedback ?? []).map(toAgentFeedback),
@@ -824,14 +848,7 @@ function toPipelineNodeActivity(source: ObservationNodeActivitySource): Pipeline
 }
 
 function toPipelineNode(source: ObservationNodeSource, frameByAgentId: ReadonlyMap<string, ObservationAgentFrameSource>): PipelineNodeProjection {
-  const frame = frameByAgentId.get(source.owner);
-  if (!frame) throw new UiProjectionError(`node ${source.nodeId} owner ${source.owner} has no declared agent frame`);
-  const role = requireAgentRole(frame.role);
-  if (source.ownerAgentRole !== undefined && source.ownerAgentRole !== role) {
-    throw new UiProjectionError(
-      `node ${source.nodeId} declares role ${source.ownerAgentRole} but owner ${source.owner} is ${role}`,
-    );
-  }
+  const { frame, role } = requireNodeFrame(source, frameByAgentId);
   // Registry pipeline nodes carry their `PIPELINE_ROWS` row; provider sub-event nodes of a child
   // scope are not registry nodes and stay rowless instead of being given a fabricated position.
   const row = (PIPELINE_ROWS as Readonly<Record<string, PipelineNodeRow | undefined>>)[source.nodeId];
@@ -934,7 +951,7 @@ export function projectPipelineObservation(input: PipelineObservationProjectionI
   if (input.selectedNodeId) {
     const node = scope.nodes.find((candidate) => candidate.nodeId === input.selectedNodeId);
     if (!node) throw new UiProjectionError(`unknown observation node ${input.selectedNodeId}`);
-    selectedNode = toObservationDetail(node);
+    selectedNode = toObservationDetail(node, frameByAgentId);
   }
 
   return {
