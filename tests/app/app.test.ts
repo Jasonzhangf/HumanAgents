@@ -837,6 +837,7 @@ class MemoryCurationReplayPort implements ExecutionRuntimePort {
   readonly kind = 'humanagent.execution-runtime-port';
   readonly submissions: string[] = [];
   readonly startedRounds: string[] = [];
+  readonly startInputs: string[] = [];
   starts = 0;
   private readonly payloads = new Map<string, Record<string, unknown>>();
   private readonly identities = new Map<string, ReturnType<MemoryCurationReplayPort['identity']>>();
@@ -866,6 +867,7 @@ class MemoryCurationReplayPort implements ExecutionRuntimePort {
   async start(input: import('../../packages/contracts/src/index.js').ProviderStartInput): Promise<ProviderStartReceipt> {
     this.starts += 1;
     this.startedRounds.push(input.runtimeId);
+    this.startInputs.push(JSON.stringify({ runtimeId: input.runtimeId, taskId: input.taskId.value, operationId: input.operationId.value, epoch: input.executionEpoch, evidence: input.evidenceRefs.length }));
     this.payloads.set(input.runtimeId, structuredClone(input.payload) as Record<string, unknown>);
     return { ...this.boundIdentity(input), startedAt: '2026-01-01T00:00:00.000Z', evidenceRefs: [] };
   }
@@ -4849,6 +4851,107 @@ test('rcc memory-role driver parses provider output as a MemoryCurationResult an
   assert.deepEqual(port.startedRounds, [`memory-analysis:${operationId.value}`]);
   assert.deepEqual(port.submissions, []);
   await rm(root, { recursive: true, force: true });
+});
+
+test('rcc memory-role driver consumes a real curation end to end and exposes model analysis', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-rcc-consume-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# RCC memory consume\n', 'utf8');
+  const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId: 'session-memory-rcc-consume' });
+  const { paths } = runtime;
+  await appendFile(join(controlRoot, 'config.toml'), [
+    '',
+    '[[agents]]',
+    'agentId = "memory-rcc"',
+    'roleId = "memory"',
+    'templateRef = "builtin/memory@1.0.0"',
+    'driverRef = "rcc"',
+    'skills = ["history-search", "novelty-review", "recurrence-review"]',
+    'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+    'permissions = ["memory.read", "memory.propose"]',
+    'memoryScopes = ["task", "organ", "approved-global"]',
+    'resourceClass = "background"',
+    '',
+  ].join('\n'), 'utf8');
+  const reloaded = await loadConfiguration(paths);
+  const port = new MemoryCurationReplayPort(fakeExecutionBinding());
+  const driverFor = memoryDriverFactory({
+    paths,
+    configuration: reloaded,
+    workspace: paths.workspaceCwd,
+    rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/rcc-consume'] },
+  })!;
+  const taskId = id('task', 'session-memory-rcc-consume');
+  const memory = await composeMemoryRuntime({
+    paths,
+    configuration: reloaded,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor,
+    binding: {
+      bindingRef: 'memory-binding:rcc-consume',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', `agent-${reloaded.effective.project?.defaultAgent ?? reloaded.agentRoster[0]!.agentId}`),
+        taskId,
+      },
+      taskId,
+      mainAgentId: 'memory-rcc-consume-main',
+      actor: { actorId: 'memory-agent', roleId: 'memory', permissions: ['memory.read', 'memory.propose'], projectKey: paths.projectKey },
+    },
+  });
+  try {
+    await mkdir(join(paths.controlRoot, 'memory-audit'), { recursive: true });
+    await writeFile(join(paths.controlRoot, 'memory-audit', 'project-memory-audit.md'), '# Audit\n', 'utf8');
+    await new SessionStore(paths).append(
+      'session-memory-rcc-consume',
+      { type: 'session.state', state: 'running' },
+      runtime.lock,
+    );
+    const result = await runAgentOperation({
+      paths,
+      configuration: reloaded,
+      workspace,
+      sessionId: 'session-memory-rcc-consume',
+      plan: 'default',
+      prompt: 'consume rcc memory curation',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    const consumed = await memory.consume();
+    assert.equal(consumed.retries.length, 0);
+    assert.equal(consumed.committed.length, 1);
+    assert.equal(consumed.committed[0]?.disposition, 'applied');
+    const state = await memory.reviewState();
+    assert.equal(state.analysis.mode, 'model');
+    assert.equal(state.analysis.state, 'succeeded');
+    assert.equal(state.analysis.operationRef, `memory-analysis:memory-binding:rcc-consume:checkpoint-${result.checkpoint.id.value}`);
+    assert.equal(state.autoUpdate, false);
+    assert.equal(state.candidates.length, 1);
+    // The memory owner assigns the durable candidate identity; the provider's
+    // candidateId is not authoritative for the report.
+    assert.match(state.candidates[0]?.candidateId ?? '', /^memory-analysis:/);
+    assert.equal(state.candidates[0]?.state, 'candidate');
+    assert.equal(state.candidates[0]?.namespace, 'project');
+    assert.equal(state.candidates[0]?.projectKey, paths.projectKey);
+    // The model round ran on the admitted memory-analysis identity, never on the
+    // main operation's runtime/operation identity.
+    assert.equal(port.startedRounds.length, 1);
+    assert.match(port.startedRounds[0]!, /^memory-analysis:memory-analysis-/);
+    await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+  } finally {
+    try {
+      await runtime.lock.release();
+    } catch {
+      // The successful settlement path already released the session lock.
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('CLI serve binds the configured memory-role driver into its memory runtime', async () => {
