@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { RuntimePaths } from '../../config/src/index.js';
+import type { AgentDriverRef, RuntimePaths } from '../../config/src/index.js';
 import type { OperationId, ScopeRef, TaskId } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 
@@ -16,7 +16,7 @@ export interface RunManifest {
   readonly schemaVersion: 1;
   readonly sessionId: string;
   readonly agentId: string;
-  readonly driverRef: 'fake' | 'dsh';
+  readonly driverRef: AgentDriverRef;
   readonly runtimeId: string;
   readonly taskId: TaskId;
   readonly operationId: OperationId;
@@ -55,7 +55,7 @@ function validateRunManifest(value: unknown, expectedSessionId: string): RunMani
   if (value.schemaVersion !== 1) return corrupt('run manifest schema version is invalid');
   if (value.sessionId !== expectedSessionId) return corrupt('run manifest session identity does not match its file');
   if (typeof value.agentId !== 'string' || !ID_PATTERN.test(value.agentId)) return corrupt('run manifest agent identity is invalid');
-  if (value.driverRef !== 'fake' && value.driverRef !== 'dsh') return corrupt('run manifest driver is invalid');
+  if (value.driverRef !== 'fake' && value.driverRef !== 'dsh' && value.driverRef !== 'rcc') return corrupt('run manifest driver is invalid');
   if (typeof value.runtimeId !== 'string' || !ID_PATTERN.test(value.runtimeId)) {
     return corrupt('run manifest runtime identity is invalid');
   }

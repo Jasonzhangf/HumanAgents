@@ -185,6 +185,7 @@ export interface MemoryCompositionInput {
     readonly operationId: import('../../contracts/src/index.js').OperationId;
     readonly executionEpoch: number;
     readonly assignmentId: string;
+    readonly scope: CanonicalMemoryScope;
   }) => AgentDriver;
   readonly externalOperations?: EventExternalOperationPort & {
     commitExternalOperation?(operation: EventExternalOperation): Promise<unknown>;

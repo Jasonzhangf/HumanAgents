@@ -16,6 +16,7 @@ import {
   type MemorySubmission,
   type ProjectSourceUpdateProposal,
 } from '../../../packages/contracts/src/index.js';
+import { assertBusinessPayload } from '../../../packages/contracts/src/index.js';
 import type { EventRecord } from '../../../packages/runtime/src/events/index.js';
 import {
   MemoryAgent,
@@ -38,6 +39,15 @@ const actor: MemoryActorContext = {
   permissions: ['memory.read', 'memory.propose'],
   projectKey: 'project-a',
 };
+
+/**
+ * The provider round never sees control identity in the business payload, so a
+ * curation cannot echo an operation id. The agent derives it from the admitted
+ * `memory-analysis:<operationId>` assignment identity instead.
+ */
+function admittedOperationFromAssignment(assignmentId: string) {
+  return { scope: 'operation' as const, value: assignmentId.slice('memory-analysis:'.length) };
+}
 
 const sessionEvidence: MemorySessionEvidence = {
   sourceRef: 'session://project-a/task-a/session-a@abc',
@@ -190,10 +200,7 @@ function providerDriver(input: {
         assignmentId: request.assignmentId,
         payload: {
           curation: {
-            operationId: {
-              scope: 'operation',
-              value: request.payload.operationId as string,
-            },
+            operationId: admittedOperationFromAssignment(request.assignmentId),
             auditPrompt: request.payload.prompt,
             sourceRefs: request.payload.sourceRefs,
             outcome: input.outcome ?? 'candidate',
@@ -247,7 +254,7 @@ function streamingProviderDriver(input: {
     async *observe(request) {
       input.events.push(`observe:${request.runtimeId}`);
       const payload = input.summary ?? JSON.stringify({
-        operationId: { scope: 'operation', value: 'analysis-a' },
+        operationId: admittedOperationFromAssignment(request.runtimeId),
         auditPrompt: {
           promptRef: 'project-memory-audit',
           canonicalRef: 'prompt://project-a/project-memory-audit',
@@ -1403,6 +1410,49 @@ test('memory agent rejects simultaneous static and per-operation drivers', () =>
     auditPrompts: { readPrompt: async () => promptSource() },
     projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
   }), /either driver or driverFor/);
+});
+
+test('memory analysis business payload carries no control key and binds identity from the admission', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  let captured: unknown;
+  const driver = providerDriver({ events });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor: (input) => {
+      // The control plane carries the operation identity; the payload must not.
+      assert.equal(input.assignmentId, 'memory-analysis:analysis-a');
+      return {
+        ...driver,
+        submit: async (request) => {
+          captured = request.payload;
+          assertBusinessPayload(request.payload as never);
+          return await driver.submit(request);
+        },
+      };
+    },
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  const payload = captured as Record<string, unknown>;
+  assert.equal('operationId' in payload, false);
+  for (const key of ['retry', 'degrade', 'steer', 'continuation', 'health', 'debug', 'checkpoint', 'executionEpoch', 'operationId']) {
+    assert.equal(key in payload, false, `control key leaked into the memory analysis payload: ${key}`);
+  }
+  // The identity still binds: the curation was produced without echoing an
+  // operation id and the result is attributed to the admitted operation.
+  assert.equal(result.value.curation.operationId.value, 'analysis-a');
+  assert.equal(ports.submissions.length, 1);
+  assert.equal(ports.submissions[0]?.operationId.value, 'analysis-a');
 });
 
 test('memory agent rejects a provider curation for another operation', async () => {

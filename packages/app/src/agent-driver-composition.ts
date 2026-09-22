@@ -13,11 +13,16 @@ import {
 } from '../../adapters/dsh/src/index.js';
 import type { AgentConfig, DshExecutionConfig, RuntimePaths } from '../../config/src/index.js';
 import { FakeAgentDriver } from '../../adapters/testing/src/index.js';
+import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
 import {
   id,
   type AgentDriver,
   type ExecutionBinding,
+  type ExecutionRuntimePort,
+  type OperationId,
   type ProviderBinding,
+  type ScopeRef,
+  type TaskId,
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 
@@ -278,17 +283,60 @@ export interface DshCompositionInput {
   readonly agent: AgentConfig;
   readonly paths: RuntimePaths;
   readonly dsh?: DshExecutionConfig;
+  /**
+   * Serve-owned RCC port binding. It is required for an `rcc` agent so the
+   * provider stream of a memory role cannot borrow the main operation's
+   * execution identity or silently fall back to another driver.
+   */
+  readonly rcc?: RccCompositionInput;
   readonly runtimeId: string;
   readonly workspace: string;
 }
 
+export interface RccCompositionInput {
+  readonly port: ExecutionRuntimePort;
+  readonly binding: ProviderBinding;
+  readonly scope: ScopeRef;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly assignmentId: string;
+  readonly inputRefs: readonly string[];
+}
+
 /**
  * Explicitly composes the configured driver. There is no fallback: an unknown
- * driverRef or a DSH agent without DSH execution config fails closed.
+ * driverRef, a DSH agent without DSH execution config, or an RCC agent without
+ * a serve-owned RCC port fails closed.
  */
 export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDriver {
   if (input.agent.driverRef === 'fake') {
     return { driver: new FakeAgentDriver() };
+  }
+  if (input.agent.driverRef === 'rcc') {
+    const config = input.rcc;
+    if (!config) {
+      throw new AppLifecycleError(
+        'rcc-config-missing',
+        'agent uses the rcc driver but no serve RCC port is bound to this composition',
+        'compose the agent from the serve RCC port and provider binding before running it',
+        'app-agent-driver-composition',
+      );
+    }
+    return {
+      driver: new ProviderAgentDriver({
+        port: config.port,
+        binding: config.binding,
+        runtimeId: input.runtimeId,
+        taskId: config.taskId,
+        operationId: config.operationId,
+        executionEpoch: config.executionEpoch,
+        assignmentId: config.assignmentId,
+        scope: config.scope,
+        inputRefs: config.inputRefs,
+        ownerId: 'humanagent.app.agent-driver-composition',
+      }),
+    };
   }
   if (input.agent.driverRef !== 'dsh') {
     throw new AppLifecycleError(

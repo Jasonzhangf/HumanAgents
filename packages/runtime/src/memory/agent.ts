@@ -189,6 +189,8 @@ export interface MemoryAgentOptions {
     readonly operationId: OperationId;
     readonly executionEpoch: number;
     readonly assignmentId: string;
+    /** Admitted analysis scope; an external provider driver binds its own identity from it. */
+    readonly scope: CanonicalMemoryScope;
   }) => AgentDriver;
   readonly sessions: MemorySessionEvidenceSourcePort;
   readonly projectSources: MemoryProjectSourcePort;
@@ -659,7 +661,6 @@ function memoryAnalysisInput(
     executionEpoch: input.executionEpoch,
     assignmentId: `memory-analysis:${input.operationId.value}`,
     payload: {
-      operationId: input.operationId.value,
       bindingRef: input.bindingRef,
       projectKey: input.projectKey,
       scope: {
@@ -712,14 +713,27 @@ function memoryAnalysisInput(
   };
 }
 
-function providerCuration(curation: unknown, input: MemoryAnalysisRequest, prompt: AuditPromptSnapshot): MemoryCurationResult {
+/**
+ * Binds a provider curation to the admitted analysis operation.
+ *
+ * The business payload never carries control identity, so the curation cannot
+ * echo an operation id back: identity is derived from the admitted control
+ * plane (`assignmentId` plus the admitted `operationId`) and the curation's own
+ * operation id must agree with it.
+ */
+function providerCuration(curation: unknown, input: MemoryAnalysisRequest, prompt: AuditPromptSnapshot, request: AgentInput): MemoryCurationResult {
   if (!isRecord(curation)) throw new ContractError('memory provider output is missing curation');
-  const result = curation as unknown as MemoryCurationResult;
+  const admitted = admittedOperationIdentity(input, request);
+  const reported = curation as unknown as Partial<MemoryCurationResult>;
+  // The admitted control identity is authoritative: a curation cannot carry an
+  // operation id that disagrees with the assignment it was admitted under.
+  if (reported.operationId !== undefined && !sameOperationId(reported.operationId, admitted)) {
+    throw new ContractError('memory provider curation reports another operation');
+  }
+  const result = { ...(curation as object), operationId: admitted } as unknown as MemoryCurationResult;
   validateMemoryCurationResult(result);
   if (
-    result.operationId.scope !== input.operationId.scope
-    || result.operationId.value !== input.operationId.value
-    || result.auditPrompt.promptRef !== prompt.promptRef
+    result.auditPrompt.promptRef !== prompt.promptRef
     || result.auditPrompt.canonicalRef !== prompt.canonicalRef
     || result.auditPrompt.revision !== prompt.revision
     || result.auditPrompt.digest !== prompt.digest
@@ -731,12 +745,34 @@ function providerCuration(curation: unknown, input: MemoryAnalysisRequest, promp
   }
   return {
     ...result,
-    operationId: { ...result.operationId },
+    operationId: admitted,
     auditPrompt: { ...result.auditPrompt },
     sourceRefs: [...result.sourceRefs],
     matchedMemoryIds: [...result.matchedMemoryIds],
     conflictRefs: [...result.conflictRefs],
   };
+}
+
+function sameOperationId(value: { readonly scope?: unknown; readonly value?: unknown }, admitted: OperationId): boolean {
+  return value.scope === admitted.scope && value.value === admitted.value;
+}
+
+/**
+ * The admitted control identity for one memory analysis round. `assignmentId`
+ * is the control-plane carrier (`memory-analysis:<operationId>`), so the
+ * operation identity is derived from it and cross-checked against the admitted
+ * request rather than read out of the business payload.
+ */
+function admittedOperationIdentity(input: MemoryAnalysisRequest, request: AgentInput): OperationId {
+  const prefix = 'memory-analysis:';
+  if (!request.assignmentId.startsWith(prefix)) {
+    throw new ContractError('memory analysis assignment identity is not bound to an operation');
+  }
+  const admittedValue = request.assignmentId.slice(prefix.length);
+  if (admittedValue !== input.operationId.value) {
+    throw new ContractError('memory analysis assignment identity does not match the admitted operation');
+  }
+  return { scope: 'operation', value: admittedValue };
 }
 
 function parseProviderCuration(text: string): unknown {
@@ -794,14 +830,15 @@ async function providerOutcome(
   inspectedSources: readonly InspectedMemorySource[],
 ): Promise<MemoryCurationResult> {
   const request = memoryAnalysisInput(input, prompt, promptContent, inspectedSources);
+  if (input.scope.namespace !== 'project') throw new ContractError('memory analysis provider requires a project scope');
   const driver = options.driver ?? options.driverFor?.({
     taskId: request.taskId,
     operationId: input.operationId,
     executionEpoch: request.executionEpoch,
     assignmentId: request.assignmentId,
+    scope: { ...input.scope },
   });
   if (driver === undefined) throw new ContractError('memory analysis provider is not configured');
-  if (input.scope.namespace !== 'project') throw new ContractError('memory analysis provider requires a project scope');
   const handle = await driver.start({
     runtimeId: request.assignmentId,
     taskId: request.taskId,
@@ -825,10 +862,10 @@ async function providerOutcome(
     }
     const payload = output.payload as Record<string, unknown>;
     if (payload.curation !== undefined) {
-      return providerCuration(payload.curation, input, prompt);
+      return providerCuration(payload.curation, input, prompt, request);
     }
     const observed = await observeCuration(driver, request);
-    return providerCuration(observed, input, prompt);
+    return providerCuration(observed, input, prompt, request);
   } catch (error) {
     firstError = error;
     throw error;

@@ -564,7 +564,7 @@ export function validateConfiguredAgentBinding(binding: ConfiguredAgentBinding):
     throw new AgentTemplateError(`template ref is not locked to the configured role: ${binding.templateRef}`);
   }
   const version = binding.templateRef.slice(expectedPrefix.length);
-  if (binding.driverRef !== 'fake' && binding.driverRef !== 'dsh') {
+  if (binding.driverRef !== 'fake' && binding.driverRef !== 'dsh' && binding.driverRef !== 'rcc') {
     throw new AgentTemplateError(`driver is not enabled in the MVP host: ${binding.driverRef}`);
   }
   const skills = roleSkills(binding.roleId, version);

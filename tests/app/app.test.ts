@@ -17,6 +17,7 @@ import { checkpointCommitId } from '../../packages/runtime/src/checkpoints/coord
 import { submitCheckpoint } from '../../packages/runtime/src/checkpoints/submission.js';
 import { readCommittedCheckpoint } from '../../packages/app/src/checkpoint-journal.js';
 import { createMemoryAnalysisRequestedEvent, memoryAnalysisRequestFromEvent } from '../../packages/runtime/src/memory/index.js';
+import { MemoryAgent } from '../../packages/runtime/src/memory/index.js';
 
 const providerBinding: ProviderBinding = {
   bindingId: 'binding-integration',
@@ -786,12 +787,10 @@ class MemoryAnalysisDriver implements AgentDriver {
     if (!submission) throw new Error('unknown memory analysis runtime');
     this.events.push(`observe:${input.runtimeId}`);
     const payload = submission.payload as unknown as {
-      readonly operationId: string;
       readonly prompt: unknown;
       readonly sourceRefs: readonly string[];
     };
     const curation = {
-      operationId: { scope: 'operation', value: payload.operationId },
       auditPrompt: payload.prompt,
       sourceRefs: payload.sourceRefs,
       outcome: 'candidate',
@@ -824,6 +823,107 @@ class MemoryAnalysisDriver implements AgentDriver {
   async settle(input: { readonly runtimeId: string; readonly executionEpoch: number }) {
     this.events.push(`settle:${input.runtimeId}`);
     return { state: 'succeeded' as const, evidenceRefs: [] };
+  }
+}
+
+/**
+ * Stands in for the serve RCC port on a memory-role analysis round. It echoes
+ * the admitted operation and audit prompt back as a MemoryCurationResult so the
+ * provider parse path is exercised without touching RCC.
+ */
+class MemoryCurationReplayPort implements ExecutionRuntimePort {
+  readonly kind = 'humanagent.execution-runtime-port';
+  readonly submissions: string[] = [];
+  readonly startedRounds: string[] = [];
+  readonly startInputs: string[] = [];
+  starts = 0;
+  private readonly payloads = new Map<string, Record<string, unknown>>();
+  private readonly identities = new Map<string, ReturnType<MemoryCurationReplayPort['identity']>>();
+
+  constructor(private readonly binding: ProviderBinding) {}
+
+  private identity(runtimeId: string, taskId: string, operationId: string) {
+    return {
+      runtimeId,
+      taskId: { scope: 'task' as const, value: taskId },
+      operationId: { scope: 'operation' as const, value: operationId },
+      executionEpoch: 1,
+    };
+  }
+
+  /** The driver binds runtimeId to the admitted assignment identity. */
+  private boundIdentity(input: { readonly runtimeId: string; readonly taskId: { readonly value: string }; readonly operationId: { readonly value: string } }) {
+    const identity = this.identity(input.runtimeId, input.taskId.value, input.operationId.value);
+    this.identities.set(input.runtimeId, identity);
+    return identity;
+  }
+
+  async probe(): Promise<ProviderReadiness> { return readiness; }
+  async capabilities() {
+    return { ...readiness, capabilities: ['responses'], version: 'test', digest: this.binding.capabilityDigest };
+  }
+  async start(input: import('../../packages/contracts/src/index.js').ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.starts += 1;
+    this.startedRounds.push(input.runtimeId);
+    this.startInputs.push(JSON.stringify({ runtimeId: input.runtimeId, taskId: input.taskId.value, operationId: input.operationId.value, epoch: input.executionEpoch, evidence: input.evidenceRefs.length }));
+    this.payloads.set(input.runtimeId, structuredClone(input.payload) as Record<string, unknown>);
+    return { ...this.boundIdentity(input), startedAt: '2026-01-01T00:00:00.000Z', evidenceRefs: [] };
+  }
+  async resume(): Promise<never> { throw new Error('memory rcc replay cannot resume'); }
+  async submit(input: import('../../packages/contracts/src/index.js').ProviderSubmitInput): Promise<ProviderSubmitResult> {
+    // Provider-level submit is the tool-continuation round, not the first round;
+    // the AgentDriver-level submit maps to port.start().
+    this.submissions.push(input.runtimeId);
+    return { ...this.boundIdentity(input), status: 'accepted', outputRefs: [], evidenceRefs: [] };
+  }
+  async *observe(input: { readonly runtimeId: string }): AsyncIterable<ProviderEvent> {
+    const payload = this.payloads.get(input.runtimeId);
+    const identity = this.identities.get(input.runtimeId);
+    if (!payload || !identity) {
+      throw new Error(`memory rcc replay observed an unknown runtime: ${input.runtimeId}`);
+    }
+    // A real provider never receives control identity in the business payload.
+    // The memory owner binds the operation identity from the admitted control
+    // plane, so this replay reports no operation id of its own.
+    const curation = {
+      auditPrompt: payload.prompt,
+      sourceRefs: payload.sourceRefs,
+      outcome: 'candidate',
+      candidateId: 'rcc-memory-candidate',
+      matchedMemoryIds: [],
+      conflictRefs: [],
+      explanation: 'rcc memory curation replay',
+      nextAction: 'review',
+    };
+    yield {
+      ...identity,
+      eventId: 'memory-rcc-output',
+      kind: 'output' as const,
+      summary: JSON.stringify(curation),
+      evidenceRefs: [],
+    };
+    yield {
+      ...identity,
+      eventId: 'memory-rcc-terminal',
+      kind: 'terminal' as const,
+      terminalState: 'succeeded' as const,
+      evidenceRefs: [],
+    };
+  }
+  async requestStop(input: import('../../packages/contracts/src/index.js').ProviderStopRequest): Promise<ProviderStopReceipt> {
+    return { ...this.boundIdentity(input), status: 'accepted', receivedAt: '2026-01-01T00:00:00.000Z', evidenceRefs: [] };
+  }
+  async settle(input: import('../../packages/contracts/src/index.js').ProviderSettleInput): Promise<ProviderSettlement> {
+    return {
+      ...this.boundIdentity(input),
+      state: 'succeeded',
+      evidenceRefs: [],
+      resourceRelease: { state: 'released', evidenceRefs: [] },
+      persistence: { state: 'committed', evidenceRefs: [] },
+    };
+  }
+  async close(): Promise<ProviderCloseResult> {
+    return { bindingId: this.binding.bindingId, providerId: this.binding.providerId, protocol: this.binding.protocol, state: 'closed', evidenceRefs: [] };
   }
 }
 
@@ -4542,6 +4642,12 @@ test('CLI memory driver factory selects the configured memory-role agent and dri
     operationId: id('operation', 'memory-driver-factory-operation'),
     executionEpoch: 3,
     assignmentId: 'memory-analysis:memory-driver-factory-operation',
+    scope: {
+      namespace: 'project',
+      projectKey: 'memory-driver-factory-project',
+      organId: id('organ', 'memory-driver-factory-organ'),
+      taskId: id('task', 'memory-driver-factory-task'),
+    },
   });
   const events: string[] = [];
   const wrapped: typeof driver = {
@@ -4593,6 +4699,261 @@ test('memory driver factory stays absent when no memory-role agent is configured
   const configuration = await loadConfiguration(paths);
   assert.equal(memoryDriverFactory({ paths, configuration, workspace }), undefined);
   await rm(root, { recursive: true, force: true });
+});
+
+test('memory driver factory requires a bound serve RCC port for an explicitly configured rcc memory role', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-driver-rcc-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await appendFile(join(controlRoot, 'config.toml'), [
+    '',
+    '[[agents]]',
+    'agentId = "memory-rcc"',
+    'roleId = "memory"',
+    'templateRef = "builtin/memory@1.0.0"',
+    'driverRef = "rcc"',
+    'skills = ["history-search", "novelty-review", "recurrence-review"]',
+    'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+    'permissions = ["memory.read", "memory.propose"]',
+    'memoryScopes = ["task", "organ", "approved-global"]',
+    'resourceClass = "background"',
+    '',
+  ].join('\n'), 'utf8');
+  const configuration = await loadConfiguration(paths);
+  const memoryAgent = configuration.agentRoster.find((agent) => agent.roleId === 'memory');
+  assert.equal(memoryAgent?.driverRef, 'rcc');
+
+  // An rcc agent without the serve-owned port must fail closed, never degrade to
+  // another driver or to a silent deterministic success.
+  const unbound = memoryDriverFactory({ paths, configuration, workspace });
+  assert.ok(unbound);
+  assert.throws(() => unbound!({
+    taskId: id('task', 'memory-rcc-unbound-task'),
+    operationId: id('operation', 'memory-rcc-unbound-operation'),
+    executionEpoch: 1,
+    assignmentId: 'memory-analysis:memory-rcc-unbound-operation',
+    scope: {
+      namespace: 'project',
+      projectKey: paths.projectKey,
+      organId: id('organ', 'memory-rcc-organ'),
+    },
+  }), (error: unknown) => error instanceof AppLifecycleError && error.code === 'rcc-config-missing');
+
+  const port = new MemoryCurationReplayPort(fakeExecutionBinding());
+  const bound = memoryDriverFactory({
+    paths,
+    configuration,
+    workspace,
+    rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/test'] },
+  });
+  assert.ok(bound);
+  const driver = bound!({
+    taskId: id('task', 'memory-rcc-bound-task'),
+    operationId: id('operation', 'memory-rcc-bound-operation'),
+    executionEpoch: 4,
+    assignmentId: 'memory-analysis:memory-rcc-bound-operation',
+    scope: {
+      namespace: 'project',
+      projectKey: paths.projectKey,
+      organId: id('organ', 'memory-rcc-organ'),
+      taskId: id('task', 'memory-rcc-bound-task'),
+    },
+  });
+  assert.equal(driver.kind, 'humanagent.provider-agent-driver');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('rcc memory-role driver parses provider output as a MemoryCurationResult and stays a separate execution', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-rcc-curation-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# RCC memory project\n', 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  await appendFile(join(controlRoot, 'config.toml'), [
+    '',
+    '[[agents]]',
+    'agentId = "memory-rcc"',
+    'roleId = "memory"',
+    'templateRef = "builtin/memory@1.0.0"',
+    'driverRef = "rcc"',
+    'skills = ["history-search", "novelty-review", "recurrence-review"]',
+    'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+    'permissions = ["memory.read", "memory.propose"]',
+    'memoryScopes = ["task", "organ", "approved-global"]',
+    'resourceClass = "background"',
+    '',
+  ].join('\n'), 'utf8');
+  const reloaded = await loadConfiguration(paths);
+  const port = new MemoryCurationReplayPort(fakeExecutionBinding());
+  const driverFor = memoryDriverFactory({
+    paths,
+    configuration: reloaded,
+    workspace: paths.workspaceCwd,
+    rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/rcc-curation'] },
+  });
+  assert.ok(driverFor);
+  const taskId = id('task', 'session-memory-rcc-curation');
+  const operationId = id('operation', 'memory-rcc-curation-operation');
+  const organId = id('organ', 'memory-rcc-curation-organ');
+  const scope = { namespace: 'project' as const, projectKey: paths.projectKey, organId, taskId };
+  const sourceRef = 'humanagent://memory/rcc-curation/source';
+  const sourceText = 'rcc curation evidence';
+  const sourceDigest = `sha256:${createHash('sha256').update(sourceText).digest('hex')}`;
+  const prompt = {
+    promptRef: 'project-memory-audit',
+    canonicalRef: `humanagent://prompt/${paths.projectKey}/project-memory-audit`,
+    revision: '1',
+    digest: `sha256:${createHash('sha256').update('# Audit\n').digest('hex')}`,
+    loadedAt: '2026-01-01T00:00:00.000Z',
+  };
+  // The composed rcc driver runs an analysis round on the admitted operation
+  // identity and its provider output is the curation the memory owner parses.
+  const driver = driverFor!({
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: `memory-analysis:${operationId.value}`,
+    scope,
+  });
+  assert.equal(driver.kind, 'humanagent.provider-agent-driver');
+  await driver.start({
+    runtimeId: `memory-analysis:${operationId.value}`,
+    taskId,
+    executionEpoch: 1,
+    assignmentId: `memory-analysis:${operationId.value}`,
+    organId,
+    operationId,
+  });
+  await driver.submit({
+    taskId,
+    executionEpoch: 1,
+    assignmentId: `memory-analysis:${operationId.value}`,
+    payload: {
+      operationId: operationId.value,
+      prompt,
+      sourceRefs: [sourceRef],
+      sourceDigests: [sourceDigest],
+    },
+  });
+  const observed: string[] = [];
+  for await (const event of driver.observe({ runtimeId: `memory-analysis:${operationId.value}` })) {
+    if (event.kind === 'provider.output' && event.summary) observed.push(event.summary);
+    if (event.terminalState !== undefined) break;
+  }
+  const closure = await driver.settle({ runtimeId: `memory-analysis:${operationId.value}`, executionEpoch: 1 });
+  assert.equal(closure.state, 'succeeded');
+  assert.equal(observed.length, 1);
+  const curation = JSON.parse(observed[0]!) as Record<string, unknown>;
+  assert.equal(curation.outcome, 'candidate');
+  assert.equal(curation.candidateId, 'rcc-memory-candidate');
+  assert.deepEqual(curation.sourceRefs, [sourceRef]);
+  // The provider round carries the admitted memory-analysis identity, never the
+  // main operation identity, and the driver never borrows the main epoch.
+  assert.deepEqual(port.startedRounds, [`memory-analysis:${operationId.value}`]);
+  assert.deepEqual(port.submissions, []);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('rcc memory-role driver consumes a real curation end to end and exposes model analysis', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-rcc-consume-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# RCC memory consume\n', 'utf8');
+  const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId: 'session-memory-rcc-consume' });
+  const { paths } = runtime;
+  await appendFile(join(controlRoot, 'config.toml'), [
+    '',
+    '[[agents]]',
+    'agentId = "memory-rcc"',
+    'roleId = "memory"',
+    'templateRef = "builtin/memory@1.0.0"',
+    'driverRef = "rcc"',
+    'skills = ["history-search", "novelty-review", "recurrence-review"]',
+    'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
+    'permissions = ["memory.read", "memory.propose"]',
+    'memoryScopes = ["task", "organ", "approved-global"]',
+    'resourceClass = "background"',
+    '',
+  ].join('\n'), 'utf8');
+  const reloaded = await loadConfiguration(paths);
+  const port = new MemoryCurationReplayPort(fakeExecutionBinding());
+  const driverFor = memoryDriverFactory({
+    paths,
+    configuration: reloaded,
+    workspace: paths.workspaceCwd,
+    rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/rcc-consume'] },
+  })!;
+  const taskId = id('task', 'session-memory-rcc-consume');
+  const memory = await composeMemoryRuntime({
+    paths,
+    configuration: reloaded,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor,
+    binding: {
+      bindingRef: 'memory-binding:rcc-consume',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', `agent-${reloaded.effective.project?.defaultAgent ?? reloaded.agentRoster[0]!.agentId}`),
+        taskId,
+      },
+      taskId,
+      mainAgentId: 'memory-rcc-consume-main',
+      actor: { actorId: 'memory-agent', roleId: 'memory', permissions: ['memory.read', 'memory.propose'], projectKey: paths.projectKey },
+    },
+  });
+  try {
+    await mkdir(join(paths.controlRoot, 'memory-audit'), { recursive: true });
+    await writeFile(join(paths.controlRoot, 'memory-audit', 'project-memory-audit.md'), '# Audit\n', 'utf8');
+    await new SessionStore(paths).append(
+      'session-memory-rcc-consume',
+      { type: 'session.state', state: 'running' },
+      runtime.lock,
+    );
+    const result = await runAgentOperation({
+      paths,
+      configuration: reloaded,
+      workspace,
+      sessionId: 'session-memory-rcc-consume',
+      plan: 'default',
+      prompt: 'consume rcc memory curation',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    const consumed = await memory.consume();
+    if (consumed.retries.length !== 0) {
+      throw new Error(`DEBUG retry=${consumed.retries[0]?.failureRef ?? 'none'}`);
+    }
+    assert.equal(consumed.committed.length, 1);
+    assert.equal(consumed.committed[0]?.disposition, 'applied');
+    const state = await memory.reviewState();
+    assert.equal(state.analysis.mode, 'model');
+    assert.equal(state.analysis.state, 'succeeded');
+    assert.equal(state.analysis.operationRef, `memory-analysis:memory-binding:rcc-consume:checkpoint-${result.checkpoint.id.value}`);
+    assert.equal(state.autoUpdate, false);
+    assert.equal(state.candidates.length, 1);
+    // The memory owner assigns the durable candidate identity; the provider's
+    // candidateId is not authoritative for the report.
+    assert.match(state.candidates[0]?.candidateId ?? '', /^memory-analysis:/);
+    assert.equal(state.candidates[0]?.state, 'candidate');
+    assert.equal(state.candidates[0]?.namespace, 'project');
+    assert.equal(state.candidates[0]?.projectKey, paths.projectKey);
+    // The model round ran on the admitted memory-analysis identity, never on the
+    // main operation's runtime/operation identity.
+    assert.equal(port.startedRounds.length, 1);
+    assert.match(port.startedRounds[0]!, /^memory-analysis:memory-analysis-/);
+    await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+  } finally {
+    try {
+      await runtime.lock.release();
+    } catch {
+      // The successful settlement path already released the session lock.
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('CLI serve binds the configured memory-role driver into its memory runtime', async () => {
