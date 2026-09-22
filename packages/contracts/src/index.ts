@@ -1423,3 +1423,74 @@ export * from './framework.js';
 export * from './explicit-brain.js';
 export * from './agent-loop.js';
 export * from './tool-execution.js';
+
+/**
+ * Requirement pipeline node identity. Single source of truth for the thirteen nodes of
+ * `docs/architecture/organ-runtime.md` ("Pipeline 节点与完整观测"). Runtime registers each node's
+ * owner role and edges; UI sorts by `PIPELINE_ROWS` instead of guessing node order.
+ */
+export type PipelineNodeId =
+  | 'sensory.inbox'
+  | 'explicit.normalize'
+  | 'implicit.classify'
+  | 'interactive.queue'
+  | 'execution.queue'
+  | 'research.queue'
+  | 'maintenance.queue'
+  | 'task.correlate-or-create'
+  | 'resource.admission'
+  | 'pipeline.execute'
+  | 'settle'
+  | 'task.output'
+  | 'memory.agent';
+
+export const PIPELINE_NODE_IDS: readonly PipelineNodeId[] = [
+  'sensory.inbox',
+  'explicit.normalize',
+  'implicit.classify',
+  'interactive.queue',
+  'execution.queue',
+  'research.queue',
+  'maintenance.queue',
+  'task.correlate-or-create',
+  'resource.admission',
+  'pipeline.execute',
+  'settle',
+  'task.output',
+  'memory.agent',
+];
+
+/**
+ * Node owner role. Structurally equivalent to the UI display role
+ * (`AgentRoleDisplay` in `packages/ui/contracts/models.ts`): `interaction | orchestration | execution
+ * | review | memory`. Control-side consumers must not import UI contracts, so contract types carry
+ * their own copy; `tests/runtime/nodes/node-registry.test.ts` asserts both sides stay equivalent.
+ */
+export type AgentRoleDisplay =
+  | 'interaction'
+  | 'orchestration'
+  | 'execution'
+  | 'review'
+  | 'memory';
+
+/**
+ * Display row of a node in the pipeline DAG. Main path occupies rows 0..8; `memory.agent` is the
+ * side column at row 9. Downstream UI sorts by this value rather than re-deriving DAG depth.
+ */
+export type PipelineNodeRow = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
+export const PIPELINE_ROWS: Readonly<Record<PipelineNodeId, PipelineNodeRow>> = {
+  'sensory.inbox': 0,
+  'explicit.normalize': 1,
+  'implicit.classify': 2,
+  'interactive.queue': 3,
+  'execution.queue': 3,
+  'research.queue': 3,
+  'maintenance.queue': 3,
+  'task.correlate-or-create': 4,
+  'resource.admission': 5,
+  'pipeline.execute': 6,
+  settle: 7,
+  'task.output': 8,
+  'memory.agent': 9,
+};
