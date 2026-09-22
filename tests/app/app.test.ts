@@ -4819,6 +4819,41 @@ test('memory review state selects a later retry over an earlier success from the
   }
 });
 
+test('memory review state replaces a historical retry with the terminal receipt for the same operation across restart', async () => {
+  const sourceRef = 'journal://memory-status/retry-then-success';
+  const sourceText = 'evidence becomes available before retry';
+  const evidence = new Map<string, string>();
+  const fixture = await createMemoryStatusFixture(
+    'humanagent-app-memory-status-retry-success-',
+    evidence,
+  );
+  try {
+    const memory = await fixture.compose();
+    await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-retry-success', sourceRef, sourceText, '2026-09-22T00:00:00.000Z'),
+    });
+    const first = await memory.consume();
+    assert.equal(first.retries.length, 1);
+    assert.equal((await memory.reviewState()).analysis.state, 'waiting');
+
+    evidence.set(sourceRef, sourceText);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_100));
+    const recovered = await memory.consume();
+    assert.equal(recovered.committed.length, 1);
+    assert.equal(recovered.committed[0]?.disposition, 'applied');
+    const succeeded = {
+      mode: 'deterministic' as const,
+      state: 'succeeded' as const,
+      operationRef: 'memory-analysis:memory-binding:status:memory-status-retry-success',
+    };
+    assert.deepEqual((await memory.reviewState()).analysis, succeeded);
+    assert.deepEqual((await (await fixture.compose()).reviewState()).analysis, succeeded);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('memory review state selects a later blocked operation over an earlier success from the same consume batch', async () => {
   const firstRef = 'journal://memory-status/success-before-blocked';
   const firstText = 'successful evidence before blocked';

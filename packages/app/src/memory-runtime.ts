@@ -714,8 +714,15 @@ async function projectMemoryAnalysisStatus(
       messageId: event.messageId,
     }),
   ]);
-  if (retry?.state === 'pending') {
-    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef };
+  if (receipt !== null) {
+    return receipt.disposition === 'applied'
+      ? { mode, state: 'succeeded', operationRef }
+      : {
+          mode,
+          state: 'failed',
+          operationRef,
+          ...(receipt.failureRef === undefined ? {} : { failureRef: receipt.failureRef }),
+        };
   }
   if (externalOperation?.state === 'unknown') {
     return { mode, state: 'unknown', operationRef, failureRef: 'unknown-side-effect' };
@@ -728,21 +735,14 @@ async function projectMemoryAnalysisStatus(
       ...(externalOperation.failureRef === undefined ? {} : { failureRef: externalOperation.failureRef }),
     };
   }
-  if (receipt !== null) {
-    return receipt.disposition === 'applied'
-      ? { mode, state: 'succeeded', operationRef }
-      : {
-          mode,
-          state: 'failed',
-          operationRef,
-          ...(receipt.failureRef === undefined ? {} : { failureRef: receipt.failureRef }),
-        };
+  if (externalOperation?.state === 'settled' || externalOperation?.state === 'reconciled') {
+    return { mode, state: 'succeeded', operationRef };
+  }
+  if (retry?.state === 'pending') {
+    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef };
   }
   if (retry !== null) {
     return { mode, state: 'failed', operationRef, failureRef: retry.failureRef };
-  }
-  if (externalOperation?.state === 'settled' || externalOperation?.state === 'reconciled') {
-    return { mode, state: 'succeeded', operationRef };
   }
   return { mode, state: 'running', operationRef };
 }
