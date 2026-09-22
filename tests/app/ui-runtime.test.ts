@@ -1398,6 +1398,131 @@ test('confirmed requirement cannot bypass implicit admission when the provider i
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 });
 
+test('runtime consumes a confirmed requirement without a browser dispatch request', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-background-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  service.startImplicitConsumer();
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:new-task',
+    rawInput: 'continue after the browser closes',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'continue after the browser closes',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the background task',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-background',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-background',
+  });
+
+  await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
+  await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
+test('runtime admission waits on actual running load and resumes when capacity is released', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-capacity-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }));
+  service.startImplicitConsumer();
+
+  const confirm = async (suffix: string): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `background task ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `background task ${suffix}`,
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'create',
+      proposal: `create background task ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  await confirm('capacity-first');
+  await waitFor(() => assert.equal(service.listTasks().counts.running, 1));
+  const secondInteraction = await confirm('capacity-second');
+  await waitFor(() => assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.waiting'));
+  assert.equal(service.listTasks().counts.total, 1);
+  assert.equal((await service.inspectExplicitInteraction(secondInteraction)).state, 'confirmed');
+
+  await waitFor(() => assert.equal(service.listTasks().counts.total, 2));
+  await waitFor(() => assert.equal(service.listTasks().counts.completed, 2));
+  assert.equal((await service.inspectExplicitInteraction(secondInteraction)).state, 'dispatched');
+  assert.equal(service.implicitSchedulingIssue(), undefined);
+});
+
+test('runtime restart hydrates dispatched state without starting the requirement twice', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-restart-'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
+  const first = serviceFor(root, port);
+  first.startImplicitConsumer();
+  const interactionId = await first.receiveExplicitInput({
+    sourceRef: 'ui:implicit-restart',
+    rawInput: 'dispatch once across restart',
+    channel: 'business',
+  });
+  await first.beginExplicitMatching(interactionId);
+  await first.recordExplicitMatch(interactionId, {
+    normalizedInput: 'dispatch once across restart',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await first.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create restart-safe task',
+  });
+  const proposed = await first.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await first.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-restart',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-restart',
+  });
+  await waitFor(() => assert.equal(port.startPayloads.length, 1));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal((await first.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+  await waitFor(() => assert.equal((first.listTasks().counts.total), 1));
+
+  const restarted = serviceFor(root, port);
+  await restarted.hydrate();
+  restarted.startImplicitConsumer();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(port.startPayloads.length, 1);
+  assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
 test('explicit brain status query never creates a task or FIFO entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
@@ -1689,11 +1814,8 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
       }),
     });
     assert.equal(confirmationResponse.status, 200);
-    const dispatchResponse = await fetch(`${runtime.server.url}/api/explicit/dispatch-next`, { method: 'POST' });
-    assert.equal(dispatchResponse.status, 202);
-    const dispatched = await dispatchResponse.json() as { readonly taskId: unknown; readonly operationId: unknown };
-    assert.equal(typeof dispatched.taskId, 'string');
-    assert.equal(typeof dispatched.operationId, 'string');
+    await waitFor(() => assert.equal(runtime.service.listTasks().counts.total, 1));
+    await waitFor(() => assert.equal(runtime.service.listTasks().counts.completed, 1));
 
     const controlResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST',

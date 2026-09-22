@@ -71,6 +71,16 @@ async function waitForTaskState(read: () => string, expected: string): Promise<v
   assert.equal(read(), expected);
 }
 
+async function waitForRuntimeTask(runtime: Awaited<ReturnType<typeof startUiRuntime>>): Promise<Task['id']> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const tasks = runtime.service.listTasks();
+    const row = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.failed, ...tasks.draft][0];
+    if (row) return row.taskId;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('runtime did not consume the confirmed requirement');
+}
+
 function assignment(task: Task): WorkAssignment {
   return {
     assignmentId: 'serve-assignment',
@@ -322,18 +332,18 @@ test('confirmed requirement enters task orchestration with RCC review before pro
       payloadRef: 'asset://requirements/serve-orchestration',
     });
 
-    const dispatched = await runtime.service.dispatchNextExplicitRequirement();
+    const taskId = await waitForRuntimeTask(runtime);
     for (let attempt = 0; attempt < 300; attempt += 1) {
-      if (runtime.service.taskDashboard(dispatched.taskId).state === 'succeeded') break;
+      if (runtime.service.taskDashboard(taskId).state === 'succeeded') break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(runtime.service.taskDashboard(dispatched.taskId).state, 'succeeded');
-    const graph = runtime.service.taskAssembly(dispatched.taskId).orchestration.graph.snapshot();
+    assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
+    const graph = runtime.service.taskAssembly(taskId).orchestration.graph.snapshot();
     assert.equal(graph.stages.length, 1);
     assert.equal(graph.assignments.length, 1);
     assert.equal(graph.assignments[0]?.status, 'merged');
     const feedback = await eventBus.ports.journal.readEvents({
-      streamId: `task:${dispatched.taskId.value}`,
+      streamId: `task:${taskId.value}`,
       afterSequence: 0,
       limit: 20,
     });
@@ -407,11 +417,11 @@ test('confirmed requirement preserves non-success provider closures through orch
         payloadRef: `asset://requirements/serve-orchestration-${terminalState}`,
       });
 
-      const dispatched = await runtime.service.dispatchNextExplicitRequirement();
-      await waitForTaskState(() => runtime.service.taskDashboard(dispatched.taskId).state, terminalState);
-      const dashboard = runtime.service.taskDashboard(dispatched.taskId);
+      const taskId = await waitForRuntimeTask(runtime);
+      await waitForTaskState(() => runtime.service.taskDashboard(taskId).state, terminalState);
+      const dashboard = runtime.service.taskDashboard(taskId);
       assert.equal(dashboard.checkpoint?.outcome, terminalState);
-      assert.equal(runtime.service.taskAssembly(dispatched.taskId).orchestration.graph.snapshot().assignments[0]?.status, terminalState === 'blocked' ? 'blocked' : 'escalated');
+      assert.equal(runtime.service.taskAssembly(taskId).orchestration.graph.snapshot().assignments[0]?.status, terminalState === 'blocked' ? 'blocked' : 'escalated');
     } finally {
       await runtime.server.close();
       await runtimeComposition.dispose();

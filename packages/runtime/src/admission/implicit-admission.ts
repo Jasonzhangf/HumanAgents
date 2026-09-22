@@ -23,6 +23,13 @@ import {
 
 const DEFAULT_OWNER_ID = 'runtime-coordinator';
 
+const DEFAULT_QUEUE_CONFIGS: Readonly<Record<AdmissionQueueKind, AdmissionQueueConfig>> = {
+  interactive: { kind: 'interactive', concurrencyLimit: 1, maxBacklog: 32 },
+  execution: { kind: 'execution', concurrencyLimit: 1, maxBacklog: 32 },
+  research: { kind: 'research', concurrencyLimit: 1, maxBacklog: 32 },
+  maintenance: { kind: 'maintenance', concurrencyLimit: 1, maxBacklog: 32 },
+};
+
 function assertNonNegativeSafeInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new AdmissionError(`${label} must be a non-negative safe integer`);
@@ -58,6 +65,15 @@ export function classifyRequirement(input: {
   validateRequirementEnvelope(input.envelope);
   assertQueueRegistered(input.queue, input.registeredQueues);
   return { envelope: input.envelope, queue: input.queue };
+}
+
+export function classifyConfirmedRequirement(envelope: RequirementEnvelope): AdmissionQueueKind {
+  validateRequirementEnvelope(envelope);
+  return envelope.taskRef ? 'interactive' : 'execution';
+}
+
+export function defaultAdmissionQueueConfig(kind: AdmissionQueueKind): AdmissionQueueConfig {
+  return { ...DEFAULT_QUEUE_CONFIGS[kind] };
 }
 
 export class RequirementAdmissionError extends Error {

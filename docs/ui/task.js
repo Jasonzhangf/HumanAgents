@@ -88,13 +88,8 @@ function renderCreate() {
         confirmedAt: new Date().toISOString(),
         payloadRef: `asset://requirements/${received.interactionId}`,
       })
-      const dispatched = await api.dispatchNextExplicitRequirement()
-      if (dispatched.requirement?.draftId !== snapshot.draft.draftId) {
-        feedback.textContent = '任务已确认，队列前还有其他任务；请从任务列表查看。'
-        window.location.href = './tasks.html'
-        return
-      }
-      window.location.href = taskDashboardHref(dispatched.taskId)
+      feedback.textContent = '任务已确认，后台会继续分类、准入和执行。'
+      window.location.href = './tasks.html'
     } catch (error) {
       feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
     }
@@ -153,13 +148,8 @@ async function renderInteraction(interactionId, currentTaskId) {
             confirmedAt: new Date().toISOString(),
             payloadRef: `asset://requirements/${interactionId}`,
           })
-          const dispatched = await api.dispatchNextExplicitRequirement()
-          if (dispatched.requirement?.draftId !== snapshot.draft.draftId) {
-            feedback.textContent = '已确认，但队列前还有其他任务；当前任务仍在等待派发。'
-            return
-          }
-          taskId = dispatched.taskId
-          window.location.href = taskDashboardHref(taskId)
+          feedback.textContent = '已确认，后台会继续分类、准入和执行。'
+          window.location.href = currentTaskId ? taskDashboardHref(currentTaskId) : './tasks.html'
         } catch (error) {
           if (button) button.disabled = false
           feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`

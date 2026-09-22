@@ -69,6 +69,8 @@ import {
   ADMISSION_QUEUE_KINDS,
   RequirementAdmissionError,
   admitRequirement,
+  classifyConfirmedRequirement,
+  defaultAdmissionQueueConfig,
   type RequirementAdmissionReceipt,
 } from '../../../runtime/src/admission/index.js';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
@@ -133,10 +135,6 @@ import { createExplicitBrainRuntime, type ExplicitBrainRuntime } from '../explic
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
 const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
-// The UI runtime composes no queue-capacity policy yet, so the execution queue
-// is explicitly unbounded. Capability, health, input, and checkpoint gates
-// still apply; only the backlog/quota dimensions are declared unlimited.
-const UNBOUNDED_QUEUE_LIMIT = Number.MAX_SAFE_INTEGER;
 
 const LIFECYCLE_STATES = new Set([
   'created',
@@ -354,6 +352,9 @@ export class UiRuntimeService {
   private readonly explicitBrainTraceRecords: import('../../../contracts/src/index.js').DecisionTraceRecord[] = [];
   private readonly explicitBrainTraceJournal: DecisionTraceJournal;
   private dispatchTail: Promise<void> = Promise.resolve();
+  private implicitConsumerEnabled = false;
+  private implicitConsumerScheduled = false;
+  private implicitConsumerIssue: UiRuntimeApiError | undefined;
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -1013,7 +1014,9 @@ export class UiRuntimeService {
           409,
         );
       }
-      return this.coordinator.startExecution(taskId, input);
+      const started = this.coordinator.startExecution(taskId, input);
+      this.watchExecutionForImplicitWakeup(started.operationId);
+      return started;
     } catch (error) {
       throw apiError(error);
     }
@@ -1101,6 +1104,15 @@ export class UiRuntimeService {
     for (const entry of restored.dispatchLedger ?? []) {
       this.dispatchLedger.set(entry.draftId, structuredClone(entry));
     }
+  }
+
+  startImplicitConsumer(): void {
+    this.implicitConsumerEnabled = true;
+    this.scheduleImplicitConsumption();
+  }
+
+  implicitSchedulingIssue(): UiRuntimeApiError | undefined {
+    return this.implicitConsumerIssue;
   }
 
   async receiveExplicitInput(input: ExplicitInput, inputRevision = 1): Promise<string> {
@@ -1219,6 +1231,7 @@ export class UiRuntimeService {
         inputRevision: confirmed.inputRevision,
       });
       this.persistExplicitBrainState();
+      this.scheduleImplicitConsumption();
       return { requirement };
     } catch (error) {
       throw apiError(error);
@@ -1226,21 +1239,25 @@ export class UiRuntimeService {
   }
 
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
+    const dispatched = await this.dispatchNextExplicitRequirementInternal();
+    if (dispatched) return dispatched;
+    throw new UiRuntimeApiError(
+      'explicit-brain.inbox.empty',
+      RUNTIME_OWNER,
+      'requirement inbox has no pending entry',
+      'wait for a confirmed requirement',
+      409,
+    );
+  }
+
+  private async dispatchNextExplicitRequirementInternal(): Promise<ExplicitBrainDispatchReceipt | null> {
     let release!: () => void;
     const previous = this.dispatchTail;
     this.dispatchTail = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
       const consumed: RequirementEnvelope | null = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
-      if (!consumed) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.inbox.empty',
-          RUNTIME_OWNER,
-          'requirement inbox has no pending entry',
-          'wait for a confirmed requirement',
-          409,
-        );
-      }
+      if (!consumed) return null;
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
       if (existingDispatch) {
         const requirement = await this.requirementInbox.acknowledge({
@@ -1268,6 +1285,7 @@ export class UiRuntimeService {
         prompt: admitted.classified.envelope.normalizedInput,
         ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
       });
+      this.watchExecutionForImplicitWakeup(started.operationId);
       this.dispatchLedger.set(consumed.draftId, {
         draftId: consumed.draftId,
         taskId: task.taskId,
@@ -1307,11 +1325,16 @@ export class UiRuntimeService {
     const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
       ? [PROVIDER_EXECUTION_CAPABILITY]
       : [];
+    const queue = classifyConfirmedRequirement(envelope);
+    const tasks = this.coordinator.taskSnapshots();
     return admitRequirement({
       envelope,
-      queue: { kind: 'execution', concurrencyLimit: UNBOUNDED_QUEUE_LIMIT, maxBacklog: UNBOUNDED_QUEUE_LIMIT },
+      queue: defaultAdmissionQueueConfig(queue),
       registeredQueues: ADMISSION_QUEUE_KINDS,
-      queueLoad: { running: 0, queued: 0 },
+      queueLoad: {
+        running: tasks.filter((task) => task.state === 'running' || task.state === 'settling').length,
+        queued: tasks.filter((task) => task.state === 'created' || task.state === 'admitted').length,
+      },
       requiredCapabilities: [PROVIDER_EXECUTION_CAPABILITY],
       availableCapabilities,
       health,
@@ -1319,6 +1342,43 @@ export class UiRuntimeService {
       providedInputRefs: [envelope.payloadRef],
       checkpoint: { recoverable: true },
       ownerId: 'runtime-coordinator',
+    });
+  }
+
+  private scheduleImplicitConsumption(): void {
+    if (!this.implicitConsumerEnabled || this.implicitConsumerScheduled) return;
+    this.implicitConsumerScheduled = true;
+    queueMicrotask(() => {
+      this.implicitConsumerScheduled = false;
+      void this.consumePendingRequirements().catch((error) => {
+        this.implicitConsumerIssue = apiError(error);
+      });
+    });
+  }
+
+  private async consumePendingRequirements(): Promise<void> {
+    while (this.implicitConsumerEnabled) {
+      try {
+        const dispatched = await this.dispatchNextExplicitRequirementInternal();
+        if (!dispatched) {
+          this.implicitConsumerIssue = undefined;
+          return;
+        }
+      } catch (error) {
+        const issue = apiError(error);
+        this.implicitConsumerIssue = issue;
+        if (issue.code === 'implicit-admission.waiting' || issue.code === 'implicit-admission.blocked') return;
+        throw issue;
+      }
+    }
+  }
+
+  private watchExecutionForImplicitWakeup(operationId: OperationId): void {
+    let unsubscribe: () => void = () => {};
+    unsubscribe = this.coordinator.subscribe(operationId, (event) => {
+      if (event.kind !== 'execution.terminal' || event.terminalPhase !== 'final') return;
+      unsubscribe();
+      this.scheduleImplicitConsumption();
     });
   }
 
