@@ -382,6 +382,13 @@ async function handleRequest(
       writeJson(response, 200, await service.executeExplicitDecision(body));
       return;
     }
+    const explicitInterpretation = /^\/api\/explicit\/interactions\/([^/]+)\/interpret$/.exec(path);
+    if (explicitInterpretation && method === 'POST') {
+      writeJson(response, 200, await service.interpretExplicitInput({
+        interactionId: decodeURIComponent(explicitInterpretation[1]!),
+      }));
+      return;
+    }
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
     if (explicitInteraction && method === 'GET') {
       writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));

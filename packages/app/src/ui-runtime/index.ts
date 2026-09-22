@@ -29,7 +29,7 @@ import {
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
-import type { ExplicitBrainAgentTarget } from '../explicit-brain-runtime.js';
+import type { ExplicitBrainAgentTarget, ExplicitBrainInputInterpreter } from '../explicit-brain-runtime.js';
 
 export interface RccModeConfig {
   readonly binding: ProviderBinding;
@@ -59,6 +59,7 @@ export interface UiRuntimeLaunchOptions {
     readonly messageClass: 'control' | 'data' | 'observation';
   }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
+  readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
   readonly restart?: (input: {
@@ -170,6 +171,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),
     ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),
     ...(options.explicitBrainAgentTargets === undefined ? {} : { explicitBrainAgentTargets: options.explicitBrainAgentTargets }),
+    ...(options.explicitBrainInterpreter === undefined ? {} : { explicitBrainInterpreter: options.explicitBrainInterpreter }),
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),

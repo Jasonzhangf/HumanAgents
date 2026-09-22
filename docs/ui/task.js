@@ -61,22 +61,19 @@ function renderCreate() {
         rawInput,
         inputRevision: 1,
       })
-      let snapshot = await api.inspectExplicitInteraction(received.interactionId)
-      await api.beginExplicitMatching(received.interactionId)
-      await api.recordExplicitMatch(received.interactionId, {
-        normalizedInput: snapshot.rawInput,
-        matchedTasks: [],
-        knownFacts: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(received.interactionId)
-      await api.proposeExplicitRequirement(received.interactionId, {
-        proposedIntent: 'create',
-        proposal: snapshot.draft?.normalizedInput || rawInput,
-        decisionRefs: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(received.interactionId)
+      const snapshot = await api.interpretExplicitInput(received.interactionId)
+      if (snapshot.state === 'status-only' || snapshot.state === 'awaiting-clarification') {
+        feedback.textContent = snapshot.reply || snapshot.nextAction
+        return
+      }
       if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
         feedback.textContent = `显式大脑当前状态：${snapshot.state}。${snapshot.nextAction}`
+        return
+      }
+      if (snapshot.draft.proposedIntent !== 'create') {
+        const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
+        feedback.textContent = '显式大脑识别到已有任务变更，请先确认整理后的内容。'
+        window.location.href = `./task.html?task=${encodeURIComponent(matchedTaskId)}&interaction=${encodeURIComponent(received.interactionId)}`
         return
       }
       feedback.textContent = '显式大脑已整理输入，正在提交后台…'
@@ -117,28 +114,12 @@ async function renderInteraction(interactionId, currentTaskId) {
 
   try {
     let snapshot = await api.inspectExplicitInteraction(interactionId)
-    if (snapshot.state === 'received' || snapshot.state === 'matching') {
-      if (snapshot.state === 'received') await api.beginExplicitMatching(interactionId)
-      await api.recordExplicitMatch(interactionId, {
-        normalizedInput: snapshot.rawInput,
-        matchedTasks: currentTaskId ? [{ taskId: currentTaskId, relation: 'current', status: detail?.state || 'created' }] : [],
-        knownFacts: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(interactionId)
-    }
-    if (snapshot.state === 'awaiting-intent' && snapshot.draft) {
-      await api.proposeExplicitRequirement(interactionId, {
-        proposedIntent: currentTaskId ? 'append' : 'create',
-        proposal: snapshot.draft.normalizedInput,
-        decisionRefs: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(interactionId)
-    }
+    if (snapshot.state === 'received' || snapshot.state === 'matching') snapshot = await api.interpretExplicitInput(interactionId)
     body.append(
       element('p', '你的输入', 'eyebrow'),
       element('p', snapshot.rawInput),
       element('p', '整理后的任务', 'eyebrow'),
-      element('p', snapshot.draft?.proposal || snapshot.rawInput),
+      element('p', snapshot.draft?.proposal || snapshot.reply || snapshot.rawInput),
     )
     if (snapshot.state === 'awaiting-confirmation' && snapshot.draft) {
       const submit = async (button) => {

@@ -58,6 +58,7 @@ import {
 } from '../../packages/app/src/ui-runtime/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
 const binding: ProviderBinding = {
@@ -168,6 +169,7 @@ function serviceFor(
   now?: () => Date,
   hookRegistry?: AgentHookRegistry,
   closurePort?: CheckpointClosurePort,
+  explicitBrainInterpreter?: ExplicitBrainInputInterpreter,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -183,6 +185,7 @@ function serviceFor(
     memory: testMemory('project-ui-test'),
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
+    ...(explicitBrainInterpreter ? { explicitBrainInterpreter } : {}),
   });
 }
 
@@ -1543,6 +1546,80 @@ test('restart restores confirmed interaction and pending explicit inbox state', 
   assert.equal(dispatched.requirement.fifoSeq, 1);
 });
 
+test('explicit brain interprets create, query, append, change, and clarification without entering the FIFO', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-interpret-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        const matchedTaskId = input.taskCandidates[0]?.taskId;
+        if (input.rawInput === '现在进行到哪一步？') return {
+          kind: 'status-query',
+          normalizedInput: '查询当前任务进度',
+          ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
+          knownFacts: ['当前任务存在'],
+          answer: '当前任务仍在等待执行。',
+          decisionRefs: ['decision:test-query'],
+        };
+        if (input.rawInput === '信息不够') return {
+          kind: 'clarification',
+          normalizedInput: '信息不够',
+          knownFacts: [],
+          question: '你希望处理哪个项目？',
+          decisionRefs: ['decision:test-clarification'],
+        };
+        const intent = input.rawInput.startsWith('追加') ? 'append'
+          : input.rawInput.startsWith('修改') ? 'change'
+            : 'create';
+        return {
+          kind: 'requirement',
+          normalizedInput: input.rawInput.replace(/^(新建|追加|修改)/, '').trim(),
+          ...(intent === 'create' || matchedTaskId === undefined ? {} : { matchedTaskId }),
+          knownFacts: [],
+          intent,
+          proposal: `${intent}:${input.rawInput}`,
+          decisionRefs: [`decision:test-${intent}`],
+        };
+      },
+    },
+  );
+  service.createTask({ title: '已有任务', directive: '整理启动步骤' });
+
+  for (const [rawInput, expectedIntent] of [
+    ['新建补充失败恢复步骤', 'create'],
+    ['追加常见启动失败', 'append'],
+    ['修改验收范围', 'change'],
+  ] as const) {
+    const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:task', rawInput, channel: 'business' });
+    const interpreted = await service.interpretExplicitInput({ interactionId });
+    assert.equal(interpreted.state, 'awaiting-confirmation');
+    assert.equal(interpreted.draft?.proposedIntent, expectedIntent);
+    assert.ok(interpreted.draft?.normalizedInput !== rawInput);
+  }
+
+  const queryId = await service.receiveExplicitInput({ sourceRef: 'ui:task', rawInput: '现在进行到哪一步？', channel: 'business' });
+  const query = await service.interpretExplicitInput({ interactionId: queryId });
+  assert.equal(query.state, 'status-only');
+  assert.equal(query.reply, '当前任务仍在等待执行。');
+
+  const clarificationId = await service.receiveExplicitInput({ sourceRef: 'ui:new-task', rawInput: '信息不够', channel: 'business' });
+  const clarification = await service.interpretExplicitInput({ interactionId: clarificationId });
+  assert.equal(clarification.state, 'awaiting-clarification');
+  assert.equal(clarification.reply, '你希望处理哪个项目？');
+
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.inbox.empty',
+  );
+});
+
 test('explicit brain HTTP routes reach typed service operations and expose typed errors', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-http-'));
   const runtime = await startUiRuntime({
@@ -1555,6 +1632,18 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     uiRoot: join(process.cwd(), 'packages/ui/static'),
     projectKey: 'project-ui-explicit-http',
     workspaceRoot: root,
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        return {
+          kind: 'requirement',
+          normalizedInput: input.rawInput.toUpperCase(),
+          knownFacts: [],
+          intent: 'create',
+          proposal: `create:${input.rawInput}`,
+          decisionRefs: ['decision:http-interpret'],
+        };
+      },
+    },
     memory: testMemory('project-ui-explicit-http'),
   });
   try {
@@ -1662,17 +1751,11 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     assert.equal(stale.error.code, 'ExplicitIntakeError');
     assert.equal(stale.error.ownerId, 'explicit-intake');
 
-    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/matching`, { method: 'POST' });
-    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/match`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ normalizedInput: 'route through HTTP', matchedTasks: [], knownFacts: [] }),
-    });
-    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/proposal`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ proposedIntent: 'create', proposal: 'create the HTTP dispatch task', decisionRefs: [] }),
-    });
+    const interpretationResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/interpret`, { method: 'POST' });
+    assert.equal(interpretationResponse.status, 200);
+    const interpretation = await interpretationResponse.json() as { readonly state: string; readonly draft?: { readonly normalizedInput: string } };
+    assert.equal(interpretation.state, 'awaiting-confirmation');
+    assert.equal(interpretation.draft?.normalizedInput, 'ROUTE THROUGH HTTP');
     const proposedResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}`);
     const proposed = await proposedResponse.json() as { readonly draft?: { readonly draftId: string; readonly inputRevision: number } };
     assert.ok(proposed.draft);

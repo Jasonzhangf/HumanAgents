@@ -1,9 +1,15 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   EXPLICIT_BRAIN_MODEL_TOOLS,
   EXPLICIT_BRAIN_TEMPLATE_REF,
+  id,
+  type ExecutionRuntimePort,
   type InteractionDecision,
+  type ProviderBinding,
+  type RequirementIntent,
 } from '../../contracts/src/index.js';
+import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import { loadBuiltinPromptSegments } from '../../agent-templates/src/index.js';
 import { WorkspaceCodeSearchFunctions } from '../../adapters/operations/src/index.js';
 import {
   ExplicitBrainDecisionExecutor,
@@ -47,6 +53,180 @@ export interface ExplicitBrainRuntime {
   readonly binding: ExplicitBrainRuntimeBinding;
   readonly ports: ExplicitBrainOperationalToolPorts;
   execute(decision: InteractionDecision): Promise<readonly unknown[]>;
+}
+
+export interface ExplicitBrainTaskCandidate {
+  readonly taskId: string;
+  readonly title: string;
+  readonly status: string;
+  readonly currentInput: string;
+}
+
+export interface ExplicitBrainInterpretationInput {
+  readonly interactionId: string;
+  readonly inputRevision: number;
+  readonly sourceRef: string;
+  readonly rawInput: string;
+  readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
+}
+
+export type ExplicitBrainInterpretation =
+  | {
+      readonly kind: 'requirement';
+      readonly normalizedInput: string;
+      readonly matchedTaskId?: string;
+      readonly knownFacts: readonly string[];
+      readonly intent: RequirementIntent;
+      readonly proposal: string;
+      readonly decisionRefs: readonly string[];
+    }
+  | {
+      readonly kind: 'status-query';
+      readonly normalizedInput: string;
+      readonly matchedTaskId?: string;
+      readonly knownFacts: readonly string[];
+      readonly answer: string;
+      readonly decisionRefs: readonly string[];
+    }
+  | {
+      readonly kind: 'clarification';
+      readonly normalizedInput: string;
+      readonly knownFacts: readonly string[];
+      readonly question: string;
+      readonly decisionRefs: readonly string[];
+    };
+
+export interface ExplicitBrainInputInterpreter {
+  interpret(input: ExplicitBrainInterpretationInput): Promise<ExplicitBrainInterpretation>;
+}
+
+function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegments: readonly string[]): string {
+  return [
+    ...promptSegments,
+    '# Explicit intake decision output',
+    'Return one JSON object only. Do not call tools and do not claim execution.',
+    'kind must be requirement, status-query, or clarification.',
+    'For requirement, intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+    'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
+    'For clarification, ask one concrete question and do not invent a task match.',
+    'All variants require normalizedInput, knownFacts string array, and decisionRefs string array.',
+    'Requirement also requires proposal. Status-query requires answer. Clarification requires question.',
+    JSON.stringify(input),
+  ].join('\n\n');
+}
+
+function parseInterpreterOutput(output: string): ExplicitBrainInterpretation {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output)?.[1];
+  const candidate = fenced ?? output.slice(output.indexOf('{'), output.lastIndexOf('}') + 1);
+  let value: unknown;
+  try {
+    value = JSON.parse(candidate);
+  } catch (error) {
+    throw new ExplicitBrainOperationalToolError(
+      'unsupported-tool',
+      `interaction agent returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!value || typeof value !== 'object') {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent returned a non-object decision');
+  }
+  const record = value as Record<string, unknown>;
+  const kind = record.kind;
+  const normalizedInput = record.normalizedInput;
+  const knownFacts = record.knownFacts;
+  const decisionRefs = record.decisionRefs;
+  if ((kind !== 'requirement' && kind !== 'status-query' && kind !== 'clarification')
+    || typeof normalizedInput !== 'string' || !normalizedInput.trim()
+    || !Array.isArray(knownFacts) || !knownFacts.every((entry) => typeof entry === 'string')
+    || !Array.isArray(decisionRefs) || !decisionRefs.every((entry) => typeof entry === 'string')) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent decision does not match the explicit intake contract');
+  }
+  const common = {
+    normalizedInput,
+    knownFacts: knownFacts as string[],
+    decisionRefs: decisionRefs as string[],
+  };
+  if (kind === 'clarification') {
+    if (typeof record.question !== 'string' || !record.question.trim()) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'clarification decision requires a question');
+    }
+    return { kind, ...common, question: record.question };
+  }
+  const matchedTaskId = typeof record.matchedTaskId === 'string' && record.matchedTaskId.trim()
+    ? record.matchedTaskId
+    : undefined;
+  if (kind === 'status-query') {
+    if (typeof record.answer !== 'string' || !record.answer.trim()) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'status decision requires an answer');
+    }
+    return { kind, ...common, ...(matchedTaskId === undefined ? {} : { matchedTaskId }), answer: record.answer };
+  }
+  if ((record.intent !== 'create' && record.intent !== 'append' && record.intent !== 'change')
+    || typeof record.proposal !== 'string' || !record.proposal.trim()) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement decision requires a typed intent and proposal');
+  }
+  return {
+    kind,
+    ...common,
+    ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
+    intent: record.intent,
+    proposal: record.proposal,
+  };
+}
+
+export function createProviderExplicitBrainInterpreter(input: {
+  readonly port: ExecutionRuntimePort;
+  readonly binding: ProviderBinding;
+}): ExplicitBrainInputInterpreter {
+  let promptSegments: Promise<readonly string[]> | undefined;
+  const loadPromptSegments = (): Promise<readonly string[]> => {
+    if (promptSegments !== undefined) return promptSegments;
+    const templateRoot = process.env.HUMANAGENT_TEMPLATE_ROOT?.trim();
+    if (!templateRoot) {
+      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent prompt root is not configured');
+    }
+    const version = EXPLICIT_BRAIN_TEMPLATE_REF.slice('builtin/interaction@'.length);
+    promptSegments = loadBuiltinPromptSegments('interaction', templateRoot, version)
+      .then((loaded) => loaded.segments.map((segment) => segment.content));
+    return promptSegments;
+  };
+  return {
+    async interpret(request) {
+      const identity = randomUUID();
+      const runtimeId = `explicit-interpret-${identity}`;
+      const taskId = id('task', `explicit-interpret-${identity}`);
+      const operationId = id('operation', `explicit-interpret-${identity}`);
+      const driver = new ProviderAgentDriver({
+        port: input.port,
+        binding: input.binding,
+        runtimeId,
+        taskId,
+        operationId,
+        executionEpoch: 1,
+        assignmentId: `explicit-interpret-${identity}`,
+        scope: { organId: id('organ', 'humanagent-explicit-brain'), taskId, operationId },
+        inputRefs: [`humanagent://interaction/${request.interactionId}/revision/${request.inputRevision}`],
+        ownerId: 'humanagent.runtime.explicit-brain',
+      });
+      const output: string[] = [];
+      await driver.start({ runtimeId, taskId, operationId, organId: id('organ', 'humanagent-explicit-brain'), executionEpoch: 1, assignmentId: `explicit-interpret-${identity}` });
+      await driver.submit({
+        taskId,
+        executionEpoch: 1,
+        assignmentId: `explicit-interpret-${identity}`,
+        payload: { prompt: interpreterPrompt(request, await loadPromptSegments()) },
+      });
+      for await (const event of driver.observe({ runtimeId })) {
+        if (event.kind === 'provider.output' && event.summary) output.push(event.summary);
+        if (event.terminalState !== undefined) break;
+      }
+      const closure = await driver.settle({ runtimeId, executionEpoch: 1 });
+      if (closure.state !== 'succeeded') {
+        throw new ExplicitBrainOperationalToolError('unsupported-tool', `interaction agent ended in ${closure.state}`);
+      }
+      return parseInterpreterOutput(output.join(''));
+    },
+  };
 }
 
 function createWorkspacePort(options: ExplicitBrainRuntimeOptions): ExplicitBrainWorkspaceToolPort {

@@ -10,6 +10,7 @@ export type ExplicitInteractionState =
   | 'matching'
   | 'status-checking'
   | 'awaiting-intent'
+  | 'awaiting-clarification'
   | 'awaiting-confirmation'
   | 'confirmed'
   | 'dispatched'
@@ -63,6 +64,7 @@ export interface ExplicitInteractionSnapshot {
   readonly nextAction: string;
   readonly condition?: string;
   readonly reason?: string;
+  readonly reply?: string;
   readonly draft?: RequirementDraft;
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
@@ -113,6 +115,7 @@ interface ExplicitInteractionRecordState {
   readonly nextAction: string;
   readonly condition?: string;
   readonly reason?: string;
+  readonly reply?: string;
   readonly draft?: RequirementDraft;
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
@@ -128,6 +131,7 @@ interface InteractionRecord {
   nextAction: string;
   condition?: string;
   reason?: string;
+  reply?: string;
   draft?: RequirementDraft;
   confirmation?: ConfirmedRequirementDraft;
   readonly history: ExplicitInteractionState[];
@@ -223,10 +227,15 @@ export class ExplicitIntake {
       nextAction: interaction.nextAction,
       condition: interaction.condition,
       reason: interaction.reason,
+      reply: interaction.reply,
       draft: interaction.draft,
       confirmation: interaction.confirmation,
       history: [...interaction.history],
     };
+  }
+
+  inputRevision(input: InteractionId): number {
+    return this.requireInteraction(input).inputRevision;
   }
 
   async beginMatching(input: InteractionId): Promise<void> {
@@ -261,8 +270,12 @@ export class ExplicitIntake {
     this.transition(interaction, 'status-checking', 'explicit-intake', 'read-status', 'status-projection-available');
   }
 
-  async completeStatusOnly(input: InteractionId): Promise<StatusQueryReceipt> {
+  async completeStatusOnly(input: InteractionId, answer?: string): Promise<StatusQueryReceipt> {
     const interaction = this.requireState(input, ['status-checking'], 'complete status query');
+    if (answer !== undefined) {
+      if (!answer.trim()) throw this.invalidState('complete status query', 'status answer is required', 'provide-status-answer');
+      interaction.reply = answer;
+    }
     this.transition(interaction, 'status-only', 'explicit-intake', 'present-status');
     return {
       kind: 'status-only',
@@ -270,6 +283,15 @@ export class ExplicitIntake {
       owner: 'explicit-intake',
       nextAction: 'present-status',
     };
+  }
+
+  async requestClarification(input: InteractionId, question: string): Promise<void> {
+    const interaction = this.requireState(input, ['matching'], 'request clarification');
+    if (!question || !question.trim()) {
+      throw this.invalidState('request clarification', 'clarification question is required', 'provide-clarification-question');
+    }
+    interaction.reply = question;
+    this.transition(interaction, 'awaiting-clarification', 'human', 'provide-clarification', 'clarification-required');
   }
 
   async propose(input: InteractionId, proposal: Proposal): Promise<void> {

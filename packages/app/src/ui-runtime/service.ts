@@ -96,7 +96,7 @@ import {
   healthEvidenceRefs,
 } from '../../../runtime/src/health/index.js';
 import { DecisionTraceJournal, ExplicitBrainDecisionError } from '../../../runtime/src/explicit-brain/index.js';
-import type { ExplicitBrainAgentTarget } from '../explicit-brain-runtime.js';
+import type { ExplicitBrainAgentTarget, ExplicitBrainInputInterpreter } from '../explicit-brain-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
@@ -128,7 +128,11 @@ import type { RuntimeObservationNodeInput, RuntimeTaskSnapshotInput } from '../.
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
 import type { ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
-import { createExplicitBrainRuntime, type ExplicitBrainRuntime } from '../explicit-brain-runtime.js';
+import {
+  createExplicitBrainRuntime,
+  createProviderExplicitBrainInterpreter,
+  type ExplicitBrainRuntime,
+} from '../explicit-brain-runtime.js';
 
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
@@ -189,6 +193,7 @@ export interface UiRuntimeServiceOptions {
   }) => Promise<unknown>;
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
+  readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: {
     readonly createTaskAssembly?: (input: {
@@ -351,6 +356,7 @@ export class UiRuntimeService {
   private readonly healthManager: OrganHealthManager;
   private readonly memoryContexts = new Map<string, BoundMemoryContext>();
   private readonly explicitBrainRuntime?: ExplicitBrainRuntime;
+  private readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
   private readonly explicitBrainTraceRecords: import('../../../contracts/src/index.js').DecisionTraceRecord[] = [];
   private readonly explicitBrainTraceJournal: DecisionTraceJournal;
   private dispatchTail: Promise<void> = Promise.resolve();
@@ -358,6 +364,8 @@ export class UiRuntimeService {
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
+    this.explicitBrainInterpreter = options.explicitBrainInterpreter
+      ?? createProviderExplicitBrainInterpreter({ port: options.port, binding: options.binding });
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
       load: () => this.explicitBrainTraceRecords,
       persist: (record) => {
@@ -1116,6 +1124,86 @@ export class UiRuntimeService {
   async inspectExplicitInteraction(interactionId: string): Promise<ExplicitInteractionSnapshot> {
     try {
       return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async interpretExplicitInput(input: { readonly interactionId: string }): Promise<ExplicitInteractionSnapshot> {
+    try {
+      let snapshot = await this.explicitIntake.inspect(input.interactionId);
+      if (snapshot.state === 'received') {
+        await this.explicitIntake.beginMatching(input.interactionId);
+        this.persistExplicitBrainState();
+        snapshot = await this.explicitIntake.inspect(input.interactionId);
+      }
+      if (snapshot.state !== 'matching') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.interpretation-state-invalid',
+          'humanagent.runtime.explicit-brain',
+          `explicit input cannot be interpreted from ${snapshot.state}`,
+          'inspect the current interaction state before retrying interpretation',
+          409,
+        );
+      }
+      const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
+        taskId: task.taskId.value,
+        title: task.title,
+        status: task.state,
+        currentInput: task.input || task.directive,
+      }));
+      const interpreted = await this.explicitBrainInterpreter.interpret({
+        interactionId: snapshot.interactionId,
+        inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
+        sourceRef: snapshot.sourceRef,
+        rawInput: snapshot.rawInput,
+        taskCandidates,
+      });
+      if (interpreted.kind === 'clarification') {
+        await this.explicitIntake.requestClarification(snapshot.interactionId, interpreted.question);
+        this.persistExplicitBrainState();
+        return await this.explicitIntake.inspect(snapshot.interactionId);
+      }
+      const matched = interpreted.matchedTaskId === undefined
+        ? undefined
+        : this.coordinator.taskSnapshots().find((task) => task.taskId.value === interpreted.matchedTaskId);
+      if (interpreted.matchedTaskId !== undefined && matched === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.task-match-invalid',
+          'humanagent.runtime.explicit-brain',
+          `interaction agent selected an unknown task: ${interpreted.matchedTaskId}`,
+          'retry interpretation using one of the current task candidates',
+          409,
+        );
+      }
+      if (interpreted.kind === 'requirement'
+        && (interpreted.intent === 'append' || interpreted.intent === 'change')
+        && matched === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.task-match-required',
+          'humanagent.runtime.explicit-brain',
+          `${interpreted.intent} requires a current task match`,
+          'retry interpretation with a current task or clarify the intended task',
+          409,
+        );
+      }
+      await this.explicitIntake.recordMatch(snapshot.interactionId, {
+        normalizedInput: interpreted.normalizedInput,
+        matchedTasks: matched === undefined ? [] : [{ taskId: matched.taskId, relation: 'current', status: matched.state }],
+        knownFacts: interpreted.knownFacts,
+      });
+      if (interpreted.kind === 'status-query') {
+        await this.explicitIntake.beginStatusCheck(snapshot.interactionId);
+        await this.explicitIntake.completeStatusOnly(snapshot.interactionId, interpreted.answer);
+      } else {
+        await this.explicitIntake.propose(snapshot.interactionId, {
+          proposedIntent: interpreted.intent,
+          proposal: interpreted.proposal,
+          decisionRefs: interpreted.decisionRefs,
+        });
+      }
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(snapshot.interactionId);
     } catch (error) {
       throw apiError(error);
     }
