@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   assertNotExpired,
   id,
@@ -37,6 +40,7 @@ import {
   type InteractionDecision,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
+import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
@@ -1850,6 +1854,43 @@ function memoryScope(input: RuntimeExecutionDriverInput, projectKey: string): Ca
   };
 }
 
+function builtinTemplateRoot(): string {
+  const configured = process.env.HUMANAGENT_TEMPLATE_ROOT?.trim();
+  if (configured) return configured;
+  const moduleRoot = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleRoot, '../../../agent-templates/templates'),
+    join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+  ];
+  const root = candidates.find((candidate) => existsSync(join(candidate, 'builtin', 'prompt-registry.json')));
+  if (!root) {
+    throw new UiRuntimeApiError(
+      'memory-context-policy-unavailable',
+      APP_OWNER,
+      'execution agent template root is not configured',
+      'configure the locked builtin template root before starting an execution',
+      409,
+    );
+  }
+  return root;
+}
+
+async function loadExecutionMemoryContextPolicy(): Promise<MemoryContextPolicy> {
+  try {
+    const manifest = await loadBuiltinAgentTemplate(builtinTemplateRoot(), 'execution', '1.1.0');
+    return manifest.memoryContextPolicy;
+  } catch (error) {
+    if (error instanceof UiRuntimeApiError) throw error;
+    throw new UiRuntimeApiError(
+      'memory-context-policy-unavailable',
+      APP_OWNER,
+      `execution agent template policy could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+      'repair the locked builtin execution template before starting an execution',
+      409,
+    );
+  }
+}
+
 export class MemoryContextCapture implements AgentMemoryContextInjectionPort {
   private readonly contexts = new Map<string, AgentMemoryContext>();
 
@@ -1961,12 +2002,13 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
       executionEpoch: this.input.executionEpoch,
     });
     if (runtimeBinding.status !== 'ready') throw memoryFailure(runtimeBinding.issue);
+    const policy = await loadExecutionMemoryContextPolicy();
     const request: AgentMemoryContextRequest = {
       agentRuntimeId: this.input.runtimeId,
       roleId: this.composition.roleId ?? 'execution',
       taskId: this.input.taskId,
       scope,
-      layers: ['current', 'approved-long-term'],
+      layers: policy.allowedLayers,
       tokenBudget: this.composition.tokenBudget ?? 4096,
       executionEpoch: this.input.executionEpoch,
       evidenceRequired: true,
