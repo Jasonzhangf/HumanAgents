@@ -91,6 +91,12 @@ function identity(options: ProviderAgentDriverOptions): ProviderExecutionIdentit
   };
 }
 
+function isExpectedStopAbort(cause: unknown, controller: AbortController): boolean {
+  if (!controller.signal.aborted) return false;
+  if (cause === controller.signal.reason) return true;
+  return cause instanceof Error && cause.name === 'AbortError';
+}
+
 export class ProviderAgentDriver implements AgentDriver {
   readonly kind = 'humanagent.provider-agent-driver';
 
@@ -199,6 +205,7 @@ export class ProviderAgentDriver implements AgentDriver {
       for (const call of toolCalls) {
         if (this.stopping) return;
         this.toolController = new AbortController();
+        const toolController = this.toolController;
         let completeTool!: () => void;
         const toolCompletion = new Promise<void>((resolve) => { completeTool = resolve; });
         this.toolCompletion = toolCompletion;
@@ -208,8 +215,14 @@ export class ProviderAgentDriver implements AgentDriver {
             execution: identity(this.options),
             scope: this.options.scope,
             call,
-            signal: this.toolController.signal,
+            signal: toolController.signal,
           });
+        } catch (cause) {
+          // A stop aborts the tool signal; an executor that rejects with that
+          // abort must drain as the same clean stopped closure as a normal
+          // return. Real tool failures stay visible.
+          if (this.stopping && isExpectedStopAbort(cause, toolController)) return;
+          throw cause;
         } finally {
           this.toolController = undefined;
           completeTool();

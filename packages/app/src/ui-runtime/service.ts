@@ -37,7 +37,6 @@ import {
   type InteractionDecision,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
-import type { ProviderToolSourceEvidenceReader } from '../provider-tool-execution.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
 import { submitInteractionClosure, type SubmittedInteractionClosure } from '../../../runtime/src/checkpoints/submission.js';
@@ -199,7 +198,6 @@ export interface UiRuntimeServiceOptions {
   readonly workspaceRoot?: string;
   readonly providerTools?: import('../../../contracts/src/index.js').ProviderToolDefinition[];
   readonly providerToolExecutor?: ProviderToolExecutionPort;
-  readonly providerToolSourceReader?: ProviderToolSourceEvidenceReader;
   readonly explicitBrainAgentMessage?: (input: {
     readonly recipientRef: string;
     readonly messageRef: string;

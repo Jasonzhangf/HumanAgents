@@ -204,7 +204,6 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(providerToolExecutor === undefined ? {} : {
       providerTools: [RESPONSES_FILE_READ_TOOL],
       providerToolExecutor,
-      providerToolSourceReader: providerToolExecutor,
     }),
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),
     ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),

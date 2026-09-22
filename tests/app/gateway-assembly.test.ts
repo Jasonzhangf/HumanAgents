@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -203,14 +202,6 @@ test('Responses file.read executes through Hand and returns actual bound-workspa
     });
     assert.equal(result.outputRefs[0], 'asset://provider-tool/output/provider-tool-app-gateway-operation-call-readme');
     assert.equal(result.evidenceRefs.some((ref) => ref.source === 'humanagent.operations.file-read'), true);
-    const source = await executor.readSourceEvidence(result.outputRefs[0]);
-    assert.deepEqual(source, {
-      ref: result.outputRefs[0],
-      workspaceRef: 'workspace:fixture-project',
-      path: 'README.md',
-      content: 'REAL_README_CONTENT\n',
-      digest: `sha256:${createHash('sha256').update('REAL_README_CONTENT\n').digest('hex')}`,
-    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

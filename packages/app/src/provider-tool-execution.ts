@@ -35,19 +35,7 @@ export const RESPONSES_FILE_READ_TOOL: ProviderToolDefinition = {
   },
 };
 
-export interface ProviderToolSourceEvidence {
-  readonly ref: string;
-  readonly workspaceRef: string;
-  readonly path: string;
-  readonly content: string;
-  readonly digest: string;
-}
-
-export interface ProviderToolSourceEvidenceReader {
-  readSourceEvidence(ref: string): Promise<ProviderToolSourceEvidence>;
-}
-
-export interface ResponsesFileToolExecutor extends ProviderToolExecutionPort, ProviderToolSourceEvidenceReader {}
+export interface ResponsesFileToolExecutor extends ProviderToolExecutionPort {}
 
 function digest(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -104,12 +92,6 @@ class FileReadAssets implements FileReadArtifactStore {
     if (!reference || reference.digest !== input.outputDigest) throw new Error('file read report artifact is missing or changed');
     return JSON.parse(new TextDecoder().decode(await this.store.read(reference))) as FileReadReport;
   }
-
-  reference(outputRef: string): AssetReference {
-    const reference = this.reports.get(outputRef);
-    if (!reference) throw new Error('file read report artifact is missing');
-    return reference;
-  }
 }
 
 class FileOperationJournal implements OperationJournalPort {
@@ -148,17 +130,6 @@ export function createResponsesFileToolExecutor(input: {
   });
 
   return {
-    async readSourceEvidence(ref) {
-      const reference = assets.reference(ref);
-      const report = await assets.readReport({ outputRef: ref, outputDigest: reference.digest });
-      return {
-        ref,
-        workspaceRef: report.workspaceRef,
-        path: report.path,
-        content: report.content,
-        digest: digest(report.content),
-      };
-    },
     async execute(request) {
       if (request.signal.aborted) throw Object.assign(new Error('file.read was stopped before admission'), { name: 'AbortError' });
       if (request.call.toolId !== RESPONSES_FILE_READ_TOOL.toolId) throw new Error(`provider tool is not registered: ${request.call.toolId}`);
