@@ -2905,6 +2905,53 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     await waitFor(() => assert.equal(runtime.service.listTasks().counts.total, 1));
     await waitFor(() => assert.equal(runtime.service.listTasks().counts.completed, 1));
 
+    // A second interaction that is still awaiting confirmation must not be
+    // confirmable through a route that points at the already-confirmed
+    // interaction: the draft is another interaction's, so the route must
+    // reject it and leave both interactions' state untouched.
+    const foreignInputResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceRef: 'ui:http',
+        rawInput: 'route a foreign draft through HTTP',
+        channel: 'business',
+      }),
+    });
+    assert.equal(foreignInputResponse.status, 201);
+    const foreignInput = await foreignInputResponse.json() as { readonly interactionId: string };
+    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(foreignInput.interactionId)}/interpret`, { method: 'POST' });
+    const foreignProposedResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(foreignInput.interactionId)}`);
+    const foreignProposed = await foreignProposedResponse.json() as { readonly state: string; readonly draft?: { readonly draftId: string; readonly inputRevision: number } };
+    assert.equal(foreignProposed.state, 'awaiting-confirmation');
+    assert.ok(foreignProposed.draft);
+
+    const foreignConfirmationResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/confirmation`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: foreignProposed.draft!.draftId,
+        inputRevision: foreignProposed.draft!.inputRevision,
+        confirmationRef: 'confirmation:http-foreign-draft',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-09-17T00:00:00.000Z',
+        payloadRef: 'asset://requirements/http-foreign-draft',
+      }),
+    });
+    assert.equal(foreignConfirmationResponse.status, 409);
+    const foreignRejection = await foreignConfirmationResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string; readonly nextAction?: string } };
+    assert.equal(foreignRejection.error.code, 'ExplicitIntakeError');
+    assert.equal(foreignRejection.error.ownerId, 'human');
+    assert.equal(foreignRejection.error.nextAction, 'reconfirm-the-current-draft-revision');
+    const foreignAfter = await (await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(foreignInput.interactionId)}`)).json() as { readonly state: string };
+    assert.equal(foreignAfter.state, 'awaiting-confirmation');
+    // The addressed interaction keeps its own confirmation: the rejected call
+    // must not have re-pointed it at the foreign draft. Its state may already
+    // have advanced past confirmation through implicit consumption.
+    const addressedAfter = await (await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}`)).json() as { readonly confirmation?: { readonly draftId: string } };
+    assert.equal(addressedAfter.confirmation?.draftId, proposed.draft!.draftId);
+    assert.equal(addressedAfter.confirmation?.draftId === foreignProposed.draft!.draftId, false);
+
     const controlResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

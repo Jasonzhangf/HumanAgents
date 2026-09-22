@@ -78,6 +78,13 @@ export interface ClarificationExchange {
 
 export interface ConfirmRequirementDraft {
   readonly draftId: string;
+  /**
+   * The interaction this confirmation is addressed to. The HTTP route carries
+   * it in the path, so an addressed confirmation must name the draft that
+   * interaction currently owns. It is optional only for direct in-process
+   * callers that confirm a draft they already hold.
+   */
+  readonly interactionId?: InteractionId;
   readonly inputRevision: number;
   readonly confirmationRef: string;
   readonly confirmedBy: string;
@@ -375,10 +382,39 @@ export class ExplicitIntake {
       );
     }
 
+    // A route that addresses one interaction while carrying another
+    // interaction's draft must fail closed, not silently confirm the foreign
+    // interaction and leave the addressed one untouched.
+    if (input.interactionId !== undefined && input.interactionId !== interactionId) {
+      throw new ExplicitIntakeError(
+        'confirmation-stale',
+        'confirmed draft does not belong to this interaction',
+        {
+          owner: 'human',
+          nextAction: 'reconfirm-the-current-draft-revision',
+          condition: `interaction-${interactionId}-owns-draft`,
+        },
+      );
+    }
+
     const interaction = this.requireInteraction(interactionId);
     const draft = interaction.draft;
     if (!draft) {
       throw this.invalidState('confirm requirement', 'requirement draft is missing', 'return-to-matching');
+    }
+    // The draft must still be the owning interaction's current draft: a
+    // superseded draft from an earlier matching round is not confirmable even
+    // when the route names the right interaction.
+    if (draft.draftId !== input.draftId) {
+      throw new ExplicitIntakeError(
+        'confirmation-stale',
+        'confirmed draft is no longer the current draft of this interaction',
+        {
+          owner: 'human',
+          nextAction: 'reconfirm-the-current-draft-revision',
+          condition: 'current-draft-of-interaction',
+        },
+      );
     }
     if (input.inputRevision !== draft.inputRevision) {
       throw new ExplicitIntakeError(

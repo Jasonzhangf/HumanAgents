@@ -467,6 +467,7 @@ async function handleRequest(
     if (explicitConfirmation && method === 'POST') {
       const body = await readBody(request);
       const receipt = await service.confirmExplicitRequirement({
+        interactionId: decodeURIComponent(explicitConfirmation[1]!),
         draftId: requireString(body, 'draftId'),
         inputRevision: requirePositiveInteger(body, 'inputRevision'),
         confirmationRef: requireString(body, 'confirmationRef'),
