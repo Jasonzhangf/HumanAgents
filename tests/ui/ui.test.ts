@@ -1323,7 +1323,8 @@ test('new task UI sends one natural-language input to the explicit brain', async
   assert.equal(source.includes('matchedTasks: currentTaskId'), false);
   assert.equal(source.includes("proposedIntent: currentTaskId ? 'append' : 'create'"), false);
   assert.equal(flowSource.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
-  assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), true);
+  assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), false);
+  assert.equal(source.includes('后台会继续分类、准入和执行'), true);
 });
 
 test('runtime task dashboard is observational and has no second execution-input form', async () => {
