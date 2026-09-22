@@ -346,12 +346,10 @@ function observationNodeFacts(
         }
         : { node: unprojected, projected: false };
     case 'memory.agent':
-      return task.orchestrated && task.state !== 'created'
-        ? {
-          node: { ...base, state: task.state, summary: '由任务编排在 checkpoint 之后唤起的经验整理请求已发出。' },
-          projected: true,
-        }
-        : { node: unprojected, projected: false };
+      // Memory analysis has its own durable owner and projection. A task or
+      // orchestration state alone does not prove that this task's Memory
+      // operation was requested, running, or completed.
+      return { node: unprojected, projected: false };
     default:
       // The four routing queues and implicit classification have no runtime observable yet.
       return { node: unprojected, projected: false };

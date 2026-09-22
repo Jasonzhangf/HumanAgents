@@ -1416,6 +1416,10 @@ test('observation projects all thirteen registry nodes in registry order with ag
   // Registry order is the projection's own node order; the page never keeps a second table.
   assert.deepEqual(observation.nodes.map((node) => node.nodeId), [...PIPELINE_NODE_IDS]);
   assert.equal(observation.nodes.length, 13);
+  const memoryNode = observation.nodes.find((node) => node.nodeId === 'memory.agent');
+  if (!memoryNode) throw new Error('expected memory observation node');
+  assert.equal(memoryNode.stateDisplay, '已创建');
+  assert.match(memoryNode.summary, /尚未投影/);
   assert.deepEqual(
     observation.nodes.map((node) => node.row),
     PIPELINE_NODE_IDS.map((nodeId) => PIPELINE_ROWS[nodeId]),
