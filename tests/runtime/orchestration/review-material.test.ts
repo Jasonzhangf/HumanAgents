@@ -203,6 +203,80 @@ test('resolveReviewMaterial fails closed on missing, empty, or drifted material'
   }), /must match assignment target refs/);
 });
 
+test('resolveReviewMaterial rejects a supplied body that disagrees with the carried result body', () => {
+  // The digest is self-consistent with the supplied body, so only the
+  // carried-body comparison can catch the disagreement.
+  const suppliedBody = 'a supplied body that the result did not produce';
+  assert.throws(
+    () => resolveReviewMaterial({
+      workerAssignment: assignment(),
+      workerResult: result({
+        producedArtifactDigests: [digest(suppliedBody)],
+        producedArtifactBodies: [subjectBody],
+      }),
+      subjects: [{ ref: 'subject-a', body: suppliedBody }],
+    }),
+    /must match the produced artifact body/,
+  );
+});
+
+test('manager takes the review subject body from the worker result when the caller supplies none', async () => {
+  // The caller cannot know a body that only exists after the worker runs, so
+  // the result-carried body must reach the reviewer on its own.
+  const reviewer = new RecordingReviewAgent();
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool(),
+    executionAgent: new StaticExecutionAgent({
+      result: result({
+        assignmentId: 'assignment-result-body',
+        pipelineNodeId: 'node-result-body',
+        producedArtifactBodies: [subjectBody],
+      }),
+    }),
+    reviewAgent: reviewer,
+    mergeCoordinator: merge,
+  });
+  manager.planStage({ nodeId: 'node-result-body', taskId: task });
+  const dispatched = await manager.dispatch({
+    stageNodeId: 'node-result-body',
+    assignment: assignment({ assignmentId: 'assignment-result-body', pipelineNodeId: 'node-result-body' }),
+    agentId: 'agent-a',
+    scope,
+    reviewKinds: ['quality'],
+  });
+  assert.equal(dispatched.status, 'merged');
+  assert.equal(reviewer.inputs.length, 1);
+  assert.equal(reviewer.inputs[0]?.reviewMaterial.subjects[0]?.body, subjectBody);
+});
+
+test('manager still blocks when the worker result carries no produced body', async () => {
+  const reviewer = new RecordingReviewAgent();
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool(),
+    executionAgent: new StaticExecutionAgent({
+      result: result({
+        assignmentId: 'assignment-empty-body',
+        pipelineNodeId: 'node-empty-body',
+      }),
+    }),
+    reviewAgent: reviewer,
+    mergeCoordinator: merge,
+  });
+  manager.planStage({ nodeId: 'node-empty-body', taskId: task });
+  const dispatched = await manager.dispatch({
+    stageNodeId: 'node-empty-body',
+    assignment: assignment({ assignmentId: 'assignment-empty-body', pipelineNodeId: 'node-empty-body' }),
+    agentId: 'agent-a',
+    scope,
+    reviewKinds: ['quality'],
+  });
+  assert.equal(dispatched.status, 'blocked');
+  assert.equal(dispatched.issue?.code, 'review-material-invalid');
+  assert.equal(reviewer.inputs.length, 0, 'an empty body must never reach the reviewer');
+});
+
 test('manager passes verified review material to the reviewer and blocks before invocation when it is missing', async () => {
   const reviewer = new RecordingReviewAgent();
   const manager = new OrchestrationManager({
