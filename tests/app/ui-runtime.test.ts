@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -29,6 +30,11 @@ import {
   type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
+import {
+  digestAgentTemplate,
+  loadBuiltinAgentTemplate,
+  type AgentTemplateManifest,
+} from '../../packages/agent-templates/src/index.js';
 import {
   AgentRuntime,
   MemoryCoordinator,
@@ -66,6 +72,7 @@ import {
 } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
+const builtinTemplateRoot = join(process.cwd(), 'packages', 'agent-templates', 'templates');
 const binding: ProviderBinding = {
   bindingId: 'binding-ui-test',
   providerId: 'provider-ui-test',
@@ -178,6 +185,19 @@ async function waitFor(assertion: () => void, timeoutMs = 3000): Promise<void> {
   }
   if (last instanceof Error) throw last;
   assertion();
+}
+
+async function narrowedExecutionTemplateRoot(allowedLayers: AgentTemplateManifest['memoryContextPolicy']['allowedLayers']): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-policy-'));
+  execFileSync('cp', ['-R', join(builtinTemplateRoot, 'builtin'), join(root, 'builtin')]);
+  const manifestPath = join(root, 'builtin', 'execution', 'v1.1.0', 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as AgentTemplateManifest;
+  const narrowed: AgentTemplateManifest = {
+    ...manifest,
+    memoryContextPolicy: { ...manifest.memoryContextPolicy, allowedLayers },
+  };
+  await writeFile(manifestPath, JSON.stringify({ ...narrowed, digest: digestAgentTemplate(narrowed) }, null, 2) + '\n', 'utf8');
+  return root;
 }
 
 function serviceFor(
@@ -346,7 +366,8 @@ test('ui runtime recalls approved long-term memory approved by an earlier task',
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
     const receipt = runtime.service.memoryContextReceipt(started.operationId);
-    assert.deepEqual(receipt.layers, ['current', 'approved-long-term']);
+    const executionPolicy = await loadBuiltinAgentTemplate(builtinTemplateRoot, 'execution', '1.1.0');
+    assert.deepEqual(receipt.layers, executionPolicy.memoryContextPolicy.allowedLayers);
     assert.deepEqual(receipt.entries, [{
       layer: 'approved-long-term',
       sourceRef: 'memory-ui-approved-long-term',
@@ -357,6 +378,64 @@ test('ui runtime recalls approved long-term memory approved by an earlier task',
     assert.equal(runtime.service.memoryContextStatus(started.operationId).httpStatus, 200);
   } finally {
     await runtime.server.close();
+  }
+});
+
+test('ui runtime never requests a recall layer the loaded execution template does not grant', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-policy-narrow-'));
+  const narrowedRoot = await narrowedExecutionTemplateRoot(['current']);
+  const previousTemplateRoot = process.env.HUMANAGENT_TEMPLATE_ROOT;
+  process.env.HUMANAGENT_TEMPLATE_ROOT = narrowedRoot;
+  const memory = new DeterministicMemoryBackend();
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: memory,
+      projectKey: 'project-ui-memory-policy-narrow',
+      roleId: 'execution',
+    },
+  });
+  try {
+    await memory.ingest({
+      scope: { kind: 'task', organId, taskId: id('task', 'earlier-task') },
+      sourceRef: 'journal://ui-memory-policy-narrow/approved-long-term',
+      sourceDigest: 'sha256:ui-memory-policy-narrow-approved-long-term',
+      text: 'ungranted long-term project fact',
+    });
+    await memory.addCanonicalRecord({
+      memoryId: 'memory-ui-policy-narrow-approved-long-term',
+      namespace: 'project',
+      projectKey: 'project-ui-memory-policy-narrow',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'ungranted long-term project fact',
+      sourceRefs: ['journal://ui-memory-policy-narrow/approved-long-term'],
+      sourceDigests: ['sha256:ui-memory-policy-narrow-approved-long-term'],
+      taskId: id('task', 'earlier-task'),
+      sourceScopeRef: 'project-ui-memory-policy-narrow:earlier-task',
+      relevanceReason: 'approved by an earlier task in the same project',
+    });
+
+    const task = runtime.service.createTask({ title: 'narrow template grant' });
+    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall with a narrowed grant' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const receipt = runtime.service.memoryContextReceipt(started.operationId);
+    assert.deepEqual(receipt.layers, ['current']);
+    assert.equal(receipt.entries.some((entry) => entry.layer === 'approved-long-term'), false);
+  } finally {
+    await runtime.server.close();
+    if (previousTemplateRoot === undefined) delete process.env.HUMANAGENT_TEMPLATE_ROOT;
+    else process.env.HUMANAGENT_TEMPLATE_ROOT = previousTemplateRoot;
   }
 });
 
