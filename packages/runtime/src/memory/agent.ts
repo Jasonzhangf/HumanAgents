@@ -55,7 +55,8 @@ export interface MemoryAgentIssue {
     | 'memory-agent-event-unsupported'
     | 'memory-agent-event-invalid'
     | 'memory-agent-event-scope-mismatch'
-    | 'memory-agent-event-evidence-missing';
+    | 'memory-agent-event-evidence-missing'
+    | 'memory-agent-analysis-provider-unsupported';
   readonly state: MemoryAgentFailureState;
   readonly ownerId: string;
   readonly message: string;
@@ -1425,7 +1426,19 @@ export class MemoryAgent {
         nextAction: 'none',
       };
     } else {
-      if (this.options.driver !== undefined || this.options.driverFor !== undefined) {
+      if (input.taskId === undefined) {
+        if (this.options.driver !== undefined || this.options.driverFor !== undefined) {
+          return {
+            status: 'attention',
+            issue: issue(
+              'memory-agent-analysis-provider-unsupported',
+              'attention',
+              'memory analysis provider requires a task-bound request',
+              'memory-analysis-provider',
+            ),
+          };
+        }
+      } else if (this.options.driver !== undefined || this.options.driverFor !== undefined) {
         try {
           outcome = await providerOutcome(
             this.options,

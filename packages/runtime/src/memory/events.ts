@@ -103,6 +103,7 @@ const MEMORY_ADMISSION_ATTENTION_DISPOSITION: Record<MemoryAgentIssue['code'], '
   'memory-agent-event-invalid': 'reject',
   'memory-agent-event-scope-mismatch': 'reject',
   'memory-agent-event-evidence-missing': 'reject',
+  'memory-agent-analysis-provider-unsupported': 'reject',
 };
 
 export interface MemoryAnalysisRequestedEventInput {

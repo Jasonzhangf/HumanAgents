@@ -5319,6 +5319,94 @@ test('memory review state restores a durable failed analysis operation after run
   }
 });
 
+test('memory review state exposes a typed terminal failure for interaction-bound model analysis', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-interaction-provider-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Interaction provider analysis\n', 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
+  const sourceRef = 'journal://memory-status/interaction-provider';
+  const sourceText = 'interaction-bound evidence for a model analysis request';
+  const driver = new MemoryAnalysisDriver();
+  const compose = () => composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor: () => driver,
+    evidenceSource: {
+      read: async ({ evidence: requested }) => {
+        if (requested.locator !== sourceRef) throw new Error(`missing evidence: ${requested.locator}`);
+        return { sourceRef: requested.locator, sourceDigest: requested.digest!, text: sourceText };
+      },
+    },
+    binding: {
+      bindingRef: 'memory-binding:interaction-provider',
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'humanagent-ui'),
+      },
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'humanagent-ui',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  try {
+    const memory = await compose();
+    await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: createMemoryAnalysisRequestedEvent({
+        messageId: 'memory-interaction-provider',
+        streamId: `memory-boundaries:interaction:runtime:${paths.projectKey}`,
+        scope: { organId: id('organ', 'humanagent-ui') },
+        occurredAt: '2026-09-22T00:00:00.000Z',
+        summary: 'analyze interaction-bound evidence with a model driver configured',
+        evidenceRefs: [{
+          evidenceId: id('evidence', 'memory-interaction-provider'),
+          kind: 'operation',
+          source: 'test',
+          locator: sourceRef,
+          digest: `sha256:${createHash('sha256').update(sourceText).digest('hex')}`,
+          scope: { organId: id('organ', 'humanagent-ui') },
+        }],
+        executionEpoch: 1,
+        trigger: 'completion',
+        candidateCategory: 'project-fact',
+      }),
+    });
+    const consumed = await memory.consume();
+    assert.equal(consumed.retries.length, 0);
+    assert.equal(consumed.committed.length, 1);
+    assert.equal(consumed.committed[0]?.disposition, 'rejected');
+    assert.equal(consumed.committed[0]?.failureRef, 'memory-agent-analysis-provider-unsupported');
+    assert.deepEqual(driver.events, []);
+    const expected = {
+      mode: 'model' as const,
+      state: 'failed' as const,
+      operationRef: 'memory-analysis:memory-binding:interaction-provider:memory-interaction-provider',
+      failureRef: 'memory-agent-analysis-provider-unsupported',
+    };
+    assert.deepEqual((await memory.reviewState()).analysis, expected);
+    assert.deepEqual((await (await compose()).reviewState()).analysis, expected);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('session outcome settlement commits failed checkpoints without marking them recoverable', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-cli-run-failed-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });

@@ -609,6 +609,44 @@ test('memory analysis consumer preserves a waiting admission as a durable retry 
   assert.equal(journal.receipts.size, 0);
 });
 
+test('memory analysis consumer rejects an interaction-bound provider-unsupported admission without retry', async () => {
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  const bus = ports(journal, registry);
+  await publishEvent(bus, { publisherId: publisher.publisherId, event: event() });
+
+  const result = await consumeEvents(
+    bus,
+    { consumerKey: binding.bindingRef, limit: 10, now: occurredAt },
+    createMemoryAnalysisEventHandler({
+      binding,
+      admission: {
+        admit: async () => ({
+          status: 'attention',
+          issue: {
+            code: 'memory-agent-analysis-provider-unsupported',
+            state: 'attention',
+            ownerId: 'memory-agent',
+            message: 'memory analysis provider requires a task-bound request',
+            nextAction: { kind: 'recover', ref: 'memory-analysis-provider' },
+          },
+        }),
+      },
+      now: () => occurredAt,
+    }),
+  );
+
+  assert.equal(result.retries.length, 0);
+  assert.equal(result.committed.length, 1);
+  assert.equal(result.committed[0]?.disposition, 'rejected');
+  assert.equal(result.committed[0]?.failureRef, 'memory-agent-analysis-provider-unsupported');
+  assert.equal(journal.retries.size, 0);
+  assert.equal(journal.receipts.size, 1);
+  assert.equal(journal.receipts.get(`${binding.bindingRef}:message-a`)?.disposition, 'rejected');
+  assert.equal(journal.receipts.get(`${binding.bindingRef}:message-a`)?.failureRef, 'memory-agent-analysis-provider-unsupported');
+  assert.equal(journal.cursors.size, 1);
+});
+
 test('memory analysis consumer rejects deterministic admission attention without retry', async () => {
   const journal = new FakeJournal();
   const registry = new FakeRegistry();
