@@ -7,6 +7,7 @@ import {
   renderRuntimeStatus,
   stateTone,
 } from './runtime-shell.js'
+import { bindMemoryReviewAction } from './memory-actions.js'
 
 const { main, status } = makePageShell(
   'Memory',
@@ -15,11 +16,13 @@ const { main, status } = makePageShell(
   '查看模型整理状态、证据来源和作用域；接受、拒绝或延期都由你明确决定。',
 )
 
-async function review(candidateId, decision) {
-  const decisionReason = window.prompt('请写明审核理由')?.trim()
-  if (!decisionReason) return
-  await api.reviewMemoryCandidate(candidateId, decision, decisionReason)
-  await refresh()
+function showReviewError(error) {
+  status.dataset.tone = 'danger'
+  clearNode(status)
+  status.append(
+    element('strong', error.code),
+    element('span', ` · ${error.message} · owner=${error.ownerId} · next=${error.nextAction}`),
+  )
 }
 
 function render(view) {
@@ -59,7 +62,15 @@ function render(view) {
       for (const [decision, label] of [['approve', '接受'], ['reject', '拒绝'], ['defer', '延期']]) {
         const button = element('button', label, `button${decision === 'approve' ? ' button--primary' : ''}`)
         button.type = 'button'
-        button.addEventListener('click', () => void review(candidate.candidateId, decision))
+        bindMemoryReviewAction({
+          button,
+          candidateId: candidate.candidateId,
+          decision,
+          readReason: () => window.prompt('请写明审核理由'),
+          review: api.reviewMemoryCandidate,
+          refresh,
+          showError: showReviewError,
+        })
         actions.append(button)
       }
       card.append(actions)

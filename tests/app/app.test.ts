@@ -71,6 +71,76 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   return { root, controlRoot, workspace };
 }
 
+async function createMemoryStatusFixture(
+  prefix: string,
+  evidence: ReadonlyMap<string, string>,
+) {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace(prefix);
+  await writeFile(join(workspace, 'AGENTS.md'), '# Memory status fixture\n', 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
+  const taskId = id('task', 'memory-status-task');
+  const binding = {
+    bindingRef: 'memory-binding:status',
+    projectKey: paths.projectKey,
+    executionEpoch: 1,
+    scope: {
+      namespace: 'project' as const,
+      projectKey: paths.projectKey,
+      organId: id('organ', 'agent-memory-status'),
+      taskId,
+    },
+    taskId,
+    mainAgentId: 'memory-status-main',
+    actor: {
+      actorId: 'memory-agent',
+      roleId: 'memory' as const,
+      permissions: ['memory.read', 'memory.propose'] as const,
+      projectKey: paths.projectKey,
+    },
+  };
+  const compose = () => composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    evidenceSource: {
+      read: async ({ evidence: requested }) => {
+        const text = evidence.get(requested.locator);
+        if (text === undefined) throw new Error(`missing evidence: ${requested.locator}`);
+        return { sourceRef: requested.locator, sourceDigest: requested.digest!, text };
+      },
+    },
+    binding,
+  });
+  const event = (messageId: string, sourceRef: string, text: string, occurredAt: string) => createMemoryAnalysisRequestedEvent({
+    messageId,
+    streamId: `memory-boundaries:${taskId.value}`,
+    scope: binding.scope,
+    occurredAt,
+    summary: `analyze ${messageId}`,
+    evidenceRefs: [{
+      evidenceId: id('evidence', messageId),
+      kind: 'operation',
+      source: 'test',
+      locator: sourceRef,
+      digest: `sha256:${createHash('sha256').update(text).digest('hex')}`,
+      scope: binding.scope,
+    }],
+    executionEpoch: 1,
+    trigger: 'completion',
+    candidateCategory: 'project-fact',
+  });
+  return { root, paths, binding, compose, event };
+}
+
 async function writeProjectPatchArtifact(
   artifactsRoot: string,
   patchRef: string,
@@ -4676,6 +4746,180 @@ test('memory composition connects an injected memory driver to checkpoint analys
       // The successful settlement path already released the session lock.
     }
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('memory review state restores the latest durable analysis operation after runtime restart', async () => {
+  const sourceRef = 'journal://memory-status/restart';
+  const sourceText = 'durable memory status restart evidence';
+  const fixture = await createMemoryStatusFixture(
+    'humanagent-app-memory-status-restart-',
+    new Map([[sourceRef, sourceText]]),
+  );
+  try {
+    const first = await fixture.compose();
+    await first.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-restart', sourceRef, sourceText, '2026-09-22T00:00:00.000Z'),
+    });
+    const consumed = await first.consume();
+    assert.equal(consumed.committed.length, 1);
+    assert.deepEqual((await first.reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'succeeded',
+      operationRef: 'memory-analysis:memory-binding:status:memory-status-restart',
+    });
+
+    const restarted = await fixture.compose();
+    assert.deepEqual((await restarted.reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'succeeded',
+      operationRef: 'memory-analysis:memory-binding:status:memory-status-restart',
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('memory review state selects a later retry over an earlier success from the same consume batch', async () => {
+  const successRef = 'journal://memory-status/success-before-retry';
+  const successText = 'successful evidence before retry';
+  const missingRef = 'journal://memory-status/retry';
+  const fixture = await createMemoryStatusFixture(
+    'humanagent-app-memory-status-retry-',
+    new Map([[successRef, successText]]),
+  );
+  try {
+    const memory = await fixture.compose();
+    await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-success', successRef, successText, '2026-09-22T00:00:00.000Z'),
+    });
+    await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-retry', missingRef, 'missing evidence', '2026-09-22T00:00:01.000Z'),
+    });
+    const consumed = await memory.consume();
+    assert.equal(consumed.committed.length, 1);
+    assert.equal(consumed.retries.length, 1);
+    assert.deepEqual((await memory.reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'waiting',
+      operationRef: 'memory-analysis:memory-binding:status:memory-status-retry',
+      failureRef: 'memory-agent-source-unavailable',
+    });
+    assert.deepEqual((await (await fixture.compose()).reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'waiting',
+      operationRef: 'memory-analysis:memory-binding:status:memory-status-retry',
+      failureRef: 'memory-agent-source-unavailable',
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('memory review state selects a later blocked operation over an earlier success from the same consume batch', async () => {
+  const firstRef = 'journal://memory-status/success-before-blocked';
+  const firstText = 'successful evidence before blocked';
+  const blockedRef = 'journal://memory-status/blocked';
+  const blockedText = 'blocked memory evidence';
+  const fixture = await createMemoryStatusFixture(
+    'humanagent-app-memory-status-blocked-',
+    new Map([[firstRef, firstText], [blockedRef, blockedText]]),
+  );
+  try {
+    const memory = await fixture.compose();
+    await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-success', firstRef, firstText, '2026-09-22T00:00:00.000Z'),
+    });
+    const blockedEvent = await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-blocked', blockedRef, blockedText, '2026-09-22T00:00:01.000Z'),
+    });
+    const operationRef = 'memory-analysis:memory-binding:status:memory-status-blocked';
+    await memory.journal.commitBarrierIntent({
+      consumerKey: fixture.binding.bindingRef,
+      messageId: blockedEvent.messageId,
+      streamId: blockedEvent.streamId,
+      handledSequence: blockedEvent.sequence,
+      intent: {
+        consumerKey: fixture.binding.bindingRef,
+        messageId: blockedEvent.messageId,
+        disposition: 'applied',
+        completionMode: 'operation-barrier',
+        internalEffectFacts: ['memory-analysis-request:memory-status-blocked'],
+        externalOperationRefs: [operationRef],
+      },
+    });
+    await memory.journal.commitExternalOperation({
+      operationRef,
+      consumerKey: fixture.binding.bindingRef,
+      messageId: blockedEvent.messageId,
+      state: 'pending',
+    });
+    await memory.journal.commitExternalOperation({
+      operationRef,
+      consumerKey: fixture.binding.bindingRef,
+      messageId: blockedEvent.messageId,
+      state: 'unknown',
+    });
+    const consumed = await memory.consume();
+    assert.equal(consumed.committed.length, 1);
+    assert.equal(consumed.blocked.length, 1);
+    assert.deepEqual((await memory.reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'unknown',
+      operationRef,
+      failureRef: 'unknown-side-effect',
+    });
+    assert.deepEqual((await (await fixture.compose()).reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'unknown',
+      operationRef,
+      failureRef: 'unknown-side-effect',
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('memory review state restores a durable failed analysis operation after runtime restart', async () => {
+  const sourceRef = 'journal://memory-status/failed';
+  const sourceText = 'failed memory evidence';
+  const fixture = await createMemoryStatusFixture(
+    'humanagent-app-memory-status-failed-',
+    new Map([[sourceRef, sourceText]]),
+  );
+  try {
+    const memory = await fixture.compose();
+    const event = await memory.journal.appendEvent({
+      publisherId: 'memory-boundary-publisher',
+      event: fixture.event('memory-status-failed', sourceRef, sourceText, '2026-09-22T00:00:00.000Z'),
+    });
+    const operationRef = 'memory-analysis:memory-binding:status:memory-status-failed';
+    await memory.journal.commitExternalOperation({
+      operationRef,
+      consumerKey: fixture.binding.bindingRef,
+      messageId: event.messageId,
+      state: 'pending',
+    });
+    await memory.journal.commitExternalOperation({
+      operationRef,
+      consumerKey: fixture.binding.bindingRef,
+      messageId: event.messageId,
+      state: 'failed',
+      failureRef: 'memory-agent-analysis-unavailable',
+    });
+    assert.deepEqual((await (await fixture.compose()).reviewState()).analysis, {
+      mode: 'deterministic',
+      state: 'failed',
+      operationRef,
+      failureRef: 'memory-agent-analysis-unavailable',
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 

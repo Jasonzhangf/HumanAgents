@@ -714,6 +714,7 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
     'docs/ui/task-dashboard.js',
     'docs/ui/observation.js',
     'docs/ui/memory.js',
+    'docs/ui/memory-actions.js',
     'docs/ui/runtime-api.js',
     'docs/ui/runtime-shell.js',
   ];
@@ -728,6 +729,49 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('createRuntimeApi'), true);
   assert.equal(source.includes('/api/memory/summary'), true);
   assert.equal(source.includes('/api/memory/review'), true);
+});
+
+test('memory review button exposes typed API failure and becomes usable again', async () => {
+  const { bindMemoryReviewAction } = await import(new URL(`file://${join(process.cwd(), 'docs/ui/memory-actions.js')}`).href);
+  let listener: (() => Promise<void>) | undefined;
+  const button = {
+    disabled: false,
+    addEventListener(type: string, callback: () => Promise<void>) {
+      assert.equal(type, 'click');
+      listener = callback;
+    },
+  };
+  let requested = false;
+  let refreshed = false;
+  let visibleError: unknown;
+  bindMemoryReviewAction({
+    button,
+    candidateId: 'candidate-failure',
+    decision: 'approve',
+    readReason: () => 'evidence digest must be reviewed',
+    review: async () => {
+      requested = true;
+      assert.equal(button.disabled, true);
+      throw Object.assign(new Error('candidate evidence digest does not match'), {
+        code: 'memory-review-unavailable',
+        ownerId: 'memory-coordinator',
+        nextAction: 'inspect the candidate evidence digest',
+      });
+    },
+    refresh: async () => { refreshed = true; },
+    showError: (error: unknown) => { visibleError = error; },
+  });
+  assert.ok(listener);
+  await listener!();
+  assert.equal(requested, true);
+  assert.equal(refreshed, false);
+  assert.equal(button.disabled, false);
+  assert.deepEqual(visibleError, {
+    code: 'memory-review-unavailable',
+    message: 'candidate evidence digest does not match',
+    ownerId: 'memory-coordinator',
+    nextAction: 'inspect the candidate evidence digest',
+  });
 });
 
 test('UI index is an explicit historical handoff, not a fake runtime console', async () => {
