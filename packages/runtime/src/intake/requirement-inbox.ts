@@ -227,6 +227,25 @@ export class RequirementInbox {
     };
   }
 
+  restoreAcknowledged(input: ReadInbox & { readonly requirementId: string }): void {
+    this.assertConsumer(input);
+    const envelope = [...this.envelopes.values()].find((candidate) => candidate.requirementId === input.requirementId);
+    if (!envelope) {
+      throw new RequirementInboxError(
+        'invalid-state',
+        `acknowledged requirement is missing: ${input.requirementId}`,
+        {
+          owner: 'runtime-coordinator',
+          nextAction: 'repair-the-ui-runtime-journal',
+          condition: 'existing-requirement-envelope',
+        },
+      );
+    }
+    if (this.pending.some((candidate) => candidate.requirementId === input.requirementId)) return;
+    this.pending.push(envelope);
+    this.pending.sort((left, right) => left.fifoSeq - right.fifoSeq);
+  }
+
   async readNext(input: ReadInbox): Promise<RequirementEnvelope | null> {
     this.assertConsumer(input);
     return this.pending.shift() ?? null;

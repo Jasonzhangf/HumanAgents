@@ -462,6 +462,8 @@ export class ExplicitIntake {
         },
       );
     }
+    const interaction = this.requireInteraction(interactionId);
+    if (interaction.state === 'dispatched') return;
     await this.markDispatched(interactionId);
   }
 

@@ -7,7 +7,9 @@ import {
   admitRequirement,
   appendTaskRevision,
   checkAdmission,
+  classifyConfirmedRequirement,
   classifyRequirement,
+  defaultAdmissionQueueConfig,
   decideOrchestrationRuntimePool,
   type AdmissionCheckInput,
   type RequirementAdmissionInput,
@@ -88,6 +90,16 @@ test('classifies confirmed envelopes into explicitly registered queues only', ()
     () => classifyRequirement({ envelope: envelope(), queue: 'control' as never, registeredQueues: ['interactive', 'execution', 'research', 'maintenance'] }),
     AdmissionError,
   );
+});
+
+test('runtime classification separates new execution from correlated task input with finite queues', () => {
+  assert.equal(classifyConfirmedRequirement(envelope()), 'execution');
+  assert.equal(classifyConfirmedRequirement(envelope({ intent: 'append', taskRef: task })), 'interactive');
+  assert.deepEqual(defaultAdmissionQueueConfig('execution'), {
+    kind: 'execution',
+    concurrencyLimit: 1,
+    maxBacklog: 32,
+  });
 });
 
 test('admits only when capability, health, input, checkpoint and quota pass', () => {

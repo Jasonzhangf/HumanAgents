@@ -199,6 +199,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
   });
   await service.hydrate();
+  service.startImplicitConsumer();
   const server = await startUiRuntimeServer({
     service,
     uiRoot: options.uiRoot,

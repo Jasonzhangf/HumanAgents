@@ -32,9 +32,13 @@ export function renderRuntimeStatus(target, status, error) {
   const provider = status.providerError
     ? ` · ${status.providerError.code} · owner=${status.providerError.ownerId} · ${status.providerError.nextAction}`
     : ''
+  const implicit = status.implicitScheduling
+    ? ` · requirement=${status.implicitScheduling.requirementId} · ${status.implicitScheduling.code} · owner=${status.implicitScheduling.ownerId} · next=${status.implicitScheduling.nextAction}`
+    : ''
+  if (status.implicitScheduling) target.dataset.tone = status.implicitScheduling.state === 'failed' ? 'danger' : 'warning'
   target.append(
     element('strong', `mode=${status.mode}`),
-    element('span', ` · provider=${status.providerState} · ${status.connected ? 'connected' : 'disconnected'}${provider}`),
+    element('span', ` · provider=${status.providerState} · ${status.connected ? 'connected' : 'disconnected'}${provider}${implicit}`),
   )
 }
 

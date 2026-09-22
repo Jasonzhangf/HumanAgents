@@ -823,6 +823,7 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('steer'), false);
   assert.equal(source.includes('/api/runtime/status'), true);
   assert.equal(source.includes('createRuntimeApi'), true);
+  assert.equal(source.includes('implicitScheduling'), true);
   assert.equal(source.includes('/api/memory/summary'), true);
   assert.equal(source.includes('/api/memory/review'), true);
 });
