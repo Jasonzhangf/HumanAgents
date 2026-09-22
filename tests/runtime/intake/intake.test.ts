@@ -229,6 +229,81 @@ test('explicit confirmation rejects a stale input revision', async () => {
   assert.equal((await intake.inspect(interactionId)).state, 'awaiting-confirmation');
 });
 
+test('explicit confirmation rejects a draft that belongs to another interaction', async () => {
+  const intake = new ExplicitIntake();
+
+  // Interaction A: the stale draft another session left behind.
+  const interactionA = await intake.receive(input());
+  await intake.beginMatching(interactionA);
+  await intake.recordMatch(interactionA, {
+    normalizedInput: 'normalized stale requirement',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await intake.propose(interactionA, {
+    proposedIntent: 'create',
+    proposal: 'create the stale requirement',
+  });
+  const snapshotA = await intake.inspect(interactionA);
+  assert.ok(snapshotA.draft);
+  const beforeA = structuredClone(await intake.inspect(interactionA));
+
+  // Interaction B: the interaction the route is actually pointing at.
+  const interactionB = await intake.receive(input());
+  await intake.beginMatching(interactionB);
+  await intake.recordMatch(interactionB, {
+    normalizedInput: 'normalized current requirement',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await intake.propose(interactionB, {
+    proposedIntent: 'create',
+    proposal: 'create the current requirement',
+  });
+  const snapshotB = await intake.inspect(interactionB);
+  assert.ok(snapshotB.draft);
+  const beforeB = structuredClone(await intake.inspect(interactionB));
+
+  // Confirm interaction B's route with interaction A's draftId: this must fail
+  // closed as a stale draft, not silently confirm interaction A.
+  await assert.rejects(
+    () => intake.prepareConfirmation({
+      draftId: snapshotA.draft!.draftId,
+      interactionId: interactionB,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:foreign-draft',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-11T00:00:00.000Z',
+      payloadRef: 'asset://requirements/foreign-draft',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ExplicitIntakeError);
+      assert.equal(error.code, 'confirmation-stale');
+      assert.equal(error.owner, 'human');
+      return true;
+    },
+  );
+
+  // No state changed anywhere: both interactions are still awaiting confirmation.
+  assert.deepEqual(await intake.inspect(interactionA), beforeA);
+  assert.deepEqual(await intake.inspect(interactionB), beforeB);
+
+  // Interaction B's own draft still confirms cleanly afterward.
+  const confirmed = await intake.prepareConfirmation({
+    draftId: snapshotB.draft!.draftId,
+    interactionId: interactionB,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:own-draft',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-11T00:00:00.000Z',
+    payloadRef: 'asset://requirements/own-draft',
+  });
+  assert.equal(confirmed.interactionId, interactionB);
+  assert.equal(confirmed.draftId, snapshotB.draft!.draftId);
+  assert.equal((await intake.inspect(interactionB)).state, 'confirmed');
+  assert.equal((await intake.inspect(interactionA)).state, 'awaiting-confirmation');
+});
+
 test('invalid transitions and rejection preserve explicit ownership', async () => {
   const intake = new ExplicitIntake();
   const interactionId = await intake.receive(input());
