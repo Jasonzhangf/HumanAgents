@@ -35,8 +35,9 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.content_part.added'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
   | { readonly protocol: 'responses'; readonly type: 'response.content_part.done'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.done'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
-  | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id: string; readonly delta: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.done'; readonly item_id: string; readonly arguments: string }
+  // Live providers may omit `item_id` and identify the call by call_id.
+  | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id?: string; readonly call_id?: string; readonly output_index?: number; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.done'; readonly item_id?: string; readonly call_id?: string; readonly output_index?: number; readonly arguments: string }
   | { readonly protocol: 'responses'; readonly type: 'response.completed'; readonly response: { readonly id: string } }
   | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response: { readonly id: string; readonly incomplete_details?: { readonly reason: string } } }
   | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response: { readonly id: string; readonly error: ResponsesWireError } }
@@ -49,7 +50,9 @@ export type ResponsesWireOutputItem =
       readonly role: 'assistant';
       readonly content: readonly { readonly type: 'output_text'; readonly text: string }[];
     }
-  | { readonly type: 'function_call'; readonly id: string; readonly call_id: string; readonly name: string; readonly arguments: string };
+  // Responses providers may omit `id` on function_call output items; call_id
+  // is the required identity (see the codecs function_call branches).
+  | { readonly type: 'function_call'; readonly id?: string; readonly call_id: string; readonly name: string; readonly arguments: string };
 
 export interface ResponsesWireError {
   readonly code: string;

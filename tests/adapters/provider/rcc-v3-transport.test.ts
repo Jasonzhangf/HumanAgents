@@ -58,7 +58,8 @@ test('RCC v3 Responses submit opens a second stream bound to the completed tool 
   const streams = [
     chunks([
       `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-round-1' } })}\n\n`,
-      `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'item-readme', call_id: 'call-readme', name: 'file_read', arguments: '{"path":"README.md"}' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: '' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: '{"path":"README.md"}' } })}\n\n`,
       `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-round-1' } })}\n\n`,
     ]),
     chunks([
