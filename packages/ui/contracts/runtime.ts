@@ -184,35 +184,6 @@ export interface RuntimeTaskDashboardProjection {
   readonly observationRef: string;
 }
 
-export interface RuntimeObservationNodeProjection {
-  readonly nodeId: string;
-  readonly title: string;
-  readonly kind: string;
-  readonly kindDisplay: string;
-  readonly state: LifecycleState;
-  readonly stateDisplay: string;
-  readonly owner: string;
-  readonly summary: string;
-  readonly inputRefs: readonly string[];
-  readonly outputRefs: readonly string[];
-  readonly evidenceRefs: readonly EvidenceRef[];
-  readonly childScopeRef?: string;
-}
-
-export interface RuntimeObservationProjection {
-  readonly surface: 'runtime-observation';
-  readonly mode: RuntimeMode;
-  readonly taskId: TaskId;
-  readonly scopeRef: string;
-  readonly title: string;
-  readonly summary: string;
-  readonly projectionSeq: string;
-  readonly breadcrumbs: readonly { readonly ref: string; readonly title: string }[];
-  readonly canReturn: boolean;
-  readonly nodes: readonly RuntimeObservationNodeProjection[];
-  readonly selectedNode?: RuntimeObservationNodeProjection;
-}
-
 // Normalized SSE event stream. Carries domain lifecycle only; never raw RCC
 // frames, full provider payloads, secrets, Journal records, or DSH types.
 export type RuntimeSseEventKind =

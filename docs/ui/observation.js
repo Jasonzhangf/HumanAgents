@@ -9,37 +9,10 @@ import {
   taskIdFromQuery,
 } from './runtime-shell.js'
 
-// Node order and row numbers are the single local copy of the pipeline registry table
-// (docs/architecture/organ-runtime.md:221). TODO(registry): 待注册表接线后改为导入
-// packages/contracts 的 `PIPELINE_ROWS`，本文件不得再出现第二份节点顺序表。
-export const PIPELINE_ROWS = Object.freeze({
-  'sensory.inbox': 1,
-  'explicit.normalize': 2,
-  'implicit.classify': 3,
-  'interactive.queue': 4,
-  'execution.queue': 4,
-  'research.queue': 4,
-  'maintenance.queue': 4,
-  'task.correlate-or-create': 5,
-  'resource.admission': 6,
-  'pipeline.execute': 7,
-  'settle': 8,
-  'task.output': 9,
-  'memory.agent': 9,
-})
-
-// Object key order is the canonical tie-break inside a shared row (the four queues, task.output).
-const PIPELINE_ORDER = Object.freeze(Object.keys(PIPELINE_ROWS))
-
-// Agent attribution is layout scaffolding, not runtime state. The five product roles are fixed;
-// membership is read from the typed projection only, never guessed from keywords or module names.
-const AGENT_LANES = Object.freeze([
-  { laneId: 'interaction', label: '交互', role: '交互 agent' },
-  { laneId: 'orchestration', label: '任务编排', role: '任务编排 agent' },
-  { laneId: 'execution', label: '执行', role: '执行 agent' },
-  { laneId: 'review', label: '审核', role: '审核 agent' },
-  { laneId: 'memory', label: '经验整理', role: '经验整理 agent' },
-])
+// Node order, display row and agent ownership are read from the HTTP projection only. The page keeps
+// no second node-order table and no keyword-based attribution: `projection.nodes[].row` comes from
+// `PIPELINE_ROWS` in packages/contracts, and `projection.agentFrames` is the only ownership source.
+const UNASSIGNED_ROLE = 'unknown'
 
 const UNASSIGNED_LANE = Object.freeze({
   laneId: 'unassigned',
@@ -47,7 +20,7 @@ const UNASSIGNED_LANE = Object.freeze({
   role: 'projection 未给出 agentId / ownerAgentRole',
 })
 
-const UNPROJECTED_ROLE = '归属未投影'
+const UNPROJECTED_ROLE = UNASSIGNED_LANE.label
 
 // Distance from the last node box edge to the routing channel, and the channel width itself.
 // The channel width is CSS-owned (`--flow-corridor` on .flow-canvas) so JS only reads it.
@@ -64,36 +37,44 @@ const { main, status } = makePageShell(
 
 let drawer
 let lastTrigger
-let selectedNode
+let selectedNodeId
 let edgeFrame
+// The scope the page is currently showing, so a node click reloads the same scope with the node
+// selected instead of re-deriving scope refs on the page.
+let currentScopeRef
 
+// Ownership frames and handoffs of the projection the page is currently rendering. They are typed
+// projection facts, not page-owned tables: the page only groups and displays them.
+let currentFrames = []
+let currentHandoffs = []
+let runtimeMode = ''
+
+// Only `ownerAgentRole` (typed contract field) attributes a node. Anything else, including an
+// unrecognised role, stays in the explicit "归属未投影" band.
 function agentRoleOf(node) {
-  for (const field of [node.agentId, node.ownerAgentRole, node.agentRole]) {
-    if (typeof field === 'string' && field.trim().length > 0) return field.trim()
-  }
-  return ''
+  const role = node.ownerAgentRole
+  return typeof role === 'string' && role.trim().length > 0 && role !== UNASSIGNED_ROLE ? role.trim() : ''
 }
 
-function agentLaneFor(node) {
+function laneDefinitions(frames) {
+  return frames.map((frame) => ({
+    laneId: frame.agentId,
+    label: frame.roleDisplay || frame.role,
+    role: frame.role,
+    iteration: frame.iteration,
+  }))
+}
+
+function agentLaneFor(node, lanes) {
   const role = agentRoleOf(node)
-  return AGENT_LANES.find((lane) => lane.laneId === role || lane.role === role) ?? UNASSIGNED_LANE
+  if (!role) return UNASSIGNED_LANE
+  return lanes.find((lane) => lane.role === role) ?? UNASSIGNED_LANE
 }
 
-function canonicalNodeId(nodeId) {
-  const value = String(nodeId || '')
-  const exact = PIPELINE_ORDER.find((candidate) => candidate === value)
-  if (exact) return exact
-  return PIPELINE_ORDER.find((candidate) => value.endsWith(`.${candidate}`) || value.endsWith(`/${candidate}`)) ?? ''
-}
-
+// `row` is the registry display row the projection carries. Nodes the projection leaves rowless are
+// not pipeline nodes and sort after every pipeline node.
 function pipelineRow(node) {
-  const canonical = canonicalNodeId(node.nodeId)
-  return canonical ? PIPELINE_ROWS[canonical] : Number.MAX_SAFE_INTEGER
-}
-
-function canonicalIndex(node) {
-  const canonical = canonicalNodeId(node.nodeId)
-  return canonical ? PIPELINE_ORDER.indexOf(canonical) : -1
+  return typeof node.row === 'number' ? node.row : Number.MAX_SAFE_INTEGER
 }
 
 function nodeState(node) {
@@ -114,7 +95,7 @@ function unresolvedList(values, fallback) {
   return { items, empty: false }
 }
 
-function renderAgentChain(nodes) {
+function renderAgentChain(nodes, lanes) {
   const section = element('section', undefined, 'agent-chain')
   section.setAttribute('aria-label', 'agent 链路')
   const head = element('header', undefined, 'agent-chain-head')
@@ -124,14 +105,14 @@ function renderAgentChain(nodes) {
   )
   section.append(head)
   const strip = element('ol', undefined, 'chain-strip')
-  const activeLanes = new Set(nodes.map((node) => agentLaneFor(node).laneId))
-  AGENT_LANES.forEach((lane, index) => {
+  const activeLanes = new Set(nodes.map((node) => agentLaneFor(node, lanes).laneId))
+  lanes.forEach((lane, index) => {
     const item = element('li', undefined, 'chain-step')
     const chip = element('div', undefined, 'chain-chip')
     if (activeLanes.has(lane.laneId)) chip.dataset.active = 'true'
     chip.append(element('span', lane.label, 'chain-chip-role'), element('small', lane.role))
     item.append(chip)
-    const next = AGENT_LANES[index + 1]
+    const next = lanes[index + 1]
     if (next) {
       const arrow = element('span', '→', 'chain-arrow')
       arrow.setAttribute('aria-hidden', 'true')
@@ -160,13 +141,19 @@ function renderNodeCard(node, index) {
   chip.dataset.tone = stateTone(state)
   head.append(chip)
   const meta = element('span', undefined, 'flow-node-meta')
-  const owner = element('small', `归属：${role || UNPROJECTED_ROLE}`)
+  const owner = element('small', `归属：${role || UNASSIGNED_LANE.label}`)
   if (!role) owner.dataset.empty = 'true'
   meta.append(element('small', node.kindDisplay || node.kind || '未标注类型'), owner)
   const summary = element('span', node.summary || '尚未投影节点摘要', 'flow-node-summary')
   if (!node.summary) summary.dataset.empty = 'true'
   card.append(head, meta, summary)
-  card.addEventListener('click', () => openNode(node, card))
+  // The drawer renders from the typed node detail, which only the projection carries. A click
+  // therefore selects the node and reloads; the returned `selectedNode` opens the drawer.
+  card.addEventListener('click', () => {
+    selectedNodeId = node.nodeId
+    lastTrigger = card
+    void load(currentScopeRef)
+  })
   return card
 }
 
@@ -189,7 +176,7 @@ function renderLane(lane, laneNodes, startIndex) {
   return section
 }
 
-function buildFlow(nodes) {
+function buildFlow(nodes, lanes) {
   const canvas = element('div', undefined, 'flow-canvas')
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
   svg.setAttribute('class', 'flow-edges')
@@ -197,31 +184,27 @@ function buildFlow(nodes) {
   svg.setAttribute('focusable', 'false')
   canvas.append(svg)
 
-  const ordered = [...nodes].sort((a, b) => {
-    const rowDelta = pipelineRow(a) - pipelineRow(b)
-    if (rowDelta !== 0) return rowDelta
-    const indexDelta = canonicalIndex(a) - canonicalIndex(b)
-    if (indexDelta !== 0) return indexDelta
-    return String(a.nodeId).localeCompare(String(b.nodeId))
-  })
+  // Sort by the row the projection carries; the projection's own order (registry order for pipeline
+  // nodes, event order for provider sub-events) breaks ties. The page owns no node-order table.
+  const ordered = [...nodes].sort((a, b) => pipelineRow(a) - pipelineRow(b))
 
   // Lane membership comes from the projection; unknown attribution stays in the explicit
   // "归属未投影" band instead of being inferred from owner/module names.
-  const lanes = new Map(AGENT_LANES.map((lane) => [lane.laneId, []]))
-  lanes.set(UNASSIGNED_LANE.laneId, [])
+  const buckets = new Map(lanes.map((lane) => [lane.laneId, []]))
+  buckets.set(UNASSIGNED_LANE.laneId, [])
   const laneOf = new Map()
   const lanePositionOf = new Map()
   for (const node of ordered) {
-    const laneId = agentLaneFor(node).laneId
-    const bucket = lanes.get(laneId)
+    const laneId = agentLaneFor(node, lanes).laneId
+    const bucket = buckets.get(laneId)
     lanePositionOf.set(node.nodeId, bucket.length)
     laneOf.set(node.nodeId, laneId)
     bucket.push(node)
   }
 
   let index = 0
-  for (const lane of [...AGENT_LANES, UNASSIGNED_LANE]) {
-    const laneNodes = lanes.get(lane.laneId)
+  for (const lane of [...lanes, UNASSIGNED_LANE]) {
+    const laneNodes = buckets.get(lane.laneId)
     if (lane === UNASSIGNED_LANE && laneNodes.length === 0) continue
     canvas.append(renderLane(lane, laneNodes, index))
     index += laneNodes.length
@@ -403,7 +386,8 @@ function trapFocus(event) {
 function renderToolHistory(node) {
   const panel = element('section', undefined, 'drawer-pane')
   panel.append(element('h3', '工具调用历史'))
-  const calls = Array.isArray(node.toolCalls) ? node.toolCalls : []
+  // Typed contract: `toolSteps[]` with stepId / name / status / statusDisplay / returned.
+  const calls = Array.isArray(node.toolSteps) ? node.toolSteps : []
   if (calls.length === 0) {
     const empty = element('p', '尚未投影工具调用记录；本栏只呈现工具调用与工具返回，不呈现模型私有思维链。', 'flow-empty')
     empty.dataset.empty = 'true'
@@ -413,21 +397,25 @@ function renderToolHistory(node) {
   const list = element('ol', undefined, 'tool-list')
   for (const call of calls) {
     const item = element('li', undefined, 'tool-call')
+    item.dataset.stepId = String(call.stepId || '')
     const head = element('div', undefined, 'tool-call-head')
-    head.append(element('strong', call.toolName || call.name || '未标注工具'))
-    const chip = element('span', call.state || 'unknown', 'state-chip')
-    chip.dataset.tone = stateTone(call.state)
+    head.append(element('strong', call.name || '未标注工具'))
+    const chip = element('span', call.statusDisplay || call.status || 'unknown', 'state-chip')
+    chip.dataset.tone = stateTone(call.status)
     head.append(chip)
     item.append(head)
-    if (call.summary) item.append(element('p', call.summary))
-    const args = unresolvedList(call.inputRefs, '未投影工具输入')
-    const results = unresolvedList(call.outputRefs, '未投影工具返回')
     const refs = element('dl', undefined, 'tool-refs')
-    for (const [label, group] of [['工具输入', args], ['工具返回', results]]) {
+    const returned = unresolvedList([call.returned], '未投影工具返回')
+    for (const [label, group] of [['工具返回', returned]]) {
       const cell = element('div')
       const dd = element('dd', group.items.join(', '))
       if (group.empty) dd.dataset.empty = 'true'
       cell.append(element('dt', label), dd)
+      refs.append(cell)
+    }
+    if (call.occurredAt) {
+      const cell = element('div')
+      cell.append(element('dt', '时间'), element('dd', call.occurredAt))
       refs.append(cell)
     }
     item.append(refs)
@@ -461,27 +449,40 @@ function renderSummaryPane(node) {
   return panel
 }
 
-function renderHandoffPane(node) {
+function renderHandoffPane(node, handoffs) {
   const panel = element('section', undefined, 'drawer-pane')
   panel.append(element('h3', '跨 agent 交接'))
-  const handoffs = Array.isArray(node.handoffs) ? node.handoffs : []
-  if (handoffs.length === 0) {
-    const empty = element('p', '尚未投影跨 agent 交接内容。', 'flow-empty')
+  // Typed contract: top-level `handoffs[]`; a node shows the handoffs whose endpoint it is.
+  const touching = (Array.isArray(handoffs) ? handoffs : []).filter(
+    (handoff) => handoff.fromNodeId === node.nodeId || handoff.toNodeId === node.nodeId,
+  )
+  if (touching.length === 0) {
+    const empty = element('p', '尚未投影与该节点相关的跨 agent 交接内容。', 'flow-empty')
     empty.dataset.empty = 'true'
     panel.append(empty)
     return panel
   }
-  for (const handoff of handoffs) {
+  for (const handoff of touching) {
     const block = element('article', undefined, 'handoff')
-    block.append(element('h4', `${handoff.fromAgent || '未标注'} → ${handoff.toAgent || '未标注'}`))
-    const carried = unresolvedList(handoff.carried, '未投影携带内容')
-    const notReturned = unresolvedList(handoff.notReturned, '未投影不回传内容')
+    block.dataset.handoffId = String(handoff.handoffId || '')
+    block.append(element(
+      'h4',
+      `${handoff.fromRoleDisplay || handoff.fromAgentId || '未标注'} → ${handoff.toRoleDisplay || handoff.toAgentId || '未标注'}`,
+    ))
+    block.append(element('p', `${handoff.fromNodeId} → ${handoff.toNodeId}`, 'handoff-route'))
+    const carried = unresolvedList([handoff.carrySummary, handoff.payloadPreview], '未投影携带内容')
+    const notCarried = unresolvedList([handoff.notCarried], '未投影不回传内容')
     const facts = element('dl', undefined, 'drawer-facts')
-    for (const [label, group] of [['携带', carried], ['不回传', notReturned]]) {
+    for (const [label, group] of [['携带', carried], ['不回传', notCarried]]) {
       const cell = element('div')
       const dd = element('dd', group.items.join('、'))
       if (group.empty) dd.dataset.empty = 'true'
       cell.append(element('dt', label), dd)
+      facts.append(cell)
+    }
+    if (handoff.occurredAt) {
+      const cell = element('div')
+      cell.append(element('dt', '时间'), element('dd', handoff.occurredAt))
       facts.append(cell)
     }
     block.append(facts)
@@ -501,17 +502,16 @@ function selectDrawerTab(tabs, panels, activeId) {
   }
 }
 
-function renderDrawerSection(definition, node) {
+function renderDrawerSection(definition, node, handoffs, detail) {
   const section = element('section', undefined, 'drawer-section')
   section.dataset.sheetId = definition.sheetId
   section.append(element('h3', definition.label))
-  section.append(definition.render(node))
+  section.append(definition.render(node, handoffs, detail))
   return section
 }
 
-function openNode(node, trigger) {
+function renderNodeDrawer(node, trigger, handoffs, detail) {
   lastTrigger = trigger
-  selectedNode = node
   const body = drawer.querySelector('.drawer-body')
   clearNode(body)
   const head = element('header', undefined, 'drawer-head')
@@ -553,7 +553,7 @@ function openNode(node, trigger) {
     tab.setAttribute('role', 'tab')
     tab.id = `drawer-tab-${definition.sheetId}`
     tab.addEventListener('click', () => selectDrawerTab(tabButtons, tabSheets, definition.sheetId))
-    const sheet = renderDrawerSection(definition, node)
+    const sheet = renderDrawerSection(definition, node, handoffs, detail)
     sheet.dataset.tabId = definition.sheetId
     sheet.setAttribute('role', 'tabpanel')
     sheet.setAttribute('aria-labelledby', tab.id)
@@ -565,12 +565,12 @@ function openNode(node, trigger) {
   body.append(tabs, sheets)
   selectDrawerTab(tabButtons, tabSheets, 'handoff')
 
-  if (node.childScopeRef) {
+  if (detail?.childScopeRef) {
     const enter = element('button', '进入下一层观测', 'button drawer-enter')
     enter.type = 'button'
     enter.addEventListener('click', () => {
       drawer.close()
-      void load(node.childScopeRef)
+      void load(detail.childScopeRef)
     })
     body.append(enter)
   }
@@ -581,9 +581,10 @@ function openNode(node, trigger) {
 
 function renderReferences(node) {
   const facts = element('dl', undefined, 'drawer-facts')
-  const inputs = unresolvedList(node.inputRefs, '无输入引用')
-  const outputs = unresolvedList(node.outputRefs, '无输出引用')
-  const evidence = unresolvedList((node.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
+  // Refs come from the typed drawer detail (`projection.selectedNode`), never from the node card.
+  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
+  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
+  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
   for (const [label, group] of [['输入引用', inputs], ['输出引用', outputs], ['Evidence', evidence]]) {
     const cell = element('div')
     const dd = element('dd', group.items.join(', '))
@@ -597,42 +598,49 @@ function renderReferences(node) {
 function renderObservation(projection) {
   clearNode(main)
 
+  currentFrames = laneDefinitions(Array.isArray(projection.agentFrames) ? projection.agentFrames : [])
+  currentHandoffs = Array.isArray(projection.handoffs) ? projection.handoffs : []
+
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
   copy.append(
     element('p', '只读 Observation', 'eyebrow'),
-    element('h1', projection.title),
-    element('p', projection.summary, 'lede'),
+    element('h1', projection.scope?.title || '任务处理流水'),
+    element('p', projection.scope?.summary || '', 'lede'),
   )
   const meta = element('div', undefined, 'observation-meta')
-  meta.append(element('span', `mode=${projection.mode}`, 'mode-chip'))
-  if (projection.mode === 'fake') {
+  if (runtimeMode) meta.append(element('span', `mode=${runtimeMode}`, 'mode-chip'))
+  if (runtimeMode === 'fake') {
     const fake = element('span', 'fake 模式：非真实 Provider 结果', 'state-chip')
     fake.dataset.tone = 'warning'
     meta.append(fake)
   }
+  meta.append(element('span', `source=${projection.data?.state || 'unknown'}`, 'mode-chip'))
+  meta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
   heading.append(copy, meta)
   main.append(heading)
 
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '当前观测路径')
-  projection.breadcrumbs.forEach((crumb, index) => {
+  const crumbs = projection.scope?.breadcrumbs || []
+  const rootScopeRef = crumbs[0]?.ref
+  crumbs.forEach((crumb, index) => {
     const button = element('button', crumb.title, 'segment')
     button.type = 'button'
     button.addEventListener('click', () => {
-      void load(index === 0 ? undefined : `task://${taskId}/observation`)
+      void load(crumb.ref === rootScopeRef ? undefined : crumb.ref)
     })
     breadcrumbs.append(button)
   })
   main.append(breadcrumbs)
 
-  main.append(renderAgentChain(projection.nodes))
+  main.append(renderAgentChain(projection.nodes, currentFrames))
 
   const flowSection = element('section', undefined, 'flow-section')
   const flowHead = element('header', undefined, 'section-head')
   flowHead.append(
     element('h2', '节点流转'),
-    element('span', `projection seq ${projection.projectionSeq}`, 'section-meta'),
+    element('span', `${projection.nodes.length} 个节点 · projection seq ${projection.scope?.projectionSeq || '0'}`, 'section-meta'),
   )
   flowSection.append(flowHead)
 
@@ -644,7 +652,7 @@ function renderObservation(projection) {
     return
   }
 
-  const flow = buildFlow(projection.nodes)
+  const flow = buildFlow(projection.nodes, currentFrames)
   const canvas = flow.canvas
   canvas.append(renderLegend())
   flowSection.append(canvas)
@@ -655,6 +663,21 @@ function renderObservation(projection) {
     const observer = new ResizeObserver(() => scheduleEdgeDraw(flow))
     observer.observe(canvas)
     canvas.dataset.observed = 'true'
+  }
+
+  // The typed detail of the selected node opens the read-only drawer; `selectedNodeId` is cleared so
+  // the drawer opens once per selection and breadcrumb navigation starts from a clean state.
+  const selected = projection.selectedNode
+  if (selected && selectedNodeId === selected.nodeId) {
+    const card = canvas.querySelector(`.flow-node[data-node-id="${CSS.escape(String(selected.nodeId))}"]`)
+    const trigger = card || lastTrigger
+    selectedNodeId = undefined
+    renderNodeDrawer(
+      projection.nodes.find((node) => node.nodeId === selected.nodeId) || { nodeId: selected.nodeId, title: selected.title },
+      trigger,
+      currentHandoffs,
+      selected,
+    )
   }
 }
 
@@ -674,7 +697,8 @@ function renderLegend() {
 
 async function load(scopeRef) {
   try {
-    const projection = await api.observation(taskId, scopeRef, selectedNode?.nodeId)
+    const projection = await api.observation(taskId, scopeRef, selectedNodeId)
+    currentScopeRef = scopeRef
     renderObservation(projection)
   } catch (error) {
     status.dataset.tone = 'danger'
@@ -685,6 +709,7 @@ async function load(scopeRef) {
 buildDrawer()
 void (async () => {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
+  runtimeMode = runtimeStatus?.mode || ''
   renderRuntimeStatus(status, runtimeStatus, error)
   await load()
 })()

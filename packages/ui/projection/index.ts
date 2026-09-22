@@ -1,9 +1,11 @@
-import type {
-  EvidenceRef,
-  LifecycleState,
-  Task,
-  TaskId,
-  TaskOutput,
+import {
+  PIPELINE_ROWS,
+  type EvidenceRef,
+  type LifecycleState,
+  type PipelineNodeRow,
+  type Task,
+  type TaskId,
+  type TaskOutput,
 } from '@humanagent/contracts';
 import {
   fromTaskOutput,
@@ -68,6 +70,17 @@ const NODE_KIND_LABELS: Record<string, string> = {
   execution: '执行',
   review: '复核',
   memory: '经验整理',
+  // Typed `PipelineNodeKind` values from `packages/runtime/src/nodes/node-registry.ts`.
+  'interaction.input': '输入与交互',
+  'interaction.normalize': '输入与交互',
+  'orchestration.classify': '任务推进',
+  'orchestration.queue': '任务推进',
+  'orchestration.correlate': '任务推进',
+  'orchestration.admission': '任务推进',
+  'execution.pipeline': '执行',
+  'review.settle': '复核',
+  'review.output': '复核',
+  'memory.curation': '经验整理',
 };
 
 const AGENT_ROLE_LABELS: Record<AgentRoleDisplay, string> = {
@@ -819,9 +832,13 @@ function toPipelineNode(source: ObservationNodeSource, frameByAgentId: ReadonlyM
       `node ${source.nodeId} declares role ${source.ownerAgentRole} but owner ${source.owner} is ${role}`,
     );
   }
+  // Registry pipeline nodes carry their `PIPELINE_ROWS` row; provider sub-event nodes of a child
+  // scope are not registry nodes and stay rowless instead of being given a fabricated position.
+  const row = (PIPELINE_ROWS as Readonly<Record<string, PipelineNodeRow | undefined>>)[source.nodeId];
   return {
     nodeId: source.nodeId,
     title: source.title,
+    ...(row === undefined ? {} : { row }),
     kindDisplay: nodeKindLabel(source.kind),
     ownerAgentRole: role,
     roleDisplay: AGENT_ROLE_LABELS[role],

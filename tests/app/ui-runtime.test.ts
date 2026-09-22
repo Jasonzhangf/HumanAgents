@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  PIPELINE_NODE_IDS,
+  PIPELINE_ROWS,
   id,
   type Attention,
   type Checkpoint,
@@ -1230,19 +1232,21 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   assert.equal(events.every((event) => event.executionEpoch === 1), true);
   assert.equal(events.every((event) => event.taskId.value === task.taskId.value), true);
 
-  const observation = service.observation(task.taskId, 'provider.execute');
-  assert.equal(observation.surface, 'runtime-observation');
-  assert.equal(observation.selectedNode?.nodeId, 'provider.execute');
-  const checkpointNode = observation.nodes.find((node) => node.nodeId === 'checkpoint.commit');
+  const observation = service.observation(task.taskId, 'pipeline.execute');
+  assert.equal(observation.surface, 'observation');
+  assert.equal(observation.selectedNode?.nodeId, 'pipeline.execute');
+  const checkpointNode = observation.scope.nodes.find((node) => node.nodeId === 'settle');
   if (!checkpointNode) throw new Error('expected checkpoint observation node');
-  assert.equal(checkpointNode.evidenceRefs.length > 0, true);
-  assert.equal(checkpointNode.evidenceRefs.every((ref) => ref.source === 'humanagent.runtime'), true);
-  const childScope = observation.nodes.find((node) => node.nodeId === 'provider.execute')?.childScopeRef;
-  assert.ok(childScope);
+  assert.equal(checkpointNode.evidenceCount > 0, true);
+  const selected = observation.selectedNode;
+  if (!selected) throw new Error('expected selected pipeline.execute node');
+  assert.equal(selected.evidenceRefs.length > 0, true);
+  const childScope = selected.childScopeRef;
+  if (!childScope) throw new Error('expected pipeline.execute child scope');
   const child = service.observation(task.taskId, undefined, childScope);
-  assert.equal(child.scopeRef, childScope);
-  assert.equal(child.nodes.length > 0, true);
-  assert.equal(child.canReturn, true);
+  assert.equal(child.scope.scopeRef, childScope);
+  assert.equal(child.scope.nodes.length > 0, true);
+  assert.equal(child.scope.canReturn, true);
   assert.throws(() => service.observation(task.taskId, 'unknown-node'));
   assert.throws(
     () => service.observation(task.taskId, undefined, `task://${task.taskId.value}/observation/foreign`),
@@ -1256,6 +1260,76 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   assert.match(journal, /"outcome":"succeeded"/);
   assert.match(journal, /"source":"humanagent.runtime"/);
   assert.equal(journal.includes('"source":"humanagent.fake-provider"'), false);
+});
+
+test('observation projects all thirteen registry nodes in registry order with agent-frame ownership and real tool steps', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-observation-thirteen-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      { kind: 'model', state: 'model', summary: 'model accepted the request' },
+      { kind: 'tool', state: 'tool', summary: 'tool call observed', outputRefs: ['fake://tool/1'] },
+      { kind: 'output', state: 'output', summary: 'final answer', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  }));
+  const task = service.createTask({ title: 'thirteen nodes', directive: 'project every registry node' });
+  service.startExecution(task.taskId, { prompt: 'observe thirteen nodes' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const observation = service.observation(task.taskId);
+
+  // Registry order is the projection's own node order; the page never keeps a second table.
+  assert.deepEqual(observation.nodes.map((node) => node.nodeId), [...PIPELINE_NODE_IDS]);
+  assert.equal(observation.nodes.length, 13);
+  assert.deepEqual(
+    observation.nodes.map((node) => node.row),
+    PIPELINE_NODE_IDS.map((nodeId) => PIPELINE_ROWS[nodeId]),
+  );
+  // Ownership comes from the merged registry, one frame per owner role.
+  assert.deepEqual(
+    observation.nodes.map((node) => node.ownerAgentRole),
+    ['interaction', 'interaction', 'orchestration', 'orchestration', 'orchestration', 'orchestration', 'orchestration', 'orchestration', 'orchestration', 'execution', 'review', 'review', 'memory'],
+  );
+  assert.deepEqual(
+    observation.agentFrames.map((frame) => frame.role),
+    ['interaction', 'orchestration', 'execution', 'review', 'memory'],
+  );
+  assert.deepEqual(
+    observation.agentFrames.find((frame) => frame.role === 'execution')?.nodeIds,
+    ['pipeline.execute'],
+  );
+
+  // Real tool step content reaches the projection; private reasoning has no channel into it.
+  const executeNode = observation.nodes.find((node) => node.nodeId === 'pipeline.execute');
+  if (!executeNode) throw new Error('expected pipeline.execute node');
+  assert.equal(executeNode.toolSteps.length, 1);
+  assert.equal(executeNode.toolSteps[0]?.returned, 'tool: fake://tool/1');
+  assert.equal(executeNode.toolSteps[0]?.name, 'humanagent.fake-provider');
+  // The provider reports `tool` without a terminal status; the step stays explicitly unknown.
+  assert.equal(executeNode.toolSteps[0]?.status, 'unknown');
+  assert.equal(executeNode.toolSteps[0]?.stepId.length > 0, true);
+
+  // Cross-agent handoff content is carried by the projection itself.
+  assert.equal(observation.handoffs.length > 0, true);
+  const toSettle = observation.handoffs.find((handoff) => handoff.toNodeId === 'settle');
+  if (!toSettle) throw new Error('expected pipeline.execute -> settle handoff');
+  assert.equal(toSettle.fromRole, 'execution');
+  assert.equal(toSettle.toRole, 'review');
+  assert.equal(toSettle.carrySummary.length > 0, true);
+  assert.equal(toSettle.notCarried.length > 0, true);
+
+  // Nodes the runtime reports no fact for stay unprojected instead of being reported as succeeded.
+  const queues = observation.nodes.filter((node) => node.nodeId.endsWith('.queue'));
+  assert.equal(queues.length, 4);
+  for (const queue of queues) {
+    assert.equal(queue.stateDisplay, '已创建');
+    assert.equal(queue.summary.includes('尚未投影'), true);
+  }
+  const classify = observation.nodes.find((node) => node.nodeId === 'implicit.classify');
+  assert.equal(classify?.activity.length, 0);
+  assert.equal(classify?.toolSteps.length, 0);
 });
 
 test('explicit brain confirmation is the only path from input to FIFO execution', async () => {
@@ -1869,9 +1943,14 @@ test('observation preserves waiting and blocked terminal states instead of repor
     await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, terminalState));
     assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, terminalState);
 
-    const child = service.observation(task.taskId, undefined, `task://${task.taskId.value}/observation/provider.execute`);
-    const terminalNode = child.nodes.find((node) => node.summary === `execution ${terminalState}`);
+    const child = service.observation(task.taskId, undefined, `task://${task.taskId.value}/observation/pipeline.execute`);
+    const terminalNode = child.scope.nodes.find((node) => node.summary === `execution ${terminalState}`);
     assert.equal(terminalNode?.state, terminalState);
+    const settleNode = service.observation(task.taskId).scope.nodes.find((node) => node.nodeId === 'settle');
+    assert.equal(
+      settleNode?.stateDisplay,
+      terminalState === 'waiting' ? '等待中' : '受阻',
+    );
   }
 });
 
@@ -1954,9 +2033,9 @@ test('provider identity mismatch fails the execution without surfacing a foreign
   const dashboard = service.taskDashboard(task.taskId);
   assert.equal(dashboard.output, '');
   assert.equal(dashboard.error?.ownerId, 'humanagent.provider-adapter');
-  const child = service.observation(task.taskId, undefined, `task://${task.taskId.value}/observation/provider.execute`);
-  assert.equal(child.nodes.some((node) => node.summary.includes('foreign-task')), false);
-  assert.equal(child.nodes.some((node) => node.summary.includes('another execution')), true);
+  const child = service.observation(task.taskId, undefined, `task://${task.taskId.value}/observation/pipeline.execute`);
+  assert.equal(child.scope.nodes.some((node) => node.summary.includes('foreign-task')), false);
+  assert.equal(child.scope.nodes.some((node) => node.summary.includes('another execution')), true);
 });
 
 test('operation-scoped hydration restores an operation-less business checkpoint after restart', async () => {

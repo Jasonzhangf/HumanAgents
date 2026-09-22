@@ -1,6 +1,7 @@
 import type {
   EvidenceRef,
   LifecycleState,
+  PipelineNodeRow,
   TaskId,
   TaskOutput,
 } from '@humanagent/contracts';
@@ -154,6 +155,12 @@ export interface PipelineNodeActivityProjection {
 export interface PipelineNodeProjection {
   readonly nodeId: string;
   readonly title: string;
+  /**
+   * Display row of `PIPELINE_ROWS` (`packages/contracts/src/index.ts`). Registry pipeline nodes
+   * always carry it; provider sub-event nodes of a child scope are not registry nodes and have none.
+   * The page sorts by this row and never re-derives node order from its own table.
+   */
+  readonly row?: PipelineNodeRow;
   readonly kindDisplay: string;
   readonly ownerAgentRole: AgentRoleDisplay | 'unknown';
   readonly roleDisplay: string;
