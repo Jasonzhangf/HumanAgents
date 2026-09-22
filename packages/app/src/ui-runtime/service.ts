@@ -1966,7 +1966,7 @@ export class MemoryBoundExecutionDriver implements AgentDriver {
       roleId: this.composition.roleId ?? 'execution',
       taskId: this.input.taskId,
       scope,
-      layers: ['current'],
+      layers: ['current', 'approved-long-term'],
       tokenBudget: this.composition.tokenBudget ?? 4096,
       executionEpoch: this.input.executionEpoch,
       evidenceRequired: true,

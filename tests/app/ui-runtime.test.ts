@@ -300,6 +300,66 @@ test('ui runtime binds memory to the real operation identity and exposes determi
   }
 });
 
+test('ui runtime recalls approved long-term memory approved by an earlier task', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-long-term-'));
+  const memory = new DeterministicMemoryBackend();
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: memory,
+      projectKey: 'project-ui-long-term',
+      roleId: 'execution',
+    },
+  });
+  try {
+    await memory.ingest({
+      scope: { kind: 'task', organId, taskId: id('task', 'earlier-task') },
+      sourceRef: 'journal://ui-memory/approved-long-term',
+      sourceDigest: 'sha256:ui-memory-approved-long-term',
+      text: 'approved long-term project fact',
+    });
+    await memory.addCanonicalRecord({
+      memoryId: 'memory-ui-approved-long-term',
+      namespace: 'project',
+      projectKey: 'project-ui-long-term',
+      kind: 'semantic',
+      state: 'approved',
+      summary: 'approved long-term project fact',
+      sourceRefs: ['journal://ui-memory/approved-long-term'],
+      sourceDigests: ['sha256:ui-memory-approved-long-term'],
+      taskId: id('task', 'earlier-task'),
+      sourceScopeRef: 'project-ui-long-term:earlier-task',
+      relevanceReason: 'approved by an earlier task in the same project',
+    });
+
+    const task = runtime.service.createTask({ title: 'later task recalls approved memory' });
+    const started = runtime.service.startExecution(task.taskId, { prompt: 'recall approved long-term memory' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const receipt = runtime.service.memoryContextReceipt(started.operationId);
+    assert.deepEqual(receipt.layers, ['current', 'approved-long-term']);
+    assert.deepEqual(receipt.entries, [{
+      layer: 'approved-long-term',
+      sourceRef: 'memory-ui-approved-long-term',
+      sourceDigest: `sha256:${createHash('sha256').update('approved long-term project fact').digest('hex')}`,
+      scope: `project:project-ui-long-term:${organId.value}:${task.taskId.value}`,
+      tokenCost: 4,
+    }]);
+    assert.equal(runtime.service.memoryContextStatus(started.operationId).httpStatus, 200);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
 test('ui runtime rejects stale memory epoch recall after the task advances', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-stale-'));
   const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));

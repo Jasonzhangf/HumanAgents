@@ -57,7 +57,8 @@
     "allowedLayers": [
       "current",
       "task-recent",
-      "related"
+      "related",
+      "approved-long-term"
     ],
     "maxTokenBudget": 4096,
     "required": false
@@ -111,5 +112,5 @@
       "capabilityDigest": "sha256:1a004a769e07c96f059f3a88ef8af646a0c66f9f4d79be2d6336403e573e8b80"
     }
   },
-  "digest": "fnv1a:cecb3908"
+  "digest": "fnv1a:712db81f"
 }
