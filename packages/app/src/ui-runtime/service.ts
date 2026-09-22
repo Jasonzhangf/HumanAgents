@@ -589,6 +589,8 @@ export class UiRuntimeService {
   private implicitConsumerEnabled = false;
   private implicitConsumerScheduled = false;
   private implicitConsumerIssue: UiRuntimeApiError | undefined;
+  private implicitTerminalIssue: UiRuntimeApiError | undefined;
+  private implicitTerminalRequirement: Pick<RequirementEnvelope, 'requirementId' | 'draftId' | 'fifoSeq'> | undefined;
   private implicitConsumerRequirement: Pick<RequirementEnvelope, 'requirementId' | 'draftId' | 'fifoSeq'> | undefined;
   private readonly implicitWatchedOperations = new Set<string>();
   private connected = true;
@@ -1381,7 +1383,7 @@ export class UiRuntimeService {
   }
 
   implicitSchedulingIssue(): UiRuntimeApiError | undefined {
-    return this.implicitConsumerIssue;
+    return this.implicitTerminalIssue ?? this.implicitConsumerIssue;
   }
 
   async receiveExplicitInput(input: ExplicitInput, inputRevision = 1): Promise<string> {
@@ -1629,6 +1631,8 @@ export class UiRuntimeService {
     await previous;
     let consumed: RequirementEnvelope | null = null;
     let dispatchEntry: DispatchLedgerEntry | undefined;
+    let inboxBeforeRetire: RequirementInboxState | undefined;
+    let retired = false;
     try {
       consumed = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
       if (!consumed) return null;
@@ -1637,6 +1641,32 @@ export class UiRuntimeService {
         draftId: consumed.draftId,
         fifoSeq: consumed.fifoSeq,
       };
+      const taskRef = consumed.taskRef;
+      if (taskRef && !this.coordinator.taskSnapshots().some((task) => task.taskId.value === taskRef.value)) {
+        inboxBeforeRetire = this.requirementInbox.exportState();
+        const outcome = await this.requirementInbox.retire({
+          consumerId: RUNTIME_OWNER,
+          requirementId: consumed.requirementId,
+          code: 'task.not.found',
+          message: `confirmed append target is not in the local task store: ${taskRef.value}`,
+          retiredAt: this.now().toISOString(),
+        });
+        retired = true;
+        this.persistExplicitBrainState();
+        this.implicitTerminalRequirement = {
+          requirementId: outcome.requirementId,
+          draftId: outcome.draftId,
+          fifoSeq: outcome.fifoSeq,
+        };
+        this.implicitTerminalIssue = new UiRuntimeApiError(
+          'explicit-brain.requirement-retired',
+          RUNTIME_OWNER,
+          outcome.message,
+          'inspect the retired requirement and resubmit against a current task',
+          409,
+        );
+        return null;
+      }
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
       if (existingDispatch) dispatchEntry = existingDispatch;
       else {
@@ -1651,7 +1681,9 @@ export class UiRuntimeService {
       }
       return await this.completePreparedDispatch(consumed, dispatchEntry);
     } catch (error) {
-      if (consumed) {
+      if (retired && inboxBeforeRetire) {
+        this.requirementInbox.restoreState(inboxBeforeRetire);
+      } else if (consumed) {
         this.requirementInbox.restoreAcknowledged({
           consumerId: RUNTIME_OWNER,
           requirementId: consumed.requirementId,
@@ -1796,6 +1828,31 @@ export class UiRuntimeService {
   }
 
   private implicitSchedulingProjection(): import('../../../ui/contracts/runtime.js').RuntimeStatusProjection['implicitScheduling'] {
+    if (this.implicitTerminalIssue && this.implicitTerminalRequirement) {
+      return {
+        state: 'blocked',
+        code: this.implicitTerminalIssue.code,
+        ownerId: this.implicitTerminalIssue.ownerId,
+        message: this.implicitTerminalIssue.message,
+        nextAction: this.implicitTerminalIssue.nextAction,
+        requirementId: this.implicitTerminalRequirement.requirementId,
+        draftId: this.implicitTerminalRequirement.draftId,
+        fifoSeq: this.implicitTerminalRequirement.fifoSeq,
+      };
+    }
+    const terminalOutcome = this.requirementInbox.exportState().terminalOutcomes?.at(-1);
+    if (terminalOutcome) {
+      return {
+        state: 'blocked',
+        code: 'explicit-brain.requirement-retired',
+        ownerId: RUNTIME_OWNER,
+        message: terminalOutcome.message,
+        nextAction: 'inspect the retired requirement and resubmit against a current task',
+        requirementId: terminalOutcome.requirementId,
+        draftId: terminalOutcome.draftId,
+        fifoSeq: terminalOutcome.fifoSeq,
+      };
+    }
     if (!this.implicitConsumerIssue) return undefined;
     const pendingState = this.requirementInbox.exportState();
     const pendingDraftId = pendingState.pendingDraftIds[0];

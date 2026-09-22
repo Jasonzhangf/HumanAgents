@@ -28,6 +28,7 @@ import {
   type ProviderStopReceipt,
   type ProviderSubmitResult,
   type ScopeRef,
+  type TaskId,
 } from '../../packages/contracts/src/index.js';
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import {
@@ -1817,6 +1818,57 @@ test('runtime admission waits on actual running load and resumes when capacity i
   await waitFor(() => assert.equal(service.listTasks().counts.completed, 2));
   assert.equal((await service.inspectExplicitInteraction(secondInteraction)).state, 'dispatched');
   assert.equal(service.implicitSchedulingIssue(), undefined);
+});
+
+test('implicit consumer retires a confirmed append whose taskRef is absent and continues later requirements', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-missing-task-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+
+  const missingTaskId = id('task', 'missing-task');
+  const confirmAppend = async (suffix: string, taskRef: TaskId): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `append to missing task ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `append to missing task ${suffix}`,
+      matchedTasks: [{ taskId: taskRef, relation: 'current', status: 'running' }],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'append',
+      proposal: `append to missing task ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  const laterTask = service.createTask({ title: 'later task', directive: 'later task' });
+  await confirmAppend('missing-task-head', missingTaskId);
+  const laterInteraction = await confirmAppend('later-append', laterTask.taskId);
+  assert.equal(service.listTasks().counts.total, 1);
+
+  service.startImplicitConsumer();
+  await waitFor(() => {
+    const state = service.status().implicitScheduling;
+    assert.equal(state?.code, 'explicit-brain.requirement-retired');
+    assert.equal(state?.state, 'blocked');
+    assert.equal(state?.requirementId, 'requirement:draft-1:1');
+  });
+  await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
+  assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
+  assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
 });
 
 test('runtime exposes a blocked requirement through status and resumes it after reconnect', async () => {
