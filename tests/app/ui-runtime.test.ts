@@ -1253,6 +1253,15 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   const selected = observation.selectedNode;
   if (!selected) throw new Error('expected selected pipeline.execute node');
   assert.equal(selected.evidenceRefs.length > 0, true);
+  // The drawer panes read the detail projection's own typed fields, so the live service path must
+  // carry the real tool steps and owning agent role, not just those of the flow node.
+  assert.equal(selected.toolSteps.length, 1);
+  assert.equal(selected.toolSteps[0]?.returned, 'tool: fake://tool/1');
+  assert.equal(selected.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.equal(selected.ownerAgentRole, 'execution');
+  assert.equal(selected.roleDisplay, '执行');
+  assert.equal(selected.owner.length > 0, true);
+  assert.equal(selected.iteration, 1);
   const childScope = selected.childScopeRef;
   if (!childScope) throw new Error('expected pipeline.execute child scope');
   const child = service.observation(task.taskId, undefined, childScope);
