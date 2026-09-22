@@ -55,9 +55,14 @@ function renderCreate() {
   diagnostics.hidden = true
   const diagnosticText = element('pre')
   diagnostics.append(element('summary', '查看技术详情'), diagnosticText)
+  const restartPanel = element('div')
+  restartPanel.hidden = true
+  const restart = element('a', '重新填写新任务', 'button')
+  restart.href = './task.html?task=new'
+  restartPanel.append(restart, element('p', '重试或继续查看会保留当前输入；重新填写会打开新请求，不修改或取消当前请求。', 'muted'))
   let interactionId
   let inFlight = false
-  form.append(directiveLabel, button, feedback, diagnostics)
+  form.append(directiveLabel, button, feedback, restartPanel, diagnostics)
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
     if (inFlight) return
@@ -71,6 +76,7 @@ function renderCreate() {
     directive.readOnly = true
     form.setAttribute('aria-busy', 'true')
     diagnostics.hidden = true
+    restartPanel.hidden = true
     button.textContent = '正在处理…'
     try {
       feedback.textContent = '正在交给显式大脑整理…'
@@ -139,6 +145,7 @@ function renderCreate() {
     } finally {
       inFlight = false
       button.disabled = false
+      restartPanel.hidden = !interactionId || !directive.readOnly
       form.setAttribute('aria-busy', 'false')
     }
   })

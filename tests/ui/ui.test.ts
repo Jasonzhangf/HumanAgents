@@ -1312,6 +1312,7 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
     disabled = false;
     readOnly = false;
     hidden = false;
+    href = '';
     attrs: Record<string, string> = {};
     handlers: Record<string, (event: { preventDefault(): void }) => Promise<void>> = {};
     constructor(readonly tag: string, text = '') { this.textContent = text; }
@@ -1340,6 +1341,7 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
     assert.equal(input.clarificationAnswer, '读取 README');
     if (clarification && advanced === 1) return { state: 'awaiting-clarification', reply: '请补充范围' };
     if (advanced === (clarification ? 2 : 1)) return pending;
+    if (advanced === (clarification ? 3 : 2)) return { state: 'matching', nextAction: '等待处理' };
     return { state: 'awaiting-confirmation', draft: { proposedIntent: 'create', draftId: 'draft', inputRevision: 1 } };
   };
   const window = { location: { href: '' } };
@@ -1375,9 +1377,21 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
   const diagnostics = nodes.find(node => node.tag === 'details')!;
   assert.equal(diagnostics.hidden, false);
   assert.equal(diagnostics.children.some(node => node.textContent.includes('typed intent')), true);
+  const restart = nodes.find(node => node.tag === 'a' && node.textContent === '重新填写新任务')!;
+  assert.equal(restart?.href, './task.html?task=new');
+  const restartPanel = nodes.find(node => node.children.includes(restart))!;
+  assert.equal(restartPanel.hidden, false);
+  assert.equal(restartPanel.children.some(node => node.textContent.includes('新请求')), true);
+  assert.equal(Object.keys(restart.handlers).length, 0);
+  assert.equal(received, 1);
   await submit();
   assert.equal(received, 1);
   assert.equal(advanced, clarification ? 3 : 2);
+  assert.equal(button.textContent, '继续查看本次提交');
+  assert.equal(restartPanel.hidden, false);
+  assert.equal(textarea.readOnly, true);
+  await submit();
+  assert.equal(received, 1);
   assert.equal(window.location.href, './tasks.html');
 });
 
