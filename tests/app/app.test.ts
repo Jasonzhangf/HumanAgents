@@ -787,12 +787,10 @@ class MemoryAnalysisDriver implements AgentDriver {
     if (!submission) throw new Error('unknown memory analysis runtime');
     this.events.push(`observe:${input.runtimeId}`);
     const payload = submission.payload as unknown as {
-      readonly operationId: string;
       readonly prompt: unknown;
       readonly sourceRefs: readonly string[];
     };
     const curation = {
-      operationId: { scope: 'operation', value: payload.operationId },
       auditPrompt: payload.prompt,
       sourceRefs: payload.sourceRefs,
       outcome: 'candidate',
@@ -882,10 +880,12 @@ class MemoryCurationReplayPort implements ExecutionRuntimePort {
     const payload = this.payloads.get(input.runtimeId);
     const identity = this.identities.get(input.runtimeId);
     if (!payload || !identity) {
-      throw new Error(`memory rcc replay observed an unknown runtime: observed=${input.runtimeId} known=${JSON.stringify([...this.identities.keys()])} submitted=${JSON.stringify(this.submissions)}`);
+      throw new Error(`memory rcc replay observed an unknown runtime: ${input.runtimeId}`);
     }
+    // A real provider never receives control identity in the business payload.
+    // The memory owner binds the operation identity from the admitted control
+    // plane, so this replay reports no operation id of its own.
     const curation = {
-      operationId: identity.operationId,
       auditPrompt: payload.prompt,
       sourceRefs: payload.sourceRefs,
       outcome: 'candidate',
@@ -4924,7 +4924,9 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       memoryBoundaryPublisher: memory.publisher,
     });
     const consumed = await memory.consume();
-    assert.equal(consumed.retries.length, 0);
+    if (consumed.retries.length !== 0) {
+      throw new Error(`DEBUG retry=${consumed.retries[0]?.failureRef ?? 'none'}`);
+    }
     assert.equal(consumed.committed.length, 1);
     assert.equal(consumed.committed[0]?.disposition, 'applied');
     const state = await memory.reviewState();
