@@ -1480,6 +1480,162 @@ test('runtime admission waits on actual running load and resumes when capacity i
   assert.equal(service.implicitSchedulingIssue(), undefined);
 });
 
+test('runtime exposes a blocked requirement through status and resumes it after reconnect', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-reconnect-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    interactionRoot: join(root, 'interactions'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: 'project-ui-implicit-reconnect',
+    workspaceRoot: root,
+    memory: testMemory('project-ui-implicit-reconnect'),
+  });
+  try {
+    runtime.service.markDisconnected();
+    const interactionId = await runtime.service.receiveExplicitInput({
+      sourceRef: 'ui:implicit-reconnect',
+      rawInput: 'resume this requirement after reconnect',
+      channel: 'business',
+    });
+    await runtime.service.beginExplicitMatching(interactionId);
+    await runtime.service.recordExplicitMatch(interactionId, {
+      normalizedInput: 'resume this requirement after reconnect',
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await runtime.service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'create',
+      proposal: 'create the reconnect requirement',
+    });
+    const proposed = await runtime.service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await runtime.service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:implicit-reconnect',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: 'asset://requirements/implicit-reconnect',
+    });
+
+    await waitFor(() => assert.equal(runtime.service.status().implicitScheduling?.code, 'implicit-admission.blocked'));
+    const statusResponse = await fetch(`${runtime.server.url}/api/runtime/status`);
+    const status = await statusResponse.json() as ReturnType<UiRuntimeService['status']>;
+    assert.deepEqual(status.implicitScheduling, {
+      state: 'blocked',
+      code: 'implicit-admission.blocked',
+      ownerId: 'runtime-coordinator',
+      message: 'required capability is unavailable: provider.execution',
+      nextAction: 'recover:capability.provider.execution',
+      requirementId: 'requirement:draft-1:1',
+      draftId: 'draft-1',
+      fifoSeq: 1,
+    });
+    assert.equal(runtime.service.listTasks().counts.total, 0);
+    assert.equal((await runtime.service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+
+    runtime.service.markConnected();
+    await waitFor(() => assert.equal(runtime.service.listTasks().counts.total, 1));
+    await waitFor(() => assert.equal(runtime.service.status().implicitScheduling, undefined));
+    assert.equal((await runtime.service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('implicit consumer attaches to an existing running task and wakes pending work at final', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-rebind-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 100 }));
+  const occupying = service.createTask({ title: 'occupy capacity', directive: 'occupy capacity' });
+  service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
+
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:implicit-rebind',
+    rawInput: 'run after existing execution finalizes',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'run after existing execution finalizes',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create work after capacity release',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-rebind',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-rebind',
+  });
+
+  service.startImplicitConsumer();
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'waiting'));
+  await waitFor(() => assert.equal(service.listTasks().counts.total, 2));
+  await waitFor(() => assert.equal(service.listTasks().completed.length, 2));
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
+test('implicit dispatch persistence failure keeps the requirement visible and retryable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-persistence-'));
+  const journal = new FailOnceProjectionJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 20 }),
+    'fake',
+    'ready',
+    journal,
+  );
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:implicit-persistence',
+    rawInput: 'retry the same requirement after projection failure',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'retry the same requirement after projection failure',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create persistence retry work',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-persistence',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-persistence',
+  });
+
+  journal.failNextExplicitState = true;
+  service.startImplicitConsumer();
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
+  assert.equal(service.status().implicitScheduling?.requirementId, 'requirement:draft-1:1');
+  assert.equal(service.listTasks().counts.total, 1);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+
+  service.markConnected();
+  await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+  assert.equal(service.listTasks().counts.total, 1);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
 test('runtime restart hydrates dispatched state without starting the requirement twice', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-restart-'));
   const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });

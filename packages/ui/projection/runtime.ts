@@ -49,6 +49,7 @@ export interface RuntimeStatusInput {
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly detail?: string;
   readonly modes: readonly RuntimeModeStatus[];
+  readonly implicitScheduling?: RuntimeStatusProjection['implicitScheduling'];
 }
 
 export interface RuntimeTaskSnapshotInput {
@@ -156,6 +157,7 @@ export function projectRuntimeStatus(input: RuntimeStatusInput): RuntimeStatusPr
     providerError: input.providerError,
     detail: input.detail,
     modes: input.modes,
+    implicitScheduling: input.implicitScheduling,
   };
 }
 

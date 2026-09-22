@@ -33,6 +33,18 @@ export interface RuntimeStatusProjection {
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly detail?: string;
   readonly modes: readonly RuntimeModeStatus[];
+  readonly implicitScheduling?: RuntimeImplicitSchedulingProjection;
+}
+
+export interface RuntimeImplicitSchedulingProjection {
+  readonly state: 'waiting' | 'blocked' | 'failed';
+  readonly code: string;
+  readonly ownerId: string;
+  readonly message: string;
+  readonly nextAction: string;
+  readonly requirementId: string;
+  readonly draftId: string;
+  readonly fifoSeq: number;
 }
 
 export type OrganHealthDimension =

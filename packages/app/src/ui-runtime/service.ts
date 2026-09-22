@@ -355,6 +355,8 @@ export class UiRuntimeService {
   private implicitConsumerEnabled = false;
   private implicitConsumerScheduled = false;
   private implicitConsumerIssue: UiRuntimeApiError | undefined;
+  private implicitConsumerRequirement: Pick<RequirementEnvelope, 'requirementId' | 'draftId' | 'fifoSeq'> | undefined;
+  private readonly implicitWatchedOperations = new Set<string>();
   private connected = true;
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
@@ -760,6 +762,7 @@ export class UiRuntimeService {
         { mode: 'rcc', enabled: true, state: this.mode === 'rcc' ? runtimeState : 'ready', detail: 'RCC 4444' },
         { mode: 'dsh', enabled: false, state: 'disabled', detail: 'DSH 接入完成后开放' },
       ],
+      implicitScheduling: this.implicitSchedulingProjection(),
     });
   }
 
@@ -1080,6 +1083,7 @@ export class UiRuntimeService {
 
   markConnected(): void {
     this.connected = true;
+    this.scheduleImplicitConsumption();
   }
 
   attentionAudit(): { readonly published: readonly Attention[]; readonly resolved: readonly Attention[] } {
@@ -1108,6 +1112,11 @@ export class UiRuntimeService {
 
   startImplicitConsumer(): void {
     this.implicitConsumerEnabled = true;
+    for (const task of this.coordinator.taskSnapshots()) {
+      if ((task.state === 'running' || task.state === 'settling') && task.operationId) {
+        this.watchExecutionForImplicitWakeup(id('operation', task.operationId));
+      }
+    }
     this.scheduleImplicitConsumption();
   }
 
@@ -1255,18 +1264,30 @@ export class UiRuntimeService {
     const previous = this.dispatchTail;
     this.dispatchTail = new Promise<void>((resolve) => { release = resolve; });
     await previous;
+    let consumed: RequirementEnvelope | null = null;
+    let dispatchEntry: DispatchLedgerEntry | undefined;
     try {
-      const consumed: RequirementEnvelope | null = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
+      consumed = await this.requirementInbox.peekNext({ consumerId: RUNTIME_OWNER });
       if (!consumed) return null;
+      this.implicitConsumerRequirement = {
+        requirementId: consumed.requirementId,
+        draftId: consumed.draftId,
+        fifoSeq: consumed.fifoSeq,
+      };
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
       if (existingDispatch) {
+        dispatchEntry = existingDispatch;
+        this.watchExecutionForImplicitWakeup(existingDispatch.operationId);
+        await this.explicitIntake.markDraftDispatched(consumed.draftId);
+        this.persistExplicitBrainState();
         const requirement = await this.requirementInbox.acknowledge({
           consumerId: RUNTIME_OWNER,
           requirementId: consumed.requirementId,
         });
-        await this.explicitIntake.markDraftDispatched(consumed.draftId);
+        this.persistExplicitBrainState();
         this.dispatchLedger.delete(consumed.draftId);
         this.persistExplicitBrainState();
+        this.implicitConsumerRequirement = undefined;
         return {
           requirement,
           taskId: existingDispatch.taskId,
@@ -1281,32 +1302,43 @@ export class UiRuntimeService {
             title: admitted.classified.envelope.normalizedInput,
             directive: admitted.classified.envelope.normalizedInput,
           });
-      const started = this.coordinator.startExecution(task.taskId, {
+      const execution = this.coordinator.startExecution(task.taskId, {
         prompt: admitted.classified.envelope.normalizedInput,
         ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
       });
-      this.watchExecutionForImplicitWakeup(started.operationId);
-      this.dispatchLedger.set(consumed.draftId, {
+      dispatchEntry = {
         draftId: consumed.draftId,
         taskId: task.taskId,
-        operationId: started.operationId,
-        executionEpoch: started.executionEpoch,
-      });
+        operationId: execution.operationId,
+        executionEpoch: execution.executionEpoch,
+      };
+      this.dispatchLedger.set(consumed.draftId, dispatchEntry);
+      this.persistExplicitBrainState();
+      this.watchExecutionForImplicitWakeup(execution.operationId);
+      await this.explicitIntake.markDraftDispatched(consumed.draftId);
       this.persistExplicitBrainState();
       const requirement = await this.requirementInbox.acknowledge({
         consumerId: RUNTIME_OWNER,
         requirementId: consumed.requirementId,
       });
-      await this.explicitIntake.markDraftDispatched(consumed.draftId);
+      this.persistExplicitBrainState();
       this.dispatchLedger.delete(consumed.draftId);
       this.persistExplicitBrainState();
+      this.implicitConsumerRequirement = undefined;
       return {
         requirement,
         taskId: task.taskId,
-        operationId: started.operationId,
-        executionEpoch: started.executionEpoch,
+        operationId: execution.operationId,
+        executionEpoch: execution.executionEpoch,
       };
     } catch (error) {
+      if (consumed) {
+        this.requirementInbox.restoreAcknowledged({
+          consumerId: RUNTIME_OWNER,
+          requirementId: consumed.requirementId,
+        });
+        if (dispatchEntry) this.dispatchLedger.set(consumed.draftId, dispatchEntry);
+      }
       throw apiError(error);
     } finally {
       release();
@@ -1362,8 +1394,10 @@ export class UiRuntimeService {
         const dispatched = await this.dispatchNextExplicitRequirementInternal();
         if (!dispatched) {
           this.implicitConsumerIssue = undefined;
+          this.implicitConsumerRequirement = undefined;
           return;
         }
+        this.implicitConsumerIssue = undefined;
       } catch (error) {
         const issue = apiError(error);
         this.implicitConsumerIssue = issue;
@@ -1374,12 +1408,45 @@ export class UiRuntimeService {
   }
 
   private watchExecutionForImplicitWakeup(operationId: OperationId): void {
+    if (this.implicitWatchedOperations.has(operationId.value)) return;
+    this.implicitWatchedOperations.add(operationId.value);
     let unsubscribe: () => void = () => {};
-    unsubscribe = this.coordinator.subscribe(operationId, (event) => {
-      if (event.kind !== 'execution.terminal' || event.terminalPhase !== 'final') return;
+    const finish = (): void => {
+      if (!this.implicitWatchedOperations.delete(operationId.value)) return;
       unsubscribe();
       this.scheduleImplicitConsumption();
+    };
+    const subscription = this.coordinator.subscribeReplay(operationId, undefined, (event) => {
+      if (event.kind !== 'execution.terminal' || event.terminalPhase !== 'final') return;
+      finish();
     });
+    unsubscribe = subscription.unsubscribe;
+    if (subscription.replay.some((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final')) finish();
+  }
+
+  private implicitSchedulingProjection(): import('../../../ui/contracts/runtime.js').RuntimeStatusProjection['implicitScheduling'] {
+    if (!this.implicitConsumerIssue) return undefined;
+    const pendingState = this.requirementInbox.exportState();
+    const pendingDraftId = pendingState.pendingDraftIds[0];
+    const pending = pendingDraftId
+      ? pendingState.envelopes.find((envelope) => envelope.draftId === pendingDraftId)
+      : undefined;
+    const requirement = this.implicitConsumerRequirement ?? pending;
+    if (!requirement) return undefined;
+    return {
+      state: this.implicitConsumerIssue.code === 'implicit-admission.waiting'
+        ? 'waiting'
+        : this.implicitConsumerIssue.code === 'implicit-admission.blocked'
+          ? 'blocked'
+          : 'failed',
+      code: this.implicitConsumerIssue.code,
+      ownerId: this.implicitConsumerIssue.ownerId,
+      message: this.implicitConsumerIssue.message,
+      nextAction: this.implicitConsumerIssue.nextAction,
+      requirementId: requirement.requirementId,
+      draftId: requirement.draftId,
+      fifoSeq: requirement.fifoSeq,
+    };
   }
 
   private persistExplicitBrainState(): void {
