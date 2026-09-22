@@ -32,7 +32,6 @@ import {
 import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
 import {
   digestAgentTemplate,
-  loadBuiltinAgentTemplate,
   type AgentTemplateManifest,
 } from '../../packages/agent-templates/src/index.js';
 import {
@@ -366,8 +365,7 @@ test('ui runtime recalls approved long-term memory approved by an earlier task',
     await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'succeeded'));
 
     const receipt = runtime.service.memoryContextReceipt(started.operationId);
-    const executionPolicy = await loadBuiltinAgentTemplate(builtinTemplateRoot, 'execution', '1.1.0');
-    assert.deepEqual(receipt.layers, executionPolicy.memoryContextPolicy.allowedLayers);
+    assert.deepEqual(receipt.layers, ['current', 'task-recent', 'related', 'approved-long-term']);
     assert.deepEqual(receipt.entries, [{
       layer: 'approved-long-term',
       sourceRef: 'memory-ui-approved-long-term',
