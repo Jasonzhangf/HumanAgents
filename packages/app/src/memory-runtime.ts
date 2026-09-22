@@ -93,6 +93,33 @@ export interface MemoryRuntimeEventConsumer {
   consume(input?: { readonly limit?: number }): Promise<Awaited<ReturnType<typeof consumeEvents>>>;
 }
 
+export interface MemoryAnalysisStatus {
+  readonly mode: 'model' | 'deterministic';
+  readonly state: 'idle' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'unknown';
+  readonly operationRef?: string;
+  readonly failureRef?: string;
+}
+
+export interface MemoryReviewCandidateState {
+  readonly candidateId: string;
+  readonly state: 'candidate' | 'approved' | 'rejected';
+  readonly namespace: 'project' | 'global';
+  readonly projectKey: string;
+  readonly taskId?: string;
+  readonly category: import('../../contracts/src/index.js').MemoryCandidateCategory;
+  readonly kind: import('../../contracts/src/index.js').MemoryKind;
+  readonly summary: string;
+  readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
+  readonly evidenceRefs: readonly string[];
+}
+
+export interface MemoryReviewState {
+  readonly analysis: MemoryAnalysisStatus;
+  readonly autoUpdate: boolean;
+  readonly candidates: readonly MemoryReviewCandidateState[];
+}
+
 export interface MemoryRuntime {
   readonly composition: MemoryComposition;
   readonly journal: JsonlEventJournal;
@@ -110,6 +137,7 @@ export interface MemoryRuntime {
   };
   readonly boundaryPublisher: MemoryRuntimeBoundaryPublisher;
   readonly consume: MemoryRuntimeEventConsumer['consume'];
+  readonly reviewState: () => Promise<MemoryReviewState>;
 }
 
 function sameScope(left: ScopeRef, right: ScopeRef): boolean {
@@ -647,7 +675,82 @@ function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPubli
   };
 }
 
+async function projectMemoryAnalysisStatus(
+  journal: JsonlEventJournal,
+  consumer: EventConsumerBinding,
+  mode: MemoryAnalysisStatus['mode'],
+): Promise<MemoryAnalysisStatus> {
+  const streamId = consumer.streamIds[0];
+  if (streamId === undefined) return { mode, state: 'idle' };
+  const cursor = await journal.readCursor({ streamId, consumerKey: consumer.consumerKey });
+  const pending = await journal.readEvents({
+    streamId,
+    afterSequence: cursor?.lastHandledSequence ?? 0,
+    limit: 1,
+  });
+  const event = pending[0] ?? (cursor === null
+    ? undefined
+    : (await journal.readEvents({
+        streamId,
+        afterSequence: Math.max(0, cursor.lastHandledSequence - 1),
+        limit: 1,
+      }))[0]);
+  if (event === undefined) return { mode, state: 'idle' };
+
+  const operationRef = `memory-analysis:${consumer.consumerKey}:${event.messageId}`;
+  const [retry, externalOperation, receipt] = await Promise.all([
+    journal.readRetryObligation({
+      streamId,
+      consumerKey: consumer.consumerKey,
+      messageId: event.messageId,
+    }),
+    journal.readExternalOperation({
+      operationRef,
+      consumerKey: consumer.consumerKey,
+      messageId: event.messageId,
+    }),
+    journal.readReceipt({
+      consumerKey: consumer.consumerKey,
+      messageId: event.messageId,
+    }),
+  ]);
+  if (receipt !== null) {
+    return receipt.disposition === 'applied'
+      ? { mode, state: 'succeeded', operationRef }
+      : {
+          mode,
+          state: 'failed',
+          operationRef,
+          ...(receipt.failureRef === undefined ? {} : { failureRef: receipt.failureRef }),
+        };
+  }
+  if (externalOperation?.state === 'unknown') {
+    return { mode, state: 'unknown', operationRef, failureRef: 'unknown-side-effect' };
+  }
+  if (externalOperation?.state === 'failed') {
+    return {
+      mode,
+      state: 'failed',
+      operationRef,
+      ...(externalOperation.failureRef === undefined ? {} : { failureRef: externalOperation.failureRef }),
+    };
+  }
+  if (externalOperation?.state === 'settled' || externalOperation?.state === 'reconciled') {
+    return { mode, state: 'succeeded', operationRef };
+  }
+  if (retry?.state === 'pending') {
+    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef };
+  }
+  if (retry !== null) {
+    return { mode, state: 'failed', operationRef, failureRef: retry.failureRef };
+  }
+  return { mode, state: 'running', operationRef };
+}
+
 export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<MemoryRuntime> {
+  const analysisMode: MemoryAnalysisStatus['mode'] = input.driver !== undefined || input.driverFor !== undefined
+    ? 'model'
+    : 'deterministic';
   const templateRoot = (globalThis as {
     readonly process?: { readonly env?: { readonly HUMANAGENT_TEMPLATE_ROOT?: string } };
   }).process?.env?.HUMANAGENT_TEMPLATE_ROOT;
@@ -942,5 +1045,25 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
       composition.eventHandler,
       composition.barrierDriver,
     ),
+    reviewState: async () => {
+      const snapshot = await composition.persistence.load();
+      return {
+        analysis: await projectMemoryAnalysisStatus(journal, consumer, analysisMode),
+        autoUpdate: input.autoUpdate,
+        candidates: (snapshot?.candidates ?? []).map((candidate) => ({
+          candidateId: candidate.candidateId ?? candidate.submission.submissionId,
+          state: candidate.state,
+          namespace: candidate.submission.desiredScope,
+          projectKey: candidate.submission.projectKey,
+          ...(candidate.submission.taskId === undefined ? {} : { taskId: candidate.submission.taskId.value }),
+          category: candidate.submission.candidateCategory,
+          kind: candidate.submission.requestedKind,
+          summary: candidate.submission.observation,
+          sourceRefs: [candidate.submission.contentRef],
+          sourceDigests: [candidate.submission.contentDigest],
+          evidenceRefs: [...candidate.submission.evidenceRefs],
+        })),
+      };
+    },
   };
 }

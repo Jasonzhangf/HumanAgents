@@ -48,6 +48,7 @@ export function makeTopbar(active) {
     ['dashboard.html', 'Dashboard'],
     ['tasks.html', 'Task List'],
     ['task.html?task=new', '新建 Task'],
+    ['memory.html', 'Memory'],
   ]
   for (const [href, label] of links) {
     const link = element('a', label)

@@ -426,6 +426,11 @@ export interface SkillCandidateSource {
   readonly value: string;
   readonly state: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly namespace: 'project' | 'global';
+  readonly projectKey: string;
+  readonly taskId?: string;
+  readonly sourceRefs: readonly string[];
+  readonly sourceDigests: readonly string[];
 }
 
 export interface MemoryInteractionSurfaceInput {
@@ -439,6 +444,8 @@ export interface MemoryInteractionSurfaceInput {
   readonly skillCandidates: readonly SkillCandidateSource[];
   readonly inspectEnabled: boolean;
   readonly compareEnabled: boolean;
+  readonly analysis: import('../contracts/models.js').MemoryAnalysisProjection;
+  readonly autoUpdate: boolean;
 }
 
 function deriveState(source: UiDataSource, hasActivity: boolean, hasContent: boolean): UiSurfaceState {
@@ -1043,6 +1050,11 @@ function toSkillCandidate(source: SkillCandidateSource) {
     value: source.value,
     state: source.state,
     evidenceRefs: source.evidenceRefs,
+    namespace: source.namespace,
+    projectKey: source.projectKey,
+    taskId: source.taskId,
+    sourceRefs: [...source.sourceRefs],
+    sourceDigests: [...source.sourceDigests],
   };
 }
 
@@ -1062,6 +1074,8 @@ export function projectMemoryInteraction(input: MemoryInteractionSurfaceInput): 
     reviewRequired: candidates.some((candidate) => candidate.state === 'candidate' || candidate.state === 'reviewing'),
     inspectEnabled: input.inspectEnabled,
     compareEnabled: input.compareEnabled,
+    analysis: { ...input.analysis },
+    autoUpdate: input.autoUpdate,
   };
 }
 

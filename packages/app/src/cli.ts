@@ -707,6 +707,11 @@ export async function main(args: readonly string[]): Promise<void> {
     let boundPortNumber = portNumber;
     const host = loopbackHost(option(args, '--host') ?? '127.0.0.1');
     const memoryRoot = paths.memoryRoot;
+    const memoryDriverFor = memoryDriverFactory({
+      paths,
+      configuration,
+      workspace: paths.workspaceCwd,
+    });
     const memoryRuntime = await composeMemoryRuntime({
       paths,
       configuration,
@@ -716,6 +721,7 @@ export async function main(args: readonly string[]): Promise<void> {
       auditPromptRoot: join(paths.controlRoot, 'memory-audit'),
       auditPromptRef: configuration.effective.memory?.audit.promptRef ?? 'project-memory-audit',
       autoUpdate: configuration.effective.memory?.update.auto ?? false,
+      ...(memoryDriverFor === undefined ? {} : { driverFor: memoryDriverFor }),
       binding: {
         bindingRef: `memory-ui:${paths.projectKey}`,
         projectKey: paths.projectKey,
@@ -900,6 +906,8 @@ export async function main(args: readonly string[]): Promise<void> {
               projectKey: paths.projectKey,
               interaction: memoryRuntime.composition.interaction,
               bindingRef: memoryRuntime.composition.bindingRef,
+              roleId: 'review',
+              reviewState: memoryRuntime.reviewState,
               checkpointBoundary: {
                 publish: async ({ checkpoint, recordDigest }) => {
                   const trigger = memoryTrigger(checkpoint.outcome);
@@ -1006,6 +1014,7 @@ export async function main(args: readonly string[]): Promise<void> {
       },
       plugins: cordisHost.snapshot().pluginIds,
       composition: entryCompositionInventory(cordisHost.snapshot(), mode),
+      memoryAnalysisMode: (await memoryRuntime.reviewState()).analysis.mode,
     }, null, 2));
     return;
   }
