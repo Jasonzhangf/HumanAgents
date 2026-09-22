@@ -55,7 +55,7 @@ export class WorkspaceCodeSearchFunctions implements CodeSearchFunctions {
   }
 
   async readFile(input: { readonly workspaceRef: string; readonly path: string; readonly signal?: AbortSignal }): Promise<CodeSearchFileContent> {
-    this.assertWorkspace(input.workspaceRef); const relativePath = this.safeRelativePath(input.path);
+    const relativePath = this.normalizePath({ workspaceRef: input.workspaceRef, path: input.path });
     try {
       const absolutePath = await this.canonicalPath(relativePath);
       if (input.signal?.aborted) throw new CodeSearchHarnessError('read-failed', 'code search was aborted', relativePath);
@@ -73,6 +73,11 @@ export class WorkspaceCodeSearchFunctions implements CodeSearchFunctions {
       if (error instanceof CodeSearchHarnessError) throw error;
       throw new CodeSearchHarnessError('read-failed', error instanceof Error ? error.message : 'file could not be read', relativePath);
     }
+  }
+
+  normalizePath(input: { readonly workspaceRef: string; readonly path: string }): string {
+    this.assertWorkspace(input.workspaceRef);
+    return this.safeRelativePath(input.path);
   }
 
   private assertWorkspace(workspaceRef: string): void { if (workspaceRef !== this.options.workspaceRef) throw new CodeSearchHarnessError('path-not-found', `workspace binding '${workspaceRef}' is unavailable`); }

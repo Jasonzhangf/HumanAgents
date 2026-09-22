@@ -35,6 +35,7 @@ import {
   type ExplicitBrainInputInterpreter,
 } from '../explicit-brain-runtime.js';
 import { AppLifecycleError } from '../errors.js';
+import { createResponsesFileToolExecutor, RESPONSES_FILE_READ_TOOL } from '../provider-tool-execution.js';
 
 export interface RccModeConfig {
   readonly binding: ProviderBinding;
@@ -177,6 +178,16 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ? new UiRuntimeJournal(join(options.interactionRoot, 'sessions', 'explicit-brain.jsonl'))
     : undefined;
   const checkpointStoreFor = (taskId: TaskId, cycleId: CycleId): TaskCheckpointStore => new FileCheckpointStore(join(modeRoot, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`));
+  const providerToolExecutor = options.mode === 'rcc'
+    && options.binding.protocol === 'responses'
+    && options.workspaceRoot !== undefined
+    && options.projectKey !== undefined
+    ? createResponsesFileToolExecutor({
+        workspaceRoot: options.workspaceRoot,
+        projectKey: options.projectKey,
+        artifactRoot: join(options.evidenceRoot, 'provider-tools'),
+      })
+    : undefined;
   const service = new UiRuntimeService({
     mode: options.mode,
     organId: options.organId,
@@ -190,6 +201,10 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     closurePort: interactionJournal ?? journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+    ...(providerToolExecutor === undefined ? {} : {
+      providerTools: [RESPONSES_FILE_READ_TOOL],
+      providerToolExecutor,
+    }),
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),
     ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),
     ...(options.explicitBrainAgentTargets === undefined ? {} : { explicitBrainAgentTargets: options.explicitBrainAgentTargets }),

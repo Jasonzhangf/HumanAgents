@@ -15,6 +15,7 @@ import {
   type ProviderStartReceipt,
   type ProviderStopReceipt,
   type ProviderSubmitResult,
+  type ProviderSubmitInput,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import { ProviderAgentDriver, ProviderAdapterError } from '../../../packages/adapters/provider/src/index.js';
@@ -292,4 +293,312 @@ test('provider agent driver exposes explicit resume capability failure', async (
     }),
     (error) => error instanceof ProviderAdapterError && error.providerError.code === 'resume.unsupported',
   );
+});
+
+test('provider agent driver executes a complete Responses tool call once and continues with its verified result', async () => {
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const toolCalls: string[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round === 1) {
+        yield {
+          ...identity,
+          eventId: 'event-tool-call',
+          kind: 'tool',
+          summary: 'file.read',
+          outputRefs: ['artifact://tool-call'],
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue' },
+          toolCall: {
+            callId: 'call-readme',
+            toolId: 'file.read',
+            arguments: { path: 'README.md' },
+            continuationRef: 'response-round-1',
+          },
+        };
+        yield {
+          ...identity,
+          eventId: 'event-tool-call-package',
+          kind: 'tool',
+          summary: 'file.read',
+          outputRefs: ['artifact://tool-call-package'],
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue' },
+          toolCall: {
+            callId: 'call-package',
+            toolId: 'file.read',
+            arguments: { path: 'package.json' },
+            continuationRef: 'response-round-1',
+          },
+        };
+        yield {
+          ...identity,
+          eventId: 'event-tool-waiting',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-final-output', kind: 'output', summary: 'Checklist from REAL_FILE_CONTENT', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+      yield { ...identity, eventId: 'event-final', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence], ownerId: 'humanagent.provider-adapter', nextAction: { kind: 'continue' } };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute(input) {
+        toolCalls.push(`${input.call.toolId}:${String(input.call.arguments.path)}`);
+        const path = String(input.call.arguments.path);
+        return {
+          output: JSON.stringify({ path, content: path === 'README.md' ? 'REAL_FILE_CONTENT' : 'REAL_PACKAGE_CONTENT' }),
+          outputRefs: [`asset://provider-tool/output/${input.call.callId}`],
+          evidenceRefs: [evidence],
+        };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  const events = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  assert.deepEqual(toolCalls, ['file.read:README.md', 'file.read:package.json']);
+  assert.equal(submissions.length, 1);
+  assert.deepEqual(submissions[0]?.toolContinuations, [{
+    callId: 'call-readme',
+    toolId: 'file.read',
+    arguments: { path: 'README.md' },
+    continuationRef: 'response-round-1',
+    output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }),
+  }, {
+    callId: 'call-package',
+    toolId: 'file.read',
+    arguments: { path: 'package.json' },
+    continuationRef: 'response-round-1',
+    output: JSON.stringify({ path: 'package.json', content: 'REAL_PACKAGE_CONTENT' }),
+  }]);
+  assert.deepEqual(events.map((event) => [event.kind, event.summary, event.terminalState]), [
+    ['provider.tool', 'file.read', undefined],
+    ['provider.tool', 'file.read', undefined],
+    ['provider.tool', 'file.read succeeded', undefined],
+    ['provider.tool', 'file.read succeeded', undefined],
+    ['provider.output', 'Checklist from REAL_FILE_CONTENT', undefined],
+    ['provider.terminal', undefined, 'succeeded'],
+  ]);
+});
+
+test('provider agent driver waits for a stopped tool to settle and never submits its late result', async () => {
+  let enteredTool!: () => void;
+  const toolEntered = new Promise<void>((resolve) => { enteredTool = resolve; });
+  let releaseTool!: () => void;
+  const toolRelease = new Promise<void>((resolve) => { releaseTool = resolve; });
+  let providerSettled = false;
+  let toolSignal: AbortSignal | undefined;
+  const submissions: ProviderSubmitInput[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-tool-call-stop',
+        kind: 'tool',
+        summary: 'file.read',
+        outputRefs: ['artifact://tool-call-stop'],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-stop', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-round-1' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-tool-waiting-stop',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+    submit: async (input) => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+    settle: async () => {
+      providerSettled = true;
+      return settlement('stopped');
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute(input) {
+        toolSignal = input.signal;
+        enteredTool();
+        await toolRelease;
+        return { output: 'LATE_RESULT', outputRefs: ['asset://late'], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  const pendingObservation = iterator.next();
+  await toolEntered;
+  await instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: 1, operationId });
+  assert.equal(toolSignal?.aborted, true);
+  const pendingSettlement = instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
+  await Promise.resolve();
+  assert.equal(providerSettled, false);
+  releaseTool();
+  assert.equal((await pendingObservation).done, true);
+  assert.equal((await pendingSettlement).state, 'stopped');
+  assert.equal(providerSettled, true);
+  assert.equal(submissions.length, 0);
+});
+
+test('provider agent driver drains cleanly when a stopped tool executor rejects with the abort', async () => {
+  let enteredTool!: () => void;
+  const toolEntered = new Promise<void>((resolve) => { enteredTool = resolve; });
+  let providerSettled = false;
+  let toolSignal: AbortSignal | undefined;
+  const submissions: ProviderSubmitInput[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-tool-call-abort',
+        kind: 'tool',
+        summary: 'file.read',
+        outputRefs: ['artifact://tool-call-abort'],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-abort', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-round-1' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-tool-waiting-abort',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+    submit: async (input) => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+    settle: async () => {
+      providerSettled = true;
+      return settlement('stopped');
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute(input) {
+        toolSignal = input.signal;
+        enteredTool();
+        await new Promise<void>((_resolve, reject) => {
+          input.signal.addEventListener('abort', () => {
+            reject(Object.assign(new Error('file.read was stopped'), { name: 'AbortError' }));
+          }, { once: true });
+        });
+        throw new Error('unreachable tool result');
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  const pendingObservation = iterator.next();
+  await toolEntered;
+  await instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: 1, operationId });
+  assert.equal(toolSignal?.aborted, true);
+  const pendingSettlement = instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
+  const observation = await pendingObservation;
+  assert.equal(observation.done, true);
+  assert.equal((await pendingSettlement).state, 'stopped');
+  assert.equal(providerSettled, true);
+  assert.equal(submissions.length, 0);
+});
+
+test('provider agent driver still surfaces a non-abort tool failure during a tool round', async () => {
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-tool-call-failure',
+        kind: 'tool',
+        summary: 'file.read',
+        outputRefs: ['artifact://tool-call-failure'],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-failure', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-round-1' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-tool-waiting-failure',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute() {
+        throw new Error('file.read failed for real');
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  await assert.rejects(() => iterator.next(), /file.read failed for real/);
 });

@@ -130,6 +130,8 @@ export { createJsonlEventJournal, publishJsonlOperationEvent } from './event-jou
 export type { JsonlEventJournal, JsonlOperationEventPublicationInput } from './event-journal.js';
 export { createHandOperationRuntime, createToolExecutionGateway, deterministicInspectRegistration } from './tool-execution-gateway.js';
 export type { ToolExecutionGatewayAssemblyInput } from './tool-execution-gateway.js';
+export { createResponsesFileToolExecutor, RESPONSES_FILE_READ_TOOL } from './provider-tool-execution.js';
+export type { ResponsesFileToolExecutor } from './provider-tool-execution.js';
 export { composeMemoryRuntime } from './memory-runtime.js';
 export type { MemoryRuntime, MemoryRuntimeInput } from './memory-runtime.js';
 export { createM3Assembly } from './m3-assembly.js';

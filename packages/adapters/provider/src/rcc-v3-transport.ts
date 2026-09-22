@@ -67,8 +67,8 @@ export interface RccV3ProviderTransportOptions {
 
 interface ActiveExecution {
   readonly identity: ProviderExecutionIdentityRef;
-  readonly controller: AbortController;
-  readonly body: AsyncIterable<Uint8Array>;
+  controller: AbortController;
+  body: AsyncIterable<Uint8Array>;
   readonly protocol: 'responses' | 'anthropic' | 'openai';
   readonly route: string;
   readonly model: string;
@@ -78,6 +78,7 @@ interface ActiveExecution {
   observed: boolean;
   streamDone: boolean;
   resourceReleased: boolean;
+  responsesToolCallsPending: boolean;
   terminalState?: 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'stopped' | 'unknown';
   terminalError?: ProviderError;
   // Resolved by observe() once the SSE loop has stopped consuming the body,
@@ -301,7 +302,9 @@ function responsesPayload(request: ResponsesWireRequest): Record<string, unknown
     instructions: request.instructions,
     input: request.input.map((item) => item.type === 'message'
       ? { type: 'message', role: item.role, content: [{ type: 'input_text', text: item.content }] }
-      : { type: 'function_call_output', call_id: item.call_id, output: item.output }),
+      : item.type === 'function_call'
+        ? { type: 'function_call', call_id: item.call_id, name: item.name, arguments: item.arguments }
+        : { type: 'function_call_output', call_id: item.call_id, output: item.output }),
     ...(request.tools ? {
       tools: request.tools.map((tool) => ({
         type: 'function',
@@ -443,6 +446,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       observed: false,
       streamDone: false,
       resourceReleased: false,
+      responsesToolCallsPending: false,
     };
     let ref: EvidenceRef;
     try {
@@ -478,11 +482,61 @@ export class RccV3ProviderTransport implements ProviderTransport {
     };
   }
 
-  async submit(input: ProviderSubmitInput, _request: ProviderWireRequest): Promise<ProviderSubmitResult> {
-    const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
-    const error = providerError(scope, 'submit', 'submit.unsupported', 'RCC v3 transport has no provider-neutral tool submit endpoint', 'capability');
-    const ref = await this.writeEvidence(scope, 'submit-unsupported', error);
-    return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } };
+  async submit(input: ProviderSubmitInput, request: ProviderWireRequest): Promise<ProviderSubmitResult> {
+    const active = this.active(input);
+    const scope = active.evidenceScope;
+    if (request.protocol !== 'responses' || input.toolContinuations === undefined) {
+      const error = providerError(scope, 'submit', 'submit.unsupported', 'RCC v3 transport supports submit only for typed Responses tool continuation', 'capability');
+      const ref = await this.writeEvidence(scope, 'submit-unsupported', error);
+      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } };
+    }
+    if (!active.streamDone || !active.resourceReleased) {
+      const error = providerError(scope, 'submit', 'submit.previous-stream-active', 'RCC v3 tool continuation requires the previous stream to release first', 'runtime');
+      const ref = await this.writeEvidence(scope, 'submit-previous-stream-active', error);
+      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'wait', ref: 'rcc-v3.observe' } };
+    }
+    if (active.stopRequested) {
+      const error = providerError(scope, 'submit', 'submit.stopped', 'RCC v3 execution was stopped before tool continuation', 'runtime');
+      const ref = await this.writeEvidence(scope, 'submit-stopped', error);
+      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } };
+    }
+    const controller = new AbortController();
+    active.controller = controller;
+    active.observed = false;
+    active.streamDone = false;
+    active.resourceReleased = false;
+    active.terminalState = undefined;
+    active.terminalError = undefined;
+    active.streamCompletion = undefined;
+    active.responsesToolCallsPending = false;
+    let response: RccV3FetchResponse;
+    try {
+      response = await this.send('responses', request, controller);
+    } catch (cause) {
+      active.streamDone = true;
+      active.resourceReleased = true;
+      if (active.stopRequested || controller.signal.aborted) active.terminalState = 'stopped';
+      else {
+        active.terminalState = 'failed';
+        active.terminalError = providerError(scope, 'submit', 'submit.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 continuation failed', 'transport');
+      }
+      throw cause;
+    }
+    if (!response.body) {
+      active.streamDone = true;
+      active.resourceReleased = true;
+      active.terminalState = 'failed';
+      throw new ProviderAdapterError({ code: 'transport.empty.body', category: 'transport', phase: 'submit', message: 'RCC v3 continuation returned no streaming body', scope: input });
+    }
+    active.body = response.body;
+    const ref = await this.writeEvidence(scope, 'submit', {
+      status: response.status,
+      endpoint: endpointPath('responses'),
+      protocol: 'responses',
+      callIds: input.toolContinuations.map((continuation) => continuation.callId),
+      continuationRef: input.toolContinuations[0].continuationRef,
+    });
+    return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'continue', ref: 'rcc-v3.observe' } };
   }
 
   async *observe(input: ProviderObserveInput): AsyncIterable<ProviderWireEvent> {
@@ -522,6 +576,10 @@ export class RccV3ProviderTransport implements ProviderTransport {
         if (active.protocol === 'responses' && type === 'response.done') continue;
         if (active.protocol === 'openai' && type !== 'openai.chat.completion' && type !== 'error') continue;
         const raw = { protocol: active.protocol, ...record, type } as unknown as ProviderWireEvent;
+        if (active.protocol === 'responses' && type === 'response.output_item.done') {
+          const item = readRecord(record.item);
+          if (item.type === 'function_call') active.responsesToolCallsPending = true;
+        }
         if (isTerminalEvent(active.protocol, type)) {
           if (type === 'error' || type.endsWith('.failed')) {
             const errorRecord = type.endsWith('.failed')
@@ -537,6 +595,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
               : 'RCC v3 provider reported a failure';
             active.terminalError = providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
             active.terminalState = 'failed';
+          } else if (active.protocol === 'responses' && type === 'response.completed' && active.responsesToolCallsPending) {
+            active.terminalState = 'waiting';
           } else {
             const stopReason = active.protocol === 'anthropic' && type === 'message_stop'
               ? this.anthropicStopReason(active)
@@ -620,6 +680,16 @@ export class RccV3ProviderTransport implements ProviderTransport {
     const active = this.active(input);
     const scope = active.evidenceScope;
     if (active.streamDone) {
+      if (active.terminalState === 'waiting') {
+        active.stopRequested = true;
+        active.terminalState = 'stopped';
+        const ref = await this.writeEvidence(scope, 'stop-between-rounds', {
+          reason: input.reason,
+          route: active.route,
+          model: active.model,
+        });
+        return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'continue', ref: 'rcc-v3.settle' } };
+      }
       const error = providerError(scope, 'stop', 'stop.after-terminal', 'RCC v3 stream is already settled', 'runtime');
       const ref = await this.writeEvidence(scope, 'stop-rejected', error);
       return { ...input, status: 'rejected', receivedAt: new Date().toISOString(), evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'continue' } };

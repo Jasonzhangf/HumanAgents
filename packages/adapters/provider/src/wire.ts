@@ -16,6 +16,7 @@ export interface ResponsesWireRequest {
 
 export type ResponsesWireInputItem =
   | { readonly type: 'message'; readonly role: 'user' | 'system'; readonly content: string }
+  | { readonly type: 'function_call'; readonly call_id: string; readonly name: string; readonly arguments: string }
   | { readonly type: 'function_call_output'; readonly call_id: string; readonly output: string };
 
 export interface ResponsesWireTool {

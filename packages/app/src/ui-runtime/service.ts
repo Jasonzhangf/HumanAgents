@@ -106,6 +106,7 @@ import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
 import {
   ProviderAgentDriver,
   ProviderAdapterError,
+  type ProviderToolExecutionPort,
 } from '../../../adapters/provider/src/index.js';
 import {
   type RuntimeDashboardProjection,
@@ -195,6 +196,8 @@ export interface UiRuntimeServiceOptions {
   readonly now?: () => Date;
   readonly projectKey?: string;
   readonly workspaceRoot?: string;
+  readonly providerTools?: import('../../../contracts/src/index.js').ProviderToolDefinition[];
+  readonly providerToolExecutor?: ProviderToolExecutionPort;
   readonly explicitBrainAgentMessage?: (input: {
     readonly recipientRef: string;
     readonly messageRef: string;
@@ -978,6 +981,8 @@ export class UiRuntimeService {
       scope: input.scope,
       inputRefs: input.inputRefs,
       ownerId: input.ownerId,
+      ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
+      ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
     });
     return new MemoryBoundExecutionDriver(driver, input, this.memory, this.memoryInjection, (bound) => {
       this.memoryContexts.set(input.operationId.value, bound);

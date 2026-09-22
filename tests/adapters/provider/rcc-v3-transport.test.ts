@@ -53,6 +53,66 @@ function evidence(label: string): EvidenceRef {
   };
 }
 
+test('RCC v3 Responses submit opens a second stream bound to the completed tool call', async () => {
+  const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+  const streams = [
+    chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-round-1' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'item-readme', call_id: 'call-readme', name: 'file_read', arguments: '{"path":"README.md"}' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-round-1' } })}\n\n`,
+    ]),
+    chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-round-2' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'message-final', text: 'Checklist from REAL_FILE_CONTENT' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-round-2' } })}\n\n`,
+    ]),
+  ];
+  const built = adapter(async (url, init) => {
+    calls.push({ url, init });
+    const body = streams.shift();
+    if (!body) throw new Error('unexpected provider round');
+    return response(body);
+  });
+  const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
+  await built.adapter.start({ ...startInput(), tools });
+  const roundOne = [];
+  for await (const event of built.adapter.observe(execution)) roundOne.push(event);
+  assert.equal(roundOne.find((event) => event.kind === 'tool')?.toolCall?.callId, 'call-readme');
+  assert.equal(roundOne.at(-1)?.terminalState, 'waiting');
+
+  const submitted = await built.adapter.submit({
+    ...execution,
+    inputRefs: ['asset://provider-tool/output/call-readme'],
+    evidenceRefs: [evidence('tool-result')],
+    payload: { toolResultRef: 'asset://provider-tool/output/call-readme' },
+    tools,
+    toolContinuations: [{
+      callId: 'call-readme',
+      toolId: 'file.read',
+      arguments: { path: 'README.md' },
+      continuationRef: 'response-round-1',
+      output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }),
+    }],
+  });
+  assert.equal(submitted.status, 'accepted');
+  const roundTwo = [];
+  for await (const event of built.adapter.observe(execution)) roundTwo.push(event);
+  assert.equal(roundTwo.find((event) => event.kind === 'output')?.summary, 'Checklist from REAL_FILE_CONTENT');
+  assert.equal(roundTwo.at(-1)?.terminalState, 'succeeded');
+  assert.equal((await built.adapter.settle(execution)).state, 'succeeded');
+
+  assert.equal(calls.length, 2);
+  const first = JSON.parse(String(calls[0]?.init.body));
+  const second = JSON.parse(String(calls[1]?.init.body));
+  assert.equal(first.tools[0].name, 'file_read');
+  assert.equal(second.previous_response_id, undefined);
+  assert.deepEqual(second.input, [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: JSON.stringify({ toolResultRef: 'asset://provider-tool/output/call-readme' }) }] },
+    { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: JSON.stringify({ path: 'README.md' }) },
+    { type: 'function_call_output', call_id: 'call-readme', output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }) },
+  ]);
+});
+
 function sink(): ProviderEvidenceSink {
   return {
     async write(input: ProviderEvidenceWrite) {

@@ -245,6 +245,8 @@ function codecContext() {
     evidence: sink,
     sink,
     responsesOutputText: new Map<string, string>(),
+    responsesCurrentResponseId: new Map<string, string>(),
+    responsesPendingToolCalls: new Set<string>(),
     nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
   };
 }
@@ -427,17 +429,64 @@ test('responses codec maps terminal, tool, and error wire events', async () => {
   assert.equal(completed.events[0].kind, 'terminal');
   assert.equal(completed.events[0].terminalState, 'succeeded');
 
+  await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'response-tool' } }, context);
   const tool = await codec.decodeEvent({
     protocol: 'responses',
-    type: 'response.output_item.added',
+    type: 'response.output_item.done',
     output_index: 0,
-    item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'lookup', arguments: '{}' },
+    item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'file.read', arguments: '{"path":"README.md"}' },
   }, context);
   assert.equal(tool.events[0].kind, 'tool');
+  assert.deepEqual(tool.events[0].toolCall, {
+    callId: 'call-1',
+    toolId: 'file.read',
+    arguments: { path: 'README.md' },
+    continuationRef: 'response-tool',
+  });
+  const waiting = await codec.decodeEvent({ protocol: 'responses', type: 'response.completed', response: { id: 'response-tool' } }, context);
+  assert.equal(waiting.events[0].terminalState, 'waiting');
+  assert.equal(waiting.events[0].nextAction?.ref, 'responses-tool-call');
 
   const error = await codec.decodeEvent({ protocol: 'responses', type: 'error', error: { code: 'wire.error', message: 'boom' } }, context);
   assert.equal(error.events[0].kind, 'error');
   assert.equal(error.events[0].error?.code, 'wire.error');
+});
+
+test('responses codec keeps tool control typed and encodes a call-bound continuation', () => {
+  const codec = new ResponsesProviderCodec();
+  const tools = [{ toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } }];
+  const started = codec.encodeStart(startInput({ tools }), ccBinding, 'cc-route');
+  assert.deepEqual(started.tools, [{ type: 'function', name: 'file_read', description: 'read one file', parameters: { type: 'object' } }]);
+  assert.equal(JSON.stringify(started.input).includes('file.read'), false);
+
+  const continued = codec.encodeSubmit(submitInput({
+    tools,
+    toolContinuations: [{
+      callId: 'call-1',
+      toolId: 'file.read',
+      arguments: { path: 'README.md' },
+      continuationRef: 'response-1',
+      output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }),
+    }],
+  }), ccBinding, 'cc-route');
+  assert.deepEqual(continued.input, [
+    { type: 'message', role: 'user', content: JSON.stringify(submitInput().payload) },
+    { type: 'function_call', call_id: 'call-1', name: 'file_read', arguments: JSON.stringify({ path: 'README.md' }) },
+    { type: 'function_call_output', call_id: 'call-1', output: JSON.stringify({ path: 'README.md', content: 'REAL_FILE_CONTENT' }) },
+  ]);
+});
+
+test('responses reasoning output item remains model evidence and does not become user-visible output text', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const decoded = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'reasoning-1', summary: [] },
+  } as unknown as ProviderWireEvent, context);
+  assert.equal(decoded.events[0].kind, 'model');
+  assert.equal(decoded.events[0].summary, undefined);
 });
 
 test('responses codec accepts RCC transparent-proxy events with empty response and message ids', async () => {
@@ -605,9 +654,10 @@ test('codec evidence refs preserve provider wire content digests instead of fake
   assert.equal(delta.events[0].outputRefs?.[0].startsWith('wire://'), false);
   assert.equal(typeof delta.events[0].evidenceRefs[0].digest, 'string');
 
+  await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'response-tool-evidence' } }, context);
   const tool = await codec.decodeEvent({
     protocol: 'responses',
-    type: 'response.output_item.added',
+    type: 'response.output_item.done',
     output_index: 0,
     item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'lookup', arguments: '{"q":"x"}' },
   }, context);
