@@ -628,6 +628,86 @@ test('context recall filters layers, enforces budget, and binds attach epoch', a
   await assert.rejects(memory.attach({ agentRuntimeId: 'runtime-a', context: { ...current, executionEpoch: 1 } }), ContractError);
 });
 
+test('approved canonical memory is recalled into the approved-long-term layer of a later task', async () => {
+  const memory = new DeterministicMemoryBackend();
+  const laterTask = id('task', 'task-later');
+  const laterScope: CanonicalMemoryScope = { namespace: 'project', projectKey: 'project-a', organId: organ, taskId: laterTask };
+  await memory.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/approved-fact',
+    sourceDigest: 'sha256:approved-fact',
+    text: 'approved long-term fact',
+  });
+  await memory.addCanonicalRecord({
+    memoryId: 'memory-approved-fact',
+    namespace: 'project',
+    projectKey: 'project-a',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'approved long-term fact',
+    sourceRefs: ['journal://task-a/approved-fact'],
+    sourceDigests: ['sha256:approved-fact'],
+    taskId: task,
+    sourceScopeRef: 'project-a:task-a',
+    relevanceReason: 'approved in an earlier task',
+  });
+  await memory.addCanonicalRecord({
+    memoryId: 'memory-other-project',
+    namespace: 'project',
+    projectKey: 'project-b',
+    kind: 'semantic',
+    state: 'approved',
+    summary: 'approved long-term fact',
+    sourceRefs: ['journal://task-a/approved-fact'],
+    sourceDigests: ['sha256:approved-fact'],
+    taskId: laterTask,
+    sourceScopeRef: 'project-b:task-later',
+    relevanceReason: 'belongs to another project',
+  });
+
+  const withoutLayer = await memory.recall({ agentRuntimeId: 'runtime-later', roleId: 'execution', taskId: laterTask, scope: laterScope, layers: ['current'], tokenBudget: 100, executionEpoch: 1, evidenceRequired: true });
+  assert.equal(withoutLayer.entries.length, 0);
+
+  const recalled = await memory.recall({ agentRuntimeId: 'runtime-later', roleId: 'execution', taskId: laterTask, scope: laterScope, layers: ['current', 'approved-long-term'], tokenBudget: 100, executionEpoch: 1, evidenceRequired: true });
+  assert.deepEqual(recalled.entries, [{
+    layer: 'approved-long-term',
+    summary: 'approved long-term fact',
+    sourceRef: 'memory-approved-fact',
+    sourceDigest: `sha256:${createHash('sha256').update('approved long-term fact').digest('hex')}`,
+    scope: `project:project-a:${organ.value}:${laterTask.value}`,
+    tokenCost: 3,
+  }]);
+  assert.deepEqual(await memory.attach({ agentRuntimeId: 'runtime-later', context: recalled }), { contextId: recalled.contextId, attached: true });
+});
+
+test('rejected and superseded canonical records never enter the approved-long-term recall', async () => {
+  const memory = new DeterministicMemoryBackend();
+  await memory.ingest({
+    scope: taskScope,
+    sourceRef: 'journal://task-a/rejected-fact',
+    sourceDigest: 'sha256:rejected-fact',
+    text: 'rejected long-term fact',
+  });
+  for (const [memoryId, state] of [['memory-rejected', 'rejected'], ['memory-superseded', 'superseded']] as const) {
+    await memory.addCanonicalRecord({
+      memoryId,
+      namespace: 'project',
+      projectKey: 'project-a',
+      kind: 'semantic',
+      state,
+      summary: 'rejected long-term fact',
+      sourceRefs: ['journal://task-a/rejected-fact'],
+      sourceDigests: ['sha256:rejected-fact'],
+      taskId: task,
+      sourceScopeRef: 'project-a:task-a',
+      relevanceReason: 'must not take effect',
+    });
+  }
+
+  const recalled = await memory.recall({ agentRuntimeId: 'runtime-later', roleId: 'execution', taskId: task, scope: canonicalTaskScope, layers: ['current', 'approved-long-term'], tokenBudget: 100, executionEpoch: 1, evidenceRequired: true });
+  assert.deepEqual(recalled.entries, []);
+});
+
 test('memory backend filters task ids exactly and keeps forgetting atomic', async () => {
   const memory = new DeterministicMemoryBackend();
   const taskAB = id('task', 'task-ab');

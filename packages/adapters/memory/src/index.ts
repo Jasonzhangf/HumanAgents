@@ -1129,6 +1129,18 @@ function queryVisible(record: CanonicalRecord, request: MemoryQueryRequest): boo
     ));
 }
 
+/**
+ * Approved canonical records are the long-term artifact itself, so the
+ * approved-long-term layer reads them directly instead of depending on a layer
+ * tag canonical storage does not carry. Project scope stays isolated: a project
+ * request can never see another project's canonical records.
+ */
+function canonicalRecallVisible(record: CanonicalRecord, scope: CanonicalMemoryScope): boolean {
+  if (record.state !== 'approved' && record.state !== 'active') return false;
+  if (scope.namespace === 'global') return record.namespace === 'global';
+  return record.namespace === 'project' && record.projectKey === scope.projectKey;
+}
+
 export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMemoryContextInjectionPort {
   readonly indexVersion = 'fake-memory-v2';
   private readonly persistence?: MemoryPersistencePort;
@@ -1728,6 +1740,26 @@ export class DeterministicMemoryBackend implements MemoryOperationsPort, AgentMe
         scope: input.scope,
       });
       const entries = [...this.records.values()].filter((record) => visible(record, legacyScope) && record.layer && input.layers.includes(record.layer)).filter((record) => !input.query || record.text.toLowerCase().includes(input.query.toLowerCase())).flatMap((record) => { const tokenCost = tokens(record.summary ?? record.text); if (tokenCost > remaining) { omitted.push({ reason: 'token-budget', sourceRef: record.sourceRef }); return []; } remaining -= tokenCost; return [{ layer: record.layer!, summary: record.summary ?? record.text, sourceRef: record.sourceRef, sourceDigest: record.sourceDigest, scope: canonicalScopeKey(input.scope), tokenCost }]; });
+      if (input.layers.includes('approved-long-term')) {
+        for (const record of this.canonicalRecords.values()) {
+          if (!canonicalRecallVisible(record, input.scope)) continue;
+          if (input.query && !record.summary.toLowerCase().includes(input.query.toLowerCase())) continue;
+          const tokenCost = tokens(record.summary);
+          if (tokenCost > remaining) {
+            omitted.push({ reason: 'token-budget', sourceRef: record.memoryId });
+            continue;
+          }
+          remaining -= tokenCost;
+          entries.push({
+            layer: 'approved-long-term',
+            summary: record.summary,
+            sourceRef: record.memoryId,
+            sourceDigest: digestText(record.summary),
+            scope: canonicalScopeKey(input.scope),
+            tokenCost,
+          });
+        }
+      }
       const context: AgentMemoryContext = { contextId, executionEpoch: input.executionEpoch, entries, omitted, indexVersion: this.indexVersion };
       assertContextBudget(context, input.tokenBudget);
       const before = this.snapshot();
