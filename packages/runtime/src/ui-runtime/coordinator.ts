@@ -834,13 +834,30 @@ export class RuntimeTaskCoordinator {
         'inspect the durable requirement dispatch identity',
       );
     }
-    this.operationCounter += 1;
-    this.cycleCounter += 1;
-    const operationId = input.operationId ?? id('operation', `ui-operation-${this.operationCounter}`);
-    const cycleId = id('cycle', `ui-cycle-${this.cycleCounter}`);
+    const operationCounter = this.operationCounter + 1;
+    const cycleCounter = this.cycleCounter + 1;
+    const operationId = input.operationId ?? id('operation', `ui-operation-${operationCounter}`);
+    const cycleId = id('cycle', `ui-cycle-${cycleCounter}`);
     const executionEpoch = (record.executionEpoch ?? 0) + 1;
     const scope: ScopeRef = { organId: this.options.organId, taskId, cycleId, operationId };
     const operation: OperationRecord = { operationId, taskId, executionEpoch, events: [], seq: 0 };
+    const startedAt = this.now().toISOString();
+    this.journal?.append({
+      kind: 'operation.started',
+      operationId,
+      taskId,
+      cycleId,
+      scope,
+      executionEpoch,
+      operationCounter,
+      cycleCounter,
+      startedAt,
+      input: prompt,
+      ...(input.orchestrate === true ? { orchestrated: true } : {}),
+    });
+
+    this.operationCounter = operationCounter;
+    this.cycleCounter = cycleCounter;
     this.operations.set(operationId.value, operation);
     this.scopes.set(operationId.value, scope);
     this.activeExecutions.add(operationId.value);
@@ -866,20 +883,7 @@ export class RuntimeTaskCoordinator {
     record.allowedActions = ['stop'];
     record.error = undefined;
     record.orchestrated = input.orchestrate === true;
-    record.updatedAt = this.now().toISOString();
-    this.journal?.append({
-      kind: 'operation.started',
-      operationId,
-      taskId,
-      cycleId,
-      scope,
-      executionEpoch,
-      operationCounter: this.operationCounter,
-      cycleCounter: this.cycleCounter,
-      startedAt: record.updatedAt,
-      input: prompt,
-      ...(record.orchestrated ? { orchestrated: true } : {}),
-    });
+    record.updatedAt = startedAt;
     this.pushEvent(record, operation, 'execution.started', 'running', 'execution started', []);
 
     void this.runExecution(record, operation, scope, prompt);
