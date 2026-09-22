@@ -312,6 +312,25 @@ function requireStringValue(record: Record<string, unknown>, key: string, execut
   return value;
 }
 
+/**
+ * Live Responses streams identify a function-call-scoped event by call_id and
+ * may omit the item id entirely. Accept either, in that order, and still fail
+ * closed when neither identity is present.
+ */
+function requireToolEventIdentity(record: Record<string, unknown>, execution: ProviderExecutionIdentityRef, type: string): string {
+  for (const key of ['item_id', 'call_id'] as const) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim() !== '') return value;
+  }
+  throw new ProviderAdapterError({
+    code: 'missing.field',
+    category: 'protocol',
+    phase: 'observe',
+    message: `${type} event missing item_id or call_id`,
+    scope: execution,
+  });
+}
+
 function requireNumber(record: Record<string, unknown>, key: string, execution: ProviderExecutionIdentityRef, type: string): number {
   const value = record[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -445,7 +464,6 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemType = requireString(item, 'type', context.execution, raw.type);
         if (itemType === 'function_call') {
           const callId = requireString(item, 'call_id', context.execution, raw.type);
-          requireString(item, 'id', context.execution, raw.type);
           const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}/started`, item)];
           return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/started`), evidenceRefs)] };
         }
@@ -511,7 +529,6 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const itemType = requireString(item, 'type', context.execution, raw.type);
         if (itemType === 'function_call') {
           const callId = requireString(item, 'call_id', context.execution, raw.type);
-          requireString(item, 'id', context.execution, raw.type);
           const wireName = requireString(item, 'name', context.execution, raw.type);
           const name = responsesToolId(wireName);
           const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
@@ -587,13 +604,13 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           : { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.function_call_arguments.delta': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = requireToolEventIdentity(record, context.execution, raw.type);
         const delta = requireStringValue(record, 'delta', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, delta)];
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), evidenceRefs)] };
       }
       case 'response.function_call_arguments.done': {
-        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const itemId = requireToolEventIdentity(record, context.execution, raw.type);
         const args = requireStringValue(record, 'arguments', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `arguments/${itemId}`, args)];
         return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `arguments/${itemId}`), [artifactRef(raw.type, `arguments/${itemId}`, evidenceRefs[0].digest)], evidenceRefs)] };

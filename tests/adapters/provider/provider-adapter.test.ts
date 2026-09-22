@@ -1029,3 +1029,58 @@ test('provider adapter source avoids dsh/rcc/sdk imports, network calls, and sec
     }
   }
 });
+
+test('responses codec accepts the live provider function_call item shape without a provider item id', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'response-real-tool' } }, context);
+
+  const added = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'function_call', call_id: 'toolu_01FMxC9BbAnqkdbSQmQf0LvZ', name: 'file_read', arguments: '' },
+  }, context);
+  assert.equal(added.events[0].kind, 'model');
+
+  const done = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { type: 'function_call', call_id: 'toolu_01FMxC9BbAnqkdbSQmQf0LvZ', name: 'file_read', arguments: '{"path":"README.md"}' },
+  }, context);
+  assert.equal(done.events[0].kind, 'tool');
+  assert.deepEqual(done.events[0].toolCall, {
+    callId: 'toolu_01FMxC9BbAnqkdbSQmQf0LvZ',
+    toolId: 'file.read',
+    arguments: { path: 'README.md' },
+    continuationRef: 'response-real-tool',
+  });
+});
+
+test('responses codec accepts the live function_call_arguments.done shape without an item_id', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const done = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.function_call_arguments.done',
+    call_id: 'toolu_01J4J0xby0cnLcieuGiDku1c',
+    output_index: 0,
+    arguments: '{"path":"README.md"}',
+  }, context);
+  assert.equal(done.events[0].kind, 'output');
+});
+
+test('responses codec still rejects a function_call_arguments.done without any call identity', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  await assert.rejects(
+    () => codec.decodeEvent({
+      protocol: 'responses',
+      type: 'response.function_call_arguments.done',
+      output_index: 0,
+      arguments: '{"path":"README.md"}',
+    }, context),
+    /missing item_id or call_id/,
+  );
+});
