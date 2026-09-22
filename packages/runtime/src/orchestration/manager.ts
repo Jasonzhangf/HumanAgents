@@ -534,10 +534,19 @@ export class OrchestrationManager {
 
     let reviewMaterial: ReviewMaterial;
     try {
+      // The produced body is carried by the result, the same way the subject
+      // digests already fall back to the result: the caller cannot know a
+      // body that only exists after the worker ran. A caller-supplied subject
+      // remains an explicit override.
+      const overrides = new Map((input.reviewSubjects ?? []).map((subject) => [subject.ref, subject.body]));
+      const subjects = input.assignment.targetRefs.map((ref, index) => ({
+        ref,
+        body: overrides.get(ref) ?? result.producedArtifactBodies?.[index] ?? '',
+      }));
       reviewMaterial = resolveReviewMaterial({
         workerAssignment: input.assignment,
         workerResult: result,
-        subjects: input.reviewSubjects ?? [],
+        subjects,
       });
     } catch (error) {
       return this.blockedResult(

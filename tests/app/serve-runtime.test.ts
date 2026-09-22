@@ -331,7 +331,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
   const binding = providerBinding();
   const deterministicPorts = createDeterministicServeOrchestrationPorts();
   const rccPorts = createRccServeOrchestrationPorts({
-    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed' }),
     binding,
     promptSegments: { review: ['review system prompt'] },
   });

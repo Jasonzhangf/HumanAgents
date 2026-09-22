@@ -1214,8 +1214,7 @@ export class RuntimeTaskCoordinator {
       record.runtime = runtime;
       let closure: AgentRuntimeClosure | undefined;
       if (record.orchestrated && this.options.createTaskAssembly) {
-            const outputRef = `operation://${operation.operationId.value}/output`;
-        const outputDigest = (): string => `sha256:${createHash('sha256').update(record.output).digest('hex')}`;
+        const outputRef = `operation://${operation.operationId.value}/output`;
         const coordinator = this;
         // The review gate receives the text this execution actually produced,
         // so an empty run blocks instead of passing on identity alone.
@@ -1342,7 +1341,10 @@ export class RuntimeTaskCoordinator {
               executionEpoch: input.assignment.executionEpoch,
               inputRevision: input.assignment.inputRevision,
               producedArtifactRefs: [outputRef],
-              producedArtifactDigests: [outputDigest()],
+              // The digest of what this attempt produced, not of shared
+              // mutable state that a later attempt may already have reset.
+              producedArtifactDigests: [digestOf(producedOutput)],
+              producedArtifactBodies: [producedOutput],
               status,
               summary: `provider execution ${closure.state}`,
               outputRefs: [outputRef],
@@ -1408,8 +1410,6 @@ export class RuntimeTaskCoordinator {
           agentId: 'humanagent.provider-execution',
           scope,
           reviewKinds: ['quality'],
-          reviewSubjectDigests: [outputDigest()],
-          reviewSubjects: [{ ref: outputRef, body: producedOutput }],
         });
         if (record.stopping || record.postCommitRecoveryPending) return;
         if (dispatched.status !== 'merged' && dispatched.status !== 'succeeded') {

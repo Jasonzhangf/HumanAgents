@@ -86,6 +86,10 @@ export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMater
     if (produced === undefined || produced !== digest) {
       throw new Error('review subject body digest must match the produced artifact digest');
     }
+    const carriedBody = workerResult.producedArtifactBodies?.[index];
+    if (carriedBody !== undefined && carriedBody !== subject.body) {
+      throw new Error('review subject body must match the produced artifact body');
+    }
     return { ref: subject.ref, body: subject.body, digest };
   });
   return {

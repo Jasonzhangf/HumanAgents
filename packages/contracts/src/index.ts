@@ -732,7 +732,7 @@ export interface WorkAssignment {
 }
 export interface WorkResult {
   readonly taskId: TaskId; readonly pipelineNodeId: string; readonly agentId: string; readonly assignmentId: string; readonly attempt: number; readonly executionEpoch: number; readonly inputRevision: number;
-  readonly producedArtifactRefs: readonly string[]; readonly producedArtifactDigests: readonly string[]; readonly status: 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled'; readonly summary: string;
+  readonly producedArtifactRefs: readonly string[]; readonly producedArtifactDigests: readonly string[]; readonly producedArtifactBodies?: readonly string[]; readonly status: 'succeeded' | 'failed' | 'incomplete' | 'blocked' | 'cancelled'; readonly summary: string;
   readonly outputRefs: readonly string[]; readonly evidenceRefs: readonly EvidenceRef[]; readonly nextAction: 'continue' | 'wait' | 'attention' | 'review' | 'settle' | 'remediate'; readonly conditionRef?: string; readonly failureRef?: string;
 }
 
@@ -844,6 +844,9 @@ export function validateWorkResult(input: WorkResult, assignment: WorkAssignment
   for (const ref of input.producedArtifactRefs) if (!ref) throw new ContractError('work result artifact ref must be present');
   if (input.producedArtifactRefs.length !== input.producedArtifactDigests.length) throw new ContractError('work result artifact digests must match artifact refs');
   for (const digest of input.producedArtifactDigests) if (!digest) throw new ContractError('work result artifact digest must be present');
+  if (input.producedArtifactBodies !== undefined) {
+    if (input.producedArtifactBodies.length !== input.producedArtifactRefs.length) throw new ContractError('work result artifact bodies must match artifact refs');
+  }
   if (assignment.expectedArtifactDigests) {
     const expectedDigests = new Set(assignment.expectedArtifactDigests);
     for (const digest of assignment.expectedArtifactDigests) if (!digest) throw new ContractError('work assignment expected artifact digest must be present');
