@@ -20,6 +20,7 @@ import {
   type ProviderReadiness,
   type ProviderRecoveryResult,
   type ProviderSettlement,
+  type ProviderStartInput,
   type ProviderStartReceipt,
   type ProviderStopReceipt,
   type ProviderSubmitResult,
@@ -128,6 +129,17 @@ class DelayedMemoryBackend extends DeterministicMemoryBackend {
 class FailingMemoryBackend extends DeterministicMemoryBackend {
   override async recall(): Promise<never> {
     throw new Error('forced memory recall failure');
+  }
+}
+
+// Records the provider-visible business input handed to the execution port so a
+// dispatch regression cannot pass by only surfacing the text in the UI projection.
+class PayloadCapturingFakeReplayPort extends FakeReplayExecutionRuntimePort {
+  readonly startPayloads: unknown[] = [];
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.startPayloads.push(structuredClone(input.payload ?? null));
+    return super.start(input);
   }
 }
 
@@ -1260,7 +1272,8 @@ test('fake execution completes through Runtime projection with SSE, output, chec
 
 test('explicit brain confirmation is the only path from input to FIFO execution', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-brain-'));
-  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });
+  const service = serviceFor(root, port);
   const interactionId = await service.receiveExplicitInput({
     sourceRef: 'ui:task-detail',
     rawInput: 'summarize the current task evidence',
@@ -1323,6 +1336,8 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
   await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(dispatched.taskId).input, 'summarize the current task evidence');
   assert.match(service.taskDashboard(dispatched.taskId).output, /fake replay/);
+  assert.deepEqual(port.startPayloads, [{ prompt: 'summarize the current task evidence' }]);
+  assert.equal(JSON.stringify(port.startPayloads).includes('asset://requirements/explicit-brain'), false);
   const events = service.eventsSince(dispatched.operationId);
   assert.deepEqual(events.map((event) => event.kind), [
     'execution.started',
