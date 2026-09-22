@@ -526,48 +526,6 @@ textarea {
   color: var(--muted);
 }
 
-.node-list {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.node-button {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  width: 100%;
-  min-height: 62px;
-  padding: 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface);
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.node-button:hover {
-  border-color: #98aaa3;
-}
-
-.node-index {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.node-copy {
-  display: grid;
-  gap: 4px;
-}
-
-.node-copy small {
-  color: var(--muted);
-}
-
 .breadcrumbs {
   display: flex;
   flex-wrap: wrap;
