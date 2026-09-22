@@ -13,7 +13,7 @@ import {
   type ScopeRef,
   type TaskId,
 } from '../../contracts/src/index.js';
-import type { LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
+import type { AgentDriverRef, LoadedConfiguration, RuntimePaths } from '../../config/src/index.js';
 import {
   checkpointJournal,
   openAgentOperation,
@@ -33,11 +33,11 @@ export interface RunAgentOperationInput extends OpenAgentOperationInput {}
 export type { RunAgentOperationResult } from './agent-operation.js';
 
 export interface AgentOperationResult extends RunAgentOperationResult {
-  readonly driverRef: 'fake' | 'dsh';
+  readonly driverRef: AgentDriverRef;
   readonly semanticEvents: readonly AgentSemanticEvent[];
 }
 
-function selectedAgentDriverRef(input: OpenAgentOperationInput): 'fake' | 'dsh' {
+function selectedAgentDriverRef(input: OpenAgentOperationInput): AgentDriverRef {
   if (input.agent) return input.agent.driverRef;
   const defaultAgentId = input.configuration.effective.project?.defaultAgent;
   const selected = defaultAgentId
@@ -145,7 +145,7 @@ export interface ResumeAgentOperationInput {
   readonly executionEpoch: number;
   readonly directiveRevision: number;
   readonly agentId: string;
-  readonly driverRef: 'fake' | 'dsh';
+  readonly driverRef: AgentDriverRef;
 }
 
 export interface ResumeAgentOperationResult {

@@ -7,7 +7,7 @@ import { loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRo
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
-export const AGENT_DRIVER_REFS = ['fake', 'dsh'] as const;
+export const AGENT_DRIVER_REFS = ['fake', 'dsh', 'rcc'] as const;
 export type AgentDriverRef = (typeof AGENT_DRIVER_REFS)[number];
 export const AGENT_ROLES = ['interaction', 'orchestration', 'execution', 'review', 'memory'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];

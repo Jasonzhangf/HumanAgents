@@ -189,6 +189,8 @@ export interface MemoryAgentOptions {
     readonly operationId: OperationId;
     readonly executionEpoch: number;
     readonly assignmentId: string;
+    /** Admitted analysis scope; an external provider driver binds its own identity from it. */
+    readonly scope: CanonicalMemoryScope;
   }) => AgentDriver;
   readonly sessions: MemorySessionEvidenceSourcePort;
   readonly projectSources: MemoryProjectSourcePort;
@@ -794,14 +796,15 @@ async function providerOutcome(
   inspectedSources: readonly InspectedMemorySource[],
 ): Promise<MemoryCurationResult> {
   const request = memoryAnalysisInput(input, prompt, promptContent, inspectedSources);
+  if (input.scope.namespace !== 'project') throw new ContractError('memory analysis provider requires a project scope');
   const driver = options.driver ?? options.driverFor?.({
     taskId: request.taskId,
     operationId: input.operationId,
     executionEpoch: request.executionEpoch,
     assignmentId: request.assignmentId,
+    scope: { ...input.scope },
   });
   if (driver === undefined) throw new ContractError('memory analysis provider is not configured');
-  if (input.scope.namespace !== 'project') throw new ContractError('memory analysis provider requires a project scope');
   const handle = await driver.start({
     runtimeId: request.assignmentId,
     taskId: request.taskId,

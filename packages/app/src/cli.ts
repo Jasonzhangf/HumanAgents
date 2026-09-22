@@ -164,18 +164,22 @@ function uiMemoryEvidence(checkpointRoot: string, mode: 'fake' | 'rcc') {
   };
 }
 
+/** Admitted memory operation identity passed to the memory-role driver factory. */
+interface MemoryDriverRequest {
+  readonly taskId: import('../../contracts/src/index.js').TaskId;
+  readonly operationId: import('../../contracts/src/index.js').OperationId;
+  readonly executionEpoch: number;
+  readonly assignmentId: string;
+  readonly scope: import('../../contracts/src/index.js').CanonicalMemoryScope;
+}
+
 async function composeTaskMemory(input: {
   readonly paths: RuntimePaths;
   readonly configuration: LoadedConfiguration;
   readonly sessionId: string;
   readonly bindingRef: string;
   readonly executionEpoch: number;
-  readonly driverFor?: (input: {
-    readonly taskId: import('../../contracts/src/index.js').TaskId;
-    readonly operationId: import('../../contracts/src/index.js').OperationId;
-    readonly executionEpoch: number;
-    readonly assignmentId: string;
-  }) => import('../../contracts/src/index.js').AgentDriver;
+  readonly driverFor?: (request: MemoryDriverRequest) => import('../../contracts/src/index.js').AgentDriver;
 }) {
   const localSkill = input.configuration.projectSourceManifest.sources?.localSkill;
   const mainAgentId = input.configuration.effective.project?.defaultAgent
@@ -217,31 +221,62 @@ async function composeTaskMemory(input: {
   });
 }
 
+export interface ServeRccDriverBinding {
+  readonly port: ExecutionRuntimePort;
+  readonly binding: ProviderBinding;
+  readonly inputRefs: readonly string[];
+}
+
 /**
  * Provider-backed memory analysis must use an explicitly configured
  * `roleId === 'memory'` agent, never the main operation driver. A fresh driver
  * is composed for each admitted memory operation so its runtime/operation
  * identity cannot leak into the main task execution.
+ *
+ * `rcc` is the one driver whose execution identity must come from the admitted
+ * memory operation: the serve RCC port and provider binding are supplied by the
+ * caller, while task/operation/assignment identity is bound per request.
  */
 export function memoryDriverFactory(input: {
   readonly paths: RuntimePaths;
   readonly configuration: LoadedConfiguration;
   readonly workspace: string;
-}): ((request: {
-  readonly taskId: import('../../contracts/src/index.js').TaskId;
-  readonly operationId: import('../../contracts/src/index.js').OperationId;
-  readonly executionEpoch: number;
-  readonly assignmentId: string;
-}) => import('../../contracts/src/index.js').AgentDriver) | undefined {
+  readonly rcc?: ServeRccDriverBinding;
+}): ((request: MemoryDriverRequest) => import('../../contracts/src/index.js').AgentDriver) | undefined {
   const memoryAgent = input.configuration.agentRoster.find((agent) => agent.roleId === 'memory');
   if (memoryAgent === undefined) return undefined;
-  return ({ assignmentId }) => {
+  return ({ assignmentId, scope, operationId, taskId, executionEpoch }) => {
+    if (scope.namespace !== 'project') {
+      throw new AppLifecycleError(
+        'memory-driver-scope-unsupported',
+        'memory analysis driver requires a project-scoped analysis request',
+        'admit the memory analysis with a project scope before composing its driver',
+        'humanagent.app.entry-composition',
+      );
+    }
+    const rcc = input.rcc === undefined
+      ? undefined
+      : {
+          port: input.rcc.port,
+          binding: input.rcc.binding,
+          scope: {
+            organId: scope.organId,
+            taskId,
+            operationId,
+          },
+          taskId,
+          operationId,
+          executionEpoch,
+          assignmentId,
+          inputRefs: input.rcc.inputRefs,
+        };
     const composed = composeAgentDriver({
       agent: memoryAgent,
       paths: input.paths,
       ...(input.configuration.effective.execution?.dsh === undefined
         ? {}
         : { dsh: input.configuration.effective.execution.dsh }),
+      ...(rcc === undefined ? {} : { rcc }),
       runtimeId: assignmentId,
       workspace: input.workspace,
     });
@@ -707,10 +742,27 @@ export async function main(args: readonly string[]): Promise<void> {
     let boundPortNumber = portNumber;
     const host = loopbackHost(option(args, '--host') ?? '127.0.0.1');
     const memoryRoot = paths.memoryRoot;
+    const port = mode === 'rcc'
+      ? buildRccExecutionPort({
+          binding,
+          routeRef: option(args, '--route') ?? configuredProvider.route,
+          baseUrl,
+          maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+        }, evidenceRoot)
+      : createFakeExecutionPort(
+          binding,
+          option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
+          fakeScenario(args),
+        );
     const memoryDriverFor = memoryDriverFactory({
       paths,
       configuration,
       workspace: paths.workspaceCwd,
+      rcc: {
+        port,
+        binding,
+        inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
+      },
     });
     const memoryRuntime = await composeMemoryRuntime({
       paths,
@@ -742,18 +794,6 @@ export async function main(args: readonly string[]): Promise<void> {
       },
       checkpointEvidence: uiMemoryEvidence(checkpointRoot, mode),
     });
-    const port = mode === 'rcc'
-      ? buildRccExecutionPort({
-          binding,
-          routeRef: option(args, '--route') ?? configuredProvider.route,
-          baseUrl,
-          maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-        }, evidenceRoot)
-      : createFakeExecutionPort(
-          binding,
-          option(args, '--fake-step-delay-ms') ? Number(option(args, '--fake-step-delay-ms')) : undefined,
-          fakeScenario(args),
-        );
     const plugins = servePlugins(mode, {
       executionPort: port,
       memory: {
