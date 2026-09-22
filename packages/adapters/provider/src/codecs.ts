@@ -42,6 +42,22 @@ import type {
 const SOURCE = 'humanagent.provider-adapter';
 const OWNER = SOURCE;
 
+function businessText(
+  execution: ProviderExecutionIdentityRef,
+  payload: ProviderStartInput['payload'],
+): string {
+  if (payload === undefined) {
+    throw new ProviderAdapterError({
+      code: 'input.payload.missing',
+      category: 'validation',
+      phase: 'start',
+      message: 'provider request requires business payload text',
+      scope: execution,
+    });
+  }
+  return JSON.stringify(payload);
+}
+
 export interface DecodeContext {
   readonly execution: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
@@ -325,15 +341,15 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   readonly protocol = 'responses' as const;
 
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload, input.checkpointId);
+    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): ResponsesWireCancelRequest {
@@ -545,19 +561,18 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
     binding: ProviderBinding,
     routeRef: string,
     execution: ProviderExecutionIdentityRef,
-    inputRefs: readonly string[],
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): ResponsesWireRequest {
-    const requestBody = { inputRefs, payload: payload ?? {} };
-    const input: ResponsesWireRequest['input'] = [{ type: 'message', role: 'user', content: JSON.stringify(requestBody) }];
+    const content = businessText(execution, payload);
+    const input: ResponsesWireRequest['input'] = [{ type: 'message', role: 'user', content }];
     const tools: ResponsesWireTool[] = [];
     return {
       protocol: 'responses',
       type: 'responses.request',
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
-      instructions: inputRefs.join('\n'),
+      instructions: '',
       input,
       execution,
       ...(checkpointId === undefined ? {} : { checkpointId }),
@@ -570,15 +585,15 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   readonly protocol = 'openai' as const;
 
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload, input.checkpointId);
+    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): OpenAIChatCancelRequest {
@@ -800,14 +815,11 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
     binding: ProviderBinding,
     routeRef: string,
     execution: ProviderExecutionIdentityRef,
-    inputRefs: readonly string[],
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): OpenAIChatWireRequest {
-    const requestBody = { inputRefs, payload: payload ?? {} };
     const messages: OpenAIChatWireMessage[] = [
-      ...(inputRefs.length === 0 ? [] : [{ role: 'system' as const, content: inputRefs.join('\n') }]),
-      { role: 'user', content: JSON.stringify(requestBody) },
+      { role: 'user', content: businessText(execution, payload) },
     ];
     const tools: OpenAIChatWireTool[] = [];
     return {
@@ -840,15 +852,15 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
   }
 
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload, input.checkpointId);
+    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): AnthropicWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.inputRefs, input.payload);
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): AnthropicWireCancelRequest {
@@ -1019,14 +1031,13 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
     binding: ProviderBinding,
     routeRef: string,
     execution: ProviderExecutionIdentityRef,
-    inputRefs: readonly string[],
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): AnthropicWireRequest {
-    const requestBody = { inputRefs, payload: payload ?? {} };
+    const content = businessText(execution, payload);
     const message: AnthropicWireMessage = {
       role: 'user',
-      content: [{ type: 'text', text: JSON.stringify(requestBody) }],
+      content: [{ type: 'text', text: content }],
     };
     const tools: AnthropicWireTool[] = [];
     return {
@@ -1035,7 +1046,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
       max_tokens: this.maxTokens,
-      system: inputRefs.join('\n'),
+      system: '',
       messages: [message],
       execution,
       ...(checkpointId === undefined ? {} : { checkpointId }),

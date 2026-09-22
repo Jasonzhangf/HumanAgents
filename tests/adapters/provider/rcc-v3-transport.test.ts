@@ -106,7 +106,26 @@ function fetchStub(body: AsyncIterable<Uint8Array>, calls: Array<{ url: string; 
 }
 
 function startInput() {
-  return { ...execution, inputRefs: ['input-rcc'], evidenceRefs: [evidence('start')] };
+  return {
+    ...execution,
+    inputRefs: ['task://task-provider-rcc/input/1'],
+    evidenceRefs: [evidence('start')],
+    payload: { prompt: 'summarize the failing build log' },
+  };
+}
+
+function anthropicAdapter(fetch: V3ProviderFetch) {
+  const provider: ProviderBinding = {
+    ...binding,
+    bindingId: 'binding-anthropic-rcc-test',
+    providerId: 'goaichat',
+    protocol: 'anthropic',
+    endpointRef: 'rcc-v3-4444-anthropic',
+    modelRef: 'provider.model',
+    configDigest: 'sha256:anthropic-test-config',
+    capabilityDigest: 'sha256:anthropic-test-capability',
+  };
+  return adapter(fetch, provider, new AnthropicProviderCodec(4096));
 }
 
 function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec()) {
@@ -385,16 +404,46 @@ test('RCC v3 start sends the explicit request and returns a receipt', async () =
   assert.equal(calls[0].init.method, 'POST');
   assert.deepEqual(JSON.parse(calls[0].init.body!), {
     model: binding.modelRef,
-    instructions: 'input-rcc',
+    instructions: '',
     input: [{
       type: 'message',
       role: 'user',
-      content: [{ type: 'input_text', text: JSON.stringify({ inputRefs: ['input-rcc'], payload: {} }) }],
+      content: [{ type: 'input_text', text: JSON.stringify({ prompt: 'summarize the failing build log' }) }],
     }],
     stream: true,
   });
   assert.deepEqual(built.writes.map((write) => write.type), ['start']);
   assert.equal((built.writes[0].content as { route?: string }).route, 'cc:test-route');
+});
+
+test('provider wire bodies carry business text and never internal control refs', async () => {
+  const bodies: string[] = [];
+  for (const build of [adapter, openAIAdapter, anthropicAdapter]) {
+    const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
+    const built = build(fetchStub(chunks([]), calls));
+    await built.adapter.start({
+      ...startInput(),
+      inputRefs: [
+        'task://task-provider-rcc/input/1',
+        'humanagent://session/provider-rcc/input/1',
+        'asset://provider-rcc/report.md',
+        'operation://operation-rcc-test/input',
+      ],
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(typeof calls[0]!.init.body, 'string');
+    bodies.push(calls[0]!.init.body!);
+  }
+
+  assert.equal(bodies.length, 3);
+  for (const body of bodies) {
+    assert.equal(body.includes('summarize the failing build log'), true);
+    assert.equal(body.includes('inputRefs'), false);
+    assert.equal(body.includes('task://'), false);
+    assert.equal(body.includes('humanagent://'), false);
+    assert.equal(body.includes('asset://'), false);
+    assert.equal(body.includes('operation://'), false);
+  }
 });
 
 test('RCC v3 openai entry sends Chat Completions and settles on [DONE]', async () => {
@@ -412,8 +461,7 @@ test('RCC v3 openai entry sends Chat Completions and settles on [DONE]', async (
   assert.deepEqual(JSON.parse(calls[0].init.body!), {
     model: 'provider.model',
     messages: [
-      { role: 'system', content: 'input-rcc' },
-      { role: 'user', content: JSON.stringify({ inputRefs: ['input-rcc'], payload: {} }) },
+      { role: 'user', content: JSON.stringify({ prompt: 'summarize the failing build log' }) },
     ],
     stream: true,
   });

@@ -62,7 +62,7 @@ function evidence(label: string, kind: EvidenceRef['kind'] = 'execution'): Evide
 }
 
 function startInput() {
-  return { ...execution(), inputRefs: ['input-a'], evidenceRefs: [evidence('start')] };
+  return { ...execution(), inputRefs: ['input-a'], evidenceRefs: [evidence('start')], payload: { prompt: 'replay the recorded provider exchange' } };
 }
 
 function stopRequest() {

@@ -59,7 +59,7 @@ function execution() {
 }
 
 function startInput(overrides: Partial<ProviderStartInput> = {}): ProviderStartInput {
-  return { ...execution(), inputRefs: ['input-a'], evidenceRefs: [evidence('start')], ...overrides };
+  return { ...execution(), inputRefs: ['input-a'], evidenceRefs: [evidence('start')], payload: { prompt: 'start the task' }, ...overrides };
 }
 
 function resumeInput(overrides: Partial<ProviderResumeInput> = {}): ProviderResumeInput {
