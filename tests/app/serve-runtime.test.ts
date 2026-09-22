@@ -32,6 +32,7 @@ import type { CheckpointJournalPort } from '../../packages/runtime/src/checkpoin
 import type { ReviewAssignment } from '../../packages/runtime/src/review/index.js';
 import type { ReviewResult } from '../../packages/runtime/src/review/index.js';
 import { acceptanceCriteriaContent, digestOf, resolveReviewMaterial } from '../../packages/runtime/src/orchestration/index.js';
+import type { ExecutionAgentPort } from '../../packages/runtime/src/orchestration/index.js';
 
 /** Produced subject body used by the fixture assignments in this file. */
 const serveArtifactBody = 'serve fixture artifact body';
@@ -330,6 +331,29 @@ test('confirmed requirement enters task orchestration with RCC review before pro
   const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-requirement-'));
   const binding = providerBinding();
   const deterministicPorts = createDeterministicServeOrchestrationPorts();
+  // The deterministic fixture execution agent returns refs and digests but no
+  // produced body, which would make the review gate fail closed on an empty
+  // subject. Give it a real body derived from the same target refs it reports
+  // so refs, digests and body all describe one artifact.
+  const fixtureWorker = deterministicPorts.executionAgent!;
+  const fixtureBody = 'serve orchestration fixture artifact body';
+  const executionAgent: ExecutionAgentPort = {
+    async execute(input) {
+      const delivery = await fixtureWorker.execute(input);
+      const result = 'result' in delivery ? delivery.result : delivery;
+      return {
+        ...result,
+        // One artifact: the ref, its digest and its body must all describe the
+        // same produced text, so the review gate can recompute the digest.
+        producedArtifactDigests: input.assignment.targetRefs.map(() => digestOf(fixtureBody)),
+        producedArtifactBodies: input.assignment.targetRefs.map(() => fixtureBody),
+        // The composed provider fixture reports its own organ; the feedback
+        // event scope is the task's, so evidence must be re-scoped to it.
+        evidenceRefs: result.evidenceRefs.map((ref) => ({ ...ref, scope: { ...input.scope } })),
+        // Evidence must sit inside the feedback event's admitted scope.
+      };
+    },
+  };
   const rccPorts = createRccServeOrchestrationPorts({
     port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed' }),
     binding,
@@ -342,7 +366,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
       publishers: eventBus.ports.publishers,
     },
     feedbackPublisherId: 'serve-test',
-    executionAgent: deterministicPorts.executionAgent,
+    executionAgent,
     reviewAgent: rccPorts.reviewAgent,
     mergeCoordinator: rccPorts.mergeCoordinator,
   });
