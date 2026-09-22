@@ -1,7 +1,7 @@
 export { ProviderAdapter } from './adapter.js';
 export type { ProviderAdapterOptions, ProviderProbeResult, ProviderTransport } from './adapter.js';
 export { ProviderAgentDriver } from './agent-driver.js';
-export type { ProviderAgentDriverOptions, ProviderAgentEvent } from './agent-driver.js';
+export type { ProviderAgentDriverOptions, ProviderAgentEvent, ProviderToolExecutionPort, ProviderToolExecutionResult } from './agent-driver.js';
 export { AnthropicProviderCodec, OpenAIChatProviderCodec, ResponsesProviderCodec } from './codecs.js';
 export type { DecodeContext, ProviderCodec, ProviderDecodedEvent } from './codecs.js';
 export { filesystemProviderEvidenceSink } from './evidence.js';

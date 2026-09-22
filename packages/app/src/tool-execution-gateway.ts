@@ -6,6 +6,9 @@ import {
   WEB_SEARCH_ROUTE_ID,
   WebSearchRoute,
   webSearchRegistration,
+  FILE_READ_ROUTE_ID,
+  FileReadRoute,
+  fileReadRegistration,
   DeterministicInspectRoute,
   DETERMINISTIC_INSPECT_ROUTE_VERSION,
   DETERMINISTIC_INSPECT_TOOL_NAME,
@@ -21,6 +24,7 @@ export interface ToolExecutionGatewayAssemblyInput extends Omit<GatewayOptions, 
   readonly route?: DeterministicInspectRoute;
   readonly codeSearchRoute?: CodeSearchRoute;
   readonly webSearchRoute?: WebSearchRoute;
+  readonly fileReadRoute?: FileReadRoute;
 }
 
 export function deterministicInspectRegistration(): ToolRegistration {
@@ -49,10 +53,12 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
     deterministicInspectRegistration(),
     ...(input.codeSearchRoute ? [codeSearchRegistration()] : []),
     ...(input.webSearchRoute ? [webSearchRegistration()] : []),
+    ...(input.fileReadRoute ? [fileReadRegistration()] : []),
   ]);
-  const selectedRoute = (routeId: string): (DeterministicInspectRoute | CodeSearchRoute | WebSearchRoute | undefined) => {
+  const selectedRoute = (routeId: string): (DeterministicInspectRoute | CodeSearchRoute | WebSearchRoute | FileReadRoute | undefined) => {
     if (routeId === CODE_SEARCH_ROUTE_ID) return input.codeSearchRoute;
     if (routeId === WEB_SEARCH_ROUTE_ID) return input.webSearchRoute;
+    if (routeId === FILE_READ_ROUTE_ID) return input.fileReadRoute;
     return route;
   };
   const executor: OperationExecutorPort = {
@@ -154,7 +160,7 @@ export function createToolExecutionGateway(input: ToolExecutionGatewayAssemblyIn
   });
 }
 
-function isCancellableRoute(route: DeterministicInspectRoute | CodeSearchRoute | WebSearchRoute): route is (CodeSearchRoute | WebSearchRoute) & CancellableOperationRoute {
+function isCancellableRoute(route: DeterministicInspectRoute | CodeSearchRoute | WebSearchRoute | FileReadRoute): route is (CodeSearchRoute | WebSearchRoute | FileReadRoute) & CancellableOperationRoute {
   return typeof (route as Partial<CancellableOperationRoute>).stop === 'function';
 }
 

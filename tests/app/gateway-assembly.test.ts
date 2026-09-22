@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   createHandOperationRuntime,
+  createResponsesFileToolExecutor,
   createToolExecutionGateway,
 } from '../../packages/app/src/index.js';
 import { DeterministicInspectRoute } from '../../packages/adapters/operations/src/index.js';
@@ -167,6 +171,74 @@ test('app assembly exposes Hand as a thin semantic-intent boundary', async () =>
 
   assert.equal(result.operation.status, 'succeeded');
   assert.equal(result.operation.route?.routeId, 'deterministic-inspect');
+});
+
+test('Responses file.read executes through Hand and returns actual bound-workspace content', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'tmp-provider-file-tool-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'README.md'), 'REAL_README_CONTENT\n', 'utf8');
+  const executor = createResponsesFileToolExecutor({
+    workspaceRoot,
+    projectKey: 'fixture-project',
+    artifactRoot: join(root, 'artifacts'),
+  });
+  try {
+    const result = await executor.execute({
+      execution: { runtimeId: 'runtime-file-tool', taskId: task, operationId: operation, executionEpoch: 1 },
+      scope,
+      call: {
+        callId: 'call-readme',
+        toolId: 'file.read',
+        arguments: { path: './README.md' },
+        continuationRef: 'response-1',
+      },
+      signal: new AbortController().signal,
+    });
+
+    assert.deepEqual(JSON.parse(result.output), {
+      workspaceRef: 'workspace:fixture-project',
+      path: 'README.md',
+      content: 'REAL_README_CONTENT\n',
+    });
+    assert.equal(result.outputRefs[0], 'asset://provider-tool/output/provider-tool-app-gateway-operation-call-readme');
+    assert.equal(result.evidenceRefs.some((ref) => ref.source === 'humanagent.operations.file-read'), true);
+    const source = await executor.readSourceEvidence(result.outputRefs[0]);
+    assert.deepEqual(source, {
+      ref: result.outputRefs[0],
+      workspaceRef: 'workspace:fixture-project',
+      path: 'README.md',
+      content: 'REAL_README_CONTENT\n',
+      digest: `sha256:${createHash('sha256').update('REAL_README_CONTENT\n').digest('hex')}`,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Responses file.read rejects an already-aborted call before Hand admission', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'tmp-provider-file-tool-abort-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'README.md'), 'MUST_NOT_BE_READ\n', 'utf8');
+  const artifactRoot = join(root, 'artifacts');
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'fixture-project', artifactRoot });
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(
+      () => executor.execute({
+        execution: { runtimeId: 'runtime-file-tool', taskId: task, operationId: operation, executionEpoch: 1 },
+        scope,
+        call: { callId: 'call-readme-aborted', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-1' },
+        signal: controller.signal,
+      }),
+      (error) => error instanceof Error && error.name === 'AbortError',
+    );
+    await assert.rejects(() => access(join(artifactRoot, 'operation-journal.jsonl')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('app assembly rejects an adapter observation with a different operation identity', async () => {

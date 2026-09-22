@@ -1,5 +1,6 @@
 import {
   id,
+  type BusinessPayload,
   type EvidenceRef,
   type NextAction,
   type ProviderBinding,
@@ -58,12 +59,34 @@ function businessText(
   return JSON.stringify(payload);
 }
 
+const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([['file.read', 'file_read']]);
+const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([['file_read', 'file.read']]);
+
+function responsesWireToolName(toolId: string): string {
+  const name = RESPONSES_TOOL_ID_TO_WIRE_NAME.get(toolId) ?? toolId;
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    throw new ProviderAdapterError({
+      code: 'tool.name.unsupported',
+      category: 'validation',
+      phase: 'tool',
+      message: `provider tool id has no registered Responses wire name: ${toolId}`,
+    });
+  }
+  return name;
+}
+
+function responsesToolId(wireName: string): string {
+  return RESPONSES_WIRE_NAME_TO_TOOL_ID.get(wireName) ?? wireName;
+}
+
 export interface DecodeContext {
   readonly execution: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
   readonly evidence: ProviderEvidenceSink;
   readonly nextEventId: (type: string, locator: string) => string;
   readonly responsesOutputText: Map<string, string>;
+  readonly responsesCurrentResponseId?: Map<string, string>;
+  readonly responsesPendingToolCalls?: Set<string>;
 }
 
 export interface ProviderDecodedEvent {
@@ -198,6 +221,7 @@ function ownedEvent(
     readonly outputRefs?: readonly string[];
     readonly evidenceRefs?: readonly EvidenceRef[];
     readonly summary?: string;
+    readonly toolCall?: ProviderEvent['toolCall'];
   } = {},
 ): ProviderEvent {
   return {
@@ -210,6 +234,7 @@ function ownedEvent(
     ...(extra.outputRefs === undefined ? {} : { outputRefs: extra.outputRefs }),
     ...(extra.evidenceRefs === undefined ? {} : { evidenceRefs: extra.evidenceRefs }),
     ...(extra.summary === undefined ? {} : { summary: extra.summary }),
+    ...(extra.toolCall === undefined ? {} : { toolCall: extra.toolCall }),
   };
 }
 
@@ -349,6 +374,37 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): ResponsesWireRequest {
+    if (input.toolContinuations !== undefined) {
+      return {
+        protocol: 'responses',
+        type: 'responses.request',
+        route: routeFor(binding, routeRef),
+        model: binding.modelRef,
+        instructions: '',
+        input: [
+          { type: 'message', role: 'user', content: businessText(input, input.payload) },
+          ...input.toolContinuations.flatMap((continuation) => ([{
+            type: 'function_call' as const,
+            call_id: continuation.callId,
+            name: responsesWireToolName(continuation.toolId),
+            arguments: JSON.stringify(continuation.arguments),
+          }, {
+            type: 'function_call_output' as const,
+            call_id: continuation.callId,
+            output: continuation.output,
+          }])),
+        ],
+        execution: input,
+        ...(input.tools === undefined || input.tools.length === 0 ? {} : {
+          tools: input.tools.map((tool) => ({
+            type: 'function' as const,
+            name: responsesWireToolName(tool.toolId),
+            description: tool.description,
+            parameters: tool.inputSchema,
+          })),
+        }),
+      };
+    }
     return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
@@ -379,6 +435,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       case 'response.in_progress': {
         const response = requireObject(record, 'response', context.execution, raw.type);
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
+        context.responsesCurrentResponseId?.set('current', responseId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`)];
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs)] };
       }
@@ -389,27 +446,23 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         if (itemType === 'function_call') {
           const callId = requireString(item, 'call_id', context.execution, raw.type);
           requireString(item, 'id', context.execution, raw.type);
-          const name = requireString(item, 'name', context.execution, raw.type);
-          const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { name, arguments: argumentsJson })];
-          return {
-            events: [
-              ownedEvent(
-                context.execution,
-                context.scope,
-                'tool',
-                raw.type,
-                eventId(context, raw.type, `tool/${callId}`),
-                `tool-${callId}`,
-                { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs },
-              ),
-            ],
-          };
+          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}/started`, item)];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/started`), evidenceRefs)] };
+        }
+        if (itemType === 'reasoning') {
+          const itemId = stringOrGenerated(item, 'id', `rcc-reasoning-${record.output_index}`);
+          const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, item)];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        }
+        if (itemType !== 'message') {
+          throw new ProviderAdapterError({ code: 'unknown.output.item', category: 'protocol', phase: 'observe', message: `unknown responses output item type ${itemType}`, scope: context.execution });
         }
         const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, responseItemText(item) ?? '', 'snapshot'))] };
+        const text = responseItemText(item);
+        return text === undefined || text === ''
+          ? { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] }
+          : { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.output_text.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
@@ -459,9 +512,45 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         if (itemType === 'function_call') {
           const callId = requireString(item, 'call_id', context.execution, raw.type);
           requireString(item, 'id', context.execution, raw.type);
-          const name = requireString(item, 'name', context.execution, raw.type);
+          const wireName = requireString(item, 'name', context.execution, raw.type);
+          const name = responsesToolId(wireName);
           const argumentsJson = requireStringValue(item, 'arguments', context.execution, raw.type);
-          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { name, arguments: argumentsJson })];
+          let args: unknown;
+          try {
+            args = JSON.parse(argumentsJson || '{}');
+          } catch (cause) {
+            throw new ProviderAdapterError({
+              code: 'tool.arguments.invalid-json',
+              category: 'protocol',
+              phase: 'tool',
+              message: cause instanceof Error ? cause.message : 'provider tool arguments are invalid JSON',
+              scope: context.execution,
+            });
+          }
+          if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            throw new ProviderAdapterError({
+              code: 'tool.arguments.invalid-shape',
+              category: 'protocol',
+              phase: 'tool',
+              message: 'provider tool arguments must be a JSON object',
+              scope: context.execution,
+            });
+          }
+          const continuationRef = context.responsesCurrentResponseId?.get('current');
+          if (!continuationRef) {
+            throw new ProviderAdapterError({
+              code: 'tool.continuation.missing',
+              category: 'protocol',
+              phase: 'tool',
+              message: 'provider tool call is missing its response continuation identity',
+              scope: context.execution,
+            });
+          }
+          const evidenceRefs = [await captureEvidence(context, raw.type, `tool/${callId}`, { wireName, toolId: name, arguments: argumentsJson })];
+          if (context.responsesPendingToolCalls?.has(callId)) {
+            return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `tool/${callId}/duplicate`), evidenceRefs)] };
+          }
+          context.responsesPendingToolCalls?.add(callId);
           return {
             events: [
               ownedEvent(
@@ -472,14 +561,30 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
                 eventId(context, raw.type, `tool/${callId}`),
                 `tool-${callId}`,
                 { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs },
+                {
+                  outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
+                  evidenceRefs,
+                  summary: name,
+                  toolCall: { callId, toolId: name, arguments: args as BusinessPayload, continuationRef },
+                },
               ),
             ],
           };
         }
+        if (itemType === 'reasoning') {
+          const itemId = stringOrGenerated(item, 'id', `rcc-reasoning-${record.output_index}`);
+          const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, item)];
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        }
+        if (itemType !== 'message') {
+          throw new ProviderAdapterError({ code: 'unknown.output.item', category: 'protocol', phase: 'observe', message: `unknown responses output item type ${itemType}`, scope: context.execution });
+        }
         const itemId = stringOrGenerated(item, 'id', `rcc-output-${record.output_index}`);
         const evidenceRefs = [await captureEvidence(context, raw.type, `output/${itemId}`, item)];
-        return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, responseItemText(item) ?? '', 'snapshot'))] };
+        const text = responseItemText(item);
+        return text === undefined || text === ''
+          ? { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] }
+          : { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.function_call_arguments.delta': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
@@ -502,8 +607,12 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
           : undefined;
         const reason = incompleteDetails === undefined ? undefined : requireString(incompleteDetails, 'reason', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`, reason)];
+        const waitingForTool = raw.type === 'response.completed' && (context.responsesPendingToolCalls?.size ?? 0) > 0;
+        context.responsesPendingToolCalls?.clear();
         const next = raw.type === 'response.incomplete'
           ? { kind: 'wait' as const, ref: `provider-incomplete-${reason ?? 'unknown'}` }
+          : waitingForTool
+            ? { kind: 'continue' as const, ref: 'responses-tool-call' }
           : { kind: 'continue' as const };
         return {
           events: [
@@ -515,7 +624,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
               eventId(context, raw.type, `response/${responseId}`),
               raw.type,
               next,
-              { terminalState: raw.type === 'response.incomplete' ? 'waiting' : 'succeeded', evidenceRefs },
+              { terminalState: raw.type === 'response.incomplete' || waitingForTool ? 'waiting' : 'succeeded', evidenceRefs },
             ),
           ],
         };
@@ -560,13 +669,18 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
   private encodeRequest(
     binding: ProviderBinding,
     routeRef: string,
-    execution: ProviderExecutionIdentityRef,
+    execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
   ): ResponsesWireRequest {
     const content = businessText(execution, payload);
     const input: ResponsesWireRequest['input'] = [{ type: 'message', role: 'user', content }];
-    const tools: ResponsesWireTool[] = [];
+    const tools: ResponsesWireTool[] = (execution.tools ?? []).map((tool) => ({
+      type: 'function',
+      name: responsesWireToolName(tool.toolId),
+      description: tool.description,
+      parameters: tool.inputSchema,
+    }));
     return {
       protocol: 'responses',
       type: 'responses.request',

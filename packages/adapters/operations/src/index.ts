@@ -14,6 +14,8 @@ export { CODE_SEARCH_ROUTE_ID, CODE_SEARCH_ROUTE_VERSION, CODE_SEARCH_TOOL_NAME,
 export type { CodeSearchArtifactStore, CodeSearchRouteOptions } from './code-search-route.js';
 export { WEB_SEARCH_ROUTE_ID, WEB_SEARCH_ROUTE_VERSION, WEB_SEARCH_TOOL_NAME, WebSearchRoute, webSearchRegistration } from './web-search-route.js';
 export type { WebSearchArtifactStore, WebSearchRouteOptions } from './web-search-route.js';
+export { FILE_READ_ROUTE_ID, FILE_READ_ROUTE_VERSION, FILE_READ_TOOL_NAME, FileReadRoute, fileReadRegistration } from './file-read-route.js';
+export type { FileReadArtifactStore, FileReadReport, FileReadRequest } from './file-read-route.js';
 export {
   OPERATIONS_ADAPTER_OWNER,
   OperationAdapterError,

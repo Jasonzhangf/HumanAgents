@@ -389,6 +389,8 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       scope: active.scope,
       evidence: this.options.evidence,
       responsesOutputText: new Map<string, string>(),
+      responsesCurrentResponseId: new Map<string, string>(),
+      responsesPendingToolCalls: new Set<string>(),
       nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
     };
     try {

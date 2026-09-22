@@ -936,6 +936,28 @@ export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
   readonly inputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly payload?: BusinessPayload;
+  readonly tools?: readonly ProviderToolDefinition[];
+}
+
+export interface ProviderToolDefinition {
+  readonly toolId: string;
+  readonly description: string;
+  readonly inputSchema: BusinessPayload;
+}
+
+export interface ProviderToolCall {
+  readonly callId: string;
+  readonly toolId: string;
+  readonly arguments: BusinessPayload;
+  readonly continuationRef: string;
+}
+
+export interface ProviderToolContinuation {
+  readonly callId: string;
+  readonly toolId: string;
+  readonly arguments: BusinessPayload;
+  readonly continuationRef: string;
+  readonly output: string;
 }
 
 export interface ProviderStartInput extends ProviderExecutionInput {}
@@ -945,6 +967,7 @@ export interface ProviderResumeInput extends ProviderExecutionInput {
 }
 export interface ProviderSubmitInput extends ProviderExecutionInput {
   readonly payload: BusinessPayload;
+  readonly toolContinuations?: readonly ProviderToolContinuation[];
 }
 export interface ProviderObserveInput extends ProviderExecutionIdentityRef {}
 export interface ProviderSettleInput extends ProviderExecutionIdentityRef {
@@ -991,6 +1014,7 @@ export interface ProviderEvent extends ProviderExecutionIdentityRef {
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
+  readonly toolCall?: ProviderToolCall;
 }
 
 export interface ProviderToolResult extends ProviderExecutionIdentityRef {
@@ -1216,6 +1240,14 @@ function validateProviderExecutionInput(input: ProviderExecutionInput): void {
   assertRefList(input.inputRefs, 'provider inputRefs');
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider execution evidenceRefs');
   if (input.payload !== undefined) assertBusinessPayload(input.payload);
+  for (const tool of input.tools ?? []) {
+    assertNonEmptyReference(tool.toolId, 'provider tool definition toolId');
+    assertNonEmptyReference(tool.description, 'provider tool definition description');
+    assertBusinessPayload(tool.inputSchema);
+  }
+  if (new Set((input.tools ?? []).map((tool) => tool.toolId)).size !== (input.tools?.length ?? 0)) {
+    throw new ContractError('provider tool definitions must be unique');
+  }
 }
 export function validateProviderStartInput(input: ProviderStartInput): void {
   validateProviderExecutionInput(input);
@@ -1230,6 +1262,22 @@ export function validateProviderSubmitInput(input: ProviderSubmitInput): void {
   validateProviderExecutionInput(input);
   if (!input.payload) throw new ContractError('provider submit payload is required');
   assertBusinessPayload(input.payload);
+  if (input.toolContinuations !== undefined) {
+    if (input.toolContinuations.length === 0) throw new ContractError('provider tool continuations must not be empty');
+    for (const continuation of input.toolContinuations) {
+      assertNonEmptyReference(continuation.callId, 'provider tool continuation callId');
+      assertNonEmptyReference(continuation.toolId, 'provider tool continuation toolId');
+      assertBusinessPayload(continuation.arguments);
+      assertNonEmptyReference(continuation.continuationRef, 'provider tool continuation ref');
+      assertNonEmptyReference(continuation.output, 'provider tool continuation output');
+    }
+    if (new Set(input.toolContinuations.map((continuation) => continuation.callId)).size !== input.toolContinuations.length) {
+      throw new ContractError('provider tool continuation callIds must be unique');
+    }
+    if (new Set(input.toolContinuations.map((continuation) => continuation.continuationRef)).size !== 1) {
+      throw new ContractError('provider tool continuations must belong to one provider response');
+    }
+  }
 }
 export function validateProviderObserveInput(input: ProviderObserveInput): void {
   assertProviderExecutionIdentity(input);
@@ -1299,6 +1347,13 @@ export function validateProviderEvent(input: ProviderEvent): void {
   if (input.error && input.kind !== 'error') throw new ContractError('provider error payload requires error event kind');
   if (['tool', 'error', 'terminal'].includes(input.kind) && input.evidenceRefs.length === 0) throw new ContractError('provider tool/error/terminal event requires evidence refs');
   if (['tool', 'error', 'terminal', 'attention'].includes(input.kind) && (!input.ownerId || !input.nextAction)) throw new ContractError('provider event requires owner and next action');
+  if (input.toolCall !== undefined) {
+    if (input.kind !== 'tool') throw new ContractError('provider tool call requires tool event kind');
+    assertNonEmptyReference(input.toolCall.callId, 'provider tool callId');
+    assertNonEmptyReference(input.toolCall.toolId, 'provider toolId');
+    assertBusinessPayload(input.toolCall.arguments);
+    assertNonEmptyReference(input.toolCall.continuationRef, 'provider tool continuation ref');
+  }
   assertOptionalProviderOwner(input);
 }
 export function checkProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): ProviderEventEpochDecision {

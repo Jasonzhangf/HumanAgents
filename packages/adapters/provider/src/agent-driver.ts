@@ -17,6 +17,9 @@ import {
   type ProviderEvent,
   type ProviderExecutionIdentityRef,
   type ProviderSettlement,
+  type ProviderStartInput,
+  type ProviderSubmitResult,
+  type ProviderToolCall,
   type ScopeRef,
   type StopRequestReceipt,
   type TaskId,
@@ -34,6 +37,24 @@ export interface ProviderAgentDriverOptions {
   readonly scope: ScopeRef;
   readonly inputRefs: readonly string[];
   readonly ownerId?: string;
+  readonly tools?: ProviderStartInput['tools'];
+  readonly executeTool?: ProviderToolExecutionPort;
+  readonly maxToolRounds?: number;
+}
+
+export interface ProviderToolExecutionResult {
+  readonly output: string;
+  readonly outputRefs: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface ProviderToolExecutionPort {
+  execute(input: {
+    readonly execution: ProviderExecutionIdentityRef;
+    readonly scope: ScopeRef;
+    readonly call: ProviderToolCall;
+    readonly signal: AbortSignal;
+  }): Promise<ProviderToolExecutionResult>;
 }
 
 export interface ProviderAgentEvent extends AgentEvent {
@@ -61,6 +82,15 @@ function sameExecution(
     && expected.executionEpoch === actual.executionEpoch;
 }
 
+function identity(options: ProviderAgentDriverOptions): ProviderExecutionIdentityRef {
+  return {
+    runtimeId: options.runtimeId,
+    taskId: options.taskId,
+    operationId: options.operationId,
+    executionEpoch: options.executionEpoch,
+  };
+}
+
 export class ProviderAgentDriver implements AgentDriver {
   readonly kind = 'humanagent.provider-agent-driver';
 
@@ -68,6 +98,11 @@ export class ProviderAgentDriver implements AgentDriver {
   private providerStarted = false;
   private providerSettlement?: ProviderSettlement;
   private readonly evidenceRef: EvidenceRef;
+  private stopping = false;
+  private toolController?: AbortController;
+  private toolCompletion?: Promise<void>;
+  private continuationCompletion?: Promise<void>;
+  private initialPayload?: AgentInput['payload'];
 
   constructor(private readonly options: ProviderAgentDriverOptions) {
     this.evidenceRef = operationEvidence(options.scope, options.operationId);
@@ -112,9 +147,11 @@ export class ProviderAgentDriver implements AgentDriver {
       inputRefs: [...this.options.inputRefs],
       evidenceRefs: [this.evidenceRef],
       payload: input.payload,
+      ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
     });
     this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
     this.providerStarted = true;
+    this.initialPayload = input.payload;
     return {
       taskId: input.taskId,
       executionEpoch: input.executionEpoch,
@@ -130,22 +167,96 @@ export class ProviderAgentDriver implements AgentDriver {
     if (input.runtimeId !== this.options.runtimeId) {
       throw this.error('runtime.identity.mismatch', 'provider observe is not bound to the current execution', 'observe', 'runtime');
     }
-    for await (const providerEvent of this.options.port.observe({
-      runtimeId: this.options.runtimeId,
-      taskId: this.options.taskId,
-      operationId: this.options.operationId,
-      executionEpoch: this.options.executionEpoch,
-    })) {
-      this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
-      yield {
-        taskId: providerEvent.taskId,
-        executionEpoch: providerEvent.executionEpoch,
-        kind: `provider.${providerEvent.kind}`,
-        evidenceRefs: providerEvent.evidenceRefs,
-        summary: providerEvent.summary,
-        ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
-        providerEvent,
-      };
+    let rounds = 0;
+    while (true) {
+      const toolCalls: ProviderToolCall[] = [];
+      let terminal: ProviderEvent | undefined;
+      for await (const providerEvent of this.options.port.observe({
+          runtimeId: this.options.runtimeId,
+          taskId: this.options.taskId,
+          operationId: this.options.operationId,
+          executionEpoch: this.options.executionEpoch,
+      })) {
+        this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
+        if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
+        if (providerEvent.terminalState !== undefined) terminal = providerEvent;
+        if (providerEvent.terminalState === 'waiting' && providerEvent.nextAction?.ref === 'responses-tool-call') continue;
+        yield this.agentEvent(providerEvent);
+      }
+      if (this.stopping) return;
+      if (toolCalls.length === 0) return;
+      if (terminal?.terminalState !== 'waiting' || terminal.nextAction?.ref !== 'responses-tool-call') {
+        throw this.error('tool.terminal.missing', 'provider emitted a tool call without a tool-waiting terminal', 'observe', 'runtime');
+      }
+      if (this.options.executeTool === undefined || this.options.tools === undefined) {
+        throw this.error('tool.executor.missing', 'provider requested a tool but no execution port is bound', 'observe', 'capability');
+      }
+      rounds += 1;
+      if (rounds > (this.options.maxToolRounds ?? 8)) {
+        throw this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
+      }
+      const toolResults: Array<{ readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }> = [];
+      for (const call of toolCalls) {
+        if (this.stopping) return;
+        this.toolController = new AbortController();
+        let completeTool!: () => void;
+        const toolCompletion = new Promise<void>((resolve) => { completeTool = resolve; });
+        this.toolCompletion = toolCompletion;
+        let result: ProviderToolExecutionResult;
+        try {
+          result = await this.options.executeTool.execute({
+            execution: identity(this.options),
+            scope: this.options.scope,
+            call,
+            signal: this.toolController.signal,
+          });
+        } finally {
+          this.toolController = undefined;
+          completeTool();
+          if (this.toolCompletion === toolCompletion) this.toolCompletion = undefined;
+        }
+        if (this.stopping) return;
+        const toolResultEvent: ProviderEvent = {
+          ...identity(this.options),
+          eventId: `event-tool-result-${call.callId}-${rounds}`,
+          kind: 'tool',
+          outputRefs: result.outputRefs,
+          summary: `${call.toolId} succeeded`,
+          evidenceRefs: result.evidenceRefs,
+          ownerId: this.options.ownerId ?? 'humanagent.provider-agent-driver',
+          nextAction: { kind: 'continue', ref: call.continuationRef },
+        };
+        yield this.agentEvent(toolResultEvent);
+        toolResults.push({ call, result });
+      }
+      if (this.stopping) return;
+      let completeContinuation!: () => void;
+      const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
+      this.continuationCompletion = continuationCompletion;
+      let submitted: ProviderSubmitResult;
+      try {
+        submitted = await this.options.port.submit({
+          ...identity(this.options),
+          inputRefs: [...this.options.inputRefs],
+          evidenceRefs: toolResults.flatMap(({ result }) => result.evidenceRefs),
+          payload: this.initialPayload ?? inputPayloadMissing(),
+          tools: this.options.tools,
+          toolContinuations: toolResults.map(({ call, result }) => ({
+            callId: call.callId,
+            toolId: call.toolId,
+            arguments: call.arguments,
+            continuationRef: call.continuationRef,
+            output: result.output,
+          })),
+        });
+      } finally {
+        completeContinuation();
+        if (this.continuationCompletion === continuationCompletion) this.continuationCompletion = undefined;
+      }
+      this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
+      if (submitted.status !== 'accepted' && submitted.status !== 'completed') {
+        throw this.error('tool.continuation.rejected', submitted.error?.message ?? 'provider rejected the tool continuation', 'submit', 'runtime');
+      }
     }
   }
 
@@ -156,6 +267,8 @@ export class ProviderAgentDriver implements AgentDriver {
       || input.operationId.value !== this.options.operationId.value) {
       throw this.error('runtime.identity.mismatch', 'provider stop is not bound to the current execution', 'stop', 'runtime');
     }
+    this.stopping = true;
+    this.toolController?.abort(new DOMException('operator requested stop', 'AbortError'));
     const receipt = await this.options.port.requestStop({
       runtimeId: this.options.runtimeId,
       taskId: this.options.taskId,
@@ -172,6 +285,8 @@ export class ProviderAgentDriver implements AgentDriver {
     if (input.runtimeId !== this.options.runtimeId || input.executionEpoch !== this.options.executionEpoch) {
       throw this.error('runtime.identity.mismatch', 'provider settle is not bound to the current execution', 'settle', 'runtime');
     }
+    if (this.toolCompletion) await this.toolCompletion;
+    if (this.continuationCompletion) await this.continuationCompletion;
     const settlement = await this.options.port.settle({
       runtimeId: this.options.runtimeId,
       taskId: this.options.taskId,
@@ -191,6 +306,18 @@ export class ProviderAgentDriver implements AgentDriver {
     return this.providerSettlement ? structuredClone(this.providerSettlement) : undefined;
   }
 
+  private agentEvent(providerEvent: ProviderEvent): ProviderAgentEvent {
+    return {
+      taskId: providerEvent.taskId,
+      executionEpoch: providerEvent.executionEpoch,
+      kind: `provider.${providerEvent.kind}`,
+      evidenceRefs: providerEvent.evidenceRefs,
+      summary: providerEvent.summary,
+      ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
+      providerEvent,
+    };
+  }
+
   private assertIdentity(input: AgentStartRequest): void {
     if (this.options.runtimeId !== input.runtimeId
       || this.options.taskId.value !== input.taskId.value
@@ -202,7 +329,7 @@ export class ProviderAgentDriver implements AgentDriver {
   private assertProviderIdentity(
     input: ProviderExecutionIdentityRef,
     label: string,
-    phase: 'start' | 'observe' | 'stop' | 'settle',
+    phase: 'start' | 'submit' | 'observe' | 'stop' | 'settle',
   ): void {
     if (!sameExecution(this.options, input)) {
       throw this.error('runtime.identity.mismatch', `${label} belongs to another execution`, phase, 'runtime');
@@ -223,4 +350,8 @@ export class ProviderAgentDriver implements AgentDriver {
       scope: this.options.scope,
     });
   }
+}
+
+function inputPayloadMissing(): never {
+  throw new Error('provider tool continuation is missing its original business payload');
 }
