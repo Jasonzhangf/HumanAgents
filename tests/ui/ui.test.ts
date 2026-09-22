@@ -462,6 +462,7 @@ test('observation projection supports recursion, drawer details, return, and rea
       title: '任务处理流水',
       summary: '从输入到任务结果的完整处理记录',
       projectionSeq: 'seq-184',
+      agents: [{ agentId: '任务编排', role: 'orchestration', stateDisplay: '运行中', iteration: 1 }],
       nodes: [
         {
           nodeId: 'implicit.classify',
@@ -470,6 +471,8 @@ test('observation projection supports recursion, drawer details, return, and rea
           state: 'running',
           summary: '正在选择处理方式',
           owner: '任务编排',
+          ownerAgentRole: 'orchestration',
+          iteration: 1,
           inputRefs: ['requirement:184'],
           outputRefs: ['queue:execution'],
           evidenceRefs: [evidence('ev-classify')],
@@ -482,6 +485,7 @@ test('observation projection supports recursion, drawer details, return, and rea
       title: '任务分类结果',
       summary: '当前项进入执行队列',
       projectionSeq: 'seq-185',
+      agents: [{ agentId: '任务编排', role: 'orchestration', stateDisplay: '运行中', iteration: 1 }],
       nodes: [
         {
           nodeId: 'queue.execution',
@@ -490,6 +494,8 @@ test('observation projection supports recursion, drawer details, return, and rea
           state: 'waiting',
           summary: '等待条件检查',
           owner: '任务编排',
+          ownerAgentRole: 'orchestration',
+          iteration: 1,
           inputRefs: ['requirement:184'],
           outputRefs: [],
           evidenceRefs: [evidence('ev-queue')],
@@ -577,6 +583,7 @@ test('observation drawer maps assignment, feedback, and reconcile while staying 
       title: '任务处理流水',
       summary: '只读节点树',
       projectionSeq: 'seq-200',
+      agents: [{ agentId: 'execution-owner', role: 'execution', stateDisplay: '执行中', iteration: 3 }],
       nodes: [{
         nodeId: 'node.execute',
         title: '执行',
@@ -584,6 +591,8 @@ test('observation drawer maps assignment, feedback, and reconcile while staying 
         state: 'running',
         summary: '执行 assignment',
         owner: 'execution-owner',
+        ownerAgentRole: 'execution',
+        iteration: 3,
         inputRefs: ['assignment://assignment-observation/input'],
         outputRefs: ['artifact://observation'],
         evidenceRefs: [evidence('ev-observation-node')],
