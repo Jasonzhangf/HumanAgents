@@ -35,6 +35,12 @@ import type {
   TrustedEventPublisher,
 } from '../../packages/runtime/src/events/index.js';
 
+const unusedExplicitBrainInterpreter = {
+  async interpret(): Promise<never> {
+    throw new Error('explicit brain interpretation is not used in serve orchestration tests');
+  },
+};
+
 async function eventBusPorts(): Promise<{ readonly ports: EventBusPorts; readonly close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-runtime-'));
   const journal = createJsonlEventJournal({ filePath: join(root, 'events.jsonl') });
@@ -288,6 +294,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
     evidenceRoot: join(root, 'evidence'),
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     portNumber: 0,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     memory: {
       coordinator: new MemoryCoordinator(),
       backend: new DeterministicMemoryBackend(),
@@ -373,6 +380,7 @@ test('confirmed requirement preserves non-success provider closures through orch
       evidenceRoot: join(root, 'evidence'),
       uiRoot: join(process.cwd(), 'docs', 'ui'),
       portNumber: 0,
+      explicitBrainInterpreter: unusedExplicitBrainInterpreter,
       memory: {
         coordinator: new MemoryCoordinator(),
         backend: new DeterministicMemoryBackend(),

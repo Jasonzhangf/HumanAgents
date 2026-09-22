@@ -56,10 +56,11 @@ import {
   UiRuntimeApiError,
   UiRuntimeService,
   buildFakeExecutionPort,
-  startUiRuntime,
+  startUiRuntime as startUiRuntimeOwner,
 } from '../../packages/app/src/ui-runtime/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
+import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
 const binding: ProviderBinding = {
@@ -71,6 +72,21 @@ const binding: ProviderBinding = {
   configDigest: 'sha256:ui-test-config',
   capabilityDigest: 'sha256:ui-test-capability',
 };
+
+const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
+  async interpret() {
+    throw new Error('explicit brain interpretation is not configured for this test');
+  },
+};
+
+function startUiRuntime(
+  options: Parameters<typeof startUiRuntimeOwner>[0],
+): ReturnType<typeof startUiRuntimeOwner> {
+  return startUiRuntimeOwner({
+    ...options,
+    explicitBrainInterpreter: options.explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
+  });
+}
 
 function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -170,6 +186,7 @@ function serviceFor(
   now?: () => Date,
   hookRegistry?: AgentHookRegistry,
   closurePort?: CheckpointClosurePort,
+  explicitBrainInterpreter?: ExplicitBrainInputInterpreter,
 ): UiRuntimeService {
   const runtimeJournal = journal ?? new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
   return new UiRuntimeService({
@@ -185,6 +202,7 @@ function serviceFor(
     memory: testMemory('project-ui-test'),
     ...(now ? { now } : {}),
     ...(hookRegistry ? { hookRegistry } : {}),
+    explicitBrainInterpreter: explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
 }
 
@@ -265,6 +283,7 @@ test('ui runtime rejects stale memory epoch recall after the task advances', asy
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal: runtimeJournal,
     closurePort: runtimeJournal,
     memory: {
@@ -1011,6 +1030,7 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal: runtimeJournal,
     closurePort: runtimeJournal,
     memory: testMemory('project-ui-organ-health-error'),
@@ -1626,6 +1646,303 @@ test('restart restores confirmed interaction and pending explicit inbox state', 
   assert.equal(dispatched.requirement.fifoSeq, 1);
 });
 
+test('explicit brain interprets create, query, append, change, and clarification without entering the FIFO', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-interpret-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        const matchedTaskId = input.taskCandidates[0]?.taskId;
+        if (input.rawInput === '现在进行到哪一步？') return {
+          kind: 'status-query',
+          normalizedInput: '查询当前任务进度',
+          ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
+          knownFacts: ['当前任务存在'],
+          answer: '当前任务仍在等待执行。',
+          decisionRefs: ['decision:test-query'],
+        };
+        if (input.rawInput === '信息不够') return {
+          kind: 'clarification',
+          normalizedInput: '信息不够',
+          knownFacts: [],
+          question: '你希望处理哪个项目？',
+          decisionRefs: ['decision:test-clarification'],
+        };
+        const intent = input.rawInput.startsWith('追加') ? 'append'
+          : input.rawInput.startsWith('修改') ? 'change'
+            : 'create';
+        return {
+          kind: 'requirement',
+          normalizedInput: input.rawInput.replace(/^(新建|追加|修改)/, '').trim(),
+          ...(intent === 'create' || matchedTaskId === undefined ? {} : { matchedTaskId }),
+          knownFacts: [],
+          intent,
+          proposal: `${intent}:${input.rawInput}`,
+          decisionRefs: [`decision:test-${intent}`],
+        };
+      },
+    },
+  );
+  service.createTask({ title: '已有任务', directive: '整理启动步骤' });
+
+  for (const [rawInput, expectedIntent] of [
+    ['新建补充失败恢复步骤', 'create'],
+    ['追加常见启动失败', 'append'],
+    ['修改验收范围', 'change'],
+  ] as const) {
+    const interactionId = await service.receiveExplicitInput({ sourceRef: 'ui:task', rawInput, channel: 'business' });
+    const interpreted = await service.interpretExplicitInput({ interactionId });
+    assert.equal(interpreted.state, 'awaiting-confirmation');
+    assert.equal(interpreted.draft?.proposedIntent, expectedIntent);
+    assert.ok(interpreted.draft?.normalizedInput !== rawInput);
+  }
+
+  const queryId = await service.receiveExplicitInput({ sourceRef: 'ui:task', rawInput: '现在进行到哪一步？', channel: 'business' });
+  const query = await service.interpretExplicitInput({ interactionId: queryId });
+  assert.equal(query.state, 'status-only');
+  assert.equal(query.reply, '当前任务仍在等待执行。');
+
+  const clarificationId = await service.receiveExplicitInput({ sourceRef: 'ui:new-task', rawInput: '信息不够', channel: 'business' });
+  const clarification = await service.interpretExplicitInput({ interactionId: clarificationId });
+  assert.equal(clarification.state, 'awaiting-clarification');
+  assert.equal(clarification.reply, '你希望处理哪个项目？');
+
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.inbox.empty',
+  );
+});
+
+test('explicit brain rejects create interpretations that also select an existing task', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-create-match-conflict-'));
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        return {
+          kind: 'requirement',
+          normalizedInput: '修改已有任务的验收范围',
+          matchedTaskId: input.taskCandidates[0]!.taskId,
+          knownFacts: ['已有任务存在'],
+          intent: 'create',
+          proposal: 'create:修改已有任务的验收范围',
+          decisionRefs: ['decision:test-create-match-conflict'],
+        };
+      },
+    },
+  );
+  service.createTask({ title: '已有任务', directive: '整理启动步骤' });
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:new-task',
+    rawInput: '修改已有任务的验收范围',
+    channel: 'business',
+  });
+
+  await assert.rejects(
+    () => service.interpretExplicitInput({ interactionId }),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.task-match-conflict',
+  );
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'matching');
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'explicit-brain.inbox.empty',
+  );
+});
+
+test('explicit brain retries matching with the same interaction after interpretation failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-interpret-retry-'));
+  const attempts = new Map<string, number>();
+  const service = serviceFor(
+    root,
+    new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    'fake',
+    'ready',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      async interpret(input) {
+        const attempt = (attempts.get(input.interactionId) ?? 0) + 1;
+        attempts.set(input.interactionId, attempt);
+        if (input.rawInput === '首次解释失败') {
+          if (attempt === 1) throw new Error('temporary provider failure');
+          return {
+            kind: 'requirement',
+            normalizedInput: '首次解释失败后重试',
+            knownFacts: [],
+            intent: 'create',
+            proposal: 'create:首次解释失败后重试',
+            decisionRefs: ['decision:test-interpret-retry'],
+          };
+        }
+        if (attempt === 1) return {
+          kind: 'clarification',
+          normalizedInput: input.rawInput,
+          knownFacts: [],
+          question: '请补充范围',
+          decisionRefs: ['decision:test-retry-clarification'],
+        };
+        if (attempt === 2) throw new Error('temporary provider failure after clarification');
+        return {
+          kind: 'requirement',
+          normalizedInput: '澄清后重试',
+          knownFacts: ['范围已补充'],
+          intent: 'create',
+          proposal: 'create:澄清后重试',
+          decisionRefs: ['decision:test-after-clarification-retry'],
+        };
+      },
+    },
+  );
+
+  const initialRetryId = await service.receiveExplicitInput({
+    sourceRef: 'ui:new-task',
+    rawInput: '首次解释失败',
+    channel: 'business',
+  });
+  await assert.rejects(() => service.interpretExplicitInput({ interactionId: initialRetryId }), /temporary provider failure/);
+  assert.equal((await service.inspectExplicitInteraction(initialRetryId)).state, 'matching');
+  const initialRetry = await service.interpretExplicitInput({ interactionId: initialRetryId });
+  assert.equal(initialRetry.interactionId, initialRetryId);
+  assert.equal(initialRetry.state, 'awaiting-confirmation');
+
+  const clarificationRetryId = await service.receiveExplicitInput({
+    sourceRef: 'ui:new-task',
+    rawInput: '先澄清再失败',
+    channel: 'business',
+  });
+  assert.equal(
+    (await service.interpretExplicitInput({ interactionId: clarificationRetryId })).state,
+    'awaiting-clarification',
+  );
+  assert.equal(
+    (await service.answerExplicitClarification({ interactionId: clarificationRetryId, answer: '只处理验收范围' })).state,
+    'matching',
+  );
+  await assert.rejects(
+    () => service.interpretExplicitInput({ interactionId: clarificationRetryId }),
+    /temporary provider failure after clarification/,
+  );
+  assert.equal((await service.inspectExplicitInteraction(clarificationRetryId)).state, 'matching');
+  const clarificationRetry = await service.interpretExplicitInput({ interactionId: clarificationRetryId });
+  assert.equal(clarificationRetry.interactionId, clarificationRetryId);
+  assert.equal(clarificationRetry.state, 'awaiting-confirmation');
+});
+
+test('explicit brain accepts a clarification answer over HTTP and re-enters interpretation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-clarification-http-'));
+  let interpretationCount = 0;
+  let observedClarificationAnswer: string | undefined;
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: 'project-ui-explicit-clarification-http',
+    workspaceRoot: root,
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        interpretationCount += 1;
+        if (interpretationCount === 1) return {
+          kind: 'clarification',
+          normalizedInput: input.rawInput,
+          knownFacts: [],
+          question: '需要修改哪个部分？',
+          decisionRefs: ['decision:http-clarification'],
+        };
+        observedClarificationAnswer = (input as typeof input & {
+          readonly clarifications?: readonly { readonly answer?: string }[];
+        }).clarifications?.at(-1)?.answer;
+        return {
+          kind: 'requirement',
+          normalizedInput: '修改现有任务的验收范围',
+          knownFacts: ['用户补充了验收范围'],
+          intent: 'create',
+          proposal: 'create:修改现有任务的验收范围',
+          decisionRefs: ['decision:http-after-clarification'],
+        };
+      },
+    },
+    memory: testMemory('project-ui-explicit-clarification-http'),
+  });
+  try {
+    const receivedResponse = await fetch(`${runtime.server.url}/api/explicit/inputs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceRef: 'ui:new-task', rawInput: '修改任务', channel: 'business' }),
+    });
+    const received = await receivedResponse.json() as { readonly interactionId: string };
+    const firstResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(received.interactionId)}/interpret`,
+      { method: 'POST' },
+    );
+    assert.equal(firstResponse.status, 200);
+    assert.equal((await firstResponse.json() as { readonly state: string }).state, 'awaiting-clarification');
+
+    const clarificationResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(received.interactionId)}/clarification`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ answer: '只修改验收范围' }),
+      },
+    );
+    assert.equal(clarificationResponse.status, 200);
+    assert.equal((await clarificationResponse.json() as { readonly state: string }).state, 'matching');
+
+    const secondResponse = await fetch(
+      `${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(received.interactionId)}/interpret`,
+      { method: 'POST' },
+    );
+    assert.equal(secondResponse.status, 200);
+    assert.equal((await secondResponse.json() as { readonly state: string }).state, 'awaiting-confirmation');
+    assert.equal(observedClarificationAnswer, '只修改验收范围');
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('UI runtime assembly rejects an unconfigured production explicit brain before startup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-unconfigured-'));
+  await assert.rejects(
+    () => startUiRuntimeOwner({
+      mode: 'fake',
+      organId,
+      binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointRoot: join(root, 'checkpoints'),
+      evidenceRoot: join(root, 'evidence'),
+      uiRoot: join(process.cwd(), 'packages/ui/static'),
+      projectKey: 'project-ui-explicit-unconfigured',
+      workspaceRoot: root,
+      memory: testMemory('project-ui-explicit-unconfigured'),
+    }),
+    (error: unknown) => error instanceof Error
+      && 'code' in error
+      && error.code === 'explicit-brain-prompt-unavailable'
+      && 'ownerId' in error
+      && error.ownerId === 'humanagent.app.ui-runtime',
+  );
+});
+
 test('explicit brain HTTP routes reach typed service operations and expose typed errors', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-http-'));
   const runtime = await startUiRuntime({
@@ -1638,6 +1955,18 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     uiRoot: join(process.cwd(), 'packages/ui/static'),
     projectKey: 'project-ui-explicit-http',
     workspaceRoot: root,
+    explicitBrainInterpreter: {
+      async interpret(input) {
+        return {
+          kind: 'requirement',
+          normalizedInput: input.rawInput.toUpperCase(),
+          knownFacts: [],
+          intent: 'create',
+          proposal: `create:${input.rawInput}`,
+          decisionRefs: ['decision:http-interpret'],
+        };
+      },
+    },
     memory: testMemory('project-ui-explicit-http'),
   });
   try {
@@ -1745,17 +2074,11 @@ test('explicit brain HTTP routes reach typed service operations and expose typed
     assert.equal(stale.error.code, 'ExplicitIntakeError');
     assert.equal(stale.error.ownerId, 'explicit-intake');
 
-    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/matching`, { method: 'POST' });
-    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/match`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ normalizedInput: 'route through HTTP', matchedTasks: [], knownFacts: [] }),
-    });
-    await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/proposal`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ proposedIntent: 'create', proposal: 'create the HTTP dispatch task', decisionRefs: [] }),
-    });
+    const interpretationResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}/interpret`, { method: 'POST' });
+    assert.equal(interpretationResponse.status, 200);
+    const interpretation = await interpretationResponse.json() as { readonly state: string; readonly draft?: { readonly normalizedInput: string } };
+    assert.equal(interpretation.state, 'awaiting-confirmation');
+    assert.equal(interpretation.draft?.normalizedInput, 'ROUTE THROUGH HTTP');
     const proposedResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(input.interactionId)}`);
     const proposed = await proposedResponse.json() as { readonly draft?: { readonly draftId: string; readonly inputRevision: number } };
     assert.ok(proposed.draft);
@@ -2363,6 +2686,7 @@ test('stop does not wait forever when orchestration fails before provider readin
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal,
     closurePort: journal,
     memory: testMemory('project-ui-orchestration-startup-failure'),
@@ -3705,6 +4029,7 @@ test('UI checkpoint boundary publishes the committed journal digest and consumes
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal: runtimeJournal,
     closurePort: runtimeJournal,
     memory: {
@@ -3739,6 +4064,7 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
     checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
     attentionPort: attentionPort(),
     providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
     journal,
     closurePort: journal,
     memory: {

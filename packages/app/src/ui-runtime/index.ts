@@ -29,7 +29,12 @@ import {
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
-import type { ExplicitBrainAgentTarget } from '../explicit-brain-runtime.js';
+import {
+  createProviderExplicitBrainInterpreter,
+  type ExplicitBrainAgentTarget,
+  type ExplicitBrainInputInterpreter,
+} from '../explicit-brain-runtime.js';
+import { AppLifecycleError } from '../errors.js';
 
 export interface RccModeConfig {
   readonly binding: ProviderBinding;
@@ -59,6 +64,8 @@ export interface UiRuntimeLaunchOptions {
     readonly messageClass: 'control' | 'data' | 'observation';
   }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
+  readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
+  readonly explicitBrainTemplateRoot?: string;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: UiRuntimeServiceOptions['runtimeComposition'];
   readonly restart?: (input: {
@@ -144,6 +151,22 @@ export interface UiRuntime {
 }
 
 export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<UiRuntime> {
+  const explicitBrainInterpreter = options.explicitBrainInterpreter ?? (() => {
+    const templateRoot = options.explicitBrainTemplateRoot?.trim();
+    if (!templateRoot) {
+      throw new AppLifecycleError(
+        'explicit-brain-prompt-unavailable',
+        'builtin interaction prompt root is not configured',
+        'configure the locked builtin template root before starting the UI runtime',
+        'humanagent.app.ui-runtime',
+      );
+    }
+    return createProviderExplicitBrainInterpreter({
+      port: options.port,
+      binding: options.binding,
+      templateRoot,
+    });
+  })();
   const readiness = options.mode === 'rcc' ? await options.port.probe(options.binding) : undefined;
   const providerState = readiness ? providerStateFromReadiness(readiness) : options.providerState ?? 'ready';
   const providerError = readiness ? providerErrorFromReadiness(readiness) : undefined;
@@ -170,6 +193,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),
     ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),
     ...(options.explicitBrainAgentTargets === undefined ? {} : { explicitBrainAgentTargets: options.explicitBrainAgentTargets }),
+    explicitBrainInterpreter,
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),

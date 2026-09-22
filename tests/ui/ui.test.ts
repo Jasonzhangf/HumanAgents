@@ -868,6 +868,7 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
   for (const method of [
     'receiveExplicitInput',
     'inspectExplicitInteraction',
+    'answerExplicitClarification',
     'beginExplicitMatching',
     'recordExplicitMatch',
     'proposeExplicitRequirement',
@@ -1182,19 +1183,88 @@ test('task detail UI consumes typed task-detail projection fields', async () => 
   assert.equal(source.includes('detail.observationRef'), true);
 });
 
+test('task clarification handler retries interpretation by typed state without resubmitting the answer', async () => {
+  const flow = await import(
+    `${new URL(`file://${join(process.cwd(), 'docs/ui/explicit-interaction-flow.js')}`).href}?clarification-retry-test`
+  ) as {
+    readonly advanceExplicitInteraction: (
+      api: {
+        readonly inspectExplicitInteraction: (interactionId: string) => Promise<{ readonly state: string }>;
+        readonly answerExplicitClarification: (interactionId: string, answer: string) => Promise<{ readonly state: string }>;
+        readonly interpretExplicitInput: (interactionId: string) => Promise<{ readonly state: string }>;
+      },
+      input: { readonly interactionId: string; readonly clarificationAnswer?: string },
+    ) => Promise<{ readonly state: string }>;
+  };
+  const calls: string[] = [];
+  let state = 'awaiting-clarification';
+  let interpretationAttempt = 0;
+  const api = {
+    async inspectExplicitInteraction(interactionId: string) {
+      assert.equal(interactionId, 'interaction-existing-task');
+      calls.push('inspect');
+      return { state };
+    },
+    async answerExplicitClarification(interactionId: string, answer: string) {
+      assert.equal(interactionId, 'interaction-existing-task');
+      assert.equal(answer, '只修改验收范围');
+      assert.equal(state, 'awaiting-clarification');
+      calls.push('clarification');
+      state = 'matching';
+      return { state };
+    },
+    async interpretExplicitInput(interactionId: string) {
+      assert.equal(interactionId, 'interaction-existing-task');
+      calls.push('interpret');
+      interpretationAttempt += 1;
+      if (interpretationAttempt === 1) throw new Error('temporary interaction provider failure');
+      state = 'awaiting-confirmation';
+      return { state };
+    },
+  };
+
+  let firstFailure: unknown;
+  try {
+    await flow.advanceExplicitInteraction(api, {
+      interactionId: 'interaction-existing-task',
+      clarificationAnswer: '只修改验收范围',
+    });
+  } catch (error) {
+    firstFailure = error;
+  }
+  assert.equal(firstFailure instanceof Error && firstFailure.message === 'temporary interaction provider failure', true);
+  assert.deepEqual(calls, ['inspect', 'clarification', 'interpret']);
+  assert.equal(state, 'matching');
+
+  const retried = await flow.advanceExplicitInteraction(api, {
+    interactionId: 'interaction-existing-task',
+    clarificationAnswer: '只修改验收范围',
+  });
+  assert.equal(retried.state, 'awaiting-confirmation');
+  assert.deepEqual(calls, ['inspect', 'clarification', 'interpret', 'inspect', 'interpret']);
+});
+
 test('new task UI sends one natural-language input to the explicit brain', async () => {
   const source = await readFile('docs/ui/task.js', 'utf8');
+  const flowSource = await readFile('docs/ui/explicit-interaction-flow.js', 'utf8');
+  const createSource = source.slice(source.indexOf('function renderCreate()'), source.indexOf('async function renderInteraction'));
   assert.equal(source.includes('title.required'), false);
   assert.equal(source.includes('title.value'), false);
   assert.equal(source.includes('api.createTask'), false);
   assert.equal(source.includes('api.receiveExplicitInput'), true);
+  assert.equal(flowSource.includes('api.answerExplicitClarification'), true);
+  assert.equal(source.includes("import { advanceExplicitInteraction } from './explicit-interaction-flow.js'"), true);
+  assert.equal(createSource.includes('await advanceExplicitInteraction(api, {'), true);
+  assert.equal(source.match(/await advanceExplicitInteraction\(api, \{/g)?.length, 3);
   assert.equal(source.includes('提交给显式大脑'), true);
   assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
   assert.equal(source.includes('确认并提交后台'), false);
-  assert.equal(source.includes('api.beginExplicitMatching(received.interactionId)'), true);
+  assert.equal(flowSource.includes('api.interpretExplicitInput(input.interactionId)'), true);
   assert.equal(source.includes('ui:creation:'), true);
-  assert.equal(source.includes('matchedTasks: currentTaskId'), true);
-  assert.equal(source.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
+  assert.equal(source.includes('normalizedInput: snapshot.rawInput'), false);
+  assert.equal(source.includes('matchedTasks: currentTaskId'), false);
+  assert.equal(source.includes("proposedIntent: currentTaskId ? 'append' : 'create'"), false);
+  assert.equal(flowSource.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
   assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), true);
 });
 

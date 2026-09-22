@@ -12,6 +12,7 @@ import {
   taskDashboardHref,
   taskIdFromQuery,
 } from './runtime-shell.js'
+import { advanceExplicitInteraction } from './explicit-interaction-flow.js'
 
 const requestedTask = taskIdFromQuery(false)
 const requestedInteraction = queryParam('interaction')
@@ -50,43 +51,59 @@ function renderCreate() {
   const feedback = element('p', '显式大脑会整理输入、补齐任务信息，并在需要时向你确认。', 'muted')
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
+  let interactionId
   form.append(directiveLabel, button, feedback)
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
     try {
       const rawInput = directive.value.trim()
       feedback.textContent = '正在交给显式大脑整理…'
-      const received = await api.receiveExplicitInput({
-        sourceRef: 'ui:new-task',
-        rawInput,
-        inputRevision: 1,
+      if (!interactionId) {
+        const received = await api.receiveExplicitInput({
+          sourceRef: 'ui:new-task',
+          rawInput,
+          inputRevision: 1,
+        })
+        interactionId = received.interactionId
+      }
+      const snapshot = await advanceExplicitInteraction(api, {
+        interactionId,
+        clarificationAnswer: rawInput,
       })
-      let snapshot = await api.inspectExplicitInteraction(received.interactionId)
-      await api.beginExplicitMatching(received.interactionId)
-      await api.recordExplicitMatch(received.interactionId, {
-        normalizedInput: snapshot.rawInput,
-        matchedTasks: [],
-        knownFacts: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(received.interactionId)
-      await api.proposeExplicitRequirement(received.interactionId, {
-        proposedIntent: 'create',
-        proposal: snapshot.draft?.normalizedInput || rawInput,
-        decisionRefs: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(received.interactionId)
+      if (snapshot.state === 'status-only') {
+        feedback.textContent = snapshot.reply || snapshot.nextAction
+        interactionId = undefined
+        return
+      }
+      if (snapshot.state === 'awaiting-clarification') {
+        feedback.textContent = snapshot.reply || snapshot.nextAction
+        directive.value = ''
+        directive.placeholder = snapshot.reply || '请补充显式大脑需要的信息。'
+        button.textContent = '回答并继续'
+        return
+      }
       if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
         feedback.textContent = `显式大脑当前状态：${snapshot.state}。${snapshot.nextAction}`
         return
       }
+      if (snapshot.draft.proposedIntent !== 'create') {
+        const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
+        if (!matchedTaskId) {
+          feedback.textContent = '显式大脑没有返回需要确认的已有任务，无法继续。'
+          return
+        }
+        feedback.textContent = '显式大脑识别到已有任务变更，请先确认整理后的内容。'
+        window.location.href = `./task.html?task=${encodeURIComponent(matchedTaskId)}&interaction=${encodeURIComponent(interactionId)}`
+        return
+      }
       feedback.textContent = '显式大脑已整理输入，正在提交后台…'
-      await api.confirmExplicitRequirement(received.interactionId, {
+      await api.confirmExplicitRequirement(interactionId, {
         draftId: snapshot.draft.draftId,
         inputRevision: snapshot.draft.inputRevision,
-        confirmationRef: `ui:creation:${received.interactionId}`,
+        confirmationRef: `ui:creation:${interactionId}`,
         confirmedBy: 'human:operator',
         confirmedAt: new Date().toISOString(),
-        payloadRef: `asset://requirements/${received.interactionId}`,
+        payloadRef: `asset://requirements/${interactionId}`,
       })
       const dispatched = await api.dispatchNextExplicitRequirement()
       if (dispatched.requirement?.draftId !== snapshot.draft.draftId) {
@@ -116,30 +133,36 @@ async function renderInteraction(interactionId, currentTaskId) {
   main.append(panel)
 
   try {
-    let snapshot = await api.inspectExplicitInteraction(interactionId)
-    if (snapshot.state === 'received' || snapshot.state === 'matching') {
-      if (snapshot.state === 'received') await api.beginExplicitMatching(interactionId)
-      await api.recordExplicitMatch(interactionId, {
-        normalizedInput: snapshot.rawInput,
-        matchedTasks: currentTaskId ? [{ taskId: currentTaskId, relation: 'current', status: detail?.state || 'created' }] : [],
-        knownFacts: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(interactionId)
-    }
-    if (snapshot.state === 'awaiting-intent' && snapshot.draft) {
-      await api.proposeExplicitRequirement(interactionId, {
-        proposedIntent: currentTaskId ? 'append' : 'create',
-        proposal: snapshot.draft.normalizedInput,
-        decisionRefs: [],
-      })
-      snapshot = await api.inspectExplicitInteraction(interactionId)
-    }
+    const snapshot = await advanceExplicitInteraction(api, { interactionId })
     body.append(
       element('p', '你的输入', 'eyebrow'),
       element('p', snapshot.rawInput),
       element('p', '整理后的任务', 'eyebrow'),
-      element('p', snapshot.draft?.proposal || snapshot.rawInput),
+      element('p', snapshot.draft?.proposal || snapshot.reply || snapshot.rawInput),
     )
+    if (snapshot.state === 'awaiting-clarification') {
+      const answer = document.createElement('textarea')
+      answer.required = true
+      answer.placeholder = snapshot.reply || '请补充显式大脑需要的信息。'
+      const submitAnswer = element('button', '回答并继续', 'button button--primary')
+      submitAnswer.type = 'button'
+      submitAnswer.addEventListener('click', async () => {
+        submitAnswer.disabled = true
+        feedback.textContent = '正在继续整理…'
+        try {
+          await advanceExplicitInteraction(api, {
+            interactionId,
+            clarificationAnswer: answer.value.trim(),
+          })
+          window.location.reload()
+        } catch (error) {
+          submitAnswer.disabled = false
+          feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+        }
+      })
+      actions.append(answer, submitAnswer)
+      feedback.textContent = snapshot.reply || snapshot.nextAction
+    }
     if (snapshot.state === 'awaiting-confirmation' && snapshot.draft) {
       const submit = async (button) => {
         if (button) button.disabled = true

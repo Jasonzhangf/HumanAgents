@@ -4,8 +4,13 @@ import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createExplicitBrainRuntime } from '../../packages/app/src/explicit-brain-runtime.js';
+import {
+  createExplicitBrainRuntime,
+  createProviderExplicitBrainInterpreter,
+} from '../../packages/app/src/explicit-brain-runtime.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
+import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/fake-port.js';
+import type { ProviderBinding } from '../../packages/contracts/src/index.js';
 
 function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -177,4 +182,53 @@ test('application explicit brain runtime requires registered agent identity and 
     }),
     /agent target is not registered/,
   );
+});
+
+test('provider explicit brain interpreter loads the interaction template and validates typed intake output', async () => {
+  const binding: ProviderBinding = {
+    bindingId: 'binding-explicit-interpret',
+    providerId: 'provider-explicit-interpret',
+    protocol: 'responses',
+    endpointRef: 'fake://explicit-interpret',
+    modelRef: 'model-explicit-interpret',
+    configDigest: 'sha256:explicit-interpret-config',
+    capabilityDigest: 'sha256:explicit-interpret-capability',
+  };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new FakeReplayExecutionRuntimePort({
+      binding,
+      stepDelayMs: 0,
+      replay: [
+        {
+          kind: 'output',
+          state: 'output',
+          summary: JSON.stringify({
+            kind: 'requirement',
+            normalizedInput: '整理启动步骤',
+            knownFacts: ['README exists'],
+            intent: 'create',
+            proposal: '创建任务并整理启动步骤',
+            decisionRefs: ['decision:provider-test'],
+          }),
+        },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ],
+    }),
+  });
+
+  const result = await interpreter.interpret({
+    interactionId: 'interaction-provider-test',
+    inputRevision: 1,
+    sourceRef: 'ui:new-task',
+    rawInput: '帮我整理启动步骤',
+    clarifications: [],
+    taskCandidates: [],
+  });
+
+  assert.equal(result.kind, 'requirement');
+  if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
+  assert.equal(result.normalizedInput, '整理启动步骤');
+  assert.equal(result.intent, 'create');
 });
