@@ -32,6 +32,8 @@ import {
   type MergeCoordinatorPort,
   type OrchestrationRuntimeFactoryPort,
   type ReviewAgentPort,
+  acceptanceCriteriaContent,
+  digestOf,
 } from '../../../packages/runtime/src/orchestration/index.js';
 import { type ReviewResult } from '../../../packages/runtime/src/review/index.js';
 import {
@@ -71,7 +73,17 @@ function evidence(label: string): EvidenceRef {
   };
 }
 
+/** Produced artifact body carried into the review gate as real material. */
+const m3ArtifactBody = 'assembled module artifact body';
+const m3ArtifactDigest = digestOf(m3ArtifactBody);
+
 function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
+  const criteria = {
+    objective: 'assemble reviewed modules',
+    successCriteria: ['modules assembled'],
+    failureCriteria: ['assembly failed'],
+    incompleteCriteria: ['assembly incomplete'],
+  };
   return {
     assignmentId: 'm3-assignment',
     taskId: taskId,
@@ -79,14 +91,14 @@ function assignment(overrides: Partial<WorkAssignment> = {}): WorkAssignment {
     attempt: 1,
     executionEpoch: 1,
     inputRevision: 1,
-    objective: 'assemble reviewed modules',
+    objective: criteria.objective,
     targetRefs: ['m3-target'],
     expectedOutputRefs: ['m3-output'],
-    expectedArtifactDigests: ['sha256:m3-artifact'],
-    acceptanceCriteriaDigest: 'sha256:m3-criteria',
-    successCriteria: ['modules assembled'],
-    failureCriteria: ['assembly failed'],
-    incompleteCriteria: ['assembly incomplete'],
+    expectedArtifactDigests: [m3ArtifactDigest],
+    acceptanceCriteriaDigest: digestOf(acceptanceCriteriaContent(criteria)),
+    successCriteria: [...criteria.successCriteria],
+    failureCriteria: [...criteria.failureCriteria],
+    incompleteCriteria: [...criteria.incompleteCriteria],
     requiredCapabilities: ['execute'],
     mergeGate: 'required',
     ...overrides,
@@ -103,7 +115,7 @@ function workResult(): WorkResult {
     executionEpoch: 1,
     inputRevision: 1,
     producedArtifactRefs: ['artifact://m3'],
-    producedArtifactDigests: ['sha256:m3-artifact'],
+    producedArtifactDigests: [m3ArtifactDigest],
     status: 'succeeded',
     summary: 'M3 modules assembled',
     outputRefs: ['m3-output'],
@@ -262,7 +274,8 @@ test('M3 app assembly closes dispatch, feedback, checkpoint, and typed UI projec
     agentId: 'worker-m3',
     scope,
     reviewKinds: ['quality'],
-    reviewSubjectDigests: ['sha256:m3-artifact'],
+    reviewSubjectDigests: [m3ArtifactDigest],
+    reviewSubjects: [{ ref: 'm3-target', body: m3ArtifactBody }],
   });
 
   assert.equal(dispatched.status, 'merged');
