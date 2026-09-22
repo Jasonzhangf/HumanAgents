@@ -12,6 +12,7 @@ import {
   taskDashboardHref,
   taskIdFromQuery,
 } from './runtime-shell.js'
+import { advanceExplicitInteraction } from './explicit-interaction-flow.js'
 
 const requestedTask = taskIdFromQuery(false)
 const requestedInteraction = queryParam('interaction')
@@ -65,13 +66,10 @@ function renderCreate() {
         })
         interactionId = received.interactionId
       }
-      let snapshot = await api.inspectExplicitInteraction(interactionId)
-      if (snapshot.state === 'awaiting-clarification') {
-        snapshot = await api.answerExplicitClarification(interactionId, rawInput)
-      }
-      if (snapshot.state === 'received' || snapshot.state === 'matching') {
-        snapshot = await api.interpretExplicitInput(interactionId)
-      }
+      const snapshot = await advanceExplicitInteraction(api, {
+        interactionId,
+        clarificationAnswer: rawInput,
+      })
       if (snapshot.state === 'status-only') {
         feedback.textContent = snapshot.reply || snapshot.nextAction
         interactionId = undefined
@@ -135,8 +133,7 @@ async function renderInteraction(interactionId, currentTaskId) {
   main.append(panel)
 
   try {
-    let snapshot = await api.inspectExplicitInteraction(interactionId)
-    if (snapshot.state === 'received' || snapshot.state === 'matching') snapshot = await api.interpretExplicitInput(interactionId)
+    const snapshot = await advanceExplicitInteraction(api, { interactionId })
     body.append(
       element('p', '你的输入', 'eyebrow'),
       element('p', snapshot.rawInput),
@@ -153,8 +150,10 @@ async function renderInteraction(interactionId, currentTaskId) {
         submitAnswer.disabled = true
         feedback.textContent = '正在继续整理…'
         try {
-          await api.answerExplicitClarification(interactionId, answer.value.trim())
-          await api.interpretExplicitInput(interactionId)
+          await advanceExplicitInteraction(api, {
+            interactionId,
+            clarificationAnswer: answer.value.trim(),
+          })
           window.location.reload()
         } catch (error) {
           submitAnswer.disabled = false
