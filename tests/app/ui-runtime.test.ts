@@ -2307,7 +2307,6 @@ test('explicit brain persists a live-shaped structured provider proposal after s
     inputRevision: 1,
     sourceRef: 'ui:live-shaped',
     kind: 'requirement',
-    intent: 'create',
     matchedTaskId: null,
     selectedAction: 'draft-requirement-and-hold-for-confirmation',
     normalizedInput: '创建需求：梳理项目集成状态并等待确认。',

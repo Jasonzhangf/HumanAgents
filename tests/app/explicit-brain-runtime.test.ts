@@ -208,7 +208,6 @@ test('provider explicit brain interpreter loads the interaction template and val
             kind: 'requirement',
             normalizedInput: '整理启动步骤',
             knownFacts: ['README exists'],
-            intent: 'create',
             proposal: {
               revision: 1,
               intent: 'create',
@@ -262,7 +261,6 @@ test('provider explicit brain interpreter loads the interaction template and val
             kind: 'requirement',
             normalizedInput: '整理启动步骤',
             knownFacts: [],
-            intent: 'create',
             proposal: { objective: '未经过 typed contract 的任意对象' },
             decisionRefs: [],
           }),
@@ -282,4 +280,66 @@ test('provider explicit brain interpreter loads the interaction template and val
     }),
     /does not match the structured proposal contract/,
   );
+});
+
+test('provider explicit brain interpreter accepts the live requirement contract with intent owned by proposal', async () => {
+  const binding: ProviderBinding = {
+    bindingId: 'binding-explicit-live-requirement',
+    providerId: 'provider-explicit-live-requirement',
+    protocol: 'responses',
+    endpointRef: 'fake://explicit-live-requirement',
+    modelRef: 'model-explicit-live-requirement',
+    configDigest: 'sha256:explicit-live-requirement-config',
+    capabilityDigest: 'sha256:explicit-live-requirement-capability',
+  };
+  const interpreter = createProviderExplicitBrainInterpreter({
+    binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
+    port: new FakeReplayExecutionRuntimePort({
+      binding,
+      stepDelayMs: 0,
+      replay: [
+        {
+          kind: 'output',
+          state: 'output',
+          summary: JSON.stringify({
+            kind: 'requirement',
+            normalizedInput: '只读整理项目启动检查清单并提出待审核的项目记忆候选',
+            knownFacts: ['输入来自 ui:new-task', '交付命令必须来自实际文件'],
+            proposal: {
+              revision: 1,
+              intent: 'create',
+              title: 'HumanAgent 项目中文启动检查清单',
+              objective: '读取项目文档并整理有来源的启动检查清单',
+              deliverable: '一份可查看的中文 Markdown 启动检查清单',
+              owner: null,
+              ownerNote: '运行时在需求确认后决定执行 owner。',
+              deliveryConditions: ['每条命令和结论均标注文件路径与行号'],
+              evidenceRefs: ['ui:new-task', 'interaction-1#inputRevision=1'],
+              blockingGaps: ['尚未读取 README.md 与 package.json'],
+              lifecycle: 'draft-awaiting-user-confirmation',
+              requiresUserConfirmation: true,
+              confirmationPrompt: '请确认 revision 1 的需求草案。',
+            },
+            decisionRefs: ['interaction-1#sourceRef=ui:new-task'],
+          }),
+        },
+        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+      ],
+    }),
+  });
+
+  const result = await interpreter.interpret({
+    interactionId: 'interaction-1',
+    inputRevision: 1,
+    sourceRef: 'ui:new-task',
+    rawInput: '整理项目启动检查清单',
+    clarifications: [],
+    taskCandidates: [],
+  });
+
+  assert.equal(result.kind, 'requirement');
+  if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
+  assert.equal(result.intent, 'create');
+  assert.match(result.proposal, /HumanAgent 项目中文启动检查清单/);
 });

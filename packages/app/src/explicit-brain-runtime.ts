@@ -160,12 +160,12 @@ function interpreterPrompt(input: ExplicitBrainInterpretationInput, promptSegmen
     '# Explicit intake decision output',
     'Return one JSON object only. Do not call tools and do not claim execution.',
     'kind must be requirement, status-query, or clarification.',
-    'For requirement, intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
+    'For requirement, proposal.intent must be create, append, or change. append/change require matchedTaskId from taskCandidates.',
     'For status-query, answer the question using taskCandidates and use matchedTaskId when one task is selected.',
     'For clarification, ask one concrete question and do not invent a task match.',
     'All variants require normalizedInput, knownFacts string array, and decisionRefs string array.',
     `Requirement proposal must be exactly this object shape: ${structuredProposalContract(input.inputRevision)}`,
-    'The proposal intent must equal the top-level intent. Do not select an owner. Status-query requires answer. Clarification requires question.',
+    'Requirement intent exists only at proposal.intent; do not add a top-level intent field. Do not select an owner. Status-query requires answer. Clarification requires question.',
     JSON.stringify(input),
   ].join('\n\n');
 }
@@ -188,7 +188,6 @@ function stringArray(record: Record<string, unknown>, field: string): readonly s
 
 function parseStructuredRequirementProposal(
   value: unknown,
-  intent: RequirementIntent,
   inputRevision: number,
 ): StructuredRequirementProposal {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -203,8 +202,8 @@ function parseStructuredRequirementProposal(
   if (record.revision !== inputRevision) {
     throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal revision does not match the current input');
   }
-  if (record.intent !== intent) {
-    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal intent does not match the interpreted intent');
+  if (record.intent !== 'create' && record.intent !== 'append' && record.intent !== 'change') {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal requires a typed intent');
   }
   if (record.owner !== null) {
     throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement proposal cannot select an execution owner');
@@ -214,7 +213,7 @@ function parseStructuredRequirementProposal(
   }
   return {
     revision: inputRevision,
-    intent,
+    intent: record.intent,
     title: nonEmptyString(record, 'title'),
     objective: nonEmptyString(record, 'objective'),
     deliverable: nonEmptyString(record, 'deliverable'),
@@ -293,15 +292,15 @@ function parseInterpreterOutput(output: string, input: ExplicitBrainInterpretati
     }
     return { kind, ...common, ...(matchedTaskId === undefined ? {} : { matchedTaskId }), answer: record.answer };
   }
-  if (record.intent !== 'create' && record.intent !== 'append' && record.intent !== 'change') {
-    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement decision requires a typed intent');
+  if (record.intent !== undefined) {
+    throw new ExplicitBrainOperationalToolError('unsupported-tool', 'requirement decision cannot duplicate proposal intent');
   }
-  const proposal = parseStructuredRequirementProposal(record.proposal, record.intent, input.inputRevision);
+  const proposal = parseStructuredRequirementProposal(record.proposal, input.inputRevision);
   return {
     kind,
     ...common,
     ...(matchedTaskId === undefined ? {} : { matchedTaskId }),
-    intent: record.intent,
+    intent: proposal.intent,
     proposal: renderBusinessProposal(proposal),
   };
 }
