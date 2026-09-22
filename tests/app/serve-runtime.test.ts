@@ -146,8 +146,12 @@ function providerBinding(): ProviderBinding {
   };
 }
 
-function providerPort(input: { readonly state: ProviderSettlement['state']; readonly reviewMarker?: string; readonly reviewMarkers?: readonly string[]; readonly outputRef?: string; readonly chunkedReviewText?: readonly string[] }): ExecutionRuntimePort {
+function providerPort(input: { readonly state: ProviderSettlement['state']; readonly reviewMarker?: string; readonly reviewMarkers?: readonly string[]; readonly outputRef?: string; readonly chunkedReviewText?: readonly string[]; readonly organId?: ReturnType<typeof id<'organ'>> }): ExecutionRuntimePort {
   const binding = providerBinding();
+  // A real provider reports the scope it was admitted under. Hardcoding a
+  // foreign organ here would make the fixture produce evidence the task-scoped
+  // feedback event can never contain.
+  const providerOrgan = () => input.organId ?? id('organ', 'humanagent-ui');
   const evidence = (scope: ScopeRef) => ({
     evidenceId: id('evidence', `serve-rcc-${scope.operationId?.value ?? 'operation'}`),
     kind: 'operation' as const,
@@ -165,7 +169,7 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
     capabilityDigest: binding.capabilityDigest,
     checkedAt: '2026-09-20T00:00:00.000Z',
     expiresAt: '2099-09-20T00:00:00.000Z',
-    evidenceRefs: [evidence({ organId: id('organ', 'serve-test') })],
+    evidenceRefs: [evidence({ organId: providerOrgan() })],
   };
   return {
     kind: 'humanagent.execution-runtime-port',
@@ -182,12 +186,20 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
       evidenceRefs: readiness.evidenceRefs,
     }),
     start: async (request): Promise<ProviderStartReceipt> => {
+      // The driver admits the execution with the task's full scope (organ,
+      // task, cycle, operation). A real provider reports that same admitted
+      // scope, so the fixture must echo it rather than rebuild a partial one.
+      const admittedScope = request.evidenceRefs[0]?.scope ?? {
+        organId: request.organId ?? providerOrgan(),
+        taskId: request.taskId,
+        operationId: request.operationId,
+      };
       active = {
         runtimeId: request.runtimeId,
         taskId: request.taskId,
         operationId: request.operationId,
         executionEpoch: request.executionEpoch,
-        scope: { organId: request.organId ?? id('organ', 'serve-test'), taskId: request.taskId, operationId: request.operationId },
+        scope: admittedScope,
       };
       return { ...request, startedAt: readiness.checkedAt, evidenceRefs: [evidence(active.scope)] };
     },
