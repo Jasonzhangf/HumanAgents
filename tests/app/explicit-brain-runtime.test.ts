@@ -185,7 +185,6 @@ test('application explicit brain runtime requires registered agent identity and 
 });
 
 test('provider explicit brain interpreter loads the interaction template and validates typed intake output', async () => {
-  process.env.HUMANAGENT_TEMPLATE_ROOT = join(process.cwd(), 'packages', 'agent-templates', 'templates');
   const binding: ProviderBinding = {
     bindingId: 'binding-explicit-interpret',
     providerId: 'provider-explicit-interpret',
@@ -197,6 +196,7 @@ test('provider explicit brain interpreter loads the interaction template and val
   };
   const interpreter = createProviderExplicitBrainInterpreter({
     binding,
+    templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
     port: new FakeReplayExecutionRuntimePort({
       binding,
       stepDelayMs: 0,
@@ -223,6 +223,7 @@ test('provider explicit brain interpreter loads the interaction template and val
     inputRevision: 1,
     sourceRef: 'ui:new-task',
     rawInput: '帮我整理启动步骤',
+    clarifications: [],
     taskCandidates: [],
   });
 

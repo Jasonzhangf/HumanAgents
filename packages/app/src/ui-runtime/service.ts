@@ -130,7 +130,6 @@ import type { UiRuntimeJournal } from './journal.js';
 import type { ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
 import {
   createExplicitBrainRuntime,
-  createProviderExplicitBrainInterpreter,
   type ExplicitBrainRuntime,
 } from '../explicit-brain-runtime.js';
 
@@ -193,7 +192,7 @@ export interface UiRuntimeServiceOptions {
   }) => Promise<unknown>;
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
-  readonly explicitBrainInterpreter?: ExplicitBrainInputInterpreter;
+  readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
   readonly memory: UiRuntimeMemoryComposition;
   readonly runtimeComposition?: {
     readonly createTaskAssembly?: (input: {
@@ -364,8 +363,7 @@ export class UiRuntimeService {
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
-    this.explicitBrainInterpreter = options.explicitBrainInterpreter
-      ?? createProviderExplicitBrainInterpreter({ port: options.port, binding: options.binding });
+    this.explicitBrainInterpreter = options.explicitBrainInterpreter;
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
       load: () => this.explicitBrainTraceRecords,
       persist: (record) => {
@@ -1157,6 +1155,7 @@ export class UiRuntimeService {
         inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
         sourceRef: snapshot.sourceRef,
         rawInput: snapshot.rawInput,
+        clarifications: snapshot.clarifications ?? [],
         taskCandidates,
       });
       if (interpreted.kind === 'clarification') {
@@ -1173,6 +1172,15 @@ export class UiRuntimeService {
           'humanagent.runtime.explicit-brain',
           `interaction agent selected an unknown task: ${interpreted.matchedTaskId}`,
           'retry interpretation using one of the current task candidates',
+          409,
+        );
+      }
+      if (interpreted.kind === 'requirement' && interpreted.intent === 'create' && matched !== undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.task-match-conflict',
+          'humanagent.runtime.explicit-brain',
+          'create cannot select an existing task',
+          'retry interpretation as append or change, or omit the existing task match for a new task',
           409,
         );
       }
@@ -1204,6 +1212,19 @@ export class UiRuntimeService {
       }
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  async answerExplicitClarification(input: {
+    readonly interactionId: string;
+    readonly answer: string;
+  }): Promise<ExplicitInteractionSnapshot> {
+    try {
+      await this.explicitIntake.answerClarification(input.interactionId, input.answer);
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(input.interactionId);
     } catch (error) {
       throw apiError(error);
     }

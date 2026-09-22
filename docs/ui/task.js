@@ -50,20 +50,34 @@ function renderCreate() {
   const feedback = element('p', '显式大脑会整理输入、补齐任务信息，并在需要时向你确认。', 'muted')
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
+  let interactionId
   form.append(directiveLabel, button, feedback)
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
     try {
       const rawInput = directive.value.trim()
       feedback.textContent = '正在交给显式大脑整理…'
-      const received = await api.receiveExplicitInput({
-        sourceRef: 'ui:new-task',
-        rawInput,
-        inputRevision: 1,
-      })
-      const snapshot = await api.interpretExplicitInput(received.interactionId)
-      if (snapshot.state === 'status-only' || snapshot.state === 'awaiting-clarification') {
+      if (interactionId) {
+        await api.answerExplicitClarification(interactionId, rawInput)
+      } else {
+        const received = await api.receiveExplicitInput({
+          sourceRef: 'ui:new-task',
+          rawInput,
+          inputRevision: 1,
+        })
+        interactionId = received.interactionId
+      }
+      const snapshot = await api.interpretExplicitInput(interactionId)
+      if (snapshot.state === 'status-only') {
         feedback.textContent = snapshot.reply || snapshot.nextAction
+        interactionId = undefined
+        return
+      }
+      if (snapshot.state === 'awaiting-clarification') {
+        feedback.textContent = snapshot.reply || snapshot.nextAction
+        directive.value = ''
+        directive.placeholder = snapshot.reply || '请补充显式大脑需要的信息。'
+        button.textContent = '回答并继续'
         return
       }
       if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
@@ -72,18 +86,22 @@ function renderCreate() {
       }
       if (snapshot.draft.proposedIntent !== 'create') {
         const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
+        if (!matchedTaskId) {
+          feedback.textContent = '显式大脑没有返回需要确认的已有任务，无法继续。'
+          return
+        }
         feedback.textContent = '显式大脑识别到已有任务变更，请先确认整理后的内容。'
-        window.location.href = `./task.html?task=${encodeURIComponent(matchedTaskId)}&interaction=${encodeURIComponent(received.interactionId)}`
+        window.location.href = `./task.html?task=${encodeURIComponent(matchedTaskId)}&interaction=${encodeURIComponent(interactionId)}`
         return
       }
       feedback.textContent = '显式大脑已整理输入，正在提交后台…'
-      await api.confirmExplicitRequirement(received.interactionId, {
+      await api.confirmExplicitRequirement(interactionId, {
         draftId: snapshot.draft.draftId,
         inputRevision: snapshot.draft.inputRevision,
-        confirmationRef: `ui:creation:${received.interactionId}`,
+        confirmationRef: `ui:creation:${interactionId}`,
         confirmedBy: 'human:operator',
         confirmedAt: new Date().toISOString(),
-        payloadRef: `asset://requirements/${received.interactionId}`,
+        payloadRef: `asset://requirements/${interactionId}`,
       })
       const dispatched = await api.dispatchNextExplicitRequirement()
       if (dispatched.requirement?.draftId !== snapshot.draft.draftId) {
@@ -121,6 +139,27 @@ async function renderInteraction(interactionId, currentTaskId) {
       element('p', '整理后的任务', 'eyebrow'),
       element('p', snapshot.draft?.proposal || snapshot.reply || snapshot.rawInput),
     )
+    if (snapshot.state === 'awaiting-clarification') {
+      const answer = document.createElement('textarea')
+      answer.required = true
+      answer.placeholder = snapshot.reply || '请补充显式大脑需要的信息。'
+      const submitAnswer = element('button', '回答并继续', 'button button--primary')
+      submitAnswer.type = 'button'
+      submitAnswer.addEventListener('click', async () => {
+        submitAnswer.disabled = true
+        feedback.textContent = '正在继续整理…'
+        try {
+          await api.answerExplicitClarification(interactionId, answer.value.trim())
+          await api.interpretExplicitInput(interactionId)
+          window.location.reload()
+        } catch (error) {
+          submitAnswer.disabled = false
+          feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+        }
+      })
+      actions.append(answer, submitAnswer)
+      feedback.textContent = snapshot.reply || snapshot.nextAction
+    }
     if (snapshot.state === 'awaiting-confirmation' && snapshot.draft) {
       const submit = async (button) => {
         if (button) button.disabled = true

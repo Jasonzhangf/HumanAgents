@@ -389,6 +389,15 @@ async function handleRequest(
       }));
       return;
     }
+    const explicitClarification = /^\/api\/explicit\/interactions\/([^/]+)\/clarification$/.exec(path);
+    if (explicitClarification && method === 'POST') {
+      const body = await readBody(request);
+      writeJson(response, 200, await service.answerExplicitClarification({
+        interactionId: decodeURIComponent(explicitClarification[1]!),
+        answer: requireString(body, 'answer'),
+      }));
+      return;
+    }
     const explicitInteraction = /^\/api\/explicit\/interactions\/([^/]+)$/.exec(path);
     if (explicitInteraction && method === 'GET') {
       writeJson(response, 200, await service.inspectExplicitInteraction(decodeURIComponent(explicitInteraction[1]!)));

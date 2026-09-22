@@ -739,6 +739,7 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
   for (const method of [
     'receiveExplicitInput',
     'inspectExplicitInteraction',
+    'answerExplicitClarification',
     'beginExplicitMatching',
     'recordExplicitMatch',
     'proposeExplicitRequirement',
@@ -1059,10 +1060,11 @@ test('new task UI sends one natural-language input to the explicit brain', async
   assert.equal(source.includes('title.value'), false);
   assert.equal(source.includes('api.createTask'), false);
   assert.equal(source.includes('api.receiveExplicitInput'), true);
+  assert.equal(source.includes('api.answerExplicitClarification'), true);
   assert.equal(source.includes('提交给显式大脑'), true);
   assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
   assert.equal(source.includes('确认并提交后台'), false);
-  assert.equal(source.includes('api.interpretExplicitInput(received.interactionId)'), true);
+  assert.equal(source.includes('api.interpretExplicitInput(interactionId)'), true);
   assert.equal(source.includes('ui:creation:'), true);
   assert.equal(source.includes('normalizedInput: snapshot.rawInput'), false);
   assert.equal(source.includes('matchedTasks: currentTaskId'), false);

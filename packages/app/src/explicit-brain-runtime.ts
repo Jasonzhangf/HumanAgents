@@ -67,6 +67,10 @@ export interface ExplicitBrainInterpretationInput {
   readonly inputRevision: number;
   readonly sourceRef: string;
   readonly rawInput: string;
+  readonly clarifications: readonly {
+    readonly question: string;
+    readonly answer?: string;
+  }[];
   readonly taskCandidates: readonly ExplicitBrainTaskCandidate[];
 }
 
@@ -177,16 +181,13 @@ function parseInterpreterOutput(output: string): ExplicitBrainInterpretation {
 export function createProviderExplicitBrainInterpreter(input: {
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
+  readonly templateRoot: string;
 }): ExplicitBrainInputInterpreter {
   let promptSegments: Promise<readonly string[]> | undefined;
   const loadPromptSegments = (): Promise<readonly string[]> => {
     if (promptSegments !== undefined) return promptSegments;
-    const templateRoot = process.env.HUMANAGENT_TEMPLATE_ROOT?.trim();
-    if (!templateRoot) {
-      throw new ExplicitBrainOperationalToolError('unsupported-tool', 'interaction agent prompt root is not configured');
-    }
     const version = EXPLICIT_BRAIN_TEMPLATE_REF.slice('builtin/interaction@'.length);
-    promptSegments = loadBuiltinPromptSegments('interaction', templateRoot, version)
+    promptSegments = loadBuiltinPromptSegments('interaction', input.templateRoot, version)
       .then((loaded) => loaded.segments.map((segment) => segment.content));
     return promptSegments;
   };

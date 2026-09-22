@@ -65,9 +65,15 @@ export interface ExplicitInteractionSnapshot {
   readonly condition?: string;
   readonly reason?: string;
   readonly reply?: string;
+  readonly clarifications?: readonly ClarificationExchange[];
   readonly draft?: RequirementDraft;
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
+}
+
+export interface ClarificationExchange {
+  readonly question: string;
+  readonly answer?: string;
 }
 
 export interface ConfirmRequirementDraft {
@@ -116,6 +122,7 @@ interface ExplicitInteractionRecordState {
   readonly condition?: string;
   readonly reason?: string;
   readonly reply?: string;
+  readonly clarifications?: readonly ClarificationExchange[];
   readonly draft?: RequirementDraft;
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
@@ -132,6 +139,7 @@ interface InteractionRecord {
   condition?: string;
   reason?: string;
   reply?: string;
+  clarifications?: ClarificationExchange[];
   draft?: RequirementDraft;
   confirmation?: ConfirmedRequirementDraft;
   readonly history: ExplicitInteractionState[];
@@ -228,6 +236,9 @@ export class ExplicitIntake {
       condition: interaction.condition,
       reason: interaction.reason,
       reply: interaction.reply,
+      clarifications: interaction.clarifications === undefined
+        ? undefined
+        : structuredClone(interaction.clarifications),
       draft: interaction.draft,
       confirmation: interaction.confirmation,
       history: [...interaction.history],
@@ -291,7 +302,26 @@ export class ExplicitIntake {
       throw this.invalidState('request clarification', 'clarification question is required', 'provide-clarification-question');
     }
     interaction.reply = question;
+    interaction.clarifications = [...(interaction.clarifications ?? []), { question }];
     this.transition(interaction, 'awaiting-clarification', 'human', 'provide-clarification', 'clarification-required');
+  }
+
+  async answerClarification(input: InteractionId, answer: string): Promise<void> {
+    const interaction = this.requireState(input, ['awaiting-clarification'], 'answer clarification');
+    if (!answer || !answer.trim()) {
+      throw this.invalidState('answer clarification', 'clarification answer is required', 'provide-clarification');
+    }
+    const clarifications = interaction.clarifications ?? [];
+    const current = clarifications.at(-1);
+    if (!current || current.answer !== undefined) {
+      throw this.invalidState('answer clarification', 'clarification question is missing', 'return-to-matching');
+    }
+    interaction.clarifications = [
+      ...clarifications.slice(0, -1),
+      { question: current.question, answer },
+    ];
+    interaction.reply = undefined;
+    this.transition(interaction, 'matching', 'explicit-intake', 'interpret-clarification', 'clarification-provided');
   }
 
   async propose(input: InteractionId, proposal: Proposal): Promise<void> {

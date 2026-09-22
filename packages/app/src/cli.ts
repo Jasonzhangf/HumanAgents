@@ -891,6 +891,9 @@ export async function main(args: readonly string[]): Promise<void> {
             interactionRoot: paths.mainRoot,
             evidenceRoot,
             uiRoot,
+            ...(process.env.HUMANAGENT_TEMPLATE_ROOT === undefined ? {} : {
+              explicitBrainTemplateRoot: process.env.HUMANAGENT_TEMPLATE_ROOT,
+            }),
             memory: {
               coordinator: memoryRuntime.composition.coordinator,
               backend: memoryRuntime.composition.backend,
