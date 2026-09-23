@@ -4527,8 +4527,34 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   assert.match(head, /grid-template-columns:\s*44px/);
   assert.equal((head.match(/minmax\(/g) ?? []).length, 8);
 
-  // The desktop time cell sits in the eighth link track.
-  assert.match(tasksCss, /@media\s*\(min-width:\s*1081px\)\s*\{\s*\.task-cell--time\s*\{\s*grid-column:\s*8;/s);
+  // The dense table is only safe once the viewport can actually fit the link's
+  // minimum track sum plus the checkbox, actions, gaps, panel padding and page
+  // margin. Derive that budget from the stylesheet so the breakpoint cannot be
+  // lowered below it again (the 1081px regression this replaced).
+  const trackMinima = [...(link.match(/minmax\((\d+)px/g) ?? [])].map((value) => Number(value.replace(/\D/g, '')));
+  assert.equal(trackMinima.length, 8);
+  const linkMin = trackMinima.reduce((total, value) => total + value, 0) + 7 * 12;
+
+  const checkbox = Number(rule('.task-row-check').match(/width:\s*(\d+)px/)?.[1]);
+  const actions = Number(rule('.task-row-actions').match(/min-width:\s*(\d+)px/)?.[1]);
+  const panelPadding = 2 * Number(rule('.panel').match(/padding:\s*0\s+(\d+)px/)?.[1]);
+  const pageMargin = Number(tasksCss.match(/width:\s*min\(1160px,\s*calc\(100%\s*-\s*(\d+)px\)\)/)?.[1]);
+  const rowGaps = 2 * Number(tasksCss.match(/--task-gap:\s*\d+px\s+(\d+)px/)?.[1]);
+  const requiredViewport = checkbox + linkMin + actions + rowGaps + panelPadding + pageMargin;
+
+  const dense = tasksCss.match(/@media\s*\(min-width:\s*(\d+)px\)\s*\{\s*\.task-cell--time\s*\{\s*grid-column:\s*8;/s);
+  if (!dense) throw new Error('expected a dense breakpoint pinning .task-cell--time to grid-column 8');
+  assert.ok(
+    Number(dense[1]) >= requiredViewport,
+    `dense breakpoint ${dense[1]}px is below the ${requiredViewport}px the link minimum needs`,
+  );
+
+  // The wrap branch must cover everything below the dense breakpoint and lay
+  // the link out as wrapped tracks rather than the eight dense ones.
+  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{\s*grid-template-columns:\s*repeat\((\d+),/);
+  if (!wrap) throw new Error('expected the wrap breakpoint to lay the link out as wrapped tracks');
+  assert.equal(Number(wrap[1]), Number(dense[1]) - 1);
+  assert.ok(Number(wrap[2]) < 8);
 });
 
 test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {

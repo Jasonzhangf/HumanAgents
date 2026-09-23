@@ -294,7 +294,9 @@
   font-size: 13px;
 }
 
-@media (max-width: 1080px) {
+/* Dense table needs 44 + (8 minima + 7 gaps) + 116 actions + 24 row gaps + 28
+   panel padding + 32 page margin = 1128px, so wrap below 1130px. */
+@media (max-width: 1129px) {
   .task-row:not(.task-row--head) {
     align-items: start;
   }
@@ -314,7 +316,7 @@
   }
 }
 
-@media (min-width: 1081px) {
+@media (min-width: 1130px) {
   .task-cell--time {
     grid-column: 8;
   }
