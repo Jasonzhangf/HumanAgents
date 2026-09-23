@@ -77,6 +77,7 @@ import {
   admitRequirement,
   classifyConfirmedRequirement,
   defaultAdmissionQueueConfig,
+  type AdmissionQueueKind,
   type RequirementAdmissionReceipt,
 } from '../../../runtime/src/admission/index.js';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
@@ -251,6 +252,51 @@ interface BoundMemoryContext {
   readonly receipt: MemoryContextReceipt;
 }
 
+interface RequirementAdmissionObservation {
+  readonly taskId: TaskId;
+  readonly queue: AdmissionQueueKind;
+  readonly receipt: RequirementAdmissionReceipt;
+}
+
+interface QueuedRequirementObservation {
+  readonly requirementId: string;
+  readonly draftId: string;
+  readonly fifoSeq: number;
+  readonly normalizedInput: string;
+  readonly queue: AdmissionQueueKind;
+}
+
+function validateRequirementAdmissionReceipt(value: unknown): RequirementAdmissionReceipt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new UiRuntimeApiError(
+      'ui-runtime.journal.invalid-admission',
+      APP_OWNER,
+      'persisted requirement admission receipt is not an object',
+      'repair the UI runtime journal before restoring the requirement admission projection',
+      500,
+    );
+  }
+  const receipt = value as Partial<RequirementAdmissionReceipt>;
+  const classified = receipt.classified;
+  const decision = receipt.decision;
+  if (
+    !classified
+    || !ADMISSION_QUEUE_KINDS.includes(classified.queue)
+    || !decision
+    || !['admitted', 'waiting', 'blocked'].includes(decision.status)
+    || decision.queue !== classified.queue
+  ) {
+    throw new UiRuntimeApiError(
+      'ui-runtime.journal.invalid-admission',
+      APP_OWNER,
+      'persisted requirement admission receipt has an invalid classified queue or decision',
+      'repair the UI runtime journal before restoring the requirement admission projection',
+      500,
+    );
+  }
+  return receipt as RequirementAdmissionReceipt;
+}
+
 export interface MemoryContextPending {
   readonly state: 'pending';
   readonly operationId: string;
@@ -278,6 +324,7 @@ function observationNodeFacts(
   definition: PipelineNodeDefinition,
   task: RuntimeTaskSnapshot,
   toolSteps: readonly ObservationNodeToolStepSource[],
+  admission: RequirementAdmissionObservation | undefined,
 ): ObservationNodeFacts {
   const inputRef = `task://${task.taskId.value}/input`;
   const base = {
@@ -319,6 +366,49 @@ function observationNodeFacts(
           projected: true,
         }
         : { node: unprojected, projected: false };
+    case 'implicit.classify':
+      return admission
+        ? {
+          node: {
+            ...base,
+            state: 'succeeded',
+            summary: `已分类为 ${admission.queue} 队列（${admission.receipt.decision.condition}）。`,
+            outputRefs: [`task://${task.taskId.value}/queue/${admission.queue}`],
+            activity: [{
+              activityRef: `task://${task.taskId.value}/admission/${admission.receipt.decision.queue}`,
+              summary: admission.receipt.decision.reason,
+              occurredAt: task.updatedAt,
+            }],
+          },
+          projected: true,
+        }
+        : { node: unprojected, projected: false };
+    case 'interactive.queue':
+    case 'execution.queue':
+    case 'research.queue':
+    case 'maintenance.queue': {
+      const queue = definition.nodeId.slice(0, -'.queue'.length) as AdmissionQueueKind;
+      if (!admission) return { node: unprojected, projected: false };
+      const selected = admission.queue === queue;
+      return {
+        node: {
+          ...base,
+          state: selected ? 'admitted' : 'created',
+          summary: selected
+            ? `已选择 ${queue} 队列并完成准入：${admission.receipt.decision.reason}`
+            : `本次需求分类为 ${admission.queue}，未选择 ${queue} 队列。`,
+          outputRefs: selected ? [`task://${task.taskId.value}/queue/${queue}`] : [],
+          activity: [{
+            activityRef: `task://${task.taskId.value}/queue/${queue}/classification`,
+            summary: selected
+              ? `selected=${queue}; condition=${admission.receipt.decision.condition}`
+              : `selected=${admission.queue}; condition=${admission.receipt.decision.condition}`,
+            occurredAt: task.updatedAt,
+          }],
+        },
+        projected: true,
+      };
+    }
     case 'resource.admission':
       return task.state === 'created'
         ? { node: unprojected, projected: false }
@@ -582,6 +672,8 @@ export class UiRuntimeService {
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
   private readonly dispatchLedger = new Map<string, DispatchLedgerEntry>();
+  private readonly requirementAdmissions = new Map<string, RequirementAdmissionObservation>();
+  private readonly queuedRequirements = new Map<string, QueuedRequirementObservation>();
   private readonly memory: UiRuntimeMemoryComposition;
   private readonly memoryInjection: MemoryContextCapture;
   private readonly memoryInteraction: MemoryInteractionPort;
@@ -1024,7 +1116,7 @@ export class UiRuntimeService {
         { mode: 'rcc', enabled: true, state: this.mode === 'rcc' ? runtimeState : 'ready', detail: 'RCC 4444' },
         { mode: 'dsh', enabled: false, state: 'disabled', detail: 'DSH 接入完成后开放' },
       ],
-      implicitScheduling: this.implicitSchedulingProjection(),
+      implicitScheduling: this.implicitSchedulingProjection() ?? this.queuedRequirementProjection(),
     });
   }
 
@@ -1095,8 +1187,50 @@ export class UiRuntimeService {
     return this.coordinator.taskAssembly(taskId);
   }
 
+  private withRequirementAdmission(task: RuntimeTaskSnapshot): RuntimeTaskSnapshotInput {
+    const admission = this.requirementAdmissions.get(task.taskId.value);
+    if (!admission) return task;
+    const state = task.state === 'created'
+      ? 'queued'
+      : task.state === 'admitted'
+        ? 'admitted'
+        : task.state === 'running' || task.state === 'settling'
+          ? 'executing'
+          : task.state === 'succeeded'
+            ? 'completed'
+            : task.state === 'blocked' || task.state === 'waiting' || task.state === 'failed'
+              ? 'blocked'
+              : 'queued';
+    return {
+      ...task,
+      requirementQueue: admission.queue,
+      requirementAdmission: state,
+      requirementAdmissionLabel: `需求${state} · ${admission.queue} 队列`,
+    };
+  }
+
+  private queuedRequirementProjection(): RuntimeStatusProjection['implicitScheduling'] {
+    const pendingState = this.requirementInbox.exportState();
+    const pendingDraftId = pendingState.pendingDraftIds[0];
+    const queued = pendingDraftId ? this.queuedRequirements.get(pendingDraftId) : undefined;
+    if (!queued) return undefined;
+    return {
+      state: 'queued',
+      code: 'explicit-brain.requirement-queued',
+      ownerId: RUNTIME_OWNER,
+      message: `已确认需求正在 ${queued.queue} 队列等待准入。`,
+      nextAction: 'wait for implicit admission to dispatch the queued requirement',
+      requirementId: queued.requirementId,
+      draftId: queued.draftId,
+      fifoSeq: queued.fifoSeq,
+    };
+  }
+
   listTasks(): RuntimeTaskListProjection {
-    return projectRuntimeTaskList({ mode: this.mode, tasks: this.coordinator.taskSnapshots() });
+    return projectRuntimeTaskList({
+      mode: this.mode,
+      tasks: this.coordinator.taskSnapshots().map((task) => this.withRequirementAdmission(task)),
+    });
   }
 
   dashboard(): RuntimeDashboardProjection {
@@ -1198,8 +1332,9 @@ export class UiRuntimeService {
       const toolSteps = observationToolSteps(task);
       const registry = nodeRegistry();
       const projectedNodeIds = new Set<string>();
+      const admission = this.requirementAdmissions.get(task.taskId.value);
       const nodes: ObservationNodeSource[] = registry.map((definition) => {
-        const facts = observationNodeFacts(definition, task, toolSteps);
+        const facts = observationNodeFacts(definition, task, toolSteps, admission);
         if (facts.projected) projectedNodeIds.add(definition.nodeId);
         return definition.nodeId === 'pipeline.execute'
           ? { ...facts.node, childScopeRef: providerScopeRef }
@@ -1375,6 +1510,27 @@ export class UiRuntimeService {
     this.dispatchLedger.clear();
     for (const entry of restored.dispatchLedger ?? []) {
       this.dispatchLedger.set(entry.draftId, structuredClone(entry));
+    }
+    this.requirementAdmissions.clear();
+    for (const admission of restored.requirementAdmissions ?? []) {
+      this.requirementAdmissions.set(admission.taskId.value, {
+        taskId: admission.taskId,
+        queue: admission.queue,
+        receipt: validateRequirementAdmissionReceipt(admission.receipt),
+      });
+    }
+    this.queuedRequirements.clear();
+    const restoredInbox = this.requirementInbox.exportState();
+    for (const draftId of restoredInbox.pendingDraftIds) {
+      const envelope = restoredInbox.envelopes.find((candidate) => candidate.draftId === draftId);
+      if (!envelope) continue;
+      this.queuedRequirements.set(draftId, {
+        requirementId: envelope.requirementId,
+        draftId: envelope.draftId,
+        fifoSeq: envelope.fifoSeq,
+        normalizedInput: envelope.normalizedInput,
+        queue: classifyConfirmedRequirement(envelope),
+      });
     }
   }
 
@@ -1610,6 +1766,16 @@ export class UiRuntimeService {
         confirmationRef: confirmed.confirmationRef,
         inputRevision: confirmed.inputRevision,
       });
+      const envelope = this.requirementInbox.find(confirmed.draftId);
+      if (envelope) {
+        this.queuedRequirements.set(envelope.draftId, {
+          requirementId: envelope.requirementId,
+          draftId: envelope.draftId,
+          fifoSeq: envelope.fifoSeq,
+          normalizedInput: envelope.normalizedInput,
+          queue: classifyConfirmedRequirement(envelope),
+        });
+      }
       this.persistExplicitBrainState();
       this.scheduleImplicitConsumption();
       return { requirement };
@@ -1689,12 +1855,18 @@ export class UiRuntimeService {
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
       if (existingDispatch) dispatchEntry = existingDispatch;
       else {
-        this.classifyAndAdmitConfirmedRequirement(consumed);
+        const admission = this.classifyAndAdmitConfirmedRequirement(consumed);
         dispatchEntry = {
           draftId: consumed.draftId,
           taskId: consumed.taskRef ?? id('task', `ui-task-implicit-${consumed.draftId}`),
           operationId: id('operation', `ui-operation-implicit-${consumed.draftId}`),
         };
+        this.requirementAdmissions.set(dispatchEntry.taskId.value, {
+          taskId: dispatchEntry.taskId,
+          queue: admission.classified.queue,
+          receipt: structuredClone(admission),
+        });
+        this.queuedRequirements.delete(consumed.draftId);
         this.dispatchLedger.set(consumed.draftId, dispatchEntry);
         this.persistExplicitBrainState();
       }
@@ -1909,6 +2081,7 @@ export class UiRuntimeService {
         inbox: this.requirementInbox.exportState(),
         confirmationLedger: this.confirmationLedger.exportState(),
         dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
+        requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
         submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
         decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
       },

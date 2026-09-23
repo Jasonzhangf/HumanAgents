@@ -46,6 +46,9 @@ export interface RuntimeTaskSnapshotInput {
   readonly taskId: TaskId;
   readonly title: string;
   readonly state: LifecycleState;
+  readonly requirementQueue?: string;
+  readonly requirementAdmission?: RuntimeTaskRowProjection['requirementAdmission'];
+  readonly requirementAdmissionLabel?: string;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;
@@ -105,6 +108,9 @@ function toRow(source: RuntimeTaskSnapshotInput): RuntimeTaskRowProjection {
     title: source.title,
     state: source.state,
     stateLabel: stateLabel(source.state),
+    requirementQueue: source.requirementQueue,
+    requirementAdmission: source.requirementAdmission,
+    requirementAdmissionLabel: source.requirementAdmissionLabel,
     currentState: source.currentState,
     nextStep: source.nextStep,
     updatedAt: source.updatedAt,

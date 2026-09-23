@@ -112,28 +112,13 @@ function renderCreate() {
         button.textContent = '继续查看本次提交'
         return
       }
-      if (snapshot.draft.proposedIntent !== 'create') {
-        const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
-        if (!matchedTaskId) {
-          feedback.textContent = '显式大脑没有返回需要确认的已有任务，无法继续。'
-          button.textContent = '重试本次提交'
-          return
-        }
-        feedback.textContent = '显式大脑识别到已有任务变更，请先确认整理后的内容。'
-        window.location.href = `./task.html?task=${encodeURIComponent(matchedTaskId)}&interaction=${encodeURIComponent(interactionId)}`
-        return
-      }
-      feedback.textContent = '显式大脑已整理输入，正在提交后台…'
-      await api.confirmExplicitRequirement(interactionId, {
-        draftId: snapshot.draft.draftId,
-        inputRevision: snapshot.draft.inputRevision,
-        confirmationRef: `ui:creation:${interactionId}`,
-        confirmedBy: 'human:operator',
-        confirmedAt: new Date().toISOString(),
-        payloadRef: `asset://requirements/${interactionId}`,
-      })
-      feedback.textContent = '任务已确认，后台会继续分类、准入和执行。'
-      window.location.href = './tasks.html'
+      const matchedTaskId = snapshot.draft.matchedTasks.find((task) => task.relation === 'current')?.taskId?.value
+      window.history.replaceState(
+        null,
+        '',
+        `./task.html?task=${encodeURIComponent(matchedTaskId || 'new')}&interaction=${encodeURIComponent(interactionId)}#task-interaction`,
+      )
+      await renderInteraction(interactionId, matchedTaskId)
     } catch (error) {
       feedback.textContent = interactionId
         ? '本次处理未完成。输入已保留并锁定，点击“重试本次提交”继续同一次请求。'
@@ -160,10 +145,24 @@ async function renderInteraction(interactionId, currentTaskId) {
   const feedback = element('p', '正在整理你的输入…', 'muted')
   feedback.setAttribute('role', 'status')
   feedback.setAttribute('aria-live', 'polite')
+  const diagnostics = element('details')
+  diagnostics.hidden = true
+  const diagnosticText = element('pre')
+  diagnostics.append(element('summary', '查看技术详情'), diagnosticText)
   const body = element('div', undefined, 'form-grid')
   const actions = element('div', undefined, 'actions')
-  panel.append(feedback, body, actions)
+  panel.append(feedback, diagnostics, body, actions)
   main.append(panel)
+
+  const showError = (error) => {
+    feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    diagnosticText.textContent = [
+      `code=${error.code || 'runtime.request.failed'}`,
+      `owner=${error.ownerId || 'unknown'}`,
+      `next=${error.nextAction || 'inspect the runtime error'}`,
+    ].join('\n')
+    diagnostics.hidden = false
+  }
 
   try {
     const snapshot = await advanceExplicitInteraction(api, { interactionId })
@@ -190,7 +189,7 @@ async function renderInteraction(interactionId, currentTaskId) {
           window.location.reload()
         } catch (error) {
           submitAnswer.disabled = false
-          feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+          showError(error)
         }
       })
       actions.append(answer, submitAnswer)
@@ -209,11 +208,13 @@ async function renderInteraction(interactionId, currentTaskId) {
             confirmedAt: new Date().toISOString(),
             payloadRef: `asset://requirements/${interactionId}`,
           })
-          feedback.textContent = '已确认，后台会继续分类、准入和执行。'
-          window.location.href = currentTaskId ? taskDashboardHref(currentTaskId) : './tasks.html'
+          feedback.textContent = `已确认，需求 requirement:${snapshot.draft.draftId}:${snapshot.draft.inputRevision} 已进入 FIFO。可在任务列表查看 queued/admitted/executing 等状态。`
+          const taskList = element('a', '打开任务列表', 'button button--primary')
+          taskList.href = './tasks.html'
+          actions.replaceChildren(taskList)
         } catch (error) {
           if (button) button.disabled = false
-          feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+          showError(error)
         }
       }
       feedback.textContent = '已整理完成。只有改变已有任务目标时才需要再次确认。'
@@ -225,7 +226,7 @@ async function renderInteraction(interactionId, currentTaskId) {
       feedback.textContent = `当前状态：${snapshot.state}。${snapshot.nextAction}`
     }
   } catch (error) {
-    feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    showError(error)
   }
 }
 

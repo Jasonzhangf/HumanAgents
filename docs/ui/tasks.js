@@ -144,13 +144,55 @@ async function deleteTask(row) {
 function visibleGroups() {
   const filtered = rows.filter((row) => currentFilter === 'all' || row.group === currentFilter)
   return [
-    ['running', '运行中任务', filtered.filter((row) => row.group === 'running'), '当前没有运行中的任务。'],
-    ['waiting', '等待决策任务', filtered.filter((row) => row.group === 'waiting'), '当前没有等待决策的任务。'],
+    ['running', '执行中任务', filtered.filter((row) => row.group === 'running'), '当前没有执行中的任务。'],
+    ['waiting', '受阻或等待决策任务', filtered.filter((row) => row.group === 'waiting'), '当前没有受阻或等待决策的任务。'],
     ['completed', '已完成任务', filtered.filter((row) => row.group === 'completed'), '当前没有已完成的任务。'],
     ['stopped', '已停止任务', filtered.filter((row) => row.group === 'stopped'), '当前没有已停止的任务。'],
-    ['draft', '未启动任务', filtered.filter((row) => row.group === 'draft'), '当前没有未启动的任务。'],
+    ['draft', '排队与准入任务', filtered.filter((row) => row.group === 'draft'), '当前没有排队或已准入但未执行的任务。'],
     ['failed', '失败任务', filtered.filter((row) => row.group === 'failed'), '当前没有失败的任务。'],
   ]
+}
+
+function renderRequirementDispatch(runtimeStatus) {
+  main.querySelector('[data-requirement-dispatch]')?.remove()
+  const scheduling = runtimeStatus?.implicitScheduling
+  if (!scheduling) return
+  const retired = scheduling.code === 'explicit-brain.requirement-retired'
+  const queued = scheduling.code === 'explicit-brain.requirement-queued'
+  const panel = element('section', undefined, 'panel requirement-dispatch')
+  panel.dataset.requirementDispatch = ''
+  panel.dataset.tone = retired || scheduling.state === 'blocked' ? 'danger' : 'warning'
+  const heading = element('div', undefined, 'section-head')
+  heading.append(
+    element(
+      'h2',
+      retired
+        ? '需求已退休'
+        : queued
+          ? '需求已排队'
+          : scheduling.state === 'waiting'
+            ? '需求等待准入'
+            : '需求调度受阻',
+    ),
+    element('span', `FIFO #${scheduling.fifoSeq}`, 'section-meta'),
+  )
+  const facts = element('dl', undefined, 'detail-grid')
+  for (const [label, value] of [
+    ['状态码', scheduling.code],
+    ['需求', scheduling.requirementId],
+    ['草稿', scheduling.draftId],
+    ['负责 owner', scheduling.ownerId],
+    ['下一步', scheduling.nextAction],
+    ['说明', scheduling.message],
+  ]) {
+    const cell = element('div', undefined, 'detail-cell')
+    cell.append(element('dt', label), element('dd', value))
+    facts.append(cell)
+  }
+  panel.append(heading, facts)
+  const groups = main.querySelector('[data-task-groups]')
+  if (groups) groups.before(panel)
+  else main.append(panel)
 }
 
 function unknown(text) {
@@ -200,6 +242,7 @@ function renderRuntimeRow(row) {
   link.append(stateCell)
 
   link.append(cell('负责 agent', 'task-cell--owner', row.agent ?? row.owner ?? row.agentId))
+  link.append(cell('需求准入', 'task-cell--admission', row.requirementAdmissionLabel))
   link.append(cell('当前节点', 'task-cell--node', row.currentNode ?? row.currentNodeId ?? row.nodeId))
   link.append(cell('正在处理', 'task-cell--work', row.currentWork ?? row.currentState))
   const round = row.round ?? row.executionEpoch
@@ -238,7 +281,7 @@ function renderTasks() {
       const header = element('div', undefined, 'task-row task-row--head')
       header.setAttribute('role', 'row')
       header.setAttribute('aria-hidden', 'true')
-      for (const label of ['任务', '状态', '负责 agent', '当前节点', '正在处理', '第几轮', '进度', '最近更新', '操作']) {
+      for (const label of ['任务', '状态', '负责 agent', '需求准入', '当前节点', '正在处理', '第几轮', '进度', '最近更新', '操作']) {
         header.append(element('span', label, 'task-cell-label'))
       }
       panel.append(header)
@@ -257,11 +300,11 @@ function addFilters() {
   const segments = element('div', undefined, 'segments')
   for (const [value, label] of [
     ['all', '全部'],
-    ['running', '运行中'],
-    ['waiting', '等待决策'],
+    ['running', '执行中'],
+    ['waiting', '受阻/等待'],
     ['completed', '已完成'],
     ['stopped', '已停止'],
-    ['draft', '未启动'],
+    ['draft', '排队/准入'],
     ['failed', '失败'],
   ]) {
     const button = element('button', label, 'segment')
@@ -285,6 +328,7 @@ async function load() {
   try {
     const [{ status: runtimeStatus, error }, taskList] = await Promise.all([loadRuntimeStatus(), api.listTasks()])
     renderRuntimeStatus(status, runtimeStatus, error)
+    renderRequirementDispatch(runtimeStatus)
     rows = [
       ...taskList.running.map((row) => ({ ...row, group: 'running' })),
       ...taskList.waiting.map((row) => ({ ...row, group: 'waiting' })),
@@ -305,7 +349,9 @@ async function load() {
 }
 
 async function loadTasks() {
-  const taskList = await api.listTasks()
+  const [{ status: runtimeStatus, error }, taskList] = await Promise.all([loadRuntimeStatus(), api.listTasks()])
+  renderRuntimeStatus(status, runtimeStatus, error)
+  renderRequirementDispatch(runtimeStatus)
   rows = [
     ...taskList.running.map((row) => ({ ...row, group: 'running' })),
     ...taskList.waiting.map((row) => ({ ...row, group: 'waiting' })),

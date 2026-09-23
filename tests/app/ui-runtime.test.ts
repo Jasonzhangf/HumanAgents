@@ -1625,7 +1625,8 @@ test('observation projects all thirteen registry nodes in registry order with ag
   assert.equal(toSettle.carrySummary.length > 0, true);
   assert.equal(toSettle.notCarried.length > 0, true);
 
-  // Nodes the runtime reports no fact for stay unprojected instead of being reported as succeeded.
+  // Direct task creation has no confirmed requirement admission; classification and queues stay
+  // explicitly unprojected instead of being invented from lifecycle state.
   const queues = observation.nodes.filter((node) => node.nodeId.endsWith('.queue'));
   assert.equal(queues.length, 4);
   for (const queue of queues) {
@@ -1635,6 +1636,114 @@ test('observation projects all thirteen registry nodes in registry order with ag
   const classify = observation.nodes.find((node) => node.nodeId === 'implicit.classify');
   assert.equal(classify?.activity.length, 0);
   assert.equal(classify?.toolSteps.length, 0);
+});
+
+test('confirmed requirement is visibly queued before implicit dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-requirement-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:queued-requirement',
+    rawInput: 'show this requirement as queued before dispatch',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'show this requirement as queued before dispatch',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create queued requirement evidence',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:queued-requirement',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-23T01:20:00.000Z',
+    payloadRef: 'asset://requirements/queued-requirement',
+  });
+
+  assert.deepEqual(service.status().implicitScheduling, {
+    state: 'queued',
+    code: 'explicit-brain.requirement-queued',
+    ownerId: 'humanagent.runtime',
+    message: '已确认需求正在 execution 队列等待准入。',
+    nextAction: 'wait for implicit admission to dispatch the queued requirement',
+    requirementId: 'requirement:draft-1:1',
+    draftId: 'draft-1',
+    fifoSeq: 1,
+  });
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
+  assert.equal(service.status().implicitScheduling, undefined);
+});
+
+test('observation projects implicit classification and queue admission for confirmed requirements after restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-observation-admission-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:observation-admission',
+    rawInput: 'observe the admitted queue',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'observe the admitted queue',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the observation admission task',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:observation-admission',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-23T01:00:00.000Z',
+    payloadRef: 'asset://requirements/observation-admission',
+  });
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  await waitFor(() => assert.equal(service.taskDashboard(dispatched.taskId).state, 'succeeded'));
+
+  const observation = service.observation(dispatched.taskId);
+  const classify = observation.nodes.find((node) => node.nodeId === 'implicit.classify');
+  assert.equal(classify?.stateDisplay, '已完成');
+  assert.match(classify?.summary ?? '', /execution 队列/);
+  assert.equal(classify?.activity.length, 1);
+  assert.equal(classify?.activity[0]?.summary, 'admission requirements are satisfied');
+  const queues = observation.nodes.filter((node) => node.nodeId.endsWith('.queue'));
+  assert.equal(queues.length, 4);
+  const selected = queues.find((node) => node.nodeId === 'execution.queue');
+  assert.equal(selected?.stateDisplay, '已准入');
+  assert.match(selected?.summary ?? '', /已选择 execution 队列/);
+  for (const queue of queues) {
+    assert.equal(queue.summary.includes('尚未投影'), false, queue.nodeId);
+  }
+  const list = service.listTasks();
+  const row = list.completed.find((task) => task.taskId.value === dispatched.taskId.value);
+  assert.equal(row?.requirementQueue, 'execution');
+  assert.equal(row?.requirementAdmission, 'completed');
+  assert.match(row?.requirementAdmissionLabel ?? '', /需求completed · execution 队列/);
+
+  const restarted = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  await restarted.hydrate();
+  const restored = restarted.observation(dispatched.taskId);
+  assert.equal(restored.nodes.find((node) => node.nodeId === 'implicit.classify')?.stateDisplay, '已完成');
+  assert.equal(restored.nodes.find((node) => node.nodeId === 'execution.queue')?.stateDisplay, '已准入');
+  assert.equal(restored.nodes.filter((node) => node.nodeId.endsWith('.queue')).every((node) => !node.summary.includes('尚未投影')), true);
 });
 
 test('explicit brain confirmation is the only path from input to FIFO execution', async () => {
@@ -1892,13 +2001,15 @@ test('implicit consumer retires a confirmed append whose taskRef is absent and c
     assert.equal(state?.code, 'explicit-brain.requirement-retired');
     assert.equal(state?.state, 'blocked');
     assert.equal(state?.requirementId, 'requirement:draft-1:1');
+    assert.equal(service.listTasks().counts.total, 1);
   });
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
   assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+  assert.equal(service.listTasks().counts.total, 1);
 });
 
-test('public explicit dispatch reports a retired FIFO head when no later requirement remains', async () => {
+test('public explicit dispatch reports a retired FIFO head without inventing a task row', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retired-alone-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
   const missingTaskId = id('task', 'missing-task');
@@ -1938,7 +2049,18 @@ test('public explicit dispatch reports a retired FIFO head when no later require
       && error.nextAction.includes('draft-1')
       && error.httpStatus === 409,
   );
-  assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+  assert.deepEqual(service.status().implicitScheduling, {
+    state: 'blocked',
+    code: 'explicit-brain.requirement-retired',
+    ownerId: 'humanagent.runtime',
+    message: `confirmed append target is not in the local task store: ${missingTaskId.value}`,
+    nextAction: 'inspect the retired requirement and resubmit against a current task',
+    requirementId: 'requirement:draft-1:1',
+    draftId: 'draft-1',
+    fifoSeq: 1,
+  });
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 });
 
 test('public explicit dispatch preserves retired evidence when a later requirement dispatches', async () => {
@@ -1995,6 +2117,7 @@ test('public explicit dispatch preserves retired evidence when a later requireme
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(retiredInteraction)).state, 'confirmed');
   assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
+  assert.equal(service.listTasks().counts.total, 1);
 });
 
 test('active implicit admission state takes precedence over historical retirement', async () => {

@@ -1325,6 +1325,7 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
   const main = new Node('main');
   let received = 0;
   let advanced = 0;
+  let confirmed = 0;
   let rejectInterpret!: (error: Error) => void;
   const pending = new Promise<never>((_, reject) => { rejectInterpret = reject; });
   const api = {
@@ -1333,7 +1334,10 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
       assert.equal(input.rawInput, '读取 README');
       return { interactionId: 'interaction-ui-retry' };
     },
-    async confirmExplicitRequirement(id: string) { assert.equal(id, 'interaction-ui-retry'); },
+    async confirmExplicitRequirement(id: string) {
+      confirmed += 1;
+      throw new Error(`create must not auto-confirm ${id}`);
+    },
   };
   const advance = async (_api: unknown, input: { interactionId: string; clarificationAnswer: string }) => {
     advanced += 1;
@@ -1390,9 +1394,9 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
   assert.equal(button.textContent, '继续查看本次提交');
   assert.equal(restartPanel.hidden, false);
   assert.equal(textarea.readOnly, true);
-  await submit();
-  assert.equal(received, 1);
-  assert.equal(window.location.href, './tasks.html');
+  assert.equal(window.location.href, '');
+  assert.equal(confirmed, 0);
+  assert.equal(feedback.textContent.includes('等待处理'), true);
 });
 
 test('new task UI sends one natural-language input to the explicit brain', async () => {
@@ -1411,13 +1415,96 @@ test('new task UI sends one natural-language input to the explicit brain', async
   assert.equal(source.includes('api.confirmExplicitRequirement(interactionId, {'), true);
   assert.equal(source.includes('确认并提交后台'), false);
   assert.equal(flowSource.includes('api.interpretExplicitInput(input.interactionId)'), true);
-  assert.equal(source.includes('ui:creation:'), true);
+  assert.equal(source.includes('ui:creation:'), false);
+  assert.equal(createSource.includes('await api.confirmExplicitRequirement'), false);
+  assert.equal(createSource.includes('await renderInteraction(interactionId, matchedTaskId)'), true);
   assert.equal(source.includes('normalizedInput: snapshot.rawInput'), false);
   assert.equal(source.includes('matchedTasks: currentTaskId'), false);
   assert.equal(source.includes("proposedIntent: currentTaskId ? 'append' : 'create'"), false);
   assert.equal(flowSource.includes("snapshot.state === 'received' || snapshot.state === 'matching'"), true);
   assert.equal(source.includes("dispatched.requirement?.draftId !== snapshot.draft.draftId"), false);
-  assert.equal(source.includes('后台会继续分类、准入和执行'), true);
+  assert.equal(source.includes('已进入 FIFO'), true);
+  assert.equal(source.includes('actions.replaceChildren(taskList)'), true);
+  assert.equal(source.includes("taskList.href = './tasks.html'"), true);
+});
+
+test('explicit confirmation stays on the interaction page and exposes the FIFO receipt', async () => {
+  const source = await readFile('docs/ui/task.js', 'utf8');
+  const interactionSource = source.slice(
+    source.indexOf('async function renderInteraction'),
+    source.indexOf('function renderTask()'),
+  );
+  class Node {
+    children: Node[] = [];
+    textContent = '';
+    className = '';
+    hidden = false;
+    disabled = false;
+    href = '';
+    attrs: Record<string, string> = {};
+    handlers: Record<string, () => Promise<void>> = {};
+    append(...nodes: Node[]) { this.children.push(...nodes); }
+    setAttribute(key: string, value: string) { this.attrs[key] = value; }
+    addEventListener(type: string, handler: () => Promise<void>) { this.handlers[type] = handler; }
+    replaceChildren(...nodes: Node[]) { this.children = nodes; }
+    removeChild(node: Node) { this.children = this.children.filter((candidate) => candidate !== node); }
+    get firstChild() { return this.children[0]; }
+  }
+  const nodes: Node[] = [];
+  const element = (tag: string, text?: string, className?: string) => {
+    const node = new Node();
+    node.textContent = text ?? '';
+    node.className = className ?? '';
+    nodes.push(node);
+    return node;
+  };
+  const document = {
+    createElement: (tag: string) => element(tag),
+  };
+  const main = new Node();
+  let confirmed = 0;
+  const api = {
+    async inspectExplicitInteraction() {
+      return {
+        state: 'awaiting-confirmation',
+        rawInput: 'prepare the release evidence',
+        nextAction: 'confirm-or-revise',
+        draft: { draftId: 'draft-7', inputRevision: 1, proposal: 'prepare release evidence' },
+      };
+    },
+    async confirmExplicitRequirement(interactionId: string) {
+      assert.equal(interactionId, 'interaction-confirm');
+      confirmed += 1;
+      return { requirement: { requirementId: 'requirement:draft-7:1' } };
+    },
+  };
+  const window = { location: { href: './task.html?task=new&interaction=interaction-confirm' } };
+  const advance = async () => ({
+    state: 'awaiting-confirmation',
+    rawInput: 'prepare the release evidence',
+    nextAction: 'confirm-or-revise',
+    draft: { draftId: 'draft-7', inputRevision: 1, proposal: 'prepare release evidence' },
+  });
+  const clearNode = (node: Node) => { node.children = []; };
+  await new Function(
+    'element',
+    'main',
+    'api',
+    'advanceExplicitInteraction',
+    'window',
+    'document',
+    'clearNode',
+    `${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
+  )(element, main, api, advance, window, document, clearNode);
+  const feedback = nodes.find((node) => node.attrs.role === 'status');
+  const confirm = nodes.find((node) => node.textContent === '按此方案继续');
+  if (!feedback || !confirm) throw new Error('expected confirmation controls');
+  await confirm.handlers.click();
+  assert.equal(confirmed, 1);
+  assert.equal(window.location.href, './task.html?task=new&interaction=interaction-confirm');
+  assert.equal(feedback.textContent.includes('已进入 FIFO'), true);
+  assert.equal(feedback.textContent.includes('requirement:draft-7:1'), true);
+  assert.equal(nodes.some((node) => node.textContent === '打开任务列表' && node.href === './tasks.html'), true);
 });
 
 test('runtime task dashboard is observational and has no second execution-input form', async () => {

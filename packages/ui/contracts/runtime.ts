@@ -37,7 +37,7 @@ export interface RuntimeStatusProjection {
 }
 
 export interface RuntimeImplicitSchedulingProjection {
-  readonly state: 'waiting' | 'blocked' | 'failed';
+  readonly state: 'queued' | 'waiting' | 'blocked' | 'failed';
   readonly code: string;
   readonly ownerId: string;
   readonly message: string;
@@ -119,6 +119,9 @@ export interface RuntimeTaskRowProjection {
   readonly title: string;
   readonly state: LifecycleState;
   readonly stateLabel: string;
+  readonly requirementQueue?: string;
+  readonly requirementAdmission?: 'queued' | 'admitted' | 'executing' | 'completed' | 'blocked' | 'retired' | 'unknown';
+  readonly requirementAdmissionLabel?: string;
   readonly currentState: string;
   readonly nextStep: string;
   readonly updatedAt: string;

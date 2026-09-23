@@ -181,6 +181,33 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     if (state.decisionTraces !== undefined && !Array.isArray(state.decisionTraces)) {
       throw new Error(`corrupt UI runtime journal ${filePath}:${line}: state.decisionTraces must be an array`);
     }
+    if (state.requirementAdmissions !== undefined) {
+      if (!Array.isArray(state.requirementAdmissions)) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: state.requirementAdmissions must be an array`);
+      }
+      for (const admission of state.requirementAdmissions) {
+        if (!admission || typeof admission !== 'object' || Array.isArray(admission)) {
+          throw new Error(`corrupt UI runtime journal ${filePath}:${line}: requirement admission must be an object`);
+        }
+        const entry = admission as Record<string, unknown>;
+        requireScopedId(entry, 'taskId', 'task', filePath, line);
+        if (!['interactive', 'execution', 'research', 'maintenance'].includes(String(entry.queue))) {
+          throw new Error(`corrupt UI runtime journal ${filePath}:${line}: requirement admission queue is invalid`);
+        }
+        const receipt = requireRecordObject(entry, 'receipt', filePath, line);
+        const classified = requireRecordObject(receipt, 'classified', filePath, line);
+        const decision = requireRecordObject(receipt, 'decision', filePath, line);
+        if (!['interactive', 'execution', 'research', 'maintenance'].includes(String(classified.queue))) {
+          throw new Error(`corrupt UI runtime journal ${filePath}:${line}: classified queue is invalid`);
+        }
+        if (!['admitted', 'waiting', 'blocked'].includes(String(decision.status))) {
+          throw new Error(`corrupt UI runtime journal ${filePath}:${line}: admission decision status is invalid`);
+        }
+        if (decision.queue !== classified.queue) {
+          throw new Error(`corrupt UI runtime journal ${filePath}:${line}: classified and admission decision queues differ`);
+        }
+      }
+    }
     return record as unknown as UiRuntimeJournalRecord;
   }
   if (kind === 'interaction.closure') {

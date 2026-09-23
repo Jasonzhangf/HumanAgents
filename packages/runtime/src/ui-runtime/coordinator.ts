@@ -198,6 +198,11 @@ export interface RuntimeExplicitBrainJournalState {
     readonly operationId: OperationId;
     readonly executionEpoch?: number;
   }[];
+  readonly requirementAdmissions?: readonly {
+    readonly taskId: TaskId;
+    readonly queue: 'interactive' | 'execution' | 'research' | 'maintenance';
+    readonly receipt: unknown;
+  }[];
   readonly submittedSubmissions: readonly PersistedSubmittedReceipt[];
   readonly decisionTraces?: readonly DecisionTraceRecord[];
 }
