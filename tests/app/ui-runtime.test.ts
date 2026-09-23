@@ -1898,6 +1898,105 @@ test('implicit consumer retires a confirmed append whose taskRef is absent and c
   assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
 });
 
+test('public explicit dispatch reports a retired FIFO head when no later requirement remains', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retired-alone-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const missingTaskId = id('task', 'missing-task');
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:retired-alone',
+    rawInput: 'append to missing task',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'append to missing task',
+    matchedTasks: [{ taskId: missingTaskId, relation: 'current', status: 'running' }],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'append',
+    proposal: 'append to missing task',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:retired-alone',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-23T00:00:00.000Z',
+    payloadRef: 'asset://requirements/retired-alone',
+  });
+
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.requirement-retired'
+      && error.ownerId === 'humanagent.runtime'
+      && error.message.includes(missingTaskId.value)
+      && error.nextAction.includes('requirement:draft-1:1')
+      && error.nextAction.includes('draft-1')
+      && error.httpStatus === 409,
+  );
+  assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+});
+
+test('public explicit dispatch preserves retired evidence when a later requirement dispatches', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-retired-later-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const missingTaskId = id('task', 'missing-task');
+  const laterTask = service.createTask({ title: 'later task', directive: 'later task' });
+  const confirmAppend = async (suffix: string, taskRef: TaskId): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `append to task ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `append to task ${suffix}`,
+      matchedTasks: [{ taskId: taskRef, relation: 'current', status: 'running' }],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'append',
+      proposal: `append to task ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-23T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  const retiredInteraction = await confirmAppend('retired-head', missingTaskId);
+  const laterInteraction = await confirmAppend('later-after-retired', laterTask.taskId);
+
+  await assert.rejects(
+    () => service.dispatchNextExplicitRequirement(),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.requirement-retired'
+      && error.nextAction.includes('requirement:draft-1:1')
+      && error.httpStatus === 409,
+  );
+  assert.equal((await service.inspectExplicitInteraction(retiredInteraction)).state, 'confirmed');
+  assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'confirmed');
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.requirementId, 'requirement:draft-2:1');
+  assert.equal(service.implicitSchedulingIssue()?.code, 'explicit-brain.requirement-retired');
+  assert.equal(service.status().implicitScheduling?.requirementId, 'requirement:draft-1:1');
+  await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
+  assert.equal((await service.inspectExplicitInteraction(retiredInteraction)).state, 'confirmed');
+  assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
+});
+
 test('active implicit admission state takes precedence over historical retirement', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-retire-blocked-'));
   let releaseOccupying!: () => void;

@@ -60,6 +60,7 @@ import {
   RequirementInbox,
   type InboxReceipt,
   type RequirementInboxState,
+  type RequirementTerminalOutcome,
 } from '../../../runtime/src/intake/requirement-inbox.js';
 import {
   type ConfirmationLedgerState,
@@ -235,7 +236,7 @@ export interface ExplicitBrainDispatchReceipt {
 
 type ExplicitBrainDispatchAttempt =
   | { readonly kind: 'dispatched'; readonly receipt: ExplicitBrainDispatchReceipt }
-  | { readonly kind: 'retired' }
+  | { readonly kind: 'retired'; readonly outcome: RequirementTerminalOutcome }
   | { readonly kind: 'empty' };
 
 interface DispatchLedgerEntry {
@@ -1621,6 +1622,15 @@ export class UiRuntimeService {
     for (;;) {
       const attempt = await this.dispatchNextExplicitRequirementInternal();
       if (attempt.kind === 'dispatched') return attempt.receipt;
+      if (attempt.kind === 'retired') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.requirement-retired',
+          RUNTIME_OWNER,
+          attempt.outcome.message,
+          `inspect retired requirement ${attempt.outcome.requirementId} draft ${attempt.outcome.draftId} and resubmit against a current task`,
+          409,
+        );
+      }
       if (attempt.kind === 'empty') {
         throw new UiRuntimeApiError(
           'explicit-brain.inbox.empty',
@@ -1674,7 +1684,7 @@ export class UiRuntimeService {
           'inspect the retired requirement and resubmit against a current task',
           409,
         );
-        return { kind: 'retired' };
+        return { kind: 'retired', outcome };
       }
       const existingDispatch = this.dispatchLedger.get(consumed.draftId);
       if (existingDispatch) dispatchEntry = existingDispatch;
