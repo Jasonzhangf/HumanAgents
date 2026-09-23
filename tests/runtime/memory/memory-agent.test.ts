@@ -1559,8 +1559,92 @@ test('memory agent does not synthesize a Task for interaction-bound provider ana
     sourceDigests: ['sha256:interaction-evidence'],
   }));
 
+  assert.equal(result.status, 'attention');
+  assert.equal(result.status === 'attention' && result.issue.code, 'memory-agent-analysis-provider-unsupported');
+  assert.equal(result.status === 'attention' && result.issue.message, 'memory analysis provider requires a task-bound request');
+  assert.deepEqual(result.status === 'attention' && result.issue.nextAction, { kind: 'recover', ref: 'memory-analysis-provider' });
+  assert.equal(ports.submissions.length, 0);
+  assert.deepEqual(events, []);
+});
+
+test('memory agent completes interaction-bound deterministic analysis without the provider guard', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const interactionScope = 'interaction-deterministic-analysis';
+  const agent = new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  });
+  agent.bind({
+    bindingRef: 'binding-interaction-deterministic',
+    projectKey: 'project-a',
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
+    interactionScopeId: interactionScope,
+    mainAgentId: 'main-agent-interaction-deterministic',
+    executionEpoch: 2,
+    ownerId: 'memory-agent',
+    operations: ports.operations,
+  });
+
+  const result = await agent.analyze(analysis({
+    bindingRef: 'binding-interaction-deterministic',
+    taskId: undefined,
+    interactionScopeId: interactionScope,
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
+    sourceRefs: ['journal://project-a/interaction-evidence'],
+    sourceDigests: ['sha256:interaction-evidence'],
+  }));
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  assert.equal(result.value.curation.outcome, 'candidate');
+  assert.equal(ports.submissions.length, 1);
+  assert.deepEqual(events, []);
+});
+
+test('memory agent keeps interaction-bound deterministic operations failures waiting on the operations branch', async () => {
+  const events: string[] = [];
+  const ports = makeOperations({ failNovelty: true });
+  const interactionScope = 'interaction-deterministic-operations-failure';
+  const agent = new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  });
+  agent.bind({
+    bindingRef: 'binding-interaction-operations-failure',
+    projectKey: 'project-a',
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
+    interactionScopeId: interactionScope,
+    mainAgentId: 'main-agent-interaction-operations-failure',
+    executionEpoch: 2,
+    ownerId: 'memory-agent',
+    operations: ports.operations,
+  });
+
+  const result = await agent.analyze(analysis({
+    bindingRef: 'binding-interaction-operations-failure',
+    taskId: undefined,
+    interactionScopeId: interactionScope,
+    scope: { namespace: 'project', projectKey: 'project-a', organId: organ },
+    sourceRefs: ['journal://project-a/interaction-evidence'],
+    sourceDigests: ['sha256:interaction-evidence'],
+  }));
+
   assert.equal(result.status, 'waiting');
-  assert.equal(result.status === 'waiting' && result.issue.message, 'memory analysis provider requires a task-bound request');
+  assert.equal(result.status === 'waiting' && result.issue.code, 'memory-agent-analysis-unavailable');
+  assert.equal(result.status === 'waiting' && result.issue.message, 'analysis backend down');
+  assert.deepEqual(result.status === 'waiting' && result.issue.nextAction, { kind: 'wait', ref: 'memory-operations-ready' });
+  assert.equal(ports.submissions.length, 0);
   assert.deepEqual(events, []);
 });
 
