@@ -1388,7 +1388,7 @@ export class UiRuntimeService {
   }
 
   implicitSchedulingIssue(): UiRuntimeApiError | undefined {
-    return this.implicitTerminalIssue ?? this.implicitConsumerIssue;
+    return this.implicitConsumerIssue ?? this.implicitTerminalIssue;
   }
 
   async receiveExplicitInput(input: ExplicitInput, inputRevision = 1): Promise<string> {
@@ -1840,6 +1840,29 @@ export class UiRuntimeService {
   }
 
   private implicitSchedulingProjection(): import('../../../ui/contracts/runtime.js').RuntimeStatusProjection['implicitScheduling'] {
+    if (this.implicitConsumerIssue) {
+      const pendingState = this.requirementInbox.exportState();
+      const pendingDraftId = pendingState.pendingDraftIds[0];
+      const pending = pendingDraftId
+        ? pendingState.envelopes.find((envelope) => envelope.draftId === pendingDraftId)
+        : undefined;
+      const requirement = this.implicitConsumerRequirement ?? pending;
+      if (!requirement) return undefined;
+      return {
+        state: this.implicitConsumerIssue.code === 'implicit-admission.waiting'
+          ? 'waiting'
+          : this.implicitConsumerIssue.code === 'implicit-admission.blocked'
+            ? 'blocked'
+            : 'failed',
+        code: this.implicitConsumerIssue.code,
+        ownerId: this.implicitConsumerIssue.ownerId,
+        message: this.implicitConsumerIssue.message,
+        nextAction: this.implicitConsumerIssue.nextAction,
+        requirementId: requirement.requirementId,
+        draftId: requirement.draftId,
+        fifoSeq: requirement.fifoSeq,
+      };
+    }
     if (this.implicitTerminalIssue && this.implicitTerminalRequirement) {
       return {
         state: 'blocked',
@@ -1865,28 +1888,7 @@ export class UiRuntimeService {
         fifoSeq: terminalOutcome.fifoSeq,
       };
     }
-    if (!this.implicitConsumerIssue) return undefined;
-    const pendingState = this.requirementInbox.exportState();
-    const pendingDraftId = pendingState.pendingDraftIds[0];
-    const pending = pendingDraftId
-      ? pendingState.envelopes.find((envelope) => envelope.draftId === pendingDraftId)
-      : undefined;
-    const requirement = this.implicitConsumerRequirement ?? pending;
-    if (!requirement) return undefined;
-    return {
-      state: this.implicitConsumerIssue.code === 'implicit-admission.waiting'
-        ? 'waiting'
-        : this.implicitConsumerIssue.code === 'implicit-admission.blocked'
-          ? 'blocked'
-          : 'failed',
-      code: this.implicitConsumerIssue.code,
-      ownerId: this.implicitConsumerIssue.ownerId,
-      message: this.implicitConsumerIssue.message,
-      nextAction: this.implicitConsumerIssue.nextAction,
-      requirementId: requirement.requirementId,
-      draftId: requirement.draftId,
-      fifoSeq: requirement.fifoSeq,
-    };
+    return undefined;
   }
 
   private persistExplicitBrainState(): void {

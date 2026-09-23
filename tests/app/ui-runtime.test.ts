@@ -171,6 +171,33 @@ class PayloadCapturingFakeReplayPort extends FakeReplayExecutionRuntimePort {
   }
 }
 
+class FirstOperationGatedReplayPort extends FakeReplayExecutionRuntimePort {
+  private observed = 0;
+  readonly firstStarted: Promise<void>;
+  private firstStartedResolve!: () => void;
+
+  constructor(
+    options: ConstructorParameters<typeof FakeReplayExecutionRuntimePort>[0],
+    private readonly gate: Promise<void>,
+  ) {
+    super(options);
+    this.firstStarted = new Promise<void>((resolve) => {
+      this.firstStartedResolve = resolve;
+    });
+  }
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.observed += 1;
+    if (this.observed === 1) this.firstStartedResolve();
+    return super.start(input);
+  }
+
+  override async *observe(input: Parameters<ExecutionRuntimePort['observe']>[0]): AsyncIterable<ProviderEvent> {
+    if (this.observed === 1) await this.gate;
+    yield* super.observe(input);
+  }
+}
+
 async function waitFor(assertion: () => void, timeoutMs = 3000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
@@ -1868,6 +1895,68 @@ test('implicit consumer retires a confirmed append whose taskRef is absent and c
   });
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
+  assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+});
+
+test('active implicit admission state takes precedence over historical retirement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-retire-blocked-'));
+  let releaseOccupying!: () => void;
+  const occupyingGate = new Promise<void>((resolve) => {
+    releaseOccupying = resolve;
+  });
+  const port = new FirstOperationGatedReplayPort({ binding, stepDelayMs: 1 }, occupyingGate);
+  const service = serviceFor(root, port);
+
+  const missingTaskId = id('task', 'missing-task');
+  const confirmAppend = async (suffix: string, taskRef: TaskId): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `append to task ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `append to task ${suffix}`,
+      matchedTasks: [{ taskId: taskRef, relation: 'current', status: 'running' }],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'append',
+      proposal: `append to task ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  const laterTask = service.createTask({ title: 'later task', directive: 'later task' });
+  const occupying = service.createTask({ title: 'occupy capacity', directive: 'occupy capacity' });
+  service.startExecution(occupying.taskId, { prompt: 'occupy capacity' });
+  await port.firstStarted;
+  await confirmAppend('missing-task-head', missingTaskId);
+  await confirmAppend('later-append', laterTask.taskId);
+
+  service.startImplicitConsumer();
+  await waitFor(() => {
+    const state = service.status().implicitScheduling;
+    assert.equal(service.listTasks().counts.running, 1, `tasks=${service.listTasks().counts.total} implicit=${state?.code}`);
+    assert.equal(state?.code, 'implicit-admission.waiting');
+    assert.equal(state?.state, 'waiting');
+    assert.equal(state?.requirementId, 'requirement:draft-2:1');
+    assert.equal(state?.draftId, 'draft-2');
+  });
+  assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.waiting');
+
+  releaseOccupying();
+  await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
 });
 
