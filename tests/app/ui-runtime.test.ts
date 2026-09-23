@@ -303,6 +303,20 @@ class FailOnceProjectionJournal extends UiRuntimeJournal {
   }
 }
 
+// Fails every task-creation journal write while the flag is set, so a persistent
+// non-admission dispatch failure keeps a failed FIFO head while later confirmed
+// requirements remain queued behind it.
+class PersistentTaskCreateFailureJournal extends UiRuntimeJournal {
+  failTaskCreated = false;
+
+  override append(record: Parameters<UiRuntimeJournal['append']>[0]): void {
+    if (this.failTaskCreated && record.kind === 'task.created') {
+      throw new Error('task journal unavailable');
+    }
+    super.append(record);
+  }
+}
+
 test('ui runtime binds memory to the real operation identity and exposes deterministic recall evidence', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-memory-binding-'));
   const memory = new DeterministicMemoryBackend();
@@ -1685,6 +1699,176 @@ test('confirmed requirement is visibly queued before implicit dispatch', async (
   assert.equal(service.status().implicitScheduling, undefined);
 });
 
+test('a confirmed requirement behind a blocked FIFO head is projected as queued', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-behind-blocked-head-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  service.startImplicitConsumer();
+  service.markDisconnected();
+
+  const confirm = async (suffix: string): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `queued behind a blocked head ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `queued behind a blocked head ${suffix}`,
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'create',
+      proposal: `create the queued-behind requirement ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  await confirm('blocked-head');
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.code, 'implicit-admission.blocked'));
+  assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.blocked');
+  assert.equal(service.listTasks().counts.total, 0);
+
+  const behind = await confirm('queued-behind');
+  await waitFor(() => {
+    const scheduling = service.status().implicitScheduling;
+    assert.equal(scheduling?.state, 'queued', `scheduling=${JSON.stringify(scheduling)}`);
+    assert.equal(scheduling?.code, 'explicit-brain.requirement-queued');
+    assert.equal(scheduling?.draftId, 'draft-2');
+    assert.equal(scheduling?.fifoSeq, 2);
+  });
+  // The blocked head stays visible through the scheduling issue even though the
+  // queued backlog is what the status projection now reports.
+  assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.blocked');
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal((await service.inspectExplicitInteraction(behind)).state, 'confirmed');
+});
+
+test('the queued backlog behind a blocked head is observable from the HTTP status surface', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-http-surface-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    interactionRoot: join(root, 'interactions'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: 'project-ui-queued-http-surface',
+    workspaceRoot: root,
+    memory: testMemory('project-ui-queued-http-surface'),
+  });
+  try {
+    runtime.service.markDisconnected();
+    const confirm = async (suffix: string): Promise<void> => {
+      const interactionId = await runtime.service.receiveExplicitInput({
+        sourceRef: `ui:${suffix}`,
+        rawInput: `http surface queued backlog ${suffix}`,
+        channel: 'business',
+      });
+      await runtime.service.beginExplicitMatching(interactionId);
+      await runtime.service.recordExplicitMatch(interactionId, {
+        normalizedInput: `http surface queued backlog ${suffix}`,
+        matchedTasks: [],
+        knownFacts: [],
+      });
+      await runtime.service.proposeExplicitRequirement(interactionId, {
+        proposedIntent: 'create',
+        proposal: `create the http-surface requirement ${suffix}`,
+      });
+      const proposed = await runtime.service.inspectExplicitInteraction(interactionId);
+      assert.ok(proposed.draft);
+      await runtime.service.confirmExplicitRequirement({
+        draftId: proposed.draft!.draftId,
+        inputRevision: 1,
+        confirmationRef: `confirmation:${suffix}`,
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-09-22T00:00:00.000Z',
+        payloadRef: `asset://requirements/${suffix}`,
+      });
+    };
+
+    await confirm('blocked-head');
+    await waitFor(() => assert.equal(runtime.service.status().implicitScheduling?.code, 'implicit-admission.blocked'));
+    await confirm('queued-behind');
+
+    await waitFor(() => assert.equal(runtime.service.status().implicitScheduling?.state, 'queued'));
+    const statusResponse = await fetch(`${runtime.server.url}/api/runtime/status`);
+    const status = await statusResponse.json() as ReturnType<UiRuntimeService['status']>;
+    assert.equal(status.implicitScheduling?.state, 'queued');
+    assert.equal(status.implicitScheduling?.code, 'explicit-brain.requirement-queued');
+    assert.equal(status.implicitScheduling?.draftId, 'draft-2');
+    assert.equal(status.implicitScheduling?.fifoSeq, 2);
+    assert.equal(status.implicitScheduling?.message.includes('explicit-brain.requirement-retired'), false);
+    assert.equal(status.implicitScheduling?.message.includes('implicit-admission.blocked'), true);
+    const tasksResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    const tasks = await tasksResponse.json() as ReturnType<UiRuntimeService['listTasks']>;
+    assert.equal(tasks.counts.total, 0);
+  } finally {
+    await runtime.server.close();
+  }
+});
+
+test('a confirmed requirement is observable as queued before the implicit consumer drains it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-before-drain-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  service.startImplicitConsumer();
+
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:queued-before-drain',
+    rawInput: 'observe this requirement as queued before the consumer drains it',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'observe this requirement as queued before the consumer drains it',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the queued-before-drain requirement',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:queued-before-drain',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/queued-before-drain',
+  });
+
+  // Draining is a macrotask boundary, so the confirming response returns while
+  // the requirement is still a genuine FIFO entry.
+  assert.deepEqual(service.status().implicitScheduling, {
+    state: 'queued',
+    code: 'explicit-brain.requirement-queued',
+    ownerId: 'humanagent.runtime',
+    message: '已确认需求正在 execution 队列等待准入。',
+    nextAction: 'wait for implicit admission to dispatch the queued requirement',
+    requirementId: 'requirement:draft-1:1',
+    draftId: 'draft-1',
+    fifoSeq: 1,
+  });
+  assert.equal(service.listTasks().counts.total, 0);
+
+  await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
+  assert.equal(service.status().implicitScheduling, undefined);
+});
+
 test('observation projects implicit classification and queue admission for confirmed requirements after restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-observation-admission-'));
   const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
@@ -2411,6 +2595,73 @@ test('task creation journal failure retries without publishing a ghost task and 
   assert.equal(port.startPayloads.length, 1);
   assert.equal(restarted.listTasks().counts.total, 1);
   assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
+test('a failed dispatch head stays the primary status while a later confirmed requirement is queued', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-failed-head-backlog-'));
+  const journal = new PersistentTaskCreateFailureJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 20 });
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+  const confirm = async (suffix: string): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: `failed head backlog ${suffix}`,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput: `failed head backlog ${suffix}`,
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'create',
+      proposal: `create failed-head backlog ${suffix}`,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  service.startImplicitConsumer();
+  journal.failTaskCreated = true;
+  await confirm('failed-head');
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
+  const head = service.status().implicitScheduling;
+  assert.ok(head);
+  const headCode = head!.code;
+  const headMessage = head!.message;
+  const headNextAction = head!.nextAction;
+  assert.equal(head!.requirementId, 'requirement:draft-1:1');
+  assert.equal(head!.draftId, 'draft-1');
+  assert.equal(headCode, 'ui-runtime.unexpected');
+  assert.equal(headMessage, 'task journal unavailable');
+  assert.equal(headNextAction, 'inspect the runtime error and retry from a new operation');
+  assert.equal(port.startPayloads.length, 0);
+
+  const behind = await confirm('queued-behind-failed-head');
+  await waitFor(() => {
+    const scheduling = service.status().implicitScheduling;
+    assert.equal(scheduling?.state, 'failed', `scheduling=${JSON.stringify(scheduling)}`);
+    assert.equal(scheduling?.requirementId, 'requirement:draft-1:1');
+    assert.equal(scheduling?.draftId, 'draft-1');
+    assert.equal(scheduling?.code, headCode);
+    assert.equal(scheduling?.message, headMessage);
+    assert.equal(scheduling?.nextAction, headNextAction);
+  });
+  // The failed head remains the dominant truth; the queued draft-2 is not promoted
+  // to the status projection and the persistence failure is not hidden.
+  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal(port.startPayloads.length, 0);
+  assert.equal((await service.inspectExplicitInteraction(behind)).state, 'confirmed');
 });
 
 test('operation start journal failure retries from the durable dispatch intent without losing work after restart', async () => {

@@ -1210,19 +1210,44 @@ export class UiRuntimeService {
   }
 
   private queuedRequirementProjection(): RuntimeStatusProjection['implicitScheduling'] {
+    return this.projectQueuedRequirement(this.queuedPendingRequirements());
+  }
+
+  private queuedBacklogProjection(headIssue: UiRuntimeApiError | undefined): RuntimeStatusProjection['implicitScheduling'] {
+    const headDraftId = this.implicitConsumerRequirement?.draftId;
+    const queued = this.queuedPendingRequirements().filter((candidate) => candidate.draftId !== headDraftId);
+    const projection = this.projectQueuedRequirement(queued);
+    if (!projection) return undefined;
+    const head = this.implicitConsumerRequirement;
+    if (!headIssue || !head) return projection;
+    return {
+      ...projection,
+      message: `${projection.message} 前序需求 ${head.requirementId} 状态：${headIssue.code}。`,
+    };
+  }
+
+  private queuedPendingRequirements(): readonly QueuedRequirementObservation[] {
     const pendingState = this.requirementInbox.exportState();
-    const pendingDraftId = pendingState.pendingDraftIds[0];
-    const queued = pendingDraftId ? this.queuedRequirements.get(pendingDraftId) : undefined;
-    if (!queued) return undefined;
+    const queued: QueuedRequirementObservation[] = [];
+    for (const draftId of pendingState.pendingDraftIds) {
+      const observation = this.queuedRequirements.get(draftId);
+      if (observation) queued.push(observation);
+    }
+    return queued;
+  }
+
+  private projectQueuedRequirement(queued: readonly QueuedRequirementObservation[]): RuntimeStatusProjection['implicitScheduling'] {
+    const first = queued[0];
+    if (!first) return undefined;
     return {
       state: 'queued',
       code: 'explicit-brain.requirement-queued',
       ownerId: RUNTIME_OWNER,
-      message: `已确认需求正在 ${queued.queue} 队列等待准入。`,
+      message: `已确认需求正在 ${first.queue} 队列等待准入。`,
       nextAction: 'wait for implicit admission to dispatch the queued requirement',
-      requirementId: queued.requirementId,
-      draftId: queued.draftId,
-      fifoSeq: queued.fifoSeq,
+      requirementId: first.requirementId,
+      draftId: first.draftId,
+      fifoSeq: first.fifoSeq,
     };
   }
 
@@ -1977,12 +2002,15 @@ export class UiRuntimeService {
   private scheduleImplicitConsumption(): void {
     if (!this.implicitConsumerEnabled || this.implicitConsumerScheduled) return;
     this.implicitConsumerScheduled = true;
-    queueMicrotask(() => {
+    // Drain on the next macrotask, not the confirming request's microtask, so
+    // the confirming HTTP response is written while the requirement is still a
+    // genuine FIFO entry that status reads can observe as queued.
+    setTimeout(() => {
       this.implicitConsumerScheduled = false;
       void this.consumePendingRequirements().catch((error) => {
         this.implicitConsumerIssue = apiError(error);
       });
-    });
+    }, 0);
   }
 
   private async consumePendingRequirements(): Promise<void> {
@@ -2022,6 +2050,23 @@ export class UiRuntimeService {
   }
 
   private implicitSchedulingProjection(): import('../../../ui/contracts/runtime.js').RuntimeStatusProjection['implicitScheduling'] {
+    const terminalOutcomeAtHead = this.requirementInbox.exportState().terminalOutcomes?.at(-1);
+    const headIssue = this.implicitConsumerIssue ?? this.implicitTerminalIssue;
+    // Requirements behind a blocked, waiting, or retired FIFO head are still
+    // confirmed and undelivered; project that backlog instead of only the head.
+    // Any other head issue (for example a dispatch or persistence failure) is a
+    // real failure terminal: it must stay the primary projection with its own
+    // code/message/nextAction so the failure is never hidden by the queued
+    // projection of a later requirement, even when an earlier retirement left a
+    // stale terminal outcome behind.
+    const headIsBacklogTerminal = headIssue === undefined
+      || headIssue.code === 'implicit-admission.waiting'
+      || headIssue.code === 'implicit-admission.blocked'
+      || headIssue.code === 'explicit-brain.requirement-retired';
+    if (headIsBacklogTerminal && (headIssue || terminalOutcomeAtHead)) {
+      const queuedBacklog = this.queuedBacklogProjection(headIssue);
+      if (queuedBacklog) return queuedBacklog;
+    }
     if (this.implicitConsumerIssue) {
       const pendingState = this.requirementInbox.exportState();
       const pendingDraftId = pendingState.pendingDraftIds[0];
@@ -2057,17 +2102,16 @@ export class UiRuntimeService {
         fifoSeq: this.implicitTerminalRequirement.fifoSeq,
       };
     }
-    const terminalOutcome = this.requirementInbox.exportState().terminalOutcomes?.at(-1);
-    if (terminalOutcome) {
+    if (terminalOutcomeAtHead) {
       return {
         state: 'blocked',
         code: 'explicit-brain.requirement-retired',
         ownerId: RUNTIME_OWNER,
-        message: terminalOutcome.message,
+        message: terminalOutcomeAtHead.message,
         nextAction: 'inspect the retired requirement and resubmit against a current task',
-        requirementId: terminalOutcome.requirementId,
-        draftId: terminalOutcome.draftId,
-        fifoSeq: terminalOutcome.fifoSeq,
+        requirementId: terminalOutcomeAtHead.requirementId,
+        draftId: terminalOutcomeAtHead.draftId,
+        fifoSeq: terminalOutcomeAtHead.fifoSeq,
       };
     }
     return undefined;
