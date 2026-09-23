@@ -23,6 +23,17 @@ export interface RequirementInboxState {
   readonly nextFifoSeq: number;
   readonly pendingDraftIds: readonly string[];
   readonly envelopes: readonly RequirementEnvelope[];
+  readonly terminalOutcomes?: readonly RequirementTerminalOutcome[];
+}
+
+export interface RequirementTerminalOutcome {
+  readonly requirementId: string;
+  readonly draftId: string;
+  readonly fifoSeq: number;
+  readonly outcome: 'retired';
+  readonly code: string;
+  readonly message: string;
+  readonly retiredAt: string;
 }
 
 export class RequirementInbox {
@@ -31,6 +42,7 @@ export class RequirementInbox {
   private readonly requirementIds = new Set<string>();
   private readonly draftIds = new Set<string>();
   private readonly confirmedEnvelopes = new WeakSet<RequirementEnvelope>();
+  private readonly terminalOutcomes: RequirementTerminalOutcome[] = [];
   private nextFifoSeq = 1;
 
   get size(): number {
@@ -46,6 +58,7 @@ export class RequirementInbox {
       nextFifoSeq: this.nextFifoSeq,
       pendingDraftIds: this.pending.map((envelope) => envelope.draftId),
       envelopes: [...this.envelopes.values()].map((envelope) => structuredClone(envelope)),
+      terminalOutcomes: this.terminalOutcomes.map((outcome) => structuredClone(outcome)),
     };
   }
 
@@ -54,6 +67,7 @@ export class RequirementInbox {
     this.envelopes.clear();
     this.requirementIds.clear();
     this.draftIds.clear();
+    this.terminalOutcomes.length = 0;
     this.nextFifoSeq = state.nextFifoSeq;
     const byDraft = new Map<string, RequirementEnvelope>();
     for (const envelope of state.envelopes) {
@@ -72,6 +86,16 @@ export class RequirementInbox {
         condition: 'existing-pending-envelope',
       });
       this.pending.push(envelope);
+    }
+    for (const outcome of state.terminalOutcomes ?? []) {
+      if (this.terminalOutcomes.some((candidate) => candidate.requirementId === outcome.requirementId)) {
+        throw new RequirementInboxError('invalid-state', `terminal outcome is duplicated: ${outcome.requirementId}`, {
+          owner: 'runtime-coordinator',
+          nextAction: 'repair-the-ui-runtime-journal',
+          condition: 'unique-terminal-outcome',
+        });
+      }
+      this.terminalOutcomes.push(structuredClone(outcome));
     }
   }
 
@@ -249,6 +273,61 @@ export class RequirementInbox {
   async readNext(input: ReadInbox): Promise<RequirementEnvelope | null> {
     this.assertConsumer(input);
     return this.pending.shift() ?? null;
+  }
+
+  async retire(input: ReadInbox & {
+    readonly requirementId: string;
+    readonly code: string;
+    readonly message: string;
+    readonly retiredAt: string;
+  }): Promise<RequirementTerminalOutcome> {
+    this.assertConsumer(input);
+    const current = this.pending[0];
+    if (!current) {
+      throw new RequirementInboxError(
+        'empty-inbox',
+        'requirement inbox has no pending entry to retire',
+        {
+          owner: 'runtime-coordinator',
+          nextAction: 'wait-for-confirmed-requirement',
+          condition: 'pending-requirement',
+        },
+      );
+    }
+    if (current.requirementId !== input.requirementId) {
+      throw new RequirementInboxError(
+        'out-of-order-envelope',
+        `requirement inbox head is ${current.requirementId}`,
+        {
+          owner: 'runtime-coordinator',
+          nextAction: 'retire-the-fifo-head',
+          condition: current.requirementId,
+        },
+      );
+    }
+    if (!input.code || !input.code.trim() || !input.message || !input.message.trim() || !Number.isFinite(Date.parse(input.retiredAt))) {
+      throw new RequirementInboxError(
+        'invalid-terminal-outcome',
+        'retired requirement requires code, message, and retiredAt',
+        {
+          owner: 'runtime-coordinator',
+          nextAction: 'repair-the-terminal-outcome',
+          condition: 'retirement-evidence',
+        },
+      );
+    }
+    this.pending.shift();
+    const outcome: RequirementTerminalOutcome = {
+      requirementId: current.requirementId,
+      draftId: current.draftId,
+      fifoSeq: current.fifoSeq,
+      outcome: 'retired',
+      code: input.code,
+      message: input.message,
+      retiredAt: input.retiredAt,
+    };
+    this.terminalOutcomes.push(outcome);
+    return structuredClone(outcome);
   }
 
   private assertConsumer(input: ReadInbox): void {

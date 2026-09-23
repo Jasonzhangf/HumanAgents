@@ -336,6 +336,7 @@ test('requirement inbox preserves FIFO and idempotently recovers the same confir
     draftId: first.draftId,
     fifoSeq: first.fifoSeq,
   });
+
   assert.deepEqual(inbox.find(first.draftId), first);
   const conflictingEnvelope: RequirementEnvelope = {
     ...first,
@@ -384,4 +385,32 @@ test('requirement inbox preserves FIFO and idempotently recovers the same confir
   assert.deepEqual(await inbox.readNext({ consumerId: 'coordinator-1' }), second);
   assert.equal(await inbox.readNext({ consumerId: 'coordinator-1' }), null);
   assert.equal(inbox.size, 0);
+});
+
+test('requirement inbox retires the FIFO head with typed terminal evidence', async () => {
+  const inbox = new RequirementInbox();
+  const intake = new ExplicitIntake();
+  const first = await createConfirmedEnvelope(intake, inbox, 'requirement-1');
+  const second = await createConfirmedEnvelope(intake, inbox, 'requirement-2');
+  await inbox.append(first);
+  await inbox.append(second);
+
+  const outcome = await inbox.retire({
+    consumerId: 'coordinator-1',
+    requirementId: first.requirementId,
+    code: 'task.not.found',
+    message: 'confirmed append target is not in the local task store',
+    retiredAt: '2026-09-22T00:00:00.000Z',
+  });
+  assert.deepEqual(outcome, {
+    requirementId: first.requirementId,
+    draftId: first.draftId,
+    fifoSeq: first.fifoSeq,
+    outcome: 'retired',
+    code: 'task.not.found',
+    message: 'confirmed append target is not in the local task store',
+    retiredAt: '2026-09-22T00:00:00.000Z',
+  });
+  assert.deepEqual(await inbox.readNext({ consumerId: 'coordinator-1' }), second);
+  assert.equal(inbox.exportState().terminalOutcomes?.length, 1);
 });
