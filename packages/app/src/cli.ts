@@ -21,6 +21,7 @@ import {
   composeAgentDriver,
   composeMemoryRuntime,
   configureBuiltinPromptRoot,
+  filesystemTaskEvidence,
   openRuntime,
   readCheckpointEvidence,
   readCommittedCheckpoint,
@@ -802,6 +803,9 @@ export async function main(args: readonly string[]): Promise<void> {
         },
       },
       checkpointEvidence: uiMemoryEvidence(checkpointRoot, mode),
+      taskEvidence: filesystemTaskEvidence({
+        journalPath: join(checkpointRoot, mode, 'ui-runtime-journal.jsonl'),
+      }),
     });
     const plugins = servePlugins(mode, {
       executionPort: port,
