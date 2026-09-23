@@ -64,6 +64,118 @@ export interface MemoryRuntimeInput extends Omit<MemoryCompositionInput, 'paths'
   readonly paths: RuntimePaths;
   readonly configuration: LoadedConfiguration;
   readonly checkpointEvidence?: MemoryRuntimeCheckpointEvidencePort;
+  readonly taskEvidence?: MemoryRuntimeTaskEvidencePort;
+}
+
+export interface MemoryRuntimeTaskEvidence {
+  readonly directive: string;
+  readonly input: string;
+  readonly output: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface MemoryRuntimeTaskEvidencePort {
+  readTask(input: {
+    readonly taskId: import('../../contracts/src/index.js').TaskId;
+    readonly scope: ScopeRef;
+  }): Promise<MemoryRuntimeTaskEvidence>;
+}
+
+/**
+ * Reads task directive/input/output evidence from the app-owned UI runtime
+ * journal. Only the business content a reviewer needs is carried; no control
+ * identity (operation, assignment, retry, health, continuation) is read.
+ *
+ * The reader is bound to the checkpoint's execution identity: the directive is
+ * the revision in effect when that cycle started, and input/output come only
+ * from that cycle's own operation records. Later task edits and later
+ * executions therefore cannot rewrite the evidence of an earlier checkpoint,
+ * so the published digest stays resolvable across delayed consumption and
+ * recovery.
+ */
+export function filesystemTaskEvidence(input: {
+  readonly journalPath: string;
+}): MemoryRuntimeTaskEvidencePort {
+  return {
+    async readTask({ taskId, scope }) {
+      const cycleId = scope.cycleId;
+      if (cycleId === undefined) {
+        throw new AppLifecycleError(
+          'memory-task-evidence-invalid',
+          `task evidence scope is missing the execution cycle for task ${taskId.value}`,
+          'publish task evidence under the committed checkpoint execution scope',
+          OWNER,
+        );
+      }
+      let content: string;
+      try {
+        content = await readFile(input.journalPath, 'utf8');
+      } catch (error) {
+        throw new AppLifecycleError(
+          'memory-task-evidence-missing',
+          `task evidence journal is unavailable for task ${taskId.value}: ${error instanceof Error ? error.message : String(error)}`,
+          'ensure the serve UI runtime has written its task journal before publishing a task memory boundary',
+          OWNER,
+        );
+      }
+      let latestDirective = '';
+      let directive = '';
+      let executionOperationId: string | undefined;
+      let taskInput: string | undefined;
+      let output = '';
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let record: Record<string, unknown>;
+        try {
+          record = JSON.parse(trimmed) as Record<string, unknown>;
+        } catch {
+          throw new AppLifecycleError(
+            'memory-task-evidence-corrupt',
+            `task evidence journal is corrupt for task ${taskId.value}`,
+            'preserve the UI runtime journal and repair its committed history',
+            OWNER,
+          );
+        }
+        if (record.kind === 'task.created' || record.kind === 'task.updated') {
+          if ((record.taskId as { readonly value?: string } | undefined)?.value !== taskId.value) continue;
+          if (typeof record.directive === 'string') latestDirective = record.directive;
+          continue;
+        }
+        if (record.kind === 'operation.started') {
+          if (executionOperationId !== undefined) continue;
+          if ((record.taskId as { readonly value?: string } | undefined)?.value !== taskId.value) continue;
+          if ((record.cycleId as { readonly value?: string } | undefined)?.value !== cycleId.value) continue;
+          if (scope.operationId !== undefined
+            && (record.operationId as { readonly value?: string } | undefined)?.value !== scope.operationId.value) continue;
+          executionOperationId = (record.operationId as { readonly value?: string } | undefined)?.value;
+          taskInput = typeof record.input === 'string' ? record.input : undefined;
+          // The directive this execution actually ran under, not the latest edit.
+          directive = latestDirective;
+          continue;
+        }
+        if (record.kind !== 'operation.event' || executionOperationId === undefined) continue;
+        if ((record.operationId as { readonly value?: string } | undefined)?.value !== executionOperationId) continue;
+        if (typeof record.taskOutput === 'string' && record.taskOutput.trim()) {
+          output = record.taskOutput;
+        }
+      }
+      if (executionOperationId === undefined || taskInput === undefined) {
+        throw new AppLifecycleError(
+          'memory-task-evidence-unresolved',
+          `task evidence execution is unavailable for cycle ${cycleId.value} of task ${taskId.value}`,
+          'ensure the serve UI runtime has written that execution to its task journal before publishing its memory boundary',
+          OWNER,
+        );
+      }
+      return {
+        directive,
+        input: taskInput,
+        output,
+        evidenceRefs: [],
+      };
+    },
+  };
 }
 
 export interface MemoryRuntimeCheckpointEvidencePort {
@@ -555,6 +667,81 @@ function checkpointEvidenceRef(checkpoint: Checkpoint): EvidenceRef {
   };
 }
 
+function taskEvidenceRef(input: {
+  readonly evidenceId: string;
+  readonly locator: string;
+  readonly text: string;
+  readonly scope: ScopeRef;
+}): EvidenceRef {
+  return {
+    evidenceId: id('evidence', input.evidenceId),
+    kind: 'operation',
+    source: OWNER,
+    locator: input.locator,
+    digest: `sha256:${createHash('sha256').update(input.text).digest('hex')}`,
+    scope: input.scope,
+  };
+}
+
+interface TaskEvidenceContent {
+  readonly directive: string;
+  readonly input: string;
+  readonly output: string;
+}
+
+function taskEvidenceContent(evidence: MemoryRuntimeTaskEvidence): string {
+  return JSON.stringify({
+    directive: evidence.directive,
+    input: evidence.input,
+    output: evidence.output,
+  });
+}
+
+function taskDirectiveFromTaskEvidence(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as Partial<TaskEvidenceContent>;
+    return typeof parsed.directive === 'string' ? parsed.directive : '';
+  } catch {
+    return '';
+  }
+}
+
+function firstLine(value: string): string {
+  return value.trim().split('\n')[0] ?? '';
+}
+
+async function readTaskEvidenceText(input: {
+  readonly taskEvidence: MemoryRuntimeTaskEvidencePort | undefined;
+  readonly evidence: EvidenceRef;
+}): Promise<{ readonly sourceRef: string; readonly sourceDigest: string; readonly text: string }> {
+  if (input.taskEvidence === undefined) {
+    throw new AppLifecycleError(
+      'memory-task-evidence-unavailable',
+      `task evidence reader is not configured: ${input.evidence.locator}`,
+      'compose the runtime memory boundary with the UI runtime task journal reader',
+      OWNER,
+    );
+  }
+  const taskId = input.evidence.scope.taskId;
+  if (taskId === undefined) {
+    throw new AppLifecycleError(
+      'memory-task-evidence-invalid',
+      `task evidence scope is missing a task id: ${input.evidence.locator}`,
+      'publish task evidence under the committed checkpoint task scope',
+      OWNER,
+    );
+  }
+  const task = await input.taskEvidence.readTask({
+    taskId,
+    scope: input.evidence.scope,
+  });
+  return {
+    sourceRef: input.evidence.locator,
+    sourceDigest: input.evidence.digest!,
+    text: taskEvidenceContent(task),
+  };
+}
+
 function closureEvidenceRef(closure: ClosureRecord, scope: ScopeRef): EvidenceRef {
   const closureId = 'closureId' in closure ? closure.closureId : closure.deadEndRef;
   const evidenceId = `checkpoint-closure-${createHash('sha256').update(closureId).digest('hex').slice(0, 24)}`;
@@ -858,7 +1045,9 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     barrierIntents: journal,
   };
   const explicitSubmissionEvidenceSource: MemoryEvidenceSourcePort = input.evidenceSource ?? {
-    read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
+    read: async ({ evidence }) => evidence.locator.startsWith('humanagent://task/')
+      ? readTaskEvidenceText({ taskEvidence: input.taskEvidence, evidence })
+      : checkpointEvidence.readEvidence({ evidence }),
   };
   let recoverPendingSubmissions: (() => Promise<void>) | undefined;
   const projectSourceUpdatePublisher = {
@@ -905,9 +1094,10 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
         await publishEvent(ports, { publisherId: PUBLISHER_ID, event });
       },
     },
-    evidenceSource: input.evidenceSource ?? {
-      read: async ({ evidence }) => checkpointEvidence.readEvidence({ evidence }),
-    },
+    // Analysis admission reads every committed boundary ref through this
+    // source, so a task-scoped boundary must resolve its task evidence here
+    // too; the task reader is the only owner of `humanagent://task/` locators.
+    evidenceSource: explicitSubmissionEvidenceSource,
     externalOperations: journal,
     state: journal,
     projectSourceUpdatePublisher,
@@ -1125,13 +1315,48 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
           handler: taskHandler,
         });
         const primaryEvidence = checkpointEvidenceRef(committed.checkpoint);
+        const executionScope = committed.checkpoint.scope;
+        const cycleId = executionScope.cycleId;
+        if (cycleId === undefined) {
+          throw new AppLifecycleError(
+            'memory-boundary-task-cycle-missing',
+            `checkpoint ${committed.checkpoint.id.value} cannot bind task evidence without its execution cycle`,
+            'commit the checkpoint with its cycle scope before publishing task memory analysis',
+            OWNER,
+          );
+        }
+        // The locator and scope carry the exact execution that produced this
+        // checkpoint, so a later task edit or a later execution can neither
+        // resolve nor overwrite this boundary's evidence.
+        const executionSuffix = executionScope.operationId === undefined
+          ? `cycle/${cycleId.value}`
+          : `cycle/${cycleId.value}/operation/${executionScope.operationId.value}`;
+        const taskEvidenceText = input.taskEvidence === undefined
+          ? undefined
+          : taskEvidenceContent(await input.taskEvidence.readTask({
+              taskId: taskBinding.taskId,
+              scope: executionScope,
+            }));
+        const taskEvidence = taskEvidenceText === undefined
+          ? undefined
+          : taskEvidenceRef({
+              evidenceId: `task-${taskBinding.taskId.value}-${cycleId.value}`,
+              locator: `humanagent://task/${taskBinding.taskId.value}/${executionSuffix}`,
+              text: taskEvidenceText,
+              scope: executionScope,
+            });
+        const directive = taskEvidenceText === undefined
+          ? undefined
+          : firstLine(taskDirectiveFromTaskEvidence(taskEvidenceText));
         const event = createMemoryAnalysisRequestedEvent({
           messageId: `checkpoint-${committed.checkpoint.id.value}-${trigger}`,
           streamId: taskConsumer.streamIds[0]!,
           scope: taskConsumer.scope,
           occurredAt: new Date().toISOString(),
-          summary: `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}`,
-          evidenceRefs: [primaryEvidence],
+          summary: directive === undefined || directive.length === 0
+            ? `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}`
+            : `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}: ${directive}`,
+          evidenceRefs: taskEvidence === undefined ? [primaryEvidence] : [primaryEvidence, taskEvidence],
           executionEpoch: committed.checkpoint.executionEpoch,
           trigger,
           requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',

@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
-import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -5072,12 +5072,11 @@ test('memory composition connects an injected memory driver to checkpoint analys
     const consumed = await memory.consume();
     assert.equal(consumed.committed.length, 1);
     assert.equal(consumed.committed[0]?.disposition, 'applied');
-    assert.deepEqual(driver.events.map((event) => event.split(':')[0]), [
-      'start',
-      'submit',
-      'observe',
-      'settle',
-    ]);
+    assert.deepEqual(
+      driver.events.map((event) => event.split(':')[0]),
+      ['start', 'submit', 'observe', 'settle'],
+      JSON.stringify((await memory.reviewState()).analysis),
+    );
     const feedback = await memory.journal.readEvents({
       streamId: `memory-feedback:${taskId.value}`,
       afterSequence: 0,
@@ -5123,7 +5122,7 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
   await mkdir(auditPromptRoot, { recursive: true });
   await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
   const driver = new MemoryAnalysisDriver();
-  const checkpointRoot = join(paths.controlRoot, 'checkpoints', 'ui-runtime');
+  const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
   const checkpointFile = (taskId: ReturnType<typeof id<'task'>>, cycleId: ReturnType<typeof id<'cycle'>>) =>
     join(checkpointRoot, 'fake', `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
   const memory = await composeMemoryRuntime({
@@ -5136,6 +5135,9 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
     auditPromptRef: 'project-memory-audit',
     autoUpdate: false,
     driverFor: () => driver,
+    taskEvidence: filesystemTaskEvidence({
+      journalPath: join(paths.checkpointsRoot, 'ui-runtime', 'fake', 'ui-runtime-journal.jsonl'),
+    }),
     checkpointEvidence: {
       readCommitted: ({ checkpoint }) => readCommittedCheckpoint({
         filePath: checkpointFile(checkpoint.scope.taskId!, checkpoint.scope.cycleId!),
@@ -5175,7 +5177,8 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
       return { attentionId: input.attentionId, delivered: true };
     },
   };
-  const journal = new UiRuntimeJournal(join(paths.controlRoot, 'ui-entry-journal.jsonl'));
+  const journalPath = join(checkpointRoot, 'fake', 'ui-runtime-journal.jsonl');
+  const journal = new UiRuntimeJournal(journalPath);
   const service = new UiRuntimeService({
     mode: 'fake',
     organId: id('organ', 'humanagent-ui'),
@@ -5213,15 +5216,20 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
     },
   });
   try {
-    const task = service.createTask({ title: 'serve entry task-bound memory' });
+    const task = service.createTask({
+      title: 'serve entry task-bound memory',
+      directive: 'teach the task-bound memory consumer a reusable serve lesson',
+    });
     service.startExecution(task.taskId, { prompt: 'complete through the serve entry boundary' });
-    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
-    assert.deepEqual(driver.events.map((event) => event.split(':')[0]), [
-      'start',
-      'submit',
-      'observe',
-      'settle',
-    ]);
+    await waitFor(() => {
+      const dashboard = service.taskDashboard(task.taskId);
+      assert.equal(dashboard.state, 'succeeded', `blocked: ${JSON.stringify(dashboard.error)}`);
+    });
+    await waitFor(() => assert.deepEqual(
+      driver.events.map((event) => event.split(':')[0]),
+      ['start', 'submit', 'observe', 'settle'],
+      'task-bound memory analysis did not reach the provider driver',
+    ));
     const reviewState = await memory.reviewState();
     assert.equal(reviewState.analysis.state, 'succeeded');
     assert.equal(reviewState.candidates.length, 1);
@@ -5233,6 +5241,187 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
     });
     assert.equal(taskEvents.length, 1);
     assert.equal(taskEvents[0]?.kind, 'memory.analysis.requested');
+    assert.match(taskEvents[0]?.summary ?? '', /teach the task-bound memory consumer a reusable serve lesson/);
+    assert.equal(
+      taskEvents[0]?.evidenceRefs.some((ref) => ref.locator.startsWith('humanagent://task/')),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('task-bound memory evidence stays bound to its own execution across delayed consumption', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-task-evidence-binding-');
+  await writeFile(join(workspace, 'AGENTS.md'), '# Task evidence binding\n', 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const auditPromptRoot = join(paths.controlRoot, 'memory-audit');
+  await mkdir(auditPromptRoot, { recursive: true });
+  await writeFile(join(auditPromptRoot, 'project-memory-audit.md'), '# Memory audit\n', 'utf8');
+  const originalDirective = 'record the original task-bound directive';
+  const originalInput = 'complete the first execution before any task edit';
+  const editedDirective = 'the directive was edited after the first execution';
+  const editedInput = 'complete a later execution the earlier checkpoint never saw';
+  const latestDirective = 'a third edit lands between publish and consume';
+  const driver = new MemoryAnalysisDriver();
+  const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
+  const journalPath = join(checkpointRoot, 'fake', 'ui-runtime-journal.jsonl');
+  const checkpointFile = (taskId: ReturnType<typeof id<'task'>>, cycleId: ReturnType<typeof id<'cycle'>>) =>
+    join(checkpointRoot, 'fake', `task-${taskId.value}-cycle-${cycleId.value}.jsonl`);
+  const taskEvidence = filesystemTaskEvidence({ journalPath });
+  const memory = await composeMemoryRuntime({
+    paths,
+    configuration,
+    workspaceCwd: paths.workspaceCwd,
+    sessionsRoot: paths.sessionsRoot,
+    runNotesRoot: paths.runNotesRoot,
+    auditPromptRoot,
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driverFor: () => driver,
+    taskEvidence,
+    checkpointEvidence: {
+      readCommitted: ({ checkpoint }) => readCommittedCheckpoint({
+        filePath: checkpointFile(checkpoint.scope.taskId!, checkpoint.scope.cycleId!),
+        scope: checkpoint.scope,
+        checkpointId: checkpoint.id,
+      }),
+      readEvidence: ({ evidence }) => readCheckpointEvidence({
+        filePath: checkpointFile(evidence.scope.taskId!, evidence.scope.cycleId!),
+        scope: evidence.scope,
+        evidence,
+      }),
+    },
+    binding: {
+      bindingRef: `memory-ui:${paths.projectKey}`,
+      projectKey: paths.projectKey,
+      executionEpoch: 1,
+      scope: {
+        namespace: 'project',
+        projectKey: paths.projectKey,
+        organId: id('organ', 'humanagent-ui'),
+      },
+      interactionScopeId: `runtime:${paths.projectKey}`,
+      mainAgentId: 'humanagent-ui',
+      actor: {
+        actorId: 'memory-agent',
+        roleId: 'memory',
+        permissions: ['memory.read', 'memory.propose'],
+        projectKey: paths.projectKey,
+      },
+    },
+  });
+  const attention: AttentionPort = {
+    async publish(input) {
+      return { attentionId: input.attentionId, delivered: true };
+    },
+    async resolve(input) {
+      return { attentionId: input.attentionId, delivered: true };
+    },
+  };
+  // Boundary publication is deferred so the task can be edited and re-executed
+  // before the earlier checkpoint's evidence is consumed.
+  const deferred: { checkpoint: Checkpoint; recordDigest: string }[] = [];
+  const journal = new UiRuntimeJournal(journalPath);
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId: id('organ', 'humanagent-ui'),
+    binding: fakeExecutionBinding(),
+    port: new FakeReplayExecutionRuntimePort({ binding: fakeExecutionBinding(), stepDelayMs: 1 }),
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(checkpointFile(taskId, cycleId)),
+    attentionPort: attention,
+    providerState: 'ready',
+    explicitBrainInterpreter: {
+      async interpret() {
+        throw new Error('explicit brain is not used in this test');
+      },
+    },
+    journal,
+    closurePort: journal,
+    memory: {
+      coordinator: memory.composition.coordinator,
+      backend: memory.composition.backend,
+      projectKey: paths.projectKey,
+      interaction: memory.composition.interaction,
+      bindingRef: memory.composition.bindingRef,
+      roleId: 'review',
+      reviewState: memory.reviewState,
+      checkpointBoundary: {
+        publish: async ({ checkpoint, recordDigest }) => {
+          deferred.push({ checkpoint, recordDigest: recordDigest! });
+        },
+      },
+    },
+  });
+  try {
+    const task = service.createTask({ title: 'task evidence binding', directive: originalDirective });
+    service.startExecution(task.taskId, { prompt: originalInput });
+    await waitFor(() => assert.equal(
+      service.taskDashboard(task.taskId).state,
+      'succeeded',
+      `first execution blocked: ${JSON.stringify(service.taskDashboard(task.taskId).error)}`,
+    ));
+    assert.equal(deferred.length, 1);
+    const firstCheckpoint = deferred[0]!.checkpoint;
+
+    service.updateTask(task.taskId, { directive: editedDirective });
+    service.startExecution(task.taskId, { prompt: editedInput });
+    await waitFor(() => assert.equal(
+      service.taskDashboard(task.taskId).state,
+      'succeeded',
+      `second execution blocked: ${JSON.stringify(service.taskDashboard(task.taskId).error)}`,
+    ));
+    assert.equal(deferred.length, 2);
+    assert.equal(deferred[1]!.checkpoint.scope.cycleId?.value !== firstCheckpoint.scope.cycleId?.value, true);
+
+    // Publish the earlier checkpoint only now, then edit the task again so the
+    // mutable journal holds different content than the published evidence.
+    await memory.boundaryPublisher.publishTask({
+      checkpoint: firstCheckpoint,
+      recordDigest: deferred[0]!.recordDigest,
+      trigger: 'completion',
+    });
+    service.updateTask(task.taskId, { directive: latestDirective });
+    const consumed = await memory.consume();
+    assert.equal(consumed.retries.length, 0, JSON.stringify(consumed.retries));
+    assert.equal(consumed.dlq.length, 0, JSON.stringify(consumed.dlq));
+    const taskStreamId = `memory-boundaries:task:${task.taskId.value}`;
+    const applied = consumed.committed.filter((receipt) => receipt.streamId === taskStreamId);
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0]?.disposition, 'applied', applied[0]?.failureRef);
+
+    const taskEvents = await memory.journal.readEvents({
+      streamId: taskStreamId,
+      afterSequence: 0,
+      limit: 10,
+    });
+    assert.equal(taskEvents.length, 1);
+    assert.match(taskEvents[0]?.summary ?? '', /record the original task-bound directive/);
+    const evidenceRef = taskEvents[0]?.evidenceRefs.find((ref) => ref.locator.startsWith('humanagent://task/'));
+    if (!evidenceRef) throw new Error('task-bound evidence ref is missing');
+    // The locator and scope carry the producing execution, not just the task.
+    assert.match(evidenceRef.locator, /\/cycle\//);
+    assert.equal(evidenceRef.scope.cycleId?.value, firstCheckpoint.scope.cycleId?.value);
+
+    // The published digest still resolves to the first execution's content, so
+    // delayed consumption and recovery cannot re-anchor it to later state.
+    const reread = await taskEvidence.readTask({ taskId: task.taskId, scope: evidenceRef.scope });
+    const rereadText = JSON.stringify({ directive: reread.directive, input: reread.input, output: reread.output });
+    assert.equal(`sha256:${createHash('sha256').update(rereadText).digest('hex')}`, evidenceRef.digest);
+    assert.equal(reread.directive, originalDirective);
+    assert.equal(reread.input, originalInput);
+    assert.equal(rereadText.includes(editedDirective), false);
+    assert.equal(rereadText.includes(latestDirective), false);
+    assert.equal(rereadText.includes(editedInput), false);
+
+    const admitted = await memory.composition.backend.inspect({ sourceRef: evidenceRef.locator });
+    assert.equal(admitted.sourceDigest, evidenceRef.digest);
+    assert.equal(admitted.text, rereadText);
+    const reviewState = await memory.reviewState();
+    assert.equal(reviewState.analysis.state, 'succeeded');
+    assert.equal(reviewState.candidates.length, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

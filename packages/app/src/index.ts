@@ -132,8 +132,13 @@ export { createHandOperationRuntime, createToolExecutionGateway, deterministicIn
 export type { ToolExecutionGatewayAssemblyInput } from './tool-execution-gateway.js';
 export { createResponsesFileToolExecutor, RESPONSES_FILE_READ_TOOL } from './provider-tool-execution.js';
 export type { ResponsesFileToolExecutor } from './provider-tool-execution.js';
-export { composeMemoryRuntime } from './memory-runtime.js';
-export type { MemoryRuntime, MemoryRuntimeInput } from './memory-runtime.js';
+export { composeMemoryRuntime, filesystemTaskEvidence } from './memory-runtime.js';
+export type {
+  MemoryRuntime,
+  MemoryRuntimeInput,
+  MemoryRuntimeTaskEvidence,
+  MemoryRuntimeTaskEvidencePort,
+} from './memory-runtime.js';
 export { createM3Assembly } from './m3-assembly.js';
 export type { M3Assembly, M3AssemblyOptions } from './m3-assembly.js';
 export { createServeRuntimeComposition, serveRuntimeOwnerId } from './serve-runtime.js';
