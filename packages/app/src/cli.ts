@@ -960,7 +960,11 @@ export async function main(args: readonly string[]): Promise<void> {
                       'humanagent.cli',
                     );
                   }
-                  await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+                  if (checkpoint.scope.taskId !== undefined) {
+                    await memoryRuntime.boundaryPublisher.publishTask({ checkpoint, recordDigest, trigger });
+                  } else {
+                    await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+                  }
                   await memoryRuntime.consume();
                 },
               },

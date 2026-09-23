@@ -85,6 +85,24 @@ export interface MemoryAnalysisEventConsumerOptions {
   readonly retryOwnerRef?: string;
 }
 
+export interface MemoryTaskAnalysisWakeBinding {
+  readonly bindingRef: string;
+  readonly projectKey: string;
+  readonly executionEpoch: number;
+  readonly scope: CanonicalMemoryScope & { readonly namespace: 'project'; readonly taskId: TaskId };
+  readonly taskId: TaskId;
+  readonly mainAgentId: string;
+  readonly actor: MemoryActorContext;
+}
+
+export interface MemoryTaskAnalysisEventConsumerOptions {
+  readonly binding: MemoryTaskAnalysisWakeBinding;
+  readonly admission: MemoryAnalysisAdmissionPort;
+  readonly now?: () => string;
+  readonly retryDelayMs?: number;
+  readonly retryOwnerRef?: string;
+}
+
 const MEMORY_ADMISSION_ATTENTION_DISPOSITION: Record<MemoryAgentIssue['code'], 'retry' | 'reject'> = {
   'memory-agent-binding-missing': 'reject',
   'memory-agent-binding-mismatch': 'reject',
@@ -227,6 +245,30 @@ function validateBinding(binding: MemoryAnalysisWakeBinding): MemoryAgentOutcome
     return eventIssue('memory-agent-event-invalid', 'memory analysis interaction scope id is required', 'memory-binding');
   }
   if (binding.taskId !== undefined && !sameId(binding.taskId, binding.scope.taskId)) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis task binding does not match its memory scope', 'memory-binding');
+  }
+  return null;
+}
+
+function validateTaskBinding(binding: MemoryTaskAnalysisWakeBinding): MemoryAgentOutcome<never> | null {
+  if (!binding.bindingRef.trim()) return eventIssue('memory-agent-event-invalid', 'memory analysis binding ref is required', 'memory-binding');
+  if (!binding.projectKey.trim()) return eventIssue('memory-agent-event-invalid', 'memory analysis project key is required', 'memory-binding');
+  if (!Number.isSafeInteger(binding.executionEpoch) || binding.executionEpoch < 1) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding execution epoch must be positive', 'memory-binding');
+  }
+  if (!binding.mainAgentId.trim()) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis binding main agent id is required', 'memory-binding');
+  }
+  if (binding.actor.projectKey !== binding.projectKey) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis actor belongs to another project', 'memory-permission');
+  }
+  if (!binding.actor.permissions.includes('memory.propose')) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis actor lacks memory.propose permission', 'memory-permission');
+  }
+  if (binding.scope.projectKey !== binding.projectKey) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis binding scope belongs to another project', 'memory-binding');
+  }
+  if (!sameId(binding.taskId, binding.scope.taskId)) {
     return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis task binding does not match its memory scope', 'memory-binding');
   }
   return null;
@@ -696,6 +738,150 @@ export function memoryAnalysisRequestFromEvent(
       executionEpoch: event.executionEpoch,
       trigger: payload.trigger,
     },
+  };
+}
+
+export function memoryTaskAnalysisRequestFromEvent(
+  event: EventRecord,
+  binding: MemoryTaskAnalysisWakeBinding,
+): MemoryAgentOutcome<MemoryAnalysisRequest> {
+  const bindingIssue = validateTaskBinding(binding);
+  if (bindingIssue) return bindingIssue;
+  if (event.kind !== MEMORY_ANALYSIS_REQUESTED_KIND) {
+    return eventIssue('memory-agent-event-unsupported', `unsupported memory analysis event: ${event.kind ?? 'missing'}`, 'memory-analysis-event');
+  }
+  if (event.class !== 'data') {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis request must be a data event', 'memory-analysis-event');
+  }
+  if (!safeOperationSegment(event.messageId)) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis message id cannot form a stable operation id', 'memory-analysis-event');
+  }
+  if (event.executionEpoch === undefined || event.executionEpoch !== binding.executionEpoch) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis event execution epoch does not match the wake binding', 'memory-analysis-event');
+  }
+  if (!scopeMatchesEvent(binding.scope, event.scope)) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis event scope does not match the wake binding', 'memory-analysis-scope');
+  }
+  if (!sameId(binding.taskId, event.scope.taskId)) {
+    return eventIssue('memory-agent-event-scope-mismatch', 'memory analysis event task does not match the wake binding', 'memory-analysis-scope');
+  }
+  const sources = evidenceSources(event);
+  if (!sources) {
+    return eventIssue('memory-agent-event-evidence-missing', 'memory analysis event requires evidence locators and digests', 'memory-analysis-evidence');
+  }
+  const payload = payloadRecord(event.payload);
+  const allowed = new Set(['trigger', 'requestedKind', 'candidateCategory', 'sessionRef', 'projectPatch', 'analysisInputs']);
+  const unknown = Object.keys(payload).find((key) => !allowed.has(key));
+  if (unknown) {
+    return eventIssue('memory-agent-event-invalid', `memory analysis event payload contains unsupported key: ${unknown}`, 'memory-analysis-event');
+  }
+  if (!isTrigger(payload.trigger)) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis event trigger is invalid', 'memory-analysis-event');
+  }
+  if (payload.sessionRef !== undefined && (typeof payload.sessionRef !== 'string' || !payload.sessionRef.trim())) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis session ref must be a non-empty string', 'memory-analysis-event');
+  }
+  const kind = requestedKind(payload, payload.trigger);
+  if (payload.requestedKind !== undefined && payload.requestedKind !== kind) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis requested kind is invalid', 'memory-analysis-event');
+  }
+  const category = candidateCategory(payload.candidateCategory);
+  if (category === null) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis candidate category is invalid', 'memory-analysis-event');
+  }
+  const patch = projectPatch(payload.projectPatch);
+  if (patch === null) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis project patch is invalid', 'memory-analysis-event');
+  }
+  const analysisInputs = eventAnalysisInputs(payload.analysisInputs);
+  if (analysisInputs === null) {
+    return eventIssue('memory-agent-event-invalid', 'memory analysis inputs are invalid', 'memory-analysis-event');
+  }
+  return {
+    status: 'ready',
+    value: {
+      operationId: id('operation', operationIdForEvent(event)),
+      bindingRef: binding.bindingRef,
+      actor: {
+        ...binding.actor,
+        permissions: [...binding.actor.permissions],
+      },
+      projectKey: binding.projectKey,
+      scope: { ...binding.scope, taskId: { ...binding.scope.taskId } },
+      taskId: { ...binding.taskId },
+      sessionRef: typeof payload.sessionRef === 'string' ? payload.sessionRef : undefined,
+      sourceRefs: sources.sourceRefs,
+      sourceDigests: sources.sourceDigests,
+      observation: event.summary,
+      ...(patch === undefined ? {} : { projectPatch: patch }),
+      requestedKind: kind,
+      candidateCategory: category,
+      executionEpoch: event.executionEpoch,
+      trigger: payload.trigger,
+      ...(analysisInputs === undefined ? {} : { analysisInputs }),
+    },
+  };
+}
+
+export function createMemoryTaskAnalysisEventHandler(
+  options: MemoryTaskAnalysisEventConsumerOptions,
+): EventConsumerHandler {
+  const now = options.now ?? (() => new Date().toISOString());
+  const retryDelayMs = options.retryDelayMs ?? 1_000;
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 1) {
+    throw new Error('memory analysis retry delay must be a positive safe integer');
+  }
+  const retryOwnerRef = options.retryOwnerRef ?? MEMORY_AGENT_OWNER;
+  if (!retryOwnerRef.trim()) throw new Error('memory analysis retry owner is required');
+
+  return async ({ event, attempt }) => {
+    const requestOutcome = memoryTaskAnalysisRequestFromEvent(event, options.binding);
+    if (requestOutcome.status === 'attention') {
+      return rejectedCommit(event, options.binding.bindingRef, requestOutcome.issue.code);
+    }
+    if (requestOutcome.status !== 'ready') {
+      return retryCommit(
+        event,
+        options.binding.bindingRef,
+        attempt,
+        now(),
+        retryDelayMs,
+        retryOwnerRef,
+        requestOutcome.issue.code,
+      );
+    }
+    const request = requestOutcome.value;
+    const admissionOutcome = await options.admission.admit({ request, event });
+    if (
+      admissionOutcome.status === 'attention'
+      && MEMORY_ADMISSION_ATTENTION_DISPOSITION[admissionOutcome.issue.code] === 'reject'
+    ) {
+      return rejectedCommit(event, options.binding.bindingRef, admissionOutcome.issue.code);
+    }
+    if (admissionOutcome.status !== 'ready') {
+      return retryCommit(
+        event,
+        options.binding.bindingRef,
+        attempt,
+        now(),
+        retryDelayMs,
+        retryOwnerRef,
+        admissionOutcome.issue.code,
+      );
+    }
+    const admitted = admissionOutcome.value;
+    return {
+      consumerKey: options.binding.bindingRef,
+      messageId: event.messageId,
+      disposition: 'applied',
+      completionMode: 'journal-atomic',
+      internalEffectFacts: [
+        `memory-analysis-request:${request.operationId.value}`,
+        admitted.admissionRef,
+        ...(admitted.effectRefs ?? []),
+      ],
+      externalOperationRefs: [],
+    };
   };
 }
 

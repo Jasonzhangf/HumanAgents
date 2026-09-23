@@ -34,6 +34,7 @@ import {
   createMemoryAnalysisRequestedEvent,
   createMemoryCurationFeedbackEvent,
   createMemoryProjectSourceUpdatedEvent,
+  createMemoryTaskAnalysisEventHandler,
   MEMORY_ANALYSIS_REQUESTED_KIND,
   MEMORY_ATTENTION_KIND,
   MEMORY_CANDIDATE_REVIEW_REQUIRED_KIND,
@@ -41,8 +42,10 @@ import {
   MEMORY_PROJECT_SOURCE_UPDATED_KIND,
   memoryAnalysisRequestFromEvent,
   memoryAnalysisBarrierDriver,
+  memoryTaskAnalysisRequestFromEvent,
   type MemoryAnalysisAdmissionPort,
   type MemoryAnalysisWakeBinding,
+  type MemoryTaskAnalysisWakeBinding,
 } from '../../../packages/runtime/src/memory/index.js';
 
 const organ = id('organ', 'organ-a');
@@ -65,6 +68,20 @@ const binding: MemoryAnalysisWakeBinding = {
   projectKey: 'project-a',
   executionEpoch: 2,
   scope: memoryScope,
+  taskId: task,
+  mainAgentId: 'main-agent-a',
+  actor,
+};
+const taskBinding: MemoryTaskAnalysisWakeBinding = {
+  bindingRef: 'memory-binding:task-a:task',
+  projectKey: 'project-a',
+  executionEpoch: 2,
+  scope: {
+    namespace: 'project',
+    projectKey: 'project-a',
+    organId: organ,
+    taskId: task,
+  },
   taskId: task,
   mainAgentId: 'main-agent-a',
   actor,
@@ -1474,4 +1491,65 @@ test('consumer errors remain explicit for an unregistered memory consumer', asyn
     })),
     EventConsumerError,
   );
+});
+
+test('task-bound memory analysis keeps the admitted task identity and rejects cross-task events', async () => {
+  const record: EventRecord = {
+    ...event(),
+    publisherId: publisher.publisherId,
+    sequence: 1,
+    committedAt: occurredAt,
+  };
+  const admitted = await memoryTaskAnalysisRequestFromEvent(record, taskBinding);
+  assert.equal(admitted.status, 'ready');
+  if (admitted.status !== 'ready') throw new Error('expected task-bound request');
+  assert.equal(admitted.value.taskId?.value, task.value);
+  assert.equal(admitted.value.interactionScopeId, undefined);
+  assert.equal(admitted.value.bindingRef, taskBinding.bindingRef);
+  assert.equal(admitted.value.sessionRef, undefined);
+
+  const otherTask = id('task', 'task-b');
+  const otherScope: ScopeRef = { organId: organ, taskId: otherTask };
+  const crossTask = await memoryTaskAnalysisRequestFromEvent({
+    ...record,
+    scope: otherScope,
+    evidenceRefs: [{ ...record.evidenceRefs[0]!, scope: otherScope }],
+  }, taskBinding);
+  assert.equal(crossTask.status, 'attention');
+  if (crossTask.status !== 'attention') throw new Error('expected cross-task rejection');
+  assert.equal(crossTask.issue.code, 'memory-agent-event-scope-mismatch');
+
+  const journal = new FakeJournal();
+  const registry = new FakeRegistry();
+  registry.consumers.set(taskBinding.bindingRef, {
+    consumerKey: taskBinding.bindingRef,
+    consumerOwner: 'memory-agent',
+    scopeRef: `memory:project-a:${organ.value}:${task.value}`,
+    contractVersion: 'memory-analysis-v1',
+    scope: { organId: organ, taskId: task },
+    streamIds: [`memory-boundaries:task:${task.value}`],
+    allowedClasses: ['data'],
+    retryLimit: 3,
+    currentEpoch: 2,
+  });
+  await publishEvent(ports(journal, registry), {
+    publisherId: publisher.publisherId,
+    event: event({ streamId: `memory-boundaries:task:${task.value}` }),
+  });
+  const result = await consumeEvents(
+    ports(journal, registry),
+    { consumerKey: taskBinding.bindingRef, limit: 10, now: occurredAt },
+    createMemoryTaskAnalysisEventHandler({
+      binding: taskBinding,
+      admission: {
+        admit: async ({ request }) => {
+          assert.equal(request.taskId?.value, task.value);
+          return { status: 'ready', value: { admissionRef: `memory-task:${task.value}` } };
+        },
+      },
+      now: () => occurredAt,
+    }),
+  );
+  assert.equal(result.committed.length, 1);
+  assert.equal(result.committed[0]?.disposition, 'applied');
 });

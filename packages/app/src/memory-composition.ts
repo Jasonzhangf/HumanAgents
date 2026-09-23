@@ -35,11 +35,13 @@ import {
   MemoryCoordinator,
   createMemoryInteractionPort,
   createMemoryAnalysisEventHandler,
+  createMemoryTaskAnalysisEventHandler,
   memoryAnalysisBarrierDriver,
   memoryAgentIssue,
   type MemoryAnalysisAdmissionPort,
   type MemoryAnalysisAdmissionReceipt,
   type MemoryAnalysisWakeBinding,
+  type MemoryTaskAnalysisWakeBinding,
   type MemoryAgentOutcome,
   type MemoryProjectUpdateOwnerPort,
   type MemorySourceUpdateReceipt,
@@ -349,11 +351,19 @@ export interface MemoryComposition {
   readonly interaction: MemoryInteractionPort;
   readonly submissions: MemorySubmissionPort;
   readonly bindingRef: string;
+  readonly taskBindingFor: (input: {
+    readonly taskId: import('../../contracts/src/index.js').TaskId;
+    readonly assignmentId: string;
+    readonly executionEpoch: number;
+  }) => MemoryTaskAnalysisWakeBinding;
   readonly persistence: MemoryPersistencePort;
   readonly sources: FilesystemMemorySourceAdapter;
   readonly agent: MemoryAgent;
   readonly admission: MemoryAnalysisAdmissionPort;
   readonly eventHandler: EventConsumerHandler;
+  readonly taskEventHandlerFor: (input: {
+    readonly binding: MemoryTaskAnalysisWakeBinding;
+  }) => EventConsumerHandler;
   readonly barrierDriver: EventOperationBarrierDriver;
 }
 
@@ -852,6 +862,7 @@ export function createProjectSourceUpdateOwner(input: {
 function createAdmission(
   agent: MemoryAgent,
   backend: DeterministicMemoryBackend,
+  coordinator: MemoryCoordinator,
   evidenceSource?: MemoryEvidenceSourcePort,
 ): MemoryAnalysisAdmissionPort {
   return {
@@ -932,6 +943,15 @@ function createAdmission(
       }
       const result = await agent.analyze(request);
       if (result.status !== 'ready') return result;
+      const candidateId = result.value.submission?.candidateId;
+      if (candidateId !== undefined) {
+        coordinator.registerCandidateBinding({
+          candidateId,
+          bindingRef: request.bindingRef,
+          projectKey: request.projectKey,
+          ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+        });
+      }
       return {
         status: 'ready',
         value: {
@@ -1147,11 +1167,64 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     ownerId: 'memory-agent',
     operations: backend,
   });
-  const admission = createAdmission(agent, backend, input.evidenceSource);
+  const coordinator = new MemoryCoordinator();
+  const coordinatorBindings = bindCoordinator(coordinator, input, backend);
+  const admission = createAdmission(agent, backend, coordinator, input.evidenceSource);
   const eventHandler = createMemoryAnalysisEventHandler({
     binding: input.binding,
     admission,
   });
+  const taskBindingFor = (taskInput: {
+    readonly taskId: import('../../contracts/src/index.js').TaskId;
+    readonly assignmentId: string;
+    readonly executionEpoch: number;
+  }): MemoryTaskAnalysisWakeBinding => {
+    if (input.binding.interactionScopeId === undefined) {
+      throw new AppLifecycleError(
+        'memory-task-binding-unsupported',
+        'task-bound memory analysis requires the interaction-scoped runtime memory binding',
+        'compose runtime memory through the serve interaction binding before registering task wake bindings',
+        OWNER,
+      );
+    }
+    if (!Number.isSafeInteger(taskInput.executionEpoch) || taskInput.executionEpoch < 1) {
+      throw new AppLifecycleError(
+        'memory-task-binding-invalid',
+        'task-bound memory analysis requires a positive execution epoch',
+        'commit the checkpoint before registering a task memory wake binding',
+        OWNER,
+      );
+    }
+    const scope: CanonicalMemoryScope & { readonly namespace: 'project'; readonly taskId: import('../../contracts/src/index.js').TaskId } = {
+      namespace: 'project',
+      projectKey: input.projectKey,
+      organId: input.binding.scope.namespace === 'project' ? input.binding.scope.organId : { scope: 'organ' as const, value: 'global' },
+      taskId: taskInput.taskId,
+    };
+    const binding: MemoryTaskAnalysisWakeBinding = {
+      bindingRef: `memory-binding:${taskInput.taskId.value}`,
+      projectKey: input.projectKey,
+      executionEpoch: taskInput.executionEpoch,
+      scope,
+      taskId: taskInput.taskId,
+      mainAgentId: input.mainAgentId ?? input.binding.mainAgentId,
+      actor: {
+        ...input.binding.actor,
+        permissions: [...input.binding.actor.permissions],
+      },
+    };
+    agent.bind({
+      bindingRef: binding.bindingRef,
+      projectKey: binding.projectKey,
+      scope: binding.scope,
+      taskId: binding.taskId,
+      mainAgentId: binding.mainAgentId,
+      executionEpoch: binding.executionEpoch,
+      ownerId: 'memory-agent',
+      operations: backend,
+    });
+    return binding;
+  };
   const barrierDriver = memoryAnalysisBarrierDriver({
     binding: input.binding,
     admission,
@@ -1177,8 +1250,6 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
       ? {}
       : { publishFeedback: (event) => input.feedbackPublisher!.publish(event) }),
   });
-  const coordinator = new MemoryCoordinator();
-  const coordinatorBindings = bindCoordinator(coordinator, input, backend);
   const interaction = createMemoryInteractionPort({
     coordinator,
     bindingFor: ({ projectKey, namespace }) => {
@@ -1233,11 +1304,16 @@ export async function composeMemory(input: MemoryCompositionInput): Promise<Memo
     interaction,
     submissions,
     bindingRef: coordinatorBindings.interactionBindingRef ?? input.binding.bindingRef,
+    taskBindingFor,
     persistence,
     sources,
     agent,
     admission,
     eventHandler,
+    taskEventHandlerFor: ({ binding }) => createMemoryTaskAnalysisEventHandler({
+      binding,
+      admission,
+    }),
     barrierDriver,
   };
 }
