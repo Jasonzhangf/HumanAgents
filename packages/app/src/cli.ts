@@ -759,7 +759,16 @@ export async function main(args: readonly string[]): Promise<void> {
       configuration,
       workspace: paths.workspaceCwd,
       rcc: {
-        port,
+        // A memory-role rcc agent must use its own provider transport even when
+        // the serve UI runs the fake provider for the main execution path.
+        port: mode === 'rcc'
+          ? port
+          : buildRccExecutionPort({
+              binding: providerBindingFromOptions(args, configuredProvider, protocol, 'rcc', baseUrl, selected.providerIdOverride),
+              routeRef: option(args, '--route') ?? configuredProvider.route,
+              baseUrl,
+              maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
+            }, evidenceRoot),
         binding,
         inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
       },
@@ -960,7 +969,11 @@ export async function main(args: readonly string[]): Promise<void> {
                       'humanagent.cli',
                     );
                   }
-                  await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+                  if (checkpoint.scope.taskId !== undefined) {
+                    await memoryRuntime.boundaryPublisher.publishTask({ checkpoint, recordDigest, trigger });
+                  } else {
+                    await memoryRuntime.boundaryPublisher.publish({ checkpoint, recordDigest, trigger });
+                  }
                   await memoryRuntime.consume();
                 },
               },

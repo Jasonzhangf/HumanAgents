@@ -885,6 +885,29 @@ export class MemoryCoordinator {
     }
   }
 
+  registerCandidateBinding(input: {
+    readonly candidateId: string;
+    readonly bindingRef: string;
+    readonly projectKey: string;
+    readonly taskId?: TaskId;
+  }): void {
+    const candidateId = nonEmpty(input.candidateId, 'memory candidate id');
+    const bindingRef = nonEmpty(input.bindingRef, 'memory candidate binding ref');
+    const binding = [...this.taskBindings.values(), ...this.interactionBindings.values()]
+      .find((candidate) => candidate.bindingId === bindingRef)
+      ?? (input.taskId === undefined ? undefined : this.taskBindings.get(input.taskId.value))
+      ?? this.projectBindings.get(input.projectKey);
+    if (!binding) return;
+    if (binding.projectKey !== input.projectKey) {
+      throw new MemoryCoordinatorError('memory candidate binding belongs to another project');
+    }
+    const existing = this.candidateBindings.get(candidateId);
+    if (existing !== undefined && existing !== binding.bindingId) {
+      throw new MemoryCoordinatorError(`memory candidate identity is already bound to a different backend: ${candidateId}`);
+    }
+    this.candidateBindings.set(candidateId, binding.bindingId);
+  }
+
   async reviewCandidate(input: MemoryReviewReceipt): Promise<MemoryOutcome<MemoryReviewReceipt>> {
     const bindingResult = this.resolveMemoryBindingForCandidate(input.candidateId);
     if (bindingResult.status !== 'ready') return bindingResult;

@@ -19,8 +19,10 @@ import {
 import {
   createMemoryAnalysisRequestedEvent,
   createMemoryProjectSourceUpdatedEvent,
+  createMemoryTaskAnalysisEventHandler,
   type MemoryAnalysisTrigger,
   type MemoryAnalysisWakeBinding,
+  type MemoryTaskAnalysisWakeBinding,
 } from '../../runtime/src/memory/index.js';
 import { createJsonlEventJournal, type JsonlEventJournal } from './event-journal.js';
 import {
@@ -87,6 +89,11 @@ export interface MemoryRuntimeBoundaryPublisher {
       readonly reentry: ClosureRecord;
     };
   }): Promise<void>;
+  publishTask(input: {
+    readonly checkpoint: Checkpoint;
+    readonly recordDigest: string;
+    readonly trigger: MemoryAnalysisTrigger;
+  }): Promise<void>;
 }
 
 export interface MemoryRuntimeEventConsumer {
@@ -98,6 +105,8 @@ export interface MemoryAnalysisStatus {
   readonly state: 'idle' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'unknown';
   readonly operationRef?: string;
   readonly failureRef?: string;
+  readonly consumerKey?: string;
+  readonly committedAt?: string;
 }
 
 export interface MemoryReviewCandidateState {
@@ -656,6 +665,23 @@ function consumerBinding(binding: MemoryAnalysisWakeBinding): EventConsumerBindi
   };
 }
 
+function taskConsumerBinding(binding: MemoryTaskAnalysisWakeBinding): EventConsumerBinding {
+  return {
+    consumerKey: binding.bindingRef,
+    consumerOwner: 'memory-agent',
+    scopeRef: `memory:${binding.projectKey}:${binding.scope.organId.value}:${binding.taskId.value}`,
+    contractVersion: 'memory-analysis-v1',
+    scope: {
+      organId: binding.scope.organId,
+      taskId: binding.taskId,
+    },
+    streamIds: [`memory-boundaries:task:${binding.taskId.value}`],
+    allowedClasses: ['data'],
+    retryLimit: 3,
+    currentEpoch: binding.executionEpoch,
+  };
+}
+
 function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPublisher {
   const scope = bindingScope(binding);
   return {
@@ -681,7 +707,9 @@ async function projectMemoryAnalysisStatus(
   mode: MemoryAnalysisStatus['mode'],
 ): Promise<MemoryAnalysisStatus> {
   const streamId = consumer.streamIds[0];
-  if (streamId === undefined) return { mode, state: 'idle' };
+  if (streamId === undefined) {
+    return { mode, state: 'idle', consumerKey: consumer.consumerKey };
+  }
   const cursor = await journal.readCursor({ streamId, consumerKey: consumer.consumerKey });
   const pending = await journal.readEvents({
     streamId,
@@ -695,9 +723,12 @@ async function projectMemoryAnalysisStatus(
         afterSequence: Math.max(0, cursor.lastHandledSequence - 1),
         limit: 1,
       }))[0]);
-  if (event === undefined) return { mode, state: 'idle' };
+  if (event === undefined) {
+    return { mode, state: 'idle', consumerKey: consumer.consumerKey };
+  }
 
   const operationRef = `memory-analysis:${consumer.consumerKey}:${event.messageId}`;
+  const scope = { consumerKey: consumer.consumerKey, committedAt: event.committedAt };
   const [retry, externalOperation, receipt] = await Promise.all([
     journal.readRetryObligation({
       streamId,
@@ -716,35 +747,58 @@ async function projectMemoryAnalysisStatus(
   ]);
   if (receipt !== null) {
     return receipt.disposition === 'applied'
-      ? { mode, state: 'succeeded', operationRef }
+      ? { mode, state: 'succeeded', operationRef, ...scope }
       : {
           mode,
           state: 'failed',
           operationRef,
+          ...scope,
           ...(receipt.failureRef === undefined ? {} : { failureRef: receipt.failureRef }),
         };
   }
   if (externalOperation?.state === 'unknown') {
-    return { mode, state: 'unknown', operationRef, failureRef: 'unknown-side-effect' };
+    return { mode, state: 'unknown', operationRef, failureRef: 'unknown-side-effect', ...scope };
   }
   if (externalOperation?.state === 'failed') {
     return {
       mode,
       state: 'failed',
       operationRef,
+      ...scope,
       ...(externalOperation.failureRef === undefined ? {} : { failureRef: externalOperation.failureRef }),
     };
   }
   if (externalOperation?.state === 'settled' || externalOperation?.state === 'reconciled') {
-    return { mode, state: 'succeeded', operationRef };
+    return { mode, state: 'succeeded', operationRef, ...scope };
   }
   if (retry?.state === 'pending') {
-    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef };
+    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef, ...scope };
   }
   if (retry !== null) {
-    return { mode, state: 'failed', operationRef, failureRef: retry.failureRef };
+    return { mode, state: 'failed', operationRef, failureRef: retry.failureRef, ...scope };
   }
-  return { mode, state: 'running', operationRef };
+  return { mode, state: 'running', operationRef, ...scope };
+}
+
+function latestMemoryAnalysisStatus(
+  mode: MemoryAnalysisStatus['mode'],
+  statuses: readonly MemoryAnalysisStatus[],
+): MemoryAnalysisStatus {
+  const ranked = statuses
+    .map((status, index) => ({ status, index }))
+    .filter(({ status }) => status.committedAt !== undefined)
+    .sort((left, right) => {
+      const byTime = (right.status.committedAt ?? '').localeCompare(left.status.committedAt ?? '');
+      return byTime !== 0 ? byTime : right.index - left.index;
+    });
+  const latest = ranked[0]?.status ?? statuses[0];
+  if (latest === undefined) return { mode, state: 'idle' };
+  return {
+    mode,
+    state: latest.state,
+    ...(latest.operationRef === undefined ? {} : { operationRef: latest.operationRef }),
+    ...(latest.failureRef === undefined ? {} : { failureRef: latest.failureRef }),
+  };
 }
 
 export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<MemoryRuntime> {
@@ -785,9 +839,16 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
   });
   const publisher = publisherBinding(input.binding);
   const consumer = consumerBinding(input.binding);
+  const taskConsumers = new Map<string, {
+    readonly binding: MemoryTaskAnalysisWakeBinding;
+    readonly consumer: EventConsumerBinding;
+    readonly handler: ReturnType<typeof createMemoryTaskAnalysisEventHandler>;
+  }>();
   const registry = {
     resolvePublisher: async (publisherId: string) => publisherId === publisher.publisherId ? publisher : null,
-    resolveConsumer: async (consumerKey: string) => consumerKey === consumer.consumerKey ? consumer : null,
+    resolveConsumer: async (consumerKey: string) => consumerKey === consumer.consumerKey
+      ? consumer
+      : taskConsumers.get(consumerKey)?.consumer ?? null,
   };
   const ports: EventBusPorts = {
     journal,
@@ -1035,20 +1096,94 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
         });
         await publishEvent(ports, { publisherId: PUBLISHER_ID, event: preparedEvent });
       },
-    },
-    consume: async (consumeInput = {}) => consumeEvents(
-      ports,
-      {
-        consumerKey: input.binding.bindingRef,
-        limit: consumeInput.limit ?? 10,
+      publishTask: async ({ checkpoint, recordDigest, trigger }) => {
+        if (checkpoint.scope.taskId === undefined) {
+          throw new AppLifecycleError(
+            'memory-boundary-task-missing',
+            `checkpoint ${checkpoint.id.value} cannot be published as task-bound memory`,
+            'commit the checkpoint with its task scope before requesting task memory analysis',
+            OWNER,
+          );
+        }
+        const committed = await checkpointEvidence.readCommitted({ checkpoint });
+        const bindingRef = `memory-binding:${checkpoint.scope.taskId.value}`;
+        const registered = taskConsumers.get(bindingRef);
+        const taskBinding = registered !== undefined
+          && registered.binding.executionEpoch === checkpoint.executionEpoch
+          ? registered.binding
+          : composition.taskBindingFor({
+              taskId: checkpoint.scope.taskId,
+              assignmentId: `memory-analysis:${checkpoint.scope.taskId.value}:${checkpoint.executionEpoch}`,
+              executionEpoch: checkpoint.executionEpoch,
+            });
+        const taskConsumer = taskConsumerBinding(taskBinding);
+        const taskHandler = composition.taskEventHandlerFor({ binding: taskBinding });
+        const existing = taskConsumers.get(taskConsumer.consumerKey);
+        taskConsumers.set(taskConsumer.consumerKey, {
+          binding: taskBinding,
+          consumer: taskConsumer,
+          handler: taskHandler,
+        });
+        const primaryEvidence = checkpointEvidenceRef(committed.checkpoint);
+        const event = createMemoryAnalysisRequestedEvent({
+          messageId: `checkpoint-${committed.checkpoint.id.value}-${trigger}`,
+          streamId: taskConsumer.streamIds[0]!,
+          scope: taskConsumer.scope,
+          occurredAt: new Date().toISOString(),
+          summary: `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}`,
+          evidenceRefs: [primaryEvidence],
+          executionEpoch: committed.checkpoint.executionEpoch,
+          trigger,
+          requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
+          candidateCategory: trigger === 'completion' || trigger === 'rewind' ? 'project-experience' : 'project-fact',
+        });
+        const preparedEvent = await prepareBoundaryEvent(event);
+        validateMemoryBoundary({
+          event: { ...preparedEvent, evidenceRefs: [primaryEvidence] },
+          recordDigest,
+          committed,
+        });
+        await publishEvent(ports, { publisherId: PUBLISHER_ID, event: preparedEvent });
       },
-      composition.eventHandler,
-      composition.barrierDriver,
-    ),
+    },
+    consume: async (consumeInput = {}) => {
+      const consumed = await consumeEvents(
+        ports,
+        {
+          consumerKey: input.binding.bindingRef,
+          limit: consumeInput.limit ?? 10,
+        },
+        composition.eventHandler,
+        composition.barrierDriver,
+      );
+      const taskResults = await Promise.all([...taskConsumers.values()].map((entry) => consumeEvents(
+        ports,
+        {
+          consumerKey: entry.consumer.consumerKey,
+          limit: consumeInput.limit ?? 10,
+        },
+        entry.handler,
+      )));
+      return taskResults.reduce(
+        (aggregate, result) => ({
+          ...aggregate,
+          committed: [...aggregate.committed, ...result.committed],
+          retries: [...aggregate.retries, ...result.retries],
+          dlq: [...aggregate.dlq, ...result.dlq],
+          blocked: [...aggregate.blocked, ...result.blocked],
+          cursors: [...aggregate.cursors, ...result.cursors],
+        }),
+        consumed,
+      );
+    },
     reviewState: async () => {
       const snapshot = await composition.persistence.load();
+      const consumerStatuses = await Promise.all([
+        projectMemoryAnalysisStatus(journal, consumer, analysisMode),
+        ...[...taskConsumers.values()].map((entry) => projectMemoryAnalysisStatus(journal, entry.consumer, analysisMode)),
+      ]);
       return {
-        analysis: await projectMemoryAnalysisStatus(journal, consumer, analysisMode),
+        analysis: latestMemoryAnalysisStatus(analysisMode, consumerStatuses),
         autoUpdate: input.autoUpdate,
         candidates: (snapshot?.candidates ?? []).map((candidate) => ({
           candidateId: candidate.candidateId ?? candidate.submission.submissionId,

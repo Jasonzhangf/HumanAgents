@@ -1060,6 +1060,16 @@ export class MemoryAgent {
       (candidate) => candidate.mainAgentId === input.mainAgentId,
     );
     if (existingMainAgent) {
+      const existingInteraction = [...this.bindings.values()].find(
+        (candidate) => candidate.mainAgentId === input.mainAgentId
+          && candidate.interactionScopeId !== undefined,
+      );
+      const candidateTask = input.interactionScopeId === undefined && input.taskId !== undefined;
+      if (existingInteraction && candidateTask && existingInteraction.projectKey === input.projectKey) {
+        const binding = { ...input };
+        this.bindings.set(binding.bindingRef, binding);
+        return binding;
+      }
       throw new ContractError(`memory binding already exists for main agent: ${input.mainAgentId}`);
     }
     const binding = { ...input };
