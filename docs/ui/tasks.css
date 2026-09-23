@@ -2,13 +2,7 @@
 .page {
   --task-columns:
     44px
-    minmax(140px, 1.5fr)
-    minmax(74px, 0.5fr)
-    minmax(92px, 0.85fr)
-    minmax(104px, 1fr)
-    minmax(132px, 1.25fr)
-    minmax(58px, 0.4fr)
-    minmax(104px, 0.8fr)
+    minmax(0, 1fr)
     auto;
   --task-gap: 8px 12px;
   width: min(1160px, calc(100% - 32px));
@@ -147,11 +141,26 @@
 }
 
 .task-row--head {
+  grid-template-columns:
+    44px
+    minmax(140px, 1.5fr)
+    minmax(74px, 0.5fr)
+    minmax(92px, 0.85fr)
+    minmax(104px, 1fr)
+    minmax(132px, 1.25fr)
+    minmax(58px, 0.4fr)
+    minmax(104px, 0.8fr)
+    minmax(96px, 0.7fr)
+    auto;
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
+}
+
+.task-row--head .task-cell-label:nth-last-child(2) {
+  justify-self: end;
 }
 
 .task-row--head .task-cell-label {
@@ -160,6 +169,22 @@
 
 .task-row--head .task-cell-label:first-child {
   grid-column: 2;
+}
+
+.task-row-link {
+  display: grid;
+  grid-column: 2;
+  grid-template-columns:
+    minmax(140px, 1.5fr)
+    minmax(74px, 0.5fr)
+    minmax(92px, 0.85fr)
+    minmax(104px, 1fr)
+    minmax(132px, 1.25fr)
+    minmax(58px, 0.4fr)
+    minmax(104px, 0.8fr)
+    minmax(96px, 0.7fr);
+  column-gap: 12px;
+  align-items: center;
 }
 
 .task-cell {
@@ -270,28 +295,28 @@
 }
 
 @media (max-width: 1080px) {
-  .page {
-    --task-columns:
-      44px
-      minmax(132px, 1.4fr)
-      minmax(72px, 0.5fr)
-      minmax(88px, 0.9fr)
-      minmax(112px, 1fr)
-      auto;
-  }
-
   .task-row:not(.task-row--head) {
     align-items: start;
   }
 
-  .task-cell--work,
-  .task-cell--round,
-  .task-cell--progress {
-    grid-column: span 2;
+  /* Below the dense desktop table the link wraps to four equal tracks and the
+     title takes the full width, so long titles stay readable without overflow. */
+  .task-row-link {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .task-cell--title {
+    grid-column: 1 / -1;
   }
 
   .task-row--head {
     display: none;
+  }
+}
+
+@media (min-width: 1081px) {
+  .task-cell--time {
+    grid-column: 8;
   }
 }
 
@@ -346,6 +371,7 @@
 
   .task-row-link {
     display: grid;
+    grid-column: 2;
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
     color: inherit;
@@ -373,6 +399,7 @@
   }
 
   .task-cell--time {
+    grid-column: auto;
     justify-self: start;
   }
 

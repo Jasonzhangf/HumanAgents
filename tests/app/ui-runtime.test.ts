@@ -4498,6 +4498,39 @@ test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
   }
 });
 
+test('task list styles keep the link contents inside the desktop task grid', async () => {
+  const tasksCss = await readFile(join(process.cwd(), 'docs', 'ui', 'tasks.css'), 'utf8');
+
+  const rule = (selector: string): string => {
+    const match = tasksCss.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{[^}]*\\}`, 's'));
+    if (!match) throw new Error(`expected a ${selector} rule`);
+    return match[0];
+  };
+  const row = rule('.task-row');
+  const link = rule('.task-row-link');
+  const head = rule('.task-row--head');
+
+  // The runtime row is a three-track shell: checkbox, the multi-column link, actions.
+  assert.match(row, /grid-template-columns:\s*var\(--task-columns\)/);
+  assert.match(tasksCss, /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+auto;/);
+
+  // The link spans that middle track and owns the eight data columns itself,
+  // so the time cell never overflows onto an implicit second row.
+  assert.match(link, /display:\s*grid;/);
+  assert.match(link, /grid-column:\s*2;/);
+  assert.match(
+    link,
+    /grid-template-columns:\s*minmax\(140px,\s*1\.5fr\)\s+minmax\(74px,\s*0\.5fr\)\s+minmax\(92px,\s*0\.85fr\)\s+minmax\(104px,\s*1fr\)\s+minmax\(132px,\s*1\.25fr\)\s+minmax\(58px,\s*0\.4fr\)\s+minmax\(104px,\s*0\.8fr\)\s+minmax\(96px,\s*0\.7fr\);/s,
+  );
+
+  // The header keeps the same nine tracks instead of inheriting the three-track shell.
+  assert.match(head, /grid-template-columns:\s*44px/);
+  assert.equal((head.match(/minmax\(/g) ?? []).length, 8);
+
+  // The desktop time cell sits in the eighth link track.
+  assert.match(tasksCss, /@media\s*\(min-width:\s*1081px\)\s*\{\s*\.task-cell--time\s*\{\s*grid-column:\s*8;/s);
+});
+
 test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-control-'));
   const received: Array<{ readonly leaseId: string; readonly generation: number }> = [];
