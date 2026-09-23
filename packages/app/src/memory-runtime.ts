@@ -105,6 +105,8 @@ export interface MemoryAnalysisStatus {
   readonly state: 'idle' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'unknown';
   readonly operationRef?: string;
   readonly failureRef?: string;
+  readonly consumerKey?: string;
+  readonly committedAt?: string;
 }
 
 export interface MemoryReviewCandidateState {
@@ -705,7 +707,9 @@ async function projectMemoryAnalysisStatus(
   mode: MemoryAnalysisStatus['mode'],
 ): Promise<MemoryAnalysisStatus> {
   const streamId = consumer.streamIds[0];
-  if (streamId === undefined) return { mode, state: 'idle' };
+  if (streamId === undefined) {
+    return { mode, state: 'idle', consumerKey: consumer.consumerKey };
+  }
   const cursor = await journal.readCursor({ streamId, consumerKey: consumer.consumerKey });
   const pending = await journal.readEvents({
     streamId,
@@ -719,9 +723,12 @@ async function projectMemoryAnalysisStatus(
         afterSequence: Math.max(0, cursor.lastHandledSequence - 1),
         limit: 1,
       }))[0]);
-  if (event === undefined) return { mode, state: 'idle' };
+  if (event === undefined) {
+    return { mode, state: 'idle', consumerKey: consumer.consumerKey };
+  }
 
   const operationRef = `memory-analysis:${consumer.consumerKey}:${event.messageId}`;
+  const scope = { consumerKey: consumer.consumerKey, committedAt: event.committedAt };
   const [retry, externalOperation, receipt] = await Promise.all([
     journal.readRetryObligation({
       streamId,
@@ -740,35 +747,58 @@ async function projectMemoryAnalysisStatus(
   ]);
   if (receipt !== null) {
     return receipt.disposition === 'applied'
-      ? { mode, state: 'succeeded', operationRef }
+      ? { mode, state: 'succeeded', operationRef, ...scope }
       : {
           mode,
           state: 'failed',
           operationRef,
+          ...scope,
           ...(receipt.failureRef === undefined ? {} : { failureRef: receipt.failureRef }),
         };
   }
   if (externalOperation?.state === 'unknown') {
-    return { mode, state: 'unknown', operationRef, failureRef: 'unknown-side-effect' };
+    return { mode, state: 'unknown', operationRef, failureRef: 'unknown-side-effect', ...scope };
   }
   if (externalOperation?.state === 'failed') {
     return {
       mode,
       state: 'failed',
       operationRef,
+      ...scope,
       ...(externalOperation.failureRef === undefined ? {} : { failureRef: externalOperation.failureRef }),
     };
   }
   if (externalOperation?.state === 'settled' || externalOperation?.state === 'reconciled') {
-    return { mode, state: 'succeeded', operationRef };
+    return { mode, state: 'succeeded', operationRef, ...scope };
   }
   if (retry?.state === 'pending') {
-    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef };
+    return { mode, state: 'waiting', operationRef, failureRef: retry.failureRef, ...scope };
   }
   if (retry !== null) {
-    return { mode, state: 'failed', operationRef, failureRef: retry.failureRef };
+    return { mode, state: 'failed', operationRef, failureRef: retry.failureRef, ...scope };
   }
-  return { mode, state: 'running', operationRef };
+  return { mode, state: 'running', operationRef, ...scope };
+}
+
+function latestMemoryAnalysisStatus(
+  mode: MemoryAnalysisStatus['mode'],
+  statuses: readonly MemoryAnalysisStatus[],
+): MemoryAnalysisStatus {
+  const ranked = statuses
+    .map((status, index) => ({ status, index }))
+    .filter(({ status }) => status.committedAt !== undefined)
+    .sort((left, right) => {
+      const byTime = (right.status.committedAt ?? '').localeCompare(left.status.committedAt ?? '');
+      return byTime !== 0 ? byTime : right.index - left.index;
+    });
+  const latest = ranked[0]?.status ?? statuses[0];
+  if (latest === undefined) return { mode, state: 'idle' };
+  return {
+    mode,
+    state: latest.state,
+    ...(latest.operationRef === undefined ? {} : { operationRef: latest.operationRef }),
+    ...(latest.failureRef === undefined ? {} : { failureRef: latest.failureRef }),
+  };
 }
 
 export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<MemoryRuntime> {
@@ -1148,12 +1178,12 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     },
     reviewState: async () => {
       const snapshot = await composition.persistence.load();
+      const consumerStatuses = await Promise.all([
+        projectMemoryAnalysisStatus(journal, consumer, analysisMode),
+        ...[...taskConsumers.values()].map((entry) => projectMemoryAnalysisStatus(journal, entry.consumer, analysisMode)),
+      ]);
       return {
-        analysis: await projectMemoryAnalysisStatus(
-          journal,
-          [...taskConsumers.values()].at(-1)?.consumer ?? consumer,
-          analysisMode,
-        ),
+        analysis: latestMemoryAnalysisStatus(analysisMode, consumerStatuses),
         autoUpdate: input.autoUpdate,
         candidates: (snapshot?.candidates ?? []).map((candidate) => ({
           candidateId: candidate.candidateId ?? candidate.submission.submissionId,
