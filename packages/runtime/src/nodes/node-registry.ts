@@ -228,3 +228,30 @@ export function nodeById(nodeId: string): PipelineNodeDefinition {
 export function pipelineNodeRow(nodeId: PipelineNodeId): number {
   return PIPELINE_ROWS[nodeId];
 }
+
+/**
+ * Runtime lifecycle node markers.
+ *
+ * `RuntimeTaskSnapshot.currentNode` reports a lifecycle marker, not one of the thirteen requirement
+ * pipeline node ids: provider execution exposes the finer sub-steps `provider.tool` /
+ * `provider.model`, and a freshly created task reports `input.received`. These markers are part of
+ * node identity, so they are owned here and must be assigned from `RUNTIME_NODE_MARKERS` instead of
+ * a bare literal in the coordinator. The pipeline-node translation used by observation lives in the
+ * UI runtime bridge (`packages/app/src/ui-runtime/service.ts`).
+ */
+export type RuntimeNodeMarker =
+  | 'input.received'
+  | 'orchestration.plan'
+  | 'provider.execute'
+  | 'provider.tool'
+  | 'provider.model'
+  | 'checkpoint.commit';
+
+export const RUNTIME_NODE_MARKERS = Object.freeze({
+  inputReceived: 'input.received',
+  orchestrationPlan: 'orchestration.plan',
+  providerExecute: 'provider.execute',
+  providerTool: 'provider.tool',
+  providerModel: 'provider.model',
+  checkpointCommit: 'checkpoint.commit',
+} as const satisfies Readonly<Record<string, RuntimeNodeMarker>>);

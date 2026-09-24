@@ -15,3 +15,13 @@ declare module 'node:test' {
   function test(name: string, fn: () => void | Promise<void>): void;
   export default test;
 }
+
+declare module 'node:fs/promises' {
+  export function readFile(path: string, encoding: 'utf8'): Promise<string>;
+}
+
+declare module 'node:path' {
+  export function join(...paths: string[]): string;
+}
+
+declare const process: { readonly cwd: () => string };

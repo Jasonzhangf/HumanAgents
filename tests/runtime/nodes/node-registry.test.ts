@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   PIPELINE_NODE_IDS,
@@ -10,8 +12,10 @@ import {
   nodeById,
   nodeRegistry,
   pipelineNodeRow,
+  RUNTIME_NODE_MARKERS,
   PipelineNodeRegistryError,
   type PipelineNodeDefinition,
+  type RuntimeNodeMarker,
 } from '../../../packages/runtime/src/nodes/node-registry.js';
 
 // Structural mirror of `AgentRoleDisplay` in `packages/ui/contracts/models.ts:130`. Declared here so
@@ -102,4 +106,47 @@ test('unknown node ids throw instead of returning undefined', () => {
   assert.throws(() => nodeById('不存在'), PipelineNodeRegistryError);
   assert.throws(() => nodeById('input.received'), PipelineNodeRegistryError);
   assert.throws(() => nodeById(''), PipelineNodeRegistryError);
+});
+
+test('runtime node markers are a frozen, duplicate-free identity set owned by the registry', () => {
+  const markers = Object.values(RUNTIME_NODE_MARKERS);
+  assert.deepEqual([...markers].sort(), [
+    'checkpoint.commit',
+    'input.received',
+    'orchestration.plan',
+    'provider.execute',
+    'provider.model',
+    'provider.tool',
+  ]);
+  assert.equal(new Set(markers).size, markers.length);
+  // A marker is a lifecycle identity, not one of the thirteen pipeline DAG node ids: the
+  // observation bridge (`packages/app/src/ui-runtime/service.ts`) owns that translation.
+  for (const marker of markers) {
+    const typed: RuntimeNodeMarker = marker;
+    assert.equal(typed, marker);
+    assert.equal(PIPELINE_NODE_IDS.includes(marker as PipelineNodeId), false, `${marker} is not a pipeline node id`);
+  }
+});
+
+test('coordinator assigns currentNode from the registry instead of a bare literal', async () => {
+  const source = await readFile(
+    join(process.cwd(), 'packages', 'runtime', 'src', 'ui-runtime', 'coordinator.ts'),
+    'utf8',
+  );
+  // A bare marker literal is a `currentNode` assignment whose assigned value is one of the marker
+  // strings. `[^;\n]*?` keeps the match inside a single statement, so a marker string appearing
+  // elsewhere on the line (e.g. an event-kind comparison) is not reported.
+  const markerValues = Object.values(RUNTIME_NODE_MARKERS).map((value) => value.replace(/\./g, '\\.'));
+  const bareAssignment = new RegExp(
+    `currentNode\\s*[:=][^;\\n]*?'(${markerValues.join('|')})'`,
+    'g',
+  );
+  const violations = [...source.matchAll(bareAssignment)].map((match) => match[0]);
+  assert.deepEqual(
+    violations,
+    [],
+    `coordinator.ts must assign currentNode from RUNTIME_NODE_MARKERS, found: ${violations.join(' | ')}`,
+  );
+  assert.ok(source.includes("from '../nodes/node-registry.js'"), 'coordinator.ts must import the node registry');
+  assert.ok(source.includes('RUNTIME_NODE_MARKERS.'), 'coordinator.ts must use RUNTIME_NODE_MARKERS');
 });
