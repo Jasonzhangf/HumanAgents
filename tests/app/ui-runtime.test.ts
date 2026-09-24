@@ -27,6 +27,7 @@ import {
   type ProviderStartReceipt,
   type ProviderStopReceipt,
   type ProviderSubmitResult,
+  type RequirementEnvelope,
   type ScopeRef,
   type TaskId,
 } from '../../packages/contracts/src/index.js';
@@ -189,6 +190,38 @@ class FirstOperationGatedReplayPort extends FakeReplayExecutionRuntimePort {
   override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
     this.observed += 1;
     if (this.observed === 1) this.firstStartedResolve();
+    return super.start(input);
+  }
+
+  override async *observe(input: Parameters<ExecutionRuntimePort['observe']>[0]): AsyncIterable<ProviderEvent> {
+    if (this.observed === 1) await this.gate;
+    yield* super.observe(input);
+  }
+}
+
+// Holds the first execution open while recording every provider-visible input,
+// so a deferred append can be proven to (a) not overwrite the running input and
+// (b) be consumed as the next execution's prompt.
+class GatedPayloadCapturingReplayPort extends FakeReplayExecutionRuntimePort {
+  readonly startPayloads: unknown[] = [];
+  private observed = 0;
+  readonly firstStarted: Promise<void>;
+  private firstStartedResolve!: () => void;
+
+  constructor(
+    options: ConstructorParameters<typeof FakeReplayExecutionRuntimePort>[0],
+    private readonly gate: Promise<void>,
+  ) {
+    super(options);
+    this.firstStarted = new Promise<void>((resolve) => {
+      this.firstStartedResolve = resolve;
+    });
+  }
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.observed += 1;
+    if (this.observed === 1) this.firstStartedResolve();
+    this.startPayloads.push(structuredClone(input.payload ?? null));
     return super.start(input);
   }
 
@@ -2364,6 +2397,143 @@ test('active implicit admission state takes precedence over historical retiremen
   releaseOccupying();
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
+});
+
+test('confirmed append against a running task queues an input revision instead of failing with task.busy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-append-running-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const port = new GatedPayloadCapturingReplayPort({ binding, stepDelayMs: 1 }, firstGate);
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+
+  const task = service.createTask({ title: 'running append target' });
+  service.startExecution(task.taskId, { prompt: 'baseline input' });
+  await port.firstStarted;
+
+  const confirmAppend = async (suffix: string, normalizedInput: string): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({
+      sourceRef: `ui:${suffix}`,
+      rawInput: normalizedInput,
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, {
+      normalizedInput,
+      matchedTasks: [{ taskId: task.taskId, relation: 'current', status: 'running' }],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(interactionId, {
+      proposedIntent: 'append',
+      proposal: normalizedInput,
+    });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    assert.ok(proposed.draft);
+    await service.confirmExplicitRequirement({
+      draftId: proposed.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: `confirmation:${suffix}`,
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-24T00:00:00.000Z',
+      payloadRef: `asset://requirements/${suffix}`,
+    });
+    return interactionId;
+  };
+
+  const interactionId = await confirmAppend('append-running', 'appended instruction');
+  service.startImplicitConsumer();
+
+  // The append must not reject with task.busy; it is deferred behind the running
+  // execution as a pending input revision.
+  await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'waiting'));
+  assert.equal(service.status().implicitScheduling?.code, 'implicit-admission.waiting');
+  assert.equal(service.taskDashboard(task.taskId).state, 'running');
+  assert.equal(service.taskDashboard(task.taskId).input, 'baseline input');
+  assert.equal(service.taskDashboard(task.taskId).executionEpoch, 1);
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
+  assert.equal(port.startPayloads.length, 1, 'no second execution while the target is running');
+
+  releaseFirst();
+  await waitFor(() => assert.equal(port.startPayloads.length, 2));
+  assert.deepEqual(port.startPayloads[0], { prompt: 'baseline input' });
+  assert.deepEqual(port.startPayloads[1], { prompt: 'appended instruction' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  assert.equal(service.taskDashboard(task.taskId).executionEpoch, 2);
+  assert.equal(service.taskDashboard(task.taskId).input, 'appended instruction');
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+  assert.equal(service.listTasks().counts.total, 1);
+  await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+
+  const revisions = journal.replay()
+    .filter((record): record is Extract<ReturnType<UiRuntimeJournal['replay']>[number], { readonly kind: 'explicit-brain.state' }> => record.kind === 'explicit-brain.state')
+    .at(-1)?.state.taskInputRevisions;
+  assert.equal(revisions?.length, 1);
+  assert.deepEqual(revisions?.[0]?.state.revisions.map((revision) => revision.inputRevision), [1]);
+  assert.equal(revisions?.[0]?.consumedInputRevision, 1);
+});
+
+test('appendTaskInput records task-scoped monotonic revisions in FIFO order and never overwrites', () => {
+  const root = join(tmpdir(), `humanagent-ui-append-coordinator-${process.pid}`);
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const coordinator = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal,
+  });
+  const task = coordinator.createTask({ title: 'append mailbox' });
+  const envelope = (suffix: string, normalizedInput: string, inputRevision = 1): RequirementEnvelope => ({
+    requirementId: `requirement:${suffix}:1`,
+    draftId: suffix,
+    inputRevision,
+    intent: 'append',
+    taskRef: task.taskId,
+    normalizedInput,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-24T00:00:00.000Z',
+    fifoSeq: inputRevision,
+    payloadRef: `asset://requirements/${suffix}`,
+  });
+
+  const first = coordinator.appendTaskInput(task.taskId, envelope('append-a', 'first appended input'));
+  assert.equal(first.status, 'updated');
+  assert.equal(first.revision, 1);
+  // Re-dispatching the same confirmed requirement is idempotent: no second copy.
+  assert.equal(coordinator.appendTaskInput(task.taskId, envelope('append-a', 'first appended input')).revision, 1);
+  const second = coordinator.appendTaskInput(task.taskId, envelope('append-b', 'second appended input', 2));
+  assert.equal(second.revision, 2);
+  assert.deepEqual(
+    coordinator.exportTaskInputRevisions()[0]?.state.revisions.map((revision) => revision.envelope.normalizedInput),
+    ['first appended input', 'second appended input'],
+  );
+
+  // FIFO: the oldest unconsumed revision is pending; consuming it advances the
+  // cursor without dropping the newer revision.
+  assert.equal(coordinator.pendingTaskInput(task.taskId)?.envelope.normalizedInput, 'first appended input');
+  coordinator.consumeTaskInput(task.taskId, 1);
+  assert.equal(coordinator.pendingTaskInput(task.taskId)?.envelope.normalizedInput, 'second appended input');
+  coordinator.consumeTaskInput(task.taskId, 2);
+  assert.equal(coordinator.pendingTaskInput(task.taskId), undefined);
+  // Consumption is monotonic: a stale consume never rewinds the cursor.
+  coordinator.consumeTaskInput(task.taskId, 1);
+  assert.equal(coordinator.pendingTaskInput(task.taskId), undefined);
+
+  const restored = new RuntimeTaskCoordinator({
+    organId,
+    createDriver: () => { throw new Error('no execution in this test'); },
+    checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    journal,
+  });
+  restored.restoreTaskInputRevisions(coordinator.exportTaskInputRevisions());
+  assert.deepEqual(
+    restored.exportTaskInputRevisions()[0]?.state.revisions.map((revision) => revision.envelope.normalizedInput),
+    ['first appended input', 'second appended input'],
+  );
+  assert.equal(restored.pendingTaskInput(task.taskId), undefined);
 });
 
 test('runtime exposes a blocked requirement through status and resumes it after reconnect', async () => {
