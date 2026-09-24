@@ -39,6 +39,7 @@ import type { AgentHookStage } from '../agent-io/events.js';
 import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
+import { RUNTIME_NODE_MARKERS } from '../nodes/node-registry.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
 import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort } from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
@@ -744,7 +745,7 @@ export class RuntimeTaskCoordinator {
       nextStep: '选择模式并发起执行',
       input: '',
       output: '',
-      currentNode: 'input.received',
+      currentNode: RUNTIME_NODE_MARKERS.inputReceived,
       createdAt: timestamp,
       updatedAt: timestamp,
       allowedActions: ['start'],
@@ -917,7 +918,7 @@ export class RuntimeTaskCoordinator {
     });
     record.state = 'running';
     record.currentState = '运行中';
-    record.currentNode = 'provider.execute';
+    record.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
     record.input = operation.input;
     record.output = '';
     record.operationId = operation.operationId;
@@ -1406,7 +1407,7 @@ export class RuntimeTaskCoordinator {
           requiredCapabilities: ['provider.execution'],
           mergeGate: 'required',
         };
-        record.currentNode = 'orchestration.plan';
+        record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
         record.nextStep = '编排执行、审查并合并';
         record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });
         const dispatched = await record.taskAssembly.orchestration.dispatch({
@@ -1721,8 +1722,8 @@ export class RuntimeTaskCoordinator {
       { taskOutput, error },
       event.kind === 'terminal' ? 'provider' : undefined,
     );
-    if (event.kind === 'tool') record.currentNode = 'provider.tool';
-    if (event.kind === 'model') record.currentNode = 'provider.model';
+    if (event.kind === 'tool') record.currentNode = RUNTIME_NODE_MARKERS.providerTool;
+    if (event.kind === 'model') record.currentNode = RUNTIME_NODE_MARKERS.providerModel;
     if (error) record.error = error;
   }
 
@@ -1818,7 +1819,7 @@ export class RuntimeTaskCoordinator {
     record.allowedActions = [];
     record.currentState = 'checkpoint 已提交，等待恢复';
     record.nextStep = nextAction;
-    record.currentNode = 'checkpoint.commit';
+    record.currentNode = RUNTIME_NODE_MARKERS.checkpointCommit;
     record.updatedAt = this.now().toISOString();
   }
 
@@ -1899,7 +1900,7 @@ export class RuntimeTaskCoordinator {
     record.stopping = false;
     record.allowedActions = state === 'succeeded' || state === 'stopped' || state === 'failed' ? ['start'] : [];
     record.currentState = state === 'succeeded' ? '已完成' : state === 'stopped' ? '已停止' : state === 'failed' ? '失败' : state;
-    record.currentNode = state === 'stopped' ? 'checkpoint.commit' : record.currentNode;
+    record.currentNode = state === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : record.currentNode;
     record.nextStep = state === 'succeeded'
       ? '可发起新的执行或停止'
       : state === 'stopped'
@@ -1968,7 +1969,7 @@ export class RuntimeTaskCoordinator {
             nextStep: '选择模式并发起执行',
             input: '',
             output: '',
-            currentNode: 'input.received',
+            currentNode: RUNTIME_NODE_MARKERS.inputReceived,
             createdAt: record.createdAt,
             updatedAt: record.createdAt,
             allowedActions: ['start'],
@@ -2048,12 +2049,12 @@ export class RuntimeTaskCoordinator {
             task.executionEpoch = operation.executionEpoch;
             task.input = operation.input;
             task.orchestrated = operation.orchestrated;
-            task.currentNode = 'provider.execute';
+            task.currentNode = RUNTIME_NODE_MARKERS.providerExecute;
           }
           if (record.taskOutput !== undefined) task.output = record.taskOutput;
           if (record.error) task.error = record.error;
-          if (record.event.kind === 'provider.tool') task.currentNode = 'provider.tool';
-          if (record.event.kind === 'provider.model') task.currentNode = 'provider.model';
+          if (record.event.kind === 'provider.tool') task.currentNode = RUNTIME_NODE_MARKERS.providerTool;
+          if (record.event.kind === 'provider.model') task.currentNode = RUNTIME_NODE_MARKERS.providerModel;
           break;
         }
         case 'explicit-brain.state': {
@@ -2124,7 +2125,7 @@ export class RuntimeTaskCoordinator {
           || checkpoint.outcome === 'cancelled'
           ? ['start']
           : [];
-        task.currentNode = checkpoint.outcome === 'stopped' ? 'checkpoint.commit' : task.currentNode;
+        task.currentNode = checkpoint.outcome === 'stopped' ? RUNTIME_NODE_MARKERS.checkpointCommit : task.currentNode;
         task.updatedAt = task.events.at(-1)?.occurredAt ?? task.updatedAt;
       } catch {
         this.markRecoveryRequired(task);
