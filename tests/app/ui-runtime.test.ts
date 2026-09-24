@@ -6310,3 +6310,39 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   assert.equal(typeof bindAgentDriver, 'function');
   assert.equal(typeof executeStopControl, 'function');
 });
+
+test('multiple appended inputs drain FIFO across successive executions of one task', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-append-fifo-drain-'));
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const port = new GatedPayloadCapturingReplayPort({ binding, stepDelayMs: 1 }, firstGate);
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+  const task = service.createTask({ title: 'fifo tmp target' });
+  service.startExecution(task.taskId, { prompt: 'baseline input' });
+  await port.firstStarted;
+  const confirmAppend = async (suffix: string, normalizedInput: string): Promise<string> => {
+    const interactionId = await service.receiveExplicitInput({ sourceRef: `ui:${suffix}`, rawInput: normalizedInput, channel: 'business' });
+    await service.beginExplicitMatching(interactionId);
+    await service.recordExplicitMatch(interactionId, { normalizedInput, matchedTasks: [{ taskId: task.taskId, relation: 'current', status: 'running' }], knownFacts: [] });
+    await service.proposeExplicitRequirement(interactionId, { proposedIntent: 'append', proposal: normalizedInput });
+    const proposed = await service.inspectExplicitInteraction(interactionId);
+    await service.confirmExplicitRequirement({ draftId: proposed.draft!.draftId, inputRevision: 1, confirmationRef: `confirmation:${suffix}`, confirmedBy: 'human:operator', confirmedAt: '2026-09-24T00:00:00.000Z', payloadRef: `asset://requirements/${suffix}` });
+    return interactionId;
+  };
+  await confirmAppend('t1', 'first appended instruction');
+  await confirmAppend('t2', 'second appended instruction');
+  service.startImplicitConsumer();
+  await waitFor(() => assert.equal(port.startPayloads.length, 1));
+  await new Promise((r) => setTimeout(r, 80));
+  releaseFirst();
+  await waitFor(() => assert.equal(port.startPayloads.length, 3));
+  assert.deepEqual(port.startPayloads, [
+    { prompt: 'baseline input' },
+    { prompt: 'first appended instruction' },
+    { prompt: 'second appended instruction' },
+  ]);
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  assert.equal(service.taskDashboard(task.taskId).executionEpoch, 3);
+  await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+});
