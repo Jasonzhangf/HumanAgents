@@ -418,6 +418,11 @@ test('memory coordinator advances a task binding only with a new assignment and 
   const staleSearch = await coordinator.search({ agentRuntimeId: 'runtime-epoch-1', query: 'directive', limit: 5 });
   assert.equal(staleSearch.status, 'attention');
   assert.equal(staleSearch.status === 'attention' && staleSearch.issue.code, 'memory-binding-missing');
+  // A binding advance is a new assignment/epoch for the SAME task binding, so
+  // the task binding ref stays stable and a query against it is still served;
+  // epoch isolation is enforced by the runtime binding (see the invalidated
+  // `runtime-epoch-1` attach/recall/search assertions above), not by mutating
+  // the task binding identity.
   const staleQuery = await coordinator.query({
     requestId: 'query-epoch-1',
     operationId: id('operation', 'query-epoch-1'),
@@ -437,8 +442,32 @@ test('memory coordinator advances a task binding only with a new assignment and 
     tokenBudget: 100,
     inputDigest: 'sha256:query-epoch-1',
   });
-  assert.equal(staleQuery.status, 'attention');
-  assert.equal(staleQuery.status === 'attention' && staleQuery.issue.code, 'memory-binding-missing');
+  assert.equal(staleQuery.status, 'ready');
+});
+
+test('memory coordinator keeps the task binding ref stable across successive assignment advances', async () => {
+  const coordinator = new MemoryCoordinator();
+  const ports = makePorts();
+  const base = {
+    taskId: id('task', 'task-advance-stable'),
+    projectKey: taskProjectKey,
+    scope: { namespace: 'project' as const, projectKey: taskProjectKey, organId: organ, taskId: id('task', 'task-advance-stable') },
+    backendRef: 'memory://fake',
+    indexVersion: 'fake-memory-v1',
+    operations: ports.operations,
+    injection: ports.injection,
+  };
+  const first = coordinator.bindTask({ ...base, assignmentId: 'assignment-a', executionEpoch: 1 });
+  const second = coordinator.bindTask({ ...base, assignmentId: 'assignment-b', executionEpoch: 2 });
+  const third = coordinator.bindTask({ ...base, assignmentId: 'assignment-c', executionEpoch: 3 });
+  // Every advance must keep the same task-level binding identity, otherwise the
+  // next execution looks like a different binding and is rejected.
+  assert.equal(first.bindingId, 'memory-binding:task-advance-stable');
+  assert.equal(second.bindingId, first.bindingId);
+  assert.equal(third.bindingId, first.bindingId);
+  assert.equal(second.assignmentId, 'assignment-b');
+  assert.equal(third.assignmentId, 'assignment-c');
+  assert.equal(third.executionEpoch, 3);
 });
 
 test('memory coordinator rejects invalid binding advances without mutating current state', () => {

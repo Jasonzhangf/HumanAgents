@@ -1544,6 +1544,7 @@ export class UiRuntimeService {
         receipt: validateRequirementAdmissionReceipt(admission.receipt),
       });
     }
+    this.coordinator.restoreTaskInputRevisions(restored.taskInputRevisions ?? []);
     this.queuedRequirements.clear();
     const restoredInbox = this.requirementInbox.exportState();
     for (const draftId of restoredInbox.pendingDraftIds) {
@@ -1929,7 +1930,49 @@ export class UiRuntimeService {
         }));
     const operationId = prepared.operationId;
     let executionEpoch = prepared.executionEpoch;
-    if (executionEpoch === undefined) {
+    const isTaskInputUpdate = consumed.taskRef !== undefined
+      && (consumed.intent === 'append' || consumed.intent === 'change');
+    if (isTaskInputUpdate) {
+      // Route `append`/`change` intents to this task's input mailbox instead of
+      // overwriting its directive with a fresh execution. `appendTaskRevision`
+      // is the single owner of the append-without-overwrite rule; the revision
+      // is retained and consumed by the next execution cycle.
+      this.coordinator.appendTaskInput(task.taskId, consumed);
+      this.persistExplicitBrainState();
+      const current = this.coordinator.taskSnapshot(task.taskId);
+      if (executionEpoch === undefined) {
+        if (current.state === 'running' || current.state === 'settling') {
+          // The target is busy. Do not start a conflicting execution (that used
+          // to surface as task.busy); keep the confirmed requirement pending in
+          // the FIFO so the running task's terminal wake consumes the appended
+          // input on the next execution cycle instead.
+          throw new RequirementAdmissionError({
+            status: 'waiting',
+            queue: 'interactive',
+            ownerId: 'runtime-coordinator',
+            condition: 'task.input.pending',
+            nextAction: { kind: 'wait', ref: 'task.input.pending' },
+            reason: `append queued behind the running execution of task ${task.taskId.value}`,
+          });
+        }
+        const pending = this.coordinator.pendingTaskInput(task.taskId);
+        const prompt = pending ? pending.envelope.normalizedInput : consumed.normalizedInput;
+        const execution = this.coordinator.startExecution(task.taskId, {
+          prompt,
+          ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+          operationId,
+        });
+        if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
+        executionEpoch = execution.executionEpoch;
+      }
+      const started: DispatchLedgerEntry = {
+        ...prepared,
+        operationId,
+        executionEpoch,
+      };
+      this.dispatchLedger.set(consumed.draftId, started);
+      this.persistExplicitBrainState();
+    } else if (executionEpoch === undefined) {
       if (task.operationId === operationId.value && task.executionEpoch !== undefined) {
         executionEpoch = task.executionEpoch;
       } else {
@@ -1981,12 +2024,22 @@ export class UiRuntimeService {
       : [];
     const queue = classifyConfirmedRequirement(envelope);
     const tasks = this.coordinator.taskSnapshots();
+    const isTaskInputUpdate = envelope.taskRef !== undefined
+      && (envelope.intent === 'append' || envelope.intent === 'change');
+    const runningTasks = tasks.filter((task) => task.state === 'running' || task.state === 'settling');
     return admitRequirement({
       envelope,
       queue: defaultAdmissionQueueConfig(queue),
       registeredQueues: ADMISSION_QUEUE_KINDS,
       queueLoad: {
-        running: tasks.filter((task) => task.state === 'running' || task.state === 'settling').length,
+        // An append/change to an already-running task does not occupy a new
+        // pipeline slot — it goes to that task's input mailbox and is consumed
+        // on the task's next execution cycle. Exclude the target task's own
+        // running status so it is admitted and deferral happens downstream;
+        // other running/settling tasks still consume the shared pipeline slot.
+        running: isTaskInputUpdate
+          ? runningTasks.filter((task) => task.taskId.value !== envelope.taskRef!.value).length
+          : runningTasks.length,
         queued: tasks.filter((task) => task.state === 'created' || task.state === 'admitted').length,
       },
       requiredCapabilities: [PROVIDER_EXECUTION_CAPABILITY],
@@ -2128,6 +2181,7 @@ export class UiRuntimeService {
         requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
         submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
         decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
+        taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
       },
     });
   }

@@ -20,6 +20,7 @@ import {
   type ScopeRef,
   type Task,
   type TaskId,
+  type RequirementEnvelope,
   type WorkAssignment,
   type WorkResult,
 } from '../../../contracts/src/index.js';
@@ -40,6 +41,12 @@ import { ContextCommitter, type PublishedContext } from '../context/index.js';
 import { createHookRegistry, type AgentHookRegistry } from '../hooks/index.js';
 import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type AgentRuntimeClosure } from '../nodes/agent-runtime.js';
 import { RUNTIME_NODE_MARKERS } from '../nodes/node-registry.js';
+import {
+  appendTaskRevision,
+  type TaskRevision,
+  type TaskRevisionState,
+  type TaskUpdateDecision,
+} from '../admission/index.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
 import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort } from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
@@ -206,6 +213,11 @@ export interface RuntimeExplicitBrainJournalState {
   }[];
   readonly submittedSubmissions: readonly PersistedSubmittedReceipt[];
   readonly decisionTraces?: readonly DecisionTraceRecord[];
+  readonly taskInputRevisions?: readonly {
+    readonly taskId: TaskId;
+    readonly state: TaskRevisionState;
+    readonly consumedInputRevision?: number;
+  }[];
 }
 
 export type RuntimeTaskJournalRecord =
@@ -325,6 +337,13 @@ interface TaskRecord {
   updatedAt: string;
   operationId?: OperationId;
   executionEpoch?: number;
+  /**
+   * Confirmed `append`/`change` input revisions for this task. `appendTaskRevision`
+   * is the single owner of the append-without-overwrite rule; this record only
+   * retains its decision and how far the execution cycles have consumed it.
+   */
+  inputRevisionState?: TaskRevisionState;
+  consumedInputRevision?: number;
   allowedActions: string[];
   runtime?: AgentRuntime;
   driver?: RuntimeExecutionDriver;
@@ -938,6 +957,104 @@ export class RuntimeTaskCoordinator {
 
     void this.runExecution(record, operation, scope, operation.input);
     return { operationId: operation.operationId, executionEpoch: operation.executionEpoch };
+  }
+
+  /**
+   * Appends a confirmed `append`/`change` requirement as this task's next input
+   * revision. `appendTaskRevision` (packages/runtime/src/admission) is the single
+   * owner of the append-without-overwrite rule; this method only supplies the
+   * task-scoped monotonic revision (the interaction's `inputRevision` is
+   * per-interaction, not per-task) and retains its decision. Re-dispatching the
+   * same confirmed requirement is idempotent and never appends a second copy.
+   */
+  appendTaskInput(taskId: TaskId, envelope: RequirementEnvelope): TaskUpdateDecision {
+    const record = this.requireTask(taskId);
+    if (envelope.taskRef?.value !== taskId.value) {
+      throw new RuntimeTaskControlError(
+        'task.input.ref-mismatch',
+        RUNTIME_OWNER,
+        'confirmed intent does not name this task',
+        `resubmit the append against task ${taskId.value}`,
+      );
+    }
+    const existing = record.inputRevisionState?.revisions.find(
+      (revision) => revision.envelope.requirementId === envelope.requirementId,
+    );
+    if (existing) {
+      return {
+        status: 'updated',
+        taskId,
+        task: record.inputRevisionState!,
+        revision: existing.inputRevision,
+        ownerId: RUNTIME_OWNER,
+        condition: 'task.input.appended',
+        nextAction: { kind: 'continue', ref: 'task.input.dispatch' },
+        reason: 'task input revision already appended',
+      };
+    }
+    const previous = record.inputRevisionState?.revisions.at(-1);
+    const inputRevision = (previous?.inputRevision ?? 0) + 1;
+    const decision = appendTaskRevision({
+      ...(record.inputRevisionState ? { task: record.inputRevisionState } : {}),
+      envelope: { ...envelope, inputRevision },
+      ownerId: RUNTIME_OWNER,
+    });
+    if (decision.status !== 'updated') {
+      throw new RuntimeTaskControlError(
+        decision.condition ?? 'task.input.blocked',
+        decision.ownerId,
+        decision.reason,
+        `${decision.nextAction.kind}${decision.nextAction.ref ? `:${decision.nextAction.ref}` : ''}`,
+      );
+    }
+    record.inputRevisionState = decision.task;
+    record.updatedAt = this.now().toISOString();
+    return decision;
+  }
+
+  /**
+   * The oldest appended input revision that an execution cycle has not consumed
+   * yet, or `undefined` when the task's input mailbox is drained. Independent
+   * of the interaction-level `inputRevision`, this reflects the task's own
+   * input sequence so FIFO order is preserved across multiple appends.
+   */
+  pendingTaskInput(taskId: TaskId): TaskRevision | undefined {
+    const record = this.requireTask(taskId);
+    const consumed = record.consumedInputRevision ?? 0;
+    return record.inputRevisionState?.revisions.find((revision) => revision.inputRevision > consumed);
+  }
+
+  consumeTaskInput(taskId: TaskId, inputRevision: number): void {
+    const record = this.requireTask(taskId);
+    if (inputRevision < (record.consumedInputRevision ?? 0)) return;
+    record.consumedInputRevision = inputRevision;
+  }
+
+  exportTaskInputRevisions(): readonly {
+    readonly taskId: TaskId;
+    readonly state: TaskRevisionState;
+    readonly consumedInputRevision?: number;
+  }[] {
+    return [...this.tasks.values()]
+      .filter((record) => record.inputRevisionState !== undefined)
+      .map((record) => ({
+        taskId: record.taskId,
+        state: structuredClone(record.inputRevisionState!),
+        ...(record.consumedInputRevision === undefined ? {} : { consumedInputRevision: record.consumedInputRevision }),
+      }));
+  }
+
+  restoreTaskInputRevisions(entries: readonly {
+    readonly taskId: TaskId;
+    readonly state: TaskRevisionState;
+    readonly consumedInputRevision?: number;
+  }[]): void {
+    for (const entry of entries) {
+      const record = this.tasks.get(entry.taskId.value);
+      if (!record) continue;
+      record.inputRevisionState = entry.state;
+      if (entry.consumedInputRevision !== undefined) record.consumedInputRevision = entry.consumedInputRevision;
+    }
   }
 
   async stop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {

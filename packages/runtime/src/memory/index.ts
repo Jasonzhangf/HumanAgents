@@ -1087,9 +1087,12 @@ export class MemoryCoordinator {
       ) {
         throw new MemoryCoordinatorError(`memory binding advance must use a new assignment and execution epoch for task: ${input.taskId.value}`);
       }
+      // A binding advance is a new assignment/epoch for the SAME task binding,
+      // so the binding identity must stay stable: the next bindTask call passes
+      // the same (or default) bindingRef, and a shape change here would make the
+      // following execution look like a different identity and be rejected.
       const advanced: MemoryTaskBinding = {
         ...existing,
-        bindingId: `memory-binding:${input.taskId.value}:${assignmentId}`,
         assignmentId,
         executionEpoch: input.executionEpoch,
       };
