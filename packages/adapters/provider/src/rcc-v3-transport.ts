@@ -641,9 +641,9 @@ export class RccV3ProviderTransport implements ProviderTransport {
       completed = true;
     } catch (cause) {
       active.streamDone = true;
+      active.resourceReleased = true;
       if (isExpectedStopAbort(cause, active)) {
         if (!active.terminalError) active.terminalState = 'stopped';
-        active.resourceReleased = true;
         return;
       } else if (!active.terminalError) {
         const errorMessage = cause instanceof Error ? cause.message : 'RCC v3 stream failed';
@@ -655,7 +655,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     } finally {
       resolveStreamCompletion();
       if (!completed) {
-        if (!failed) {
+        if (!failed || !active.resourceReleased) {
           if (!active.controller.signal.aborted) {
             active.controller.abort(new DOMException('RCC v3 observe consumer stopped before stream completion', 'AbortError'));
           }
@@ -765,11 +765,13 @@ export class RccV3ProviderTransport implements ProviderTransport {
         `RCC v3 settlement requires recovery for ${state}`,
         'runtime',
       ));
+      active.resourceReleased = true;
+      this.executions.delete(executionKey(input));
       return {
         ...input,
         state,
         evidenceRefs: [evidenceRef],
-        resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
+        resourceRelease: { state: 'released', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
         error,
         ownerId: OWNER,

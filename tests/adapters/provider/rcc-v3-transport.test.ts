@@ -813,7 +813,8 @@ test('RCC v3 provider failure remains failed when exact stop abort closes observ
   assert.equal(settled.error?.code, 'overloaded');
   assert.equal(settled.resourceRelease.state, 'released');
   assert.equal(settled.persistence.state, 'pending');
-  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), true);
+  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
+  assert.equal((await built.transport.close(binding)).state, 'closed');
   const errorRef = settled.error?.evidenceRefs[0];
   assert.ok(errorRef);
   const readable = await built.evidence.read(errorRef);
@@ -873,7 +874,7 @@ test('RCC v3 early observe return cancels the response body and controller', asy
   assert.equal(settled.nextAction?.kind, 'recover');
 });
 
-test('RCC v3 terminal observe failure keeps the session and rejects a later stop', async () => {
+test('RCC v3 terminal observe failure releases the session and allows close', async () => {
   const built = transportHarness();
   let controller!: AbortController;
   const failingBody: AsyncIterable<Uint8Array> = {
@@ -888,29 +889,44 @@ test('RCC v3 terminal observe failure keeps the session and rejects a later stop
     for await (const _event of built.transport.observe(execution)) void _event;
   }, /socket hang up/);
 
-  // The stream is already terminal when observation fails, so the resource is
-  // never released and the settlement stays non-final with the session kept.
+  // The stream is terminal even when observation fails, so the resource is
+  // released and the settlement moves the session out of the transport.
   const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'failed');
-  assert.equal(settled.resourceRelease.state, 'pending');
+  assert.equal(settled.resourceRelease.state, 'released');
 
-  // A stop after the terminal state is rejected by the transport, so callers
-  // must not advertise it as a recovery action.
-  const stop = await built.transport.requestStop({ ...execution, reason: 'failure cleanup', ownerId: 'stop-controller' }, {
+  // Settlement removed the released session, so a later stop has no live
+  // execution to address and must fail explicitly.
+  await assert.rejects(() => built.transport.requestStop({ ...execution, reason: 'failure cleanup', ownerId: 'stop-controller' }, {
     protocol: 'responses',
     type: 'responses.cancel',
     route: 'cc:test-route',
     model: binding.modelRef,
     reason: 'failure cleanup',
     execution,
-  });
-  assert.equal(stop.status, 'rejected');
-  assert.equal(stop.error?.code, 'stop.after-terminal');
+  }), /not active/);
   assert.equal(controller.signal.aborted, false);
 
-  // The session is retained, so the transport cannot close the binding yet.
+  // The session was released by settlement, so close terminates normally.
   const closed = await built.transport.close(binding);
-  assert.equal(closed.state, 'pending');
+  assert.equal(closed.state, 'closed');
+});
+
+test('RCC v3 unknown anthropic settlement releases the session and allows close', async () => {
+  const built = transportHarness();
+  seedActive(built.transport, chunks([
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-unknown","model":"provider.model","role":"assistant"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"interrupted"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ]), 'anthropic');
+  for await (const _event of built.transport.observe(execution)) void _event;
+
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'unknown');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'pending');
+  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
+  assert.equal((await built.transport.close(binding)).state, 'closed');
 });
 
 test('RCC v3 ignores the duplicate response.done trailer emitted by the transparent proxy', async () => {
