@@ -243,6 +243,10 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
   // Forces the transport to reject a stop request so failure cleanup cannot
   // reach a final settlement.
   failStop = false;
+  // Simulates the RCC v3 terminal transport failure: observation throws while
+  // the stream is already terminal, so settle returns `failed` with a pending
+  // resource release and the provider session is retained.
+  failObserve = false;
   private readonly heldTasks = new Set<string>();
   private readonly sessions = new Map<string, { readonly scope: ScopeRef; stopRequested: boolean }>();
 
@@ -334,6 +338,17 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
     if (this.heldTasks.has(input.taskId.value)) {
       await new Promise<void>(() => {});
     }
+    if (this.failObserve) {
+      // The real transport marks the stream done and terminal `failed` but
+      // leaves the resource unreleased, then surfaces the transport error.
+      throw new ProviderAdapterError({
+        code: 'transport.failure',
+        category: 'transport',
+        phase: 'observe',
+        message: 'provider transport observe failed',
+        scope: session.scope,
+      });
+    }
     const identity = {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
@@ -395,13 +410,13 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
       };
     }
     // Ordinary settlement of a waiting execution cannot release the session.
-    this.settleStates.push('blocked');
+    this.settleStates.push(this.failObserve ? 'failed' : 'blocked');
     return {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
       operationId: input.operationId,
       executionEpoch: input.executionEpoch,
-      state: 'blocked',
+      state: this.failObserve ? 'failed' : 'blocked',
       evidenceRefs: [this.evidence('settle-blocked', scope)],
       resourceRelease: { state: 'pending', evidenceRefs: [this.evidence('release-pending', scope)] },
       persistence: { state: 'pending', evidenceRefs: [this.evidence('persistence-pending', scope)] },
@@ -4858,6 +4873,46 @@ test('failure cleanup does not report a clean failure while the shared provider 
 
   // The other execution stays suspended, so no further journal writes race the
   // teardown of the temp directory.
+  await rm(root, { recursive: true, force: true });
+});
+
+test('a terminal provider failure does not advertise a stop the provider will reject', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-terminal-failure-'));
+  const port = new AbandonedToolExecutionPort();
+  // The stream is already terminal when observation fails, so the session can
+  // never be released: a stop is impossible and must not be advertised.
+  port.failObserve = true;
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-terminal-failure'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+  });
+  const task = service.createTask({ title: 'terminal provider failure' });
+  service.startExecution(task.taskId, { prompt: 'fail the transport' });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'), 5000);
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'blocked'), 5000);
+  const dashboard = service.taskDashboard(task.taskId);
+  // The provider session cannot be released, so the task stays blocked. It must
+  // not offer retry-stop because both the runtime and RCC v3 reject stop once
+  // the execution is terminal; the failure remains recoverable through its
+  // owner instead of through an action that cannot succeed.
+  assert.ok(dashboard.error?.cleanupError, 'the unresolved cleanup must remain attached to the task error');
+  assert.deepEqual(dashboard.allowedActions, []);
+  assert.equal(service.taskDashboard(task.taskId).state, 'blocked');
+  await assert.rejects(
+    async () => service.retryStop(task.taskId),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.recoverable',
+  );
+
   await rm(root, { recursive: true, force: true });
 });
 

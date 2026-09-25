@@ -1673,11 +1673,6 @@ export class RuntimeTaskCoordinator {
       }
       const outcome: 'failed' | 'blocked' = 'failed';
       const runtimeState = runtime?.snapshot().state ?? 'failed';
-      const providerMayBeActive = runtimeState === 'running'
-        || runtimeState === 'settling'
-        || runtimeState === 'admitted'
-        || runtimeState === 'waiting'
-        || runtimeState === 'blocked';
       let cleanupEvidenceRefs: readonly EvidenceRef[] = [];
       let cleanupFailure: unknown;
       let abandonedProviderOperation = false;
@@ -1747,14 +1742,25 @@ export class RuntimeTaskCoordinator {
         if (!cleanupProjection.evidenceRefs?.length && cleanupEvidenceRefs.length > 0) {
           cleanupProjection.evidenceRefs = cleanupEvidenceRefs;
         }
+        // The runtime state after cleanup is the authority on whether a stop
+        // control can still reach the provider session: a `failed`/`unknown`
+        // runtime rejects stop (assertStopTarget) and RCC v3 rejects stop once
+        // the stream is terminal. Only advertise retry-stop when the runtime is
+        // still stoppable, otherwise the task stays blocked with no action that
+        // the provider would reject.
+        const finalRuntimeState = runtime?.snapshot().state ?? 'failed';
+        const stopIsPossible = finalRuntimeState === 'admitted'
+          || finalRuntimeState === 'running'
+          || finalRuntimeState === 'waiting'
+          || finalRuntimeState === 'blocked';
         projection.cleanupError = cleanupProjection;
         record.error = projection;
         record.state = 'blocked';
-        record.running = providerMayBeActive;
-        record.stopping = providerMayBeActive;
+        record.running = stopIsPossible;
+        record.stopping = stopIsPossible;
         record.currentState = '失败收拢未完成';
         record.nextStep = cleanupProjection.nextAction;
-        record.allowedActions = providerMayBeActive ? ['retry-stop'] : [];
+        record.allowedActions = stopIsPossible ? ['retry-stop'] : [];
         record.updatedAt = this.now().toISOString();
         this.pushEvent(
           record,
