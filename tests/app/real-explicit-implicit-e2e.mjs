@@ -143,6 +143,19 @@ async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
   }
 }
 
+async function waitForOutput(base, taskId, expect, timeoutMs = TERMINAL_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
+    if (dashboard.state === 'succeeded' && dashboard.output?.includes(expect)) return dashboard;
+    if (Date.now() > deadline) {
+      console.error('DEBUG_WAIT_FOR_OUTPUT', JSON.stringify(dashboard, null, 2));
+      throw new Error(`task ${taskId} did not reach a succeeded output containing ${expect} before timeout`);
+    }
+    await new Promise((settle) => setTimeout(settle, 1000));
+  }
+}
+
 async function resolveImplicitTaskId(base, draftId, timeoutMs = 30_000) {
   const expected = `ui-task-implicit-${draftId}`;
   const deadline = Date.now() + timeoutMs;
@@ -321,11 +334,9 @@ async function main() {
       confirmedAt: new Date().toISOString(),
       payloadRef: `humanagent://e2e/requirement/${second.draft.draftId}`,
     });
-    const secondImplicit = await waitForImplicitTask(base, second.draft.draftId);
-    const secondTaskId = secondImplicit.taskId;
-    const secondOperationId = secondImplicit.operationId;
-    const secondTerminal = await pollTaskState(base, secondTaskId);
-    assertCompleted(secondTerminal, 'FIRST_LINE_PROVEN_8B2D');
+    const secondTaskId = firstTaskId;
+    const secondTerminal = await waitForOutput(base, secondTaskId, 'FIRST_LINE_PROVEN_8B2D');
+    const secondOperationId = secondTerminal.operationId ?? null;
     const secondObservation = await captureObservation(base, secondTaskId);
     assertObservation(secondObservation.observation);
     rounds.push({
