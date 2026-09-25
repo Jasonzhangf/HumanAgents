@@ -3,51 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="HumanAgent UI entry" />
-    <title>HumanAgent · UI Entry</title>
+    <meta name="description" content="HumanAgent task input entry" />
+    <title>HumanAgent · Task Input</title>
     <link rel="stylesheet" href="./runtime.css" />
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="./dashboard.html">HumanAgent</a>
-      <nav class="topnav" aria-label="主导航">
-        <a href="./dashboard.html">Runtime Dashboard</a>
-        <a href="./tasks.html">Task List</a>
-      </nav>
-    </header>
-
-    <main class="page">
-      <section class="page-heading" aria-labelledby="entry-title">
-        <div>
-          <p class="eyebrow">UI Entry</p>
-          <h1 id="entry-title">当前产品入口已迁移</h1>
-          <p class="lede">
-            这里是保留的历史视觉原型入口，不呈现真实任务状态，也不会伪造 Runtime 成功结果。
-          </p>
-        </div>
-        <span class="state-chip" data-tone="warning">非产品入口</span>
-      </section>
-
-      <section class="panel" aria-labelledby="current-entry-title">
-        <h2 id="current-entry-title">进入 Runtime-connected UI</h2>
-        <p>
-          当前产品从 Dashboard 开始。页面状态、任务列表和执行操作都通过 HumanAgent Runtime API
-          获取；Runtime 未连接时会显示明确错误。
-        </p>
-        <a class="button button--primary" href="./dashboard.html">打开 Runtime Dashboard</a>
-      </section>
-
-      <section class="panel" aria-labelledby="prototype-title">
-        <h2 id="prototype-title">历史视觉原型</h2>
-        <p>
-          以下页面只用于保留早期视觉和交互定义，不是当前产品入口，也不代表真实运行状态。
-        </p>
-        <a class="button" href="./interaction.html">查看 Interaction 原型</a>
-      </section>
-    </main>
-
-    <script type="module">
-      location.replace('./dashboard.html')
-    </script>
+    <script type="module" src="./entry.js"></script>
   </body>
 </html>
