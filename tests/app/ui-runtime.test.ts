@@ -240,7 +240,17 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
   readonly kind = 'humanagent.execution-runtime-port' as const;
   closeCalls = 0;
   settleStates: string[] = [];
+  // Forces the transport to reject a stop request so failure cleanup cannot
+  // reach a final settlement.
+  failStop = false;
+  private readonly heldTasks = new Set<string>();
   private readonly sessions = new Map<string, { readonly scope: ScopeRef; stopRequested: boolean }>();
+
+  // Keeps one task's observation open so another task's failure cleanup runs
+  // while a shared provider execution is still active.
+  hold(taskIdValue: string): void {
+    this.heldTasks.add(taskIdValue);
+  }
 
   private key(input: { readonly runtimeId: string; readonly taskId: TaskId; readonly operationId: { readonly value: string }; readonly executionEpoch: number }): string {
     return `${input.runtimeId}:${input.taskId.value}:${input.operationId.value}:${input.executionEpoch}`;
@@ -321,6 +331,9 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
   async *observe(input: Parameters<ExecutionRuntimePort['observe']>[0]): AsyncIterable<ProviderEvent> {
     const session = this.sessions.get(this.key(input));
     if (!session) throw new Error('abandoned port has no active session');
+    if (this.heldTasks.has(input.taskId.value)) {
+      await new Promise<void>(() => {});
+    }
     const identity = {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
@@ -350,6 +363,7 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
   async requestStop(input: Parameters<ExecutionRuntimePort['requestStop']>[0]): Promise<ProviderStopReceipt> {
     const session = this.sessions.get(this.key(input));
     if (!session) throw new Error('abandoned port has no active session');
+    if (this.failStop) throw new Error('provider transport rejected the stop request');
     session.stopRequested = true;
     return {
       runtimeId: input.runtimeId,
@@ -4788,6 +4802,63 @@ test('a failed tool execution releases the provider session and reports the real
     }
     assert.deepEqual(record.checkpoint.recoveryStateRef.scope, record.checkpoint.scope);
   }
+});
+
+test('failure cleanup does not report a clean failure while the shared provider was retained for another execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-retained-cleanup-'));
+  const port = new AbandonedToolExecutionPort();
+  port.failStop = true;
+  // Hold the unrelated execution open so closeForExecution sees an active
+  // execution and returns retained=true without closing the shared provider.
+  port.hold('retained-cleanup-other');
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-retained-cleanup'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    providerTools: [RESPONSES_FILE_READ_TOOL],
+    providerToolExecutor: {
+      async execute() {
+        throw new Error('EISDIR: illegal operation on a directory, read');
+      },
+    },
+  });
+  const other = service.createTask({ title: 'retained cleanup other' });
+  port.hold(other.taskId.value);
+  service.startExecution(other.taskId, { prompt: 'stay running' });
+  // The other execution stays active, which is what makes the failed task's
+  // close see a retained shared provider.
+  await waitFor(() => assert.equal(service.taskDashboard(other.taskId).state, 'running'));
+
+  const task = service.createTask({ title: 'retained cleanup failure' });
+  service.startExecution(task.taskId, { prompt: 'read the directory' });
+
+  // The stop could not release the abandoned provider execution and the shared
+  // provider was retained, so the task must stay blocked with retry-stop
+  // instead of being reported as a clean failure.
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'), 5000);
+  // The blocked state is projected before the blocked checkpoint is committed,
+  // so wait for the durable checkpoint before asserting or tearing down.
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'blocked'), 5000);
+  const dashboard = service.taskDashboard(task.taskId);
+  assert.equal(dashboard.error?.message, 'EISDIR: illegal operation on a directory, read');
+  assert.ok(dashboard.error?.cleanupError, 'the unresolved cleanup must remain attached to the task error');
+  assert.equal(dashboard.error?.cleanupError?.code, 'stop.failed');
+  assert.deepEqual(dashboard.allowedActions, ['retry-stop']);
+  // The retained execution is still the reason the provider was never closed.
+  assert.equal(service.taskDashboard(other.taskId).state, 'running');
+  assert.equal(port.closeCalls, 0);
+
+  // The other execution stays suspended, so no further journal writes race the
+  // teardown of the temp directory.
+  await rm(root, { recursive: true, force: true });
 });
 
 test('stop racing a startup failure leaves a terminal failed task instead of retry-stop', async () => {

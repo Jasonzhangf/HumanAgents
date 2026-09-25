@@ -1709,7 +1709,12 @@ export class RuntimeTaskCoordinator {
           if (close.state !== 'closed') {
             throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
           }
-          cleanupFailure = undefined;
+          // A retained close means another execution still owns the shared
+          // provider, so this task's provider was never actually closed. Any
+          // pending cleanup failure must survive: the abandoned execution may
+          // still be active, so the task stays blocked with retry-stop instead
+          // of reporting a clean failure.
+          if (!close.retained) cleanupFailure = undefined;
         } catch (cleanupError) {
           cleanupFailure = cleanupError;
         }
