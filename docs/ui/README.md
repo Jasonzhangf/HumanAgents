@@ -2,7 +2,7 @@
 
 状态：`RUNTIME-CONNECTED`
 工作总览：[dashboard.html](dashboard.html)  
-任务输入首页：[index.html](index.html)  
+任务输入首页：[index.html](index.html)
 任务列表第一入口：[tasks.html](tasks.html)  
 任务详情与输入决策：[task.html](task.html)  
 运行任务看板：[task-dashboard.html](task-dashboard.html)  
