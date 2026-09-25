@@ -66,6 +66,7 @@ import {
   startUiRuntime as startUiRuntimeOwner,
 } from '../../packages/app/src/ui-runtime/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
+import { RESPONSES_FILE_READ_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createProviderExplicitBrainInterpreter,
@@ -228,6 +229,203 @@ class GatedPayloadCapturingReplayPort extends FakeReplayExecutionRuntimePort {
   override async *observe(input: Parameters<ExecutionRuntimePort['observe']>[0]): AsyncIterable<ProviderEvent> {
     if (this.observed === 1) await this.gate;
     yield* super.observe(input);
+  }
+}
+
+// Models the real provider adapter's session semantics for a failed tool
+// execution: an ordinary settle of a fully observed `waiting` execution returns
+// `blocked` and keeps the session, so `close` is rejected with
+// `close.pending.executions` until a real stop settlement releases it.
+class AbandonedToolExecutionPort implements ExecutionRuntimePort {
+  readonly kind = 'humanagent.execution-runtime-port' as const;
+  closeCalls = 0;
+  settleStates: string[] = [];
+  private readonly sessions = new Map<string, { readonly scope: ScopeRef; stopRequested: boolean }>();
+
+  private key(input: { readonly runtimeId: string; readonly taskId: TaskId; readonly operationId: { readonly value: string }; readonly executionEpoch: number }): string {
+    return `${input.runtimeId}:${input.taskId.value}:${input.operationId.value}:${input.executionEpoch}`;
+  }
+
+  private evidence(label: string, scope: ScopeRef): EvidenceRef {
+    return {
+      evidenceId: id('evidence', `abandoned-${label}`),
+      kind: 'execution',
+      source: 'humanagent.provider-adapter',
+      locator: `abandoned/${label}`,
+      scope,
+    };
+  }
+
+  async probe(value: ProviderBinding): Promise<ProviderReadiness> {
+    return {
+      bindingId: value.bindingId,
+      providerId: value.providerId,
+      protocol: value.protocol,
+      state: 'ready',
+      capabilityDigest: value.capabilityDigest,
+      checkedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      evidenceRefs: [],
+    };
+  }
+
+  async capabilities(value: ProviderBinding): Promise<ProviderCapabilities> {
+    return {
+      bindingId: value.bindingId,
+      providerId: value.providerId,
+      protocol: value.protocol,
+      capabilities: ['start', 'submit', 'observe', 'stop', 'settle', 'close'],
+      version: 'test-1',
+      digest: value.capabilityDigest,
+      checkedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      evidenceRefs: [],
+    };
+  }
+
+  async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    const scope: ScopeRef = {
+      ...(input.evidenceRefs[0]?.scope ?? { organId }),
+      taskId: input.taskId,
+      operationId: input.operationId,
+    };
+    this.sessions.set(this.key(input), { scope, stopRequested: false });
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      evidenceRefs: [this.evidence('start', scope)],
+    };
+  }
+
+  async resume(): Promise<ProviderRecoveryResult> {
+    throw new Error('resume is not supported');
+  }
+
+  async submit(input: Parameters<ExecutionRuntimePort['submit']>[0]): Promise<ProviderSubmitResult> {
+    const session = this.sessions.get(this.key(input));
+    if (!session) throw new Error('abandoned port has no active session');
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      status: 'accepted',
+      outputRefs: [],
+      evidenceRefs: [this.evidence('submit', session.scope)],
+    };
+  }
+
+  async *observe(input: Parameters<ExecutionRuntimePort['observe']>[0]): AsyncIterable<ProviderEvent> {
+    const session = this.sessions.get(this.key(input));
+    if (!session) throw new Error('abandoned port has no active session');
+    const identity = {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+    };
+    yield {
+      ...identity,
+      eventId: 'abandoned-tool-call',
+      kind: 'tool',
+      summary: 'file.read',
+      evidenceRefs: [this.evidence('tool-call', session.scope)],
+      toolCall: { callId: 'call-eisdir', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-round-1' },
+    };
+    // A fully observed tool-waiting terminal is consumed by the agent driver's
+    // tool loop, which then runs the executor and surfaces its failure.
+    yield {
+      ...identity,
+      eventId: 'abandoned-tool-waiting',
+      kind: 'terminal',
+      terminalState: 'waiting',
+      evidenceRefs: [this.evidence('tool-waiting', session.scope)],
+      nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+    };
+  }
+
+  async requestStop(input: Parameters<ExecutionRuntimePort['requestStop']>[0]): Promise<ProviderStopReceipt> {
+    const session = this.sessions.get(this.key(input));
+    if (!session) throw new Error('abandoned port has no active session');
+    session.stopRequested = true;
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      status: 'accepted',
+      receivedAt: '2026-01-01T00:00:00.000Z',
+      evidenceRefs: [this.evidence('stop', session.scope)],
+    };
+  }
+
+  async settle(input: Parameters<ExecutionRuntimePort['settle']>[0]): Promise<ProviderSettlement> {
+    const session = this.sessions.get(this.key(input));
+    if (!session) throw new Error('abandoned port has no active session');
+    const scope = session.scope;
+    if (session.stopRequested) {
+      this.sessions.delete(this.key(input));
+      this.settleStates.push('stopped');
+      return {
+        runtimeId: input.runtimeId,
+        taskId: input.taskId,
+        operationId: input.operationId,
+        executionEpoch: input.executionEpoch,
+        state: 'stopped',
+        evidenceRefs: [this.evidence('settle-stopped', scope)],
+        resourceRelease: { state: 'released', evidenceRefs: [this.evidence('release', scope)] },
+        persistence: { state: 'committed', evidenceRefs: [this.evidence('persistence', scope)] },
+      };
+    }
+    // Ordinary settlement of a waiting execution cannot release the session.
+    this.settleStates.push('blocked');
+    return {
+      runtimeId: input.runtimeId,
+      taskId: input.taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      state: 'blocked',
+      evidenceRefs: [this.evidence('settle-blocked', scope)],
+      resourceRelease: { state: 'pending', evidenceRefs: [this.evidence('release-pending', scope)] },
+      persistence: { state: 'pending', evidenceRefs: [this.evidence('persistence-pending', scope)] },
+      error: {
+        errorId: 'provider.settle.continuation-unavailable',
+        code: 'capability.continuation-unavailable',
+        category: 'capability',
+        phase: 'settle',
+        message: 'provider cannot continue a fully observed waiting execution',
+        ownerId: 'humanagent.provider-adapter',
+        retryable: 'manual',
+        attention: 'foreground',
+        evidenceRefs: [this.evidence('settle-blocked', scope)],
+        nextAction: { kind: 'recover', ref: 'humanagent.provider-adapter' },
+      },
+      ownerId: 'humanagent.provider-adapter',
+      nextAction: { kind: 'recover', ref: 'humanagent.provider-adapter' },
+    };
+  }
+
+  async close(value: ProviderBinding): Promise<ProviderCloseResult> {
+    this.closeCalls += 1;
+    if (this.sessions.size > 0) {
+      throw new ProviderAdapterError({
+        code: 'close.pending.executions',
+        category: 'runtime',
+        phase: 'close',
+        message: 'provider close rejected while active executions require settlement or recovery',
+        scope: value,
+      });
+    }
+    return {
+      bindingId: value.bindingId,
+      providerId: value.providerId,
+      protocol: value.protocol,
+      state: 'closed',
+      evidenceRefs: [],
+    };
   }
 }
 
@@ -4527,6 +4725,69 @@ test('a stopped task remains stopped after restart hydration', async () => {
   assert.equal(dashboard.state, 'stopped');
   assert.equal(dashboard.checkpoint?.outcome, 'stopped');
   assert.deepEqual(dashboard.allowedActions, ['start']);
+});
+
+test('a failed tool execution releases the provider session and reports the real failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-abandoned-tool-'));
+  const port = new AbandonedToolExecutionPort();
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-abandoned-tool'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    providerTools: [RESPONSES_FILE_READ_TOOL],
+    providerToolExecutor: {
+      async execute() {
+        throw new Error('EISDIR: illegal operation on a directory, read');
+      },
+    },
+  });
+  const task = service.createTask({ title: 'failed tool execution' });
+  const started = service.startExecution(task.taskId, { prompt: 'read the directory' });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  // The real tool failure owns the task terminal state; resource cleanup must
+  // not disguise it as a stop or as a provider-close failure.
+  assert.equal(dashboard.error?.message, 'EISDIR: illegal operation on a directory, read');
+  assert.equal(dashboard.error?.cleanupError, undefined);
+  assert.deepEqual(dashboard.allowedActions, ['start']);
+  assert.deepEqual(port.settleStates, ['blocked', 'stopped']);
+  assert.equal(port.closeCalls, 1);
+
+  const events = service.eventsSince(started.operationId);
+  assert.equal(events.some((event) => event.state === 'blocked'), false);
+  assert.equal(
+    events.some((event) => event.kind === 'provider.error' && event.summary.includes('close.pending.executions')),
+    false,
+  );
+  assert.equal(
+    events.some((event) => event.kind === 'execution.terminal' && event.state === 'failed' && event.terminalPhase === 'final'),
+    true,
+  );
+
+  const checkpointJournal = await readFile(join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`), 'utf8');
+  const checkpoints = checkpointJournal.trim().split('\n').map((line) => JSON.parse(line) as { readonly checkpoint: Checkpoint });
+  assert.deepEqual(checkpoints.map((record) => record.checkpoint.outcome), ['stopped', 'failed']);
+  assert.equal(checkpoints[1]?.checkpoint.previousCheckpointId?.value, checkpoints[0]?.checkpoint.id.value);
+  // The failure checkpoint follows a stop checkpoint, so it must keep the same
+  // operation identity and every evidence reference must share that scope.
+  assert.equal(checkpoints[1]?.checkpoint.scope.operationId?.value, started.operationId.value);
+  for (const record of checkpoints) {
+    for (const evidenceRef of record.checkpoint.evidenceRefs) {
+      assert.deepEqual(evidenceRef.scope, record.checkpoint.scope);
+    }
+    assert.deepEqual(record.checkpoint.recoveryStateRef.scope, record.checkpoint.scope);
+  }
 });
 
 test('stop racing a startup failure leaves a terminal failed task instead of retry-stop', async () => {
