@@ -143,19 +143,6 @@ async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
   }
 }
 
-async function waitForOutput(base, taskId, expect, timeoutMs = TERMINAL_TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
-    if (dashboard.state === 'succeeded' && dashboard.output?.includes(expect)) return dashboard;
-    if (Date.now() > deadline) {
-      console.error('DEBUG_WAIT_FOR_OUTPUT', JSON.stringify(dashboard, null, 2));
-      throw new Error(`task ${taskId} did not reach a succeeded output containing ${expect} before timeout`);
-    }
-    await new Promise((settle) => setTimeout(settle, 1000));
-  }
-}
-
 async function resolveImplicitTaskId(base, draftId, timeoutMs = 30_000) {
   const expected = `ui-task-implicit-${draftId}`;
   const deadline = Date.now() + timeoutMs;
@@ -177,6 +164,18 @@ async function waitForImplicitTask(base, draftId) {
   const resolved = await resolveImplicitTaskId(base, draftId);
   const operationId = `ui-operation-implicit-${draftId}`;
   return { taskId: resolved.taskId, operationId, task: resolved.task };
+}
+
+async function waitForNewTask(base, excludeTaskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const list = await jsonRequest(`${base}/api/tasks`);
+    const all = [...(list.running ?? []), ...(list.waiting ?? []), ...(list.completed ?? []), ...(list.stopped ?? []), ...(list.draft ?? []), ...(list.failed ?? [])];
+    const task = all.find((candidate) => (candidate.taskId?.value ?? candidate.taskId) !== excludeTaskId);
+    if (task) return { taskId: task.taskId?.value ?? task.taskId, task };
+    if (Date.now() > deadline) throw new Error(`no second task appeared after excluding ${excludeTaskId}: ${JSON.stringify(all.map((candidate) => candidate.taskId?.value))}`);
+    await new Promise((settle) => setTimeout(settle, 1000));
+  }
 }
 
 function eventKinds(dashboard) {
@@ -334,8 +333,10 @@ async function main() {
       confirmedAt: new Date().toISOString(),
       payloadRef: `humanagent://e2e/requirement/${second.draft.draftId}`,
     });
-    const secondTaskId = firstTaskId;
-    const secondTerminal = await waitForOutput(base, secondTaskId, 'FIRST_LINE_PROVEN_8B2D');
+    const secondImplicit = await waitForNewTask(base, firstTaskId);
+    const secondTaskId = secondImplicit.taskId;
+    const secondTerminal = await pollTaskState(base, secondTaskId);
+    assertCompleted(secondTerminal, 'FIRST_LINE_PROVEN_8B2D');
     const secondOperationId = secondTerminal.operationId ?? null;
     const secondObservation = await captureObservation(base, secondTaskId);
     assertObservation(secondObservation.observation);
@@ -377,6 +378,7 @@ async function main() {
     console.log(JSON.stringify(receipt, null, 2));
   } finally {
     if (serve) await serve.stop();
+    await rm(root, { recursive: true, force: true });
   }
 }
 
