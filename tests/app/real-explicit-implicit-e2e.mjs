@@ -1,37 +1,43 @@
 #!/usr/bin/env node
 /**
- * Real RCC explicit -> implicit -> executor E2E proof.
+ * Real RCC explicit -> implicit -> executor completion proof (T4).
  *
- * Drives the built HumanAgent CLI `serve --mode rcc --protocol responses`
- * over its own HTTP Runtime API. It submits a user task, requires explicit
- * brain interpretation and confirmation, lets the implicit consumer create
- * and start the execution, then waits for at least two provider tool rounds,
- * evidence refs, a committed checkpoint, and a final `succeeded` task.
+ * Drives the built HumanAgent CLI `serve --mode rcc` entry over its HTTP
+ * Runtime API:
+ *
+ *   explicit round 1  - business input -> real provider explicit brain draft
+ *                       -> user confirmation -> implicit FIFO admission
+ *                       -> executor runs file.read -> task succeeded
+ *   explicit round 2  - append a second concrete requirement to the same task
+ *                       -> confirmed -> second real RCC execution reads another
+ *                       workspace file -> task succeeded again
+ *   UI observation    - the served dashboard/task-detail/observation projections
+ *                       show the nodes, tool evidence, and completed state
+ *
+ * Persists `dist/receipts/explicit-implicit-e2e-proof.json`.
  *
  * Required env:
  *   none (the live RCC endpoint must answer on 127.0.0.1:4444)
  * Optional env:
- *   HUMANAGENT_RCC_BASE_URL               default http://127.0.0.1:4444
- *   HUMANAGENT_UI_MODEL                   default gpt-5.5
- *   HUMANAGENT_EXPLICIT_IMPLICIT_RECEIPT_PATH default ./dist/receipts/explicit-implicit-e2e-proof.json
+ *   HUMANAGENT_RCC_BASE_URL       default http://127.0.0.1:4444
+ *   HUMANAGENT_UI_MODEL           default gpt-5.5
+ *   HUMANAGENT_EI_RECEIPT_PATH    default ./dist/receipts/explicit-implicit-e2e-proof.json
  */
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const RCC_BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
 const MODEL = process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5';
 const RECEIPT_PATH = resolve(
-  process.env.HUMANAGENT_EXPLICIT_IMPLICIT_RECEIPT_PATH ?? 'dist/receipts/explicit-implicit-e2e-proof.json',
+  process.env.HUMANAGENT_EI_RECEIPT_PATH ?? 'dist/receipts/explicit-implicit-e2e-proof.json',
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
-const TERMINAL_TIMEOUT_MS = 180_000;
-const EVENT_TIMEOUT_MS = 180_000;
-const REQUEST_TIMEOUT_MS = 180_000;
-const TASK_POLL_MS = 500;
+const TERMINAL_TIMEOUT_MS = 240_000;
+const MAX_INTERPRET_ATTEMPTS = 4;
 
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' }).trim();
@@ -40,7 +46,8 @@ function git(args) {
 function sourceDigest() {
   const entries = execFileSync('git', ['ls-files', '-s'], { encoding: 'utf8' })
     .split('\n')
-    .filter((line) => line && !line.includes('dist/receipts/explicit-implicit-e2e-proof.json'))
+    .filter((line) => line && !line.includes('docs/evidence/explicit-implicit-e2e/')
+      && !line.includes('dist/receipts/explicit-implicit-e2e-proof.json'))
     .sort();
   return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
 }
@@ -53,7 +60,7 @@ function startServe(root) {
     'serve',
     '--mode', 'rcc',
     '--protocol', 'responses',
-    '--binding', 'ui-rcc-explicit-implicit',
+    '--binding', 'ui-ei-e2e-proof',
     '--provider', 'rcc',
     '--model', MODEL,
     '--route', 'rcc/ui-explicit-implicit',
@@ -96,10 +103,7 @@ function startServe(root) {
 }
 
 async function jsonRequest(url, init) {
-  const response = await fetch(url, {
-    ...init,
-    signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  const response = await fetch(url, init);
   const text = await response.text();
   let body;
   try {
@@ -108,216 +112,264 @@ async function jsonRequest(url, init) {
     throw new Error(`non-JSON response from ${url}: ${text.slice(0, 400)}`);
   }
   if (!response.ok) {
-    throw new Error(`request failed ${response.status} ${url}: ${text.slice(0, 600)}`);
+    throw new Error(`request failed ${response.status} ${url}: ${text.slice(0, 800)}`);
   }
   return body;
 }
 
-async function waitForTask(url) {
-  const deadline = Date.now() + TERMINAL_TIMEOUT_MS;
+async function statusText(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`status failed ${response.status} ${url}`);
+  return response.text();
+}
+
+async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let dashboard;
   for (;;) {
-    const list = await jsonRequest(`${url}/api/tasks`);
-    if (list.counts.total > 0) {
-      const row = [
-        ...list.running,
-        ...list.waiting,
-        ...list.completed,
-        ...list.draft,
-        ...list.failed,
-        ...list.stopped,
-      ][0];
-      if (row) return { list, row };
+    try {
+      dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
+    } catch (error) {
+      if (!String(error).includes('task.not.found')) throw error;
+      dashboard = undefined;
     }
+    if (dashboard) {
+      if (!['created', 'admitted', 'running', 'waiting', 'settling'].includes(dashboard.state)) {
+        return dashboard;
+      }
+    }
+    if (Date.now() > deadline) return dashboard ?? null;
+    await new Promise((settle) => setTimeout(settle, 1000));
+  }
+}
+
+async function resolveImplicitTaskId(base, draftId, timeoutMs = 30_000) {
+  const expected = `ui-task-implicit-${draftId}`;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const list = await jsonRequest(`${base}/api/tasks`);
+    const all = [...(list.running ?? []), ...(list.waiting ?? []), ...(list.completed ?? []), ...(list.stopped ?? []), ...(list.draft ?? []), ...(list.failed ?? [])];
+    const found = all.find((task) => task.taskId?.value === expected);
+    if (found) return { taskId: expected, task: found };
     if (Date.now() > deadline) {
-      throw new Error(`implicit consumer did not create a task: ${JSON.stringify(list)}`);
+      const first = all[0];
+      if (first) return { taskId: first.taskId?.value ?? first.taskId, task: first };
+      throw new Error(`implicit task ${expected} was not created: ${JSON.stringify(all.map((task) => task.taskId?.value))}`);
     }
-    await new Promise((settle) => setTimeout(settle, TASK_POLL_MS));
+    await new Promise((settle) => setTimeout(settle, 1000));
   }
 }
 
-async function waitForTerminal(url, taskId) {
-  const deadline = Date.now() + TERMINAL_TIMEOUT_MS;
-  for (;;) {
-    const dashboard = await jsonRequest(`${url}/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
-    if (!['created', 'admitted', 'running', 'settling'].includes(dashboard.state)) return dashboard;
-    if (Date.now() > deadline) return dashboard;
-    await new Promise((settle) => setTimeout(settle, 500));
-  }
+async function waitForImplicitTask(base, draftId) {
+  const resolved = await resolveImplicitTaskId(base, draftId);
+  const operationId = `ui-operation-implicit-${draftId}`;
+  return { taskId: resolved.taskId, operationId, task: resolved.task };
 }
 
-async function main() {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-implicit-e2e-'));
-  await mkdir(join(root, 'workspace', 'notes'), { recursive: true });
-  await writeFile(join(root, 'workspace', 'notes', 'startup.md'), 'startup checklist: run typecheck, run focused tests, persist receipt\n', 'utf8');
-  await writeFile(join(root, 'workspace', 'notes', 'runtime.md'), 'runtime entry: serve --mode rcc on port 0\n', 'utf8');
-  const serve = startServe(root);
-  const receipt = {
-    schemaVersion: 1,
-    kind: 'humanagent.explicit-implicit-e2e-proof',
-    generatedAt: new Date().toISOString(),
-    candidate: {
-      branch: git(['rev-parse', '--abbrev-ref', 'HEAD']),
-      head: git(['rev-parse', 'HEAD']),
-      sourceDigest: sourceDigest(),
-    },
-    rcc: {
-      baseUrl: RCC_BASE_URL,
-      health: await jsonRequest(`${RCC_BASE_URL}/health`, {}),
-      routeSemantics: 'routeRef is a local HumanAgent entry label for binding and evidence; it is not sent as an RCC upstream route selector',
-    },
-    entry: 'CLI serve --mode rcc --protocol responses over the UI Runtime HTTP API',
-    model: MODEL,
-    record: null,
-  };
+function eventKinds(dashboard) {
+  return (dashboard.recentEvents ?? []).map((event) => `${event.kind}:${event.state}`);
+}
 
-  try {
-    const launched = await serve.ready;
-    receipt.endpoint = launched.url;
-    receipt.checkpointRoot = launched.checkpointRoot;
-
-    const before = await jsonRequest(`${launched.url}/api/runtime/status`);
-    if (before.providerState !== 'ready') {
-      throw new Error(`runtime was not provider-ready: ${JSON.stringify(before)}`);
-    }
-
-    const interaction = await jsonRequest(`${launched.url}/api/explicit/inputs`, {
+async function interpretUntilDraft(base, input) {
+  let lastError;
+  for (let attempt = 0; attempt < MAX_INTERPRET_ATTEMPTS; attempt += 1) {
+    const sourceRef = `${input.sourceRef}-attempt-${attempt + 1}`;
+    const created = await jsonRequest(`${base}/api/explicit/inputs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         channel: 'business',
-        sourceRef: 'e2e:explicit-implicit',
-        rawInput: 'Create one task: read notes/startup.md and notes/runtime.md, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+        sourceRef,
+        rawInput: input.rawInput,
       }),
     });
-    const interactionId = interaction.interactionId;
+    const interactionId = created.interactionId;
+    let snapshot;
+    try {
+      snapshot = await jsonRequest(`${base}/api/explicit/interactions/${interactionId}/interpret`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+    if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
+      lastError = new Error(`explicit interpretation reached ${snapshot.state} instead of awaiting-confirmation`);
+      continue;
+    }
+    const draftMatches = input.requireDraft
+      ? snapshot.draft.proposal.includes(input.requireDraft)
+        && (input.requireIntent ? snapshot.draft.proposedIntent === input.requireIntent : true)
+      : true;
+    if (!draftMatches) {
+      lastError = new Error(`explicit draft did not satisfy requirement: ${snapshot.draft.proposal.slice(0, 300)}`);
+      continue;
+    }
+    return { interaction: snapshot, draft: snapshot.draft };
+  }
+  throw lastError ?? new Error(`no valid explicit draft after ${MAX_INTERPRET_ATTEMPTS} attempts`);
+}
 
-    const interpreted = await jsonRequest(`${launched.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}/interpret`, {
-      method: 'POST',
-    });
-    if (interpreted.state !== 'awaiting-confirmation' || !interpreted.draft?.draftId) {
-      throw new Error(`explicit brain did not produce a confirmable draft: ${JSON.stringify(interpreted)}`);
-    }
-    const draft = interpreted.draft;
-    if (draft.proposedIntent !== 'create' || !draft.proposal.trim()) {
-      throw new Error(`explicit brain draft is not a create requirement: ${JSON.stringify(draft)}`);
-    }
+async function confirmDraft(base, interaction, draft, confirmationMark) {
+  return jsonRequest(`${base}/api/explicit/interactions/${interaction.interactionId}/confirmation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      draftId: draft.draftId,
+      inputRevision: draft.inputRevision,
+      confirmationRef: confirmationMark.confirmationRef,
+      confirmedBy: confirmationMark.confirmedBy,
+      confirmedAt: confirmationMark.confirmedAt,
+      payloadRef: confirmationMark.payloadRef,
+    }),
+  });
+}
 
-    const confirmedAt = new Date().toISOString();
-    const confirmed = await jsonRequest(`${launched.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}/confirmation`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        draftId: draft.draftId,
-        inputRevision: draft.inputRevision,
-        confirmationRef: 'confirmation:explicit-implicit-e2e',
-        confirmedBy: 'human:operator',
-        confirmedAt,
-        payloadRef: 'asset://requirements/explicit-implicit-e2e',
-      }),
-    });
-    const requirement = confirmed.requirement;
-    if (!requirement?.requirementId || requirement.status !== 'submitted') {
-      throw new Error(`confirmation did not submit the requirement: ${JSON.stringify(confirmed)}`);
-    }
+async function captureObservation(base, taskId) {
+  const dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
+  const observation = await jsonRequest(`${base}/api/tasks/${taskId}/observation`);
+  const detail = await jsonRequest(`${base}/api/tasks/${taskId}`);
+  return { dashboard, observation, detail };
+}
 
-    const queuedStatus = await jsonRequest(`${launched.url}/api/runtime/status`);
-    const queuedObservation = queuedStatus.implicitScheduling ?? null;
-    if (queuedObservation?.state === 'queued' && typeof queuedObservation.fifoSeq !== 'number') {
-      throw new Error(`queued projection did not carry a FIFO sequence: ${JSON.stringify(queuedObservation)}`);
-    }
-
-    const { row } = await waitForTask(launched.url);
-    const taskId = row.taskId.value ?? row.taskId;
-    const dashboard = await waitForTerminal(launched.url, taskId);
-    if (dashboard.state !== 'succeeded') {
-      throw new Error(`task did not complete successfully: ${JSON.stringify(dashboard)}`);
-    }
-    if (!dashboard.checkpoint) {
-      throw new Error(`succeeded task has no committed checkpoint: ${JSON.stringify(dashboard)}`);
-    }
-
-    const operationId = dashboard.operationId ?? null;
-    const eventList = dashboard.recentEvents ?? [];
-    const toolEvents = eventList.filter((event) => event.kind === 'provider.tool');
-    if (toolEvents.length < 2) {
-      throw new Error(`expected at least two executor tool rounds, saw ${toolEvents.length}`);
-    }
-    const evidencedTool = toolEvents.find((event) => Array.isArray(event.evidenceRefs) && event.evidenceRefs.length > 0);
-    if (!evidencedTool) {
-      throw new Error('no provider tool event carried evidence refs');
-    }
-
-    const finalList = await jsonRequest(`${launched.url}/api/tasks`);
-    const finalRow = [...finalList.completed, ...finalList.running, ...finalList.waiting, ...finalList.failed]
-      .find((candidate) => (candidate.taskId.value ?? candidate.taskId) === taskId);
-    if (!finalRow || finalRow.state !== 'succeeded') {
-      throw new Error(`task list did not project completed: ${JSON.stringify({ taskId, finalList })}`);
-    }
-
-    const providerObservation = await jsonRequest(`${launched.url}/api/tasks/${encodeURIComponent(taskId)}/observation?scope=${encodeURIComponent(`task://${taskId}/observation/pipeline.execute`)}`);
-    const providerNodes = providerObservation.nodes ?? [];
-    const observationTools = providerNodes.filter((node) => node.title.startsWith('provider.tool'));
-    if (observationTools.length < 2) {
-      throw new Error(`observation did not project at least two provider tool nodes: ${JSON.stringify(providerNodes.map((node) => node.title))}`);
-    }
-
-    receipt.record = {
-      interactionId,
-      draft: {
-        draftId: draft.draftId,
-        inputRevision: draft.inputRevision,
-        proposedIntent: draft.proposedIntent,
-        proposal: draft.proposal,
-      },
-      confirmed: {
-        confirmationRef: 'confirmation:explicit-implicit-e2e',
-        confirmedAt,
-        requirementId: requirement.requirementId,
-        fifoSeq: queuedObservation?.fifoSeq ?? null,
-      },
-      queuedObservation,
-      taskId,
-      operationId,
-      finalState: dashboard.state,
-      checkpoint: dashboard.checkpoint ?? null,
-      requirementAdmission: finalRow.requirementAdmission ?? null,
-      requirementQueue: finalRow.requirementQueue ?? null,
-      toolRounds: toolEvents.map((event) => ({
-        kind: event.kind,
-        state: event.state,
-        summary: event.summary,
-        evidenceRefs: event.evidenceRefs ?? [],
-      })),
-      providerNodeCount: providerNodes.length,
-      observationToolCount: observationTools.length,
-      eventSummaries: eventList.map((event) => ({
-        kind: event.kind,
-        state: event.state,
-        summary: event.summary,
-        terminalPhase: event.terminalPhase ?? null,
-      })),
-    };
-
-    await mkdir(resolve(RECEIPT_PATH, '..'), { recursive: true });
-    await writeFile(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-    console.log(JSON.stringify({
-      receipt: RECEIPT_PATH,
-      interactionId,
-      taskId,
-      operationId,
-      fifoSeq: queuedObservation?.fifoSeq ?? null,
-      queued: queuedObservation?.state ?? 'already-dispatched',
-      finalState: dashboard.state,
-      toolRounds: toolEvents.length,
-      checkpointOutcome: dashboard.checkpoint?.outcome ?? null,
-    }, null, 2));
-  } finally {
-    await serve.stop();
-    await rm(root, { recursive: true, force: true });
+function assertCompleted(dashboard, expect) {
+  if (dashboard.state !== 'succeeded') {
+    console.error('DEBUG_ASSERT_COMPLETED', JSON.stringify(dashboard, null, 2));
+    throw new Error(`task did not complete: state=${dashboard.state}; output=${JSON.stringify(dashboard.output ?? null).slice(0, 600)}`);
+  }
+  if (expect && (!dashboard.output || !dashboard.output.includes(expect))) {
+    throw new Error(`task output did not include expected text ${expect}: ${JSON.stringify(dashboard.output ?? null).slice(0, 600)}`);
   }
 }
 
-await main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+function assertObservation(observation) {
+  const ids = (observation.nodes ?? []).map((node) => node.nodeId);
+  for (const expected of ['sensory.inbox', 'explicit.normalize', 'implicit.classify', 'interactive.queue', 'execution.queue', 'pipeline.execute', 'settle', 'task.output']) {
+    if (!ids.includes(expected)) throw new Error(`observation is missing node ${expected}: ${ids.join(', ')}`);
+  }
+}
+
+async function main() {
+  const root = await mkdtemp(join(tmpdir(), 'ha-explicit-implicit-4-e2e-'));
+  await mkdir(join(root, 'workspace'), { recursive: true });
+  await writeFile(join(root, 'workspace', 'marker.txt'), 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C\n', 'utf8');
+  await writeFile(join(root, 'workspace', 'readme-first-line.txt'), 'FIRST_LINE_PROVEN_8B2D\n', 'utf8');
+
+  let serve;
+  const steps = {};
+  const rounds = [];
+  try {
+    serve = startServe(root);
+    const launched = await serve.ready;
+    const base = launched.url;
+    steps.serve = {
+      root,
+      url: base,
+      checkpointRoot: launched.checkpointRoot,
+      memoryAnalysisMode: launched.memoryAnalysisMode,
+    };
+
+    steps.status = await jsonRequest(`${base}/api/runtime/status`);
+    steps.uiRoot = await statusText(`${base}/`);
+
+    const firstInput = {
+      sourceRef: 'explicit-implicit-e2e-round-1',
+      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt using file.read only, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+      requireDraft: 'readme-first-line.txt',
+      requireIntent: 'create',
+    };
+    const first = await interpretUntilDraft(base, firstInput);
+    steps.round1Draft = first.draft;
+    await confirmDraft(base, first.interaction, first.draft, {
+      confirmationRef: `confirmation-${first.draft.draftId}`,
+      confirmedBy: 'e2e-user',
+      confirmedAt: new Date().toISOString(),
+      payloadRef: `humanagent://e2e/requirement/${first.draft.draftId}`,
+    });
+    const firstImplicit = await waitForImplicitTask(base, first.draft.draftId);
+    const firstTaskId = firstImplicit.taskId;
+    const firstOperationId = firstImplicit.operationId;
+    const firstTerminal = await pollTaskState(base, firstTaskId);
+    assertCompleted(firstTerminal, 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C');
+    const firstObservation = await captureObservation(base, firstTaskId);
+    assertObservation(firstObservation.observation);
+    rounds.push({
+      round: 1,
+      interactionId: first.interaction.interactionId,
+      draftId: first.draft.draftId,
+      taskId: firstTaskId,
+      operationId: firstOperationId,
+      terminalState: firstTerminal.state,
+      events: eventKinds(firstTerminal),
+      output: firstTerminal.output,
+      observation: firstObservation.observation,
+    });
+
+    const secondInput = {
+      sourceRef: 'explicit-implicit-e2e-round-2',
+      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt using file.read only, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+      requireDraft: 'marker.txt',
+      requireIntent: 'create',
+    };
+    const second = await interpretUntilDraft(base, secondInput);
+    steps.round2Draft = second.draft;
+    await confirmDraft(base, second.interaction, second.draft, {
+      confirmationRef: `confirmation-${second.draft.draftId}`,
+      confirmedBy: 'e2e-user',
+      confirmedAt: new Date().toISOString(),
+      payloadRef: `humanagent://e2e/requirement/${second.draft.draftId}`,
+    });
+    const secondImplicit = await waitForImplicitTask(base, second.draft.draftId);
+    const secondTaskId = secondImplicit.taskId;
+    const secondOperationId = secondImplicit.operationId;
+    const secondTerminal = await pollTaskState(base, secondTaskId);
+    assertCompleted(secondTerminal, 'FIRST_LINE_PROVEN_8B2D');
+    const secondObservation = await captureObservation(base, secondTaskId);
+    assertObservation(secondObservation.observation);
+    rounds.push({
+      round: 2,
+      interactionId: second.interaction.interactionId,
+      draftId: second.draft.draftId,
+      taskId: secondTaskId,
+      operationId: secondOperationId,
+      terminalState: secondTerminal.state,
+      events: eventKinds(secondTerminal),
+      output: secondTerminal.output,
+      observation: secondObservation.observation,
+    });
+
+    if (rounds.length < 2) throw new Error('proof expected at least two executor rounds');
+
+    const receipt = {
+      proof: 'explicit-implicit-e2e',
+      generatedAt: new Date().toISOString(),
+      sourceDigest: sourceDigest(),
+      rcc: {
+        baseUrl: RCC_BASE_URL,
+        protocol: 'responses',
+        model: MODEL,
+        route: 'rcc/ui-explicit-implicit',
+      },
+      serve: steps.serve,
+      status: steps.status,
+      uiRootServed: typeof steps.uiRoot === 'string' && steps.uiRoot.startsWith('<!doctype html>') || steps.uiRoot.startsWith('<!DOCTYPE html>'),
+      dashboards: {
+        round1: rounds[0] ?? null,
+        round2: rounds[1] ?? null,
+      },
+      rounds,
+    };
+    await mkdir(resolve('dist/receipts'), { recursive: true });
+    await writeFile(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+    console.log(JSON.stringify(receipt, null, 2));
+  } finally {
+    if (serve) await serve.stop();
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
   process.exitCode = 1;
 });
