@@ -276,7 +276,7 @@ async function main() {
 
     const firstInput = {
       sourceRef: 'explicit-implicit-e2e-round-1',
-      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt using file.read only, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
       requireDraft: 'readme-first-line.txt',
       requireIntent: 'create',
     };
@@ -309,7 +309,7 @@ async function main() {
 
     const secondInput = {
       sourceRef: 'explicit-implicit-e2e-round-2',
-      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt using file.read only, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
       requireDraft: 'marker.txt',
       requireIntent: 'create',
     };
