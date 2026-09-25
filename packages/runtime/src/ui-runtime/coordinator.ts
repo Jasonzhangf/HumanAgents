@@ -1637,7 +1637,7 @@ export class RuntimeTaskCoordinator {
         this.finalize(record, 'stopped');
         return;
       }
-      const projection = errorFromUnknown(error);
+      const projection: MutableRuntimeTaskError = errorFromUnknown(error);
       const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: scope.cycleId };
       const errorEvidenceRef: EvidenceRef = {
         evidenceId: id('evidence', `error-${record.operationId?.value ?? 'none'}-${record.checkpointSeq + 1}`),
@@ -1673,19 +1673,28 @@ export class RuntimeTaskCoordinator {
       }
       const outcome: 'failed' | 'blocked' = 'failed';
       const runtimeState = runtime?.snapshot().state ?? 'failed';
-      const providerMayBeActive = runtimeState === 'running'
-        || runtimeState === 'settling'
-        || runtimeState === 'admitted'
-        || runtimeState === 'waiting'
-        || runtimeState === 'blocked';
       let cleanupEvidenceRefs: readonly EvidenceRef[] = [];
       let cleanupFailure: unknown;
+      let abandonedProviderOperation = false;
       if (composition && runtimeState === 'running') {
         try {
           const closure = await composition.settle();
           cleanupEvidenceRefs = closure.evidenceRefs;
+          // An ordinary settle cannot complete a fully observed waiting execution:
+          // the adapter retains the provider session, so close() would reject with
+          // close.pending.executions and mask the real failure. The only
+          // contract-sanctioned release is the standard stop control.
+          abandonedProviderOperation = closure.state === 'waiting' || closure.state === 'blocked';
         } catch (settleError) {
           cleanupFailure = settleError;
+        }
+      }
+      if (abandonedProviderOperation && cleanupFailure === undefined) {
+        try {
+          const stopped = await this.stopAbandonedProviderExecution(record, operation, scope);
+          cleanupEvidenceRefs = [...cleanupEvidenceRefs, ...stopped.evidenceRefs];
+        } catch (stopError) {
+          cleanupFailure = stopError;
         }
       }
       if (driver) {
@@ -1695,7 +1704,12 @@ export class RuntimeTaskCoordinator {
           if (close.state !== 'closed') {
             throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
           }
-          cleanupFailure = undefined;
+          // A retained close means another execution still owns the shared
+          // provider, so this task's provider was never actually closed. Any
+          // pending cleanup failure must survive: the abandoned execution may
+          // still be active, so the task stays blocked with retry-stop instead
+          // of reporting a clean failure.
+          if (!close.retained) cleanupFailure = undefined;
         } catch (cleanupError) {
           cleanupFailure = cleanupError;
         }
@@ -1724,14 +1738,25 @@ export class RuntimeTaskCoordinator {
         return;
       }
       if (cleanupFailure) {
-        const cleanupProjection = errorFromUnknown(cleanupFailure);
-        record.error = cleanupProjection;
+        const cleanupProjection: MutableRuntimeTaskError = errorFromUnknown(cleanupFailure);
+        if (!cleanupProjection.evidenceRefs?.length && cleanupEvidenceRefs.length > 0) {
+          cleanupProjection.evidenceRefs = cleanupEvidenceRefs;
+        }
+        // The runtime owns whether a stop control can still reach the provider
+        // session: a `failed`/`unknown` runtime rejects stop (assertStopTarget),
+        // RCC v3 rejects stop once the stream is terminal, and a fenced stop
+        // claim left active by a failed attention publication is not retryable.
+        // Ask the runtime instead of re-deriving admissibility from state, so we
+        // never advertise a retry-stop that the stop lifecycle would refuse.
+        const stopIsPossible = runtime?.canStartStopControl(operation.operationId) ?? false;
+        projection.cleanupError = cleanupProjection;
+        record.error = projection;
         record.state = 'blocked';
-        record.running = providerMayBeActive;
-        record.stopping = providerMayBeActive;
+        record.running = stopIsPossible;
+        record.stopping = stopIsPossible;
         record.currentState = '失败收拢未完成';
         record.nextStep = cleanupProjection.nextAction;
-        record.allowedActions = providerMayBeActive ? ['retry-stop'] : [];
+        record.allowedActions = stopIsPossible ? ['retry-stop'] : [];
         record.updatedAt = this.now().toISOString();
         this.pushEvent(
           record,
@@ -1743,7 +1768,7 @@ export class RuntimeTaskCoordinator {
           cleanupProjection.ownerId,
           true,
           cleanupProjection.nextAction,
-          { error: cleanupProjection },
+          { error: projection },
         );
         try {
           await this.commitBusinessCheckpoint(record, scope, 'blocked', errorEvidenceRefs);
@@ -1814,6 +1839,81 @@ export class RuntimeTaskCoordinator {
     };
   }
 
+  /**
+   * Releases a provider execution that an ordinary settle left `waiting`/`blocked`.
+   * The adapter keeps the session for a non-final settlement, so the failure
+   * cleanup must drive the standard stop control (requestStop -> settle) to reach
+   * a final `stopped` closure. The stop is resource release only; the task still
+   * terminates as `failed` with its original error.
+   */
+  private async stopAbandonedProviderExecution(
+    record: TaskRecord,
+    operation: OperationRecord,
+    executionScope: ScopeRef,
+  ): Promise<{ readonly checkpoint: Checkpoint; readonly evidenceRefs: readonly EvidenceRef[] }> {
+    if (!record.runtime || !record.driver || !record.composition || !record.operationId || !record.executionEpoch) {
+      throw new RuntimeTaskControlError('task.not.recoverable', RUNTIME_OWNER, 'abandoned provider execution has no bound runtime', 'start a new execution');
+    }
+    const stopScope: ScopeRef = { ...executionScope };
+    const recoveryStateRef: EvidenceRef = {
+      evidenceId: id('evidence', `recovery-${record.operationId.value}`),
+      kind: 'operation',
+      source: RUNTIME_OWNER,
+      locator: `operation/${record.operationId.value}/recovery`,
+      scope: stopScope,
+    };
+    const runtimeState = record.runtime.snapshot().state;
+    const stopRequestState = runtimeState === 'admitted' || runtimeState === 'running' || runtimeState === 'waiting' || runtimeState === 'blocked'
+      ? runtimeState
+      : 'blocked';
+    const command: RequestStopCommand = {
+      source: 'control',
+      command: 'steer.request-stop',
+      actorKind: 'harness-control',
+      hasStopPermission: true,
+      organId: this.options.organId,
+      taskId: record.taskId,
+      executionEpoch: record.executionEpoch,
+      currentState: stopRequestState,
+      runtimeId: this.runtimeId(record.operationId),
+    };
+    try {
+      const result = await executeStopControl({
+        command,
+        driver: record.driver,
+        checkpointPort: record.composition.checkpointCommitPort(record.checkpoint ?? null),
+        attentionPort: this.options.attentionPort,
+        currentOrganId: this.options.organId,
+        currentTaskId: record.taskId,
+        currentEpoch: record.executionEpoch,
+        operationId: record.operationId,
+        scope: stopScope,
+        cycleId: executionScope.cycleId!,
+        ownerId: RUNTIME_OWNER,
+        previousCheckpoint: record.checkpoint ?? null,
+        checkpointSeq: record.checkpointSeq + 1,
+        directiveRevision: record.directiveRevision,
+        stopReason: 'failure-cleanup',
+        recoveryStateRef,
+        runtime: record.runtime,
+      });
+      if (result.state !== 'stopped') {
+        throw new RuntimeTaskControlError('stop.failed', result.ownerId, 'abandoned provider execution did not reach stopped', toNextActionText(result.nextAction) ?? 'retry stop settlement');
+      }
+      record.checkpoint = result.checkpoint;
+      record.checkpointSeq = result.checkpoint.seq;
+      this.pushEvent(record, operation, 'checkpoint.committed', 'stopped', 'failure cleanup released the abandoned provider execution', result.checkpoint.evidenceRefs);
+      return { checkpoint: result.checkpoint, evidenceRefs: result.closure.evidenceRefs };
+    } catch (error) {
+      if (error instanceof StopSettlementCommitError && error.checkpointCommitted && error.recovery) {
+        await this.throwCommittedStopRecovery(record, operation, error, error.recovery);
+      }
+      throw error instanceof RuntimeTaskControlError
+        ? error
+        : new RuntimeTaskControlError('stop.failed', RUNTIME_OWNER, error instanceof Error ? error.message : String(error), 'inspect the provider stop settlement');
+    }
+  }
+
   private recordProviderEvent(record: TaskRecord, operation: OperationRecord, event: ProviderEvent): void {
     const kind = mapProviderEventKind(event.kind);
     const state = event.terminalState ?? (event.error ? 'failed' : event.kind);
@@ -1846,7 +1946,21 @@ export class RuntimeTaskCoordinator {
 
   private async commitBusinessCheckpoint(record: TaskRecord, executionScope: ScopeRef, outcome: string, extraEvidenceRefs: readonly EvidenceRef[] = []): Promise<void> {
     const checkpointOutcome = (['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'unknown'] as const).find((candidate) => candidate === outcome) ?? 'unknown';
-    const businessScope: ScopeRef = { organId: this.options.organId, taskId: record.taskId, cycleId: executionScope.cycleId };
+    // Failure cleanup may commit a stop-control checkpoint before the business
+    // terminal checkpoint. A non-stopped checkpoint must keep the same operation
+    // identity as its predecessor, so inherit the operation id and align any
+    // business-scoped evidence that predates the inheritance.
+    const inheritedOperationId = record.checkpoint?.scope.operationId;
+    const businessScope: ScopeRef = inheritedOperationId === undefined
+      ? { organId: this.options.organId, taskId: record.taskId, cycleId: executionScope.cycleId }
+      : { organId: this.options.organId, taskId: record.taskId, cycleId: executionScope.cycleId, operationId: inheritedOperationId };
+    const alignEvidenceScope = (ref: EvidenceRef): EvidenceRef => {
+      if (inheritedOperationId === undefined || ref.scope.operationId !== undefined) return ref;
+      if (!sameId(ref.scope.organId, businessScope.organId)
+        || !sameId(ref.scope.taskId, businessScope.taskId)
+        || !sameId(ref.scope.cycleId, businessScope.cycleId)) return ref;
+      return { ...ref, scope: businessScope };
+    };
     const recoveryStateRef: EvidenceRef = {
       evidenceId: id('evidence', `recovery-${record.operationId?.value ?? 'none'}-${record.checkpointSeq + 1}`),
       kind: 'operation',
@@ -1861,7 +1975,7 @@ export class RuntimeTaskCoordinator {
       locator: `operation/${record.operationId?.value ?? 'none'}/checkpoint`,
       scope: businessScope,
     };
-    const evidence: readonly EvidenceRef[] = [checkpointRef, ...extraEvidenceRefs];
+    const evidence: readonly EvidenceRef[] = [checkpointRef, ...extraEvidenceRefs.map(alignEvidenceScope)];
     const next: NextAction = checkpointOutcome === 'waiting'
       ? { kind: 'wait', ref: `recovery-${record.operationId?.value ?? 'none'}` }
       : checkpointOutcome === 'failed' || checkpointOutcome === 'blocked' || checkpointOutcome === 'unknown'

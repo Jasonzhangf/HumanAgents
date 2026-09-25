@@ -873,6 +873,46 @@ test('RCC v3 early observe return cancels the response body and controller', asy
   assert.equal(settled.nextAction?.kind, 'recover');
 });
 
+test('RCC v3 terminal observe failure keeps the session and rejects a later stop', async () => {
+  const built = transportHarness();
+  let controller!: AbortController;
+  const failingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      yield new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"resp-terminal-failure"}}\n\n');
+      throw new Error('socket hang up');
+    },
+  };
+  controller = seedActive(built.transport, failingBody).controller;
+
+  await assert.rejects(async () => {
+    for await (const _event of built.transport.observe(execution)) void _event;
+  }, /socket hang up/);
+
+  // The stream is already terminal when observation fails, so the resource is
+  // never released and the settlement stays non-final with the session kept.
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.resourceRelease.state, 'pending');
+
+  // A stop after the terminal state is rejected by the transport, so callers
+  // must not advertise it as a recovery action.
+  const stop = await built.transport.requestStop({ ...execution, reason: 'failure cleanup', ownerId: 'stop-controller' }, {
+    protocol: 'responses',
+    type: 'responses.cancel',
+    route: 'cc:test-route',
+    model: binding.modelRef,
+    reason: 'failure cleanup',
+    execution,
+  });
+  assert.equal(stop.status, 'rejected');
+  assert.equal(stop.error?.code, 'stop.after-terminal');
+  assert.equal(controller.signal.aborted, false);
+
+  // The session is retained, so the transport cannot close the binding yet.
+  const closed = await built.transport.close(binding);
+  assert.equal(closed.state, 'pending');
+});
+
 test('RCC v3 ignores the duplicate response.done trailer emitted by the transparent proxy', async () => {
   const built = transportHarness();
   seedActive(built.transport, chunks([

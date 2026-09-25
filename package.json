@@ -33,6 +33,7 @@
     "test:provider": "pnpm build:app && tsc -p tests/adapters/provider/tsconfig.json && node --test dist/tests-provider/tests/adapters/provider/provider-adapter.test.js dist/tests-provider/tests/adapters/provider/provider-agent-driver.test.js dist/tests-provider/tests/adapters/provider/provider-replay.test.js dist/tests-provider/tests/adapters/provider/rcc-v3-transport.test.js",
     "test:ui": "pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js",
     "proof:ui-provider-loop": "node tests/app/real-ui-provider-loop.mjs",
+    "proof:failure-cleanup": "node tests/app/real-failure-cleanup-proof.mjs",
     "proof:cordis-host-closeout": "node tests/app/real-cordis-host-closeout.mjs",
     "test:release": "node --test tests/release/release-gates.test.mjs",
     "test:journal": "pnpm build:contracts && tsc -p tests/adapters/jsonl/tsconfig.json && node --test dist/tests/adapters/jsonl/journal.test.js",

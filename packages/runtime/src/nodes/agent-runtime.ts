@@ -115,6 +115,11 @@ export interface PendingStopSettlement {
 
 type StopSettlementInput = Omit<PendingStopSettlement, 'checkpointCommitted'>;
 
+// The lifecycle states from which a stop control may target a live execution.
+// `assertStopTarget` and `canStartStopControl` are the only consumers; keep the
+// list here so the two checks cannot drift apart.
+const STOPPABLE_STATES: readonly LifecycleState[] = ['admitted', 'running', 'waiting', 'blocked'];
+
 const DRIVER_BINDINGS = new WeakMap<AgentDriver, AgentRuntime>();
 
 export function bindAgentDriver(runtime: AgentRuntime, driver: AgentDriver): AgentDriver {
@@ -304,7 +309,7 @@ export class AgentRuntime {
     ) {
       throw new RuntimeError('agent runtime stop target does not match stop control', this.errorContext());
     }
-    if (!['admitted', 'running', 'waiting', 'blocked'].includes(this.state)) {
+    if (!STOPPABLE_STATES.includes(this.state)) {
       throw new RuntimeError(`agent runtime cannot be stopped: ${this.state}`, this.errorContext());
     }
   }
@@ -317,6 +322,20 @@ export class AgentRuntime {
 
   isStopRetryable(operationId: OperationId): boolean {
     return this.stopControlOperationId?.value === operationId.value && this.stopControlPhase === 'retryable';
+  }
+
+  /**
+   * Whether a stop control can be started or retried for this operation right
+   * now. This mirrors what `beginStop` accepts: a stoppable lifecycle state plus
+   * either no existing claim or a retryable claim for the same operation. The
+   * runtime owns this decision so a caller never advertises a stop that the stop
+   * lifecycle would refuse (for example after an attention-publication failure
+   * leaves the claim fenced as active).
+   */
+  canStartStopControl(operationId: OperationId): boolean {
+    if (!STOPPABLE_STATES.includes(this.state)) return false;
+    if (!this.stopControlOperationId) return true;
+    return this.stopControlOperationId.value === operationId.value && this.stopControlPhase === 'retryable';
   }
 
   recordStopAttention(operationId: OperationId, attention: Attention, originalFailure?: unknown): void {
@@ -583,7 +602,7 @@ export class AgentRuntime {
       this.stopControlBinding = undefined;
       return;
     }
-    if (['admitted', 'running', 'waiting', 'blocked'].includes(this.state)) {
+    if (STOPPABLE_STATES.includes(this.state)) {
       this.state = this.advance(this.state, 'settling');
     }
     if (this.state === 'settling') {

@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.failure-cleanup.gates",
+  "candidate": {
+    "base": "e0164ecb1d2ee736eb0215066e6b99b883fd0252",
+    "head": "6cd4efdfbf8982eddb33bef89ea36e094fcd3deb",
+    "sourceDigest": "sha256:63678b2a71af0db19a9657731b46492a568ade37c8c66d9a45fa8fc6fd95c86c",
+    "binding": "sourceDigest covers every tracked source file except docs/evidence/failure-cleanup/, so the proof stays verifiable from both the implementation commit and the evidence commit"
+  },
+  "provider": {
+    "endpoint": "http://127.0.0.1:4444",
+    "entry": "CLI serve --mode rcc --protocol responses over the UI Runtime HTTP API",
+    "protocols": [
+      "responses"
+    ],
+    "requestModel": "gpt-5.5",
+    "realTool": "file.read (createResponsesFileToolExecutor) reads a directory to surface EISDIR"
+  },
+  "commands": [
+    {
+      "command": "pnpm typecheck",
+      "exitCode": 0,
+      "result": "PASS"
+    },
+    {
+      "command": "pnpm test:contracts",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "36/36"
+    },
+    {
+      "command": "pnpm test:journal",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "19/19"
+    },
+    {
+      "command": "pnpm test:provider",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "79/79"
+    },
+    {
+      "command": "pnpm test:ui",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "32/32"
+    },
+    {
+      "command": "pnpm test:app",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "295/295"
+    },
+    {
+      "command": "pnpm test:runtime",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "379/379 + 22/22"
+    },
+    {
+      "command": "pnpm test:release",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "35/35"
+    },
+    {
+      "command": "pnpm proof:failure-cleanup",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "real RCC 4444 responses entry: real file.read EISDIR -> cleanup stop checkpoint -> terminal failed with the real error and allowedActions ['start']"
+    },
+    {
+      "command": "pnpm proof:ui-provider-loop",
+      "exitCode": 0,
+      "result": "PASS",
+      "notes": "happy path regression check; a pre-existing openai task.busy race also reproduces on base (bug c562924), unrelated to this change"
+    }
+  ],
+  "redEvidence": {
+    "worktree": "/tmp/ha-base-e0164ec (detached at base e0164ec)",
+    "command": "node tests/app/real-failure-cleanup-proof.mjs",
+    "exitCode": 1,
+    "observed": "task did not fail terminally: blocked / close.pending.executions ('provider close rejected while active executions require settlement or recovery'), allowedActions ['retry-stop'], no final terminal",
+    "note": "Same proof script against the unfixed base reproduces the original bug 7721953 signature at the real entry."
+  },
+  "artifacts": {
+    "failure-cleanup-proof.json": {
+      "sha256": "67e786b2aee6249f69285beb2ad8cde617c6e3ab34c4ac6d2cecd6907e21ff6d",
+      "source": "dist/receipts/failure-cleanup-proof.json"
+    }
+  },
+  "acceptance": {
+    "responses": {
+      "state": "failed",
+      "error": "EISDIR: illegal operation on a directory, read",
+      "cleanupError": "none",
+      "allowedActions": [
+        "start"
+      ],
+      "checkpointOutcomes": [
+        "stopped",
+        "failed"
+      ],
+      "checkpointOperationIds": [
+        "ui-operation-1",
+        "ui-operation-1"
+      ],
+      "cleanupStopCheckpoint": "failure cleanup released the abandoned provider execution",
+      "terminal": "execution.terminal failed (final)"
+    }
+  }
+}

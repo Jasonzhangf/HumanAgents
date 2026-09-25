@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "kind": "humanagent.failure-cleanup-proof",
+  "generatedAt": "2026-09-25T09:10:31.193Z",
+  "candidate": {
+    "branch": "codex/bug-7721953-settle-on-failure",
+    "head": "6cd4efdfbf8982eddb33bef89ea36e094fcd3deb",
+    "sourceDigest": "sha256:63678b2a71af0db19a9657731b46492a568ade37c8c66d9a45fa8fc6fd95c86c"
+  },
+  "rcc": {
+    "baseUrl": "http://127.0.0.1:4444",
+    "health": {
+      "bind": "0.0.0.0",
+      "build_version": "0.90.4815",
+      "manifest_version": 3,
+      "port": 4444,
+      "server_id": "routecodex_v3_4444",
+      "status": "ok",
+      "version": 3
+    }
+  },
+  "entry": "CLI serve --mode rcc --protocol responses over the UI Runtime HTTP API",
+  "model": "gpt-5.5",
+  "nonExercisedAttempts": [],
+  "record": {
+    "attempt": 1,
+    "taskId": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1",
+    "operationId": "ui-operation-1",
+    "state": "failed",
+    "error": {
+      "code": "runtime.execution.failure",
+      "ownerId": "humanagent.runtime",
+      "message": "EISDIR: illegal operation on a directory, read",
+      "retryable": false,
+      "nextAction": "inspect the runtime error and retry from a new operation"
+    },
+    "allowedActions": [
+      "start"
+    ],
+    "checkpointOutcomes": [
+      "stopped",
+      "failed"
+    ],
+    "checkpointOperationIds": [
+      "ui-operation-1",
+      "ui-operation-1"
+    ],
+    "events": [
+      {
+        "kind": "execution.started",
+        "state": "running",
+        "summary": "execution started",
+        "terminalPhase": null
+      },
+      {
+        "kind": "provider.model",
+        "state": "model",
+        "summary": "model",
+        "terminalPhase": null
+      },
+      {
+        "kind": "provider.output",
+        "state": "output",
+        "summary": "I'll attempt to read the directory at path \"adir\" using the file.read tool.",
+        "terminalPhase": null
+      },
+      {
+        "kind": "provider.model",
+        "state": "model",
+        "summary": "model",
+        "terminalPhase": null
+      },
+      {
+        "kind": "provider.output",
+        "state": "output",
+        "summary": "output: humanagent.provider-adapter:response.function_call_arguments.done:arguments-call_00_TQSzAAHdkhtIArp1vsqU3054:sha256:c61d0",
+        "terminalPhase": null
+      },
+      {
+        "kind": "provider.tool",
+        "state": "tool",
+        "summary": "file.read",
+        "terminalPhase": null
+      },
+      {
+        "kind": "provider.error",
+        "state": "failed",
+        "summary": "EISDIR: illegal operation on a directory, read",
+        "terminalPhase": null
+      },
+      {
+        "kind": "checkpoint.committed",
+        "state": "stopped",
+        "summary": "failure cleanup released the abandoned provider execution",
+        "terminalPhase": null
+      },
+      {
+        "kind": "checkpoint.committed",
+        "state": "failed",
+        "summary": "execution failed",
+        "terminalPhase": null
+      },
+      {
+        "kind": "execution.terminal",
+        "state": "failed",
+        "summary": "EISDIR: illegal operation on a directory, read",
+        "terminalPhase": "final"
+      }
+    ],
+    "checkpointJournal": [
+      {
+        "name": "task-ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1-cycle-ui-cycle-1.jsonl",
+        "checkpoint": {
+          "id": {
+            "scope": "checkpoint",
+            "value": "stopped-ui-operation-1-1"
+          },
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          },
+          "cycleId": {
+            "scope": "cycle",
+            "value": "ui-cycle-1"
+          },
+          "seq": 1,
+          "previousCheckpointId": null,
+          "directiveRevision": 1,
+          "executionEpoch": 1,
+          "outcome": "stopped",
+          "summary": "failure-cleanup",
+          "recoveryStateRef": {
+            "evidenceId": {
+              "scope": "evidence",
+              "value": "recovery-ui-operation-1"
+            },
+            "kind": "operation",
+            "source": "humanagent.runtime",
+            "locator": "operation/ui-operation-1/recovery",
+            "scope": {
+              "organId": {
+                "scope": "organ",
+                "value": "humanagent-ui"
+              },
+              "taskId": {
+                "scope": "task",
+                "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+              },
+              "cycleId": {
+                "scope": "cycle",
+                "value": "ui-cycle-1"
+              },
+              "operationId": {
+                "scope": "operation",
+                "value": "ui-operation-1"
+              }
+            }
+          },
+          "evidenceRefs": [
+            {
+              "evidenceId": {
+                "scope": "evidence",
+                "value": "provider-settle-rcc-v3---settle-ea463ff238a8"
+              },
+              "kind": "external",
+              "source": "humanagent.provider-adapter",
+              "locator": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-failure-cleanup-jmnTn8/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-failure-cleanup-jmnTn8-workspace/artifacts/ui-provider-evidence/provider-settle-rcc-v3---settle-ea463ff238a8",
+              "digest": "sha256:ea463ff238a8e24d95cec51b5748f2a45d26ddb9741ebd972c4cac65be5fc675",
+              "scope": {
+                "organId": {
+                  "scope": "organ",
+                  "value": "humanagent-ui"
+                },
+                "taskId": {
+                  "scope": "task",
+                  "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+                },
+                "cycleId": {
+                  "scope": "cycle",
+                  "value": "ui-cycle-1"
+                },
+                "operationId": {
+                  "scope": "operation",
+                  "value": "ui-operation-1"
+                }
+              }
+            }
+          ],
+          "next": {
+            "kind": "stop",
+            "ref": "failure-cleanup"
+          }
+        }
+      },
+      {
+        "name": "task-ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1-cycle-ui-cycle-1.jsonl",
+        "checkpoint": {
+          "id": {
+            "scope": "checkpoint",
+            "value": "checkpoint-ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1-2"
+          },
+          "scope": {
+            "organId": {
+              "scope": "organ",
+              "value": "humanagent-ui"
+            },
+            "taskId": {
+              "scope": "task",
+              "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+            },
+            "cycleId": {
+              "scope": "cycle",
+              "value": "ui-cycle-1"
+            },
+            "operationId": {
+              "scope": "operation",
+              "value": "ui-operation-1"
+            }
+          },
+          "cycleId": {
+            "scope": "cycle",
+            "value": "ui-cycle-1"
+          },
+          "seq": 2,
+          "previousCheckpointId": {
+            "scope": "checkpoint",
+            "value": "stopped-ui-operation-1-1"
+          },
+          "directiveRevision": 1,
+          "executionEpoch": 1,
+          "outcome": "failed",
+          "summary": "execution failed",
+          "recoveryStateRef": {
+            "evidenceId": {
+              "scope": "evidence",
+              "value": "recovery-ui-operation-1-2"
+            },
+            "kind": "operation",
+            "source": "humanagent.runtime",
+            "locator": "operation/ui-operation-1/checkpoint-recovery",
+            "scope": {
+              "organId": {
+                "scope": "organ",
+                "value": "humanagent-ui"
+              },
+              "taskId": {
+                "scope": "task",
+                "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+              },
+              "cycleId": {
+                "scope": "cycle",
+                "value": "ui-cycle-1"
+              },
+              "operationId": {
+                "scope": "operation",
+                "value": "ui-operation-1"
+              }
+            }
+          },
+          "evidenceRefs": [
+            {
+              "evidenceId": {
+                "scope": "evidence",
+                "value": "checkpoint-ui-operation-1-2"
+              },
+              "kind": "operation",
+              "source": "humanagent.runtime",
+              "locator": "operation/ui-operation-1/checkpoint",
+              "scope": {
+                "organId": {
+                  "scope": "organ",
+                  "value": "humanagent-ui"
+                },
+                "taskId": {
+                  "scope": "task",
+                  "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+                },
+                "cycleId": {
+                  "scope": "cycle",
+                  "value": "ui-cycle-1"
+                },
+                "operationId": {
+                  "scope": "operation",
+                  "value": "ui-operation-1"
+                }
+              }
+            },
+            {
+              "evidenceId": {
+                "scope": "evidence",
+                "value": "error-ui-operation-1-1"
+              },
+              "kind": "operation",
+              "source": "humanagent.runtime",
+              "locator": "operation/ui-operation-1/error",
+              "scope": {
+                "organId": {
+                  "scope": "organ",
+                  "value": "humanagent-ui"
+                },
+                "taskId": {
+                  "scope": "task",
+                  "value": "ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1"
+                },
+                "cycleId": {
+                  "scope": "cycle",
+                  "value": "ui-cycle-1"
+                },
+                "operationId": {
+                  "scope": "operation",
+                  "value": "ui-operation-1"
+                }
+              }
+            }
+          ],
+          "next": {
+            "kind": "recover",
+            "ref": "task://ui-task-00dafaa9-edda-46bc-8e0d-5d463d6d9d72-1/recovery"
+          }
+        }
+      }
+    ]
+  },
+  "endpoint": "http://127.0.0.1:56763",
+  "checkpointRoot": "/private/var/folders/jm/blkk8bbd6v78rv2pwxgxh3kr0000gn/T/humanagent-failure-cleanup-jmnTn8/control/sessions/-private-var-folders-jm-blkk8bbd6v78rv2pwxgxh3kr0000gn-T-humanagent-failure-cleanup-jmnTn8-workspace/checkpoints/ui-runtime"
+}
