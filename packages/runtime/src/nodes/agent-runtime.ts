@@ -319,6 +319,20 @@ export class AgentRuntime {
     return this.stopControlOperationId?.value === operationId.value && this.stopControlPhase === 'retryable';
   }
 
+  /**
+   * Whether a stop control can be started or retried for this operation right
+   * now. This mirrors what `beginStop` accepts: a stoppable lifecycle state plus
+   * either no existing claim or a retryable claim for the same operation. The
+   * runtime owns this decision so a caller never advertises a stop that the stop
+   * lifecycle would refuse (for example after an attention-publication failure
+   * leaves the claim fenced as active).
+   */
+  canStartStopControl(operationId: OperationId): boolean {
+    if (!['admitted', 'running', 'waiting', 'blocked'].includes(this.state)) return false;
+    if (!this.stopControlOperationId) return true;
+    return this.stopControlOperationId.value === operationId.value && this.stopControlPhase === 'retryable';
+  }
+
   recordStopAttention(operationId: OperationId, attention: Attention, originalFailure?: unknown): void {
     this.assertStopControlOwner(operationId);
     this.stopAttentionRecord = { operationId, attention: structuredClone(attention), phase: 'publishing', originalResolved: false, originalFailure };

@@ -1742,17 +1742,13 @@ export class RuntimeTaskCoordinator {
         if (!cleanupProjection.evidenceRefs?.length && cleanupEvidenceRefs.length > 0) {
           cleanupProjection.evidenceRefs = cleanupEvidenceRefs;
         }
-        // The runtime state after cleanup is the authority on whether a stop
-        // control can still reach the provider session: a `failed`/`unknown`
-        // runtime rejects stop (assertStopTarget) and RCC v3 rejects stop once
-        // the stream is terminal. Only advertise retry-stop when the runtime is
-        // still stoppable, otherwise the task stays blocked with no action that
-        // the provider would reject.
-        const finalRuntimeState = runtime?.snapshot().state ?? 'failed';
-        const stopIsPossible = finalRuntimeState === 'admitted'
-          || finalRuntimeState === 'running'
-          || finalRuntimeState === 'waiting'
-          || finalRuntimeState === 'blocked';
+        // The runtime owns whether a stop control can still reach the provider
+        // session: a `failed`/`unknown` runtime rejects stop (assertStopTarget),
+        // RCC v3 rejects stop once the stream is terminal, and a fenced stop
+        // claim left active by a failed attention publication is not retryable.
+        // Ask the runtime instead of re-deriving admissibility from state, so we
+        // never advertise a retry-stop that the stop lifecycle would refuse.
+        const stopIsPossible = runtime?.canStartStopControl(operation.operationId) ?? false;
         projection.cleanupError = cleanupProjection;
         record.error = projection;
         record.state = 'blocked';

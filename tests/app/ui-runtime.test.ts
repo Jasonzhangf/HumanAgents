@@ -136,6 +136,17 @@ function attentionPort(): AttentionPort & { readonly published: Attention[]; rea
   };
 }
 
+function failingAttentionPort(): AttentionPort {
+  return {
+    async publish(): Promise<never> {
+      throw new Error('attention journal is unavailable');
+    },
+    async resolve(): Promise<never> {
+      throw new Error('attention journal is unavailable');
+    },
+  };
+}
+
 function testMemory(projectKey: string) {
   return {
     coordinator: new MemoryCoordinator(),
@@ -4908,6 +4919,53 @@ test('a terminal provider failure does not advertise a stop the provider will re
   assert.ok(dashboard.error?.cleanupError, 'the unresolved cleanup must remain attached to the task error');
   assert.deepEqual(dashboard.allowedActions, []);
   assert.equal(service.taskDashboard(task.taskId).state, 'blocked');
+  await assert.rejects(
+    async () => service.retryStop(task.taskId),
+    (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.recoverable',
+  );
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('failure cleanup does not advertise a retry-stop fenced by a failed attention publication', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-fenced-stop-claim-'));
+  const port = new AbandonedToolExecutionPort();
+  // The transport rejects the stop request, and the stop attention cannot be
+  // published either, so the stop claim stays fenced as active. A retry would
+  // be refused by beginStop as an already-active stop control, so retry-stop
+  // must not be advertised even though the runtime state is still stoppable.
+  port.failStop = true;
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: failingAttentionPort(),
+    providerState: 'ready',
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-fenced-stop-claim'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    providerTools: [RESPONSES_FILE_READ_TOOL],
+    providerToolExecutor: {
+      async execute() {
+        throw new Error('EISDIR: illegal operation on a directory, read');
+      },
+    },
+  });
+  const task = service.createTask({ title: 'fenced stop claim' });
+  service.startExecution(task.taskId, { prompt: 'read the directory' });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'blocked'), 5000);
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).checkpoint?.outcome, 'blocked'), 5000);
+  const dashboard = service.taskDashboard(task.taskId);
+  // The stop claim is fenced as active, so retry-stop cannot succeed and must
+  // not be advertised. The task stays blocked and explicitly non-recoverable
+  // through the stop lifecycle rather than exposing a dead-end action.
+  assert.equal(dashboard.error?.message, 'EISDIR: illegal operation on a directory, read');
+  assert.ok(dashboard.error?.cleanupError, 'the unresolved cleanup must remain attached to the task error');
+  assert.deepEqual(dashboard.allowedActions, []);
   await assert.rejects(
     async () => service.retryStop(task.taskId),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.not.recoverable',
