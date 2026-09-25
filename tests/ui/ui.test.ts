@@ -813,6 +813,7 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
     'docs/ui/memory-actions.js',
     'docs/ui/runtime-api.js',
     'docs/ui/runtime-shell.js',
+    'docs/ui/entry.js',
   ];
   const source = (await Promise.all(files.map((file) => readFile(file, 'utf8')))).join('\n');
   assert.equal(source.includes('Journal'), false);
@@ -904,19 +905,21 @@ test('observation page reads only typed pipeline fields and owns no node-order t
   assert.equal(page.includes('node.row'), true);
 });
 
-test('UI index is an explicit historical handoff, not a fake runtime console', async () => {
+test('UI index is the task input entry with explicit draft, confirmation gate, and runtime status', async () => {
   const html = await readFile('docs/ui/index.html', 'utf8');
-  const readme = await readFile('docs/ui/README.md', 'utf8');
-  assert.equal(html.includes("location.replace('./dashboard.html')"), true);
-  assert.equal(html.includes('打开 Runtime Dashboard'), true);
-  assert.equal(html.includes('历史视觉原型'), true);
-  assert.equal(html.includes('不会伪造 Runtime 成功结果'), true);
+  const entry = await readFile('docs/ui/entry.js', 'utf8');
+  assert.equal(html.includes('type="module" src="./entry.js"'), true);
+  assert.equal(html.includes('HumanAgent · Task Input'), true);
+  assert.equal(entry.includes('api.receiveExplicitInput'), true);
+  assert.equal(entry.includes('api.interpretExplicitInput'), true);
+  assert.equal(entry.includes('api.confirmExplicitRequirement'), true);
+  assert.equal(entry.includes('api.listTasks'), true);
+  assert.equal(entry.includes('implicitScheduling'), true);
+  assert.equal(entry.includes('taskDashboardHref'), true);
   assert.equal(html.includes('data-mode="running"'), false);
   assert.equal(html.includes('本地状态已同步'), false);
   assert.equal(html.includes('正在运行'), false);
   assert.equal(html.includes('checkpoint committed'), false);
-  assert.equal(readme.includes('明确重定向'), true);
-  assert.equal(readme.includes('不呈现静态运行状态'), true);
 });
 
 test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {

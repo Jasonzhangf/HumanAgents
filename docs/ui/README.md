@@ -2,17 +2,19 @@
 
 状态：`RUNTIME-CONNECTED`
 工作总览：[dashboard.html](dashboard.html)  
+任务输入首页：[index.html](index.html)  
 任务列表第一入口：[tasks.html](tasks.html)  
 任务详情与输入决策：[task.html](task.html)  
 运行任务看板：[task-dashboard.html](task-dashboard.html)  
 后台观测：[observation.html](observation.html)  
-兼容入口说明页（非产品入口）：[index.html](index.html)；历史视觉原型（非产品入口）：
+历史视觉原型（非产品入口）：
 [interaction.html](interaction.html)
 
-当前主入口是 `dashboard.html`、`tasks.html`、`task.html`、`task-dashboard.html` 和
+当前产品入口从 `index.html` 接受用户任务，经显式大脑生成可确认草稿，确认后进入
+隐式队列。运行状态入口包括 `dashboard.html`、`tasks.html`、`task.html`、`task-dashboard.html` 和
 `observation.html`。这些页面通过 `runtime-api.js` 消费 HumanAgent Runtime API，不读取
-Journal、DSH Session、RCC raw frame 或 debug log。`index.html` 只说明历史原型并明确重定向
-到 `dashboard.html`，不呈现静态运行状态。
+Journal、DSH Session、RCC raw frame 或 debug log。`index.html` 不呈现静态运行状态，
+队列确认和任务状态都来自 Runtime projection。
 
 ## UI brief
 
