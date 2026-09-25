@@ -2924,6 +2924,11 @@ test('implicit dispatch intent survives a persistence failure and restart withou
   await waitFor(() => assert.equal(service.status().implicitScheduling?.state, 'failed'));
   assert.equal(service.status().implicitScheduling?.requirementId, 'requirement:draft-1:1');
   assert.equal(service.listTasks().counts.total, 1);
+  // startExecution schedules the provider start asynchronously, so the journal
+  // failure can become visible before FakeReplayExecutionRuntimePort.start has
+  // pushed its payload; wait for the real provider-visible start before
+  // asserting it happened exactly once.
+  await waitFor(() => assert.equal(port.startPayloads.length, 1));
   assert.equal(port.startPayloads.length, 1);
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 
@@ -2937,6 +2942,7 @@ test('implicit dispatch intent survives a persistence failure and restart withou
     assert.deepEqual(state?.inbox.pendingDraftIds, []);
     assert.deepEqual(state?.dispatchLedger, []);
   });
+  await waitFor(() => assert.equal(port.startPayloads.length, 1));
   assert.equal(port.startPayloads.length, 1);
   assert.equal(restarted.status().implicitScheduling, undefined);
   assert.equal(restarted.listTasks().counts.total, 1);
