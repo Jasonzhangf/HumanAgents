@@ -1976,7 +1976,54 @@ test('confirmed requirement is visibly queued before implicit dispatch', async (
 
   const dispatched = await service.dispatchNextExplicitRequirement();
   assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
+  assert.equal(dispatched.taskId.value, queuedRow.taskId.value);
+  assert.equal(service.taskDashboard(queuedRow.taskId).taskId.value, queuedRow.taskId.value);
+  assert.equal(service.listTasks().draft.some((row) => row.taskId.value === queuedRow.taskId.value), false);
   assert.equal(service.status().implicitScheduling, undefined);
+});
+
+test('queued requirement row resolves through taskDashboard before and after dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-dashboard-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:queued-dashboard',
+    rawInput: 'resolve the queued row through the dashboard route',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'resolve the queued row through the dashboard route',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create queued dashboard evidence',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:queued-dashboard',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-23T02:00:00.000Z',
+    payloadRef: 'asset://requirements/queued-dashboard',
+  });
+
+  const queuedRow = queuedDraftRow(service.listTasks(), 'draft-1');
+  assert.equal(queuedRow.taskId.value, 'ui-task-implicit-draft-1');
+  const queuedDashboard = service.taskDashboard(queuedRow.taskId);
+  assert.equal(queuedDashboard.taskId.value, queuedRow.taskId.value);
+  assert.equal(queuedDashboard.state, 'created');
+  assert.equal(queuedDashboard.currentNode, 'implicit.classify');
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
+  const dispatchedDashboard = service.taskDashboard(dispatched.taskId);
+  assert.equal(dispatchedDashboard.taskId.value, queuedRow.taskId.value);
+  assert.equal(dispatchedDashboard.state === 'created', false);
+  assert.equal(service.listTasks().draft.some((row) => row.taskId.value === queuedRow.taskId.value), false);
 });
 
 test('a confirmed requirement behind a blocked FIFO head is projected as queued', async () => {

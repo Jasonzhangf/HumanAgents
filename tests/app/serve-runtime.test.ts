@@ -89,12 +89,13 @@ async function waitForRuntimeTask(runtime: Awaited<ReturnType<typeof startUiRunt
     const tasks = runtime.service.listTasks();
     const rows = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.failed, ...tasks.draft];
     for (const row of rows) {
+      if (row.requirementAdmission === 'queued') continue;
       try {
         runtime.service.taskDashboard(row.taskId);
         return row.taskId;
       } catch {
-        // Synthetic queued rows are not coordinator tasks; keep looking for the
-        // real task created by FIFO dispatch before returning a task id.
+        // Queued rows now resolve through the dashboard; still keep looking for
+        // the real coordinator task created by FIFO dispatch.
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 10));

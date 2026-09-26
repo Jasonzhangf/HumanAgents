@@ -1274,11 +1274,17 @@ export class UiRuntimeService {
     };
   }
 
-  listTasks(): RuntimeTaskListProjection {
-    const queuedRows: RuntimeTaskSnapshotInput[] = this.queuedPendingRequirements().map((candidate) => {
+  private queuedTaskSnapshots(): readonly RuntimeTaskSnapshotInput[] {
+    const coordinatorTaskIds = new Set(this.coordinator.taskSnapshots().map((task) => task.taskId.value));
+    return this.queuedPendingRequirements().flatMap((candidate) => {
+      const taskId = id('task', `ui-task-implicit-${candidate.draftId}`);
+      // Once dispatch materializes the coordinator task under the same stable id,
+      // the real task supersedes the synthetic queued row so listTasks has no
+      // duplicate and the row link resolves to the coordinator task.
+      if (coordinatorTaskIds.has(taskId.value)) return [];
       const envelope = this.requirementInbox.find(candidate.draftId);
-      return {
-        taskId: id('task', `ui-task-implicit-${candidate.draftId}`),
+      return [{
+        taskId,
         title: candidate.normalizedInput,
         state: 'created' as const,
         requirementQueue: candidate.queue,
@@ -1292,12 +1298,19 @@ export class UiRuntimeService {
         currentNode: 'implicit.classify',
         allowedActions: [],
         recentEvents: [],
-      };
+      }];
     });
+  }
+
+  private queuedTaskSnapshot(taskId: TaskId): RuntimeTaskSnapshotInput | undefined {
+    return this.queuedTaskSnapshots().find((candidate) => candidate.taskId.value === taskId.value);
+  }
+
+  listTasks(): RuntimeTaskListProjection {
     return projectRuntimeTaskList({
       mode: this.mode,
       tasks: [
-        ...queuedRows,
+        ...this.queuedTaskSnapshots(),
         ...this.coordinator.taskSnapshots().map((task) => this.withRequirementAdmission(task)),
       ],
     });
@@ -1325,6 +1338,10 @@ export class UiRuntimeService {
     try {
       return projectRuntimeTaskDashboard(this.coordinator.taskSnapshot(taskId), this.mode);
     } catch (error) {
+      if (error instanceof RuntimeTaskControlError && error.code === 'task.not.found') {
+        const queued = this.queuedTaskSnapshot(taskId);
+        if (queued) return projectRuntimeTaskDashboard(queued, this.mode);
+      }
       throw apiError(error);
     }
   }
@@ -1880,11 +1897,20 @@ export class UiRuntimeService {
     }
   }
 
-  private async dispatchNextExplicitRequirementInternal(): Promise<ExplicitBrainDispatchAttempt> {
+  private async withDispatchLock<T>(work: () => Promise<T>): Promise<T> {
     let release!: () => void;
     const previous = this.dispatchTail;
     this.dispatchTail = new Promise<void>((resolve) => { release = resolve; });
     await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  private async dispatchNextExplicitRequirementInternal(): Promise<ExplicitBrainDispatchAttempt> {
+    return this.withDispatchLock(async () => {
     let consumed: RequirementEnvelope | null = null;
     let dispatchEntry: DispatchLedgerEntry | undefined;
     let inboxBeforeRetire: RequirementInboxState | undefined;
@@ -1956,9 +1982,8 @@ export class UiRuntimeService {
         if (dispatchEntry) this.dispatchLedger.set(consumed.draftId, dispatchEntry);
       }
       throw apiError(error);
-    } finally {
-      release();
     }
+    });
   }
 
   private async dispatchConfirmedRequirementThroughCoordinator(
@@ -2176,7 +2201,9 @@ export class UiRuntimeService {
         const availableCapabilities = status.state === 'ready' || status.state === 'degraded'
           ? [PROVIDER_EXECUTION_CAPABILITY]
           : [];
-        const attempt = await this.implicitBrain.drainNext({
+        // Share the explicit dispatch mutex so a manual /api/explicit/dispatch-next
+        // cannot interleave with the background FIFO drain on the same head.
+        const attempt = await this.withDispatchLock(() => this.implicitBrain.drainNext({
           queueLoad: {
             running: this.coordinator.taskSnapshots().filter((task) => task.state === 'running' || task.state === 'settling').length,
             queued: this.coordinator.taskSnapshots().filter((task) => task.state === 'created' || task.state === 'admitted').length,
@@ -2187,7 +2214,7 @@ export class UiRuntimeService {
           requiredInputRefs: ['task://pending'],
           providedInputRefs: ['task://pending'],
           checkpoint: { recoverable: true },
-        });
+        }));
         if (attempt.kind === 'retired') {
           this.implicitConsumerIssue = undefined;
           continue;
