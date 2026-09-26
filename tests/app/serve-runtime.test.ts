@@ -753,7 +753,7 @@ test('RCC review agent remains inconclusive when the model omits its review mark
   });
   assert.equal(review.status, 'inconclusive');
   assert.equal(review.findings.length, 1);
-  assert.match(review.findings[0]!.expected, /unambiguous review marker/);
+  assert.match(review.findings[0]!.expected, /terminal HUMANAGENT_REVIEW marker/);
 });
 
 test('RCC review agent retries a real provider reply that dropped the terminal marker', async () => {
@@ -820,12 +820,12 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
   assert.equal(review.findings.length, 0);
 });
 
-test('RCC review agent remains inconclusive when review markers conflict', async () => {
+test('RCC review agent uses the terminal verdict when review markers conflict', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-conflict'),
     organId: id('organ', 'humanagent-ui'),
-    title: 'RCC review conflict',
-    directive: 'keep contradictory review output blocked',
+    title: 'RCC review terminal verdict',
+    directive: 'keep the terminal review verdict as authoritative',
     directiveRevision: 1,
     state: 'created',
     memoryScope: 'task',
@@ -880,8 +880,23 @@ test('RCC review agent remains inconclusive when review markers conflict', async
     reviewMaterial: materialFor(workerAssignment, workerResult),
     scope,
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
+});
+
+test('RCC review agent uses a terminal passed verdict after an earlier failed quote', async () => {
+  const review = await reviewWithProviderText({
+    taskSuffix: 'terminal-passed-after-quote',
+    provider: providerPort({
+      state: 'succeeded',
+      chunkedReviewText: [
+        'The criteria text includes HUMANAGENT_REVIEW: failed only as an example. ',
+        'HUMANAGENT_REVIEW: passed',
+      ],
+    }),
+  });
+  assert.equal(review.status, 'passed');
+  assert.deepEqual(review.findings, []);
 });
 
 test('RCC ports reach the runtime review and Harness merge gates with provider artifacts', async () => {
@@ -1050,7 +1065,7 @@ test('RCC review keeps a verdict marker tail that depends on an earlier chunk', 
   assert.equal(review.status, 'passed');
 });
 
-test('RCC review stays inconclusive when verdict markers conflict across chunks', async () => {
+test('RCC review uses the terminal verdict when verdict markers conflict across chunks', async () => {
   const review = await reviewWithProviderText({
     taskSuffix: 'conflicting-chunks',
     provider: providerPort({
@@ -1058,6 +1073,6 @@ test('RCC review stays inconclusive when verdict markers conflict across chunks'
       chunkedReviewText: ['HUMANAGENT_REVIEW: passed', ' but on reflection HUMANAGENT_REVIEW: failed'],
     }),
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
 });

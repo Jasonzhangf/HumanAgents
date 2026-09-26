@@ -231,7 +231,7 @@ async function runProviderAgent(input: {
 
 function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inconclusive' | undefined {
   const markers = [...reviewerText(events).matchAll(/HUMANAGENT_REVIEW\s*:\s*(passed|failed|inconclusive)/gi)].map((match) => match[1].toLowerCase() as 'passed' | 'failed' | 'inconclusive');
-  if (markers.length === 0 || new Set(markers).size > 1) return undefined;
+  if (markers.length === 0) return undefined;
   return markers[markers.length - 1];
 }
 
@@ -265,7 +265,7 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           acceptanceCriteriaDigest: material.acceptanceCriteriaDigest,
           subjects: material.subjects,
           workerSummary: request.workerResult.summary,
-          instruction: 'Evaluate the acceptance criteria against each subject body below. The subject bodies are the artifact; a summary, ref, or digest is never a substitute for them. End with HUMANAGENT_REVIEW: passed, failed, or inconclusive',
+          instruction: 'Evaluate the acceptance criteria against each subject body below. The subject bodies are the artifact; a summary, ref, or digest is never a substitute for them. End on the final line with exactly HUMANAGENT_REVIEW: passed, failed, or inconclusive',
         }),
       );
       let provider!: Awaited<ReturnType<typeof runProviderAgent>>;
@@ -299,9 +299,9 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
               provider.events,
               status === 'failed'
                 ? 'provider review failed'
-                : 'provider review did not return an unambiguous HUMANAGENT_REVIEW marker',
+                : 'provider review did not return a terminal HUMANAGENT_REVIEW marker',
             ),
-            expected: 'review must pass the assigned acceptance criteria and return one unambiguous review marker',
+            expected: 'review must pass the assigned acceptance criteria and return one terminal HUMANAGENT_REVIEW marker',
             evidenceRefs,
           }]
         : [];

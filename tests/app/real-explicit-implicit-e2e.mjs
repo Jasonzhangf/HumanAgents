@@ -26,7 +26,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -50,6 +50,45 @@ function sourceDigest() {
       && !line.includes('dist/receipts/explicit-implicit-e2e-proof.json'))
     .sort();
   return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
+}
+
+async function captureReviewFeedback(root) {
+  const results = [];
+  if (!root) return results;
+  const sessionsDir = join(root, 'control', 'sessions');
+  let entries;
+  try {
+    entries = await readdir(sessionsDir, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const journalPath = join(sessionsDir, entry.name, 'journal', 'events.jsonl');
+    let text;
+    try {
+      text = await readFile(journalPath, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      try {
+        const record = JSON.parse(line);
+        const event = record.payload?.type === 'event' ? record.payload.event : null;
+        if (!event || typeof event.messageId !== 'string' || !event.messageId.includes('review-feedback')) continue;
+        results.push({
+          seq: record.seq,
+          committedAt: event.committedAt ?? record.committedAt ?? null,
+          summary: event.summary ?? null,
+          evidenceRefs: (event.evidenceRefs ?? []).map((ref) => ref.evidenceId?.value ?? null),
+        });
+      } catch {
+        // Ignore malformed non-event lines; the receipt only needs review feedback evidence.
+      }
+    }
+  }
+  return results.sort((a, b) => a.seq - b.seq);
 }
 
 function startServe(root) {
@@ -366,7 +405,7 @@ async function main() {
 
     const firstInput = {
       sourceRef: 'explicit-implicit-e2e-round-1',
-      rawInput: 'Do not clarify. Create exactly one concrete task: read the files marker.txt and readme-first-line.txt at the workspace root, combine both facts into a single completion summary that includes the exact contents of both files verbatim, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+      rawInput: 'Do not clarify. Create exactly one concrete task: read the files marker.txt and readme-first-line.txt at the workspace root, combine both facts into a single completion summary that includes the exact contents of both files verbatim, and finish with the word COMPLETE.',
       requireDraft: 'readme-first-line.txt',
       requireIntent: 'create',
     };
@@ -403,7 +442,7 @@ async function main() {
 
     const secondInput = {
       sourceRef: 'explicit-implicit-e2e-round-2',
-      rawInput: `Do not clarify. Do not create a new task; apply this to the existing task ${firstTaskId}. Read the file readme-first-line.txt at the workspace root, include its exact contents verbatim in the completion summary, and finish with exactly HUMANAGENT_REVIEW: passed.`,
+      rawInput: `Do not clarify. Do not create a new task; apply this to the existing task ${firstTaskId}. Read the file readme-first-line.txt at the workspace root, include its exact contents verbatim in the completion summary, and finish with the word COMPLETE.`,
       requireDraft: 'readme-first-line.txt',
       requireTaskId: firstTaskId,
       requireIntents: ['append', 'change'],
@@ -461,6 +500,7 @@ async function main() {
       proof: 'explicit-implicit-e2e',
       generatedAt: new Date().toISOString(),
       sourceDigest: sourceDigest(),
+      reviewFeedback: await captureReviewFeedback(root),
       rcc: {
         baseUrl: RCC_BASE_URL,
         protocol: 'responses',
