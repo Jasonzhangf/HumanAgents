@@ -2237,8 +2237,8 @@ test('a confirmed requirement is observable as queued before the implicit consum
     payloadRef: 'asset://requirements/queued-before-drain',
   });
 
-  // Draining is a macrotask boundary, so the confirming response returns while
-  // the requirement is still a genuine FIFO entry.
+  // Draining is scheduled behind a short visibility window, so the confirming
+  // response returns while the requirement is still a genuine FIFO entry.
   assert.deepEqual(service.status().implicitScheduling, {
     state: 'queued',
     code: 'explicit-brain.requirement-queued',
@@ -2255,6 +2255,85 @@ test('a confirmed requirement is observable as queued before the implicit consum
 
   await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
   await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+});
+
+test('confirmed requirement is HTTP-observable as queued before the implicit consumer drains it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-http-window-'));
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'packages/ui/static'),
+    projectKey: 'project-ui-queued-http-window',
+    workspaceRoot: root,
+    memory: testMemory('project-ui-queued-http-window'),
+  });
+  try {
+    // Let the starter implicit-consumer wake finish before exercising confirm,
+    // so the queued observations we sample below belong to the confirmation.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const post = async (path: string, body: unknown): Promise<Response> => fetch(`${runtime.server.url}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const receive = await post('/api/explicit/inputs', {
+      sourceRef: 'ui:queued-http-window',
+      rawInput: 'observe this requirement through HTTP while it is queued',
+      channel: 'business',
+    });
+    assert.equal(receive.status, 201);
+    const { interactionId } = await receive.json() as { readonly interactionId: string };
+    await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/matching`, {});
+    const match = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/match`, {
+      normalizedInput: 'observe this requirement through HTTP while it is queued',
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    assert.equal(match.status, 202);
+    const proposal = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/proposal`, {
+      proposedIntent: 'create',
+      proposal: 'create the HTTP queued visibility requirement',
+    });
+    assert.equal(proposal.status, 202);
+    const interactionResponse = await fetch(`${runtime.server.url}/api/explicit/interactions/${encodeURIComponent(interactionId)}`);
+    const interaction = await interactionResponse.json() as { readonly draft?: { readonly draftId: string } };
+    assert.ok(interaction.draft);
+    const confirmation = await post(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/confirmation`, {
+      draftId: interaction.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:http-queued-window',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-09-22T00:00:00.000Z',
+      payloadRef: 'asset://requirements/http-queued-window',
+    });
+    assert.equal(confirmation.status, 200);
+
+    const statusResponse = await fetch(`${runtime.server.url}/api/runtime/status`);
+    const status = await statusResponse.json() as ReturnType<UiRuntimeService['status']>;
+    assert.equal(status.implicitScheduling?.state, 'queued');
+    assert.equal(status.implicitScheduling?.code, 'explicit-brain.requirement-queued');
+    assert.equal(status.implicitScheduling?.draftId, 'draft-1');
+
+    const tasksResponse = await fetch(`${runtime.server.url}/api/tasks`);
+    const tasks = await tasksResponse.json() as ReturnType<UiRuntimeService['listTasks']>;
+    assert.equal(tasks.counts.total, 1);
+    const queuedRow = queuedDraftRow(tasks, 'draft-1');
+    assert.equal(queuedRow.requirementAdmission, 'queued');
+
+    const detailResponse = await fetch(`${runtime.server.url}/api/tasks/${encodeURIComponent(queuedRow.taskId.value)}`);
+    assert.equal(detailResponse.status, 200);
+    const detail = await detailResponse.json() as ReturnType<UiRuntimeService['taskDetail']>;
+    assert.equal(detail.taskId.value, queuedRow.taskId.value);
+
+    await waitFor(() => assert.equal(runtime.service.status().implicitScheduling, undefined));
+  } finally {
+    await runtime.server.close();
+  }
 });
 
 test('observation projects implicit classification and queue admission for confirmed requirements after restart', async () => {
