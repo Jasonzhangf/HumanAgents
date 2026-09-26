@@ -158,6 +158,10 @@ import {
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
 const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
+// Keep the confirmed FIFO entry observable through real HTTP reads (status and
+// task list) before the background drain starts consuming it. A macrotask-only
+// delay is too short for a second localhost request to sample the queued state.
+const QUEUED_VISIBILITY_WINDOW_MS = 100;
 
 const LIFECYCLE_STATES = new Set([
   'created',
@@ -2211,15 +2215,15 @@ export class UiRuntimeService {
   private scheduleImplicitConsumption(): void {
     if (!this.implicitConsumerEnabled || this.implicitConsumerScheduled) return;
     this.implicitConsumerScheduled = true;
-    // Drain on the next macrotask, not the confirming request's microtask, so
-    // the confirming HTTP response is written while the requirement is still a
-    // genuine FIFO entry that status reads can observe as queued.
+    // Drain after a short visibility window, not on the next macrotask, so the
+    // confirming HTTP response is written and a following status/task read can
+    // still observe the requirement as a genuine queued FIFO entry.
     setTimeout(() => {
       this.implicitConsumerScheduled = false;
       void this.consumePendingRequirements().catch((error) => {
         this.implicitConsumerIssue = apiError(error);
       });
-    }, 0);
+    }, QUEUED_VISIBILITY_WINDOW_MS);
   }
 
   private async consumePendingRequirements(): Promise<void> {
