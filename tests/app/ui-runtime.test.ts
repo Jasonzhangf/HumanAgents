@@ -527,6 +527,12 @@ function serviceFor(
   });
 }
 
+function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId: string) {
+  const row = list.draft.find((task) => task.taskId.value === `ui-task-implicit-${draftId}`);
+  if (!row) throw new Error(`missing queued draft row for ${draftId}`);
+  return row;
+}
+
 class FailingInteractionClosurePort implements CheckpointClosurePort {
   async commit(_input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {
     throw new Error('closure store unavailable');
@@ -1962,12 +1968,68 @@ test('confirmed requirement is visibly queued before implicit dispatch', async (
     draftId: 'draft-1',
     fifoSeq: 1,
   });
-  assert.equal(service.listTasks().counts.total, 0);
+  const queuedList = service.listTasks();
+  assert.equal(queuedList.counts.total, 1);
+  const queuedRow = queuedDraftRow(queuedList, 'draft-1');
+  assert.equal(queuedRow.requirementAdmission, 'queued');
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 
   const dispatched = await service.dispatchNextExplicitRequirement();
   assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
+  assert.equal(dispatched.taskId.value, queuedRow.taskId.value);
+  assert.equal(service.taskDashboard(queuedRow.taskId).taskId.value, queuedRow.taskId.value);
+  assert.equal(service.listTasks().draft.some((row) => row.taskId.value === queuedRow.taskId.value), false);
   assert.equal(service.status().implicitScheduling, undefined);
+});
+
+test('queued requirement row resolves through taskDashboard before and after dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-queued-dashboard-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:queued-dashboard',
+    rawInput: 'resolve the queued row through the dashboard route',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'resolve the queued row through the dashboard route',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create queued dashboard evidence',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:queued-dashboard',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-23T02:00:00.000Z',
+    payloadRef: 'asset://requirements/queued-dashboard',
+  });
+
+  const queuedRow = queuedDraftRow(service.listTasks(), 'draft-1');
+  assert.equal(queuedRow.taskId.value, 'ui-task-implicit-draft-1');
+  const queuedDashboard = service.taskDashboard(queuedRow.taskId);
+  assert.equal(queuedDashboard.taskId.value, queuedRow.taskId.value);
+  assert.equal(queuedDashboard.state, 'created');
+  assert.equal(queuedDashboard.currentNode, 'implicit.classify');
+  const queuedDetail = service.taskDetail(queuedRow.taskId);
+  assert.equal(queuedDetail.taskId.value, queuedRow.taskId.value);
+  assert.equal(queuedDetail.state, 'ready');
+  assert.equal(queuedDetail.currentState, queuedRow.currentState);
+  const queuedObservation = service.observation(queuedRow.taskId);
+  assert.equal(queuedObservation.scope.scopeRef, `task://${queuedRow.taskId.value}/observation`);
+
+  const dispatched = await service.dispatchNextExplicitRequirement();
+  assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');
+  const dispatchedDashboard = service.taskDashboard(dispatched.taskId);
+  assert.equal(dispatchedDashboard.taskId.value, queuedRow.taskId.value);
+  assert.equal(dispatchedDashboard.state === 'created', false);
+  assert.equal(service.listTasks().draft.some((row) => row.taskId.value === queuedRow.taskId.value), false);
 });
 
 test('a confirmed requirement behind a blocked FIFO head is projected as queued', async () => {
@@ -2008,7 +2070,8 @@ test('a confirmed requirement behind a blocked FIFO head is projected as queued'
   await confirm('blocked-head');
   await waitFor(() => assert.equal(service.status().implicitScheduling?.code, 'implicit-admission.blocked'));
   assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.blocked');
-  assert.equal(service.listTasks().counts.total, 0);
+  assert.equal(service.listTasks().counts.total, 1);
+  assert.equal(queuedDraftRow(service.listTasks(), 'draft-1').requirementAdmission, 'queued');
 
   const behind = await confirm('queued-behind');
   await waitFor(() => {
@@ -2021,7 +2084,10 @@ test('a confirmed requirement behind a blocked FIFO head is projected as queued'
   // The blocked head stays visible through the scheduling issue even though the
   // queued backlog is what the status projection now reports.
   assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.blocked');
-  assert.equal(service.listTasks().counts.total, 0);
+  const backlogList = service.listTasks();
+  assert.equal(backlogList.counts.total, 2);
+  assert.equal(queuedDraftRow(backlogList, 'draft-1').requirementAdmission, 'queued');
+  assert.equal(queuedDraftRow(backlogList, 'draft-2').requirementAdmission, 'queued');
   assert.equal((await service.inspectExplicitInteraction(behind)).state, 'confirmed');
 });
 
@@ -2085,10 +2151,59 @@ test('the queued backlog behind a blocked head is observable from the HTTP statu
     assert.equal(status.implicitScheduling?.message.includes('implicit-admission.blocked'), true);
     const tasksResponse = await fetch(`${runtime.server.url}/api/tasks`);
     const tasks = await tasksResponse.json() as ReturnType<UiRuntimeService['listTasks']>;
-    assert.equal(tasks.counts.total, 0);
+    assert.equal(tasks.counts.total, 2);
+    assert.equal(tasks.draft.some((row) => row.taskId.value === 'ui-task-implicit-draft-1' && row.requirementAdmission === 'queued'), true);
+    assert.equal(tasks.draft.some((row) => row.taskId.value === 'ui-task-implicit-draft-2' && row.requirementAdmission === 'queued'), true);
   } finally {
     await runtime.server.close();
   }
+});
+
+test('confirmed requirement drains through the FIFO-owned serve consumer after exposing a queued row', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-fifo-serve-consumer-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:fifo-serve-consumer',
+    rawInput: 'dispatch through the FIFO-owned serve consumer',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'dispatch through the FIFO-owned serve consumer',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create FIFO serve consumer work',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:fifo-serve-consumer',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-22T00:00:00.000Z',
+    payloadRef: 'asset://requirements/fifo-serve-consumer',
+  });
+
+  const queuedBeforeDrain = service.listTasks();
+  assert.equal(queuedBeforeDrain.counts.total, 1);
+  const queuedRow = queuedDraftRow(queuedBeforeDrain, 'draft-1');
+  assert.equal(queuedRow.requirementAdmission, 'queued');
+  assert.equal(queuedRow.taskId.value, 'ui-task-implicit-draft-1');
+  assert.deepEqual(service.status().implicitScheduling?.draftId, 'draft-1');
+
+  service.startImplicitConsumer();
+  await waitFor(() => {
+    const drained = service.listTasks();
+    assert.equal(drained.draft.length, 0);
+    assert.equal(drained.completed.length, 1);
+    assert.equal(drained.completed[0]?.requirementAdmission, 'completed');
+    assert.equal(drained.completed[0]?.requirementQueue, 'execution');
+  });
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
 test('a confirmed requirement is observable as queued before the implicit consumer drains it', async () => {
@@ -2134,10 +2249,12 @@ test('a confirmed requirement is observable as queued before the implicit consum
     draftId: 'draft-1',
     fifoSeq: 1,
   });
-  assert.equal(service.listTasks().counts.total, 0);
+  const queuedList = service.listTasks();
+  assert.equal(queuedList.counts.total, 1);
+  assert.equal(queuedDraftRow(queuedList, 'draft-1').requirementAdmission, 'queued');
 
   await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
-  assert.equal(service.status().implicitScheduling, undefined);
+  await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
 });
 
 test('observation projects implicit classification and queue admission for confirmed requirements after restart', async () => {
@@ -2257,7 +2374,9 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
   });
   assert.equal(receipt.requirement.requirementId, 'requirement:draft-1:1');
   assert.equal(receipt.requirement.status, 'submitted');
-  assert.equal(service.listTasks().counts.total, 0);
+  const confirmedList = service.listTasks();
+  assert.equal(confirmedList.counts.total, 1);
+  assert.equal(queuedDraftRow(confirmedList, 'draft-1').requirementAdmission, 'queued');
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 
   const dispatched = await service.dispatchNextExplicitRequirement();
@@ -2325,7 +2444,9 @@ test('confirmed requirement cannot bypass implicit admission when the provider i
       && error.ownerId === 'runtime-coordinator'
       && error.httpStatus === 409,
   );
-  assert.equal(service.listTasks().counts.total, 0);
+  const blockedList = service.listTasks();
+  assert.equal(blockedList.counts.total, 1);
+  assert.equal(queuedDraftRow(blockedList, 'draft-1').requirementAdmission, 'queued');
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 });
 
@@ -2402,7 +2523,9 @@ test('runtime admission waits on actual running load and resumes when capacity i
   await waitFor(() => assert.equal(service.listTasks().counts.running, 1));
   const secondInteraction = await confirm('capacity-second');
   await waitFor(() => assert.equal(service.implicitSchedulingIssue()?.code, 'implicit-admission.waiting'));
-  assert.equal(service.listTasks().counts.total, 1);
+  const waitingList = service.listTasks();
+  assert.equal(waitingList.counts.total, 2);
+  assert.equal(queuedDraftRow(waitingList, 'draft-2').requirementAdmission, 'queued');
   assert.equal((await service.inspectExplicitInteraction(secondInteraction)).state, 'confirmed');
 
   await waitFor(() => assert.equal(service.listTasks().counts.total, 2));
@@ -2448,7 +2571,10 @@ test('implicit consumer retires a confirmed append whose taskRef is absent and c
   const laterTask = service.createTask({ title: 'later task', directive: 'later task' });
   await confirmAppend('missing-task-head', missingTaskId);
   const laterInteraction = await confirmAppend('later-append', laterTask.taskId);
-  assert.equal(service.listTasks().counts.total, 1);
+  const pendingList = service.listTasks();
+  assert.equal(pendingList.counts.total, 3);
+  assert.equal(queuedDraftRow(pendingList, 'draft-1').requirementAdmission, 'queued');
+  assert.equal(queuedDraftRow(pendingList, 'draft-2').requirementAdmission, 'queued');
 
   service.startImplicitConsumer();
   await waitFor(() => {
@@ -2456,8 +2582,8 @@ test('implicit consumer retires a confirmed append whose taskRef is absent and c
     assert.equal(state?.code, 'explicit-brain.requirement-retired');
     assert.equal(state?.state, 'blocked');
     assert.equal(state?.requirementId, 'requirement:draft-1:1');
-    assert.equal(service.listTasks().counts.total, 1);
   });
+  await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
   await waitFor(() => assert.equal(service.taskDashboard(laterTask.taskId).state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(laterInteraction)).state, 'dispatched');
   assert.equal(service.status().implicitScheduling?.code, 'explicit-brain.requirement-retired');
@@ -2830,7 +2956,9 @@ test('runtime exposes a blocked requirement through status and resumes it after 
       draftId: 'draft-1',
       fifoSeq: 1,
     });
-    assert.equal(runtime.service.listTasks().counts.total, 0);
+    const blockedList = runtime.service.listTasks();
+    assert.equal(blockedList.counts.total, 1);
+    assert.equal(queuedDraftRow(blockedList, 'draft-1').requirementAdmission, 'queued');
     assert.equal((await runtime.service.inspectExplicitInteraction(interactionId)).state, 'confirmed');
 
     runtime.service.markConnected();
@@ -3073,7 +3201,9 @@ test('a failed dispatch head stays the primary status while a later confirmed re
   });
   // The failed head remains the dominant truth; the queued draft-2 is not promoted
   // to the status projection and the persistence failure is not hidden.
-  assert.equal(service.listTasks().counts.total, 0);
+  const failedBacklog = service.listTasks();
+  assert.equal(failedBacklog.counts.total, 1);
+  assert.equal(queuedDraftRow(failedBacklog, 'draft-2').requirementAdmission, 'queued');
   assert.equal(port.startPayloads.length, 0);
   assert.equal((await service.inspectExplicitInteraction(behind)).state, 'confirmed');
 });
@@ -4063,7 +4193,9 @@ test('explicit brain HTTP dispatch blocks on implicit admission instead of creat
     const body = await dispatchResponse.json() as { readonly error: { readonly code: string; readonly ownerId: string } };
     assert.equal(body.error.code, 'implicit-admission.blocked');
     assert.equal(body.error.ownerId, 'runtime-coordinator');
-    assert.equal(runtime.service.listTasks().counts.total, 0);
+    const blockedList = runtime.service.listTasks();
+    assert.equal(blockedList.counts.total, 1);
+    assert.equal(queuedDraftRow(blockedList, 'draft-1').requirementAdmission, 'queued');
   } finally {
     await runtime.server.close();
   }

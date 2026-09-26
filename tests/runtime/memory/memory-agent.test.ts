@@ -858,6 +858,34 @@ test('memory agent accepts interaction follow-ups when analysis and binding epoc
   assert.equal(accepted.value.inReplyTo, 'interaction-analysis');
 });
 
+test('memory agent advances a task-scoped binding to a newer execution epoch', async () => {
+  const ports = makeOperations();
+  const agent = new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  });
+  const binding = {
+    bindingRef: 'binding-a',
+    projectKey: 'project-a',
+    scope,
+    taskId: task,
+    mainAgentId: 'main-agent-a',
+    ownerId: 'memory-agent',
+    operations: ports.operations,
+  };
+  agent.bind({ ...binding, executionEpoch: 2 });
+  const advanced = agent.bind({ ...binding, executionEpoch: 3 });
+  assert.equal(advanced.executionEpoch, 3);
+
+  const result = await agent.analyze(analysis({ executionEpoch: 3 }));
+  assert.equal(result.status, 'ready');
+});
+
 test('memory agent auto=false returns proposal-only; auto=true delegates a CAS update to the owner', async () => {
   const proposal: ProjectSourceUpdateProposal = {
     target: 'project-agents',

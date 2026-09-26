@@ -26,7 +26,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -50,6 +50,45 @@ function sourceDigest() {
       && !line.includes('dist/receipts/explicit-implicit-e2e-proof.json'))
     .sort();
   return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
+}
+
+async function captureReviewFeedback(root) {
+  const results = [];
+  if (!root) return results;
+  const sessionsDir = join(root, 'control', 'sessions');
+  let entries;
+  try {
+    entries = await readdir(sessionsDir, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const journalPath = join(sessionsDir, entry.name, 'journal', 'events.jsonl');
+    let text;
+    try {
+      text = await readFile(journalPath, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      try {
+        const record = JSON.parse(line);
+        const event = record.payload?.type === 'event' ? record.payload.event : null;
+        if (!event || typeof event.messageId !== 'string' || !event.messageId.includes('review-feedback')) continue;
+        results.push({
+          seq: record.seq,
+          committedAt: event.committedAt ?? record.committedAt ?? null,
+          summary: event.summary ?? null,
+          evidenceRefs: (event.evidenceRefs ?? []).map((ref) => ref.evidenceId?.value ?? null),
+        });
+      } catch {
+        // Ignore malformed non-event lines; the receipt only needs review feedback evidence.
+      }
+    }
+  }
+  return results.sort((a, b) => a.seq - b.seq);
 }
 
 function startServe(root) {
@@ -93,6 +132,7 @@ function startServe(root) {
 
   return {
     ready,
+    pid: child.pid,
     stop: async () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise((done) => child.once('exit', done));
@@ -123,7 +163,7 @@ async function statusText(url) {
   return response.text();
 }
 
-async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
+async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS, minExecutionEpoch) {
   const deadline = Date.now() + timeoutMs;
   let dashboard;
   for (;;) {
@@ -134,6 +174,11 @@ async function pollTaskState(base, taskId, timeoutMs = TERMINAL_TIMEOUT_MS) {
       dashboard = undefined;
     }
     if (dashboard) {
+      if (minExecutionEpoch !== undefined && (dashboard.executionEpoch ?? 0) < minExecutionEpoch) {
+        if (Date.now() > deadline) return dashboard ?? null;
+        await new Promise((settle) => setTimeout(settle, 1000));
+        continue;
+      }
       if (!['created', 'admitted', 'running', 'waiting', 'settling'].includes(dashboard.state)) {
         return dashboard;
       }
@@ -182,6 +227,49 @@ function eventKinds(dashboard) {
   return (dashboard.recentEvents ?? []).map((event) => `${event.kind}:${event.state}`);
 }
 
+function eventRefs(dashboard) {
+  return (dashboard.recentEvents ?? [])
+    .flatMap((event) => (event.evidenceRefs ?? []).map((ref) => ref.locator || ref.digest || JSON.stringify(ref)))
+    .filter((ref) => ref && typeof ref === 'string');
+}
+
+function hasProviderEvidence(dashboard) {
+  return (dashboard.recentEvents ?? []).some((event) =>
+    String(event.kind).startsWith('provider.') && (event.evidenceRefs ?? []).length > 0);
+}
+
+async function assertAdmissionObservation(base, draftId, expectedTaskId) {
+  const status = await jsonRequest(`${base}/api/runtime/status`);
+  const observation = {
+    status,
+    taskRows: [],
+    assertion: 'none',
+  };
+  const scheduling = status?.implicitScheduling;
+  if (scheduling?.draftId === draftId || scheduling?.state === 'queued') {
+    if (scheduling.draftId !== draftId || typeof scheduling.fifoSeq !== 'number' || scheduling.fifoSeq <= 0) {
+      throw new Error(`queued FIFO projection did not match confirmed draft ${draftId}: ${JSON.stringify(scheduling)}`);
+    }
+    observation.assertion = 'queued-fifo';
+  } else {
+    const tasks = await jsonRequest(`${base}/api/tasks`);
+    const all = [...(tasks.running ?? []), ...(tasks.waiting ?? []), ...(tasks.completed ?? []), ...(tasks.stopped ?? []), ...(tasks.draft ?? []), ...(tasks.failed ?? [])];
+    const expected = expectedTaskId ?? `ui-task-implicit-${draftId}`;
+    const row = all.find((candidate) => candidate.taskId?.value === expected);
+    if (!row || !row.requirementAdmission) {
+      throw new Error(`confirmed requirement was not queued and has no task-row admission: ${JSON.stringify(all.map((candidate) => ({ taskId: candidate.taskId?.value, admission: candidate.requirementAdmission })))}`);
+    }
+    observation.taskRows = all.map((candidate) => ({
+      taskId: candidate.taskId?.value,
+      state: candidate.state,
+      admission: candidate.requirementAdmission,
+      updatedAt: candidate.updatedAt,
+    }));
+    observation.assertion = 'task-row-admission';
+  }
+  return observation;
+}
+
 async function interpretUntilDraft(base, input) {
   let lastError;
   for (let attempt = 0; attempt < MAX_INTERPRET_ATTEMPTS; attempt += 1) {
@@ -211,10 +299,13 @@ async function interpretUntilDraft(base, input) {
       lastError = new Error(`explicit interpretation reached ${snapshot.state} instead of awaiting-confirmation`);
       continue;
     }
-    const draftMatches = input.requireDraft
+    const intents = input.requireIntents ?? (input.requireIntent ? [input.requireIntent] : []);
+    const draftMatches = (input.requireDraft
       ? snapshot.draft.proposal.includes(input.requireDraft)
-        && (input.requireIntent ? snapshot.draft.proposedIntent === input.requireIntent : true)
-      : true;
+      : true)
+      && (intents.length === 0 || intents.includes(snapshot.draft.proposedIntent))
+      && (input.requireTaskId === undefined
+        || snapshot.draft.matchedTasks.some((task) => task.taskId.value === input.requireTaskId && task.relation === 'current'));
     if (!draftMatches) {
       lastError = new Error(`explicit draft did not satisfy requirement: ${snapshot.draft.proposal.slice(0, 300)}`);
       continue;
@@ -246,6 +337,10 @@ async function captureObservation(base, taskId) {
   return { dashboard, observation, detail };
 }
 
+async function captureTaskList(base) {
+  return jsonRequest(`${base}/api/tasks`);
+}
+
 function assertCompleted(dashboard, expect) {
   if (dashboard.state !== 'succeeded') {
     console.error('DEBUG_ASSERT_COMPLETED', JSON.stringify(dashboard, null, 2));
@@ -256,15 +351,36 @@ function assertCompleted(dashboard, expect) {
   }
 }
 
+function assertProviderToolRounds(dashboard, expectAtLeast = 2) {
+  const count = (dashboard.recentEvents ?? []).filter((event) => event.kind === 'provider.tool').length;
+  if (count < expectAtLeast) {
+    console.error('DEBUG_ASSERT_PROVIDER_TOOL_ROUNDS', JSON.stringify(dashboard, null, 2));
+    throw new Error(`task did not exercise ${expectAtLeast} provider.tool rounds: ${count}`);
+  }
+  if (!hasProviderEvidence(dashboard)) {
+    throw new Error(`task had no provider event with evidence refs: ${JSON.stringify((dashboard.recentEvents ?? []).map((event) => ({ kind: event.kind, refs: event.evidenceRefs?.length ?? 0 })))}`);
+  }
+}
+
 function assertObservation(observation) {
   const ids = (observation.nodes ?? []).map((node) => node.nodeId);
   for (const expected of ['sensory.inbox', 'explicit.normalize', 'implicit.classify', 'interactive.queue', 'execution.queue', 'pipeline.execute', 'settle', 'task.output']) {
     if (!ids.includes(expected)) throw new Error(`observation is missing node ${expected}: ${ids.join(', ')}`);
   }
+  const evidenceCount = (observation.scope?.nodes ?? observation.nodes ?? []).reduce((sum, node) => sum + (node.evidenceCount ?? 0), 0);
+  if (evidenceCount <= 0) throw new Error(`observation carried no evidence refs: ${JSON.stringify(observation.nodes ?? [])}`);
+}
+
+function assertCommittedCheckpoint(dashboard) {
+  if (!dashboard.checkpoint || dashboard.checkpoint.outcome !== 'succeeded') {
+    console.error('DEBUG_ASSERT_CHECKPOINT', JSON.stringify(dashboard, null, 2));
+    throw new Error(`task did not expose a committed succeeded checkpoint: ${JSON.stringify(dashboard.checkpoint ?? null)}`);
+  }
 }
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), 'ha-explicit-implicit-4-e2e-'));
+  const keepRoot = process.env.HUMANAGENT_EI_KEEP_ROOT === '1';
   await mkdir(join(root, 'workspace'), { recursive: true });
   await writeFile(join(root, 'workspace', 'marker.txt'), 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C\n', 'utf8');
   await writeFile(join(root, 'workspace', 'readme-first-line.txt'), 'FIRST_LINE_PROVEN_8B2D\n', 'utf8');
@@ -273,12 +389,14 @@ async function main() {
   const steps = {};
   const rounds = [];
   try {
+    steps.rccHealth = await jsonRequest(`${RCC_BASE_URL}/health`);
     serve = startServe(root);
     const launched = await serve.ready;
     const base = launched.url;
     steps.serve = {
       root,
       url: base,
+      pid: serve.pid,
       checkpointRoot: launched.checkpointRoot,
       memoryAnalysisMode: launched.memoryAnalysisMode,
     };
@@ -288,7 +406,7 @@ async function main() {
 
     const firstInput = {
       sourceRef: 'explicit-implicit-e2e-round-1',
-      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
+      rawInput: 'Do not clarify. Create exactly one concrete task: read the files marker.txt and readme-first-line.txt at the workspace root, combine both facts into a single completion summary that includes the exact contents of both files verbatim, and finish with the word COMPLETE.',
       requireDraft: 'readme-first-line.txt',
       requireIntent: 'create',
     };
@@ -300,11 +418,14 @@ async function main() {
       confirmedAt: new Date().toISOString(),
       payloadRef: `humanagent://e2e/requirement/${first.draft.draftId}`,
     });
+    steps.round1Admission = await assertAdmissionObservation(base, first.draft.draftId);
     const firstImplicit = await waitForImplicitTask(base, first.draft.draftId);
     const firstTaskId = firstImplicit.taskId;
     const firstOperationId = firstImplicit.operationId;
     const firstTerminal = await pollTaskState(base, firstTaskId);
     assertCompleted(firstTerminal, 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C');
+    assertProviderToolRounds(firstTerminal);
+    assertCommittedCheckpoint(firstTerminal);
     const firstObservation = await captureObservation(base, firstTaskId);
     assertObservation(firstObservation.observation);
     rounds.push({
@@ -315,15 +436,17 @@ async function main() {
       operationId: firstOperationId,
       terminalState: firstTerminal.state,
       events: eventKinds(firstTerminal),
+      dashboard: firstTerminal,
       output: firstTerminal.output,
       observation: firstObservation.observation,
     });
 
     const secondInput = {
       sourceRef: 'explicit-implicit-e2e-round-2',
-      rawInput: 'Do not clarify. Create exactly one concrete task: read marker.txt and readme-first-line.txt, combine both facts into a single completion summary, finish with the word COMPLETE, and end with exactly HUMANAGENT_REVIEW: passed.',
-      requireDraft: 'marker.txt',
-      requireIntent: 'create',
+      rawInput: `Do not clarify. Do not create a new task; apply this to the existing task ${firstTaskId}. Read the file readme-first-line.txt at the workspace root, include its exact contents verbatim in the completion summary, and finish with the word COMPLETE.`,
+      requireDraft: 'readme-first-line.txt',
+      requireTaskId: firstTaskId,
+      requireIntents: ['append', 'change'],
     };
     const second = await interpretUntilDraft(base, secondInput);
     steps.round2Draft = second.draft;
@@ -333,13 +456,30 @@ async function main() {
       confirmedAt: new Date().toISOString(),
       payloadRef: `humanagent://e2e/requirement/${second.draft.draftId}`,
     });
-    const secondImplicit = await waitForNewTask(base, firstTaskId);
-    const secondTaskId = secondImplicit.taskId;
-    const secondTerminal = await pollTaskState(base, secondTaskId);
+    const boundTask = second.draft.matchedTasks.find((task) => task.relation === 'current');
+    if (boundTask?.taskId?.value !== firstTaskId) {
+      throw new Error(`round-two draft did not bind to ${firstTaskId}: ${JSON.stringify(second.draft.matchedTasks)}`);
+    }
+    steps.round2Admission = await assertAdmissionObservation(base, second.draft.draftId, firstTaskId);
+    const secondTerminal = await pollTaskState(base, firstTaskId, TERMINAL_TIMEOUT_MS, (firstTerminal.executionEpoch ?? 0) + 1);
+    const secondTaskId = firstTaskId;
     assertCompleted(secondTerminal, 'FIRST_LINE_PROVEN_8B2D');
+    assertProviderToolRounds(secondTerminal);
+    assertCommittedCheckpoint(secondTerminal);
     const secondOperationId = secondTerminal.operationId ?? null;
     const secondObservation = await captureObservation(base, secondTaskId);
     assertObservation(secondObservation.observation);
+
+    steps.taskList = await captureTaskList(base);
+    const completedRows = [...(steps.taskList.completed ?? []), ...(steps.taskList.waiting ?? [])];
+    const finalTaskRows = completedRows.filter((row) => row.taskId?.value === firstTaskId);
+    const finalDashboard = await jsonRequest(`${base}/api/tasks/${firstTaskId}/dashboard`);
+    if (finalDashboard.state !== 'succeeded') {
+      throw new Error(`final projection did not mark ${firstTaskId} completed: ${JSON.stringify(finalDashboard)}`);
+    }
+    if (finalTaskRows.length === 0) {
+      throw new Error(`final /api/tasks did not expose ${firstTaskId} completed: ${JSON.stringify(steps.taskList)}`);
+    }
     rounds.push({
       round: 2,
       interactionId: second.interaction.interactionId,
@@ -348,16 +488,20 @@ async function main() {
       operationId: secondOperationId,
       terminalState: secondTerminal.state,
       events: eventKinds(secondTerminal),
+      dashboard: secondTerminal,
       output: secondTerminal.output,
       observation: secondObservation.observation,
     });
 
     if (rounds.length < 2) throw new Error('proof expected at least two executor rounds');
+    if (rounds[0].taskId !== rounds[1].taskId) throw new Error('proof expected both rounds on the same task');
+    if (!(rounds[1].dashboard.executionEpoch > rounds[0].dashboard.executionEpoch)) throw new Error('proof expected a second execution epoch on the same task');
 
     const receipt = {
       proof: 'explicit-implicit-e2e',
       generatedAt: new Date().toISOString(),
       sourceDigest: sourceDigest(),
+      reviewFeedback: await captureReviewFeedback(root),
       rcc: {
         baseUrl: RCC_BASE_URL,
         protocol: 'responses',
@@ -366,6 +510,11 @@ async function main() {
       },
       serve: steps.serve,
       status: steps.status,
+      taskList: steps.taskList,
+      admission: {
+        round1: steps.round1Admission,
+        round2: steps.round2Admission,
+      },
       uiRootServed: typeof steps.uiRoot === 'string' && steps.uiRoot.startsWith('<!doctype html>') || steps.uiRoot.startsWith('<!DOCTYPE html>'),
       dashboards: {
         round1: rounds[0] ?? null,
@@ -378,7 +527,11 @@ async function main() {
     console.log(JSON.stringify(receipt, null, 2));
   } finally {
     if (serve) await serve.stop();
-    await rm(root, { recursive: true, force: true });
+    if (keepRoot) {
+      console.error(`HUMANAGENT_EI_ROOT=${root}`);
+    } else {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 }
 

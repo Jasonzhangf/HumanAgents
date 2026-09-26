@@ -87,8 +87,17 @@ async function waitForTaskState(read: () => string, expected: string): Promise<v
 async function waitForRuntimeTask(runtime: Awaited<ReturnType<typeof startUiRuntime>>): Promise<Task['id']> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const tasks = runtime.service.listTasks();
-    const row = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.failed, ...tasks.draft][0];
-    if (row) return row.taskId;
+    const rows = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.failed, ...tasks.draft];
+    for (const row of rows) {
+      if (row.requirementAdmission === 'queued') continue;
+      try {
+        runtime.service.taskDashboard(row.taskId);
+        return row.taskId;
+      } catch {
+        // Queued rows now resolve through the dashboard; still keep looking for
+        // the real coordinator task created by FIFO dispatch.
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('runtime did not consume the confirmed requirement');
@@ -146,7 +155,16 @@ function providerBinding(): ProviderBinding {
   };
 }
 
-function providerPort(input: { readonly state: ProviderSettlement['state']; readonly reviewMarker?: string; readonly reviewMarkers?: readonly string[]; readonly outputRef?: string; readonly chunkedReviewText?: readonly string[]; readonly organId?: ReturnType<typeof id<'organ'>> }): ExecutionRuntimePort {
+function providerPort(input: {
+  readonly state: ProviderSettlement['state'];
+  readonly reviewMarker?: string;
+  readonly reviewMarkers?: readonly string[];
+  readonly reviewMarkerSequence?: readonly (string | undefined)[];
+  readonly outputRef?: string;
+  readonly chunkedReviewText?: readonly string[];
+  readonly organId?: ReturnType<typeof id<'organ'>>;
+  readonly submittedPrompts?: string[];
+}): ExecutionRuntimePort {
   const binding = providerBinding();
   // A real provider reports the scope it was admitted under. Hardcoding a
   // foreign organ here would make the fixture produce evidence the task-scoped
@@ -161,6 +179,7 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
     scope,
   });
   let active: { readonly runtimeId: string; readonly taskId: ReturnType<typeof id<'task'>>; readonly operationId: ReturnType<typeof id<'operation'>>; readonly executionEpoch: number; readonly scope: ScopeRef } | undefined;
+  let observeCount = 0;
   const readiness: ProviderReadiness = {
     bindingId: binding.bindingId,
     providerId: binding.providerId,
@@ -201,6 +220,8 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
         executionEpoch: request.executionEpoch,
         scope: admittedScope,
       };
+      const prompt = request.payload?.prompt;
+      if (prompt !== undefined && typeof prompt === 'string') input.submittedPrompts?.push(prompt);
       return { ...request, startedAt: readiness.checkedAt, evidenceRefs: [evidence(active.scope)] };
     },
     resume: async (): Promise<ProviderRecoveryResult> => { throw new Error('not used'); },
@@ -212,6 +233,8 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
     }),
     observe: async function* (): AsyncIterable<ProviderEvent> {
       if (!active) throw new Error('missing active provider execution');
+      const sequenceMarker = input.reviewMarkerSequence?.[observeCount];
+      observeCount += 1;
       // A reviewer reply split across SSE chunks arrives as several output
       // events; the review parser must reconstruct the whole reply from them.
       if (input.chunkedReviewText) {
@@ -236,7 +259,9 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
         };
         return;
       }
-      const reviewMarkers = input.reviewMarkers ?? (input.reviewMarker === undefined ? [] : [input.reviewMarker]);
+      const reviewMarkers = sequenceMarker !== undefined
+        ? [sequenceMarker]
+        : input.reviewMarkers ?? (input.reviewMarker === undefined ? [] : [input.reviewMarker]);
       yield {
         ...active,
         eventId: `output-${active.runtimeId}`,
@@ -526,6 +551,61 @@ test('confirmed requirement preserves non-success provider closures through orch
   }
 });
 
+test('same-task execution epochs commit epoch-scoped checkpoint ids', async () => {
+  const eventBus = await eventBusPorts();
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-epoch-checkpoint-'));
+  const binding = fakeExecutionBinding({ bindingId: 'serve-epoch-checkpoint' });
+  const runtimeComposition = createServeRuntimeComposition({
+    eventBusPorts: eventBus.ports,
+    feedbackPorts: {
+      journal: eventBus.ports.journal,
+      publishers: eventBus.ports.publishers,
+    },
+    feedbackPublisherId: 'serve-test',
+    ...createDeterministicServeOrchestrationPorts(),
+  });
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId: id('organ', 'humanagent-ui'),
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    portNumber: 0,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'serve-epoch-checkpoint',
+    },
+    runtimeComposition,
+  });
+  try {
+    const task = runtime.service.createTask({ title: 'epoch checkpoint identity' });
+    runtime.service.startExecution(task.taskId, { prompt: 'first epoch' });
+    await waitForTaskState(() => runtime.service.taskDashboard(task.taskId).state, 'succeeded');
+    const firstDashboard = runtime.service.taskDashboard(task.taskId);
+    const first = firstDashboard.checkpoint;
+    if (!first) throw new Error('epoch 1 checkpoint missing');
+
+    runtime.service.startExecution(task.taskId, { prompt: 'second epoch' });
+    await waitForTaskState(() => runtime.service.taskDashboard(task.taskId).state, 'succeeded');
+    const secondDashboard = runtime.service.taskDashboard(task.taskId);
+    const second = secondDashboard.checkpoint;
+    if (!second) throw new Error('epoch 2 checkpoint missing');
+    assert.ok(second.checkpointId !== first.checkpointId, 'epoch 2 checkpoint reuses epoch 1 checkpoint id');
+    assert.match(second.checkpointId, /^checkpoint-.+-2-1$/, `epoch 2 checkpoint id should include epoch: ${second.checkpointId}`);
+    assert.equal(secondDashboard.executionEpoch, 2);
+    assert.equal(second.seq, 1);
+  } finally {
+    await runtime.server.close();
+    await runtimeComposition.dispose();
+    await eventBus.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('RCC orchestration ports provide review and merge agents for the live execution owner', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-agent-task'),
@@ -614,7 +694,7 @@ test('RCC orchestration ports provide review and merge agents for the live execu
   assert.ok(merged.evidenceRefs.length > 0);
 });
 
-test('RCC review agent remains inconclusive when the model omits its review marker', async () => {
+test('RCC review agent fails closed when the model exhausts retries without a review marker', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-omission'),
     organId: id('organ', 'humanagent-ui'),
@@ -674,17 +754,209 @@ test('RCC review agent remains inconclusive when the model omits its review mark
     reviewMaterial: materialFor(workAssignment, worker),
     scope,
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
-  assert.match(review.findings[0]!.expected, /unambiguous review marker/);
+  assert.match(review.findings[0]!.expected, /bounded recover\/re-review consumer/);
 });
 
-test('RCC review agent remains inconclusive when review markers conflict', async () => {
+test('RCC review agent retries a real provider reply that dropped the terminal marker', async () => {
+  const task: Task = {
+    id: id('task', 'serve-rcc-review-retry'),
+    organId: id('organ', 'humanagent-ui'),
+    title: 'RCC review retry',
+    directive: 'recover a markerless provider reply with a bounded real retry',
+    directiveRevision: 1,
+    state: 'created',
+    memoryScope: 'task',
+  };
+  const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-review-retry-cycle') };
+  const ports = createRccServeOrchestrationPorts({
+    port: providerPort({ state: 'succeeded', reviewMarkerSequence: [undefined, 'HUMANAGENT_REVIEW: passed'] }),
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+  });
+  const reviewAssignment: ReviewAssignment = {
+    assignmentId: 'serve-rcc-retry-review',
+    taskId: task.id.value,
+    workerAgentId: 'serve-rcc-execution-agent',
+    reviewKind: 'quality',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    acceptanceCriteriaDigest: 'sha256:serve-rcc-review-retry-criteria',
+    subjectRefs: ['serve-output'],
+    subjectDigests: [],
+    workerCapabilities: ['provider.execution'],
+    requiredCapabilities: ['quality.review'],
+    mergeGate: 'required',
+  };
+  const workerAssignment: WorkAssignment = {
+    ...assignment(task),
+    assignmentId: 'serve-rcc-retry-worker',
+    expectedArtifactDigests: [digestOf(serveArtifactBody)],
+  };
+  const workerResult: WorkResult = {
+    ...assignment(task),
+    pipelineNodeId: 'serve-stage',
+    agentId: 'serve-rcc-execution-agent',
+    assignmentId: 'serve-rcc-retry-worker',
+    executionEpoch: 1,
+    attempt: 1,
+    inputRevision: 1,
+    taskId: task.id,
+    producedArtifactRefs: ['serve-output'],
+    producedArtifactDigests: [digestOf(serveArtifactBody)],
+    status: 'succeeded',
+    summary: 'worker result',
+    outputRefs: ['serve-output'],
+    evidenceRefs: [],
+    nextAction: 'review',
+  };
+  const review = await ports.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment,
+    workerResult,
+    reviewMaterial: materialFor(workerAssignment, workerResult),
+    scope,
+  });
+  assert.equal(review.status, 'passed');
+  assert.equal(review.findings.length, 0);
+});
+
+test('RCC review agent retries an inconclusive verdict before accepting a later pass', async () => {
+  const review = await reviewWithProviderText({
+    taskSuffix: 'inconclusive-then-pass',
+    provider: providerPort({
+      state: 'succeeded',
+      reviewMarkerSequence: ['HUMANAGENT_REVIEW: inconclusive', 'HUMANAGENT_REVIEW: passed'],
+    }),
+  });
+  assert.equal(review.status, 'passed');
+  assert.deepEqual(review.findings, []);
+});
+
+test('RCC review agent renders executor tool evidence into the review prompt', async () => {
+  const submittedPrompts: string[] = [];
+  const task: Task = {
+    id: id('task', 'serve-rcc-review-executor-evidence'),
+    organId: id('organ', 'humanagent-ui'),
+    title: 'RCC review executor evidence',
+    directive: 'carry executor tool evidence into the reviewer prompt',
+    directiveRevision: 1,
+    state: 'created',
+    memoryScope: 'task',
+  };
+  const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-review-executor-cycle') };
+  const ports = createRccServeOrchestrationPorts({
+    port: providerPort({
+      state: 'succeeded',
+      reviewMarker: 'HUMANAGENT_REVIEW: passed',
+      submittedPrompts,
+    }),
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+  });
+  const workerPorts = createDeterministicServeOrchestrationPorts();
+  const workAssignment: WorkAssignment = {
+    ...assignment(task),
+    assignmentId: 'serve-rcc-review-executor-worker',
+    pipelineNodeId: 'serve-rcc-review-executor-stage',
+    expectedArtifactDigests: [digestOf(serveArtifactBody)],
+  };
+  const workerDelivery = await workerPorts.executionAgent!.execute({
+    assignment: workAssignment,
+    agentId: 'serve-rcc-review-executor-agent',
+    executionEpoch: 1,
+    attempt: 1,
+    lease: {
+      leaseId: 'serve-rcc-review-executor-lease',
+      runtimeId: 'serve-rcc-review-executor-runtime',
+      generation: 1,
+      executionEpoch: 1,
+      ownerId: 'serve-test',
+      assignmentId: workAssignment.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    scope,
+  });
+  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
+  const executorEvidence = [
+    {
+      summary: 'provider.tool search matched 3 files',
+      evidenceRefs: [{
+        evidenceId: id('evidence', 'serve-rcc-executor-tool'),
+        kind: 'tool' as const,
+        source: 'test.serve-rcc-orchestration',
+        locator: 'serve-rcc/executor-tool',
+        scope,
+      }],
+    },
+  ];
+  const workerWithEvidence = { ...worker, executorEvidence };
+  const reviewAssignment: ReviewAssignment = {
+    assignmentId: 'serve-rcc-review-executor-review',
+    taskId: task.id.value,
+    workerAgentId: 'serve-rcc-review-executor-agent',
+    reviewKind: 'quality',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
+    subjectRefs: [...workAssignment.targetRefs],
+    subjectDigests: [...worker.producedArtifactDigests],
+    workerCapabilities: ['provider.execution'],
+    requiredCapabilities: ['quality.review'],
+    mergeGate: 'required',
+  };
+  const review = await ports.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment: workAssignment,
+    workerResult: workerWithEvidence,
+    reviewMaterial: materialFor(workAssignment, workerWithEvidence),
+    scope,
+  });
+  assert.equal(review.status, 'passed');
+  assert.equal(submittedPrompts.length, 1, 'the reviewer provider must receive the review prompt');
+  const prompt = submittedPrompts[0] ?? '';
+  assert.match(prompt, /provider\.tool search matched 3 files/);
+  assert.match(prompt, /serve-rcc-executor-tool/);
+  assert.match(prompt, /first-hand execution evidence/);
+});
+
+test('RCC review agent does not invent executor evidence when none exists', async () => {
+  const submittedPrompts: string[] = [];
+  const review = await reviewWithProviderText({
+    taskSuffix: 'absent-executor-evidence',
+    provider: providerPort({
+      state: 'succeeded',
+      reviewMarker: 'HUMANAGENT_REVIEW: failed',
+      submittedPrompts,
+    }),
+  });
+  assert.equal(review.status, 'failed');
+  const prompt = submittedPrompts[0] ?? '';
+  assert.match(prompt, /"executorEvidence":\[\]/);
+});
+
+test('RCC review agent honors an explicit failed verdict without retrying to pass', async () => {
+  const review = await reviewWithProviderText({
+    taskSuffix: 'failed-not-retried',
+    provider: providerPort({
+      state: 'succeeded',
+      reviewMarkerSequence: ['HUMANAGENT_REVIEW: failed', 'HUMANAGENT_REVIEW: passed'],
+    }),
+  });
+  assert.equal(review.status, 'failed');
+  assert.equal(review.findings.length, 1);
+  assert.match(review.findings[0]!.problem, /HUMANAGENT_REVIEW: failed/);
+});
+
+test('RCC review agent uses the terminal verdict when review markers conflict', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-conflict'),
     organId: id('organ', 'humanagent-ui'),
-    title: 'RCC review conflict',
-    directive: 'keep contradictory review output blocked',
+    title: 'RCC review terminal verdict',
+    directive: 'keep the terminal review verdict as authoritative',
     directiveRevision: 1,
     state: 'created',
     memoryScope: 'task',
@@ -739,8 +1011,23 @@ test('RCC review agent remains inconclusive when review markers conflict', async
     reviewMaterial: materialFor(workerAssignment, workerResult),
     scope,
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
+});
+
+test('RCC review agent uses a terminal passed verdict after an earlier failed quote', async () => {
+  const review = await reviewWithProviderText({
+    taskSuffix: 'terminal-passed-after-quote',
+    provider: providerPort({
+      state: 'succeeded',
+      chunkedReviewText: [
+        'The criteria text includes HUMANAGENT_REVIEW: failed only as an example. ',
+        'HUMANAGENT_REVIEW: passed',
+      ],
+    }),
+  });
+  assert.equal(review.status, 'passed');
+  assert.deepEqual(review.findings, []);
 });
 
 test('RCC ports reach the runtime review and Harness merge gates with provider artifacts', async () => {
@@ -909,7 +1196,7 @@ test('RCC review keeps a verdict marker tail that depends on an earlier chunk', 
   assert.equal(review.status, 'passed');
 });
 
-test('RCC review stays inconclusive when verdict markers conflict across chunks', async () => {
+test('RCC review uses the terminal verdict when verdict markers conflict across chunks', async () => {
   const review = await reviewWithProviderText({
     taskSuffix: 'conflicting-chunks',
     provider: providerPort({
@@ -917,6 +1204,6 @@ test('RCC review stays inconclusive when verdict markers conflict across chunks'
       chunkedReviewText: ['HUMANAGENT_REVIEW: passed', ' but on reflection HUMANAGENT_REVIEW: failed'],
     }),
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
 });
