@@ -79,6 +79,9 @@ export interface MemoryRuntimeTaskEvidencePort {
     readonly taskId: import('../../contracts/src/index.js').TaskId;
     readonly scope: ScopeRef;
   }): Promise<MemoryRuntimeTaskEvidence>;
+  readEvidence?(input: {
+    readonly evidence: EvidenceRef;
+  }): Promise<{ readonly sourceRef: string; readonly sourceDigest: string; readonly text: string }>;
 }
 
 /**
@@ -123,6 +126,7 @@ export function filesystemTaskEvidence(input: {
       let executionOperationId: string | undefined;
       let taskInput: string | undefined;
       let output = '';
+      const runEvidenceRefs: EvidenceRef[] = [];
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -159,6 +163,13 @@ export function filesystemTaskEvidence(input: {
         if (typeof record.taskOutput === 'string' && record.taskOutput.trim()) {
           output = record.taskOutput;
         }
+        const event = record.event as { readonly evidenceRefs?: readonly unknown[] } | undefined;
+        if (event?.evidenceRefs !== undefined) {
+          for (const candidate of event.evidenceRefs) {
+            const normalized = normalizeRunEvidence(candidate);
+            if (normalized !== undefined) runEvidenceRefs.push(normalized);
+          }
+        }
       }
       if (executionOperationId === undefined || taskInput === undefined) {
         throw new AppLifecycleError(
@@ -172,7 +183,55 @@ export function filesystemTaskEvidence(input: {
         directive,
         input: taskInput,
         output,
-        evidenceRefs: [],
+        evidenceRefs: runEvidenceRefs,
+      };
+    },
+    async readEvidence({ evidence }) {
+      let content: string;
+      try {
+        content = await readFile(input.journalPath, 'utf8');
+      } catch (error) {
+        throw new AppLifecycleError(
+          'memory-run-evidence-missing',
+          `run evidence journal is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          'ensure the serve UI runtime has written its task journal before publishing its memory boundary',
+          OWNER,
+        );
+      }
+      let matched: EvidenceRef | undefined;
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let record: Record<string, unknown>;
+        try {
+          record = JSON.parse(trimmed) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (record.kind !== 'operation.event') continue;
+        const event = record.event as { readonly evidenceRefs?: readonly unknown[] } | undefined;
+        if (event?.evidenceRefs === undefined) continue;
+        for (const candidate of event.evidenceRefs) {
+          const normalized = normalizeRunEvidence(candidate);
+          if (normalized !== undefined && normalized.locator === evidence.locator) {
+            matched = normalized;
+            break;
+          }
+        }
+        if (matched !== undefined) break;
+      }
+      if (matched === undefined) {
+        throw new AppLifecycleError(
+          'memory-run-evidence-missing',
+          `run evidence is unavailable for ${evidence.locator}`,
+          'ensure the serve UI runtime journal contains the operation event that produced this evidence',
+          OWNER,
+        );
+      }
+      return {
+        sourceRef: matched.locator,
+        sourceDigest: matched.digest!,
+        text: runEvidenceText(matched),
       };
     },
   };
@@ -697,17 +756,76 @@ function taskEvidenceContent(evidence: MemoryRuntimeTaskEvidence): string {
   });
 }
 
-function taskDirectiveFromTaskEvidence(text: string): string {
-  try {
-    const parsed = JSON.parse(text) as Partial<TaskEvidenceContent>;
-    return typeof parsed.directive === 'string' ? parsed.directive : '';
-  } catch {
-    return '';
-  }
+function runEvidenceText(evidence: EvidenceRef): string {
+  return JSON.stringify({
+    evidenceId: evidence.evidenceId.value,
+    kind: evidence.kind,
+    source: evidence.source,
+    locator: evidence.locator,
+  });
 }
 
-function firstLine(value: string): string {
-  return value.trim().split('\n')[0] ?? '';
+function runEvidenceDigest(evidence: EvidenceRef): string {
+  return `sha256:${createHash('sha256').update(runEvidenceText(evidence)).digest('hex')}`;
+}
+
+function runEvidenceScope(value: unknown): ScopeRef | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const scope = value as Record<string, unknown>;
+  const scopedId = (key: string, expectedScope: string): { readonly scope: string; readonly value: string } | undefined => {
+    const candidate = scope[key];
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+    const id = candidate as Record<string, unknown>;
+    return id.scope === expectedScope && typeof id.value === 'string' && id.value.trim().length > 0
+      ? { scope: expectedScope, value: id.value }
+      : undefined;
+  };
+  const organId = scopedId('organId', 'organ');
+  if (organId === undefined) return undefined;
+  const taskId = scope.taskId === undefined ? undefined : scopedId('taskId', 'task');
+  const cycleId = scope.cycleId === undefined ? undefined : scopedId('cycleId', 'cycle');
+  const operationId = scope.operationId === undefined ? undefined : scopedId('operationId', 'operation');
+  if (
+    (scope.taskId !== undefined && taskId === undefined)
+    || (scope.cycleId !== undefined && cycleId === undefined)
+    || (scope.operationId !== undefined && operationId === undefined)
+  ) {
+    return undefined;
+  }
+  return {
+    organId: organId as ScopeRef['organId'],
+    ...(taskId === undefined ? {} : { taskId: taskId as NonNullable<ScopeRef['taskId']> }),
+    ...(cycleId === undefined ? {} : { cycleId: cycleId as NonNullable<ScopeRef['cycleId']> }),
+    ...(operationId === undefined ? {} : { operationId: operationId as NonNullable<ScopeRef['operationId']> }),
+  };
+}
+
+function normalizeRunEvidence(value: unknown): EvidenceRef | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  const evidenceId = candidate.evidenceId as { readonly scope?: string; readonly value?: string } | undefined;
+  const kind = candidate.kind;
+  const scope = runEvidenceScope(candidate.scope);
+  if (
+    evidenceId?.scope !== 'evidence'
+    || typeof evidenceId.value !== 'string'
+    || (kind !== 'execution' && kind !== 'tool' && kind !== 'operation' && kind !== 'external')
+    || typeof candidate.source !== 'string'
+    || typeof candidate.locator !== 'string'
+    || scope === undefined
+  ) {
+    return undefined;
+  }
+  const base: EvidenceRef = {
+    evidenceId: { scope: 'evidence', value: evidenceId.value },
+    kind,
+    source: candidate.source,
+    locator: candidate.locator,
+    scope,
+  };
+  return typeof candidate.digest === 'string' && candidate.digest.trim().length > 0
+    ? { ...base, digest: candidate.digest }
+    : { ...base, digest: runEvidenceDigest(base) };
 }
 
 async function readTaskEvidenceText(input: {
@@ -870,12 +988,22 @@ function taskConsumerBinding(binding: MemoryTaskAnalysisWakeBinding): EventConsu
 }
 
 function publisherBinding(binding: MemoryAnalysisWakeBinding): TrustedEventPublisher {
-  const scope = bindingScope(binding);
+  if (binding.scope.namespace !== 'project') {
+    throw new AppLifecycleError(
+      'memory-boundary-scope-invalid',
+      'memory boundary events require a project-scoped publisher binding',
+      'configure the memory binding with a project scope',
+      OWNER,
+    );
+  }
   return {
     publisherId: PUBLISHER_ID,
     kind: 'harness',
     ownerId: OWNER,
-    scope,
+    // Task-bound boundary events carry the exact execution that produced the
+    // checkpoint, so the publisher authority is organ-scoped while consumer
+    // delivery remains task-scoped.
+    scope: { organId: binding.scope.organId },
     allowedClasses: ['data'],
     capabilities: [
       'memory.analysis.requested',
@@ -1045,9 +1173,21 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
     barrierIntents: journal,
   };
   const explicitSubmissionEvidenceSource: MemoryEvidenceSourcePort = input.evidenceSource ?? {
-    read: async ({ evidence }) => evidence.locator.startsWith('humanagent://task/')
-      ? readTaskEvidenceText({ taskEvidence: input.taskEvidence, evidence })
-      : checkpointEvidence.readEvidence({ evidence }),
+    read: async ({ evidence }) => {
+      if (evidence.locator.startsWith('humanagent://task/')) {
+        return readTaskEvidenceText({ taskEvidence: input.taskEvidence, evidence });
+      }
+      if (
+        evidence.locator.startsWith('humanagent://checkpoint/')
+        || evidence.locator.startsWith('humanagent://checkpoint-closure/')
+      ) {
+        return checkpointEvidence.readEvidence({ evidence });
+      }
+      if (input.taskEvidence?.readEvidence !== undefined) {
+        return input.taskEvidence.readEvidence({ evidence });
+      }
+      return checkpointEvidence.readEvidence({ evidence });
+    },
   };
   let recoverPendingSubmissions: (() => Promise<void>) | undefined;
   const projectSourceUpdatePublisher = {
@@ -1331,13 +1471,16 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
         const executionSuffix = executionScope.operationId === undefined
           ? `cycle/${cycleId.value}`
           : `cycle/${cycleId.value}/operation/${executionScope.operationId.value}`;
-        const taskEvidenceText = input.taskEvidence === undefined
+        const taskEvidenceRecord = input.taskEvidence === undefined
           ? undefined
-          : taskEvidenceContent(await input.taskEvidence.readTask({
+          : await input.taskEvidence.readTask({
               taskId: taskBinding.taskId,
               scope: executionScope,
-            }));
-        const taskEvidence = taskEvidenceText === undefined
+            });
+        const taskEvidenceText = taskEvidenceRecord === undefined
+          ? undefined
+          : taskEvidenceContent(taskEvidenceRecord);
+        const taskEvidence = taskEvidenceRecord === undefined || taskEvidenceText === undefined
           ? undefined
           : taskEvidenceRef({
               evidenceId: `task-${taskBinding.taskId.value}-${cycleId.value}`,
@@ -1345,18 +1488,21 @@ export async function composeMemoryRuntime(input: MemoryRuntimeInput): Promise<M
               text: taskEvidenceText,
               scope: executionScope,
             });
-        const directive = taskEvidenceText === undefined
-          ? undefined
-          : firstLine(taskDirectiveFromTaskEvidence(taskEvidenceText));
+        const runEvidenceRefs = (taskEvidenceRecord?.evidenceRefs ?? []).map((evidence) => ({
+          ...evidence,
+          scope: executionScope,
+        }));
         const event = createMemoryAnalysisRequestedEvent({
           messageId: `checkpoint-${committed.checkpoint.id.value}-${trigger}`,
           streamId: taskConsumer.streamIds[0]!,
-          scope: taskConsumer.scope,
+          scope: executionScope,
           occurredAt: new Date().toISOString(),
-          summary: directive === undefined || directive.length === 0
+          summary: taskEvidenceText === undefined
             ? `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}`
-            : `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}: ${directive}`,
-          evidenceRefs: taskEvidence === undefined ? [primaryEvidence] : [primaryEvidence, taskEvidence],
+            : `checkpoint ${committed.checkpoint.outcome} for task ${taskBinding.taskId.value}: ${taskEvidenceText}`,
+          evidenceRefs: taskEvidence === undefined
+            ? [primaryEvidence, ...runEvidenceRefs]
+            : [primaryEvidence, taskEvidence, ...runEvidenceRefs],
           executionEpoch: committed.checkpoint.executionEpoch,
           trigger,
           requestedKind: trigger === 'rewind' ? 'procedural' : 'semantic',
