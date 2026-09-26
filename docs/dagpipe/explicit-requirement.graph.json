@@ -1,0 +1,161 @@
+{
+  "id": "humanagent-explicit-requirement",
+  "version": "1",
+  "meta": {
+    "title": "用户任务确认后进入隐式队列并执行到任务输出",
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+  },
+  "inputs": [
+    { "id": "user_task_input", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "sensory_inbox",
+      "operator": "humanagent-sensory-inbox",
+      "operator_version": "1",
+      "inputs": ["user_task_input"],
+      "output": { "id": "raw_interaction", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "explicit_normalize",
+      "operator": "humanagent-explicit-normalize",
+      "operator_version": "1",
+      "inputs": ["raw_interaction"],
+      "output": { "id": "normalized_intent", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "explicit_confirm",
+      "operator": "humanagent-explicit-confirm",
+      "operator_version": "1",
+      "inputs": ["normalized_intent"],
+      "output": { "id": "confirmed_requirement", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "implicit_classify",
+      "operator": "humanagent-implicit-classify",
+      "operator_version": "1",
+      "inputs": ["confirmed_requirement"],
+      "output": { "id": "classified_requirement", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "interactive_queue",
+      "operator": "humanagent-interactive-queue",
+      "operator_version": "1",
+      "inputs": ["classified_requirement"],
+      "output": { "id": "interactive_queue_item", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "execution_queue",
+      "operator": "humanagent-execution-queue",
+      "operator_version": "1",
+      "inputs": ["classified_requirement"],
+      "output": { "id": "execution_queue_item", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "research_queue",
+      "operator": "humanagent-research-queue",
+      "operator_version": "1",
+      "inputs": ["classified_requirement"],
+      "output": { "id": "research_queue_item", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "maintenance_queue",
+      "operator": "humanagent-maintenance-queue",
+      "operator_version": "1",
+      "inputs": ["classified_requirement"],
+      "output": { "id": "maintenance_queue_item", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "task_correlate_or_create",
+      "operator": "humanagent-task-correlate-or-create",
+      "operator_version": "1",
+      "inputs": ["interactive_queue_item", "execution_queue_item", "research_queue_item", "maintenance_queue_item"],
+      "output": { "id": "task_binding", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resource_admission",
+      "operator": "humanagent-resource-admission",
+      "operator_version": "1",
+      "inputs": ["task_binding"],
+      "output": { "id": "admitted_execution", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "pipeline_execute",
+      "operator": "humanagent-pipeline-execute",
+      "operator_version": "1",
+      "inputs": ["admitted_execution"],
+      "output": { "id": "execution_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "settle",
+      "operator": "humanagent-settle",
+      "operator_version": "1",
+      "inputs": ["execution_evidence"],
+      "output": { "id": "settled_checkpoint", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "task_output",
+      "operator": "humanagent-task-output",
+      "operator_version": "1",
+      "inputs": ["settled_checkpoint"],
+      "output": { "id": "completed_task", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "sensory_inbox", "to": "explicit_normalize", "arc_id": "raw_interaction" },
+    { "from": "explicit_normalize", "to": "explicit_confirm", "arc_id": "normalized_intent" },
+    { "from": "explicit_confirm", "to": "implicit_classify", "arc_id": "confirmed_requirement" },
+    { "from": "implicit_classify", "to": "interactive_queue", "arc_id": "classified_requirement" },
+    { "from": "implicit_classify", "to": "execution_queue", "arc_id": "classified_requirement" },
+    { "from": "implicit_classify", "to": "research_queue", "arc_id": "classified_requirement" },
+    { "from": "implicit_classify", "to": "maintenance_queue", "arc_id": "classified_requirement" },
+    { "from": "interactive_queue", "to": "task_correlate_or_create", "arc_id": "interactive_queue_item" },
+    { "from": "execution_queue", "to": "task_correlate_or_create", "arc_id": "execution_queue_item" },
+    { "from": "research_queue", "to": "task_correlate_or_create", "arc_id": "research_queue_item" },
+    { "from": "maintenance_queue", "to": "task_correlate_or_create", "arc_id": "maintenance_queue_item" },
+    { "from": "task_correlate_or_create", "to": "resource_admission", "arc_id": "task_binding" },
+    { "from": "resource_admission", "to": "pipeline_execute", "arc_id": "admitted_execution" },
+    { "from": "pipeline_execute", "to": "settle", "arc_id": "execution_evidence" },
+    { "from": "settle", "to": "task_output", "arc_id": "settled_checkpoint" }
+  ],
+  "outputs": ["completed_task"]
+}

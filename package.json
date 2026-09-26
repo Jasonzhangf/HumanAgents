@@ -11,6 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "dagpipe:validate": "node scripts/dagpipe-validate-graphs.mjs",
     "build:contracts": "tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json",
     "build:config": "tsc -p packages/config/tsconfig.json",
     "build:app": "tsc -p packages/app/tsconfig.json && node scripts/copy-template-assets.mjs && node scripts/copy-ui-assets.mjs",
