@@ -93,6 +93,7 @@ function startServe(root) {
 
   return {
     ready,
+    pid: child.pid,
     stop: async () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise((done) => child.once('exit', done));
@@ -246,6 +247,10 @@ async function captureObservation(base, taskId) {
   return { dashboard, observation, detail };
 }
 
+async function captureTaskList(base) {
+  return jsonRequest(`${base}/api/tasks`);
+}
+
 function assertCompleted(dashboard, expect) {
   if (dashboard.state !== 'succeeded') {
     console.error('DEBUG_ASSERT_COMPLETED', JSON.stringify(dashboard, null, 2));
@@ -253,6 +258,14 @@ function assertCompleted(dashboard, expect) {
   }
   if (expect && (!dashboard.output || !dashboard.output.includes(expect))) {
     throw new Error(`task output did not include expected text ${expect}: ${JSON.stringify(dashboard.output ?? null).slice(0, 600)}`);
+  }
+}
+
+function assertProviderToolRounds(dashboard, expectAtLeast = 2) {
+  const count = (dashboard.recentEvents ?? []).filter((event) => event.kind === 'provider.tool').length;
+  if (count < expectAtLeast) {
+    console.error('DEBUG_ASSERT_PROVIDER_TOOL_ROUNDS', JSON.stringify(dashboard, null, 2));
+    throw new Error(`task did not exercise ${expectAtLeast} provider.tool rounds: ${count}`);
   }
 }
 
@@ -273,12 +286,14 @@ async function main() {
   const steps = {};
   const rounds = [];
   try {
+    steps.rccHealth = await jsonRequest(`${RCC_BASE_URL}/health`);
     serve = startServe(root);
     const launched = await serve.ready;
     const base = launched.url;
     steps.serve = {
       root,
       url: base,
+      pid: serve.pid,
       checkpointRoot: launched.checkpointRoot,
       memoryAnalysisMode: launched.memoryAnalysisMode,
     };
@@ -305,6 +320,7 @@ async function main() {
     const firstOperationId = firstImplicit.operationId;
     const firstTerminal = await pollTaskState(base, firstTaskId);
     assertCompleted(firstTerminal, 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C');
+    assertProviderToolRounds(firstTerminal);
     const firstObservation = await captureObservation(base, firstTaskId);
     assertObservation(firstObservation.observation);
     rounds.push({
@@ -337,9 +353,12 @@ async function main() {
     const secondTaskId = secondImplicit.taskId;
     const secondTerminal = await pollTaskState(base, secondTaskId);
     assertCompleted(secondTerminal, 'FIRST_LINE_PROVEN_8B2D');
+    assertProviderToolRounds(secondTerminal);
     const secondOperationId = secondTerminal.operationId ?? null;
     const secondObservation = await captureObservation(base, secondTaskId);
     assertObservation(secondObservation.observation);
+
+    steps.taskList = await captureTaskList(base);
     rounds.push({
       round: 2,
       interactionId: second.interaction.interactionId,
@@ -366,6 +385,7 @@ async function main() {
       },
       serve: steps.serve,
       status: steps.status,
+      taskList: steps.taskList,
       uiRootServed: typeof steps.uiRoot === 'string' && steps.uiRoot.startsWith('<!doctype html>') || steps.uiRoot.startsWith('<!DOCTYPE html>'),
       dashboards: {
         round1: rounds[0] ?? null,
