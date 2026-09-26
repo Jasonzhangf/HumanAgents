@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { WorkAssignment, WorkResult } from '../../../contracts/src/index.js';
+import type { EvidenceRef, WorkAssignment, WorkResult } from '../../../contracts/src/index.js';
 
 /**
  * One produced subject body handed to the reviewer with the ref and digest the
@@ -11,6 +11,11 @@ export interface ReviewSubjectMaterial {
   readonly digest: string;
 }
 
+export interface ExecutorReviewEvidence {
+  readonly summary: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
 /**
  * Review input content. The reviewer evaluates this material; a digest or an
  * evidence locator is never a substitute for the artifact itself.
@@ -19,12 +24,14 @@ export interface ReviewMaterial {
   readonly acceptanceCriteria: string;
   readonly acceptanceCriteriaDigest: string;
   readonly subjects: readonly ReviewSubjectMaterial[];
+  readonly executorEvidence?: readonly ExecutorReviewEvidence[];
 }
 
 export interface ReviewMaterialRequest {
   readonly workerAssignment: WorkAssignment;
   readonly workerResult: WorkResult;
   readonly subjects: readonly { readonly ref: string; readonly body: string }[];
+  readonly executorEvidence?: readonly ExecutorReviewEvidence[];
 }
 
 /**
@@ -63,6 +70,7 @@ export function acceptanceCriteriaContent(assignment: AcceptanceCriteriaSource):
  */
 export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMaterial {
   const { workerAssignment, workerResult } = input;
+  const result = workerResult as WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] };
   const acceptanceCriteria = acceptanceCriteriaContent(workerAssignment);
   if (!acceptanceCriteria.trim()) {
     throw new Error('review acceptance criteria content is empty');
@@ -96,6 +104,9 @@ export function resolveReviewMaterial(input: ReviewMaterialRequest): ReviewMater
     acceptanceCriteria,
     acceptanceCriteriaDigest: workerAssignment.acceptanceCriteriaDigest,
     subjects,
+    executorEvidence: [
+      ...(input.executorEvidence ?? result.executorEvidence ?? []),
+    ],
   };
 }
 

@@ -171,6 +171,36 @@ test('resolveReviewMaterial carries acceptance criteria content matching its dig
   assert.equal(material.subjects[0]?.digest, digest(subjectBody));
 });
 
+test('resolveReviewMaterial carries executor tool evidence additively from the worker result', () => {
+  const executorEvidence = [
+    { summary: 'provider.tool search matched 3 files', evidenceRefs: [evidence('executor-tool')] },
+  ];
+  const workerResult = { ...result(), executorEvidence } as WorkResult & {
+    readonly executorEvidence: typeof executorEvidence;
+  };
+  const material = resolveReviewMaterial({
+    workerAssignment: assignment(),
+    workerResult,
+    subjects: [{ ref: 'subject-a', body: subjectBody }],
+  });
+  // Evidence is additional material; the artifact body and its digest mapping
+  // must stay intact.
+  assert.deepEqual(material.executorEvidence, executorEvidence);
+  assert.equal(material.subjects[0]?.body, subjectBody);
+  assert.equal(material.subjects[0]?.digest, digest(subjectBody));
+});
+
+test('resolveReviewMaterial leaves executor evidence empty when the worker result carries none', () => {
+  const material = resolveReviewMaterial({
+    workerAssignment: assignment(),
+    workerResult: result(),
+    subjects: [{ ref: 'subject-a', body: subjectBody }],
+  });
+  // No tool evidence exists, so none may be invented; the reviewer must judge
+  // only from the artifact body it was handed.
+  assert.deepEqual(material.executorEvidence, []);
+});
+
 test('resolveReviewMaterial fails closed on missing, empty, or drifted material', () => {
   const workerAssignment = assignment();
   const workerResult = result();

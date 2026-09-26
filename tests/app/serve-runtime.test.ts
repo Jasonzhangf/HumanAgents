@@ -163,6 +163,7 @@ function providerPort(input: {
   readonly outputRef?: string;
   readonly chunkedReviewText?: readonly string[];
   readonly organId?: ReturnType<typeof id<'organ'>>;
+  readonly submittedPrompts?: string[];
 }): ExecutionRuntimePort {
   const binding = providerBinding();
   // A real provider reports the scope it was admitted under. Hardcoding a
@@ -219,6 +220,8 @@ function providerPort(input: {
         executionEpoch: request.executionEpoch,
         scope: admittedScope,
       };
+      const prompt = request.payload?.prompt;
+      if (prompt !== undefined && typeof prompt === 'string') input.submittedPrompts?.push(prompt);
       return { ...request, startedAt: readiness.checkedAt, evidenceRefs: [evidence(active.scope)] };
     },
     resume: async (): Promise<ProviderRecoveryResult> => { throw new Error('not used'); },
@@ -830,6 +833,109 @@ test('RCC review agent retries an inconclusive verdict before accepting a later 
   });
   assert.equal(review.status, 'passed');
   assert.deepEqual(review.findings, []);
+});
+
+test('RCC review agent renders executor tool evidence into the review prompt', async () => {
+  const submittedPrompts: string[] = [];
+  const task: Task = {
+    id: id('task', 'serve-rcc-review-executor-evidence'),
+    organId: id('organ', 'humanagent-ui'),
+    title: 'RCC review executor evidence',
+    directive: 'carry executor tool evidence into the reviewer prompt',
+    directiveRevision: 1,
+    state: 'created',
+    memoryScope: 'task',
+  };
+  const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-review-executor-cycle') };
+  const ports = createRccServeOrchestrationPorts({
+    port: providerPort({
+      state: 'succeeded',
+      reviewMarker: 'HUMANAGENT_REVIEW: passed',
+      submittedPrompts,
+    }),
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+  });
+  const workerPorts = createDeterministicServeOrchestrationPorts();
+  const workAssignment: WorkAssignment = {
+    ...assignment(task),
+    assignmentId: 'serve-rcc-review-executor-worker',
+    pipelineNodeId: 'serve-rcc-review-executor-stage',
+    expectedArtifactDigests: [digestOf(serveArtifactBody)],
+  };
+  const workerDelivery = await workerPorts.executionAgent!.execute({
+    assignment: workAssignment,
+    agentId: 'serve-rcc-review-executor-agent',
+    executionEpoch: 1,
+    attempt: 1,
+    lease: {
+      leaseId: 'serve-rcc-review-executor-lease',
+      runtimeId: 'serve-rcc-review-executor-runtime',
+      generation: 1,
+      executionEpoch: 1,
+      ownerId: 'serve-test',
+      assignmentId: workAssignment.assignmentId,
+      capabilities: ['provider.execution'],
+    },
+    scope,
+  });
+  const worker = 'result' in workerDelivery ? workerDelivery.result : workerDelivery;
+  const executorEvidence = [
+    {
+      summary: 'provider.tool search matched 3 files',
+      evidenceRefs: [{
+        evidenceId: id('evidence', 'serve-rcc-executor-tool'),
+        kind: 'tool' as const,
+        source: 'test.serve-rcc-orchestration',
+        locator: 'serve-rcc/executor-tool',
+        scope,
+      }],
+    },
+  ];
+  const workerWithEvidence = { ...worker, executorEvidence };
+  const reviewAssignment: ReviewAssignment = {
+    assignmentId: 'serve-rcc-review-executor-review',
+    taskId: task.id.value,
+    workerAgentId: 'serve-rcc-review-executor-agent',
+    reviewKind: 'quality',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    acceptanceCriteriaDigest: workAssignment.acceptanceCriteriaDigest,
+    subjectRefs: [...workAssignment.targetRefs],
+    subjectDigests: [...worker.producedArtifactDigests],
+    workerCapabilities: ['provider.execution'],
+    requiredCapabilities: ['quality.review'],
+    mergeGate: 'required',
+  };
+  const review = await ports.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment: workAssignment,
+    workerResult: workerWithEvidence,
+    reviewMaterial: materialFor(workAssignment, workerWithEvidence),
+    scope,
+  });
+  assert.equal(review.status, 'passed');
+  assert.equal(submittedPrompts.length, 1, 'the reviewer provider must receive the review prompt');
+  const prompt = submittedPrompts[0] ?? '';
+  assert.match(prompt, /provider\.tool search matched 3 files/);
+  assert.match(prompt, /serve-rcc-executor-tool/);
+  assert.match(prompt, /first-hand execution evidence/);
+});
+
+test('RCC review agent does not invent executor evidence when none exists', async () => {
+  const submittedPrompts: string[] = [];
+  const review = await reviewWithProviderText({
+    taskSuffix: 'absent-executor-evidence',
+    provider: providerPort({
+      state: 'succeeded',
+      reviewMarker: 'HUMANAGENT_REVIEW: failed',
+      submittedPrompts,
+    }),
+  });
+  assert.equal(review.status, 'failed');
+  const prompt = submittedPrompts[0] ?? '';
+  assert.match(prompt, /"executorEvidence":\[\]/);
 });
 
 test('RCC review agent honors an explicit failed verdict without retrying to pass', async () => {

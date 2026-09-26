@@ -48,7 +48,7 @@ import {
   type TaskUpdateDecision,
 } from '../admission/index.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
-import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort } from '../orchestration/index.js';
+import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort, type ExecutorReviewEvidence } from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
@@ -1342,6 +1342,7 @@ export class RuntimeTaskCoordinator {
         // The review gate receives the text this execution actually produced,
         // so an empty run blocks instead of passing on identity alone.
         let producedOutput = '';
+        const executorEvidence: ExecutorReviewEvidence[] = [];
         const providerExecutionAgent: ExecutionAgentPort = {
           async execute(input): Promise<WorkResult> {
             await composition!.start();
@@ -1392,6 +1393,12 @@ export class RuntimeTaskCoordinator {
               if (!event.providerEvent) continue;
               if (event.providerEvent.kind === 'output' && event.providerEvent.summary) {
                 producedOutput = `${producedOutput}${event.providerEvent.summary}`;
+              }
+              if (event.providerEvent.kind === 'tool') {
+                executorEvidence.push({
+                  summary: providerEventSummary(event.providerEvent),
+                  evidenceRefs: [...event.providerEvent.evidenceRefs],
+                });
               }
               coordinator.recordProviderEvent(record, operation, event.providerEvent);
             }
@@ -1455,7 +1462,7 @@ export class RuntimeTaskCoordinator {
                 : closure.state === 'blocked' || closure.state === 'failed' || closure.state === 'unknown'
                   ? 'attention'
                   : 'settle';
-            return {
+            const workResult: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] } = {
               taskId: input.assignment.taskId,
               pipelineNodeId: input.assignment.pipelineNodeId,
               agentId: input.agentId,
@@ -1468,6 +1475,7 @@ export class RuntimeTaskCoordinator {
               // mutable state that a later attempt may already have reset.
               producedArtifactDigests: [digestOf(producedOutput)],
               producedArtifactBodies: [producedOutput],
+              executorEvidence,
               status,
               summary: `provider execution ${closure.state}`,
               outputRefs: [outputRef],
@@ -1480,6 +1488,7 @@ export class RuntimeTaskCoordinator {
                 ? { failureRef: closure.failureRef ?? `operation://${operation.operationId.value}/failed` }
                 : {}),
             };
+            return workResult;
           },
         };
         record.taskAssembly = this.options.createTaskAssembly({

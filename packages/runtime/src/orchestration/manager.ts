@@ -17,7 +17,7 @@ import {
 } from '../review/index.js';
 import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from './assignment-graph.js';
 import { OrchestrationError } from './errors.js';
-import { type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
+import { type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
 import { AgentRuntimePoolManager } from './runtime-pool.js';
 import type {
   AssignmentRecord,
@@ -547,6 +547,7 @@ export class OrchestrationManager {
         workerAssignment: input.assignment,
         workerResult: result,
         subjects,
+        executorEvidence: (result as WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] }).executorEvidence,
       });
     } catch (error) {
       return this.blockedResult(
