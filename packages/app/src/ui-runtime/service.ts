@@ -1383,7 +1383,7 @@ export class UiRuntimeService {
 
   taskDetail(taskId: TaskId): TaskDetailProjection {
     try {
-      const task = this.coordinator.taskSnapshot(taskId);
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
       return projectTaskDetail({
         source: {
           state: task.state === 'failed' || task.state === 'blocked'
