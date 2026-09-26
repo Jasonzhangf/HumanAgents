@@ -1,0 +1,59 @@
+{
+  "id": "humanagent-observation-read",
+  "version": "1",
+  "meta": {
+    "title": "浏览器只读观测从 HTTP 请求到所见视图",
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+  },
+  "inputs": [
+    { "id": "browser_request", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "http_api",
+      "operator": "humanagent-observation-http-api",
+      "operator_version": "1",
+      "inputs": ["browser_request"],
+      "output": { "id": "runtime_projection", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "task_dashboard",
+      "operator": "humanagent-task-dashboard",
+      "operator_version": "1",
+      "inputs": ["runtime_projection"],
+      "output": { "id": "dashboard_data", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "observation_projection",
+      "operator": "humanagent-observation-projection",
+      "operator_version": "1",
+      "inputs": ["dashboard_data"],
+      "output": { "id": "read_model", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "browser_view",
+      "operator": "humanagent-browser-view",
+      "operator_version": "1",
+      "inputs": ["read_model"],
+      "output": { "id": "rendered_view", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "http_api", "to": "task_dashboard", "arc_id": "runtime_projection" },
+    { "from": "task_dashboard", "to": "observation_projection", "arc_id": "dashboard_data" },
+    { "from": "observation_projection", "to": "browser_view", "arc_id": "read_model" }
+  ],
+  "outputs": ["rendered_view"]
+}

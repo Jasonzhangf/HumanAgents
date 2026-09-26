@@ -1,0 +1,12 @@
+{
+  "graph": "humanagent-headless-session",
+  "labels": {
+    "resolve_config": "解析运行配置",
+    "acquire_session_lock": "获取会话锁",
+    "recover_or_create_operation": "恢复或创建操作",
+    "execute_agent": "执行 Agent",
+    "observe_events": "观测执行事件",
+    "commit_checkpoint": "提交检查点",
+    "close_session": "关闭会话"
+  }
+}

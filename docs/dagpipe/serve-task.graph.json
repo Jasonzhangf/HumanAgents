@@ -1,0 +1,81 @@
+{
+  "id": "humanagent-serve-task",
+  "version": "1",
+  "meta": {
+    "title": "serve 运行时从已确认需求到任务完成投影",
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+  },
+  "inputs": [
+    { "id": "confirmed_requirement", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "fifo_peek",
+      "operator": "humanagent-fifo-peek",
+      "operator_version": "1",
+      "inputs": ["confirmed_requirement"],
+      "output": { "id": "fifo_envelope", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "admission_check",
+      "operator": "humanagent-serve-admission-check",
+      "operator_version": "1",
+      "inputs": ["fifo_envelope"],
+      "output": { "id": "admitted_requirement", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "correlate_task",
+      "operator": "humanagent-serve-correlate-task",
+      "operator_version": "1",
+      "inputs": ["admitted_requirement"],
+      "output": { "id": "runtime_task", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "provider_execution",
+      "operator": "humanagent-serve-provider-execution",
+      "operator_version": "1",
+      "inputs": ["runtime_task"],
+      "output": { "id": "provider_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "checkpoint_commit",
+      "operator": "humanagent-serve-checkpoint-commit",
+      "operator_version": "1",
+      "inputs": ["provider_evidence"],
+      "output": { "id": "terminal_checkpoint", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "task_terminal",
+      "operator": "humanagent-serve-task-terminal",
+      "operator_version": "1",
+      "inputs": ["terminal_checkpoint"],
+      "output": { "id": "completed_task_projection", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "fifo_peek", "to": "admission_check", "arc_id": "fifo_envelope" },
+    { "from": "admission_check", "to": "correlate_task", "arc_id": "admitted_requirement" },
+    { "from": "correlate_task", "to": "provider_execution", "arc_id": "runtime_task" },
+    { "from": "provider_execution", "to": "checkpoint_commit", "arc_id": "provider_evidence" },
+    { "from": "checkpoint_commit", "to": "task_terminal", "arc_id": "terminal_checkpoint" }
+  ],
+  "outputs": ["completed_task_projection"]
+}

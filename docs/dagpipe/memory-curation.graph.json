@@ -1,0 +1,81 @@
+{
+  "id": "humanagent-memory-curation",
+  "version": "1",
+  "meta": {
+    "title": "已收拢检查点沉淀为可审阅经验",
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+  },
+  "inputs": [
+    { "id": "settled_checkpoint", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "wake_memory_agent",
+      "operator": "humanagent-wake-memory-agent",
+      "operator_version": "1",
+      "inputs": ["settled_checkpoint"],
+      "output": { "id": "memory_trigger", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_task_evidence",
+      "operator": "humanagent-read-task-evidence",
+      "operator_version": "1",
+      "inputs": ["memory_trigger"],
+      "output": { "id": "task_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "compose_memory_request",
+      "operator": "humanagent-compose-memory-request",
+      "operator_version": "1",
+      "inputs": ["task_evidence"],
+      "output": { "id": "memory_request", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "run_memory_agent",
+      "operator": "humanagent-run-memory-agent",
+      "operator_version": "1",
+      "inputs": ["memory_request"],
+      "output": { "id": "memory_analysis", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "curate_lesson",
+      "operator": "humanagent-curate-lesson",
+      "operator_version": "1",
+      "inputs": ["memory_analysis"],
+      "output": { "id": "memory_candidate", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "write_memory_event",
+      "operator": "humanagent-write-memory-event",
+      "operator_version": "1",
+      "inputs": ["memory_candidate"],
+      "output": { "id": "durable_memory_lesson", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "wake_memory_agent", "to": "read_task_evidence", "arc_id": "memory_trigger" },
+    { "from": "read_task_evidence", "to": "compose_memory_request", "arc_id": "task_evidence" },
+    { "from": "compose_memory_request", "to": "run_memory_agent", "arc_id": "memory_request" },
+    { "from": "run_memory_agent", "to": "curate_lesson", "arc_id": "memory_analysis" },
+    { "from": "curate_lesson", "to": "write_memory_event", "arc_id": "memory_candidate" }
+  ],
+  "outputs": ["durable_memory_lesson"]
+}

@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-observation-read",
+  "labels": {
+    "http_api": "处理浏览器 HTTP 请求",
+    "task_dashboard": "生成任务仪表盘投影",
+    "observation_projection": "生成流水线观测投影",
+    "browser_view": "渲染浏览器只读视图"
+  }
+}
