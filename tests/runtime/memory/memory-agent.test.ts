@@ -317,6 +317,38 @@ test('memory agent drives observe to a terminal event and parses streaming curat
   ]);
 });
 
+test('memory agent admits a provider candidate without a provider-authored candidate id', async () => {
+  const events: string[] = [];
+  const ports = makeOperations();
+  const driver = providerDriver({
+    events,
+    mutateOutput: (output) => {
+      const curation = { ...(output.payload.curation as Record<string, unknown>) };
+      delete curation.candidateId;
+      return { ...output, payload: { curation } as AgentOutput['payload'] };
+    },
+  });
+  const agent = bind(new MemoryAgent({
+    projectKey: 'project-a',
+    auditPromptRef: 'project-memory-audit',
+    autoUpdate: false,
+    driver,
+    sessions: { readSession: async () => sessionEvidence },
+    projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
+    auditPrompts: { readPrompt: async () => promptSource() },
+    projectUpdateOwner: { apply: async () => { throw new Error('unexpected update'); } },
+  }), ports.operations);
+
+  const result = await agent.analyze(analysis());
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') throw new Error(result.issue.message);
+  assert.equal(result.value.curation.outcome, 'candidate');
+  assert.equal(result.value.curation.candidateId, `candidate:memory-analysis:analysis-a`);
+  assert.equal(ports.submissions.length, 1);
+  assert.equal(ports.submissions[0]?.operationId.value, 'analysis-a');
+});
+
 test('memory agent sends the audit prompt body and inspected source text to the provider', async () => {
   const events: string[] = [];
   const ports = makeOperations();
