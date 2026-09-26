@@ -11,6 +11,7 @@
     "noEmitOnError": true
   },
   "include": [
+    "../orchestration/node-modules.d.ts",
     "**/*.ts",
     "../../../packages/contracts/src/**/*.ts",
     "../../../packages/runtime/src/admission/**/*.ts"
