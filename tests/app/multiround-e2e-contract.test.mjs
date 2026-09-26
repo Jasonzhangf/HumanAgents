@@ -15,7 +15,7 @@ function validReceipt() {
     proof: 'explicit-implicit-e2e',
     gitSha: 'a'.repeat(40),
     mainSha: 'b'.repeat(40),
-    sourceDigest: 'sha256:deadbeef',
+    sourceDigest: `sha256:${'a'.repeat(64)}`,
     rounds: [
       {
         round: 1,
@@ -57,10 +57,34 @@ test('multi-round receipt contract rejects a missing git binding', () => {
   assert.throws(() => assertReceiptContract(receipt), /not bound to a git commit/);
 });
 
+test('multi-round receipt contract rejects a missing main binding', () => {
+  const receipt = validReceipt();
+  delete receipt.mainSha;
+  assert.throws(() => assertReceiptContract(receipt), /not bound to the main SHA/);
+});
+
+test('multi-round receipt contract rejects a malformed source digest', () => {
+  const receipt = validReceipt();
+  receipt.sourceDigest = 'sha256:not-a-valid-hex-digest';
+  assert.throws(() => assertReceiptContract(receipt), /source digest/);
+});
+
+test('multi-round receipt contract rejects an invalid provider call id', () => {
+  const receipt = validReceipt();
+  receipt.rounds[0].toolCallIds = ['fake_id'];
+  assert.throws(() => assertReceiptContract(receipt), /invalid provider call id/);
+});
+
 test('multi-round receipt contract rejects rounds without a real tool call id', () => {
   const receipt = validReceipt();
   receipt.rounds[0].toolCallIds = [];
   assert.throws(() => assertReceiptContract(receipt), /recorded no real tool call id/);
+});
+
+test('multi-round receipt contract rejects round 2 without a new tool call id', () => {
+  const receipt = validReceipt();
+  receipt.rounds[1].toolCallIds = ['call_round_1'];
+  assert.throws(() => assertReceiptContract(receipt), /new tool call id/);
 });
 
 test('multi-round receipt contract rejects two rounds on different tasks', () => {

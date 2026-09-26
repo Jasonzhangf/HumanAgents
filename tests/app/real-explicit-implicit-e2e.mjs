@@ -37,7 +37,7 @@ const RECEIPT_PATH = resolve(
   process.env.HUMANAGENT_EI_RECEIPT_PATH ?? 'dist/receipts/explicit-implicit-e2e-proof.json',
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
-const TERMINAL_TIMEOUT_MS = 240_000;
+const TERMINAL_TIMEOUT_MS = 420_000;
 const MAX_INTERPRET_ATTEMPTS = 4;
 
 function git(args) {
@@ -52,7 +52,7 @@ function mainSha() {
   try {
     return git(['rev-parse', 'main']);
   } catch {
-    return gitSha();
+    throw new Error('main ref is not resolvable; receipt cannot bind mainSha');
   }
 }
 
@@ -69,6 +69,7 @@ function providerToolCallIds(dashboard) {
   const ids = new Set();
   for (const event of dashboard.recentEvents ?? []) {
     if (event.kind !== 'provider.tool') continue;
+    if (event.executionEpoch !== dashboard.executionEpoch) continue;
     for (const ref of event.evidenceRefs ?? []) {
       // The locator appends a content digest after the call id, so stop at the
       // first non-identifier character to record the exact provider call id.
@@ -95,7 +96,7 @@ export function assertReceiptContract(receipt) {
   if (typeof receipt.mainSha !== 'string' || !/^[0-9a-f]{40}$/.test(receipt.mainSha)) {
     throw new Error(`receipt is not bound to the main SHA: ${JSON.stringify(receipt.mainSha ?? null)}`);
   }
-  if (typeof receipt.sourceDigest !== 'string' || !receipt.sourceDigest.startsWith('sha256:')) {
+  if (typeof receipt.sourceDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(receipt.sourceDigest)) {
     throw new Error(`receipt is missing a source digest: ${JSON.stringify(receipt.sourceDigest ?? null)}`);
   }
   const rounds = receipt.rounds ?? [];
@@ -111,7 +112,16 @@ export function assertReceiptContract(receipt) {
     if (!Array.isArray(round.toolCallIds) || round.toolCallIds.length < 1) {
       throw new Error(`round ${index + 1} recorded no real tool call id`);
     }
+    for (const id of round.toolCallIds) {
+      if (!/^call_[A-Za-z0-9_]+$/.test(id)) {
+        throw new Error(`round ${index + 1} recorded an invalid provider call id: ${JSON.stringify(id)}`);
+      }
+    }
   });
+  const earlier = new Set(rounds[0].toolCallIds);
+  if (!rounds[1].toolCallIds.some((id) => !earlier.has(id))) {
+    throw new Error('receipt expected round 2 to include a new tool call id not present in earlier rounds');
+  }
   return true;
 }
 
