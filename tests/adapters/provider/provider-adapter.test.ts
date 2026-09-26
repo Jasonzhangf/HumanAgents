@@ -489,6 +489,84 @@ test('responses reasoning output item remains model evidence and does not become
   assert.equal(decoded.events[0].summary, undefined);
 });
 
+test('responses codec maps reasoning summary wire events as model evidence', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  const events: readonly ProviderWireEvent[] = [
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.added',
+      item_id: 'item-1',
+      output_index: 0,
+      content_index: 0,
+      part: { type: 'reasoning_summary', summary: [{ type: 'summary_text', text: 'part added' }] },
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.delta',
+      item_id: 'item-1',
+      output_index: 0,
+      content_index: 0,
+      delta: { type: 'reasoning_summary_text', text: 'part delta' },
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.done',
+      item_id: 'item-1',
+      output_index: 0,
+      content_index: 0,
+      part: { type: 'reasoning_summary', summary: [{ type: 'summary_text', text: 'part done' }] },
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_text.delta',
+      item_id: 'item-1',
+      output_index: 0,
+      content_index: 0,
+      delta: 'text delta',
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_text.done',
+      item_id: 'item-1',
+      output_index: 0,
+      content_index: 0,
+      text: 'text done',
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.added',
+      item_id: 'item-empty',
+      output_index: 1,
+      content_index: 0,
+      part: { type: 'reasoning_summary', summary: [] },
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.delta',
+      item_id: 'item-empty',
+      output_index: 1,
+      content_index: 0,
+      delta: { type: 'reasoning_summary_text', text: '' },
+    },
+    {
+      protocol: 'responses',
+      type: 'response.reasoning_summary_part.done',
+      item_id: 'item-empty',
+      output_index: 1,
+      content_index: 0,
+      part: { type: 'reasoning_summary', summary: [] },
+    },
+  ];
+  for (const event of events) {
+    const decoded = await codec.decodeEvent(event, context);
+    assert.equal(decoded.events.length, 1);
+    assert.equal(decoded.events[0].kind, 'model');
+    assert.equal(decoded.events[0].summary, undefined);
+    assert.equal(decoded.events[0].evidenceRefs.length, 1);
+  }
+});
+
 test('responses codec accepts RCC transparent-proxy events with empty response and message ids', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();
