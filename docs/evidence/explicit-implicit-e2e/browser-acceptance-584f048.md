@@ -5,6 +5,9 @@ Date: 2026-09-26
 Worktree: `/Volumes/extension/code/humanagent/playground/e2e-browser-acceptance`
 Branch: `codex/e2e-browser-acceptance`
 Base commit: `8b1bfd6a035c48f7539bcf9251f70ad932e9d413`
+Delivered candidate: `584f04852063e19d0424d8f19a65b25f2040cc2c`
+Tree: `71ae7f52a74536e169382c65cfce831a03951d8c`
+Source digest: `sha256:0624ffc1a3c58846a84851b743fd0736f86841723d07d2c359cddac062df230d`
 Harness commit: `c9739b6c2d7689c159f97fc6f83b19ae22d31762`
 Real provider: RCC `http://127.0.0.1:4444`
 Model: `gpt-5.5`, protocol `responses`, route `rcc/ui-explicit-implicit`
@@ -25,6 +28,8 @@ executor -> completed task. The task dashboard and Pipeline Observation pages
 were loaded in the same browser and shown as completed.
 
 Receipt: `dist/receipts/browser-explicit-implicit-e2e-proof.json`
+(re-run from candidate `584f048`, so `receipt.candidate.head == 584f048` and
+`receipt.candidate.sourceDigest` matches the delivered tree.)
 
 Screenshots: `dist/receipts/browser-e2e-shots/`
 
