@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -68,9 +68,20 @@ export function validateBinding(graph, binding) {
     if (bound.ownerRel.includes('..')) {
       throw new Error(`ownerRel ${bound.ownerRel} for node ${node.id} must not contain '..'`);
     }
-    const ownerPath = resolve(projectRoot, bound.ownerPath);
-    if (!existsSync(ownerPath)) {
-      throw new Error(`ownerPath ${bound.ownerPath} for node ${node.id} does not exist`);
+    if (!bound.ownerPath.includes('..') && !isAbsolute(bound.ownerPath)) {
+      const ownerPath = resolve(projectRoot, bound.ownerPath);
+      const ownerRelative = relative(projectRoot, ownerPath);
+      if (ownerRelative.startsWith('..') || isAbsolute(ownerRelative)) {
+        throw new Error(`ownerPath ${bound.ownerPath} for node ${node.id} escapes projectRoot`);
+      }
+      if (!ownerRoots.some((root) => ownerRelative.startsWith(root))) {
+        throw new Error(`ownerPath ${bound.ownerPath} for node ${node.id} is outside allowed roots`);
+      }
+      if (!existsSync(ownerPath)) {
+        throw new Error(`ownerPath ${bound.ownerPath} for node ${node.id} does not exist`);
+      }
+    } else {
+      throw new Error(`ownerPath ${bound.ownerPath} for node ${node.id} is not a project-relative path`);
     }
   }
 
@@ -130,7 +141,10 @@ export function loadGraphBinding(graphPath, override) {
     throw new Error(`missing binding file for ${graphPath}: expected ${bindingPath}`);
   }
   const binding = readJson(bindingPath);
-  if (binding.graph && binding.graph !== graph.id) {
+  if (!binding.graph) {
+    throw new Error(`binding graph missing for ${graphPath}: expected ${graph.id}`);
+  }
+  if (binding.graph !== graph.id) {
     throw new Error(`binding graph mismatch for ${graphPath}: expected ${graph.id}, got ${binding.graph}`);
   }
   return { graph, binding, bindingPath };

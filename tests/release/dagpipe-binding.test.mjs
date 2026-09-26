@@ -143,3 +143,31 @@ test('non-humanagent operator prefix fails closed', () => {
   });
   assertFails(result, 'operator evil-operator must start with humanagent-');
 });
+
+test('missing binding.graph fails closed', () => {
+  const nodes = ['a', 'b'];
+  const bindingFixture = binding({ nodes });
+  delete bindingFixture.graph;
+  const { result, graphPath } = runBinder({
+    graphFixture: graph({
+      nodes,
+      edges: [{ from: 'a', to: 'b', arc_id: 'a_b' }],
+    }),
+    bindingFixture,
+  });
+  assertFails(result, `binding graph missing for ${graphPath}: expected fixture-graph`);
+});
+
+test('unsafe ownerPath fails closed', () => {
+  const nodes = ['a', 'b'];
+  const bindingFixture = binding({ nodes });
+  bindingFixture.nodes.a.ownerPath = '/etc/hosts';
+  const { result } = runBinder({
+    graphFixture: graph({
+      nodes,
+      edges: [{ from: 'a', to: 'b', arc_id: 'a_b' }],
+    }),
+    bindingFixture,
+  });
+  assertFails(result, 'ownerPath /etc/hosts for node a is not a project-relative path');
+});

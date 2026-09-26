@@ -136,11 +136,15 @@ pnpm dagpipe:validate
 pnpm dagpipe:bind
 node --test tests/release/dagpipe-binding.test.mjs
 pnpm typecheck
+pnpm dagpipe:gate
 ```
 
 Expected results:
 
 - `pnpm dagpipe:validate` prints `validated 5 DAGpipe graph(s)`.
 - `pnpm dagpipe:bind` prints five `bound <graph>: <n> nodes ok` lines.
-- `node --test tests/release/dagpipe-binding.test.mjs` prints six passing tests.
+- `node --test tests/release/dagpipe-binding.test.mjs` prints all binding
+  fail-closed fixtures passing.
+- `pnpm dagpipe:gate` runs `dagpipe:validate` followed by `test:release` and
+  is wired into the checkpointed `ci` release stage.
 - `pnpm typecheck` exits `0`.
