@@ -53,16 +53,16 @@ finishing with the word `COMPLETE` as the round contract requires.
 Receipt fields (see `dist/receipts/explicit-implicit-e2e-proof.json`):
 
 - `proof`: `explicit-implicit-e2e`
-- `gitSha`: `5c87c76575060f28e75b2825d8b5795d430a085e` (receipt-generation commit;
-  the E2E harness + contract test + this evidence doc)
+- `gitSha`: `5c66519287a8837c992a9fe4265bdc309826c656` (receipt-generation commit;
+  the E2E harness + contract test)
 - `mainSha`: `7f00515cb288dccd70b3606b457052e4782a4130`
-- `sourceDigest`: `sha256:69b84e484d77c71e63777882544e3fef1c23ec47aa7e2b78ccd9b704c55b7002`
+- `sourceDigest`: `sha256:f9ca29460c4d97c9d4986b6d13ccee97300fe9ae704cf4e3f01e02eff4f981c8`
 - `rounds[0]`: `terminalState: succeeded`, `executionEpoch: 1`,
-  `toolCallIds: [call_01a0de95a311767dbd993ecc, call_01a0de95a311767dbd993ecd]`,
+  `toolCallIds: [call_8851953c9a5949a6abee9075, call_40e165eb3197444cb4c5616f]`,
   output contains `EXPLICIT_IMPLICIT_E2E_MARKER_7A1C`, `FIRST_LINE_PROVEN_8B2D`,
   and `COMPLETE`.
 - `rounds[1]`: `terminalState: succeeded`, `executionEpoch: 2`,
-  `toolCallIds: [call_01a0de95a311767dbd993ecd, call_00_YXf4joKqGsnwJf4bpwRE6124]`,
+  `toolCallIds: [call_ljdh8w0z7vydqrqu8094ggjh]`,
   output contains `FIRST_LINE_PROVEN_8B2D` and `COMPLETE`.
 
 ## Focused contract test
