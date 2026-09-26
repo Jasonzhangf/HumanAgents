@@ -183,6 +183,16 @@ function openEventStream(url) {
 
 const terminalFinal = (events) => events.some((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final');
 
+async function waitForTaskIdle(base, taskId, timeoutMs = EVENT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const dashboard = await jsonRequest(`${base}/api/tasks/${taskId}/dashboard`);
+    if (!['running', 'settling', 'waiting'].includes(dashboard.state)) return dashboard;
+    if (Date.now() > deadline) throw new Error(`task ${taskId} stayed ${dashboard.state} before becoming idle`);
+    await new Promise((settle) => setTimeout(settle, 250));
+  }
+}
+
 async function runProtocol(protocol) {
   const root = await mkdtemp(join(tmpdir(), `humanagent-ui-loop-${protocol}-`));
   await mkdir(join(root, 'workspace'), { recursive: true });
@@ -222,6 +232,7 @@ async function runProtocol(protocol) {
       checkpoint: dashboard.checkpoint ?? null,
       error: dashboard.error ?? null,
     };
+    await waitForTaskIdle(`${launched.url}`, taskId);
     await stream.close();
 
     // stop -> settle -> stopped checkpoint -> close
