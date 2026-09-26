@@ -74,10 +74,10 @@ export interface ImplicitExecutorDispatchResult extends ImplicitExecutorPlanInpu
 }
 
 export interface ImplicitBrainFifoDrainOptions {
-  readonly taskId: TaskId;
-  readonly scope: ScopeRef;
-  readonly executionEpoch: number;
-  readonly inputRevision: number;
+  readonly taskId?: TaskId;
+  readonly scope?: ScopeRef;
+  readonly executionEpoch?: number;
+  readonly inputRevision?: number;
   readonly queueLoad: QueueLoadSnapshot;
   readonly requiredCapabilities: readonly string[];
   readonly availableCapabilities: readonly string[];
@@ -90,16 +90,51 @@ export interface ImplicitBrainFifoDrainOptions {
 
 export type ImplicitBrainFifoDrainResult =
   | { readonly kind: 'empty' }
+  | { readonly kind: 'retired' }
   | (ImplicitExecutorDispatchResult & {
       readonly kind: 'succeeded' | ImplicitExecutorTerminalStatus;
     });
 
+export interface ImplicitRequirementRetireInput {
+  readonly envelope: RequirementEnvelope;
+  readonly ownerId: string;
+}
+
+export interface ImplicitRequirementDispatchInput {
+  readonly envelope: RequirementEnvelope;
+  readonly admission: RequirementAdmissionReceipt;
+  readonly ownerId: string;
+  readonly scope: ScopeRef;
+  readonly executionEpoch: number;
+  readonly inputRevision: number;
+}
+
+export interface ImplicitRequirementDispatchSucceeded extends ImplicitRequirementDispatchInput {
+  readonly status: 'succeeded';
+  readonly taskId: TaskId;
+  readonly operationId?: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export interface ImplicitRequirementDispatchFailed extends ImplicitRequirementDispatchInput {
+  readonly status: ImplicitExecutorTerminalStatus;
+  readonly taskId?: TaskId;
+  readonly issue?: OrchestrationIssue;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export type ImplicitRequirementDispatchResult =
+  | ImplicitRequirementDispatchSucceeded
+  | ImplicitRequirementDispatchFailed;
+
 export interface ImplicitBrainFifoOptions {
   readonly inbox: RequirementInbox;
   readonly consumerId: string;
-  readonly orchestration: OrchestrationManager;
+  readonly orchestration?: OrchestrationManager;
   readonly ownerId?: string;
   readonly planSubtasks?: (input: ImplicitExecutorPlanInput) => readonly ExecutorSubtask[];
+  readonly retireHead?: (input: ImplicitRequirementRetireInput) => Promise<boolean>;
+  readonly dispatchRequirement?: (input: ImplicitRequirementDispatchInput) => Promise<ImplicitRequirementDispatchResult>;
   readonly admit?: (input: {
     readonly envelope: RequirementEnvelope;
     readonly queueLoad: QueueLoadSnapshot;
@@ -282,8 +317,10 @@ export class ImplicitBrainFifo {
   readonly ownerId: string;
   private readonly inbox: RequirementInbox;
   private readonly consumerId: string;
-  private readonly orchestration: OrchestrationManager;
+  private readonly orchestration?: OrchestrationManager;
   private readonly planSubtasks: (input: ImplicitExecutorPlanInput) => readonly ExecutorSubtask[];
+  private readonly retireHead?: (input: ImplicitRequirementRetireInput) => Promise<boolean>;
+  private readonly dispatchRequirement?: (input: ImplicitRequirementDispatchInput) => Promise<ImplicitRequirementDispatchResult>;
   private readonly admit: NonNullable<ImplicitBrainFifoOptions['admit']>;
 
   constructor(options: ImplicitBrainFifoOptions) {
@@ -293,6 +330,11 @@ export class ImplicitBrainFifo {
     this.inbox = options.inbox;
     this.consumerId = options.consumerId;
     this.orchestration = options.orchestration;
+    this.retireHead = options.retireHead;
+    this.dispatchRequirement = options.dispatchRequirement;
+    if (!this.orchestration && !this.dispatchRequirement) {
+      throw new Error('implicit FIFO requires either an orchestration manager or a dispatchRequirement port');
+    }
     this.planSubtasks = options.planSubtasks ?? createDefaultImplicitExecutorSubtasks;
     this.admit = options.admit ?? defaultAdmit;
   }
@@ -300,6 +342,9 @@ export class ImplicitBrainFifo {
   async drainNext(input: ImplicitBrainFifoDrainOptions): Promise<ImplicitBrainFifoDrainResult> {
     const envelope = await this.inbox.peekNext({ consumerId: this.consumerId });
     if (!envelope) return { kind: 'empty' };
+    if (this.retireHead && await this.retireHead({ envelope, ownerId: this.ownerId })) {
+      return { kind: 'retired' };
+    }
     const admission = this.admit({
       envelope,
       queueLoad: input.queueLoad,
@@ -311,6 +356,50 @@ export class ImplicitBrainFifo {
       checkpoint: input.checkpoint,
       ownerId: this.ownerId,
     });
+    if (this.dispatchRequirement) {
+      const result = await this.dispatchRequirement({
+        envelope,
+        admission,
+        ownerId: this.ownerId,
+        scope: input.scope ?? { organId: id('organ', 'implicit-fifo') },
+        executionEpoch: input.executionEpoch ?? 0,
+        inputRevision: input.inputRevision ?? 0,
+      });
+      if (result.status === 'succeeded') {
+        await this.inbox.acknowledge({
+          consumerId: this.consumerId,
+          requirementId: envelope.requirementId,
+        });
+        return {
+          kind: 'succeeded',
+          status: 'succeeded',
+          envelope,
+          admission,
+          taskId: result.taskId,
+          scope: result.scope,
+          executionEpoch: result.executionEpoch,
+          inputRevision: result.inputRevision,
+          dispatches: [],
+          evidenceRefs: result.evidenceRefs ?? [],
+        };
+      }
+      return {
+        kind: result.status,
+        status: result.status,
+        envelope,
+        admission,
+        taskId: result.taskId ?? input.taskId ?? id('task', 'implicit-fifo'),
+        scope: result.scope,
+        executionEpoch: result.executionEpoch,
+        inputRevision: result.inputRevision,
+        dispatches: [],
+        evidenceRefs: result.evidenceRefs ?? [],
+        ...(result.issue === undefined ? {} : { issue: result.issue }),
+      };
+    }
+    if (!input.taskId || !input.scope || input.executionEpoch === undefined || input.inputRevision === undefined) {
+      throw new Error('implicit FIFO orchestration mode requires taskId, scope, executionEpoch, and inputRevision');
+    }
     const planInput: ImplicitExecutorPlanInput = {
       envelope,
       admission,
@@ -323,7 +412,7 @@ export class ImplicitBrainFifo {
       ? input.planSubtasks(planInput)
       : this.planSubtasks(planInput);
     const dispatched = await dispatchImplicitExecutorSubtasks({
-      orchestration: this.orchestration,
+      orchestration: this.orchestration!,
       ...planInput,
       subtasks,
     });

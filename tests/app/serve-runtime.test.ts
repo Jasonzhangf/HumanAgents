@@ -87,8 +87,16 @@ async function waitForTaskState(read: () => string, expected: string): Promise<v
 async function waitForRuntimeTask(runtime: Awaited<ReturnType<typeof startUiRuntime>>): Promise<Task['id']> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const tasks = runtime.service.listTasks();
-    const row = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.failed, ...tasks.draft][0];
-    if (row) return row.taskId;
+    const rows = [...tasks.running, ...tasks.waiting, ...tasks.completed, ...tasks.failed, ...tasks.draft];
+    for (const row of rows) {
+      try {
+        runtime.service.taskDashboard(row.taskId);
+        return row.taskId;
+      } catch {
+        // Synthetic queued rows are not coordinator tasks; keep looking for the
+        // real task created by FIFO dispatch before returning a task id.
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('runtime did not consume the confirmed requirement');

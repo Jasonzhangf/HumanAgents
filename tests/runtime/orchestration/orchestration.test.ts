@@ -1699,3 +1699,33 @@ test('implicit FIFO keeps a failed head pending and tracks evidence to terminal 
   assert.equal(result.evidenceRefs.some((ref) => ref.locator.includes(`fail-${firstAssignmentId}`)), true);
   assert.equal(inbox.size, 1);
 });
+
+test('implicit FIFO lets the pre-admit retirement port remove a stale head before dispatch', async () => {
+  const inbox = new RequirementInbox();
+  await appendImplicitConfirmed(inbox, implicitEnvelope());
+  const { orchestration, executor } = implicitAssembly();
+  const retired: string[] = [];
+  const brain = new ImplicitBrainFifo({
+    inbox,
+    consumerId: 'implicit-test',
+    orchestration,
+    retireHead: async ({ envelope, ownerId }) => {
+      assert.equal(ownerId, 'humanagent.runtime.implicit');
+      retired.push(envelope.requirementId);
+      await inbox.retire({
+        consumerId: 'implicit-test',
+        requirementId: envelope.requirementId,
+        code: 'task.not.found',
+        message: 'stale head',
+        retiredAt: '2026-09-25T00:00:00.000Z',
+      });
+      return true;
+    },
+  });
+
+  const result = await brain.drainNext(implicitDrainOptions());
+  assert.deepEqual(result, { kind: 'retired' });
+  assert.deepEqual(retired, ['requirement-implicit-a']);
+  assert.equal(executor.inputs.length, 0);
+  assert.equal(inbox.size, 0);
+});
