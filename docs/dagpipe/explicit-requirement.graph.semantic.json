@@ -1,0 +1,18 @@
+{
+  "graph": "humanagent-explicit-requirement",
+  "labels": {
+    "sensory_inbox": "接收用户任务",
+    "explicit_normalize": "显式整理需求",
+    "explicit_confirm": "用户确认需求",
+    "implicit_classify": "隐式分类需求",
+    "interactive_queue": "写入交互队列",
+    "execution_queue": "写入执行队列",
+    "research_queue": "写入研究队列",
+    "maintenance_queue": "写入维护队列",
+    "task_correlate_or_create": "关联或创建任务",
+    "resource_admission": "执行资源准入",
+    "pipeline_execute": "执行流水线任务",
+    "settle": "收拢任务检查点",
+    "task_output": "生成任务输出"
+  }
+}

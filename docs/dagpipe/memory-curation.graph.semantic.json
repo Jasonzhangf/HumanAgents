@@ -1,0 +1,11 @@
+{
+  "graph": "humanagent-memory-curation",
+  "labels": {
+    "wake_memory_agent": "唤醒记忆 Agent",
+    "read_task_evidence": "读取任务证据",
+    "compose_memory_request": "组装记忆请求",
+    "run_memory_agent": "运行记忆 Agent",
+    "curate_lesson": "整理经验候选",
+    "write_memory_event": "写入持久经验"
+  }
+}

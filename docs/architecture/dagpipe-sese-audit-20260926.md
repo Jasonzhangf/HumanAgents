@@ -43,6 +43,27 @@ one declared input and leaves exactly one declared output.
 The graphs are not a function-call map. Node labels are business steps; the
 mapping table below is supporting traceability, not the semantic graph itself.
 
+## 语义标签机制
+
+The graph JSON schema keeps stable English node IDs and Operator bindings. A sibling
+`*.graph.semantic.json` file carries the Chinese business-step label for every node.
+`pnpm dagpipe:validate` requires that every node in each graph has a semantic label and
+that each label contains at least one CJK character. The DAGpipe CLI still validates the
+graph JSON itself without reading the semantic overlay, so topology validation and
+business-label checking remain explicit and machine-checked separately.
+
+Graph-to-label mapping:
+
+| Graph JSON | Semantic label file |
+|---|---|
+| `docs/dagpipe/explicit-requirement.graph.json` | `docs/dagpipe/explicit-requirement.graph.semantic.json` |
+| `docs/dagpipe/headless-session.graph.json` | `docs/dagpipe/headless-session.graph.semantic.json` |
+| `docs/dagpipe/serve-task.graph.json` | `docs/dagpipe/serve-task.graph.semantic.json` |
+| `docs/dagpipe/memory-curation.graph.json` | `docs/dagpipe/memory-curation.graph.semantic.json` |
+| `docs/dagpipe/observation-read.graph.json` | `docs/dagpipe/observation-read.graph.semantic.json` |
+
+Each semantic label file uses `{ "graph": "<graph-id>", "labels": { "<node-id>": "<中文业务步骤>" } }`.
+
 ## Semantic DAG: explicit requirement mainline
 
 ```mermaid
