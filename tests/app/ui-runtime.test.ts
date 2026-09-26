@@ -2017,6 +2017,8 @@ test('queued requirement row resolves through taskDashboard before and after dis
   assert.equal(queuedDashboard.taskId.value, queuedRow.taskId.value);
   assert.equal(queuedDashboard.state, 'created');
   assert.equal(queuedDashboard.currentNode, 'implicit.classify');
+  const queuedObservation = service.observation(queuedRow.taskId);
+  assert.equal(queuedObservation.scope.scopeRef, `task://${queuedRow.taskId.value}/observation`);
 
   const dispatched = await service.dispatchNextExplicitRequirement();
   assert.equal(dispatched.requirement.requirementId, 'requirement:draft-1:1');

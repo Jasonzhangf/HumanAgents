@@ -1306,6 +1306,45 @@ export class UiRuntimeService {
     return this.queuedTaskSnapshots().find((candidate) => candidate.taskId.value === taskId.value);
   }
 
+  /**
+   * A queued requirement has no coordinator task yet, so read surfaces that
+   * need the coordinator snapshot shape get an explicit zero-fact projection:
+   * the requirement exists, but nothing has been admitted or executed.
+   */
+  private queuedRuntimeTaskSnapshot(taskId: TaskId): RuntimeTaskSnapshot | undefined {
+    const queued = this.queuedTaskSnapshot(taskId);
+    if (!queued) return undefined;
+    return {
+      taskId: queued.taskId,
+      title: queued.title,
+      directive: queued.input,
+      directiveRevision: 1,
+      state: queued.state,
+      currentState: queued.currentState,
+      nextStep: queued.nextStep,
+      updatedAt: queued.updatedAt,
+      input: queued.input,
+      output: queued.output,
+      currentNode: queued.currentNode,
+      orchestrated: false,
+      allowedActions: queued.allowedActions,
+      recentEvents: [],
+      events: [],
+    };
+  }
+
+  private coordinatorOrQueuedTaskSnapshot(taskId: TaskId): RuntimeTaskSnapshot {
+    try {
+      return this.coordinator.taskSnapshot(taskId);
+    } catch (error) {
+      if (error instanceof RuntimeTaskControlError && error.code === 'task.not.found') {
+        const queued = this.queuedRuntimeTaskSnapshot(taskId);
+        if (queued) return queued;
+      }
+      throw error;
+    }
+  }
+
   listTasks(): RuntimeTaskListProjection {
     return projectRuntimeTaskList({
       mode: this.mode,
@@ -1336,12 +1375,8 @@ export class UiRuntimeService {
 
   taskDashboard(taskId: TaskId): RuntimeTaskDashboardProjection {
     try {
-      return projectRuntimeTaskDashboard(this.coordinator.taskSnapshot(taskId), this.mode);
+      return projectRuntimeTaskDashboard(this.coordinatorOrQueuedTaskSnapshot(taskId), this.mode);
     } catch (error) {
-      if (error instanceof RuntimeTaskControlError && error.code === 'task.not.found') {
-        const queued = this.queuedTaskSnapshot(taskId);
-        if (queued) return projectRuntimeTaskDashboard(queued, this.mode);
-      }
       throw apiError(error);
     }
   }
@@ -1403,7 +1438,7 @@ export class UiRuntimeService {
 
   observation(taskId: TaskId, selectedNodeId?: string, scopeRef?: string): PipelineObservationProjection {
     try {
-      const task = this.coordinator.taskSnapshot(taskId);
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
       const rootScopeRef = `task://${taskId.value}/observation`;
       const providerScopeRef = `${rootScopeRef}/pipeline.execute`;
       if (scopeRef !== undefined && scopeRef !== rootScopeRef && scopeRef !== providerScopeRef) {
