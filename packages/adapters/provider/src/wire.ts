@@ -35,6 +35,11 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.content_part.added'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
   | { readonly protocol: 'responses'; readonly type: 'response.content_part.done'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.done'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.added'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly part: ResponsesWireReasoningSummaryPart }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: ResponsesWireReasoningSummaryDelta }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly part: ResponsesWireReasoningSummaryPart }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_text.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_text.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly text: string }
   // Live providers may omit `item_id` and identify the call by call_id.
   | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.delta'; readonly item_id?: string; readonly call_id?: string; readonly output_index?: number; readonly delta: string }
   | { readonly protocol: 'responses'; readonly type: 'response.function_call_arguments.done'; readonly item_id?: string; readonly call_id?: string; readonly output_index?: number; readonly arguments: string }
@@ -53,6 +58,14 @@ export type ResponsesWireOutputItem =
   // Responses providers may omit `id` on function_call output items; call_id
   // is the required identity (see the codecs function_call branches).
   | { readonly type: 'function_call'; readonly id?: string; readonly call_id: string; readonly name: string; readonly arguments: string };
+
+export type ResponsesWireReasoningSummaryPart =
+  | { readonly type: 'reasoning_summary'; readonly summary?: readonly { readonly type?: 'summary_text'; readonly text?: string }[]; readonly text?: string }
+  | { readonly type?: 'summary_text'; readonly text?: string };
+
+export type ResponsesWireReasoningSummaryDelta =
+  | { readonly type: 'reasoning_summary_text'; readonly text: string }
+  | { readonly type?: 'summary_text'; readonly text: string };
 
 export interface ResponsesWireError {
   readonly code: string;

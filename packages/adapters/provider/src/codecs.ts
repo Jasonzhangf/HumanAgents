@@ -132,6 +132,20 @@ function responsesTextSummary(context: DecodeContext, itemId: string, text: stri
   return delta.length > 0 ? delta : undefined;
 }
 
+function responsesReasoningSummaryText(record: Record<string, unknown>): string {
+  if (typeof record.text === 'string') return record.text;
+  const summary = record.summary;
+  if (Array.isArray(summary)) {
+    const text = summary
+      .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object')
+      .filter((entry) => typeof entry.text === 'string')
+      .map((entry) => entry.text as string)
+      .join('');
+    if (text.length > 0) return text;
+  }
+  return '';
+}
+
 async function captureEvidence(context: DecodeContext, type: string, locator: string, value?: unknown, kind: EvidenceRef['kind'] = 'execution'): Promise<EvidenceRef> {
   return context.evidence.write({
     scope: context.scope,
@@ -602,6 +616,33 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         return text === undefined || text === ''
           ? { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), evidenceRefs)] }
           : { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `output/${itemId}`), [artifactRef(raw.type, `output/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
+      }
+      case 'response.reasoning_summary_part.added':
+      case 'response.reasoning_summary_part.done': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const part = requireObject(record, 'part', context.execution, raw.type);
+        const text = responsesReasoningSummaryText(part);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+      }
+      case 'response.reasoning_summary_part.delta': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const delta = requireObject(record, 'delta', context.execution, raw.type);
+        const text = responsesReasoningSummaryText(delta);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+      }
+      case 'response.reasoning_summary_text.delta': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const delta = requireStringValue(record, 'delta', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+      }
+      case 'response.reasoning_summary_text.done': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const text = requireStringValue(record, 'text', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
       }
       case 'response.function_call_arguments.delta': {
         const itemId = requireToolEventIdentity(record, context.execution, raw.type);
