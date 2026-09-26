@@ -1,0 +1,92 @@
+{
+  "id": "humanagent-headless-session",
+  "version": "1",
+  "meta": {
+    "title": "CLI run/resume 从会话方案到可恢复终端",
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+  },
+  "inputs": [
+    { "id": "session_plan", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "resolve_config",
+      "operator": "humanagent-resolve-config",
+      "operator_version": "1",
+      "inputs": ["session_plan"],
+      "output": { "id": "runtime_paths", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "acquire_session_lock",
+      "operator": "humanagent-acquire-session-lock",
+      "operator_version": "1",
+      "inputs": ["runtime_paths"],
+      "output": { "id": "session_handle", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "recover_or_create_operation",
+      "operator": "humanagent-recover-or-create-operation",
+      "operator_version": "1",
+      "inputs": ["session_handle"],
+      "output": { "id": "operation_request", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "execute_agent",
+      "operator": "humanagent-execute-agent",
+      "operator_version": "1",
+      "inputs": ["operation_request"],
+      "output": { "id": "agent_events", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "observe_events",
+      "operator": "humanagent-observe-events",
+      "operator_version": "1",
+      "inputs": ["agent_events"],
+      "output": { "id": "observed_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_checkpoint",
+      "operator": "humanagent-headless-commit-checkpoint",
+      "operator_version": "1",
+      "inputs": ["observed_evidence"],
+      "output": { "id": "computed_checkpoint", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "close_session",
+      "operator": "humanagent-close-session",
+      "operator_version": "1",
+      "inputs": ["computed_checkpoint"],
+      "output": { "id": "terminal_session", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "resolve_config", "to": "acquire_session_lock", "arc_id": "runtime_paths" },
+    { "from": "acquire_session_lock", "to": "recover_or_create_operation", "arc_id": "session_handle" },
+    { "from": "recover_or_create_operation", "to": "execute_agent", "arc_id": "operation_request" },
+    { "from": "execute_agent", "to": "observe_events", "arc_id": "agent_events" },
+    { "from": "observe_events", "to": "commit_checkpoint", "arc_id": "observed_evidence" },
+    { "from": "commit_checkpoint", "to": "close_session", "arc_id": "computed_checkpoint" }
+  ],
+  "outputs": ["terminal_session"]
+}
