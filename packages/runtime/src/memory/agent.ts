@@ -732,7 +732,16 @@ function providerCuration(curation: unknown, input: MemoryAnalysisRequest, promp
     throw new ContractError('memory provider curation reports another operation');
   }
   const result = { ...(curation as object), operationId: admitted } as unknown as MemoryCurationResult;
-  validateMemoryCurationResult(result);
+  // A provider casts the curation decision; the memory owner assigns the
+  // durable candidate identity when the candidate is admitted. Validate the
+  // decision with a placeholder identity so a provider-authored candidateId is
+  // never required to cross the provider boundary.
+  validateMemoryCurationResult({
+    ...result,
+    ...(result.outcome === 'candidate'
+      ? { candidateId: result.candidateId ?? `memory-analysis:${input.operationId.value}` }
+      : {}),
+  });
   if (
     result.auditPrompt.promptRef !== prompt.promptRef
     || result.auditPrompt.canonicalRef !== prompt.canonicalRef
@@ -1468,7 +1477,16 @@ export class MemoryAgent {
             ),
           };
         }
-        validateMemoryCurationResult(outcome);
+        // A provider casts the curation decision; the memory owner assigns the
+        // durable candidate identity when the candidate is admitted. The
+        // candidateId here is only a validation placeholder until
+        // submitCandidate returns the authoritative id below.
+        validateMemoryCurationResult({
+          ...outcome,
+          ...(outcome.outcome === 'candidate'
+            ? { candidateId: outcome.candidateId ?? `memory-analysis:${input.operationId.value}` }
+            : {}),
+        });
         if (outcome.outcome !== 'candidate') {
           this.analyses.set(input.operationId.value, {
             request: {
