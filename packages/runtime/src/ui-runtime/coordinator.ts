@@ -1984,7 +1984,11 @@ export class RuntimeTaskCoordinator {
           ? { kind: 'stop', ref: `task://${record.taskId.value}/terminal` }
           : { kind: 'continue', ref: `task://${record.taskId.value}/next` };
     const checkpoint: Checkpoint = {
-      id: id('checkpoint', `checkpoint-${record.taskId.value}-${record.checkpointSeq + 1}`),
+      // The checkpoint sequence is per task, but execution epochs reuse the
+      // same task id. Include the epoch so a later execution cannot commit
+      // under the same checkpoint identity as an earlier epoch; each epoch
+      // still keeps its own root sequence (seq 1, no predecessor).
+      id: id('checkpoint', `checkpoint-${record.taskId.value}-${record.executionEpoch ?? 1}-${record.checkpointSeq + 1}`),
       scope: businessScope,
       cycleId: businessScope.cycleId!,
       seq: record.checkpointSeq + 1,

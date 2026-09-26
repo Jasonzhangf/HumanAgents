@@ -548,6 +548,61 @@ test('confirmed requirement preserves non-success provider closures through orch
   }
 });
 
+test('same-task execution epochs commit epoch-scoped checkpoint ids', async () => {
+  const eventBus = await eventBusPorts();
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-epoch-checkpoint-'));
+  const binding = fakeExecutionBinding({ bindingId: 'serve-epoch-checkpoint' });
+  const runtimeComposition = createServeRuntimeComposition({
+    eventBusPorts: eventBus.ports,
+    feedbackPorts: {
+      journal: eventBus.ports.journal,
+      publishers: eventBus.ports.publishers,
+    },
+    feedbackPublisherId: 'serve-test',
+    ...createDeterministicServeOrchestrationPorts(),
+  });
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId: id('organ', 'humanagent-ui'),
+    binding,
+    port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    portNumber: 0,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    memory: {
+      coordinator: new MemoryCoordinator(),
+      backend: new DeterministicMemoryBackend(),
+      projectKey: 'serve-epoch-checkpoint',
+    },
+    runtimeComposition,
+  });
+  try {
+    const task = runtime.service.createTask({ title: 'epoch checkpoint identity' });
+    runtime.service.startExecution(task.taskId, { prompt: 'first epoch' });
+    await waitForTaskState(() => runtime.service.taskDashboard(task.taskId).state, 'succeeded');
+    const firstDashboard = runtime.service.taskDashboard(task.taskId);
+    const first = firstDashboard.checkpoint;
+    if (!first) throw new Error('epoch 1 checkpoint missing');
+
+    runtime.service.startExecution(task.taskId, { prompt: 'second epoch' });
+    await waitForTaskState(() => runtime.service.taskDashboard(task.taskId).state, 'succeeded');
+    const secondDashboard = runtime.service.taskDashboard(task.taskId);
+    const second = secondDashboard.checkpoint;
+    if (!second) throw new Error('epoch 2 checkpoint missing');
+    assert.ok(second.checkpointId !== first.checkpointId, 'epoch 2 checkpoint reuses epoch 1 checkpoint id');
+    assert.match(second.checkpointId, /^checkpoint-.+-2-1$/, `epoch 2 checkpoint id should include epoch: ${second.checkpointId}`);
+    assert.equal(secondDashboard.executionEpoch, 2);
+    assert.equal(second.seq, 1);
+  } finally {
+    await runtime.server.close();
+    await runtimeComposition.dispose();
+    await eventBus.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('RCC orchestration ports provide review and merge agents for the live execution owner', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-agent-task'),
