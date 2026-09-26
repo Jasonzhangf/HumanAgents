@@ -68,7 +68,8 @@ Receipt fields (see `dist/receipts/explicit-implicit-e2e-proof.json`):
 ## Focused contract test
 
 `node tests/app/multiround-e2e-contract.test.mjs` exercises the exportable
-`assertReceiptContract` function with a valid two-round receipt and five
+`assertReceiptContract` function with a valid two-round receipt and nine
 intentionally broken receipts (single round, non-succeeded terminal, missing
-git binding, missing tool call id, rounds on different tasks). All six subtests
-pass.
+git binding, missing main binding, malformed source digest, invalid provider
+call id, missing tool call id, round 2 without a new tool call id, rounds on
+different tasks). All ten subtests pass.
