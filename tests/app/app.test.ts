@@ -752,6 +752,7 @@ class StopCloseDriver extends FakeAgentDriver {
 class MemoryAnalysisDriver implements AgentDriver {
   readonly kind = 'memory-analysis-composition-test';
   readonly events: string[] = [];
+  readonly observations: string[] = [];
   private readonly submissions = new Map<string, AgentInput>();
 
   async capabilities() {
@@ -774,6 +775,7 @@ class MemoryAnalysisDriver implements AgentDriver {
   async submit(input: AgentInput): Promise<AgentOutput> {
     this.events.push(`submit:${input.assignmentId}`);
     this.submissions.set(input.assignmentId, structuredClone(input));
+    this.observations.push(String((input.payload as { readonly observation?: unknown }).observation ?? ''));
     return {
       taskId: input.taskId,
       executionEpoch: input.executionEpoch,
@@ -5246,6 +5248,25 @@ test('serve entry publishes a task-scoped checkpoint through the task-bound cons
       taskEvents[0]?.evidenceRefs.some((ref) => ref.locator.startsWith('humanagent://task/')),
       true,
     );
+    const runEvidenceRef = taskEvents[0]?.evidenceRefs.find((ref) => ref.locator.startsWith('fake/'));
+    if (!runEvidenceRef) throw new Error('task-bound run evidence ref is missing');
+    assert.equal(
+      taskEvents[0]?.evidenceRefs.some((ref) => ref.locator.startsWith('humanagent://checkpoint/')),
+      true,
+    );
+    const taskEvidence = filesystemTaskEvidence({ journalPath });
+    const resolved = await taskEvidence.readEvidence!({ evidence: runEvidenceRef });
+    assert.equal(resolved.sourceRef, runEvidenceRef.locator);
+    assert.equal(resolved.sourceDigest, runEvidenceRef.digest);
+    assert.match(resolved.text, /fake\//);
+    assert.match(
+      driver.observations[0] ?? '',
+      /teach the task-bound memory consumer a reusable serve lesson/,
+    );
+    assert.match(driver.observations[0] ?? '', /complete through the serve entry boundary/);
+    assert.match(driver.observations[0] ?? '', /fake replay: final output chunk 2/);
+    assert.equal(reviewState.analysis.state, 'succeeded');
+    assert.equal(reviewState.candidates[0]?.state, 'candidate');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
