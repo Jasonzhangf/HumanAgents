@@ -410,14 +410,15 @@ async function main() {
     };
     const second = await interpretUntilDraft(base, secondInput);
     steps.round2Draft = second.draft;
-    const secondConfirm = await confirmDraft(base, second.interaction, second.draft, {
+    await confirmDraft(base, second.interaction, second.draft, {
       confirmationRef: `confirmation-${second.draft.draftId}`,
       confirmedBy: 'e2e-user',
       confirmedAt: new Date().toISOString(),
       payloadRef: `humanagent://e2e/requirement/${second.draft.draftId}`,
     });
-    if (secondConfirm.taskRef?.value !== firstTaskId) {
-      throw new Error(`round-two confirmation did not bind to ${firstTaskId}: ${JSON.stringify(secondConfirm)}`);
+    const boundTask = second.draft.matchedTasks.find((task) => task.relation === 'current');
+    if (boundTask?.taskId?.value !== firstTaskId) {
+      throw new Error(`round-two draft did not bind to ${firstTaskId}: ${JSON.stringify(second.draft.matchedTasks)}`);
     }
     steps.round2Admission = await assertAdmissionObservation(base, second.draft.draftId, firstTaskId);
     const secondTerminal = await pollTaskState(base, firstTaskId, TERMINAL_TIMEOUT_MS, (firstTerminal.executionEpoch ?? 0) + 1);
