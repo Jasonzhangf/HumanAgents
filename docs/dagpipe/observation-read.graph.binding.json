@@ -1,0 +1,25 @@
+{
+  "graph": "humanagent-observation-read",
+  "operator": {
+    "operator": "humanagent-observation-read",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "http_api": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts"
+    },
+    "task_dashboard": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    },
+    "observation_projection": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    },
+    "browser_view": {
+      "ownerPath": "packages/ui/surfaces/dsh-dashboard-replay.html",
+      "ownerRel": "packages/ui/surfaces/dsh-dashboard-replay.html"
+    }
+  }
+}

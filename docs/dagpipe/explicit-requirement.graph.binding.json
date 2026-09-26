@@ -1,0 +1,61 @@
+{
+  "graph": "humanagent-explicit-requirement",
+  "operator": {
+    "operator": "humanagent-explicit-requirement",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "sensory_inbox": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "explicit_normalize": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+    },
+    "explicit_confirm": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+    },
+    "implicit_classify": {
+      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
+      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    },
+    "interactive_queue": {
+      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    },
+    "execution_queue": {
+      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    },
+    "research_queue": {
+      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    },
+    "maintenance_queue": {
+      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    },
+    "task_correlate_or_create": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+    },
+    "resource_admission": {
+      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
+      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    },
+    "pipeline_execute": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+    },
+    "settle": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
+    },
+    "task_output": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    }
+  }
+}

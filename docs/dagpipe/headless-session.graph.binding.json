@@ -1,0 +1,37 @@
+{
+  "graph": "humanagent-headless-session",
+  "operator": {
+    "operator": "humanagent-headless-session",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "resolve_config": {
+      "ownerPath": "packages/config/src/index.ts",
+      "ownerRel": "packages/config/src/index.ts"
+    },
+    "acquire_session_lock": {
+      "ownerPath": "packages/app/src/session-store.ts",
+      "ownerRel": "packages/app/src/session-store.ts"
+    },
+    "recover_or_create_operation": {
+      "ownerPath": "packages/app/src/run-operation.ts",
+      "ownerRel": "packages/app/src/run-operation.ts"
+    },
+    "execute_agent": {
+      "ownerPath": "packages/app/src/agent-execution.ts",
+      "ownerRel": "packages/app/src/agent-execution.ts"
+    },
+    "observe_events": {
+      "ownerPath": "packages/app/src/agent-execution.ts",
+      "ownerRel": "packages/app/src/agent-execution.ts"
+    },
+    "commit_checkpoint": {
+      "ownerPath": "packages/app/src/checkpoint-journal.ts",
+      "ownerRel": "packages/app/src/checkpoint-journal.ts"
+    },
+    "close_session": {
+      "ownerPath": "packages/app/src/session-store.ts",
+      "ownerRel": "packages/app/src/session-store.ts"
+    }
+  }
+}

@@ -3,6 +3,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { loadGraphBinding, validateBinding } from './dagpipe-bind-graphs.mjs';
+
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const graphDir = join(projectRoot, 'docs', 'dagpipe');
 const hanRegex = /[\u3400-\u9FFF\uF900-\uFAFF]/;
@@ -40,6 +42,9 @@ for (const file of graphs) {
   }
 
   execFileSync('dagpipe', ['graph', 'validate', graphPath], { stdio: 'inherit' });
+
+  const { binding } = loadGraphBinding(graphPath);
+  validateBinding(graph, binding);
 }
 
 console.log(`validated ${graphs.length} DAGpipe graph(s)`);
