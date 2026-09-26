@@ -380,6 +380,7 @@ function assertCommittedCheckpoint(dashboard) {
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), 'ha-explicit-implicit-4-e2e-'));
+  const keepRoot = process.env.HUMANAGENT_EI_KEEP_ROOT === '1';
   await mkdir(join(root, 'workspace'), { recursive: true });
   await writeFile(join(root, 'workspace', 'marker.txt'), 'EXPLICIT_IMPLICIT_E2E_MARKER_7A1C\n', 'utf8');
   await writeFile(join(root, 'workspace', 'readme-first-line.txt'), 'FIRST_LINE_PROVEN_8B2D\n', 'utf8');
@@ -526,7 +527,11 @@ async function main() {
     console.log(JSON.stringify(receipt, null, 2));
   } finally {
     if (serve) await serve.stop();
-    await rm(root, { recursive: true, force: true });
+    if (keepRoot) {
+      console.error(`HUMANAGENT_EI_ROOT=${root}`);
+    } else {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 }
 

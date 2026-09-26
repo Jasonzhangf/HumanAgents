@@ -264,8 +264,7 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           acceptanceCriteria: material.acceptanceCriteria,
           acceptanceCriteriaDigest: material.acceptanceCriteriaDigest,
           subjects: material.subjects,
-          workerSummary: request.workerResult.summary,
-          instruction: 'Evaluate the acceptance criteria against each subject body below. The subject bodies are the artifact; a summary, ref, or digest is never a substitute for them. End on the final line with exactly HUMANAGENT_REVIEW: passed, failed, or inconclusive',
+          instruction: 'Evaluate the acceptance criteria against each subject body below. Each subject body is the artifact under review; a summary, ref, or digest is never a substitute for it. Judge only from the subject bodies and the stated criteria; do not require filesystem access or evidence outside the review material. End on the final line with exactly HUMANAGENT_REVIEW: passed, failed, or inconclusive',
         }),
       );
       let provider!: Awaited<ReturnType<typeof runProviderAgent>>;
