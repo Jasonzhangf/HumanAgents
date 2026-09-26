@@ -3,10 +3,16 @@ import test from 'node:test';
 import {
   id,
   type EvidenceRef,
+  type RequirementEnvelope,
   type ScopeRef,
   type WorkAssignment,
   type WorkResult,
 } from '../../../packages/contracts/src/index.js';
+import { RequirementInbox } from '../../../packages/runtime/src/intake/requirement-inbox.js';
+import {
+  ImplicitBrainFifo,
+  createDefaultImplicitExecutorSubtasks,
+} from '../../../packages/runtime/src/admission/index.js';
 import {
   AgentRuntimePoolManager,
   AssignmentGraph,
@@ -1473,4 +1479,223 @@ test('retry control stays out of business objective and all failure issues carry
       && Array.isArray((error as { evidenceRefs?: unknown }).evidenceRefs)
       && (error as { evidenceRefs: unknown[] }).evidenceRefs.length > 0,
   );
+});
+
+const implicitOrgan = id('organ', 'implicit-brain-organ');
+const implicitTask = id('task', 'implicit-brain-task');
+const implicitScope: ScopeRef = { organId: implicitOrgan, taskId: implicitTask };
+
+function implicitEvidence(label: string): EvidenceRef {
+  const safeValue = label.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 80);
+  return {
+    evidenceId: id('evidence', `implicit-test-${safeValue}`),
+    kind: 'operation',
+    source: 'implicit-brain-test',
+    locator: label,
+    scope: implicitScope,
+  };
+}
+
+class ImplicitRuntimeFactory implements OrchestrationRuntimeFactoryPort {
+  async start(input: Parameters<OrchestrationRuntimeFactoryPort['start']>[0]) {
+    return {
+      runtimeId: input.runtimeId,
+      generation: input.generation,
+      capabilities: [...input.requiredCapabilities],
+    };
+  }
+
+  async dispose(): Promise<void> {}
+}
+
+class ImplicitExecutor implements ExecutionAgentPort {
+  readonly inputs: ExecutionAgentInput[] = [];
+
+  constructor(private readonly failures = new Set<string>()) {}
+
+  async execute(input: ExecutionAgentInput): Promise<WorkResult> {
+    this.inputs.push(input);
+    const assignment = input.assignment;
+    if (this.failures.has(assignment.assignmentId)) {
+      return {
+        taskId: assignment.taskId,
+        pipelineNodeId: assignment.pipelineNodeId,
+        agentId: input.agentId,
+        assignmentId: assignment.assignmentId,
+        attempt: assignment.attempt,
+        executionEpoch: assignment.executionEpoch,
+        inputRevision: assignment.inputRevision,
+        producedArtifactRefs: [],
+        producedArtifactDigests: [],
+        status: 'failed',
+        summary: 'implicit executor failed',
+        outputRefs: [],
+        evidenceRefs: [implicitEvidence(`fail-${assignment.assignmentId}`)],
+        nextAction: 'attention',
+        failureRef: `asset://implicit/${assignment.assignmentId}/failure`,
+      };
+    }
+    return {
+      taskId: assignment.taskId,
+      pipelineNodeId: assignment.pipelineNodeId,
+      agentId: input.agentId,
+      assignmentId: assignment.assignmentId,
+      attempt: assignment.attempt,
+      executionEpoch: assignment.executionEpoch,
+      inputRevision: assignment.inputRevision,
+      producedArtifactRefs: [...assignment.targetRefs],
+      producedArtifactDigests: [digestOf('implicit artifact body')],
+      producedArtifactBodies: ['implicit artifact body'],
+      status: 'succeeded',
+      summary: 'implicit executor succeeded',
+      outputRefs: [...assignment.expectedOutputRefs],
+      evidenceRefs: [implicitEvidence(`ok-${assignment.assignmentId}`)],
+      nextAction: 'review',
+    };
+  }
+}
+
+class ImplicitReviewAgent implements ReviewAgentPort {
+  readonly results: ReviewResult[] = [];
+
+  async review(input: Parameters<ReviewAgentPort['review']>[0]): Promise<ReviewResult> {
+    const reviewResult: ReviewResult = {
+      resultId: `review-${input.reviewAssignment.assignmentId}`,
+      assignmentId: input.reviewAssignment.assignmentId,
+      taskId: input.reviewAssignment.taskId,
+      workerAgentId: input.reviewAssignment.workerAgentId,
+      reviewKind: input.reviewAssignment.reviewKind,
+      attempt: input.reviewAssignment.attempt,
+      executionEpoch: input.reviewAssignment.executionEpoch,
+      inputRevision: input.reviewAssignment.inputRevision,
+      acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+      subjectRefs: [...input.reviewAssignment.subjectRefs],
+      subjectDigests: [...input.reviewAssignment.subjectDigests],
+      status: 'passed',
+      findings: [],
+      evidenceRefs: [implicitEvidence(`review-${input.reviewAssignment.assignmentId}`)],
+    };
+    this.results.push(reviewResult);
+    return reviewResult;
+  }
+}
+
+function implicitAssembly(failures = new Set<string>()) {
+  const factory = new ImplicitRuntimeFactory();
+  const pool = new AgentRuntimePoolManager({
+    maxRuntimes: 4,
+    factory,
+    initialRuntimes: [{ runtimeId: 'implicit-runtime', capabilities: ['code.search', 'file.checkpoint'] }],
+  });
+  const executor = new ImplicitExecutor(failures);
+  const review = new ImplicitReviewAgent();
+  const orchestration = new OrchestrationManager({
+    ownerId: 'implicit-test',
+    runtimePool: pool,
+    executionAgent: executor,
+    reviewAgent: review,
+    maxAttempts: 1,
+  });
+  return { orchestration, executor, review };
+}
+
+function implicitEnvelope(overrides: Partial<RequirementEnvelope> = {}): RequirementEnvelope {
+  return {
+    requirementId: 'requirement-implicit-a',
+    draftId: 'draft-implicit-a',
+    inputRevision: 1,
+    intent: 'create',
+    normalizedInput: 'find code evidence and write checkpoint',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-25T00:00:00.000Z',
+    fifoSeq: 1,
+    payloadRef: 'asset://requirements/implicit-a',
+    ...overrides,
+  };
+}
+
+async function appendImplicitConfirmed(inbox: RequirementInbox, envelope: RequirementEnvelope): Promise<void> {
+  inbox.markConfirmed(envelope);
+  await inbox.append(envelope);
+}
+
+function implicitDrainOptions() {
+  return {
+    taskId: implicitTask,
+    scope: implicitScope,
+    executionEpoch: 1,
+    inputRevision: 1,
+    queueLoad: { running: 0, queued: 0 },
+    requiredCapabilities: ['code.search', 'file.checkpoint'],
+    availableCapabilities: ['code.search', 'file.checkpoint'],
+    health: 'healthy' as const,
+    requiredInputRefs: ['asset://requirements/implicit-a'],
+    providedInputRefs: ['asset://requirements/implicit-a'],
+    checkpoint: { recoverable: true },
+  };
+}
+
+test('implicit FIFO admits and dispatches executor subtasks to terminal success with evidence', async () => {
+  const inbox = new RequirementInbox();
+  await appendImplicitConfirmed(inbox, implicitEnvelope());
+  const { orchestration, executor, review } = implicitAssembly();
+  const brain = new ImplicitBrainFifo({
+    inbox,
+    consumerId: 'implicit-test',
+    orchestration,
+  });
+
+  const result = await brain.drainNext(implicitDrainOptions());
+  assert.equal(result.kind, 'succeeded');
+  if (result.kind !== 'succeeded') return;
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.dispatches.length, 2);
+  assert.equal(executor.inputs.length, 2);
+  assert.deepEqual(
+    executor.inputs.map((input) => input.assignment.requiredCapabilities[0]),
+    ['code.search', 'file.checkpoint'],
+  );
+  assert.equal(review.results.length, 2);
+  assert.equal(result.evidenceRefs.length >= 2, true);
+  assert.equal(inbox.size, 0);
+});
+
+test('implicit FIFO keeps a failed head pending and tracks evidence to terminal escalation', async () => {
+  const inbox = new RequirementInbox();
+  const envelope = implicitEnvelope();
+  await appendImplicitConfirmed(inbox, envelope);
+  const planInput = {
+    envelope,
+    admission: {
+      classified: { envelope, queue: 'execution' as const },
+      decision: {
+        status: 'admitted' as const,
+        queue: 'execution' as const,
+        ownerId: 'implicit-test',
+        condition: 'admitted',
+        nextAction: { kind: 'continue', ref: 'orchestration.bind' } as const,
+        reason: 'admission requirements are satisfied',
+      },
+    },
+    taskId: implicitTask,
+    scope: implicitScope,
+    executionEpoch: 1,
+    inputRevision: 1,
+  };
+  const plan = createDefaultImplicitExecutorSubtasks(planInput);
+  const firstAssignmentId = plan[0]!.assignmentId;
+  const { orchestration } = implicitAssembly(new Set([firstAssignmentId]));
+  const brain = new ImplicitBrainFifo({
+    inbox,
+    consumerId: 'implicit-test',
+    orchestration,
+  });
+
+  const result = await brain.drainNext(implicitDrainOptions());
+  assert.equal(result.kind, 'escalated');
+  if (result.kind !== 'escalated') return;
+  assert.equal(result.dispatches.length, 1);
+  assert.equal(result.dispatches[0]?.assignment.assignment.assignmentId, firstAssignmentId);
+  assert.equal(result.evidenceRefs.some((ref) => ref.locator.includes(`fail-${firstAssignmentId}`)), true);
+  assert.equal(inbox.size, 1);
 });
