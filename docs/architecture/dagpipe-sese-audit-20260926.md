@@ -170,6 +170,8 @@ Allowed in this audit candidate:
 
 - `docs/dagpipe/**`
 - `docs/architecture/dagpipe-sese-audit-20260926.md`
+- `scripts/dagpipe-validate-graphs.mjs`
+- `package.json` script `dagpipe:validate`
 
 Forbidden in this audit candidate:
 
@@ -194,6 +196,12 @@ dagpipe graph validate docs/dagpipe/headless-session.graph.json
 dagpipe graph validate docs/dagpipe/serve-task.graph.json
 dagpipe graph validate docs/dagpipe/memory-curation.graph.json
 dagpipe graph validate docs/dagpipe/observation-read.graph.json
+```
+
+Repeatable gate:
+
+```sh
+pnpm dagpipe:validate
 ```
 
 `dagpipe graph inspect` provides operator bindings and deterministic waves. It
