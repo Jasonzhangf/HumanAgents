@@ -236,11 +236,12 @@ function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inc
 }
 
 /**
- * A real reviewer can drop the required terminal marker even when its provider
- * call succeeded. Retrying that real call a bounded number of times keeps an
- * unformatted reply from permanently wedging the Harness review gate. An
- * explicit `passed`/`failed`/`inconclusive` verdict is honored as-is, so the
- * gate is never steered toward a pass.
+ * A real reviewer can drop the required terminal marker, or return an explicit
+ * `inconclusive` verdict, even when its provider call succeeded. Retrying that
+ * real call a bounded number of times keeps a non-terminal reply from
+ * permanently wedging the Harness review gate. An explicit `passed` or
+ * `failed` verdict is honored immediately, so the gate is never steered toward
+ * a pass.
  */
 const REVIEW_ATTEMPTS = 3;
 
@@ -283,12 +284,19 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           prompt,
         });
         marker = provider.settlement.state === 'succeeded' ? reviewMarker(provider.events) : undefined;
-        if (marker !== undefined || provider.settlement.state !== 'succeeded') break;
+        if (marker === 'passed' || marker === 'failed' || provider.settlement.state !== 'succeeded') break;
       }
       const evidenceRefs = uniqueEvidence(provider.events, provider.settlement, request.scope);
-      const status: ReviewResult['status'] = provider.settlement.state !== 'succeeded'
-        ? provider.settlement.state === 'failed' || provider.settlement.state === 'unknown' ? 'failed' : 'inconclusive'
-        : marker ?? 'inconclusive';
+      const providerFailed = provider.settlement.state !== 'succeeded'
+        && (provider.settlement.state === 'failed' || provider.settlement.state === 'unknown');
+      const exhaustedInconclusive = provider.settlement.state === 'succeeded'
+        && marker !== 'passed'
+        && marker !== 'failed';
+      const status: ReviewResult['status'] = providerFailed || marker === 'failed' || exhaustedInconclusive
+        ? 'failed'
+        : provider.settlement.state === 'succeeded' && marker === 'passed'
+          ? 'passed'
+          : 'inconclusive';
       const findings = status !== 'passed'
         ? [{
             findingId: `finding-${request.reviewAssignment.assignmentId}`,
@@ -297,10 +305,16 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
             problem: eventSummary(
               provider.events,
               status === 'failed'
-                ? 'provider review failed'
-                : 'provider review did not return a terminal HUMANAGENT_REVIEW marker',
+                ? providerFailed
+                  ? 'provider review failed'
+                  : marker === 'failed'
+                    ? 'provider review returned an explicit failed verdict'
+                    : 'review remained inconclusive after the bounded re-review attempts; escalate or re-review with additional evidence'
+                : 'provider review remained inconclusive after the bounded re-review attempts',
             ),
-            expected: 'review must pass the assigned acceptance criteria and return one terminal HUMANAGENT_REVIEW marker',
+            expected: providerFailed
+              ? 'provider review must settle successfully and return a terminal HUMANAGENT_REVIEW verdict'
+              : 'review must return a terminal HUMANAGENT_REVIEW passed or failed verdict within the bounded re-review attempts; a bounded recover/re-review consumer must own the inconclusive result',
             evidenceRefs,
           }]
         : [];

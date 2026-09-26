@@ -691,7 +691,7 @@ test('RCC orchestration ports provide review and merge agents for the live execu
   assert.ok(merged.evidenceRefs.length > 0);
 });
 
-test('RCC review agent remains inconclusive when the model omits its review marker', async () => {
+test('RCC review agent fails closed when the model exhausts retries without a review marker', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-omission'),
     organId: id('organ', 'humanagent-ui'),
@@ -751,9 +751,9 @@ test('RCC review agent remains inconclusive when the model omits its review mark
     reviewMaterial: materialFor(workAssignment, worker),
     scope,
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
-  assert.match(review.findings[0]!.expected, /terminal HUMANAGENT_REVIEW marker/);
+  assert.match(review.findings[0]!.expected, /bounded recover\/re-review consumer/);
 });
 
 test('RCC review agent retries a real provider reply that dropped the terminal marker', async () => {
@@ -818,6 +818,31 @@ test('RCC review agent retries a real provider reply that dropped the terminal m
   });
   assert.equal(review.status, 'passed');
   assert.equal(review.findings.length, 0);
+});
+
+test('RCC review agent retries an inconclusive verdict before accepting a later pass', async () => {
+  const review = await reviewWithProviderText({
+    taskSuffix: 'inconclusive-then-pass',
+    provider: providerPort({
+      state: 'succeeded',
+      reviewMarkerSequence: ['HUMANAGENT_REVIEW: inconclusive', 'HUMANAGENT_REVIEW: passed'],
+    }),
+  });
+  assert.equal(review.status, 'passed');
+  assert.deepEqual(review.findings, []);
+});
+
+test('RCC review agent honors an explicit failed verdict without retrying to pass', async () => {
+  const review = await reviewWithProviderText({
+    taskSuffix: 'failed-not-retried',
+    provider: providerPort({
+      state: 'succeeded',
+      reviewMarkerSequence: ['HUMANAGENT_REVIEW: failed', 'HUMANAGENT_REVIEW: passed'],
+    }),
+  });
+  assert.equal(review.status, 'failed');
+  assert.equal(review.findings.length, 1);
+  assert.match(review.findings[0]!.problem, /HUMANAGENT_REVIEW: failed/);
 });
 
 test('RCC review agent uses the terminal verdict when review markers conflict', async () => {
