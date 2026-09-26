@@ -236,6 +236,15 @@ function reviewMarker(events: readonly AgentEvent[]): 'passed' | 'failed' | 'inc
 }
 
 /**
+ * A real reviewer can drop the required terminal marker even when its provider
+ * call succeeded. Retrying that real call a bounded number of times keeps an
+ * unformatted reply from permanently wedging the Harness review gate. An
+ * explicit `passed`/`failed`/`inconclusive` verdict is honored as-is, so the
+ * gate is never steered toward a pass.
+ */
+const REVIEW_ATTEMPTS = 3;
+
+/**
  * RCC-backed agent ports. Provider output is evidence; only the provider
  * terminal state and an explicit review marker can advance the Harness gate.
  * Merge remains Harness-owned and never becomes a model tool call.
@@ -259,20 +268,25 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
           instruction: 'Evaluate the acceptance criteria against each subject body below. The subject bodies are the artifact; a summary, ref, or digest is never a substitute for them. End with HUMANAGENT_REVIEW: passed, failed, or inconclusive',
         }),
       );
-      const provider = await runProviderAgent({
-        role: 'review',
-        port: input.port,
-        binding: input.binding,
-        taskId: id('task', request.reviewAssignment.taskId),
-        assignmentId: request.reviewAssignment.assignmentId,
-        attempt: request.reviewAssignment.attempt,
-        executionEpoch: request.reviewAssignment.executionEpoch,
-        scope: request.scope,
-        inputRefs: request.reviewAssignment.subjectRefs,
-        prompt,
-      });
+      let provider!: Awaited<ReturnType<typeof runProviderAgent>>;
+      let marker: ReturnType<typeof reviewMarker>;
+      for (let attemptIndex = 0; attemptIndex < REVIEW_ATTEMPTS; attemptIndex += 1) {
+        provider = await runProviderAgent({
+          role: 'review',
+          port: input.port,
+          binding: input.binding,
+          taskId: id('task', request.reviewAssignment.taskId),
+          assignmentId: request.reviewAssignment.assignmentId,
+          attempt: request.reviewAssignment.attempt + attemptIndex,
+          executionEpoch: request.reviewAssignment.executionEpoch,
+          scope: request.scope,
+          inputRefs: request.reviewAssignment.subjectRefs,
+          prompt,
+        });
+        marker = provider.settlement.state === 'succeeded' ? reviewMarker(provider.events) : undefined;
+        if (marker !== undefined || provider.settlement.state !== 'succeeded') break;
+      }
       const evidenceRefs = uniqueEvidence(provider.events, provider.settlement, request.scope);
-      const marker = reviewMarker(provider.events);
       const status: ReviewResult['status'] = provider.settlement.state !== 'succeeded'
         ? provider.settlement.state === 'failed' || provider.settlement.state === 'unknown' ? 'failed' : 'inconclusive'
         : marker ?? 'inconclusive';

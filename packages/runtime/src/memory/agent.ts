@@ -1043,18 +1043,32 @@ export class MemoryAgent {
     if (!Number.isSafeInteger(input.executionEpoch) || input.executionEpoch < 1) throw new ContractError('memory binding execution epoch must be positive');
     const existing = this.bindings.get(input.bindingRef);
     if (existing) {
-      if (
-        existing.projectKey !== input.projectKey
-        || existing.executionEpoch !== input.executionEpoch
-        || scopeKey(existing.scope) !== scopeKey(input.scope)
-        || !sameTask(existing.taskId, input.taskId)
-        || existing.interactionScopeId !== input.interactionScopeId
-        || existing.mainAgentId !== input.mainAgentId
-        || existing.operations !== input.operations
-      ) {
+      const sameIdentity =
+        existing.projectKey === input.projectKey
+        && scopeKey(existing.scope) === scopeKey(input.scope)
+        && sameTask(existing.taskId, input.taskId)
+        && existing.interactionScopeId === input.interactionScopeId
+        && existing.mainAgentId === input.mainAgentId
+        && existing.operations === input.operations;
+      if (!sameIdentity) {
         throw new ContractError('memory binding conflicts with an existing binding');
       }
-      return existing;
+      if (existing.executionEpoch === input.executionEpoch) return existing;
+      // A task-scoped binding advances to the next execution epoch for the same
+      // task, mirroring the memory coordinator's bindTask advance. The task
+      // bindingRef is stable across epochs, so the newer epoch must replace the
+      // previous one instead of being rejected as a conflicting identity.
+      if (
+        existing.interactionScopeId === undefined
+        && input.interactionScopeId === undefined
+        && input.taskId !== undefined
+        && input.executionEpoch > existing.executionEpoch
+      ) {
+        const advanced = { ...input };
+        this.bindings.set(input.bindingRef, advanced);
+        return advanced;
+      }
+      throw new ContractError('memory binding conflicts with an existing binding');
     }
     const existingMainAgent = [...this.bindings.values()].find(
       (candidate) => candidate.mainAgentId === input.mainAgentId,

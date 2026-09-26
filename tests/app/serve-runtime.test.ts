@@ -155,7 +155,15 @@ function providerBinding(): ProviderBinding {
   };
 }
 
-function providerPort(input: { readonly state: ProviderSettlement['state']; readonly reviewMarker?: string; readonly reviewMarkers?: readonly string[]; readonly outputRef?: string; readonly chunkedReviewText?: readonly string[]; readonly organId?: ReturnType<typeof id<'organ'>> }): ExecutionRuntimePort {
+function providerPort(input: {
+  readonly state: ProviderSettlement['state'];
+  readonly reviewMarker?: string;
+  readonly reviewMarkers?: readonly string[];
+  readonly reviewMarkerSequence?: readonly (string | undefined)[];
+  readonly outputRef?: string;
+  readonly chunkedReviewText?: readonly string[];
+  readonly organId?: ReturnType<typeof id<'organ'>>;
+}): ExecutionRuntimePort {
   const binding = providerBinding();
   // A real provider reports the scope it was admitted under. Hardcoding a
   // foreign organ here would make the fixture produce evidence the task-scoped
@@ -170,6 +178,7 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
     scope,
   });
   let active: { readonly runtimeId: string; readonly taskId: ReturnType<typeof id<'task'>>; readonly operationId: ReturnType<typeof id<'operation'>>; readonly executionEpoch: number; readonly scope: ScopeRef } | undefined;
+  let observeCount = 0;
   const readiness: ProviderReadiness = {
     bindingId: binding.bindingId,
     providerId: binding.providerId,
@@ -221,6 +230,8 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
     }),
     observe: async function* (): AsyncIterable<ProviderEvent> {
       if (!active) throw new Error('missing active provider execution');
+      const sequenceMarker = input.reviewMarkerSequence?.[observeCount];
+      observeCount += 1;
       // A reviewer reply split across SSE chunks arrives as several output
       // events; the review parser must reconstruct the whole reply from them.
       if (input.chunkedReviewText) {
@@ -245,7 +256,9 @@ function providerPort(input: { readonly state: ProviderSettlement['state']; read
         };
         return;
       }
-      const reviewMarkers = input.reviewMarkers ?? (input.reviewMarker === undefined ? [] : [input.reviewMarker]);
+      const reviewMarkers = sequenceMarker !== undefined
+        ? [sequenceMarker]
+        : input.reviewMarkers ?? (input.reviewMarker === undefined ? [] : [input.reviewMarker]);
       yield {
         ...active,
         eventId: `output-${active.runtimeId}`,
@@ -686,6 +699,70 @@ test('RCC review agent remains inconclusive when the model omits its review mark
   assert.equal(review.status, 'inconclusive');
   assert.equal(review.findings.length, 1);
   assert.match(review.findings[0]!.expected, /unambiguous review marker/);
+});
+
+test('RCC review agent retries a real provider reply that dropped the terminal marker', async () => {
+  const task: Task = {
+    id: id('task', 'serve-rcc-review-retry'),
+    organId: id('organ', 'humanagent-ui'),
+    title: 'RCC review retry',
+    directive: 'recover a markerless provider reply with a bounded real retry',
+    directiveRevision: 1,
+    state: 'created',
+    memoryScope: 'task',
+  };
+  const scope: ScopeRef = { organId: task.organId, taskId: task.id, cycleId: id('cycle', 'serve-rcc-review-retry-cycle') };
+  const ports = createRccServeOrchestrationPorts({
+    port: providerPort({ state: 'succeeded', reviewMarkerSequence: [undefined, 'HUMANAGENT_REVIEW: passed'] }),
+    binding: providerBinding(),
+    promptSegments: { review: ['review system prompt'] },
+  });
+  const reviewAssignment: ReviewAssignment = {
+    assignmentId: 'serve-rcc-retry-review',
+    taskId: task.id.value,
+    workerAgentId: 'serve-rcc-execution-agent',
+    reviewKind: 'quality',
+    attempt: 1,
+    executionEpoch: 1,
+    inputRevision: 1,
+    acceptanceCriteriaDigest: 'sha256:serve-rcc-review-retry-criteria',
+    subjectRefs: ['serve-output'],
+    subjectDigests: [],
+    workerCapabilities: ['provider.execution'],
+    requiredCapabilities: ['quality.review'],
+    mergeGate: 'required',
+  };
+  const workerAssignment: WorkAssignment = {
+    ...assignment(task),
+    assignmentId: 'serve-rcc-retry-worker',
+    expectedArtifactDigests: [digestOf(serveArtifactBody)],
+  };
+  const workerResult: WorkResult = {
+    ...assignment(task),
+    pipelineNodeId: 'serve-stage',
+    agentId: 'serve-rcc-execution-agent',
+    assignmentId: 'serve-rcc-retry-worker',
+    executionEpoch: 1,
+    attempt: 1,
+    inputRevision: 1,
+    taskId: task.id,
+    producedArtifactRefs: ['serve-output'],
+    producedArtifactDigests: [digestOf(serveArtifactBody)],
+    status: 'succeeded',
+    summary: 'worker result',
+    outputRefs: ['serve-output'],
+    evidenceRefs: [],
+    nextAction: 'review',
+  };
+  const review = await ports.reviewAgent.review({
+    reviewAssignment,
+    workerAssignment,
+    workerResult,
+    reviewMaterial: materialFor(workerAssignment, workerResult),
+    scope,
+  });
+  assert.equal(review.status, 'passed');
+  assert.equal(review.findings.length, 0);
 });
 
 test('RCC review agent remains inconclusive when review markers conflict', async () => {
