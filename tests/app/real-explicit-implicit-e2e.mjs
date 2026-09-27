@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const RCC_BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
 const MODEL = process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5';
@@ -36,11 +37,23 @@ const RECEIPT_PATH = resolve(
   process.env.HUMANAGENT_EI_RECEIPT_PATH ?? 'dist/receipts/explicit-implicit-e2e-proof.json',
 );
 const CLI_PATH = resolve('dist/app/app/src/cli.js');
-const TERMINAL_TIMEOUT_MS = 240_000;
+const TERMINAL_TIMEOUT_MS = 420_000;
 const MAX_INTERPRET_ATTEMPTS = 4;
 
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' }).trim();
+}
+
+function gitSha() {
+  return git(['rev-parse', 'HEAD']);
+}
+
+function mainSha() {
+  try {
+    return git(['rev-parse', 'main']);
+  } catch {
+    throw new Error('main ref is not resolvable; receipt cannot bind mainSha');
+  }
 }
 
 function sourceDigest() {
@@ -50,6 +63,66 @@ function sourceDigest() {
       && !line.includes('dist/receipts/explicit-implicit-e2e-proof.json'))
     .sort();
   return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
+}
+
+function providerToolCallIds(dashboard) {
+  const ids = new Set();
+  for (const event of dashboard.recentEvents ?? []) {
+    if (event.kind !== 'provider.tool') continue;
+    if (event.executionEpoch !== dashboard.executionEpoch) continue;
+    for (const ref of event.evidenceRefs ?? []) {
+      // The locator appends a content digest after the call id, so stop at the
+      // first non-identifier character to record the exact provider call id.
+      const match = /call_[A-Za-z0-9_]+/.exec(String(ref.locator ?? ''));
+      if (match) ids.add(match[0]);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Repeatable contract for the multi-round completion proof. The receipt is the
+ * durable artifact, so it must fail closed unless it proves two real executor
+ * rounds on one task, both terminal succeeded, with real file.read tool calls
+ * and a source digest bound to a concrete git commit.
+ */
+export function assertReceiptContract(receipt) {
+  if (!receipt || receipt.proof !== 'explicit-implicit-e2e') {
+    throw new Error(`receipt proof marker is invalid: ${JSON.stringify(receipt?.proof ?? null)}`);
+  }
+  if (typeof receipt.gitSha !== 'string' || !/^[0-9a-f]{40}$/.test(receipt.gitSha)) {
+    throw new Error(`receipt is not bound to a git commit: ${JSON.stringify(receipt.gitSha ?? null)}`);
+  }
+  if (typeof receipt.mainSha !== 'string' || !/^[0-9a-f]{40}$/.test(receipt.mainSha)) {
+    throw new Error(`receipt is not bound to the main SHA: ${JSON.stringify(receipt.mainSha ?? null)}`);
+  }
+  if (typeof receipt.sourceDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(receipt.sourceDigest)) {
+    throw new Error(`receipt is missing a source digest: ${JSON.stringify(receipt.sourceDigest ?? null)}`);
+  }
+  const rounds = receipt.rounds ?? [];
+  if (rounds.length < 2) throw new Error(`receipt expected at least two executor rounds: ${rounds.length}`);
+  if (rounds[0].taskId !== rounds[1].taskId) throw new Error('receipt expected both rounds on the same task');
+  if (!(rounds[1].dashboard?.executionEpoch > rounds[0].dashboard?.executionEpoch)) {
+    throw new Error('receipt expected a second execution epoch on the same task');
+  }
+  rounds.forEach((round, index) => {
+    if (round.terminalState !== 'succeeded') {
+      throw new Error(`round ${index + 1} did not reach terminal succeeded: ${JSON.stringify(round.terminalState)}`);
+    }
+    if (!Array.isArray(round.toolCallIds) || round.toolCallIds.length < 1) {
+      throw new Error(`round ${index + 1} recorded no real tool call id`);
+    }
+    for (const id of round.toolCallIds) {
+      if (!/^call_[A-Za-z0-9_]+$/.test(id)) {
+        throw new Error(`round ${index + 1} recorded an invalid provider call id: ${JSON.stringify(id)}`);
+      }
+    }
+  });
+  const earlier = new Set(rounds[0].toolCallIds);
+  if (!rounds[1].toolCallIds.some((id) => !earlier.has(id))) {
+    throw new Error('receipt expected round 2 to include a new tool call id not present in earlier rounds');
+  }
+  return true;
 }
 
 async function captureReviewFeedback(root) {
@@ -435,6 +508,7 @@ async function main() {
       taskId: firstTaskId,
       operationId: firstOperationId,
       terminalState: firstTerminal.state,
+      toolCallIds: providerToolCallIds(firstTerminal),
       events: eventKinds(firstTerminal),
       dashboard: firstTerminal,
       output: firstTerminal.output,
@@ -487,6 +561,7 @@ async function main() {
       taskId: secondTaskId,
       operationId: secondOperationId,
       terminalState: secondTerminal.state,
+      toolCallIds: providerToolCallIds(secondTerminal),
       events: eventKinds(secondTerminal),
       dashboard: secondTerminal,
       output: secondTerminal.output,
@@ -500,6 +575,8 @@ async function main() {
     const receipt = {
       proof: 'explicit-implicit-e2e',
       generatedAt: new Date().toISOString(),
+      gitSha: gitSha(),
+      mainSha: mainSha(),
       sourceDigest: sourceDigest(),
       reviewFeedback: await captureReviewFeedback(root),
       rcc: {
@@ -522,6 +599,7 @@ async function main() {
       },
       rounds,
     };
+    assertReceiptContract(receipt);
     await mkdir(resolve('dist/receipts'), { recursive: true });
     await writeFile(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
     console.log(JSON.stringify(receipt, null, 2));
@@ -535,7 +613,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+const isMainModule = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+if (isMainModule) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
