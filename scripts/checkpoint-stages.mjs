@@ -12,7 +12,7 @@ export function checkpointStages({ includePackaging = false, releaseVersion = co
       { kind: 'path', value: 'packages/contracts/dist' },
     ] },
     { name: 'regression', owner: 'regression', dependsOn: ['compile'], command: ['pnpm', 'run', 'test:compiled:services'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'tests' }, { kind: 'path', value: 'scripts' }] },
-    { name: 'ci', owner: 'ci', dependsOn: ['regression'], command: ['pnpm', 'run', 'test:release'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: '.gitignore' }, { kind: 'path', value: 'scripts' }, { kind: 'path', value: 'tests/release' }] },
+    { name: 'ci', owner: 'ci', dependsOn: ['regression'], command: ['pnpm', 'run', 'dagpipe:gate'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'pnpm-lock.yaml' }, { kind: 'path', value: '.gitignore' }, { kind: 'path', value: 'scripts' }, { kind: 'path', value: 'tests/release' }, { kind: 'path', value: 'docs/dagpipe' }] },
   ];
   if (includePackaging) {
     stages.push(

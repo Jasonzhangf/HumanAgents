@@ -1,0 +1,33 @@
+{
+  "graph": "humanagent-memory-curation",
+  "operator": {
+    "operator": "humanagent-memory-curation",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "wake_memory_agent": {
+      "ownerPath": "packages/runtime/src/memory/events.ts",
+      "ownerRel": "packages/runtime/src/memory/events.ts"
+    },
+    "read_task_evidence": {
+      "ownerPath": "packages/app/src/memory-composition.ts",
+      "ownerRel": "packages/app/src/memory-composition.ts"
+    },
+    "compose_memory_request": {
+      "ownerPath": "packages/runtime/src/memory/agent.ts",
+      "ownerRel": "packages/runtime/src/memory/agent.ts"
+    },
+    "run_memory_agent": {
+      "ownerPath": "packages/runtime/src/memory/agent.ts",
+      "ownerRel": "packages/runtime/src/memory/agent.ts"
+    },
+    "curate_lesson": {
+      "ownerPath": "packages/runtime/src/memory/agent.ts",
+      "ownerRel": "packages/runtime/src/memory/agent.ts"
+    },
+    "write_memory_event": {
+      "ownerPath": "packages/runtime/src/memory/events.ts",
+      "ownerRel": "packages/runtime/src/memory/events.ts"
+    }
+  }
+}

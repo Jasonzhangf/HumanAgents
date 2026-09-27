@@ -1,0 +1,33 @@
+{
+  "graph": "humanagent-serve-task",
+  "operator": {
+    "operator": "humanagent-serve-task",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "fifo_peek": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "admission_check": {
+      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
+      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    },
+    "correlate_task": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+    },
+    "provider_execution": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "checkpoint_commit": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
+    },
+    "task_terminal": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    }
+  }
+}
