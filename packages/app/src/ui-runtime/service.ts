@@ -39,6 +39,7 @@ import {
   type StopRequestReceipt,
   type TaskId,
   type InteractionDecision,
+  type WorkResult,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
@@ -149,7 +150,7 @@ import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/
 import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
-import type { ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
+import { digestOf, type ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
 import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
@@ -767,6 +768,7 @@ export class UiRuntimeService {
           createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!(input),
         }),
       }),
+      implicitSubtaskExecutionAgent: this.createImplicitSubtaskExecutionAgent(),
       ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
     });
     this.implicitBrain = new ImplicitBrainFifo({
@@ -1118,6 +1120,117 @@ export class UiRuntimeService {
     return new MemoryBoundExecutionDriver(driver, input, this.memory, this.memoryInjection, (bound) => {
       this.memoryContexts.set(input.operationId.value, bound);
     });
+  }
+
+  private createImplicitSubtaskExecutionAgent(): ExecutionAgentPort {
+    return {
+      execute: async (input): Promise<WorkResult> => {
+        const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
+        const operationId = id('operation', `implicit-${input.assignment.assignmentId}-${input.attempt}`);
+        const driver = new ProviderAgentDriver({
+          port: this.options.port,
+          binding: this.options.binding,
+          runtimeId,
+          taskId: input.assignment.taskId,
+          operationId,
+          executionEpoch: input.executionEpoch,
+          assignmentId: input.assignment.assignmentId,
+          scope: { ...input.scope, operationId },
+          inputRefs: [...input.assignment.targetRefs, input.assignment.objective],
+          ownerId: RUNTIME_OWNER,
+          ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
+          ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
+        });
+        let started = false;
+        const events: AgentEvent[] = [];
+        try {
+          await driver.start({
+            runtimeId,
+            taskId: input.assignment.taskId,
+            executionEpoch: input.executionEpoch,
+            assignmentId: input.assignment.assignmentId,
+            organId: input.scope.organId,
+            ...(input.scope.cycleId === undefined ? {} : { cycleId: input.scope.cycleId }),
+            operationId,
+          });
+          started = true;
+          await driver.submit({
+            taskId: input.assignment.taskId,
+            executionEpoch: input.executionEpoch,
+            assignmentId: input.assignment.assignmentId,
+            payload: { prompt: input.assignment.objective },
+          });
+          for await (const event of driver.observe({ runtimeId })) {
+            events.push(event);
+            if (event.terminalState !== undefined) break;
+          }
+        } catch (error) {
+          if (started) {
+            try {
+              await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
+            } catch (settlementError) {
+              throw new Error(
+                `implicit executor failed and settlement also failed: ${settlementError instanceof Error ? settlementError.message : String(settlementError)}`,
+                { cause: error },
+              );
+            }
+          }
+          throw error;
+        }
+        await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
+        const settlement = driver.settlement();
+        if (!settlement) throw new Error('implicit executor did not expose settlement');
+        const producedOutput = events.map((event) => event.summary ?? '').join('');
+        const status: WorkResult['status'] = settlement.state === 'succeeded'
+          ? 'succeeded'
+          : settlement.state === 'waiting'
+            ? 'incomplete'
+            : settlement.state === 'blocked'
+              ? 'blocked'
+              : settlement.state === 'failed' || settlement.state === 'unknown'
+                ? 'failed'
+                : 'cancelled';
+        const nextAction: WorkResult['nextAction'] = status === 'succeeded'
+          ? 'review'
+          : status === 'incomplete'
+            ? 'wait'
+            : status === 'blocked' || status === 'failed'
+              ? 'attention'
+              : 'settle';
+        const evidenceRefs = [
+          ...events.flatMap((event) => event.evidenceRefs),
+          ...settlement.evidenceRefs,
+        ];
+        const outputRefs = input.assignment.expectedOutputRefs.length > 0
+          ? [...input.assignment.expectedOutputRefs]
+          : [...input.assignment.targetRefs];
+        return {
+          taskId: input.assignment.taskId,
+          pipelineNodeId: input.assignment.pipelineNodeId,
+          agentId: input.agentId,
+          assignmentId: input.assignment.assignmentId,
+          attempt: input.assignment.attempt,
+          executionEpoch: input.executionEpoch,
+          inputRevision: input.assignment.inputRevision,
+          producedArtifactRefs: outputRefs,
+          producedArtifactDigests: outputRefs.map(() => digestOf(producedOutput)),
+          producedArtifactBodies: outputRefs.map(() => producedOutput),
+          status,
+          summary: producedOutput.trim() === ''
+            ? `implicit executor ${input.agentId} ${status}`
+            : `implicit executor ${input.agentId} ${status}: ${producedOutput.trim()}`,
+          outputRefs,
+          evidenceRefs,
+          nextAction,
+          ...(status === 'incomplete'
+            ? { conditionRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/waiting` }
+            : {}),
+          ...(status === 'failed'
+            ? { failureRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/failed` }
+            : {}),
+        };
+      },
+    };
   }
 
   status(): RuntimeStatusProjection {
@@ -2081,6 +2194,10 @@ export class UiRuntimeService {
           title: consumed.normalizedInput,
           directive: consumed.normalizedInput,
         }));
+    const admission = this.requirementAdmissions.get(prepared.taskId.value)?.receipt;
+    const implicitRequirement = admission === undefined
+      ? undefined
+      : { envelope: consumed, admission };
     const operationId = prepared.operationId;
     let executionEpoch = prepared.executionEpoch;
     const isTaskInputUpdate = consumed.taskRef !== undefined
@@ -2114,6 +2231,7 @@ export class UiRuntimeService {
           prompt,
           ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
           operationId,
+          ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
         });
         if (pending) this.coordinator.consumeTaskInput(task.taskId, pending.inputRevision);
         executionEpoch = execution.executionEpoch;
@@ -2133,6 +2251,7 @@ export class UiRuntimeService {
           prompt: consumed.normalizedInput,
           ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
           operationId,
+          ...(implicitRequirement === undefined ? {} : { implicitRequirement }),
         });
         executionEpoch = execution.executionEpoch;
       }

@@ -65,6 +65,13 @@ import {
   buildFakeExecutionPort,
   startUiRuntime as startUiRuntimeOwner,
 } from '../../packages/app/src/ui-runtime/index.js';
+import {
+  AgentRuntimePoolManager,
+  OrchestrationManager,
+  type ExecutionAgentPort,
+  type MergeCoordinatorPort,
+  type ReviewAgentPort,
+} from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { RESPONSES_FILE_READ_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -525,6 +532,14 @@ function serviceFor(
     ...(hookRegistry ? { hookRegistry } : {}),
     explicitBrainInterpreter: explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
+}
+
+class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimePort {
+  startCount = 0;
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    this.startCount += 1;
+    return super.start(input);
+  }
 }
 
 function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId: string) {
@@ -2562,6 +2577,150 @@ test('runtime consumes a confirmed requirement without a browser dispatch reques
   await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
   await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
+});
+
+test('orchestrated confirmed requirement dispatches implicit executor agents through the real UI runtime', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-executor-dispatch-'));
+  const port = new CountingFakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 });
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-implicit-executor-dispatch'),
+    runtimeComposition: {
+      createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
+        const runtimePool = new AgentRuntimePoolManager({
+          maxRuntimes: 4,
+          factory: {
+            async start(request) {
+              return {
+                runtimeId: request.runtimeId,
+                generation: request.generation,
+                capabilities: [...request.requiredCapabilities],
+              };
+            },
+            async dispose() {},
+          },
+          ownerId: 'ui-runtime-test',
+          initialRuntimes: [{
+            runtimeId: 'ui-runtime-test-0',
+            generation: 1,
+            capabilities: ['code.search', 'file.checkpoint', 'provider.execution'],
+          }],
+        });
+        const reviewAgent: ReviewAgentPort = {
+          async review(input) {
+            const reviewResult = {
+              resultId: `review-${input.reviewAssignment.assignmentId}`,
+              assignmentId: input.reviewAssignment.assignmentId,
+              taskId: input.reviewAssignment.taskId,
+              workerAgentId: input.reviewAssignment.workerAgentId,
+              reviewKind: input.reviewAssignment.reviewKind,
+              attempt: input.reviewAssignment.attempt,
+              executionEpoch: input.reviewAssignment.executionEpoch,
+              inputRevision: input.reviewAssignment.inputRevision,
+              acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+              subjectRefs: [...input.reviewAssignment.subjectRefs],
+              subjectDigests: [...input.reviewAssignment.subjectDigests],
+              status: 'passed' as const,
+              findings: [],
+              evidenceRefs: [evidence('implicit-review', input.scope)],
+            };
+            return reviewResult;
+          },
+        };
+        const mergeCoordinator: MergeCoordinatorPort = {
+          async merge(request) {
+            return {
+              status: 'merged',
+              evidenceRefs: [
+                ...request.workerResult.evidenceRefs,
+                ...request.reviewResults.flatMap((review) => review.evidenceRefs),
+                evidence(`implicit-merge-${request.workerAssignment.assignmentId}`, request.scope),
+              ],
+            };
+          },
+        };
+        const orchestration = new OrchestrationManager({
+          ownerId: 'ui-runtime-test',
+          runtimePool,
+          executionAgent: executionAgent,
+          reviewAgent,
+          mergeCoordinator,
+          maxAttempts: maxAttempts ?? 1,
+        });
+        return { orchestration, runtimePool };
+      },
+    },
+  });
+  service.startImplicitConsumer();
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:implicit-executor-dispatch',
+    rawInput: 'search code and write checkpoint evidence',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'search code and write checkpoint evidence',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create the executor subtask task',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-executor-dispatch',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-26T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-executor-dispatch',
+  });
+  await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
+  await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
+  assert.ok(port.startCount >= 3, `expected provider execution plus implicit executor subtasks, got ${port.startCount}`);
+  const createdTaskId = service.listTasks().completed[0]?.taskId;
+  assert.ok(createdTaskId);
+  const afterCreateStarts = port.startCount;
+  const appendInteraction = await service.receiveExplicitInput({
+    sourceRef: 'ui:implicit-executor-append',
+    rawInput: 'append checkpoint evidence to the same task',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(appendInteraction);
+  await service.recordExplicitMatch(appendInteraction, {
+    normalizedInput: 'append checkpoint evidence to the same task',
+    matchedTasks: [{ taskId: createdTaskId, relation: 'current', status: 'running' }],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(appendInteraction, {
+    proposedIntent: 'append',
+    proposal: 'append evidence to the same task',
+  });
+  const appendProposed = await service.inspectExplicitInteraction(appendInteraction);
+  assert.ok(appendProposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: appendProposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:implicit-executor-append',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-09-26T00:00:00.000Z',
+    payloadRef: 'asset://requirements/implicit-executor-append',
+  });
+  await waitFor(() => assert.equal(port.startCount, afterCreateStarts + 1));
+  await waitFor(() => assert.equal(service.taskDashboard(createdTaskId).state, 'succeeded'));
+  assert.equal(port.startCount, afterCreateStarts + 1, 'interactive append must not dispatch extra implicit executor subtasks');
+  await rm(root, { recursive: true, force: true });
 });
 
 test('runtime admission waits on actual running load and resumes when capacity is released', async () => {

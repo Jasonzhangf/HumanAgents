@@ -57,6 +57,8 @@ export interface ImplicitExecutorPlanInput {
 export interface ImplicitExecutorDispatchOptions extends ImplicitExecutorPlanInput {
   readonly orchestration: OrchestrationManager;
   readonly subtasks: readonly ExecutorSubtask[];
+  readonly executionAgentOverride?: import('../orchestration/index.js').ExecutionAgentPort;
+  readonly parentStageNodeId?: string;
 }
 
 export type ImplicitExecutorTerminalStatus =
@@ -275,6 +277,7 @@ export async function dispatchImplicitExecutorSubtasks(
     options.orchestration.planStage({
       nodeId: subtask.stageNodeId,
       taskId: options.taskId,
+      ...(options.parentStageNodeId === undefined ? {} : { parentNodeId: options.parentStageNodeId }),
     });
     const assignment = assignmentForSubtask(subtask, options);
     const dispatched = await options.orchestration.dispatch({
@@ -283,6 +286,7 @@ export async function dispatchImplicitExecutorSubtasks(
       agentId: subtask.agentId,
       scope: options.scope,
       ...(subtask.reviewKinds ? { reviewKinds: subtask.reviewKinds } : {}),
+      ...(options.executionAgentOverride === undefined ? {} : { executionAgentOverride: options.executionAgentOverride }),
     });
     dispatches.push(dispatched);
     if (dispatched.status !== 'succeeded' && dispatched.status !== 'merged') {

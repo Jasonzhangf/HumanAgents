@@ -12,6 +12,7 @@ import { RequirementInbox } from '../../../packages/runtime/src/intake/requireme
 import {
   ImplicitBrainFifo,
   createDefaultImplicitExecutorSubtasks,
+  dispatchImplicitExecutorSubtasks,
 } from '../../../packages/runtime/src/admission/index.js';
 import {
   AgentRuntimePoolManager,
@@ -1658,6 +1659,43 @@ test('implicit FIFO admits and dispatches executor subtasks to terminal success 
   assert.equal(review.results.length, 2);
   assert.equal(result.evidenceRefs.length >= 2, true);
   assert.equal(inbox.size, 0);
+});
+
+test('implicit executor dispatch uses the execution agent override for every subtask', async () => {
+  const envelope = implicitEnvelope();
+  const admission = {
+    classified: { envelope, queue: 'execution' as const },
+    decision: {
+      status: 'admitted' as const,
+      queue: 'execution' as const,
+      ownerId: 'implicit-test',
+      condition: 'admitted',
+      nextAction: { kind: 'continue', ref: 'orchestration.bind' } as const,
+      reason: 'admission requirements are satisfied',
+    },
+  };
+  const planInput = {
+    envelope,
+    admission,
+    taskId: implicitTask,
+    scope: implicitScope,
+    executionEpoch: 1,
+    inputRevision: 1,
+  };
+  const { orchestration } = implicitAssembly();
+  const override = new ImplicitExecutor();
+  const result = await dispatchImplicitExecutorSubtasks({
+    orchestration,
+    ...planInput,
+    subtasks: createDefaultImplicitExecutorSubtasks(planInput),
+    executionAgentOverride: override,
+  });
+  assert.equal(result.status, 'succeeded');
+  assert.equal(override.inputs.length, 2);
+  assert.deepEqual(
+    override.inputs.map((input) => input.assignment.requiredCapabilities[0]),
+    ['code.search', 'file.checkpoint'],
+  );
 });
 
 test('implicit FIFO keeps a failed head pending and tracks evidence to terminal escalation', async () => {
