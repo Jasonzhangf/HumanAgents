@@ -384,6 +384,14 @@ export class OrchestrationManager {
         scope: input.scope,
       });
     } catch (error) {
+      const agent = input.executionAgentOverride ?? this.executionAgent;
+      if (agent?.release) {
+        try {
+          await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
+        } catch {
+          // Preserve the original execute error; release is best-effort cleanup.
+        }
+      }
       const executionIssue = issueFromUnknown(error, {
         code: 'execution-failed',
         ownerId: this.ownerId,
@@ -457,6 +465,10 @@ export class OrchestrationManager {
     if (resultIssue) return this.blockedResult(accepted.record, resultIssue, input.scope);
 
     if (accepted.record.status === 'retryable' || accepted.record.status === 'escalated' || accepted.record.status === 'blocked') {
+      const agent = input.executionAgentOverride ?? this.executionAgent;
+      if (agent?.release) {
+        await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
+      }
       const retry = accepted.record.status === 'retryable'
         ? retryAssignment(input.assignment, { reason: 'failed or incomplete result' })
         : undefined;
@@ -485,6 +497,10 @@ export class OrchestrationManager {
     }
 
     if (result.nextAction === 'attention') {
+      const agent = input.executionAgentOverride ?? this.executionAgent;
+      if (agent?.release) {
+        await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
+      }
       const escalated = this.graph.markEscalated(
         input.assignment,
         result.conditionRef ?? result.failureRef ?? 'work result requires attention',

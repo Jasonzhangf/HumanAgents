@@ -545,9 +545,10 @@ export class ProviderAdapter implements ExecutionRuntimePort {
   }
 
   private isFinalSettlement(result: ProviderSettlement): boolean {
-    return (result.state === 'succeeded' || result.state === 'stopped' || result.state === 'cancelled')
-      && result.resourceRelease.state === 'released'
-      && result.persistence.state === 'committed';
+    if (result.state === 'succeeded' || result.state === 'stopped' || result.state === 'cancelled') {
+      return result.resourceRelease.state === 'released' && result.persistence.state === 'committed';
+    }
+    return result.resourceRelease.state === 'released';
   }
 
   private async callTransport<T>(

@@ -819,6 +819,40 @@ test('provider adapter keeps active execution until settlement is final', async 
   assert.ok(observed.length > 0);
 });
 
+test('provider adapter releases terminal failure once resources are released even before persistence commit', async () => {
+  const failed = settlement({
+    state: 'failed',
+    resourceRelease: { state: 'released', evidenceRefs: [evidence('resource')] },
+    persistence: { state: 'pending', evidenceRefs: [evidence('persistence-pending')] },
+    error: {
+      errorId: 'provider.settle.continuation-unavailable',
+      code: 'capability.continuation-unavailable',
+      category: 'capability',
+      phase: 'settle',
+      message: 'provider cannot continue a fully observed waiting execution',
+      ownerId: 'humanagent.provider-adapter',
+      retryable: 'manual',
+      attention: 'foreground',
+      evidenceRefs: [evidence('error')],
+      nextAction: { kind: 'recover', ref: 'humanagent.provider-adapter' },
+    },
+  });
+  const transport = makeTransport(ccBinding, {
+    observe: async function* () {
+      yield { protocol: 'responses', type: 'response.output_text.delta', item_id: 'item-1', delta: 'x' };
+    },
+    settle: async () => failed,
+  });
+  const adapter = responsesAdapter(transport, ccBinding);
+
+  await adapter.start(startInput());
+  const settled = await adapter.settle(execution());
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'pending');
+  assert.equal((await adapter.close(ccBinding)).state, 'closed');
+});
+
 test('provider adapter rejects expired readiness/capability evidence and mismatched close receipts', async () => {
   const expiredReadiness = responsesAdapter(makeTransport(ccBinding, {
     readiness: { ...readiness(ccBinding), expiresAt: '2000-01-01T00:00:00Z' },

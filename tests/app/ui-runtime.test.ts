@@ -265,6 +265,10 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
   // the stream is already terminal, so settle returns `failed` with a pending
   // resource release and the provider session is retained.
   failObserve = false;
+  // Simulates an RCC v3 terminal failure whose stream cleanup already released
+  // the session; settle can then return `failed` with resources released and
+  // the provider can close without an abandoned stop recovery.
+  failObserveRelease = false;
   private readonly heldTasks = new Set<string>();
   private readonly sessions = new Map<string, { readonly scope: ScopeRef; stopRequested: boolean }>();
 
@@ -429,6 +433,8 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
     }
     // Ordinary settlement of a waiting execution cannot release the session.
     this.settleStates.push(this.failObserve ? 'failed' : 'blocked');
+    const released = this.failObserve && this.failObserveRelease;
+    if (released) this.sessions.delete(this.key(input));
     return {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
@@ -436,7 +442,9 @@ class AbandonedToolExecutionPort implements ExecutionRuntimePort {
       executionEpoch: input.executionEpoch,
       state: this.failObserve ? 'failed' : 'blocked',
       evidenceRefs: [this.evidence('settle-blocked', scope)],
-      resourceRelease: { state: 'pending', evidenceRefs: [this.evidence('release-pending', scope)] },
+      resourceRelease: released
+        ? { state: 'released', evidenceRefs: [this.evidence('release', scope)] }
+        : { state: 'pending', evidenceRefs: [this.evidence('release-pending', scope)] },
       persistence: { state: 'pending', evidenceRefs: [this.evidence('persistence-pending', scope)] },
       error: {
         errorId: 'provider.settle.continuation-unavailable',
@@ -5204,6 +5212,57 @@ test('a failed tool execution releases the provider session and reports the real
     }
     assert.deepEqual(record.checkpoint.recoveryStateRef.scope, record.checkpoint.scope);
   }
+});
+
+test('a terminal provider continuation failure settles before close and reports the original provider error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-terminal-failure-'));
+  const port = new AbandonedToolExecutionPort();
+  port.failObserve = true;
+  port.failObserveRelease = true;
+  port.failStop = true;
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-terminal-failure'),
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    providerTools: [RESPONSES_FILE_READ_TOOL],
+    providerToolExecutor: {
+      async execute({ call }) {
+        return {
+          output: `read ${call.arguments}`,
+          outputRefs: [],
+          evidenceRefs: [],
+        };
+      },
+    },
+  });
+  const task = service.createTask({ title: 'terminal provider failure' });
+  const started = service.startExecution(task.taskId, { prompt: 'read a file then fail' });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'failed'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  assert.equal(dashboard.error?.message, 'provider transport observe failed');
+  assert.equal(dashboard.error?.cleanupError, undefined);
+  assert.equal(port.closeCalls, 1);
+
+  const events = service.eventsSince(started.operationId);
+  assert.equal(
+    events.some((event) => event.kind === 'provider.error' && event.summary.includes('close.pending.executions')),
+    false,
+  );
+  assert.equal(
+    events.some((event) => event.kind === 'execution.terminal' && event.state === 'failed' && event.terminalPhase === 'final'),
+    true,
+  );
 });
 
 test('failure cleanup does not report a clean failure while the shared provider was retained for another execution', async () => {

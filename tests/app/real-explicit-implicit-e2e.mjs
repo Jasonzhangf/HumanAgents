@@ -416,7 +416,6 @@ async function captureTaskList(base) {
 
 function assertCompleted(dashboard, expect) {
   if (dashboard.state !== 'succeeded') {
-    console.error('DEBUG_ASSERT_COMPLETED', JSON.stringify(dashboard, null, 2));
     throw new Error(`task did not complete: state=${dashboard.state}; output=${JSON.stringify(dashboard.output ?? null).slice(0, 600)}`);
   }
   if (expect && (!dashboard.output || !dashboard.output.includes(expect))) {

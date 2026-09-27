@@ -678,6 +678,44 @@ test('failed work retries within budget and escalates after budget exhaustion', 
   assert.ok(dispatched.issue?.evidenceRefs.length);
 });
 
+test('failed executor invokes optional release before preserving the original execute error', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
+  });
+  const execution: ExecutionAgentPort = {
+    async execute() {
+      throw new Error('executor exploded');
+    },
+    async release(input) {
+      assert.deepEqual(input, {
+        assignment: assignment(),
+        agentId: 'agent-a',
+        executionEpoch: 1,
+        attempt: 1,
+        scope,
+      });
+    },
+  };
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: execution,
+    maxAttempts: 1,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  const dispatched = await manager.dispatch({
+    stageNodeId: 'node-a',
+    assignment: assignment(),
+    agentId: 'agent-a',
+    scope,
+  });
+
+  assert.equal(dispatched.status, 'escalated');
+  assert.equal(dispatched.issue?.code, 'execution-failed');
+  assert.equal(dispatched.issue?.reason, 'executor exploded');
+});
+
 test('failed and incomplete results map to retryable until the budget is exhausted', () => {
   const graph = new AssignmentGraph({ ownerId: 'orchestration-manager' });
   graph.addStage({ nodeId: 'node-a', taskId: task });
