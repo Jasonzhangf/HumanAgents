@@ -1123,6 +1123,7 @@ export class UiRuntimeService {
   }
 
   private createImplicitSubtaskExecutionAgent(): ExecutionAgentPort {
+    const activeDrivers = new Map<string, ProviderAgentDriver>();
     return {
       execute: async (input): Promise<WorkResult> => {
         const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
@@ -1141,6 +1142,7 @@ export class UiRuntimeService {
           ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
           ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
         });
+        activeDrivers.set(input.assignment.assignmentId, driver);
         let started = false;
         const events: AgentEvent[] = [];
         try {
@@ -1229,6 +1231,20 @@ export class UiRuntimeService {
             ? { failureRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/failed` }
             : {}),
         };
+      },
+      release: async (input) => {
+        const driver = activeDrivers.get(input.assignment.assignmentId);
+        if (!driver) return;
+        activeDrivers.delete(input.assignment.assignmentId);
+        if (driver.settlement()) return;
+        const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
+        const operationId = id('operation', `implicit-${input.assignment.assignmentId}-${input.attempt}`);
+        try {
+          await driver.requestStop({ runtimeId, executionEpoch: input.executionEpoch, operationId });
+          await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
+        } finally {
+          activeDrivers.delete(input.assignment.assignmentId);
+        }
       },
     };
   }

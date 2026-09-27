@@ -45,6 +45,11 @@ function safeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 96);
 }
 
+function assetId(prefix: string, label: string, digestValue: string): string {
+  const digestPart = digestValue.startsWith('sha256:') ? digestValue.slice('sha256:'.length) : digestValue;
+  return safeId(`${prefix}-${digestPart.slice(0, 16)}-${label}`);
+}
+
 function evidence(scope: Scope, label: string): EvidenceRef {
   return {
     evidenceId: id('evidence', safeId(`provider-file-tool-${label}`)),
@@ -53,6 +58,11 @@ function evidence(scope: Scope, label: string): EvidenceRef {
     locator: `provider-tool://file.read/${encodeURIComponent(label)}`,
     scope,
   };
+}
+
+function workspaceRelativePath(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  return value === '/workspace' ? '.' : value.startsWith('/workspace/') ? value.slice('/workspace/'.length) : value;
 }
 
 class FileReadAssets implements FileReadArtifactStore {
@@ -66,7 +76,7 @@ class FileReadAssets implements FileReadArtifactStore {
     const inputDigest = digest(content);
     const inputRef = `asset://provider-tool/input/${encodeURIComponent(callId)}`;
     this.requests.set(inputRef, { digest: inputDigest, request });
-    await this.store.write(safeId(`provider-tool-input-${callId}-${inputDigest.slice(-12)}`), new TextEncoder().encode(content));
+    await this.store.write(assetId('provider-tool-input', callId, inputDigest), new TextEncoder().encode(content));
     return { inputRef, inputDigest };
   }
 
@@ -79,7 +89,7 @@ class FileReadAssets implements FileReadArtifactStore {
   async writeReport(input: { readonly operationId: OperationId; readonly report: FileReadReport }): Promise<{ readonly outputRef: string; readonly outputDigest: string }> {
     const content = JSON.stringify(input.report);
     const reference = await this.store.write(
-      safeId(`provider-tool-output-${input.operationId.value}-${digest(content).slice(-12)}`),
+      assetId('provider-tool-output', input.operationId.value, digest(content)),
       new TextEncoder().encode(content),
     );
     const outputRef = `asset://provider-tool/output/${encodeURIComponent(input.operationId.value)}`;
@@ -133,7 +143,7 @@ export function createResponsesFileToolExecutor(input: {
     async execute(request) {
       if (request.signal.aborted) throw Object.assign(new Error('file.read was stopped before admission'), { name: 'AbortError' });
       if (request.call.toolId !== RESPONSES_FILE_READ_TOOL.toolId) throw new Error(`provider tool is not registered: ${request.call.toolId}`);
-      const path = request.call.arguments.path;
+      const path = workspaceRelativePath(request.call.arguments.path);
       if (typeof path !== 'string' || path.trim() === '') throw new Error('file.read requires a non-empty path');
       const cycleId = request.scope.cycleId ?? id('cycle', safeId(`provider-tool-${request.execution.taskId.value}`));
       const operationId = id('operation', safeId(`provider-tool-${request.execution.operationId.value}-${request.call.callId}`));

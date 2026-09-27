@@ -1071,6 +1071,58 @@ test('feedback failures surface as blocked business outcomes instead of success'
   assert.equal(dispatched.assignment.status, 'blocked');
 });
 
+test('feedback evidence is projected into the published event scope before feedback publication', async () => {
+  const { pool } = factoryPool({
+    maxRuntimes: 1,
+    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
+  });
+  const feedback = new RecordingFeedback();
+  const manager = new OrchestrationManager({
+    ownerId: 'orchestration-manager',
+    runtimePool: pool,
+    executionAgent: new StaticExecutionAgent([
+      {
+        result: result({
+          nextAction: 'settle',
+          evidenceRefs: [
+            {
+              ...evidence('provider-nested'),
+              scope: {
+                ...scope,
+                operationId: id('operation', 'provider-child-operation'),
+              },
+            },
+          ],
+        }),
+        criteria: criteria(),
+      },
+    ]),
+    feedback,
+  });
+  manager.planStage({ nodeId: 'node-a', taskId: task });
+  const dispatched = await manager.dispatch({
+    stageNodeId: 'node-a',
+    assignment: assignment(),
+    agentId: 'agent-a',
+    scope: {
+      ...scope,
+      operationId: id('operation', 'provider-parent-operation'),
+    },
+  });
+
+  assert.equal(dispatched.status, 'succeeded');
+  assert.equal(feedback.events.length, 1);
+  assert.deepEqual(feedback.events[0]?.evidenceRefs, [
+    {
+      ...evidence('provider-nested'),
+      scope: {
+        ...scope,
+        operationId: id('operation', 'provider-parent-operation'),
+      },
+    },
+  ]);
+});
+
 test('attention results preserve recovery ownership and never become success', async () => {
   const { pool } = factoryPool({
     maxRuntimes: 1,

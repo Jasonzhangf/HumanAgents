@@ -31,7 +31,7 @@ export function filesystemProviderEvidenceSink(
     async write(input) {
       const content = contentString(input.content);
       const digest = createHash('sha256').update(content).digest('hex');
-      const assetId = `provider-${sanitizeRefPart(input.type)}-${sanitizeRefPart(input.locator)}-${digest.slice(0, 12)}`.slice(0, 128);
+      const assetId = `provider-${digest.slice(0, 16)}-${sanitizeRefPart(input.type)}-${sanitizeRefPart(input.locator)}`.slice(0, 128);
       const reference = await store.write(assetId, new TextEncoder().encode(content));
       return evidenceReference(reference, input.scope, input.kind, source);
     },

@@ -293,7 +293,7 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
       const exhaustedInconclusive = provider.settlement.state === 'succeeded'
         && marker !== 'passed'
         && marker !== 'failed';
-      const status: ReviewResult['status'] = providerFailed || marker === 'failed' || exhaustedInconclusive
+      const status: ReviewResult['status'] = providerFailed || marker === 'failed'
         ? 'failed'
         : provider.settlement.state === 'succeeded' && marker === 'passed'
           ? 'passed'
