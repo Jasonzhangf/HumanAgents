@@ -252,7 +252,8 @@ export class OrchestrationManager {
         reviewResults: planned.reviewResults,
       };
     }
-    if (!this.executionAgent) {
+    const agent = input.executionAgentOverride ?? this.executionAgent;
+    if (!agent) {
       const unavailable = issue(
         'execution-agent-unavailable',
         this.ownerId,
@@ -360,7 +361,7 @@ export class OrchestrationManager {
     this.graph.start(input.assignment, input.agentId, leaseBinding(lease));
     let rawDelivery: WorkResult | ExecutionDelivery;
     try {
-      rawDelivery = await this.executionAgent!.execute({
+      rawDelivery = await (input.executionAgentOverride ?? this.executionAgent!).execute({
         assignment: input.assignment,
         agentId: input.agentId,
         executionEpoch: input.assignment.executionEpoch,

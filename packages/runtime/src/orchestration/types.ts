@@ -232,6 +232,12 @@ export interface DispatchInput {
   readonly assignment: WorkAssignment;
   readonly agentId: string;
   readonly scope: ScopeRef;
+  /**
+   * Optional executor bound to this dispatch only. The orchestration manager
+   * still owns the graph, review gate, merge gate, and feedback path; this
+   * override only selects which worker executes the bounded work.
+   */
+  readonly executionAgentOverride?: ExecutionAgentPort;
   readonly reviewKinds?: readonly ReviewKind[];
   readonly reviewSubjectDigests?: readonly string[];
   /**

@@ -43,9 +43,13 @@ import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type Agent
 import { RUNTIME_NODE_MARKERS } from '../nodes/node-registry.js';
 import {
   appendTaskRevision,
+  createDefaultImplicitExecutorSubtasks,
+  dispatchImplicitExecutorSubtasks,
   type TaskRevision,
   type TaskRevisionState,
   type TaskUpdateDecision,
+  type ImplicitExecutorPlanInput,
+  type RequirementAdmissionReceipt,
 } from '../admission/index.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
 import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort, type ExecutorReviewEvidence } from '../orchestration/index.js';
@@ -305,6 +309,13 @@ export interface RuntimeTaskCoordinatorOptions {
     readonly executionAgent?: ExecutionAgentPort;
     readonly maxAttempts?: number;
   }) => RuntimeTaskAssembly;
+  /**
+   * Executor used by the implicit brain to run concrete subtasks after the
+   * provider execution has completed. When bound, confirmed requirements are
+   * dispatched as separate executor agents through the same task assembly's
+   * orchestration graph instead of only a single provider-execution assignment.
+   */
+  readonly implicitSubtaskExecutionAgent?: ExecutionAgentPort;
 }
 
 export interface RuntimeTaskAssembly {
@@ -350,6 +361,10 @@ interface TaskRecord {
   composition?: RuntimeExecutionComposition;
   checkpointBoundary?: ContextCheckpointBoundary;
   taskAssembly?: RuntimeTaskAssembly;
+  implicitRequirement?: {
+    readonly envelope: RequirementEnvelope;
+    readonly admission: RequirementAdmissionReceipt;
+  };
   events: RuntimeTaskEvent[];
   checkpoint?: Checkpoint;
   checkpointSeq: number;
@@ -838,6 +853,10 @@ export class RuntimeTaskCoordinator {
     readonly prompt: string;
     readonly orchestrate?: boolean;
     readonly operationId?: OperationId;
+    readonly implicitRequirement?: {
+      readonly envelope: RequirementEnvelope;
+      readonly admission: RequirementAdmissionReceipt;
+    };
   }): { readonly operationId: OperationId; readonly executionEpoch: number } {
     const record = this.requireTask(taskId);
     if (record.running) throw new RuntimeTaskControlError('task.busy', RUNTIME_OWNER, 'task already has a running execution', 'stop the current execution first');
@@ -947,6 +966,7 @@ export class RuntimeTaskCoordinator {
     record.composition = undefined;
     record.checkpointBoundary = undefined;
     record.taskAssembly = undefined;
+    record.implicitRequirement = input.implicitRequirement;
     record.nextStep = '等待 Provider 事件';
     record.allowedActions = ['stop'];
     record.error = undefined;
@@ -1573,6 +1593,54 @@ export class RuntimeTaskCoordinator {
               evidenceRefs,
               nextAction: problem?.nextAction ?? { kind: 'recover', ref: `assignment.${assignment.assignmentId}` },
               conditionRef: problem?.conditionRef ?? `assignment.${assignment.assignmentId}`,
+            };
+          }
+        }
+        if (
+          (dispatched.status === 'merged' || dispatched.status === 'succeeded')
+          && record.implicitRequirement
+          && record.implicitRequirement.admission.classified.queue !== 'interactive'
+          && this.options.implicitSubtaskExecutionAgent
+          && closure
+        ) {
+          const planInput: ImplicitExecutorPlanInput = {
+            envelope: record.implicitRequirement.envelope,
+            admission: record.implicitRequirement.admission,
+            taskId: record.taskId,
+            scope,
+            executionEpoch: operation.executionEpoch,
+            inputRevision: record.directiveRevision,
+          };
+          const subtaskResult = await dispatchImplicitExecutorSubtasks({
+            orchestration: record.taskAssembly.orchestration,
+            ...planInput,
+            subtasks: createDefaultImplicitExecutorSubtasks(planInput),
+            executionAgentOverride: this.options.implicitSubtaskExecutionAgent,
+            parentStageNodeId: stageNodeId,
+          });
+          if (subtaskResult.status !== 'succeeded') {
+            const problem = subtaskResult.issue;
+            record.error = {
+              code: problem?.code ?? 'implicit.subtasks.failed',
+              ownerId: problem?.ownerId ?? RUNTIME_OWNER,
+              message: problem?.reason ?? `implicit executor subtasks ended as ${subtaskResult.status}`,
+              retryable: subtaskResult.status === 'retryable',
+              nextAction: problem
+                ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}`
+                : 'inspect implicit executor subtask evidence',
+              evidenceRefs: subtaskResult.evidenceRefs,
+            };
+            closure = {
+              ...closure,
+              state: 'blocked',
+              evidenceRefs: [...closure.evidenceRefs, ...subtaskResult.evidenceRefs],
+              nextAction: problem?.nextAction ?? { kind: 'recover', ref: 'implicit.executor.subtasks' },
+              conditionRef: problem?.conditionRef ?? 'implicit.executor.subtasks',
+            };
+          } else {
+            closure = {
+              ...closure,
+              evidenceRefs: [...closure.evidenceRefs, ...subtaskResult.evidenceRefs],
             };
           }
         }
