@@ -2688,7 +2688,7 @@ test('orchestrated confirmed requirement dispatches implicit executor agents thr
   });
   await waitFor(() => assert.equal(service.listTasks().counts.total, 1));
   await waitFor(() => assert.equal(service.listTasks().completed[0]?.state, 'succeeded'));
-  assert.ok(port.startCount >= 3, `expected provider execution plus implicit executor subtasks, got ${port.startCount}`);
+  assert.ok(port.startCount === 1, `single executor assignment, got ${port.startCount}`);
   const createdTaskId = service.listTasks().completed[0]?.taskId;
   assert.ok(createdTaskId);
   const afterCreateStarts = port.startCount;

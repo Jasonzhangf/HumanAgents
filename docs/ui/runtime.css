@@ -636,3 +636,299 @@ pre {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Dashboard CRUD item layout */
+.item--with-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.item--with-actions .item-main {
+  flex: 1;
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.item--with-actions .item-main:hover h3 {
+  text-decoration: underline;
+}
+.item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.button--sm {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+/* Dashboard edit dialog */
+.edit-dialog {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px;
+  background: var(--surface);
+  max-width: 420px;
+  width: 90vw;
+}
+.edit-form {
+  display: grid;
+  gap: 10px;
+}
+.field-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.edit-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-danger, #c33);
+  min-height: 18px;
+}
+
+/* Dashboard v2: quick create + task CRUD + polling */
+.quick-create {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.quick-create-form {
+  display: grid;
+  gap: 10px;
+}
+.quick-create-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.quick-create-form textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 60px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--background);
+  color: inherit;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.quick-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.quick-create-actions p {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.task-item:first-child { padding-top: 0; }
+.task-item:last-child { border-bottom: 0; padding-bottom: 0; }
+.task-item-main {
+  flex: 1;
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.task-item-main h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.task-item-main:hover h3 { text-decoration: underline; }
+.task-item-main p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.task-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.task-state-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-attention, rgba(0,0,0,0.06));
+  font-weight: 500;
+}
+.task-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+/* Edit dialog */
+.edit-dialog {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px;
+  background: var(--surface);
+  max-width: 420px;
+  width: 90vw;
+}
+.edit-form {
+  display: grid;
+  gap: 10px;
+}
+.edit-form input {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--background);
+  color: inherit;
+  font-family: inherit;
+  font-size: 14px;
+}
+.field-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.edit-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-danger, #c33);
+  min-height: 18px;
+}
+
+/* Dashboard v2: inline interaction draft */
+.draft-area {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--surface) 60%, var(--background));
+}
+.draft-area[hidden] { display: none; }
+.draft-proposal {
+  margin: 4px 0;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.draft-meta {
+  margin: 2px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.draft-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* Dashboard progress widget: drives the submit-flow state machine. */
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: color-mix(in oklch, var(--surface) 70%, var(--background));
+  font-size: 13px;
+  color: var(--muted);
+  min-height: 38px;
+}
+.progress[data-tone="idle"] {
+  background: color-mix(in oklch, var(--surface) 80%, var(--background));
+}
+.progress[data-tone="active"] {
+  border-color: color-mix(in oklch, var(--accent, #4f8cff) 35%, var(--line));
+  color: inherit;
+  background: color-mix(in oklch, var(--accent, #4f8cff) 6%, var(--surface));
+}
+.progress[data-tone="success"] {
+  border-color: color-mix(in oklch, #2f9d57 35%, var(--line));
+  background: color-mix(in oklch, #2f9d57 7%, var(--surface));
+  color: inherit;
+}
+.progress[data-tone="danger"] {
+  border-color: color-mix(in oklch, #c33 40%, var(--line));
+  background: color-mix(in oklch, #c33 8%, var(--surface));
+  color: inherit;
+}
+.progress[data-tone="waiting"] {
+  border-color: color-mix(in oklch, #b7791f 40%, var(--line));
+  background: color-mix(in oklch, #b7791f 7%, var(--surface));
+  color: inherit;
+}
+.progress-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.35;
+}
+.progress--live .progress-spinner {
+  opacity: 1;
+  animation: progress-spin 0.9s linear infinite;
+}
+.progress[data-tone="waiting"] .progress-spinner {
+  opacity: 0;
+  animation: none;
+}
+@keyframes progress-spin {
+  to { transform: rotate(360deg); }
+}
+.progress-phase {
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.progress-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.progress-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.quick-create-policy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.quick-create-policy input {
+  margin: 0;
+  cursor: pointer;
+}

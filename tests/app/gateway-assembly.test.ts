@@ -9,7 +9,7 @@ import {
 } from '../../packages/app/src/index.js';
 import { DeterministicInspectRoute } from '../../packages/adapters/operations/src/index.js';
 import { CodeSearchRoute, type CodeSearchArtifactStore } from '../../packages/adapters/operations/src/index.js';
-import { id, type CodeSearchReport, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope } from '../../packages/contracts/src/index.js';
+import { id, type BusinessPayload, type CodeSearchReport, type EvidenceRef, type OperationEvent, type OperationIntent, type Scope } from '../../packages/contracts/src/index.js';
 import { type CodeSearchFileContent, type CodeSearchFileList, type CodeSearchFunctions } from '../../packages/runtime/src/hand/index.js';
 import type { OperationJournalPort } from '../../packages/runtime/src/gateway/index.js';
 
@@ -148,6 +148,76 @@ test('app assembly exposes code.search as one gateway operation over multiple in
   assert.equal(result.operation.route?.routeId, 'code-search');
   assert.equal(result.operation.result?.outputRef, 'artifact://code-search/app-code-search-operation');
   assert.equal(functions.calls, 3);
+});
+
+test('Responses built-in tools execute write, edit, bash, todo, goal, and present through the provider executor', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'tmp-provider-builtin-tools-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  const executor = createResponsesFileToolExecutor({
+    workspaceRoot,
+    projectKey: 'builtin-tools-project',
+    artifactRoot: join(root, 'artifacts'),
+  });
+  try {
+    const run = async (toolId: string, arguments_: BusinessPayload, callId: string) => executor.execute({
+      execution: { runtimeId: 'runtime-builtin-tools', taskId: task, operationId: operation, executionEpoch: 1 },
+      scope,
+      call: { callId, toolId, arguments: arguments_, continuationRef: 'response-builtin' },
+      signal: new AbortController().signal,
+    });
+
+    const written = await run('file.write', {
+      file_path: 'notes/hello.md',
+      content: 'hello world\n',
+    }, 'call-write');
+    assert.equal(JSON.parse(written.output).operation, 'create');
+
+    const edited = await run('file.edit', {
+      file_path: 'notes/hello.md',
+      old_string: 'world',
+      new_string: 'agent',
+    }, 'call-edit');
+    assert.equal(JSON.parse(edited.output).after, 'hello agent\n');
+
+    const shell = await run('bash', {
+      command: 'node -p "JSON.stringify({ok:true})"',
+      description: 'check node json output',
+      workdir: '.',
+    }, 'call-bash');
+    assert.equal(JSON.parse(shell.output).exitCode, 0);
+    assert.equal(JSON.parse(shell.output).stdout.text, '{"ok":true}\n');
+
+    const todos = await run('todo_write', {
+      todos: [
+        { content: 'verify built-ins', status: 'in_progress' },
+        { content: 'report evidence', status: 'pending' },
+      ],
+    }, 'call-todo');
+    assert.equal(JSON.parse(todos.output).counts.inProgress, 1);
+
+    const created = await run('create_goal', { objective: 'complete built-in provider tool coverage' }, 'call-create-goal');
+    const createdGoal = JSON.parse(created.output).goal;
+    assert.equal(createdGoal.phase, 'active');
+    assert.equal(createdGoal.revision, 1);
+
+    const completed = await run('update_goal', {
+      goal_id: createdGoal.id,
+      revision: createdGoal.revision,
+      action: 'complete',
+    }, 'call-update-goal');
+    assert.equal(JSON.parse(completed.output).goal.phase, 'complete');
+
+    const presented = await run('present', {
+      files: [{ path: 'notes/hello.md', description: 'created built-in output' }],
+    }, 'call-present');
+    assert.deepEqual(JSON.parse(presented.output).files, [{
+      path: 'notes/hello.md',
+      description: 'created built-in output',
+    }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('app assembly exposes Hand as a thin semantic-intent boundary', async () => {

@@ -95,6 +95,19 @@ export interface ExecutionAgentInput {
 
 export interface ExecutionAgentPort {
   execute(input: ExecutionAgentInput): Promise<WorkResult | ExecutionDelivery>;
+  /**
+   * Optional release hook for execution agents that bind external resources
+   * (for example a shared provider session) and finished non-successfully.
+   * The runtime calls it before closing shared resources so a non-final
+   * settlement does not leave that resource pending.
+   */
+  release?(input: {
+    readonly assignment: WorkAssignment;
+    readonly agentId: string;
+    readonly executionEpoch: number;
+    readonly attempt: number;
+    readonly scope: ScopeRef;
+  }): Promise<void>;
 }
 
 export interface ReviewAgentInput {

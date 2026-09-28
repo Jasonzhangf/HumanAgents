@@ -1123,6 +1123,7 @@ export class UiRuntimeService {
   }
 
   private createImplicitSubtaskExecutionAgent(): ExecutionAgentPort {
+    const activeDrivers = new Map<string, ProviderAgentDriver>();
     return {
       execute: async (input): Promise<WorkResult> => {
         const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
@@ -1141,6 +1142,7 @@ export class UiRuntimeService {
           ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
           ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
         });
+        activeDrivers.set(input.assignment.assignmentId, driver);
         let started = false;
         const events: AgentEvent[] = [];
         try {
@@ -1201,6 +1203,11 @@ export class UiRuntimeService {
           ...events.flatMap((event) => event.evidenceRefs),
           ...settlement.evidenceRefs,
         ];
+        const scopedEvidenceRefs = [
+          ...new Map(
+            evidenceRefs.map((ref) => [ref.evidenceId.value, { ...ref, scope: { ...input.scope } }]),
+          ).values(),
+        ];
         const outputRefs = input.assignment.expectedOutputRefs.length > 0
           ? [...input.assignment.expectedOutputRefs]
           : [...input.assignment.targetRefs];
@@ -1220,7 +1227,7 @@ export class UiRuntimeService {
             ? `implicit executor ${input.agentId} ${status}`
             : `implicit executor ${input.agentId} ${status}: ${producedOutput.trim()}`,
           outputRefs,
-          evidenceRefs,
+          evidenceRefs: scopedEvidenceRefs,
           nextAction,
           ...(status === 'incomplete'
             ? { conditionRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/waiting` }

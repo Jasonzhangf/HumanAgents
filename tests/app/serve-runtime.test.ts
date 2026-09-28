@@ -456,8 +456,8 @@ test('confirmed requirement enters task orchestration with RCC review before pro
       if (runtime.service.taskDashboard(taskId).state === 'succeeded') break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
     const graph = runtime.service.taskAssembly(taskId).orchestration.graph.snapshot();
+    assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
     assert.equal(graph.stages.length, 1);
     assert.equal(graph.assignments.length, 1);
     assert.equal(graph.assignments[0]?.status, 'merged', JSON.stringify(graph.assignments[0]));

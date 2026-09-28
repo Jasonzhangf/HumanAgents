@@ -829,6 +829,22 @@ test('runtime UI consumes typed API without hardcoded success or direct source a
   assert.equal(source.includes('/api/memory/review'), true);
 });
 
+test('dashboard progress copy does not expose internal identifiers or protocol names', async () => {
+  const source = await readFile('docs/ui/dashboard.js', 'utf8');
+  assert.equal(source.includes('interaction='), false);
+  assert.equal(source.includes('draftId='), false);
+  assert.equal(source.includes('RequirementEnvelope'), false);
+});
+
+test('dashboard confirmation waits on user without continuing a provider timer', async () => {
+  const source = await readFile('docs/ui/dashboard.js', 'utf8');
+  assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), true);
+  assert.equal(source.includes("timer.hidden = true"), true);
+  assert.equal(source.includes("root.dataset.tone = 'waiting'"), true);
+  assert.equal(source.includes('await api.confirmExplicitRequirement(interaction.id'), true);
+  assert.equal(source.includes("progress.set('等待你确认任务草案'"), false);
+});
+
 test('memory review button exposes typed API failure and becomes usable again', async () => {
   const { bindMemoryReviewAction } = await import(new URL(`file://${join(process.cwd(), 'docs/ui/memory-actions.js')}`).href);
   let listener: (() => Promise<void>) | undefined;

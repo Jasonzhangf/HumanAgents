@@ -1586,7 +1586,7 @@ function implicitAssembly(failures = new Set<string>()) {
   const pool = new AgentRuntimePoolManager({
     maxRuntimes: 4,
     factory,
-    initialRuntimes: [{ runtimeId: 'implicit-runtime', capabilities: ['code.search', 'file.checkpoint'] }],
+    initialRuntimes: [{ runtimeId: 'implicit-runtime', capabilities: ['provider.execution'] }],
   });
   const executor = new ImplicitExecutor(failures);
   const review = new ImplicitReviewAgent();
@@ -1650,13 +1650,13 @@ test('implicit FIFO admits and dispatches executor subtasks to terminal success 
   assert.equal(result.kind, 'succeeded');
   if (result.kind !== 'succeeded') return;
   assert.equal(result.status, 'succeeded');
-  assert.equal(result.dispatches.length, 2);
-  assert.equal(executor.inputs.length, 2);
+  assert.equal(result.dispatches.length, 1);
+  assert.equal(executor.inputs.length, 1);
   assert.deepEqual(
     executor.inputs.map((input) => input.assignment.requiredCapabilities[0]),
-    ['code.search', 'file.checkpoint'],
+    ['provider.execution'],
   );
-  assert.equal(review.results.length, 2);
+  assert.equal(review.results.length, 1);
   assert.equal(result.evidenceRefs.length >= 2, true);
   assert.equal(inbox.size, 0);
 });
@@ -1691,10 +1691,10 @@ test('implicit executor dispatch uses the execution agent override for every sub
     executionAgentOverride: override,
   });
   assert.equal(result.status, 'succeeded');
-  assert.equal(override.inputs.length, 2);
+  assert.equal(override.inputs.length, 1);
   assert.deepEqual(
     override.inputs.map((input) => input.assignment.requiredCapabilities[0]),
-    ['code.search', 'file.checkpoint'],
+    ['provider.execution'],
   );
 });
 

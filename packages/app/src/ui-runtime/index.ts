@@ -35,7 +35,20 @@ import {
   type ExplicitBrainInputInterpreter,
 } from '../explicit-brain-runtime.js';
 import { AppLifecycleError } from '../errors.js';
-import { createResponsesFileToolExecutor, RESPONSES_FILE_READ_TOOL } from '../provider-tool-execution.js';
+import {
+  createResponsesFileToolExecutor,
+  RESPONSES_BASH_TOOL,
+  RESPONSES_CREATE_GOAL_TOOL,
+  RESPONSES_FILE_EDIT_TOOL,
+  RESPONSES_FILE_LIST_TOOL,
+  RESPONSES_FILE_READ_TOOL,
+  RESPONSES_FILE_SEARCH_TOOL,
+  RESPONSES_FILE_WRITE_TOOL,
+  RESPONSES_GET_GOAL_TOOL,
+  RESPONSES_PRESENT_TOOL,
+  RESPONSES_TODO_WRITE_TOOL,
+  RESPONSES_UPDATE_GOAL_TOOL,
+} from '../provider-tool-execution.js';
 
 export interface RccModeConfig {
   readonly binding: ProviderBinding;
@@ -202,7 +215,19 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(providerToolExecutor === undefined ? {} : {
-      providerTools: [RESPONSES_FILE_READ_TOOL],
+      providerTools: [
+        RESPONSES_FILE_READ_TOOL,
+        RESPONSES_FILE_LIST_TOOL,
+        RESPONSES_FILE_SEARCH_TOOL,
+        RESPONSES_FILE_WRITE_TOOL,
+        RESPONSES_FILE_EDIT_TOOL,
+        RESPONSES_BASH_TOOL,
+        RESPONSES_TODO_WRITE_TOOL,
+        RESPONSES_GET_GOAL_TOOL,
+        RESPONSES_CREATE_GOAL_TOOL,
+        RESPONSES_UPDATE_GOAL_TOOL,
+        RESPONSES_PRESENT_TOOL,
+      ],
       providerToolExecutor,
     }),
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),

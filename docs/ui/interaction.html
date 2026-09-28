@@ -3,126 +3,202 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="HumanAgent 交互界面定义：显式层与隐式层" />
-    <title>HumanAgent · Interaction Definition</title>
+    <meta name="description" content="HumanAgent 交互界面：显式输入 → 解释 → 确认 → 派发 → 隐式执行" />
+    <title>HumanAgent · Interaction</title>
     <link rel="stylesheet" href="./interaction.css" />
   </head>
   <body>
-    <div class="wireframe">
-      <header class="wireframe-header" data-region="global-navigation">
-        <a href="#main-content">HumanAgent</a>
-        <span>Explicit interaction</span>
-        <span class="state-label" data-runtime-mode>连接中…</span>
-      </header>
-
-      <main id="main-content" class="wireframe-main">
-        <section class="region region--current" aria-labelledby="current-title" data-region="current-task">
-          <header class="region-heading">
-            <div>
-              <span class="region-kicker">HumanAgent Runtime</span>
-              <h1 id="current-title">显式输入</h1>
-            </div>
-            <span class="state-label" data-visible-state>未开始</span>
-          </header>
-
-          <section class="interaction-block" data-region="input">
-            <h2>1. 输入</h2>
-            <form data-explicit-input>
-              <label>来源 <input name="sourceRef" value="ui:interaction" required /></label>
-              <label>输入修订 <input name="inputRevision" type="number" min="1" value="1" required /></label>
-              <label>业务输入 <textarea name="rawInput" required placeholder="描述要处理的需求，或询问当前状态"></textarea></label>
-              <div class="action-row"><button class="action-primary" type="submit">提交并检查</button><button type="button" data-action="status-only" disabled>只查询状态</button></div>
-            </form>
-          </section>
-
-          <section class="interaction-block" data-region="inspection">
-            <h2>2. Inspection</h2>
-            <p data-interaction-id>尚未创建 interaction。</p>
-            <dl data-inspection></dl>
-          </section>
-
-          <section class="interaction-block" data-region="matching">
-            <h2>3. Matching / match result</h2>
-            <form data-explicit-match>
-              <label>规范化输入 <input name="normalizedInput" required /></label>
-              <label>已知事实（每行一项） <textarea name="knownFacts" placeholder="可选"></textarea></label>
-              <label>匹配任务（JSON 数组） <textarea name="matchedTasks" placeholder="例如：[]"></textarea></label>
-              <div class="action-row"><button type="submit" disabled>执行 matching 并记录 match</button><button type="button" data-action="status-only" disabled>只查询状态</button></div>
-            </form>
-          </section>
-
-          <section class="interaction-block" data-region="proposal">
-            <h2>4. Proposal</h2>
-            <form data-explicit-proposal>
-              <label>意图 <select name="proposedIntent"><option value="create">create</option><option value="append">append</option><option value="change">change</option></select></label>
-              <label>建议 <textarea name="proposal" required placeholder="说明确认后要提交的需求"></textarea></label>
-              <label>决策引用（每行一项） <textarea name="decisionRefs" placeholder="可选"></textarea></label>
-              <button type="submit" disabled>提交 proposal</button>
-            </form>
-          </section>
-
-          <section class="interaction-block" data-region="confirmation">
-            <h2>5. Confirmation</h2>
-            <p>确认前不会创建 FIFO item，也不会 dispatch。</p>
-            <form data-explicit-confirmation>
-              <label>draft ID <input name="draftId" required /></label>
-              <label>输入修订 <input name="inputRevision" type="number" min="1" value="1" required /></label>
-              <label>confirmation ref <input name="confirmationRef" placeholder="confirmation:ui" required /></label>
-              <label>确认人 <input name="confirmedBy" placeholder="human:operator" required /></label>
-              <label>确认时间 <input name="confirmedAt" type="datetime-local" required /></label>
-              <label>payload ref <input name="payloadRef" placeholder="asset://requirements/ui" required /></label>
-              <button class="action-primary" type="submit" disabled>确认当前 proposal</button>
-            </form>
-          </section>
-
-          <section class="interaction-block" data-region="dispatch">
-            <h2>6. Dispatch</h2>
-            <button class="action-primary" type="button" data-action="dispatch" disabled>dispatch confirmed requirement</button>
-            <p>Dispatch 只消费已确认的 FIFO item。</p>
-          </section>
-
-          <section class="interaction-block" data-region="control">
-            <h2>正式控制操作</h2>
-            <p>steer / stop / continue 不进入业务输入；以下按钮直接调用 Runtime control/execution routes。</p>
-            <form data-control-form>
-              <label>Task ID <input name="taskId" placeholder="ui-task-1" required /></label>
-              <label>Continue prompt <textarea name="prompt" required placeholder="继续执行时的 prompt"></textarea></label>
-              <div class="action-row">
-                <button type="button" data-action="steer">steer / stop</button>
-                <button type="button" data-action="continue">continue</button>
-              </div>
-            </form>
-          </section>
-
-          <p class="action-feedback" role="status" aria-live="polite" data-action-feedback>等待输入。</p>
-        </section>
-
-        <aside class="region region--attention" aria-labelledby="attention-title" data-region="attention">
-          <header class="region-heading">
-            <div>
-              <span class="region-kicker">Server projection</span>
-              <h2 id="attention-title">Interaction evidence</h2>
-            </div>
-          </header>
-          <pre data-server-result>服务端 inspection 会显示在这里。</pre>
-          <p>页面不从 Journal、DSH Session 或 RCC raw response 重建状态。</p>
-        </aside>
-
-        <section class="region region--implicit" aria-labelledby="diagnostic-title" data-region="diagnostic-entry">
-          <details>
-            <summary id="diagnostic-title">只读诊断入口</summary>
-            <p>诊断只用于查看当前 API 错误和服务端返回，不产生需求、不修改队列。</p>
-            <pre data-diagnostic-output>暂无诊断信息。</pre>
-          </details>
-        </section>
-      </main>
-
-      <nav class="mobile-navigation" aria-label="页面导航">
+    <header class="topbar">
+      <a class="brand" href="./dashboard.html">HumanAgent</a>
+      <nav class="topnav" aria-label="主导航">
         <a href="./dashboard.html">Dashboard</a>
-        <a href="./tasks.html">Tasks</a>
+        <a href="./tasks.html">Task List</a>
         <a href="./interaction.html" aria-current="page">Interaction</a>
+        <a href="./memory.html">Memory</a>
       </nav>
-    </div>
+      <span class="state-label" data-runtime-mode>连接中…</span>
+    </header>
+
+    <main id="main-content" class="page">
+      <section class="page-heading">
+        <div>
+          <p class="eyebrow">HumanAgent Runtime</p>
+          <h1>显式输入 → 解释 → 确认 → 派发 → 隐式执行</h1>
+          <p class="lede">显式大脑负责理解与确认；隐式大脑负责调度与执行，任务结果回到任务列表和实时事件。</p>
+        </div>
+        <div class="status-banner" role="status" aria-live="polite" data-runtime-status>正在连接 Runtime API…</div>
+      </section>
+
+      <section class="panel flow-panel" data-flow-panel>
+        <header class="section-head">
+          <h2>当前任务流程</h2>
+          <span class="section-meta" data-flow-meta>暂无活动任务</span>
+        </header>
+        <div class="confirm-policy" data-confirm-policy>
+          <span class="confirm-policy-label">确认策略：</span>
+          <label><input type="radio" name="confirmPolicy" value="manual" checked /> 每次手动确认（默认）</label>
+          <label><input type="radio" name="confirmPolicy" value="auto" /> 自动确认并派发</label>
+        </div>
+        <dl class="flow-grid">
+          <div><dt>当前状态</dt><dd data-flow-state>未开始</dd></div>
+          <div><dt>关联任务</dt><dd data-flow-task>—</dd></div>
+          <div><dt>最近动作</dt><dd data-flow-action>—</dd></div>
+          <div><dt>说明</dt><dd data-flow-note>提交输入后会显示当前流程状态、关联任务和最近动作。</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel input-panel">
+        <header class="section-head">
+          <h2>1. 输入</h2>
+        </header>
+        <form data-explicit-input class="form-grid">
+          <label>来源 <input name="sourceRef" value="ui:interaction" required /></label>
+          <label>输入修订 <input name="inputRevision" type="number" min="1" value="1" required /></label>
+          <label>业务输入 <textarea name="rawInput" required placeholder="描述要处理的需求，或询问当前状态"></textarea></label>
+          <div class="action-row">
+            <button class="action-primary" type="submit">提交并解释</button>
+            <button type="button" data-action="status-only" disabled>只查询状态</button>
+          </div>
+        </form>
+        <p class="action-feedback" role="status" aria-live="polite" data-action-feedback>等待输入。</p>
+      </section>
+
+      <section class="panel inspection-panel" data-region="inspection">
+        <header class="section-head">
+          <h2>2. Inspection</h2>
+          <span class="section-meta" data-interaction-id>尚未创建 interaction。</span>
+        </header>
+        <dl class="inspection-grid" data-inspection></dl>
+      </section>
+
+      <section class="panel matching-panel" data-region="matching">
+        <header class="section-head">
+          <h2>3. Matching / match result</h2>
+        </header>
+        <form data-explicit-match class="form-grid">
+          <label>规范化输入 <input name="normalizedInput" required /></label>
+          <label>已知事实（每行一项） <textarea name="knownFacts" placeholder="可选"></textarea></label>
+          <label>匹配任务（JSON 数组） <textarea name="matchedTasks" placeholder="例如：[]"></textarea></label>
+          <div class="action-row">
+            <button type="submit" disabled>执行 matching 并记录 match</button>
+            <button type="button" data-action="status-only" disabled>只查询状态</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel proposal-panel" data-region="proposal">
+        <header class="section-head">
+          <h2>4. Proposal</h2>
+        </header>
+        <form data-explicit-proposal class="form-grid">
+          <label>意图 <select name="proposedIntent">
+            <option value="create">create</option>
+            <option value="append">append</option>
+            <option value="change">change</option>
+          </select></label>
+          <label>建议 <textarea name="proposal" required placeholder="说明确认后要提交的需求"></textarea></label>
+          <label>决策引用（每行一项） <textarea name="decisionRefs" placeholder="可选"></textarea></label>
+          <button type="submit" disabled>提交 proposal</button>
+        </form>
+      </section>
+
+      <section class="panel confirmation-panel" data-region="confirmation">
+        <header class="section-head">
+          <h2>5. Confirmation</h2>
+        </header>
+        <p>确认前不会创建 FIFO item，也不会 dispatch。</p>
+        <form data-explicit-confirmation class="form-grid">
+          <label>draft ID <input name="draftId" required /></label>
+          <label>输入修订 <input name="inputRevision" type="number" min="1" value="1" required /></label>
+          <label>confirmation ref <input name="confirmationRef" placeholder="confirmation:ui" required /></label>
+          <label>确认人 <input name="confirmedBy" placeholder="human:operator" required /></label>
+          <label>确认时间 <input name="confirmedAt" type="datetime-local" required /></label>
+          <label>payload ref <input name="payloadRef" placeholder="asset://requirements/ui" required /></label>
+          <button class="action-primary" type="submit" disabled>确认当前 proposal</button>
+        </form>
+      </section>
+
+      <section class="panel dispatch-panel" data-region="dispatch">
+        <header class="section-head">
+          <h2>6. Dispatch</h2>
+        </header>
+        <button class="action-primary" type="button" data-action="dispatch" disabled>dispatch confirmed requirement</button>
+        <p>Dispatch 只消费已确认的 FIFO item。</p>
+      </section>
+
+      <section class="panel control-panel" data-region="control">
+        <header class="section-head">
+          <h2>正式控制操作</h2>
+        </header>
+        <p>steer / stop / continue 不进入业务输入；以下按钮直接调用 Runtime control/execution routes。</p>
+        <form data-control-form class="form-grid">
+          <label>Task ID <input name="taskId" placeholder="ui-task-1" required /></label>
+          <label>Continue prompt <textarea name="prompt" required placeholder="继续执行时的 prompt"></textarea></label>
+          <div class="action-row">
+            <button type="button" data-action="steer">steer / stop</button>
+            <button type="button" data-action="continue">continue</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel queue-panel" data-task-queue>
+        <header class="section-head">
+          <h2>任务队列</h2>
+          <span class="section-meta" data-task-queue-meta>正在加载…</span>
+        </header>
+        <ul class="task-list" data-task-list>
+          <li class="task-row-empty">正在加载任务…</li>
+        </ul>
+      </section>
+
+      <section class="panel create-panel" data-create-task>
+        <header class="section-head">
+          <h2>直接创建 / 编辑 / 删除任务</h2>
+          <span class="section-meta" data-create-task-meta>从 Interaction 页直接 CRUD，绕过显式大脑。</span>
+        </header>
+        <form class="form-grid" data-create-task-form>
+          <label>Task ID（编辑/删除时填写） <input name="taskId" placeholder="留空表示新建" /></label>
+          <label>任务名称 <input name="title" placeholder="例如：补齐审计证据" /></label>
+          <label>指令 <textarea name="directive" placeholder="可选，描述任务目标"></textarea></label>
+          <div class="action-row">
+            <button type="submit" data-action="create">新建任务</button>
+            <button type="button" data-action="update" disabled>保存修改</button>
+            <button type="button" data-action="delete" disabled>删除任务</button>
+          </div>
+        </form>
+        <p class="action-feedback" role="status" aria-live="polite" data-create-task-feedback>尚未创建任务。</p>
+      </section>
+
+      <section class="panel live-panel" data-task-live>
+        <header class="section-head">
+          <h2>实时事件</h2>
+          <span class="section-meta" data-task-live-meta>选中任务后会显示 provider / execution 事件。</span>
+        </header>
+        <ol class="event-list" data-task-live-events>
+          <li class="event-row-empty">尚无事件。</li>
+        </ol>
+      </section>
+
+      <aside class="panel diagnostic-panel" data-region="diagnostic-entry">
+        <header class="section-head">
+          <h2>只读诊断入口</h2>
+        </header>
+        <details>
+          <summary>查看当前 API 错误和服务端返回</summary>
+          <p>诊断只用于查看当前 API 错误和服务端返回，不产生需求、不修改队列。</p>
+          <pre data-diagnostic-output>暂无诊断信息。</pre>
+          <pre data-server-result>服务端 inspection 会显示在这里。</pre>
+        </details>
+      </aside>
+    </main>
+
+    <nav class="mobile-navigation" aria-label="页面导航">
+      <a href="./dashboard.html">Dashboard</a>
+      <a href="./tasks.html">Tasks</a>
+      <a href="./interaction.html" aria-current="page">Interaction</a>
+      <a href="./memory.html">Memory</a>
+    </nav>
+
     <script type="module" src="./interaction.js"></script>
   </body>
 </html>
