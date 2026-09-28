@@ -19,6 +19,7 @@ import { AssignmentGraph, assignmentKey, type AssignmentResultAcceptance } from 
 import { OrchestrationError } from './errors.js';
 import { type ExecutorReviewEvidence, type ReviewMaterial, resolveReviewMaterial } from './review-material.js';
 import { AgentRuntimePoolManager } from './runtime-pool.js';
+import { scopeContains } from '../events/acl.js';
 import type {
   AssignmentRecord,
   DispatchInput,
@@ -113,6 +114,19 @@ function issueFromUnknown(
 function normalizeDelivery(delivery: WorkResult | ExecutionDelivery): ExecutionDelivery {
   if ('result' in delivery) return delivery;
   return { result: delivery };
+}
+
+function uniqueEvidenceRefs(refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    if (seen.has(ref.evidenceId.value)) return false;
+    seen.add(ref.evidenceId.value);
+    return true;
+  });
+}
+
+function scopedEvidenceRefs(scope: ScopeRef, refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
+  return uniqueEvidenceRefs(refs.map((ref) => (scopeContains(scope, ref.scope) ? ref : { ...ref, scope })));
 }
 
 function leaseBinding(lease: RuntimePoolLease) {
@@ -370,6 +384,14 @@ export class OrchestrationManager {
         scope: input.scope,
       });
     } catch (error) {
+      const agent = input.executionAgentOverride ?? this.executionAgent;
+      if (agent?.release) {
+        try {
+          await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
+        } catch {
+          // Preserve the original execute error; release is best-effort cleanup.
+        }
+      }
       const executionIssue = issueFromUnknown(error, {
         code: 'execution-failed',
         ownerId: this.ownerId,
@@ -411,8 +433,12 @@ export class OrchestrationManager {
     }
 
     const delivery = normalizeDelivery(rawDelivery);
+    const result = {
+      ...delivery.result,
+      evidenceRefs: scopedEvidenceRefs(input.scope, delivery.result.evidenceRefs),
+    };
     const accepted = this.graph.acceptResult(input.assignment, {
-      result: delivery.result,
+      result,
       expectedAgentId: input.agentId,
       ...(delivery.criteria ? { criteria: delivery.criteria } : {}),
       maxAttempts: this.maxAttempts,
@@ -431,14 +457,18 @@ export class OrchestrationManager {
     const resultIssue = await this.publish({
       kind: 'work-result',
       assignment: input.assignment,
-      result: delivery.result,
+      result,
       ownerId: this.ownerId,
       scope: input.scope,
-      evidenceRefs: delivery.result.evidenceRefs,
+      evidenceRefs: result.evidenceRefs,
     });
     if (resultIssue) return this.blockedResult(accepted.record, resultIssue, input.scope);
 
     if (accepted.record.status === 'retryable' || accepted.record.status === 'escalated' || accepted.record.status === 'blocked') {
+      const agent = input.executionAgentOverride ?? this.executionAgent;
+      if (agent?.release) {
+        await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
+      }
       const retry = accepted.record.status === 'retryable'
         ? retryAssignment(input.assignment, { reason: 'failed or incomplete result' })
         : undefined;
@@ -466,12 +496,16 @@ export class OrchestrationManager {
       };
     }
 
-    if (delivery.result.nextAction === 'attention') {
+    if (result.nextAction === 'attention') {
+      const agent = input.executionAgentOverride ?? this.executionAgent;
+      if (agent?.release) {
+        await agent.release({ assignment: input.assignment, agentId: input.agentId, executionEpoch: input.assignment.executionEpoch, attempt: input.assignment.attempt, scope: input.scope });
+      }
       const escalated = this.graph.markEscalated(
         input.assignment,
-        delivery.result.conditionRef ?? delivery.result.failureRef ?? 'work result requires attention',
-        { kind: 'recover', ref: delivery.result.conditionRef ?? `attention.${input.assignment.assignmentId}` },
-        delivery.result.evidenceRefs,
+        result.conditionRef ?? result.failureRef ?? 'work result requires attention',
+        { kind: 'recover', ref: result.conditionRef ?? `attention.${input.assignment.assignmentId}` },
+        result.evidenceRefs,
       );
       const feedbackIssue = await this.publishFailureFeedback(input, escalated, 'attention');
       if (feedbackIssue) return this.blockedResult(escalated, feedbackIssue, input.scope);
@@ -489,7 +523,7 @@ export class OrchestrationManager {
       };
     }
 
-    const reviewRequired = delivery.result.nextAction === 'review' || input.assignment.mergeGate === 'required';
+    const reviewRequired = result.nextAction === 'review' || input.assignment.mergeGate === 'required';
     if (!reviewRequired) {
       return {
         status: 'succeeded',
@@ -497,7 +531,7 @@ export class OrchestrationManager {
         reviewResults: accepted.record.reviewResults,
       };
     }
-    return this.reviewAndMerge(input, accepted.record, delivery.result);
+    return this.reviewAndMerge(input, accepted.record, result);
   }
 
   private async reviewAndMerge(
@@ -915,8 +949,9 @@ export class OrchestrationManager {
     event: Parameters<OrchestrationFeedbackPort['publish']>[0],
   ): Promise<OrchestrationIssue | undefined> {
     if (!this.feedback) return undefined;
+    const evidenceRefs = scopedEvidenceRefs(event.scope, event.evidenceRefs);
     try {
-      await this.feedback.publish(event);
+      await this.feedback.publish({ ...event, evidenceRefs });
       return undefined;
     } catch (error) {
       return issueFromUnknown(error, {
@@ -924,7 +959,7 @@ export class OrchestrationManager {
         ownerId: this.ownerId,
         scope: event.scope,
         conditionRef: 'orchestration.feedback',
-        evidenceRefs: event.evidenceRefs,
+        evidenceRefs,
       });
     }
   }
