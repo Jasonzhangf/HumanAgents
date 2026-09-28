@@ -56,6 +56,22 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 需要单独授权的是超出该流程的操作：删除、回滚、迁移、清权限、生产变更、force push、
   改写他人已推送历史、清理他人 worktree。
 
+## 长程任务与 peer DAG
+
+- 具体 feature/debug/重构/迁移/清理任务必须拆分给 peer 执行；master 只做目标拆解、
+  依赖判定、派发、证据验收、集成裁决和最终验收，不亲自实现 peer-owned concrete task。
+- 全局规则提供原则，本项目规则提供 HumanAgent 的执行细节；不得把项目细节反向当作全局规则。
+- peer 写入必须在 `playground/<task>` 独立 clean worktree 完成；docs-only 快速路径除外，
+  但仍保留已有 dirty 状态。
+- 每个 peer 任务必须写明入口、唯一 owner、allowed/forbidden paths、交付物、测试命令、
+  E2E/manual 验证、review 条件和资源清理条件。
+- peer 回传必须包含 candidate SHA、changed files、测试数量与结果、真实入口/E2E 或手动验证证据、
+  独立 review PASS、清理列表和剩余风险。READ IS NOT DONE；测试和 review 是 gate，不是建议。
+- master 合并前必须 fetch 最新 `origin/main`，确认候选已组合到最新 main 并重跑受影响验证；
+  若当前 main 有大量 dirty 或未归属候选，先派 audit/classification 任务，不得直接提交。
+- 资源清理是终点生命周期：只核销 owner 明确、已确认 stale 且本任务可负责的资源；清理失败必须
+  报告原因并标记 `INCOMPLETE`，不得静默跳过或清理他人资源。
+
 ## 已批准 MVP 交付门禁
 
 1. Wave 2 candidate 只有在 focused tests、runtime integration 和独立 Codex/Astra review 通过后才可进入 main；不得伪造已入 main。

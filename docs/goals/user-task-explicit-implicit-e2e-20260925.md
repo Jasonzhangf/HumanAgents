@@ -113,3 +113,30 @@ or second task truth.
 
 Code tasks require independent clean worktree under playground/. Real RCC 4444 and
 serve must be live; otherwise record blocker, do not mock success.
+
+## Current TODO 2026-09-27
+
+Status after local evidence:
+
+- Built-in provider tools are aligned for the first testable stage:
+  `file.read`, `file.list`, `file.search`, `file.write`, `file.edit`, `bash`,
+  `todo_write`, `get_goal`, `create_goal`, `update_goal`, and `present`.
+- WebUI confirmation is optional at the prototype interaction layer; runtime
+  still requires explicit confirm before FIFO for new tasks because that is the
+  domain gate for task creation and change control.
+- E2E blocker found: a confirmed requirement currently creates three
+  orchestration assignments instead of one single completed stage. The immediate
+  root blocker was duplicate implicit executor evidence ids entering the review
+  gate; that was fixed by deduplicating executor evidence before orchestration
+  acceptance. The next blocker is subtask over-fanout for the first stage.
+
+Next owner work:
+
+1. Keep the default first-stage executor plan at one assignment per confirmed
+   requirement, while preserving multi-round execution on the same task.
+2. Re-run `pnpm typecheck`, `pnpm test:runtime`, `pnpm test:provider`,
+   `pnpm test:ui`, and `pnpm test:app`.
+3. Run `node tests/app/real-explicit-implicit-e2e.mjs` against a real RCC 4444
+   endpoint and keep the receipt under `dist/receipts/`.
+4. Browser-check the WebUI entry and terminal completed projection after the
+   runtime gate is green.

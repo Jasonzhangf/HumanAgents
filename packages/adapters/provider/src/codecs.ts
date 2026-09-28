@@ -59,8 +59,32 @@ function businessText(
   return JSON.stringify(payload);
 }
 
-const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([['file.read', 'file_read']]);
-const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([['file_read', 'file.read']]);
+const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
+  ['file.read', 'file_read'],
+  ['file.list', 'file_list'],
+  ['file.search', 'file_search'],
+  ['file.write', 'file_write'],
+  ['file.edit', 'file_edit'],
+  ['bash', 'bash'],
+  ['todo_write', 'todo_write'],
+  ['get_goal', 'get_goal'],
+  ['create_goal', 'create_goal'],
+  ['update_goal', 'update_goal'],
+  ['present', 'present'],
+]);
+const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
+  ['file_read', 'file.read'],
+  ['file_list', 'file.list'],
+  ['file_search', 'file.search'],
+  ['file_write', 'file.write'],
+  ['file_edit', 'file.edit'],
+  ['bash', 'bash'],
+  ['todo_write', 'todo_write'],
+  ['get_goal', 'get_goal'],
+  ['create_goal', 'create_goal'],
+  ['update_goal', 'update_goal'],
+  ['present', 'present'],
+]);
 
 function responsesWireToolName(toolId: string): string {
   const name = RESPONSES_TOOL_ID_TO_WIRE_NAME.get(toolId) ?? toolId;

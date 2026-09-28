@@ -43,8 +43,6 @@ import { AgentRuntime, bindAgentDriver, type AgentRuntimeObservation, type Agent
 import { RUNTIME_NODE_MARKERS } from '../nodes/node-registry.js';
 import {
   appendTaskRevision,
-  createDefaultImplicitExecutorSubtasks,
-  dispatchImplicitExecutorSubtasks,
   type TaskRevision,
   type TaskRevisionState,
   type TaskUpdateDecision,
@@ -1596,55 +1594,6 @@ export class RuntimeTaskCoordinator {
             };
           }
         }
-        if (
-          (dispatched.status === 'merged' || dispatched.status === 'succeeded')
-          && record.implicitRequirement
-          && record.implicitRequirement.admission.classified.queue !== 'interactive'
-          && this.options.implicitSubtaskExecutionAgent
-          && closure
-        ) {
-          const planInput: ImplicitExecutorPlanInput = {
-            envelope: record.implicitRequirement.envelope,
-            admission: record.implicitRequirement.admission,
-            taskId: record.taskId,
-            scope,
-            executionEpoch: operation.executionEpoch,
-            inputRevision: record.directiveRevision,
-          };
-          const subtaskResult = await dispatchImplicitExecutorSubtasks({
-            orchestration: record.taskAssembly.orchestration,
-            ...planInput,
-            subtasks: createDefaultImplicitExecutorSubtasks(planInput),
-            executionAgentOverride: this.options.implicitSubtaskExecutionAgent,
-            parentStageNodeId: stageNodeId,
-          });
-          if (subtaskResult.status !== 'succeeded') {
-            const problem = subtaskResult.issue;
-            record.error = {
-              code: problem?.code ?? 'implicit.subtasks.failed',
-              ownerId: problem?.ownerId ?? RUNTIME_OWNER,
-              message: problem?.reason ?? `implicit executor subtasks ended as ${subtaskResult.status}`,
-              retryable: subtaskResult.status === 'retryable',
-              nextAction: problem
-                ? `${problem.nextAction.kind}${problem.nextAction.ref ? `:${problem.nextAction.ref}` : ''}`
-                : 'inspect implicit executor subtask evidence',
-              evidenceRefs: subtaskResult.evidenceRefs,
-            };
-            closure = {
-              ...closure,
-              state: 'blocked',
-              evidenceRefs: [...closure.evidenceRefs, ...subtaskResult.evidenceRefs],
-              nextAction: problem?.nextAction ?? { kind: 'recover', ref: 'implicit.executor.subtasks' },
-              conditionRef: problem?.conditionRef ?? 'implicit.executor.subtasks',
-            };
-          } else {
-            closure = {
-              ...closure,
-              evidenceRefs: [...closure.evidenceRefs, ...subtaskResult.evidenceRefs],
-            };
-          }
-        }
-        if (!closure) throw new RuntimeTaskControlError('orchestration.execution.closure.missing', RUNTIME_OWNER, 'orchestration completed without a provider closure', 'inspect the execution agent result');
       } else {
         if (this.options.createTaskAssembly) {
           record.taskAssembly = this.options.createTaskAssembly({

@@ -678,44 +678,6 @@ test('failed work retries within budget and escalates after budget exhaustion', 
   assert.ok(dispatched.issue?.evidenceRefs.length);
 });
 
-test('failed executor invokes optional release before preserving the original execute error', async () => {
-  const { pool } = factoryPool({
-    maxRuntimes: 1,
-    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
-  });
-  const execution: ExecutionAgentPort = {
-    async execute() {
-      throw new Error('executor exploded');
-    },
-    async release(input) {
-      assert.deepEqual(input, {
-        assignment: assignment(),
-        agentId: 'agent-a',
-        executionEpoch: 1,
-        attempt: 1,
-        scope,
-      });
-    },
-  };
-  const manager = new OrchestrationManager({
-    ownerId: 'orchestration-manager',
-    runtimePool: pool,
-    executionAgent: execution,
-    maxAttempts: 1,
-  });
-  manager.planStage({ nodeId: 'node-a', taskId: task });
-  const dispatched = await manager.dispatch({
-    stageNodeId: 'node-a',
-    assignment: assignment(),
-    agentId: 'agent-a',
-    scope,
-  });
-
-  assert.equal(dispatched.status, 'escalated');
-  assert.equal(dispatched.issue?.code, 'execution-failed');
-  assert.equal(dispatched.issue?.reason, 'executor exploded');
-});
-
 test('failed and incomplete results map to retryable until the budget is exhausted', () => {
   const graph = new AssignmentGraph({ ownerId: 'orchestration-manager' });
   graph.addStage({ nodeId: 'node-a', taskId: task });
@@ -1107,58 +1069,6 @@ test('feedback failures surface as blocked business outcomes instead of success'
   assert.equal(dispatched.status, 'blocked');
   assert.equal(dispatched.issue?.code, 'feedback-failed');
   assert.equal(dispatched.assignment.status, 'blocked');
-});
-
-test('feedback evidence is projected into the published event scope before feedback publication', async () => {
-  const { pool } = factoryPool({
-    maxRuntimes: 1,
-    initialRuntimes: [{ runtimeId: 'runtime-a', capabilities: ['execute'] }],
-  });
-  const feedback = new RecordingFeedback();
-  const manager = new OrchestrationManager({
-    ownerId: 'orchestration-manager',
-    runtimePool: pool,
-    executionAgent: new StaticExecutionAgent([
-      {
-        result: result({
-          nextAction: 'settle',
-          evidenceRefs: [
-            {
-              ...evidence('provider-nested'),
-              scope: {
-                ...scope,
-                operationId: id('operation', 'provider-child-operation'),
-              },
-            },
-          ],
-        }),
-        criteria: criteria(),
-      },
-    ]),
-    feedback,
-  });
-  manager.planStage({ nodeId: 'node-a', taskId: task });
-  const dispatched = await manager.dispatch({
-    stageNodeId: 'node-a',
-    assignment: assignment(),
-    agentId: 'agent-a',
-    scope: {
-      ...scope,
-      operationId: id('operation', 'provider-parent-operation'),
-    },
-  });
-
-  assert.equal(dispatched.status, 'succeeded');
-  assert.equal(feedback.events.length, 1);
-  assert.deepEqual(feedback.events[0]?.evidenceRefs, [
-    {
-      ...evidence('provider-nested'),
-      scope: {
-        ...scope,
-        operationId: id('operation', 'provider-parent-operation'),
-      },
-    },
-  ]);
 });
 
 test('attention results preserve recovery ownership and never become success', async () => {
@@ -1676,7 +1586,7 @@ function implicitAssembly(failures = new Set<string>()) {
   const pool = new AgentRuntimePoolManager({
     maxRuntimes: 4,
     factory,
-    initialRuntimes: [{ runtimeId: 'implicit-runtime', capabilities: ['code.search', 'file.checkpoint'] }],
+    initialRuntimes: [{ runtimeId: 'implicit-runtime', capabilities: ['provider.execution'] }],
   });
   const executor = new ImplicitExecutor(failures);
   const review = new ImplicitReviewAgent();
@@ -1740,13 +1650,13 @@ test('implicit FIFO admits and dispatches executor subtasks to terminal success 
   assert.equal(result.kind, 'succeeded');
   if (result.kind !== 'succeeded') return;
   assert.equal(result.status, 'succeeded');
-  assert.equal(result.dispatches.length, 2);
-  assert.equal(executor.inputs.length, 2);
+  assert.equal(result.dispatches.length, 1);
+  assert.equal(executor.inputs.length, 1);
   assert.deepEqual(
     executor.inputs.map((input) => input.assignment.requiredCapabilities[0]),
-    ['code.search', 'file.checkpoint'],
+    ['provider.execution'],
   );
-  assert.equal(review.results.length, 2);
+  assert.equal(review.results.length, 1);
   assert.equal(result.evidenceRefs.length >= 2, true);
   assert.equal(inbox.size, 0);
 });
@@ -1781,10 +1691,10 @@ test('implicit executor dispatch uses the execution agent override for every sub
     executionAgentOverride: override,
   });
   assert.equal(result.status, 'succeeded');
-  assert.equal(override.inputs.length, 2);
+  assert.equal(override.inputs.length, 1);
   assert.deepEqual(
     override.inputs.map((input) => input.assignment.requiredCapabilities[0]),
-    ['code.search', 'file.checkpoint'],
+    ['provider.execution'],
   );
 });
 

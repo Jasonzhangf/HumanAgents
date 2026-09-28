@@ -40,7 +40,6 @@ import {
   type TaskId,
   type InteractionDecision,
   type WorkResult,
-  type WorkAssignment,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
@@ -1146,57 +1145,6 @@ export class UiRuntimeService {
         activeDrivers.set(input.assignment.assignmentId, driver);
         let started = false;
         const events: AgentEvent[] = [];
-        const settleAndBuild = (settlement: NonNullable<ReturnType<ProviderAgentDriver['settlement']>>): WorkResult => {
-          const producedOutput = events.map((event) => event.summary ?? '').join('');
-          const status: WorkResult['status'] = settlement.state === 'succeeded'
-            ? 'succeeded'
-            : settlement.state === 'waiting'
-              ? 'incomplete'
-              : settlement.state === 'blocked'
-                ? 'blocked'
-                : settlement.state === 'failed' || settlement.state === 'unknown'
-                  ? 'failed'
-                  : 'cancelled';
-          const nextAction: WorkResult['nextAction'] = status === 'succeeded'
-            ? 'review'
-            : status === 'incomplete'
-              ? 'wait'
-              : status === 'blocked' || status === 'failed'
-                ? 'attention'
-                : 'settle';
-          const evidenceRefs = [
-            ...events.flatMap((event) => event.evidenceRefs),
-            ...settlement.evidenceRefs,
-          ];
-          const outputRefs = input.assignment.expectedOutputRefs.length > 0
-            ? [...input.assignment.expectedOutputRefs]
-            : [...input.assignment.targetRefs];
-          return {
-            taskId: input.assignment.taskId,
-            pipelineNodeId: input.assignment.pipelineNodeId,
-            agentId: input.agentId,
-            assignmentId: input.assignment.assignmentId,
-            attempt: input.assignment.attempt,
-            executionEpoch: input.executionEpoch,
-            inputRevision: input.assignment.inputRevision,
-            producedArtifactRefs: outputRefs,
-            producedArtifactDigests: outputRefs.map(() => digestOf(producedOutput)),
-            producedArtifactBodies: outputRefs.map(() => producedOutput),
-            status,
-            summary: producedOutput.trim() === ''
-              ? `implicit executor ${input.agentId} ${status}`
-              : `implicit executor ${input.agentId} ${status}: ${producedOutput.trim()}`,
-            outputRefs,
-            evidenceRefs,
-            nextAction,
-            ...(status === 'incomplete'
-              ? { conditionRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/waiting` }
-              : {}),
-            ...(status === 'failed'
-              ? { failureRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/failed` }
-              : {}),
-          };
-        };
         try {
           await driver.start({
             runtimeId,
@@ -1220,10 +1168,13 @@ export class UiRuntimeService {
           }
         } catch (error) {
           if (started) {
-            await this.releaseImplicitExecutorDriver(driver, input, operationId);
-            const released = driver.settlement();
-            if (released && (released.state === 'failed' || released.state === 'unknown' || released.state === 'blocked')) {
-              return settleAndBuild(released);
+            try {
+              await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
+            } catch (settlementError) {
+              throw new Error(
+                `implicit executor failed and settlement also failed: ${settlementError instanceof Error ? settlementError.message : String(settlementError)}`,
+                { cause: error },
+              );
             }
           }
           throw error;
@@ -1231,36 +1182,62 @@ export class UiRuntimeService {
         await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
         const settlement = driver.settlement();
         if (!settlement) throw new Error('implicit executor did not expose settlement');
-        return settleAndBuild(settlement);
-      },
-      release: async (input) => {
-        const driver = activeDrivers.get(input.assignment.assignmentId);
-        if (!driver) return;
-        const operationId = id('operation', `implicit-${input.assignment.assignmentId}-${input.attempt}`);
-        await this.releaseImplicitExecutorDriver(driver, input, operationId);
+        const producedOutput = events.map((event) => event.summary ?? '').join('');
+        const status: WorkResult['status'] = settlement.state === 'succeeded'
+          ? 'succeeded'
+          : settlement.state === 'waiting'
+            ? 'incomplete'
+            : settlement.state === 'blocked'
+              ? 'blocked'
+              : settlement.state === 'failed' || settlement.state === 'unknown'
+                ? 'failed'
+                : 'cancelled';
+        const nextAction: WorkResult['nextAction'] = status === 'succeeded'
+          ? 'review'
+          : status === 'incomplete'
+            ? 'wait'
+            : status === 'blocked' || status === 'failed'
+              ? 'attention'
+              : 'settle';
+        const evidenceRefs = [
+          ...events.flatMap((event) => event.evidenceRefs),
+          ...settlement.evidenceRefs,
+        ];
+        const scopedEvidenceRefs = [
+          ...new Map(
+            evidenceRefs.map((ref) => [ref.evidenceId.value, { ...ref, scope: { ...input.scope } }]),
+          ).values(),
+        ];
+        const outputRefs = input.assignment.expectedOutputRefs.length > 0
+          ? [...input.assignment.expectedOutputRefs]
+          : [...input.assignment.targetRefs];
+        return {
+          taskId: input.assignment.taskId,
+          pipelineNodeId: input.assignment.pipelineNodeId,
+          agentId: input.agentId,
+          assignmentId: input.assignment.assignmentId,
+          attempt: input.assignment.attempt,
+          executionEpoch: input.executionEpoch,
+          inputRevision: input.assignment.inputRevision,
+          producedArtifactRefs: outputRefs,
+          producedArtifactDigests: outputRefs.map(() => digestOf(producedOutput)),
+          producedArtifactBodies: outputRefs.map(() => producedOutput),
+          status,
+          summary: producedOutput.trim() === ''
+            ? `implicit executor ${input.agentId} ${status}`
+            : `implicit executor ${input.agentId} ${status}: ${producedOutput.trim()}`,
+          outputRefs,
+          evidenceRefs: scopedEvidenceRefs,
+          nextAction,
+          ...(status === 'incomplete'
+            ? { conditionRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/waiting` }
+            : {}),
+          ...(status === 'failed'
+            ? { failureRef: settlement.nextAction?.ref ?? `operation://${operationId.value}/failed` }
+            : {}),
+        };
       },
     };
-  }
-
-  private async releaseImplicitExecutorDriver(
-    driver: ProviderAgentDriver,
-    input: {
-      readonly assignment: WorkAssignment;
-      readonly agentId: string;
-      readonly executionEpoch: number;
-      readonly attempt: number;
-      readonly scope: ScopeRef;
-    },
-    operationId: OperationId,
-  ): Promise<void> {
-    const runtimeId = `implicit-executor-${input.assignment.assignmentId}-${input.attempt}-${input.executionEpoch}`;
-    try {
-      await driver.requestStop({ runtimeId, executionEpoch: input.executionEpoch, operationId });
-    } catch {
-      // The provider may already be terminal; release must still settle the
-      // active execution so shared provider close sees no pending execution.
-    }
-    await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
   }
 
   status(): RuntimeStatusProjection {

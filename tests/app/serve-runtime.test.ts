@@ -456,27 +456,17 @@ test('confirmed requirement enters task orchestration with RCC review before pro
       if (runtime.service.taskDashboard(taskId).state === 'succeeded') break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
     const graph = runtime.service.taskAssembly(taskId).orchestration.graph.snapshot();
-    assert.equal(graph.stages.length, 3);
-    assert.equal(graph.assignments.length, 3);
-    assert.equal(graph.stages[0]?.state, 'merged');
+    assert.equal(runtime.service.taskDashboard(taskId).state, 'succeeded');
+    assert.equal(graph.stages.length, 1);
+    assert.equal(graph.assignments.length, 1);
     assert.equal(graph.assignments[0]?.status, 'merged', JSON.stringify(graph.assignments[0]));
-    assert.ok(graph.assignments.every((assignment) => assignment.status === 'merged' || assignment.status === 'succeeded'));
     const feedback = await eventBus.ports.journal.readEvents({
       streamId: `task:${taskId.value}`,
       afterSequence: 0,
       limit: 20,
     });
-    assert.deepEqual(feedback.map((event) => event.class), [
-      'data',
-      'data',
-      'control',
-      'data',
-      'data',
-      'data',
-      'data',
-    ]);
+    assert.deepEqual(feedback.map((event) => event.class), ['data', 'data', 'control']);
   } finally {
     await runtime.server.close();
     await runtimeComposition.dispose();
@@ -704,7 +694,7 @@ test('RCC orchestration ports provide review and merge agents for the live execu
   assert.ok(merged.evidenceRefs.length > 0);
 });
 
-test('RCC review agent stays inconclusive when the model exhausts retries without a review marker', async () => {
+test('RCC review agent fails closed when the model exhausts retries without a review marker', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-omission'),
     organId: id('organ', 'humanagent-ui'),
@@ -764,7 +754,7 @@ test('RCC review agent stays inconclusive when the model exhausts retries withou
     reviewMaterial: materialFor(workAssignment, worker),
     scope,
   });
-  assert.equal(review.status, 'inconclusive');
+  assert.equal(review.status, 'failed');
   assert.equal(review.findings.length, 1);
   assert.match(review.findings[0]!.expected, /bounded recover\/re-review consumer/);
 });
