@@ -33,6 +33,10 @@ function shouldObserveActiveState() {
     && !dashboard.operationId
 }
 
+function visibleRecentEvents(events) {
+  return events.filter((event) => event.kind !== 'provider.model' || (event.summary && event.summary !== 'model'))
+}
+
 function stopObserving() {
   if (observeTimer) {
     clearTimeout(observeTimer)
@@ -110,16 +114,17 @@ function renderDashboard() {
   const events = element('section', undefined, 'section')
   events.append(element('h2', '最近事件'))
   const eventPanel = element('div', undefined, 'panel')
-  if (dashboard.recentEvents.length === 0) {
+  const recentEvents = visibleRecentEvents(dashboard.recentEvents)
+  if (recentEvents.length === 0) {
     eventPanel.append(element('p', '尚无事件。', 'empty'))
   } else {
     const list = element('ol', undefined, 'event-list')
-    for (const event of dashboard.recentEvents) {
+    for (const event of recentEvents) {
       const row = element('li', undefined, 'event')
       row.append(
         element('time', formatTime(event.occurredAt)),
         element('span', `${event.kind} · ${event.state}`, 'event-kind'),
-        element('span', `${event.summary}${event.ownerId ? ` · owner=${event.ownerId}` : ''}${event.nextAction ? ` · next=${event.nextAction}` : ''}`),
+        element('span', event.summary),
       )
       list.append(row)
     }

@@ -34,6 +34,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -65,6 +66,10 @@ function sourceDigest() {
       && !line.includes('dist/receipts/'))
     .sort();
   return `sha256:${createHash('sha256').update(`${entries.join('\n')}\n`).digest('hex')}`;
+}
+
+function harnessDigest() {
+  return `sha256:${createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex')}`;
 }
 
 async function loadPlaywright() {
@@ -173,19 +178,52 @@ async function waitForDom(page, label, predicate, timeoutMs, intervalMs = 500) {
   }
 }
 
-async function taskDashboardTaskId(page) {
-  const href = await page.getAttribute('a.task-row-link', 'href');
-  if (!href) return null;
-  const match = /[?&]task=([^&#]+)/.exec(href);
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
 function eventKinds(dashboard) {
   return (dashboard.recentEvents ?? []).map((event) => `${event.kind}:${event.state}`);
 }
 
 function providerToolRoundCount(dashboard) {
   return (dashboard.recentEvents ?? []).filter((event) => event.kind === 'provider.tool').length;
+}
+
+function requestStartTurnCount(dashboard) {
+  return (dashboard.recentEvents ?? []).filter((event) => event.summary === 'provider requested model work').length;
+}
+
+function requestStartTurns(dashboard) {
+  return (dashboard.recentEvents ?? [])
+    .filter((event) => event.summary === 'provider requested model work')
+    .map((event) => ({
+      eventId: event.eventId ?? null,
+      seq: event.seq ?? null,
+      occurredAt: event.occurredAt ?? null,
+      kind: event.kind,
+      state: event.state,
+      summary: event.summary,
+    }));
+}
+
+function providerToolLabels(dashboard) {
+  return (dashboard.recentEvents ?? [])
+    .filter((event) => event.kind === 'provider.tool')
+    .map((event) => event.summary);
+}
+
+function genericProviderModelRows(eventRows) {
+  return (eventRows ?? []).filter((row) => row.summary === 'model');
+}
+
+function terminalTurn(dashboard) {
+  return (dashboard.recentEvents ?? []).find((event) => event.kind === 'execution.terminal') ?? null;
+}
+
+function bboxFor(box) {
+  return {
+    width: Math.round(box.width),
+    height: Math.round(box.height),
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+  };
 }
 
 function assertCompleted(dashboard) {
@@ -207,6 +245,12 @@ async function assertDashboardDom(page, expectedToolRounds) {
   const currentState = facts.find((fact) => fact.label === '当前状态');
   const eventKindsDom = await page.$$eval('.event-kind', (nodes) => nodes.map((node) => node.textContent?.trim() ?? ''));
   const toolRoundsDom = eventKindsDom.filter((text) => text.startsWith('provider.tool')).length;
+  const eventRows = await page.$$eval('.event-list li.event', (rows) => rows.map((row) => ({
+    kind: row.querySelector('.event-kind')?.textContent?.trim() ?? '',
+    summary: row.children[2]?.textContent?.trim() ?? '',
+    text: row.textContent?.trim() ?? '',
+  })));
+  const requestStartRowsDom = eventRows.filter((row) => row.summary === 'provider requested model work');
 
   if (stateChip !== '已完成') {
     throw new Error(`dashboard DOM did not show 已完成: chip=${JSON.stringify(stateChip)}`);
@@ -220,7 +264,33 @@ async function assertDashboardDom(page, expectedToolRounds) {
   if (toolRoundsDom < expectedToolRounds) {
     throw new Error(`dashboard DOM showed ${toolRoundsDom} provider.tool rounds, expected >= ${expectedToolRounds}`);
   }
-  return { stateChip, currentState, checkpoint, toolRoundsDom, eventKindsDom };
+  const toolRequestRowsDom = eventRows.filter((row) => row.kind.startsWith('provider.tool') && row.summary.startsWith('调用工具：'));
+  if (toolRequestRowsDom.length < expectedToolRounds) {
+    throw new Error(`dashboard DOM showed ${toolRequestRowsDom.length} provider tool request rows, expected >= ${expectedToolRounds}: ${eventRows.map((row) => row.summary).join(' | ')}`);
+  }
+  if (genericProviderModelRows(eventRows).length > 0) {
+    throw new Error(`dashboard DOM still showed generic provider.model rows with summary=model: ${JSON.stringify(genericProviderModelRows(eventRows))}`);
+  }
+  if (!requestStartRowsDom.some((row) => row.kind.startsWith('provider.model'))) {
+    throw new Error(`dashboard DOM showed no visible provider request-start row: ${eventRows.map((row) => row.summary).join(' | ')}`);
+  }
+  return { stateChip, currentState, checkpoint, toolRoundsDom, eventKindsDom, eventRows, requestStartRowsDom, toolRequestRowsDom };
+}
+
+async function assertDashboardDomRequestStarts(page, label, expected = 2) {
+  const eventRows = await page.$$eval('.event-list li.event', (rows) => rows.map((row) => ({
+    kind: row.querySelector('.event-kind')?.textContent?.trim() ?? '',
+    summary: row.children[2]?.textContent?.trim() ?? '',
+    text: row.textContent?.trim() ?? '',
+  })));
+  const requestStartRowsDom = eventRows.filter((row) => row.summary === 'provider requested model work');
+  if (genericProviderModelRows(eventRows).length > 0) {
+    throw new Error(`${label}: dashboard DOM still showed generic provider.model rows with summary=model: ${JSON.stringify(genericProviderModelRows(eventRows))}`);
+  }
+  if (requestStartRowsDom.length < expected) {
+    throw new Error(`${label}: dashboard DOM showed ${requestStartRowsDom.length} request-start rows, expected >= ${expected}: ${eventRows.map((row) => row.summary).join(' | ')}`);
+  }
+  return { eventRows, requestStartRowsDom };
 }
 
 async function assertObservationDom(page) {
@@ -252,6 +322,9 @@ async function main() {
   await mkdir(join(root, 'workspace'), { recursive: true });
   await writeFile(join(root, 'workspace', 'marker.txt'), 'BROWSER_E2E_MARKER_4F9A\n', 'utf8');
   await writeFile(join(root, 'workspace', 'readme-first-line.txt'), 'BROWSER_FIRST_LINE_7C3E\n', 'utf8');
+  await writeFile(join(root, 'workspace', 'alpha-fact.txt'), 'BROWSER_ALPHA_FACT_1C02\n', 'utf8');
+  await writeFile(join(root, 'workspace', 'beta-fact.txt'), 'BROWSER_BETA_FACT_8A77\n', 'utf8');
+  await writeFile(join(root, 'workspace', 'gamma-fact.txt'), 'BROWSER_GAMMA_FACT_5D29\n', 'utf8');
   await mkdir(SHOT_DIR, { recursive: true });
 
   const playwright = await loadPlaywright();
@@ -280,49 +353,65 @@ async function main() {
       if (message.type() === 'error') consoleErrors.push(`console: ${message.text()}`);
     });
 
-    // 1. Load the real served UI entry page.
-    const entryUrl = `${base}/`;
+    // 1. Load the real served dashboard page.
+    const entryUrl = `${base}/dashboard.html`;
     const entryResponse = await page.goto(entryUrl, { waitUntil: 'domcontentloaded' });
     if (!entryResponse || !entryResponse.ok()) {
       throw new Error(`served UI entry did not load: ${entryUrl} status=${entryResponse?.status()}`);
     }
-    await page.waitForSelector('textarea[name="rawInput"]', { timeout: 15_000 });
-    steps.entry = { url: page.url(), title: await page.title(), screenshot: await screenshot(page, '01-entry') };
-
-    // 2. Type a real task into the UI and submit it to the explicit brain.
-    const rawInput = 'Do not clarify. Create exactly one concrete task: read the files marker.txt and readme-first-line.txt at the workspace root, combine both facts into a single completion summary that includes the exact contents of both files verbatim, and finish with the word COMPLETE.';
-    await page.fill('textarea[name="rawInput"]', rawInput);
+    await page.waitForSelector('.quick-create-form textarea[name="directive"]', { timeout: 15_000 });
+    const inputHandle = await page.$('.quick-create-form textarea[name="directive"]');
+    const inputBox = inputHandle ? bboxFor(await inputHandle.boundingBox()) : null;
+    const policyHandle = await page.$('.quick-create-policy input[name="autoConfirm"]');
+    const policyBox = policyHandle ? bboxFor(await policyHandle.boundingBox()) : null;
+    if (!inputBox || inputBox.width <= 0 || inputBox.height <= 0) {
+      throw new Error(`real browser input was not laid out with a positive bbox: ${JSON.stringify(inputBox)}`);
+    }
+    if (!policyBox || policyBox.width <= 0 || policyBox.height <= 0) {
+      throw new Error(`dashboard autoConfirm checkbox was not laid out with a positive bbox: ${JSON.stringify(policyBox)}`);
+    }
+    if (policyBox.width > 20 || policyBox.height > 20) {
+      throw new Error(`dashboard autoConfirm checkbox was not compact: ${JSON.stringify(policyBox)}`);
+    }
+    // 2. Type a real task into the dashboard and submit it to the explicit brain.
+    const rawInput = 'Do not clarify. Create exactly one concrete task: read the workspace-root marker.txt first. Only if its exact content is BROWSER_E2E_MARKER_4F9A, read alpha-fact.txt. Only if that exact content is BROWSER_ALPHA_FACT_1C02, read beta-fact.txt. Only if that exact content is BROWSER_BETA_FACT_8A77, read gamma-fact.txt. Only if that exact content is BROWSER_GAMMA_FACT_5D29, read readme-first-line.txt. Then combine every exact file content verbatim into one completion summary, and finish with the word COMPLETE.';
+    steps.entry = { url: page.url(), title: await page.title(), inputBox, policyBox, screenshot: await screenshot(page, '01-entry') };
+    await page.fill('.quick-create-form textarea[name="directive"]', rawInput);
     await page.click('form button[type="submit"]');
 
     // 3. Wait for the UI to render a confirmable draft.
     let draft;
     for (let attempt = 0; attempt < MAX_INTERPRET_ATTEMPTS; attempt += 1) {
       const outcome = await waitForDom(page, 'explicit draft', async () => {
-        const confirm = await page.$('#entry-draft button.button--primary');
+        const confirm = await page.$('.draft-actions button.button--primary');
         if (confirm) {
           const text = (await confirm.textContent())?.trim();
-          if (text === '确认并进入队列') return { kind: 'draft' };
+          if (text === '确认并执行') return { kind: 'draft' };
         }
-        const clarification = await page.$('#entry-draft input[name="answer"]');
-        if (clarification) return { kind: 'clarification' };
+        const submitText = (await page.textContent('.quick-create-form button[type="submit"]'))?.trim() ?? '';
+        const progressText = (await page.textContent('.quick-create-progress .progress-phase'))?.trim() ?? '';
+        const placeholder = await page.getAttribute('.quick-create-form textarea[name="directive"]', 'placeholder');
+        if (submitText === '回答并继续' || progressText === '需要补充信息') {
+          return { kind: 'clarification', submitText, progressText, placeholder: placeholder ?? null };
+        }
         return null;
       }, 120_000);
       if (outcome.kind === 'draft') {
-        const grid = await page.$$eval('#entry-draft .detail-cell', (cells) => cells.map((cell) => ({
-          label: cell.querySelector('dt')?.textContent?.trim() ?? '',
-          value: cell.querySelector('dd')?.textContent?.trim() ?? '',
-        })));
-        const proposal = (await page.textContent('#entry-draft section p.muted'))?.trim() ?? '';
-        const intent = grid.find((cell) => cell.label === '意图')?.value ?? '';
-        if (!proposal.includes('readme-first-line.txt') || intent !== 'create') {
-          throw new Error(`explicit draft did not satisfy the requirement: intent=${intent}; proposal=${proposal.slice(0, 300)}`);
+        const metaRows = await page.$$eval('.draft-meta', (nodes) => nodes.map((node) => node.textContent?.trim() ?? ''));
+        const proposal = (await page.textContent('.draft-area .draft-proposal'))?.trim() ?? '';
+        const intent = (metaRows.find((row) => row.startsWith('意图：')) ?? '').replace('意图：', '');
+        if (!proposal.includes('BROWSER_E2E_MARKER_4F9A') || !proposal.includes('alpha-fact.txt') || !proposal.includes('BROWSER_ALPHA_FACT_1C02') || !proposal.includes('gamma-fact.txt') || !proposal.includes('readme-first-line.txt') || intent !== 'create') {
+          throw new Error(`dashboard draft did not satisfy the requirement: intent=${intent}; proposal=${proposal.slice(0, 300)}`);
         }
-        draft = { intent, proposal, grid };
+        draft = { intent, proposal, metaRows };
         break;
       }
       // The UI asked for clarification: answer it through the UI and continue.
-      await page.fill('#entry-draft input[name="answer"]', 'Use the workspace root files directly; do not ask again.');
-      await page.click('#entry-draft button[type="submit"]');
+      if (!outcome.placeholder && !outcome.submitText) {
+        throw new Error('dashboard clarification state had no UI evidence');
+      }
+      await page.fill('.quick-create-form textarea[name="directive"]:not([readonly])', 'Use the workspace root files directly; do not ask again.');
+      await page.click('.quick-create-form button[type="submit"]');
     }
     if (!draft) throw new Error(`no confirmable explicit draft after ${MAX_INTERPRET_ATTEMPTS} attempts`);
     steps.draft = { ...draft, screenshot: await screenshot(page, '02-draft') };
@@ -330,39 +419,110 @@ async function main() {
     // 4. Confirm through the UI. Nothing may enter the queue before this click.
     const tasksBeforeConfirm = await jsonRequest(`${base}/api/tasks`);
     const draftRowsBefore = (tasksBeforeConfirm.draft ?? []).length;
-    await page.click('#entry-draft button.button--primary');
+    const confirmResponsePromise = page.waitForResponse((response) => response.url().includes('/api/explicit/interactions/') && response.url().endsWith('/confirmation') && response.request().method() === 'POST');
+    await page.click('.draft-actions button.button--primary');
+    const confirmResponse = await confirmResponsePromise;
+    const confirmStatus = confirmResponse.status();
+    if (confirmStatus < 200 || confirmStatus >= 300) {
+      throw new Error(`confirmation POST returned non-2xx status=${confirmStatus}; response=${JSON.stringify({ url: confirmResponse.url(), ok: confirmResponse.ok() })}`);
+    }
+    const dispatchedTask = await waitForDom(page, 'dispatched task id', async () => {
+      const tasks = await jsonRequest(`${base}/api/tasks`);
+      const candidates = []
+        .concat(tasks.running ?? [])
+        .concat(tasks.waiting ?? [])
+        .concat(tasks.draft ?? [])
+        .concat(tasks.completed ?? [])
+        .concat(tasks.failed ?? [])
+        .filter((task) => task?.taskId?.value && task.updatedAt);
+      if (candidates.length === 0) return null;
+      const latest = candidates
+        .map((task) => ({ task, timestamp: new Date(task.updatedAt).getTime() }))
+        .sort((left, right) => right.timestamp - left.timestamp)[0];
+      return latest?.task?.taskId?.value ?? null;
+    }, 60_000);
+    const taskId = typeof dispatchedTask === 'string' ? dispatchedTask : null;
+    if (!taskId) throw new Error('confirmation did not create a dispatched task');
 
-    // 5. Follow the queued task row link the UI renders after confirmation.
-    const taskId = await waitForDom(page, 'queued task row link', async () => taskDashboardTaskId(page), 60_000);
+    // 5. Open the dashboard for the dispatched task as soon as its id is known.
+    const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskId)}`;
+    if (page.url() !== dashboardUrl) {
+      await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
+    }
     steps.admission = {
       draftRowsBeforeConfirm: draftRowsBefore,
+      confirmStatus,
       taskId,
-      rowLabel: (await page.textContent('a.task-row-link'))?.trim() ?? null,
       screenshot: await screenshot(page, '03-queued'),
     };
 
-    // 6. Open the task dashboard page the UI links to and wait for completion.
-    await page.goto(`${base}/task-dashboard.html?task=${encodeURIComponent(taskId)}`, { waitUntil: 'domcontentloaded' });
-    let terminalChip;
+    // 6. Capture request-start rows while nonterminal before terminal.
+    let activeRequestStartDom;
+    let activeScreenshot;
     try {
-      terminalChip = await waitForDom(page, 'task dashboard completed', async () => {
-        const chip = await page.locator('.state-chip').first().textContent().catch(() => null);
-        const trimmed = chip?.trim() ?? '';
-        if (trimmed === '已完成' || trimmed === '失败' || trimmed === '已停止') return trimmed;
+      activeRequestStartDom = await waitForDom(page, 'nonterminal request-start marker', async () => assertDashboardDomRequestStarts(page, 'nonterminal dashboard', 1), 90_000, 250);
+      const chip = await page.locator('.state-chip').first().textContent().catch(() => '');
+      if (chip?.trim() === '已完成' || chip?.trim() === '失败' || chip?.trim() === '已停止') {
+        throw new Error(`nonterminal request-start evidence was captured after terminal state: ${chip?.trim()}`);
+      }
+      activeScreenshot = await screenshot(page, '04-task-dashboard-nonterminal-request-starts');
+    } catch (error) {
+      const fallbackScreenshot = await screenshot(page, '04-task-dashboard-missing-request-starts').catch(() => null);
+      throw new Error(`${error.message}; screenshot=${JSON.stringify(fallbackScreenshot)}`);
+    }
+    let terminalState;
+    try {
+      terminalState = await waitForDom(page, 'task runtime terminal', async () => {
+        const probe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
+        if (['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
         return null;
-      }, TERMINAL_TIMEOUT_MS, 250);
+      }, TERMINAL_TIMEOUT_MS, 500);
+      await page.reload({ waitUntil: 'domcontentloaded' });
     } catch (error) {
       const probe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`).catch((probeError) => ({ probeError: String(probeError) }));
-      throw new Error(`${error.message}; runtime dashboard probe=${JSON.stringify(probe, null, 2)}`);
+      const probeScreenshot = await screenshot(page, '04-task-dashboard-terminal-timeout').catch(() => null);
+      const probeEvents = eventKinds(probe);
+      const probeSummary = JSON.stringify({
+        state: probe.state ?? null,
+        executionEpoch: probe.executionEpoch ?? null,
+        checkpoint: probe.checkpoint ?? null,
+        toolRounds: providerToolRoundCount(probe),
+        requestStartCount: requestStartTurnCount(probe),
+        recentEventKinds: probeEvents.slice(-10),
+        probeError: probe.probeError ?? null,
+      });
+      throw new Error(`${error.message}; runtime dashboard probe=${probeSummary}; screenshot=${JSON.stringify(probeScreenshot)}`);
     }
-    const dashboardDom = await assertDashboardDom(page, 2);
+    const dashboardDom = await waitForDom(page, 'task dashboard completed DOM', async () => {
+      const apiProbe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
+      if (apiProbe.state !== 'succeeded') return null;
+      const chip = await page.locator('.state-chip').first().textContent().catch(() => null);
+      if (chip?.trim() !== '已完成') return null;
+      return assertDashboardDom(page, 2);
+    }, 30_000, 250);
     const dashboardShot = await screenshot(page, '04-task-dashboard-completed');
 
     const dashboard = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`);
     assertCompleted(dashboard);
     const toolRounds = providerToolRoundCount(dashboard);
+    const requestStartCount = requestStartTurnCount(dashboard);
     if (toolRounds < 2) {
       throw new Error(`runtime reported ${toolRounds} provider.tool rounds, expected >= 2`);
+    }
+    if (requestStartCount < 2) {
+      throw new Error(`runtime reported ${requestStartCount} provider request-start turns, expected >= 2: ${JSON.stringify(requestStartTurns(dashboard))}`);
+    }
+    if (!providerToolLabels(dashboard).some((label) => label.startsWith('调用工具：'))) {
+      throw new Error(`runtime did not report provider tool request labels: ${JSON.stringify(providerToolLabels(dashboard))}`);
+    }
+    if (providerToolLabels(dashboard).some((label) => /succeeded|success|completed/i.test(label))) {
+      throw new Error(`runtime reported tool-call completion semantics instead of request semantics: ${JSON.stringify(providerToolLabels(dashboard))}`);
+    }
+    if (terminalTurn(dashboard)?.state !== 'succeeded') {
+      throw new Error(`runtime did not report a distinct successful terminal turn: ${JSON.stringify(terminalTurn(dashboard))}`);
+    }
+    if (dashboardDom.requestStartRowsDom.length !== requestStartCount) {
+      throw new Error(`terminal dashboard DOM showed ${dashboardDom.requestStartRowsDom.length} request-start rows, runtime reported ${requestStartCount}`);
     }
     steps.dashboard = {
       taskId,
@@ -371,8 +531,14 @@ async function main() {
       operationId: dashboard.operationId ?? null,
       checkpoint: dashboard.checkpoint ?? null,
       toolRounds,
+      requestStartCount,
+      requestStartTurns: requestStartTurns(dashboard),
+      providerToolLabels: providerToolLabels(dashboard),
+      terminalTurn: terminalTurn(dashboard),
       events: eventKinds(dashboard),
       dom: dashboardDom,
+      activeRequestStartDom,
+      activeScreenshot,
       screenshot: dashboardShot,
     };
 
@@ -406,9 +572,10 @@ async function main() {
       generatedAt: new Date().toISOString(),
       candidate: {
         head: git(['rev-parse', 'HEAD']),
-        tree: git(['rev-parse', 'HEAD^{tree}']),
+        tree: git(['write-tree']),
         branch: git(['rev-parse', '--abbrev-ref', 'HEAD']),
         sourceDigest: sourceDigest(),
+        harnessDigest: harnessDigest(),
       },
       rcc: {
         baseUrl: RCC_BASE_URL,
@@ -433,6 +600,7 @@ async function main() {
         taskId,
         terminalState: dashboard.state,
         toolRounds,
+        requestStartCount,
         executionEpoch: dashboard.executionEpoch ?? null,
         checkpoint: dashboard.checkpoint ?? null,
       },
@@ -445,6 +613,7 @@ async function main() {
         steps.entry.screenshot,
         steps.draft.screenshot,
         steps.admission.screenshot,
+        activeScreenshot,
         dashboardShot,
         observationShot,
         steps.taskList.screenshot,
@@ -462,6 +631,7 @@ async function main() {
       taskId,
       terminalState: dashboard.state,
       toolRounds,
+      requestStartCount,
       checkpoint: dashboard.checkpoint?.seq ?? null,
       screenshots: receipt.screenshots,
     }, null, 2));

@@ -391,6 +391,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       responsesOutputText: new Map<string, string>(),
       responsesCurrentResponseId: new Map<string, string>(),
       responsesPendingToolCalls: new Set<string>(),
+      responsesRequestStartEmitted: new Map<string, boolean>(),
       nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
     };
     try {

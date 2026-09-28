@@ -847,6 +847,14 @@ test('explicit requirement checkbox stays compact under the shared input style',
   assert.equal(/background:\s*transparent/.test(policyRule[0]), true);
 });
 
+test('task dashboard event rows do not render internal owner or next action details', async () => {
+  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
+  assert.equal(source.includes('event.ownerId'), false);
+  assert.equal(source.includes('event.nextAction'), false);
+  assert.equal(source.includes("event.kind !== 'provider.model' || (event.summary && event.summary !== 'model')"), true);
+  assert.equal(source.includes('element(\'span\', event.summary)'), true);
+});
+
 test('dashboard confirmation waits on user without continuing a provider timer', async () => {
   const source = await readFile('docs/ui/dashboard.js', 'utf8');
   assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), true);

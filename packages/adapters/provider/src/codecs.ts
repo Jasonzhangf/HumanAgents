@@ -111,11 +111,14 @@ export interface DecodeContext {
   readonly responsesOutputText: Map<string, string>;
   readonly responsesCurrentResponseId?: Map<string, string>;
   readonly responsesPendingToolCalls?: Set<string>;
+  readonly responsesRequestStartEmitted: Map<string, boolean>;
 }
 
 export interface ProviderDecodedEvent {
   readonly events: readonly ProviderEvent[];
 }
+
+const REQUEST_START_SUMMARY = 'provider requested model work';
 
 export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireRequest> {
   readonly protocol: 'responses' | 'anthropic' | 'openai';
@@ -224,8 +227,15 @@ function eventBase(
   };
 }
 
-function modelEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, type: string, eventId: string, evidenceRefs?: readonly EvidenceRef[]): ProviderEvent {
-  return { ...eventBase(execution, scope, type, eventId, type, evidenceRefs), kind: 'model' };
+function modelEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, type: string, eventId: string, evidenceRefs?: readonly EvidenceRef[], forcedSummary?: string): ProviderEvent {
+  const summary: string | undefined = type === 'message_start'
+    ? REQUEST_START_SUMMARY
+    : forcedSummary;
+  return {
+    ...eventBase(execution, scope, type, eventId, type, evidenceRefs),
+    kind: 'model',
+    ...(summary === undefined ? {} : { summary }),
+  };
 }
 
 function outputEvent(
@@ -494,7 +504,10 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const responseId = requireStringOrGenerated(response, 'id', context.execution, raw.type, `rcc-response-${context.execution.executionEpoch}`);
         context.responsesCurrentResponseId?.set('current', responseId);
         const evidenceRefs = [await captureEvidence(context, raw.type, `response/${responseId}`)];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs)] };
+        const marked = context.responsesRequestStartEmitted.get(responseId);
+        if (marked) return { events: [] };
+        context.responsesRequestStartEmitted.set(responseId, true);
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs, REQUEST_START_SUMMARY)] };
       }
       case 'response.output_item.added': {
         requireNumber(record, 'output_index', context.execution, raw.type);
@@ -619,7 +632,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
                 {
                   outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
                   evidenceRefs,
-                  summary: name,
+                  summary: `调用工具：${name}`,
                   toolCall: { callId, toolId: name, arguments: args as BusinessPayload, continuationRef },
                 },
               ),
@@ -926,7 +939,7 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
               {
                 outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
                 evidenceRefs,
-                ...(name === undefined ? {} : { summary: name }),
+                ...(name === undefined ? {} : { summary: `调用工具：${name}` }),
               },
             ));
           }
@@ -1108,7 +1121,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
                 eventId(context, raw.type, `tool/${callId}`),
                 `tool-${callId}`,
                 { kind: 'continue' },
-                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs },
+                { outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)], evidenceRefs, summary: `调用工具：${name}` },
               ),
             ],
           };
