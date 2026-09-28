@@ -343,19 +343,14 @@ async function main() {
 
     // 6. Open the task dashboard page the UI links to and wait for completion.
     await page.goto(`${base}/task-dashboard.html?task=${encodeURIComponent(taskId)}`, { waitUntil: 'domcontentloaded' });
-    // The dashboard page renders once and only subscribes to SSE when the
-    // operation is already running/settling, so the harness reloads the page
-    // while the implicit consumer is dispatching and executing.
     let terminalChip;
     try {
       terminalChip = await waitForDom(page, 'task dashboard completed', async () => {
         const chip = await page.locator('.state-chip').first().textContent().catch(() => null);
         const trimmed = chip?.trim() ?? '';
         if (trimmed === '已完成' || trimmed === '失败' || trimmed === '已停止') return trimmed;
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('.state-chip', { timeout: 30_000 }).catch(() => {});
         return null;
-      }, TERMINAL_TIMEOUT_MS, 2000);
+      }, TERMINAL_TIMEOUT_MS, 250);
     } catch (error) {
       const probe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`).catch((probeError) => ({ probeError: String(probeError) }));
       throw new Error(`${error.message}; runtime dashboard probe=${JSON.stringify(probe, null, 2)}`);

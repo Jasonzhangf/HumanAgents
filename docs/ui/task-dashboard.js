@@ -22,7 +22,32 @@ const { main, status } = makePageShell(
 
 let dashboard
 let stream
+let subscribedOperationId
+let observeTimer
 let actionStatus
+
+const OBSERVE_REFRESH_MS = 750
+
+function shouldObserveActiveState() {
+  return ['created', 'admitted', 'running', 'settling'].includes(dashboard.state)
+    && !dashboard.operationId
+}
+
+function stopObserving() {
+  if (observeTimer) {
+    clearTimeout(observeTimer)
+    observeTimer = 0
+  }
+}
+
+function scheduleObservation() {
+  stopObserving()
+  if (!shouldObserveActiveState()) return
+  observeTimer = setTimeout(() => {
+    observeTimer = 0
+    void refresh().catch(() => {})
+  }, OBSERVE_REFRESH_MS)
+}
 
 function renderDashboard() {
   if (!dashboard) return
@@ -111,6 +136,18 @@ function renderDashboard() {
 async function refresh() {
   dashboard = await api.taskDashboard(taskId)
   renderDashboard()
+  if (dashboard.operationId && ['running', 'settling'].includes(dashboard.state)) {
+    stopObserving()
+    subscribe(dashboard.operationId)
+  } else if (dashboard.state === 'created' || dashboard.state === 'admitted' || dashboard.state === 'running' || dashboard.state === 'settling') {
+    scheduleObservation()
+  } else {
+    if (subscribedOperationId) {
+      subscribedOperationId = undefined
+      if (stream) stream.close()
+    }
+    stopObserving()
+  }
 }
 
 async function stopExecution() {
@@ -144,7 +181,9 @@ async function retryStopExecution() {
 }
 
 function subscribe(operationId) {
-  stream?.close()
+  if (subscribedOperationId === operationId) return
+  if (stream) stream.close()
+  subscribedOperationId = undefined
   stream = new EventSource(api.eventsUrl(operationId))
   for (const kind of [
     'execution.started',
@@ -162,6 +201,7 @@ function subscribe(operationId) {
       void refresh().catch(() => {})
     })
   }
+  subscribedOperationId = operationId
   stream.onerror = () => {
     actionStatus.textContent = 'SSE 已断开；页面将使用 Runtime projection 恢复。'
   }
@@ -172,7 +212,6 @@ async function load() {
     const [{ status: runtimeStatus, error }] = await Promise.all([loadRuntimeStatus()])
     renderRuntimeStatus(status, runtimeStatus, error)
     await refresh()
-    if (dashboard.operationId && ['running', 'settling'].includes(dashboard.state)) subscribe(dashboard.operationId)
   } catch (error) {
     status.dataset.tone = 'danger'
     status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`

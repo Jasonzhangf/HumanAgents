@@ -836,6 +836,17 @@ test('dashboard progress copy does not expose internal identifiers or protocol n
   assert.equal(source.includes('RequirementEnvelope'), false);
 });
 
+test('explicit requirement checkbox stays compact under the shared input style', async () => {
+  const runtimeCss = await readFile('docs/ui/runtime.css', 'utf8');
+  const policyRule = runtimeCss.match(/\.quick-create-policy input\s*\{[^}]*\}/s);
+  if (!policyRule) throw new Error('expected .quick-create-policy input rule');
+  assert.equal(/min-width:\s*16px/.test(policyRule[0]), true);
+  assert.equal(/min-height:\s*16px/.test(policyRule[0]), true);
+  assert.equal(/padding:\s*0/.test(policyRule[0]), true);
+  assert.equal(/border:\s*0/.test(policyRule[0]), true);
+  assert.equal(/background:\s*transparent/.test(policyRule[0]), true);
+});
+
 test('dashboard confirmation waits on user without continuing a provider timer', async () => {
   const source = await readFile('docs/ui/dashboard.js', 'utf8');
   assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), true);
@@ -1533,4 +1544,11 @@ test('runtime task dashboard is observational and has no second execution-input 
   assert.equal(source.includes('api.startExecution'), false);
   assert.equal(source.includes('taskDetailHref(taskId)'), true);
   assert.equal(source.includes('进入显式大脑'), true);
+  assert.equal(/shouldObserveActiveState\(\)/.test(source), true);
+  assert.equal(/dashboard\.state\)\n    && !dashboard\.operationId/.test(source), true);
+  assert.equal(/dashboard\.operationId && \['running', 'settling'\]\.includes\(dashboard\.state\)/.test(source), true);
+  assert.equal(/if \(subscribedOperationId === operationId\) return/.test(source), true);
+  assert.equal(/subscribedOperationId = operationId/.test(source), true);
+  assert.equal(/if \(subscribedOperationId\) \{[\s\S]*subscribedOperationId = undefined/.test(source), true);
+  assert.equal(source.includes('subscribe(dashboard.operationId)'), true);
 });

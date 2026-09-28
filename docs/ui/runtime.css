@@ -932,7 +932,13 @@ pre {
   appearance: auto;
   width: 16px;
   height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  box-sizing: border-box;
   flex: 0 0 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   margin: 0;
   cursor: pointer;
   accent-color: var(--accent, #4f8cff);
