@@ -929,6 +929,11 @@ pre {
   user-select: none;
 }
 .quick-create-policy input {
+  appearance: auto;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   margin: 0;
   cursor: pointer;
+  accent-color: var(--accent, #4f8cff);
 }

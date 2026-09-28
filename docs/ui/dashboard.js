@@ -189,6 +189,9 @@ function renderInputPanel() {
       if (snap.state === 'awaiting-confirmation' && snap.draft) {
         progress.waiting('等待你确认任务草案', '查看下方显式大脑整理结果')
         interaction.draft = snap.draft
+        // Reset inFlight so the confirm/cancel buttons inside the draft panel
+        // are not blocked by the submit guard.
+        interaction.inFlight = false
         renderDraftConfirmation(draftArea, snap, textarea, submit, progress, autoConfirm.checked)
         return
       }
@@ -256,6 +259,14 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
         payloadRef: `asset://requirements/dashboard-${Date.now()}`,
       })
       progress.done('已入队 · 隐式大脑将消费', '任务需求已进入隐式大脑队列')
+      // Implicit dispatch is async — wait for the task to appear in the list
+      // and jump straight to its dashboard so the user sees live turns instead
+      // of a stale "已入队" message on the input panel.
+      const dispatchedTaskId = await findDispatchedTaskId()
+      if (dispatchedTaskId) {
+        window.location.href = taskDashboardHref(dispatchedTaskId)
+        return
+      }
       area.hidden = true
       clearNode(area)
       // Reset input for next task
@@ -461,6 +472,31 @@ function renderTaskLists(dashboard, tasks) {
 
 function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild)
+}
+
+// Poll listTasks until implicit dispatch creates a task for the just-confirmed
+// requirement, then return its id. Returns null if dispatch never shows up.
+async function findDispatchedTaskId() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const tasks = await api.listTasks()
+      const candidates = []
+        .concat(tasks.running || [])
+        .concat(tasks.waiting || [])
+        .concat(tasks.draft || [])
+        .filter((task) => task && task.updatedAt)
+      if (candidates.length > 0) {
+        const latest = candidates
+          .map((task) => ({ task, ts: new Date(task.updatedAt).getTime() }))
+          .sort((left, right) => right.ts - left.ts)[0]
+        if (latest?.task?.taskId?.value) return latest.task.taskId.value
+      }
+    } catch (_) {
+      // keep polling
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return null
 }
 
 // ── Init ──
