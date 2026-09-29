@@ -21,8 +21,8 @@
 
 三个任务各自使用新的 task/run ID，并全部通过真实 WebUI、Runtime 和相应真实能力完成：
 
-1. **网络搜索**：通过 Agent Reach 执行真实搜索；任务详情能看到实际搜索工具调用、工具结果、来源和正常完成状态。
-2. **本地只读搜索**：在隔离 workspace 中先执行真实的文件搜索动作（如项目已接线的搜索工具，或明确只读的搜索命令），再读取命中的文件；不能从预先知道的路径直接 `file.read` 冒充搜索。任务详情和 receipt 须包含搜索 query、搜索调用及其匹配路径/摘要、后续读取的真实路径与内容证据，并确认 workspace 未被修改。
+1. **网络搜索**：通过 Agent Reach TinyFish `/search` 完成真实搜索；任务详情能看到实际工具调用、结果来源和正常完成状态。只可按 `docs/architecture/hand-search-websearch-plan.md` 中明确覆盖 Agent Reach/Monid TinyFish、Dashboard 工具注册和调用/取消/result/report/cleanup 路径的版本实施；该 SESE DAG 须经独立 review PASS 后才能编码。若引用版本仍标为未审 design candidate、排除外部 provider 或只描述 Hand service 而无 Dashboard 到 TinyFish 的可执行边，则本类保持 `INCOMPLETE`。不得改用内置搜索、mock、模型知识或付费 provider。
+2. **本地只读搜索**：Dashboard 的真实 Responses 工具循环先调用 `file.search`，再读取搜索命中的文件；不能从预先知道的路径直接 `file.read`、用 Explicit Brain intent 或只读代码检查代替 Provider 搜索工具。`ProviderEvent.toolCall` 是调用 ID、toolId 和 arguments 的唯一真源。Provider contract 须扩展 `ProviderEvent`，让 `toolPhase='result'` 携带合法、经 validator 校验的 typed `ProviderToolResult`（task/operation/epoch、callId、toolId、status、evidenceRefs、error）；调用失败或取消也必须产生同 callId 的失败/取消结果，不能只向上抛异常。成功结果须包含唯一 typed immutable output descriptor `{ outputRef, outputDigest }`，其中 `outputDigest` 为 `sha256:<64 lowercase hex>`；`packages/app/src/provider-tool-execution.ts` 是报告持久化与摘要生成唯一 owner，写入 `ImmutableAssetStore` 后将 descriptor 附入结果，validator 检查格式，读取时重算 SHA-256。不得在 result event 伪造 `toolCall` 或违反 event validator。`packages/adapters/provider/src/agent-driver.ts` 从原调用上下文关联结果，`packages/runtime/src/ui-runtime/coordinator.ts` 唯一负责将调用与结果投影到 `RuntimeTaskEvent`/Journal。`packages/ui/contracts/runtime.ts` 须声明 `RuntimeTaskEventProjection` 和 `RuntimeSseEvent` 的类型字段；`packages/app/src/ui-runtime/service.ts`、`server.ts` 与 Dashboard renderer 按契约提供 GET/SSE/DOM 投影。不得从 summary、eventId、evidence locator、operationId 或最终回答推导调用 ID、query、result。事件与公开投影须保留 taskId、operationId、executionEpoch、seq、callId、toolId、arguments、结果状态/错误及该 immutable descriptor。UI server 须提供 task-scoped `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`，由 `UiRuntimeService` 校验 task/operation/epoch/seq 对应的成功 `file.search` 结果及 descriptor digest 后返回报告；不能用 task 范围内未经保证唯一的 callId 单独查找，也不能暴露 artifact 文件路径。未实现该读取入口前，本地搜索 E2E 不得通过。真实 runner 通过 Dashboard 页面、页面实际使用的 `GET /api/tasks/{taskId}/dashboard` 和 SSE 验证同一 `file.search` invoke/result 的 callId、toolId 以及 taskId、operationId、epoch、seq 关联一致，通过上述读取入口断言报告包含 query、匹配路径及行/摘要；之后 `file.read` 必须读取搜索命中的同一路径，并将真实路径与内容写入 receipt。执行前后 receipt 都保存按相对路径排序的 workspace 文件清单及每个文件的 SHA-256，且断言两份清单完全相同。上述投影、搜索报告、读取入口或清单证据缺失时，本类为 `INCOMPLETE`。
 3. **AItest task**：先核实 AItest 仓库、目标 task、输入/输出及适用 checker；使用本轮专属隔离目录执行真实任务；运行 task 指定 checker，并按 task 的人工观察要求检查产物语义/视觉结果；记录观察截图与结论，确认既有任务数据未被覆盖。仅检查 HTML/SVG/动画标签存在不能证明 task 完成。
 
 每类只可由一次完整任务成功计数；错误尝试、单轮调用、API-only、mock、旧候选收据都不计入成功次数。Retry-10 是独立能力验证，不计入上述三项。
@@ -68,14 +68,15 @@ AItest 的 checker 成功不能代替 task 语义验收：必须保存 checker �
 
 无论成功、失败、超时或取消，都必须在 `finally` 中：
 
-1. 关闭本轮浏览器上下文；若使用共享浏览器 daemon，只关闭本轮创建的 profile/target，不关闭共享 daemon。
-2. 通过服务接口或本轮启动所得的精确 PID 停止本轮服务；禁止 `pkill`、`killall`、`kill $(...)`、`xargs kill` 或端口扫描后批量终止。
-3. 在成功/失败 receipt 和必要截图落盘后，删除本轮创建且不再需要的 workspace、control root、临时日志和运行目录；不得删除他人资源、共享状态、既有 AItest 数据或候选 worktree。
-4. 复核本轮 PID 已退出、服务端口已关闭、临时路径均不存在，并将清理结果写入 receipt。
+1. 若用户取消或 runner 超时且任务仍在运行，通过 `POST /api/tasks/{taskId}/stop` 发起 task-scoped stop；轮询 Dashboard 与 Journal，直到 stop/checkpoint 已 settled 并且任务到达明确终态。不能证明 settle/终态时，先落 `INCOMPLETE` receipt，保留该 task 的 control root/workspace 和恢复所需证据；不得停服务或删除这些资源。
+2. 保存最终必要截图并关闭本轮浏览器上下文；若使用共享浏览器 daemon，只关闭本轮创建的 profile/target，不关闭共享 daemon。
+3. 只有任务已 settled 到明确终态时，才通过服务接口或本轮启动所得的精确 PID 停止本轮服务；禁止 `pkill`、`killall`、`kill $(...)`、`xargs kill` 或端口扫描后批量终止。若 task 未 settled，保留该 task 恢复所需的服务及精确 PID，并在 receipt 指定唯一 recovery owner；这属于 `INCOMPLETE` 的未收口恢复资源，不得标记清理成功。
+4. 只有任务已 settled 到明确终态时，才在 receipt 记下终态、stop/checkpoint settle、错误和当前清理状态后，删除本轮创建且不再需要的 workspace、control root、临时日志和运行目录；不得删除他人资源、共享状态、既有 AItest 数据或候选 worktree。若未 settled，只保留恢复所必需资源并记录路径、owner 和下一步。
+5. 复核本轮 PID、端口和临时路径：已 settled 的任务必须证明本轮 PID 已退出、端口已关闭、清理路径不存在；未 settled 的任务必须列出仍存活 PID/端口/路径及 recovery owner，标记 `INCOMPLETE`。将命令、退出码及核验结果写入 receipt。
 
 任一清理动作失败时，attempt 必须标记 `INCOMPLETE`，receipt 记录 owner、精确路径或 PID、失败原因和所需后续动作；不得把“已发出停止命令”当作资源已释放。Receipt 与必要截图是交付证据，保留到候选收口；其他临时数据不得因失败重试而累积。
 
-清理 receipt 至少记录服务地址与端口、精确 PID、服务停止接口/命令及其结果、进程不存在的核验结果、端口关闭的核验结果、每个临时路径不存在的核验结果。核验命令和原始退出码或等价结构化结果必须落盘；只记 `cleanup: done` 不算证据。
+清理 receipt 至少记录服务地址与端口、精确 PID、服务停止接口/命令及其结果和所有临时路径。若 task 已 settled，receipt 须附进程退出、端口关闭、每个清理路径不存在的核验命令及原始退出码/等价结构化结果；若 task 未 settled，receipt 须附仍存活 PID/端口/保留路径、recovery owner、stop/settle 的已知结果和下一步，不得要求这些恢复资源不存在，也不得标记 cleanup complete。只记 `cleanup: done` 不算证据。
 
 ## Retry-10 独立验收
 
@@ -105,9 +106,20 @@ pnpm test:hand
 node tests/app/real-browser-explicit-implicit-e2e.mjs
 ```
 
+Retry-10 coordinator tests are not run by `pnpm test:runtime` today. When
+Retry-10 is in scope, the same candidate must also run this explicit gate and
+retain its raw output/exit status in the candidate-bound receipt:
+
+```sh
+pnpm exec tsc -p tests/runtime/orchestration/tsconfig.json \
+  && node --test \
+  dist/tests/tests/runtime/orchestration/retry-cycle.test.js \
+  dist/tests/tests/runtime/orchestration/retry-cycle-coordinator.test.js
+```
+
 候选验证必须在同一个精确候选树中按顺序执行。`provider`、`app`、`ui`、`runtime` 和 `hand` gate 的原始退出码与日志路径都要绑定到候选 SHA/tree；修复后只重跑受影响 gate，但最终候选仍须包含完整的适用结果。上面的浏览器脚本只证明其实际覆盖的本地文件读取路径；网络搜索和 AItest 必须各有独立的真实 Dashboard 流程与 receipt，不能因为该命令通过而略过。
 
-`real-explicit-implicit-e2e.mjs` 和 `real-failure-cleanup-proof.mjs` 是真实 Runtime/API 证明，不是这三类浏览器任务的替代品。runner 的每个场景都必须在 `finally` 关闭本轮 browser context，停止精确归属本轮的服务 PID，核验 PID 退出、端口关闭和临时路径删除；不得设置保留临时 root 的开关。失败、超时和取消同样写带清理核验的 `INCOMPLETE` receipt。`pnpm e2e:dashboard:*` 命令及三类场景目前尚未落地，故本规则目前定义了放行合同，不代表验收已通过。
+`real-explicit-implicit-e2e.mjs` 和 `real-failure-cleanup-proof.mjs` 是真实 Runtime/API 证明，不是这三类浏览器任务的替代品。runner 的每个场景都必须在 `finally` 按上面的 settled/未 settled 两分支完成收口。已 settled 的 task 必须关闭本轮 browser context、停止精确归属本轮的服务 PID，并核验 PID 退出、端口关闭和临时路径删除；未 settled 的 task 必须保留并记录恢复所需的服务 PID/端口/路径、recovery owner 和下一步，标 `INCOMPLETE`，不得宣称清理完成。正常成功路径不得设置保留临时 root 的开关。失败、超时和取消都须写 `INCOMPLETE` receipt，且报告真实清理或恢复资源状态。`pnpm e2e:dashboard:*` 命令及三类场景目前尚未落地，故本规则目前定义了放行合同，不代表验收已通过。
 
 正式安装验证顺序：在已 review 且 clean 的候选执行 `pnpm build:release`、`pnpm release:check`、`pnpm run install:global`；随后从任意非仓库目录执行 `humanagent --version`，再以 `humanagent --workspace <本轮专属 workspace> --port <空闲 loopback 端口>` 启动正式 WebUI，并用新浏览器页面复核输入、确认、turn、工具结果和最终输出。receipt 记录候选 SHA/tree、release manifest 中的 artifact 路径与 SHA-256、安装命令结果、`command -v humanagent` 的实际路径与 binary SHA-256、版本响应、服务 PID/端口/health、页面截图及清理证据。实际 binary 必须来自已验候选 release artifact；不得用候选源码版本或 `connected` 状态替代安装与运行态证据。
 
