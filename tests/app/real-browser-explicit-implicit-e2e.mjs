@@ -444,7 +444,15 @@ async function main() {
     // 5. Open the dashboard for the dispatched task as soon as its id is known.
     const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskId)}`;
     if (page.url() !== dashboardUrl) {
-      await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
+          break;
+        } catch (error) {
+          if (attempt === 2) throw error;
+          await page.waitForLoadState('domcontentloaded').catch(() => {});
+        }
+      }
     }
     steps.admission = {
       draftRowsBeforeConfirm: draftRowsBefore,
