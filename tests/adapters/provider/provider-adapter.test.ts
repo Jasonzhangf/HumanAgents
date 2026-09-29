@@ -757,6 +757,30 @@ test('anthropic codec maps terminal, tool, and error wire events', async () => {
     content_block: { type: 'tool_use', id: 'tool-1', name: 'lookup', input: {} },
   }, context);
   assert.equal(tool.events[0].kind, 'tool');
+  assert.equal(tool.events[0].summary, '调用工具：lookup');
+
+  const signature = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_delta',
+    index: 1,
+    delta: { type: 'signature_delta', signature: 'sig' },
+  } as unknown as ProviderWireEvent, context);
+  assert.equal(signature.events[0].summary, 'provider completed reasoning signature');
+
+  const inputJson = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_delta',
+    index: 2,
+    delta: { type: 'input_json_delta', partial_json: '{"q":' },
+  }, context);
+  assert.equal(inputJson.events[0].summary, 'provider completed tool request details');
+
+  const messageDelta = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn' },
+  }, context);
+  assert.equal(messageDelta.events[0].summary, 'provider completed model turn details');
 
   const error = await codec.decodeEvent({ protocol: 'anthropic', type: 'error', error: { type: 'wire_error', message: 'boom' } }, context);
   assert.equal(error.events[0].kind, 'error');
@@ -1134,6 +1158,7 @@ test('codecs consume legal wire events and preserve real error fields', async ()
   const anthropicContext = codecContext();
   const ping = await anthropic.decodeEvent({ protocol: 'anthropic', type: 'ping' }, anthropicContext);
   assert.equal(ping.events[0].kind, 'model');
+  assert.equal(ping.events[0].summary, 'provider sent heartbeat');
 });
 
 test('codec evidence refs remain readable through the injected content sink', async () => {
