@@ -28,7 +28,7 @@ import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
-import type { AttentionPort } from '../control/attention.js';
+import { publishRequiredAttention, type AttentionPort } from '../control/attention.js';
 import type { RequestStopCommand } from '../control/control-command.js';
 import { executeStopControl } from '../control/runtime-stop.js';
 import {
@@ -58,6 +58,7 @@ import {
   type ExecutionAgentPort,
   type ExecutorReviewEvidence,
   type RetryCycleConfigSet,
+  type RetryCycleIssue,
   type RetryCycleJournalPort,
 } from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
@@ -1329,6 +1330,47 @@ export class RuntimeTaskCoordinator {
     return { published: this.publishedAttentions, resolved: this.resolvedAttentions };
   }
 
+  private async publishRetryAttention(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    issue: RetryCycleIssue,
+  ): Promise<void> {
+    const attention: Attention = {
+      attentionId: `retry-cycle:${operation.operationId.value}:${issue.code}`,
+      scope,
+      severity: 'blocker',
+      state: 'open',
+      message: issue.reason,
+      evidenceRefs: issue.evidenceRefs,
+      ownerId: issue.ownerId,
+      nextAction: issue.nextAction,
+    };
+    await publishRequiredAttention(this.options.attentionPort, attention);
+    this.publishedAttentions.push(attention);
+    record.error = {
+      code: issue.code,
+      ownerId: issue.ownerId,
+      message: issue.reason,
+      retryable: false,
+      nextAction: toNextActionText(issue.nextAction) ?? 'recover retry cycle',
+      evidenceRefs: issue.evidenceRefs,
+    };
+    record.nextStep = record.error.nextAction;
+    this.pushEvent(
+      record,
+      operation,
+      'attention.opened',
+      'blocked',
+      issue.reason,
+      issue.evidenceRefs,
+      issue.ownerId,
+      false,
+      record.error.nextAction,
+      { error: record.error },
+    );
+  }
+
   private providerAttemptReport(input: Parameters<ExecutionAgentPort['execute']>[0], attempt: number, executionEpoch: number): {
     readonly taskId: import('../../../contracts/src/index.js').TaskId;
     readonly pipelineNodeId: string;
@@ -1537,6 +1579,7 @@ export class RuntimeTaskCoordinator {
     let selectedBindingId: string | undefined;
     let selectedExecutionEpoch: number | undefined;
     let retryCycle: ReturnType<typeof createRetryCycleManager> | undefined;
+    const closedRetryDrivers = new Map<RuntimeExecutionDriver, ProviderCloseResult>();
     try {
       if (this.options.providerRetry) {
         retryCycle = createRetryCycleManager({
@@ -1603,6 +1646,26 @@ export class RuntimeTaskCoordinator {
             let attemptBindingId = selectedBindingId;
             let attemptEpoch = selectedExecutionEpoch ?? operation.executionEpoch;
             let attemptNumber = input.assignment.attempt;
+            const blockedResult = async (workResult: WorkResult, issue: RetryCycleIssue): Promise<WorkResult> => {
+              await coordinator.publishRetryAttention(record, operation, scope, issue);
+              closure = {
+                state: 'blocked',
+                evidenceRefs: [...workResult.evidenceRefs, ...issue.evidenceRefs],
+                ownerRef: issue.ownerId,
+                nextAction: issue.nextAction,
+                conditionRef: issue.nextAction.ref ?? `retry-cycle:${assignmentId}`,
+              };
+              return {
+                ...workResult,
+                attempt: input.assignment.attempt,
+                executionEpoch: input.assignment.executionEpoch,
+                status: 'blocked',
+                nextAction: 'attention',
+                summary: issue.reason,
+                evidenceRefs: [...workResult.evidenceRefs, ...issue.evidenceRefs],
+                conditionRef: issue.nextAction.ref ?? `retry-cycle:${assignmentId}`,
+              };
+            };
             while (true) {
               let attemptComposition: RuntimeExecutionComposition;
               let attemptRuntime: AgentRuntime;
@@ -1655,7 +1718,7 @@ export class RuntimeTaskCoordinator {
                 attemptRuntime,
               );
               closure = attempt.closure;
-              const workResult = attempt.result;
+              let workResult = attempt.result;
               if (!coordinator.options.providerRetry || !retryCycle || !attemptBindingId) {
                 return workResult;
               }
@@ -1668,9 +1731,48 @@ export class RuntimeTaskCoordinator {
                   bindingId: attemptBindingId,
                   evidenceRefs: workResult.evidenceRefs,
                 });
-                return workResult;
+                return {
+                  ...workResult,
+                  attempt: input.assignment.attempt,
+                  executionEpoch: input.assignment.executionEpoch,
+                };
               }
               if (workResult.status === 'failed' && closure?.state === 'failed') {
+                if (!attemptDriver) {
+                  throw new RuntimeTaskControlError(
+                    'execution.retry.driver.missing',
+                    RUNTIME_OWNER,
+                    'settled retry attempt has no provider driver to close',
+                    'inspect retry-cycle provider driver construction',
+                  );
+                }
+                const closeResult = await attemptDriver.close();
+                closedRetryDrivers.set(attemptDriver, closeResult);
+                workResult = {
+                  ...workResult,
+                  evidenceRefs: [...workResult.evidenceRefs, ...closeResult.evidenceRefs],
+                };
+                if (closeResult.state !== 'closed') {
+                  const unresolved = await retryCycle.recordFailure({
+                    assignmentId,
+                    initialExecutionEpoch,
+                    attempt: attemptNumber,
+                    executionEpoch: attemptEpoch,
+                    bindingId: attemptBindingId,
+                    failureRef: workResult.failureRef ?? `operation://${operation.operationId.value}/failed`,
+                    evidenceRefs: workResult.evidenceRefs,
+                    settleState: 'unsettled',
+                  });
+                  if (unresolved.kind === 'dispatch') {
+                    throw new RuntimeTaskControlError(
+                      'execution.retry.close.inconsistent',
+                      RUNTIME_OWNER,
+                      'retry cycle selected another binding after provider close was not confirmed',
+                      'inspect retry-cycle journal and provider close evidence',
+                    );
+                  }
+                  return blockedResult(workResult, unresolved.issue);
+                }
                 const failure = await retryCycle.recordFailure({
                   assignmentId,
                   initialExecutionEpoch,
@@ -1687,19 +1789,9 @@ export class RuntimeTaskCoordinator {
                   attemptNumber = failure.attempt;
                   continue;
                 }
-                const blockedResult: WorkResult = {
-                  ...workResult,
-                  status: 'blocked',
-                  nextAction: 'attention',
-                  summary: failure.issue.reason,
-                  evidenceRefs: [...workResult.evidenceRefs, ...failure.issue.evidenceRefs],
-                  ...(failure.issue.nextAction.ref
-                    ? { conditionRef: failure.issue.nextAction.ref }
-                    : {}),
-                };
-                return blockedResult;
+                return blockedResult(workResult, failure.issue);
               }
-              await retryCycle.recordFailure({
+              const failure = await retryCycle.recordFailure({
                 assignmentId,
                 initialExecutionEpoch,
                 attempt: attemptNumber,
@@ -1709,7 +1801,15 @@ export class RuntimeTaskCoordinator {
                 evidenceRefs: workResult.evidenceRefs,
                 settleState: closure?.state === 'unknown' ? 'unknown' : closure?.state === 'cancelled' ? 'cancelled' : 'unsettled',
               });
-              return workResult;
+              if (failure.kind === 'dispatch') {
+                throw new RuntimeTaskControlError(
+                  'execution.retry.unsettled.dispatch',
+                  RUNTIME_OWNER,
+                  'retry cycle selected a provider after an unsettled attempt',
+                  'inspect retry-cycle journal before dispatching another provider',
+                );
+              }
+              return blockedResult(workResult, failure.issue);
             }
           },
         };
@@ -1866,7 +1966,20 @@ export class RuntimeTaskCoordinator {
           'inspect the executed provider binding',
         );
       }
-      const close = await this.closeForExecution(operation.operationId, closeDriver, closure.evidenceRefs);
+      const cachedRetryClose = closedRetryDrivers.get(closeDriver);
+      let close: Pick<ProviderCloseResult, 'state' | 'evidenceRefs' | 'ownerId' | 'nextAction'> & { readonly retained: boolean };
+      if (cachedRetryClose) {
+        this.activeExecutions.delete(operation.operationId.value);
+        close = {
+          state: cachedRetryClose.state,
+          evidenceRefs: cachedRetryClose.evidenceRefs,
+          retained: false,
+          ownerId: cachedRetryClose.ownerId,
+          nextAction: cachedRetryClose.nextAction,
+        };
+      } else {
+        close = await this.closeForExecution(operation.operationId, closeDriver, closure.evidenceRefs);
+      }
       if (close.state !== 'closed') {
         throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
       }

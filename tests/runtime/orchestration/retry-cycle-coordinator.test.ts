@@ -144,6 +144,26 @@ class FakeProviderDriver implements RuntimeExecutionDriver {
     };
   }
   async *observe(): AsyncIterable<AgentEvent> {
+    if (this.outcome === 'succeeded') {
+      yield {
+        taskId: this.input.taskId,
+        executionEpoch: this.input.executionEpoch,
+        kind: 'provider.output',
+        evidenceRefs: [evidence(`output-${this.input.executionEpoch}`)],
+        providerEvent: {
+          eventId: `output-${this.input.executionEpoch}`,
+          kind: 'output',
+          bindingId: this.bindingId,
+          providerId: 'fake-provider',
+          executionEpoch: this.input.executionEpoch,
+          operationId: this.input.operationId,
+          taskId: this.input.taskId,
+          assignmentId: this.input.assignmentId,
+          summary: `provider artifact for ${this.bindingId}`,
+          evidenceRefs: [evidence(`output-${this.input.executionEpoch}`)],
+        },
+      } as AgentEvent;
+    }
     const terminal = this.outcome === 'failed' ? 'failed'
       : this.outcome === 'succeeded' ? 'succeeded'
         : this.outcome === 'cancelled' ? 'cancelled'
