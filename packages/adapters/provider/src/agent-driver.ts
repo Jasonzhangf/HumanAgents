@@ -324,7 +324,9 @@ export class ProviderAgentDriver implements AgentDriver {
     return {
       taskId: providerEvent.taskId,
       executionEpoch: providerEvent.executionEpoch,
-      kind: `provider.${providerEvent.kind}`,
+      kind: providerEvent.kind === 'tool' && providerEvent.toolPhase === 'result'
+        ? 'provider.tool-result'
+        : `provider.${providerEvent.kind}`,
       evidenceRefs: providerEvent.evidenceRefs,
       summary: providerEvent.summary,
       ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
