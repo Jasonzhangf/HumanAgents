@@ -71,6 +71,8 @@ interface RetryBindingExclusion {
   readonly evidenceRefs: readonly string[];
 }
 
+Exclusion membership is keyed by `bindingId` for the full retry cycle. A persisted exclusion excludes that provider binding from every later attempt or epoch in the same cycle, even when the retry starts a new execution epoch. `failedExecutionEpoch` is provenance only; it records where the binding failed and is never part of retry eligibility.
+
 interface EpochAdmissionSnapshot {
   readonly executionEpoch: number;
   readonly bindingId: string;
@@ -96,7 +98,7 @@ The retry loop follows this single path:
 4. On success, the retry cycle records the successful attempt and lets the assignment complete through its existing owner path.
 5. On a retryable failure, Runtime first asks Operation Owner to settle/reconcile the failed operation.
 6. If settlement returns `unknown`, unsettled side effect, cancellation, or recovery-required state, Runtime records a visible blocked-attention recovery path. It must not retry another provider until the failed attempt is known retry-safe.
-7. If settlement returns retry-safe failure, Runtime appends an exclusion for `bindingId + failedExecutionEpoch`, increments the attempt count, and checks the retry budget.
+7. If settlement returns retry-safe failure, Runtime appends an exclusion by `bindingId`, records `failedExecutionEpoch` as provenance, increments the attempt count, and checks the retry budget.
 8. If no eligible persisted snapshot candidate remains, Runtime records `blocked-attention` or exhaustion according to whether attempt 11 has been settled retry-safe.
 9. If another persisted snapshot candidate remains, Runtime starts a new execution epoch, creates a fresh checkpoint, re-admits permission/capability/readiness/lease, persists the new admission snapshot, and dispatches the next attempt.
 10. If attempt 11 has been settled retry-safe and no further retry is allowed, Runtime records exhaustion with evidence and routes to visible recovery/attention rather than success.
@@ -108,7 +110,7 @@ Candidate provider lists must be explicit config owned by Harness/config admissi
 Selection rules:
 
 - The first epoch chooses from the persisted cycle `candidateSetSnapshot` according to the recorded order and eligibility.
-- Retry epochs choose only from persisted snapshot candidates not present in persisted exclusions for the retry cycle.
+- Retry epochs choose only from persisted snapshot candidates not present in persisted exclusions for the retry cycle. A candidate binding already present in persisted exclusions may not be selected for any later attempt or epoch in the cycle, even under a new execution epoch.
 - A candidate must pass permission, capability, readiness, and lease admission before dispatch.
 - If a persisted snapshot candidate no longer matches the current live config/fingerprint, or fresh admission fails, the cycle does not refresh the set mid-cycle. It records a visible recovery/attention state with owner and evidence.
 - If no eligible persisted snapshot candidate remains, the cycle does not dispatch. It records a visible recovery/attention state with owner and evidence.
