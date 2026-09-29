@@ -264,7 +264,8 @@ async function assertDashboardDom(page, expectedToolRounds) {
   if (toolRoundsDom < expectedToolRounds) {
     throw new Error(`dashboard DOM showed ${toolRoundsDom} provider.tool rounds, expected >= ${expectedToolRounds}`);
   }
-  const toolRequestRowsDom = eventRows.filter((row) => row.kind.startsWith('provider.tool') && row.summary.startsWith('调用工具：'));
+  const toolRequestRowsDom = eventRows.filter((row) => row.kind === 'provider.tool' && row.summary.startsWith('调用工具：'));
+  const toolResultRowsDom = eventRows.filter((row) => row.kind === 'provider.tool-result');
   if (toolRequestRowsDom.length < expectedToolRounds) {
     throw new Error(`dashboard DOM showed ${toolRequestRowsDom.length} provider tool request rows, expected >= ${expectedToolRounds}: ${eventRows.map((row) => row.summary).join(' | ')}`);
   }
@@ -274,7 +275,7 @@ async function assertDashboardDom(page, expectedToolRounds) {
   if (!requestStartRowsDom.some((row) => row.kind.startsWith('provider.model'))) {
     throw new Error(`dashboard DOM showed no visible provider request-start row: ${eventRows.map((row) => row.summary).join(' | ')}`);
   }
-  return { stateChip, currentState, checkpoint, toolRoundsDom, eventKindsDom, eventRows, requestStartRowsDom, toolRequestRowsDom };
+  return { stateChip, currentState, checkpoint, toolRoundsDom, eventKindsDom, eventRows, requestStartRowsDom, toolRequestRowsDom, toolResultRowsDom };
 }
 
 async function assertDashboardDomRequestStarts(page, label, expected = 2) {
