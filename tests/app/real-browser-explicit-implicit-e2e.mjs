@@ -244,12 +244,15 @@ async function assertDashboardDom(page, expectedToolRounds) {
   const checkpoint = facts.find((fact) => fact.label === 'Checkpoint');
   const currentState = facts.find((fact) => fact.label === '当前状态');
   const eventKindsDom = await page.$$eval('.event-kind', (nodes) => nodes.map((node) => node.textContent?.trim() ?? ''));
-  const toolRoundsDom = eventKindsDom.filter((text) => text.startsWith('provider.tool')).length;
   const eventRows = await page.$$eval('.event-list li.event', (rows) => rows.map((row) => ({
     kind: row.querySelector('.event-kind')?.textContent?.trim() ?? '',
     summary: row.children[2]?.textContent?.trim() ?? '',
     text: row.textContent?.trim() ?? '',
   })));
+  const eventKindPrefix = (kindLabel) => kindLabel.split(' · ', 1)[0];
+  const toolRequestRowsDom = eventRows.filter((row) => eventKindPrefix(row.kind) === 'provider.tool' && row.summary.startsWith('调用工具：'));
+  const toolResultRowsDom = eventRows.filter((row) => eventKindPrefix(row.kind) === 'provider.tool-result');
+  const toolRoundsDom = toolRequestRowsDom.length;
   const requestStartRowsDom = eventRows.filter((row) => row.summary === 'provider requested model work');
 
   if (stateChip !== '已完成') {
@@ -264,8 +267,6 @@ async function assertDashboardDom(page, expectedToolRounds) {
   if (toolRoundsDom < expectedToolRounds) {
     throw new Error(`dashboard DOM showed ${toolRoundsDom} provider.tool rounds, expected >= ${expectedToolRounds}`);
   }
-  const toolRequestRowsDom = eventRows.filter((row) => row.kind === 'provider.tool' && row.summary.startsWith('调用工具：'));
-  const toolResultRowsDom = eventRows.filter((row) => row.kind === 'provider.tool-result');
   if (toolRequestRowsDom.length < expectedToolRounds) {
     throw new Error(`dashboard DOM showed ${toolRequestRowsDom.length} provider tool request rows, expected >= ${expectedToolRounds}: ${eventRows.map((row) => row.summary).join(' | ')}`);
   }
