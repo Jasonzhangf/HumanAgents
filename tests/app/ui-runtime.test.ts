@@ -1892,7 +1892,7 @@ test('provider tool-result output stays out of task output while remaining visib
   assert.deepEqual(dashboard.checkpoint?.outcome, 'succeeded');
 
   const events = service.eventsSince(started.operationId);
-  assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read'), true);
+  assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'tool: fake://tool/1'), true);
   assert.equal(events.some((event) => event.kind === 'provider.tool-result' && event.summary === 'file.read succeeded'), true);
   assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read succeeded'), false);
   assert.equal(events.some((event) => event.kind === 'provider.output' && event.summary === 'REAL_FILE_CONTENT'), true);

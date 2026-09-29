@@ -236,7 +236,9 @@ export class FakeReplayExecutionRuntimePort implements ExecutionRuntimePort {
 
   private event(input: ProviderObserveInput, session: FakeSession, index: number, step: FakeReplayStep): ProviderEvent {
     const evidenceRefs = [fakeEvidence(session.scope, `${step.kind}-${index}`)];
-    const summary = step.kind === 'output' || step.kind === 'tool' ? step.summary : undefined;
+    const summary = step.kind === 'output' || (step.kind === 'tool' && step.toolPhase === 'result')
+      ? step.summary
+      : undefined;
     const base = {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
