@@ -32,6 +32,7 @@ import {
   ProviderAdapterError,
   ResponsesProviderCodec,
   filesystemProviderEvidenceSink,
+  type DecodeContext,
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
   type ProviderTransport,
@@ -236,7 +237,7 @@ function memoryEvidenceSink(): ProviderEvidenceSink {
   };
 }
 
-function codecContext() {
+function codecContext(overrides: Partial<DecodeContext> = {}) {
   let sequence = 0;
   const sink = memoryEvidenceSink();
   return {
@@ -247,7 +248,9 @@ function codecContext() {
     responsesOutputText: new Map<string, string>(),
     responsesCurrentResponseId: new Map<string, string>(),
     responsesPendingToolCalls: new Set<string>(),
+    responsesRequestStartEmitted: new Map<string, boolean>(),
     nextEventId: (type: string, locator: string) => `event-${type}-${locator.replace(/[^A-Za-z0-9._-]/g, '-')}-${++sequence}`,
+    ...overrides,
   };
 }
 
@@ -333,7 +336,7 @@ test('openai chat codec maps text, tool calls, finish reason, and error events',
     }],
   }, context);
   assert.equal(tool.events[0].kind, 'tool');
-  assert.equal(tool.events[0].summary, 'lookup');
+  assert.equal(tool.events[0].summary, '调用工具：lookup');
 
   const terminal = await codec.decodeEvent({
     protocol: 'openai',
@@ -476,6 +479,44 @@ test('responses codec keeps tool control typed and encodes a call-bound continua
   ]);
 });
 
+test('responses codec marks request starts once per response id regardless of lifecycle order', async () => {
+  const codec = new ResponsesProviderCodec();
+  const createdFirst = codecContext();
+  const inProgressFirst = codecContext();
+
+  for (const responseId of ['request-start-1', 'request-start-2']) {
+    const first = await codec.decodeEvent(
+      { protocol: 'responses', type: 'response.created', response: { id: responseId } },
+      createdFirst,
+    );
+    const duplicate = await codec.decodeEvent(
+      { protocol: 'responses', type: 'response.in_progress', response: { id: responseId } },
+      createdFirst,
+    );
+    assert.deepEqual(first.events.map((event) => event.summary), ['provider requested model work']);
+    assert.deepEqual(duplicate.events, []);
+  }
+
+  const inProgress = await codec.decodeEvent(
+    { protocol: 'responses', type: 'response.in_progress', response: { id: 'request-start-3' } },
+    inProgressFirst,
+  );
+  const duplicateCreated = await codec.decodeEvent(
+    { protocol: 'responses', type: 'response.created', response: { id: 'request-start-3' } },
+    inProgressFirst,
+  );
+  assert.deepEqual(inProgress.events.map((event) => event.summary), ['provider requested model work']);
+  assert.deepEqual(duplicateCreated.events, []);
+
+  await assert.rejects(
+    () => codec.decodeEvent(
+      { protocol: 'responses', type: 'response.created', response: { id: 'missing-map' } },
+      codecContext({ responsesRequestStartEmitted: undefined }) as DecodeContext,
+    ),
+    /Cannot read propert|get/,
+  );
+});
+
 test('responses reasoning output item remains model evidence and does not become user-visible output text', async () => {
   const codec = new ResponsesProviderCodec();
   const context = codecContext();
@@ -574,7 +615,7 @@ test('responses codec gives every visible model event a semantic summary', async
   const created = await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'response-semantic-1' } }, context);
   assert.equal(created.events[0].summary, 'provider requested model work');
 
-  const inProgress = await codec.decodeEvent({ protocol: 'responses', type: 'response.in_progress', response: { id: 'response-semantic-1' } }, context);
+  const inProgress = await codec.decodeEvent({ protocol: 'responses', type: 'response.in_progress', response: { id: 'response-semantic-2' } }, context);
   assert.equal(inProgress.events[0].summary, 'provider requested model work');
 
   const outputAdded = await codec.decodeEvent({
@@ -599,7 +640,8 @@ test('responses codec gives every visible model event a semantic summary', async
     call_id: 'call-semantic',
     arguments: '{"path":"README.md"}',
   }, context);
-  assert.equal(functionArgsDone.events[0].summary, 'provider completed tool request details');
+  assert.equal(functionArgsDone.events[0].kind, 'output');
+  assert.equal(functionArgsDone.events[0].outputRefs?.length, 1);
 });
 
 test('responses codec accepts RCC transparent-proxy events with empty response and message ids', async () => {
@@ -1071,9 +1113,8 @@ test('codecs consume legal wire events and preserve real error fields', async ()
     item_id: 'item-1',
     arguments: '{"q":"x"}',
   }, context);
-  assert.equal(argsDone.events[0].kind, 'model');
-  assert.equal(argsDone.events[0].outputRefs, undefined);
-  assert.equal(argsDone.events[0].summary, 'provider completed tool request details');
+  assert.equal(argsDone.events[0].kind, 'output');
+  assert.equal(argsDone.events[0].outputRefs?.length, 1);
 
   const incomplete = await codec.decodeEvent({
     protocol: 'responses',
@@ -1215,7 +1256,8 @@ test('responses codec accepts the live function_call_arguments.done shape withou
     output_index: 0,
     arguments: '{"path":"README.md"}',
   }, context);
-  assert.equal(done.events[0].kind, 'model');
+  assert.equal(done.events[0].kind, 'output');
+  assert.equal(done.events[0].outputRefs?.length, 1);
 });
 
 test('responses codec still rejects a function_call_arguments.done without any call identity', async () => {
