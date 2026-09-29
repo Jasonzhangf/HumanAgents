@@ -22,14 +22,14 @@
 三个任务各自使用新的 task/run ID，并全部通过真实 WebUI、Runtime 和相应真实能力完成：
 
 1. **网络搜索**：通过 Agent Reach 执行真实搜索；任务详情能看到实际搜索工具调用、工具结果、来源和正常完成状态。
-2. **本地只读搜索**：通过真实文件工具搜索隔离 workspace；任务详情能看到实际工具调用、真实文件路径和匹配内容；确认 workspace 未被修改。
-3. **AItest task**：先核实 AItest 仓库、目标 task、输入/输出及适用 checker；使用本轮专属隔离目录执行真实任务；确认产物存在且 checker 通过，既有任务数据未被覆盖。
+2. **本地只读搜索**：在隔离 workspace 中先执行真实的文件搜索动作（如项目已接线的搜索工具，或明确只读的搜索命令），再读取命中的文件；不能从预先知道的路径直接 `file.read` 冒充搜索。任务详情和 receipt 须包含搜索 query、搜索调用及其匹配路径/摘要、后续读取的真实路径与内容证据，并确认 workspace 未被修改。
+3. **AItest task**：先核实 AItest 仓库、目标 task、输入/输出及适用 checker；使用本轮专属隔离目录执行真实任务；运行 task 指定 checker，并按 task 的人工观察要求检查产物语义/视觉结果；记录观察截图与结论，确认既有任务数据未被覆盖。仅检查 HTML/SVG/动画标签存在不能证明 task 完成。
 
 每类只可由一次完整任务成功计数；错误尝试、单轮调用、API-only、mock、旧候选收据都不计入成功次数。Retry-10 是独立能力验证，不计入上述三项。
 
 ## 候选证据
 
-每个成功任务的 receipt 必须绑定同一候选 SHA 和 tree，并包含：task/run ID、候选 SHA/tree、输入与确认阶段证据、关键 API/journal 事件、每个 turn 的请求/调用/结果/输出、任务终态、相关 checker（AItest）、浏览器截图，以及真实文件或搜索来源等业务结果证据。Receipt 与截图写到该候选的 `dist/receipts/dashboard-e2e/`；路径不得指向另一候选或旧 run。
+每个成功任务的 receipt 必须绑定同一候选 SHA 和 tree，并包含：task/run ID、候选 SHA/tree、输入与确认阶段证据、关键 API/journal 事件、每个 turn 的请求/调用/结果/输出、任务终态、相关 checker（AItest）、浏览器截图，以及真实文件或搜索来源等业务结果证据。本地搜索 receipt 还须分别证明搜索 query/结果和随后读取的内容；只有 `file.read` 事件的 receipt 不满足本地搜索验收。AItest receipt 须附 checker 原始结果及 task 要求的人工观察记录/截图。Receipt 与截图写到该候选的 `dist/receipts/dashboard-e2e/`；路径不得指向另一候选或旧 run。
 
 候选含未提交改动时，身份须同时记录 HEAD SHA、HEAD tree、`git diff --binary HEAD` 的 SHA-256、tracked/untracked 状态和 harness digest；所有会影响运行或测试的 untracked 输入须逐项列出并 hash。源码、测试或 harness 任一变动都会使旧 receipt 失效，必须从该状态重跑受影响的真实 E2E。
 
@@ -42,7 +42,23 @@ HUMANAGENT_BROWSER_SHOT_DIR=dist/receipts/dashboard-e2e/local-file-shots \
 node tests/app/real-browser-explicit-implicit-e2e.mjs
 ```
 
-该脚本当前只覆盖本地文件读取；网络搜索与 AItest 需使用各自真实浏览器任务入口和独立 receipt，不能把上例重复运行三次充作三类能力。
+此兼容脚本只覆盖本地文件读取；即使运行成功，也不证明本地搜索、网络搜索或 AItest。
+
+## 标准浏览器入口合同
+
+三类场景必须使用同一受版本控制的真实浏览器 runner，并各自以独立命令启动，产生新的 task/run 和独立 receipt：
+
+```sh
+pnpm e2e:dashboard:web-search
+pnpm e2e:dashboard:local-file-search
+pnpm e2e:dashboard:aitest
+```
+
+每条命令必须从真实 Dashboard 建立隔离 runtime/workspace，执行真实业务能力并验证成功终态；不得调用 API 代替浏览器用户流程。本次修复的成功、失败和取消断言必须分别由 runner 执行。命令缺失、runner 不支持对应场景或 capability 未接线时，该类为 `INCOMPLETE`，不能退回使用本地文件读取脚本、mock、checker-only 或一次 Provider 调用计数。
+
+当前 `package.json` 尚未提供这三个命令，当前 browser harness 也只执行 `file.read`，不执行搜索动作、不验证匹配路径，AItest checker 也不验证 task 语义/视觉结果。因此 runner 和三个命令仍是实现 gate；完成实现并通过这些命令前，三类浏览器 E2E 均不得标记通过。
+
+AItest 的 checker 成功不能代替 task 语义验收：必须保存 checker 原始 stdout/exit code 和人工观察记录。用户取消或 checker/结果验证失败时，Dashboard 必须有明确非成功终态；网络搜索失败时须展示真实 Provider 错误，不得伪造空结果成功。本地搜索结果为零时须显示真实的零命中结果，不能把搜索未执行表现成零命中。
 
 失败尝试另记 `INCOMPLETE` receipt，包含首次偏离、原始错误、关联 task/operation/tool-call ID 和必要截图。失败 receipt 用于修复与复现，不可充当成功证据。
 
@@ -80,13 +96,18 @@ receipt 必须绑定候选 SHA/tree、配置 revision/digest、候选 binding �
 以下命令是当前项目已有的针对性验证：
 
 ```sh
+pnpm typecheck
+pnpm test:provider
 pnpm test:app
 pnpm test:ui
-pnpm typecheck
+pnpm test:runtime
+pnpm test:hand
 node tests/app/real-browser-explicit-implicit-e2e.mjs
 ```
 
-浏览器脚本 `real-browser-explicit-implicit-e2e.mjs` 当前覆盖真实 UI 的本地文件读取流程，并在 `finally` 关闭 Playwright browser、停止本轮服务、默认移除临时 root；设置 `HUMANAGENT_BROWSER_KEEP_ROOT=1` 会保留该 root，正式验收不得设置。`real-explicit-implicit-e2e.mjs` 和 `real-failure-cleanup-proof.mjs` 是真实 Runtime/API 证明，不是这三类浏览器任务的替代品。当前没有一个统一命令串起网络搜索、本地搜索、AItest task 三类浏览器 E2E；在该入口补齐前，三类任务须分别运行并各自提交完整 receipt，任何一类缺失都保持 `INCOMPLETE`。
+候选验证必须在同一个精确候选树中按顺序执行。`provider`、`app`、`ui`、`runtime` 和 `hand` gate 的原始退出码与日志路径都要绑定到候选 SHA/tree；修复后只重跑受影响 gate，但最终候选仍须包含完整的适用结果。上面的浏览器脚本只证明其实际覆盖的本地文件读取路径；网络搜索和 AItest 必须各有独立的真实 Dashboard 流程与 receipt，不能因为该命令通过而略过。
+
+`real-explicit-implicit-e2e.mjs` 和 `real-failure-cleanup-proof.mjs` 是真实 Runtime/API 证明，不是这三类浏览器任务的替代品。runner 的每个场景都必须在 `finally` 关闭本轮 browser context，停止精确归属本轮的服务 PID，核验 PID 退出、端口关闭和临时路径删除；不得设置保留临时 root 的开关。失败、超时和取消同样写带清理核验的 `INCOMPLETE` receipt。`pnpm e2e:dashboard:*` 命令及三类场景目前尚未落地，故本规则目前定义了放行合同，不代表验收已通过。
 
 正式安装验证顺序：在已 review 且 clean 的候选执行 `pnpm build:release`、`pnpm release:check`、`pnpm run install:global`；随后从任意非仓库目录执行 `humanagent --version`，再以 `humanagent --workspace <本轮专属 workspace> --port <空闲 loopback 端口>` 启动正式 WebUI，并用新浏览器页面复核输入、确认、turn、工具结果和最终输出。receipt 记录候选 SHA/tree、release manifest 中的 artifact 路径与 SHA-256、安装命令结果、`command -v humanagent` 的实际路径与 binary SHA-256、版本响应、服务 PID/端口/health、页面截图及清理证据。实际 binary 必须来自已验候选 release artifact；不得用候选源码版本或 `connected` 状态替代安装与运行态证据。
 
