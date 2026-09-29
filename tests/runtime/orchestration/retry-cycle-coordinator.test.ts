@@ -122,6 +122,7 @@ class FakeProviderDriver implements RuntimeExecutionDriver {
     private readonly bindingId: string,
     private readonly outcome: ProviderOutcome,
     private readonly events: string[],
+    private readonly closeState: ProviderCloseResult['state'] = 'closed',
   ) {}
 
   async capabilities() { return { driverKind: this.kind, capabilities: ['execute'], version: '1' }; }
@@ -205,7 +206,7 @@ class FakeProviderDriver implements RuntimeExecutionDriver {
       bindingId: this.bindingId,
       providerId: 'fake-provider',
       protocol: 'responses',
-      state: 'closed',
+      state: this.closeState,
       evidenceRefs: [evidence(`close-${this.input.executionEpoch}`)],
     };
   }
@@ -214,6 +215,7 @@ class FakeProviderDriver implements RuntimeExecutionDriver {
 function makeHarness(input: {
   readonly bindingIds: readonly string[];
   readonly outcomes: readonly ProviderOutcome[];
+  readonly closeStates?: readonly ProviderCloseResult['state'][];
 }) {
   const events: string[] = [];
   const createdBindings: string[] = [];
@@ -234,7 +236,13 @@ function makeHarness(input: {
       createDriverForBinding(bindingId, driverInput) {
         const index = createdBindings.length;
         createdBindings.push(bindingId);
-        return new FakeProviderDriver(driverInput, bindingId, input.outcomes[index] ?? 'failed', events);
+        return new FakeProviderDriver(
+          driverInput,
+          bindingId,
+          input.outcomes[index] ?? 'failed',
+          events,
+          input.closeStates?.[index] ?? 'closed',
+        );
       },
     },
     checkpointStoreFor: () => ({
@@ -314,6 +322,23 @@ test('RuntimeTaskCoordinator exposes no-candidate attention without an extra pro
   assert.equal(harness.journal.writes.at(-1)?.state, 'blocked-attention');
   assert.ok(result.task.error?.nextAction, JSON.stringify({ state: result.task.state, error: result.task.error, attentionCount: harness.coordinator.attentionAudit().published.length, retryState: harness.journal.writes.at(-1)?.state }));
   assert.ok(harness.coordinator.attentionAudit().published.length > 0, JSON.stringify({ state: result.task.state, error: result.task.error, retryState: harness.journal.writes.at(-1)?.state }));
+});
+
+test('RuntimeTaskCoordinator blocks retry dispatch and publishes attention when a settled provider close is unknown', async () => {
+  const harness = makeHarness({
+    bindingIds: ['binding-a', 'binding-b'],
+    outcomes: ['failed', 'succeeded'],
+    closeStates: ['unknown', 'closed'],
+  });
+  const result = await run(harness);
+
+  assert.deepEqual(harness.createdBindings, ['binding-a']);
+  assert.deepEqual(harness.events, ['start:1', 'submit:1', 'settle:1:failed', 'close:1']);
+  assert.equal(harness.journal.writes.at(-1)?.state, 'blocked-attention');
+  assert.equal(harness.journal.writes.at(-1)?.attempts.length, 1);
+  assert.equal(harness.journal.writes.at(-1)?.attempts[0]?.settleState, 'unsettled');
+  assert.ok(result.task.error?.nextAction, JSON.stringify({ state: result.task.state, error: result.task.error, attentionCount: harness.coordinator.attentionAudit().published.length, retryState: harness.journal.writes.at(-1)?.state }));
+  assert.ok(harness.attentions.length > 0, JSON.stringify({ state: result.task.state, error: result.task.error, retryState: harness.journal.writes.at(-1)?.state }));
 });
 
 for (const outcome of ['unknown', 'unsettled', 'cancelled'] as const) {
