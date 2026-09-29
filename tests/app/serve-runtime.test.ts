@@ -694,7 +694,7 @@ test('RCC orchestration ports provide review and merge agents for the live execu
   assert.ok(merged.evidenceRefs.length > 0);
 });
 
-test('RCC review agent fails closed when the model exhausts retries without a review marker', async () => {
+test('RCC review agent stays inconclusive when the model exhausts retries without a review marker', async () => {
   const task: Task = {
     id: id('task', 'serve-rcc-review-omission'),
     organId: id('organ', 'humanagent-ui'),
@@ -754,7 +754,7 @@ test('RCC review agent fails closed when the model exhausts retries without a re
     reviewMaterial: materialFor(workAssignment, worker),
     scope,
   });
-  assert.equal(review.status, 'failed');
+  assert.equal(review.status, 'inconclusive');
   assert.equal(review.findings.length, 1);
   assert.match(review.findings[0]!.expected, /bounded recover\/re-review consumer/);
 });
