@@ -31,7 +31,7 @@
 
 每个成功任务的 receipt 必须绑定同一候选 SHA 和 tree，并包含：task/run ID、候选 SHA/tree、输入与确认阶段证据、关键 API/journal 事件、每个 turn 的请求/调用/结果/输出、任务终态、相关 checker（AItest）、浏览器截图，以及真实文件或搜索来源等业务结果证据。Receipt 与截图写到该候选的 `dist/receipts/dashboard-e2e/`；路径不得指向另一候选或旧 run。
 
-候选含未提交改动时，身份须同时记录 HEAD SHA、HEAD tree、index tree、`git diff --binary HEAD` 的 SHA-256、tracked/untracked 状态和 harness digest；所有会影响运行或测试的 untracked 输入须逐项列出并 hash。源码、测试或 harness 任一变动都会使旧 receipt 失效，必须从该状态重跑受影响的真实 E2E。
+候选含未提交改动时，身份须同时记录 HEAD SHA、HEAD tree、`git diff --binary HEAD` 的 SHA-256、tracked/untracked 状态和 harness digest；所有会影响运行或测试的 untracked 输入须逐项列出并 hash。源码、测试或 harness 任一变动都会使旧 receipt 失效，必须从该状态重跑受影响的真实 E2E。
 
 真实浏览器验收必须显式设定 receipt 与截图目录，例如：
 
