@@ -20,7 +20,7 @@ The implementation must preserve these HumanAgent contracts:
 - Provider binding is immutable inside an execution epoch. Switching provider requires a new binding identity and a new execution epoch.
 - Each new retry epoch must create a new checkpoint and perform fresh permission, capability, readiness, and lease admission.
 - Provider/model selection is controlled by Harness/config admission. It must not be selected from prompt text, model output, tool results, ACP updates, or provider responses.
-- Runtime owns retry policy, retry budget, candidate set snapshots, exclusions, candidate eligibility, admission snapshots, and dispatch orchestration.
+- Runtime owns retry policy, retry budget, cycle candidate set snapshot lifecycle, exclusions, candidate eligibility, admission snapshots, and dispatch orchestration. Harness/config admission supplies the ordered configured bindings/fingerprints/revision/digest as immutable input; Runtime requests Journal Owner to persist the cycle snapshot before first dispatch.
 - Operation Owner owns operation settlement/reconciliation. Unknown, unsettled, cancelled, or recovery-requiring attempts must become visible recovery/attention state.
 - Exhaustion is allowed only after settled retry-safe attempt 11. It must not be reported as success when a side effect remains unknown.
 
@@ -90,7 +90,7 @@ All records are keyed by `assignmentId + initialExecutionEpoch` for the cycle an
 
 The retry loop follows this single path:
 
-1. Orchestration admits the first assignment and creates the durable retry-cycle record for `assignmentId + initialExecutionEpoch`, including a cycle-level immutable `candidateSetSnapshot` with ordered binding IDs, binding fingerprints, and source config revision/digest.
+1. Orchestration admits the first assignment. Harness/config admission supplies the ordered configured bindings/fingerprints/revision/digest as immutable input; Runtime builds the durable retry-cycle record for `assignmentId + initialExecutionEpoch`, including a cycle-level immutable `candidateSetSnapshot`, then requests Journal Owner to commit that record before any dispatch.
 2. Admission selects the initial provider binding from the persisted cycle `candidateSetSnapshot` and persists the per-epoch admission snapshot before dispatch.
 3. The attempt dispatches as an ordinary executor operation under that binding and execution epoch.
 4. On success, the retry cycle records the successful attempt and lets the assignment complete through its existing owner path.
@@ -103,7 +103,7 @@ The retry loop follows this single path:
 
 ## 5. Candidate Provider Selection
 
-Candidate provider lists must be explicit config owned by Harness/config admission. There is no automatic fallback to an unspecified provider/model. Before the first dispatch, Harness/config admission snapshots the complete ordered candidate set for the retry cycle, including binding IDs, binding fingerprints, source config revision, and source config digest. That snapshot is persisted through Journal Owner and becomes immutable for the cycle.
+Candidate provider lists must be explicit config owned by Harness/config admission. There is no automatic fallback to an unspecified provider/model. Before the first dispatch, Harness/config admission supplies the complete ordered configured bindings/fingerprints/revision/digest as immutable input to Runtime. Runtime owns the `candidateSetSnapshot` lifecycle, requests Journal Owner to persist it with the retry-cycle record, and treats that snapshot as immutable for the cycle.
 
 Selection rules:
 
@@ -134,7 +134,8 @@ Operation reconciliation remains owned by Operation Owner. Retry-10 records can 
 
 | Concern | Owner |
 | --- | --- |
-| Retry budget, immutable candidate set snapshot, exclusions, candidate eligibility, per-cycle state | Runtime Orchestration / RetryCyclePort |
+| Ordered configured bindings/fingerprints/revision/digest input | Harness/config admission |
+| Retry budget, immutable candidate set snapshot lifecycle, exclusions, candidate eligibility, per-cycle state | Runtime Orchestration / RetryCyclePort |
 | Per-epoch admission snapshot and binding fingerprint | Harness/config admission, consumed by Runtime |
 | Checkpoint creation and checkpoint linkage | Checkpoint/Control Owner |
 | Permission, capability, readiness, lease admission | Harness/runtime admission owners |
