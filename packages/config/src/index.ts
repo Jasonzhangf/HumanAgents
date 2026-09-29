@@ -42,6 +42,10 @@ export interface DshExecutionConfig {
   readonly shutdownTimeoutMs?: number;
 }
 
+export interface ProviderRetryExecutionConfig {
+  readonly candidates: readonly ProviderConfig[];
+}
+
 export interface ProviderConfig {
   readonly provider: ProviderId;
   readonly binding: string;
@@ -71,6 +75,7 @@ export interface UserConfig {
     readonly maxConcurrentTasks?: number;
     readonly stopTimeoutMs?: number;
     readonly dsh?: DshExecutionConfig;
+    readonly providerRetry?: ProviderRetryExecutionConfig;
   };
 }
 
@@ -441,24 +446,34 @@ function validateDshExecution(value: unknown, label: string): DshExecutionConfig
   };
 }
 
-function validateProviderConfig(value: unknown): ProviderConfig {
-  const provider = asRecord(value, 'provider');
-  rejectUnknownKeys(provider, ['provider', 'binding', 'protocol', 'model', 'route', 'baseUrl'], 'provider config');
-  const providerId = asString(provider.provider, 'provider.provider');
+function validateProviderConfig(value: unknown, label = 'provider'): ProviderConfig {
+  const provider = asRecord(value, label);
+  rejectUnknownKeys(provider, ['provider', 'binding', 'protocol', 'model', 'route', 'baseUrl'], label);
+  const providerId = asString(provider.provider, `${label}.provider`);
   if (!(PROVIDERS as readonly string[]).includes(providerId)) {
     fail('config-capability', `unknown provider: ${providerId}`, 'choose the configured RCC provider');
   }
-  const protocol = asString(provider.protocol, 'provider.protocol');
+  const protocol = asString(provider.protocol, `${label}.protocol`);
   if (!(PROVIDER_PROTOCOLS as readonly string[]).includes(protocol)) {
     fail('config-invalid', `unsupported provider protocol: ${protocol}`, 'choose responses, openai, or anthropic');
   }
   return {
     provider: providerId as ProviderId,
-    binding: asString(provider.binding, 'provider.binding'),
+    binding: asString(provider.binding, `${label}.binding`),
     protocol: protocol as ProviderProtocol,
-    model: asString(provider.model, 'provider.model'),
-    route: asString(provider.route, 'provider.route'),
-    baseUrl: asString(provider.baseUrl, 'provider.baseUrl'),
+    model: asString(provider.model, `${label}.model`),
+    route: asString(provider.route, `${label}.route`),
+    baseUrl: asString(provider.baseUrl, `${label}.baseUrl`),
+  };
+}
+
+function validateProviderRetryExecution(value: unknown, label: string): ProviderRetryExecutionConfig {
+  const retry = asRecord(value, label);
+  rejectUnknownKeys(retry, ['candidates'], label);
+  if (!Array.isArray(retry.candidates)) fail('config-invalid', `${label}.candidates must be an array`);
+  if (retry.candidates.length === 0) fail('config-invalid', `${label}.candidates must include at least one provider candidate`);
+  return {
+    candidates: retry.candidates.map((candidate, index) => validateProviderConfig(candidate, `${label}.candidates[${index}]`)),
   };
 }
 
@@ -499,9 +514,12 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'user project config');
-  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh'], 'user execution config');
+  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh', 'providerRetry'], 'user execution config');
   const maxConcurrentTasks = execution?.maxConcurrentTasks as unknown;
   const stopTimeoutMs = execution?.stopTimeoutMs as unknown;
+  const providerRetry = execution?.providerRetry === undefined
+    ? undefined
+    : validateProviderRetryExecution(execution.providerRetry, 'execution.providerRetry');
   if (maxConcurrentTasks !== undefined && (typeof maxConcurrentTasks !== 'number' || !Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)) fail('config-invalid', 'execution.maxConcurrentTasks must be positive');
   if (stopTimeoutMs !== undefined && (typeof stopTimeoutMs !== 'number' || !Number.isSafeInteger(stopTimeoutMs) || stopTimeoutMs < 1)) fail('config-invalid', 'execution.stopTimeoutMs must be positive');
   return {
@@ -517,6 +535,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
       ...(maxConcurrentTasks === undefined ? {} : { maxConcurrentTasks: maxConcurrentTasks as number }),
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
       ...(execution.dsh === undefined ? {} : { dsh: validateDshExecution(execution.dsh, 'execution.dsh') }),
+      ...(providerRetry === undefined ? {} : { providerRetry }),
     }}),
   };
 }

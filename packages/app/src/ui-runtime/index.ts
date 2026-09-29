@@ -10,6 +10,7 @@ import type {
   TaskId,
 } from '../../../contracts/src/index.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
+import type { RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import {
   AnthropicProviderCodec,
   OpenAIChatProviderCodec,
@@ -71,6 +72,10 @@ export interface UiRuntimeLaunchOptions {
   readonly portNumber?: number;
   readonly projectKey?: string;
   readonly workspaceRoot?: string;
+  readonly providerRetryConfig?: {
+    readonly config: RetryCycleConfigSet;
+    readonly journalRoot: string;
+  };
   readonly explicitBrainAgentQuery?: (input: { readonly agentRef: string; readonly scopeRef: string }) => Promise<unknown>;
   readonly explicitBrainAgentMessage?: (input: {
     readonly recipientRef: string;
@@ -214,6 +219,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     closurePort: interactionJournal ?? journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+    ...(options.providerRetryConfig === undefined ? {} : { providerRetryConfig: options.providerRetryConfig }),
     ...(providerToolExecutor === undefined ? {} : {
       providerTools: [
         RESPONSES_FILE_READ_TOOL,

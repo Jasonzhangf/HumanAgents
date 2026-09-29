@@ -150,7 +150,8 @@ import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/
 import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeJournal } from './journal.js';
-import { digestOf, type ExecutionAgentPort } from '../../../runtime/src/orchestration/index.js';
+import { digestOf, type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
+import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
 import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
@@ -220,6 +221,10 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
   readonly memory: UiRuntimeMemoryComposition;
+  readonly providerRetryConfig?: {
+    readonly config: RetryCycleConfigSet;
+    readonly journalRoot: string;
+  };
   readonly runtimeComposition?: {
     readonly createTaskAssembly?: (input: {
       readonly task: import('../../../contracts/src/index.js').Task;
@@ -763,6 +768,17 @@ export class UiRuntimeService {
       taskIdPrefix: randomUUID(),
       now: options.now,
       createDriver: (input) => this.createMemoryBoundDriver(input),
+      ...(options.providerRetryConfig === undefined
+        ? {}
+        : {
+            providerRetry: {
+              config: options.providerRetryConfig.config,
+              journal: createJsonlRetryCycleJournalPort({
+                filePath: retryCycleJournalFilePath({ journalRoot: options.providerRetryConfig.journalRoot }),
+              }),
+              createDriverForBinding: (bindingId, input) => this.createMemoryBoundDriverForBinding(bindingId, input),
+            },
+          }),
       ...(options.runtimeComposition === undefined ? {} : {
         ...(options.runtimeComposition.createTaskAssembly === undefined ? {} : {
           createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!(input),
@@ -1103,9 +1119,18 @@ export class UiRuntimeService {
   }
 
   private createMemoryBoundDriver(input: RuntimeExecutionDriverInput): RuntimeExecutionDriver {
+    return this.createMemoryBoundDriverForBinding(this.options.binding.bindingId, input);
+  }
+
+  private findProviderRetryBinding(bindingId: string): ProviderBinding | undefined {
+    return this.options.providerRetryConfig?.config.candidates.find((candidate) => candidate.binding.bindingId === bindingId)?.binding;
+  }
+
+  private createMemoryBoundDriverForBinding(bindingId: string, input: RuntimeExecutionDriverInput): RuntimeExecutionDriver {
+    const binding = this.findProviderRetryBinding(bindingId) ?? this.options.binding;
     const driver = new ProviderAgentDriver({
       port: this.options.port,
-      binding: this.options.binding,
+      binding,
       runtimeId: input.runtimeId,
       taskId: input.taskId,
       operationId: input.operationId,

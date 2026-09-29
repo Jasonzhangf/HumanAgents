@@ -50,7 +50,16 @@ import {
   type RequirementAdmissionReceipt,
 } from '../admission/index.js';
 import type { OrchestrationManager } from '../orchestration/manager.js';
-import { acceptanceCriteriaContent, digestOf, type AgentRuntimePoolManager, type ExecutionAgentPort, type ExecutorReviewEvidence } from '../orchestration/index.js';
+import {
+  acceptanceCriteriaContent,
+  createRetryCycleManager,
+  digestOf,
+  type AgentRuntimePoolManager,
+  type ExecutionAgentPort,
+  type ExecutorReviewEvidence,
+  type RetryCycleConfigSet,
+  type RetryCycleJournalPort,
+} from '../orchestration/index.js';
 import type { ExplicitIntakeState } from '../intake/explicit-intake.js';
 import type { RequirementInboxState } from '../intake/requirement-inbox.js';
 import type { ConfirmationLedgerState, PersistedSubmittedReceipt } from '../explicit-brain/router.js';
@@ -144,6 +153,9 @@ export interface RuntimeExecutionDriverInput {
 }
 
 export type RuntimeExecutionDriverFactory = (input: RuntimeExecutionDriverInput) => RuntimeExecutionDriver;
+
+export type RuntimeExecutionDriverForBindingFactory =
+  (bindingId: string, input: RuntimeExecutionDriverInput) => RuntimeExecutionDriver;
 
 export interface RuntimeExecutionCapabilities {
   readonly providerNeutralHarness: {
@@ -293,6 +305,17 @@ export interface TaskCheckpointStore extends CheckpointJournalPort, CheckpointCo
 export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
+  /**
+   * Optional Retry-10 provider avoidance. When present, provider execution is
+   * chosen through a durable retry cycle before each attempt and the selected
+   * binding drives the actual provider runtime. Absent config keeps the
+   * existing single-binding behavior and never synthesizes an alternate route.
+   */
+  readonly providerRetry?: {
+    readonly config: RetryCycleConfigSet;
+    readonly journal: RetryCycleJournalPort;
+    readonly createDriverForBinding: RuntimeExecutionDriverForBindingFactory;
+  };
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => TaskCheckpointStore;
   readonly attentionPort: AttentionPort;
   readonly journal?: RuntimeTaskJournalPort;
@@ -1306,6 +1329,195 @@ export class RuntimeTaskCoordinator {
     return { published: this.publishedAttentions, resolved: this.resolvedAttentions };
   }
 
+  private providerAttemptReport(input: Parameters<ExecutionAgentPort['execute']>[0], attempt: number, executionEpoch: number): {
+    readonly taskId: import('../../../contracts/src/index.js').TaskId;
+    readonly pipelineNodeId: string;
+    readonly agentId: string;
+    readonly assignmentId: string;
+    readonly attempt: number;
+    readonly executionEpoch: number;
+    readonly inputRevision: number;
+  } {
+    return {
+      taskId: input.assignment.taskId,
+      pipelineNodeId: input.assignment.pipelineNodeId,
+      agentId: input.agentId,
+      assignmentId: input.assignment.assignmentId,
+      attempt,
+      executionEpoch,
+      inputRevision: input.assignment.inputRevision,
+    };
+  }
+
+  private async executePreparedProviderAttempt(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+    prompt: string,
+    outputRef: string,
+    input: Parameters<ExecutionAgentPort['execute']>[0],
+    report: ReturnType<RuntimeTaskCoordinator['providerAttemptReport']>,
+    composition: RuntimeExecutionComposition,
+    runtime: AgentRuntime,
+  ): Promise<{ readonly result: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] }; readonly closure?: AgentRuntimeClosure }> {
+    const coordinator = this;
+    let producedOutput = '';
+    const executorEvidence: ExecutorReviewEvidence[] = [];
+    await composition.start();
+    await composition.submit(prompt);
+    record.resolveExecutionReady?.(true);
+    record.resolveExecutionReady = undefined;
+    if (record.stopping || record.postCommitRecoveryPending) {
+      return {
+        result: {
+          taskId: report.taskId,
+          pipelineNodeId: report.pipelineNodeId,
+          agentId: report.agentId,
+          assignmentId: report.assignmentId,
+          attempt: report.attempt,
+          executionEpoch: report.executionEpoch,
+          inputRevision: report.inputRevision,
+          producedArtifactRefs: [],
+          producedArtifactDigests: [],
+          status: 'cancelled',
+          summary: 'provider execution was stopped before observation completed',
+          outputRefs: [],
+          evidenceRefs: [],
+          nextAction: 'settle',
+        },
+      };
+    }
+    for await (const observation of composition.observe()) {
+      if (record.postCommitRecoveryPending) {
+        return {
+          result: {
+            taskId: report.taskId,
+            pipelineNodeId: report.pipelineNodeId,
+            agentId: report.agentId,
+            assignmentId: report.assignmentId,
+            attempt: report.attempt,
+            executionEpoch: report.executionEpoch,
+            inputRevision: report.inputRevision,
+            producedArtifactRefs: [],
+            producedArtifactDigests: [],
+            status: 'blocked',
+            summary: 'provider execution reached post-commit recovery',
+            outputRefs: [],
+            evidenceRefs: [],
+            nextAction: 'attention',
+            conditionRef: `operation://${operation.operationId.value}/recovery`,
+          },
+        };
+      }
+      if (!observation.accepted) {
+        coordinator.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
+        continue;
+      }
+      const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
+      if (!event.providerEvent) continue;
+      if (event.providerEvent.kind === 'output' && event.providerEvent.summary) {
+        producedOutput = `${producedOutput}${event.providerEvent.summary}`;
+      }
+      if (event.providerEvent.kind === 'tool') {
+        executorEvidence.push({
+          summary: providerEventSummary(event.providerEvent),
+          evidenceRefs: [...event.providerEvent.evidenceRefs],
+        });
+      }
+      coordinator.recordProviderEvent(record, operation, event.providerEvent);
+    }
+    if (record.postCommitRecoveryPending) {
+      return {
+        result: {
+          taskId: report.taskId,
+          pipelineNodeId: report.pipelineNodeId,
+          agentId: report.agentId,
+          assignmentId: report.assignmentId,
+          attempt: report.attempt,
+          executionEpoch: report.executionEpoch,
+          inputRevision: report.inputRevision,
+          producedArtifactRefs: [],
+          producedArtifactDigests: [],
+          status: 'blocked',
+          summary: 'provider execution reached post-commit recovery',
+          outputRefs: [],
+          evidenceRefs: [],
+          nextAction: 'attention',
+          conditionRef: `operation://${operation.operationId.value}/recovery`,
+        },
+      };
+    }
+    if (runtime.snapshot().state === 'stopped' || record.stopping) {
+      const closure = runtime.snapshot().closure;
+      return {
+        closure,
+        result: {
+          taskId: report.taskId,
+          pipelineNodeId: report.pipelineNodeId,
+          agentId: report.agentId,
+          assignmentId: report.assignmentId,
+          attempt: report.attempt,
+          executionEpoch: report.executionEpoch,
+          inputRevision: report.inputRevision,
+          producedArtifactRefs: [],
+          producedArtifactDigests: [],
+          status: 'cancelled',
+          summary: 'provider execution was stopped during observation',
+          outputRefs: [],
+          evidenceRefs: closure?.evidenceRefs ?? [],
+          nextAction: 'settle',
+        },
+      };
+    }
+    coordinator.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
+    record.state = 'settling';
+    record.currentState = '收拢中';
+    record.nextStep = '等待编排审查和 checkpoint';
+    record.allowedActions = [];
+    const closure = await composition.settle();
+    const status: WorkResult['status'] = closure.state === 'succeeded'
+      ? 'succeeded'
+      : closure.state === 'waiting'
+        ? 'incomplete'
+        : closure.state === 'blocked'
+          ? 'blocked'
+          : closure.state === 'failed' || closure.state === 'unknown'
+            ? 'failed'
+            : 'cancelled';
+    const nextAction: WorkResult['nextAction'] = closure.state === 'succeeded'
+      ? 'review'
+      : closure.state === 'waiting'
+        ? 'wait'
+        : closure.state === 'blocked' || closure.state === 'failed' || closure.state === 'unknown'
+          ? 'attention'
+          : 'settle';
+    const workResult: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] } = {
+      taskId: report.taskId,
+      pipelineNodeId: report.pipelineNodeId,
+      agentId: report.agentId,
+      assignmentId: report.assignmentId,
+      attempt: report.attempt,
+      executionEpoch: report.executionEpoch,
+      inputRevision: report.inputRevision,
+      producedArtifactRefs: [outputRef],
+      producedArtifactDigests: [digestOf(producedOutput)],
+      producedArtifactBodies: [producedOutput],
+      executorEvidence,
+      status,
+      summary: `provider execution ${closure.state}`,
+      outputRefs: [outputRef],
+      evidenceRefs: closure.evidenceRefs,
+      nextAction,
+      ...(nextAction === 'wait'
+        ? { conditionRef: closure.conditionRef ?? `operation://${operation.operationId.value}/waiting` }
+        : {}),
+      ...(status === 'failed'
+        ? { failureRef: closure.failureRef ?? `operation://${operation.operationId.value}/failed` }
+        : {}),
+    };
+    return { closure, result: workResult };
+  }
+
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly listeners = new OperationListeners();
 
@@ -1322,191 +1534,183 @@ export class RuntimeTaskCoordinator {
     let driver: RuntimeExecutionDriver | undefined;
     let runtime: AgentRuntime | undefined;
     let composition: RuntimeExecutionComposition | undefined;
+    let selectedBindingId: string | undefined;
+    let selectedExecutionEpoch: number | undefined;
+    let retryCycle: ReturnType<typeof createRetryCycleManager> | undefined;
     try {
-      const checkpointBoundary = new ContextCheckpointBoundary(
-        this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
-      );
-      record.checkpointBoundary = checkpointBoundary;
-      driver = this.options.createDriver({
-        runtimeId,
-        taskId: record.taskId,
-        operationId: operation.operationId,
-        executionEpoch: operation.executionEpoch,
-        assignmentId: `assignment-${operation.operationId.value}`,
-        scope,
-        inputRefs: [`task://${record.taskId.value}/input/${operation.seq}`],
-        ownerId: RUNTIME_OWNER,
-      });
-      composition = new HarnessExecutionComposition({
-        driver,
-        runtimeId,
-        taskId: record.taskId,
-        assignmentId: `assignment-${operation.operationId.value}`,
-        operationId: operation.operationId,
-        executionEpoch: operation.executionEpoch,
-        scope,
-        checkpointBoundary,
-        now: this.now,
-        hookRegistry: this.options.hookRegistry,
-      });
-      runtime = composition.runtime;
-      record.composition = composition;
-      record.driver = driver;
-      record.runtime = runtime;
+      if (this.options.providerRetry) {
+        retryCycle = createRetryCycleManager({
+          config: this.options.providerRetry.config,
+          journal: this.options.providerRetry.journal,
+        });
+        const decision = await retryCycle.begin({
+          assignmentId: `assignment-${operation.operationId.value}`,
+          initialExecutionEpoch: operation.executionEpoch,
+          scope,
+        });
+        if (decision.kind !== 'dispatch') {
+          throw new RuntimeTaskControlError(
+            'execution.retry.unavailable',
+            decision.issue.ownerId,
+            decision.issue.reason,
+            decision.issue.nextAction.kind,
+          );
+        }
+        selectedBindingId = decision.candidate.binding.bindingId;
+        selectedExecutionEpoch = decision.executionEpoch;
+      }
+      if (!this.options.providerRetry) {
+        const checkpointBoundary = new ContextCheckpointBoundary(
+          this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+        );
+        record.checkpointBoundary = checkpointBoundary;
+        const createDriverInput = {
+          runtimeId,
+          taskId: record.taskId,
+          operationId: operation.operationId,
+          executionEpoch: operation.executionEpoch,
+          assignmentId: `assignment-${operation.operationId.value}`,
+          scope,
+          inputRefs: [`task://${record.taskId.value}/input/${operation.seq}`],
+          ownerId: RUNTIME_OWNER,
+        } as const;
+        driver = this.options.createDriver(createDriverInput);
+        composition = new HarnessExecutionComposition({
+          driver,
+          runtimeId,
+          taskId: record.taskId,
+          assignmentId: `assignment-${operation.operationId.value}`,
+          operationId: operation.operationId,
+          executionEpoch: operation.executionEpoch,
+          scope,
+          checkpointBoundary,
+          now: this.now,
+          hookRegistry: this.options.hookRegistry,
+        });
+        runtime = composition.runtime;
+        record.composition = composition;
+        record.driver = driver;
+        record.runtime = runtime;
+      }
       let closure: AgentRuntimeClosure | undefined;
       if (record.orchestrated && this.options.createTaskAssembly) {
         const outputRef = `operation://${operation.operationId.value}/output`;
         const coordinator = this;
-        // The review gate receives the text this execution actually produced,
-        // so an empty run blocks instead of passing on identity alone.
-        let producedOutput = '';
-        const executorEvidence: ExecutorReviewEvidence[] = [];
         const providerExecutionAgent: ExecutionAgentPort = {
           async execute(input): Promise<WorkResult> {
-            await composition!.start();
-            await composition!.submit(prompt);
-            record.resolveExecutionReady?.(true);
-            record.resolveExecutionReady = undefined;
-            if (record.stopping || record.postCommitRecoveryPending) {
-              return {
-                taskId: input.assignment.taskId,
-                pipelineNodeId: input.assignment.pipelineNodeId,
-                agentId: input.agentId,
-                assignmentId: input.assignment.assignmentId,
-                attempt: input.assignment.attempt,
-                executionEpoch: input.assignment.executionEpoch,
-                inputRevision: input.assignment.inputRevision,
-                producedArtifactRefs: [],
-                producedArtifactDigests: [],
-                status: 'cancelled',
-                summary: 'provider execution was stopped before observation completed',
-                outputRefs: [],
-                evidenceRefs: [],
-                nextAction: 'settle',
-              };
-            }
-            for await (const observation of composition!.observe()) {
-              if (record.postCommitRecoveryPending) return {
-                taskId: input.assignment.taskId,
-                pipelineNodeId: input.assignment.pipelineNodeId,
-                agentId: input.agentId,
-                assignmentId: input.assignment.assignmentId,
-                attempt: input.assignment.attempt,
-                executionEpoch: input.assignment.executionEpoch,
-                inputRevision: input.assignment.inputRevision,
-                producedArtifactRefs: [],
-                producedArtifactDigests: [],
-                status: 'blocked',
-                summary: 'provider execution reached post-commit recovery',
-                outputRefs: [],
-                evidenceRefs: [],
-                nextAction: 'attention',
-                conditionRef: `operation://${operation.operationId.value}/recovery`,
-              };
-              if (!observation.accepted) {
-                coordinator.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
-                continue;
-              }
-              const event = observation.event as AgentEvent & { readonly providerEvent?: ProviderEvent };
-              if (!event.providerEvent) continue;
-              if (event.providerEvent.kind === 'output' && event.providerEvent.summary) {
-                producedOutput = `${producedOutput}${event.providerEvent.summary}`;
-              }
-              if (event.providerEvent.kind === 'tool') {
-                executorEvidence.push({
-                  summary: providerEventSummary(event.providerEvent),
-                  evidenceRefs: [...event.providerEvent.evidenceRefs],
+            const assignmentId = `assignment-${operation.operationId.value}`;
+            const initialExecutionEpoch = operation.executionEpoch;
+            let attemptBindingId = selectedBindingId;
+            let attemptEpoch = selectedExecutionEpoch ?? operation.executionEpoch;
+            let attemptNumber = input.assignment.attempt;
+            while (true) {
+              let attemptComposition: RuntimeExecutionComposition;
+              let attemptRuntime: AgentRuntime;
+              let attemptDriver: RuntimeExecutionDriver | undefined;
+              if (coordinator.options.providerRetry && retryCycle && attemptBindingId) {
+                const checkpointBoundary = new ContextCheckpointBoundary(
+                  coordinator.options.checkpointStoreFor(record.taskId, scope.cycleId!),
+                );
+                record.checkpointBoundary = checkpointBoundary;
+                attemptDriver = coordinator.options.providerRetry.createDriverForBinding(attemptBindingId, {
+                  runtimeId: `retry-${assignmentId}-${attemptEpoch}`,
+                  taskId: record.taskId,
+                  operationId: operation.operationId,
+                  executionEpoch: attemptEpoch,
+                  assignmentId,
+                  scope,
+                  inputRefs: [`task://${record.taskId.value}/input/${operation.seq}`],
+                  ownerId: RUNTIME_OWNER,
                 });
+                attemptComposition = new HarnessExecutionComposition({
+                  driver: attemptDriver,
+                  runtimeId: `retry-${assignmentId}-${attemptEpoch}`,
+                  taskId: record.taskId,
+                  assignmentId,
+                  operationId: operation.operationId,
+                  executionEpoch: attemptEpoch,
+                  scope,
+                  checkpointBoundary,
+                  now: coordinator.now,
+                  hookRegistry: coordinator.options.hookRegistry,
+                });
+                attemptRuntime = attemptComposition.runtime;
+                record.composition = attemptComposition;
+                record.driver = attemptDriver;
+                record.runtime = attemptRuntime;
+              } else {
+                attemptComposition = composition!;
+                attemptRuntime = runtime!;
+                attemptDriver = driver;
               }
-              coordinator.recordProviderEvent(record, operation, event.providerEvent);
+              const attempt = await coordinator.executePreparedProviderAttempt(
+                record,
+                operation,
+                scope,
+                prompt,
+                outputRef,
+                input,
+                coordinator.providerAttemptReport(input, attemptNumber, attemptEpoch),
+                attemptComposition,
+                attemptRuntime,
+              );
+              closure = attempt.closure;
+              const workResult = attempt.result;
+              if (!coordinator.options.providerRetry || !retryCycle || !attemptBindingId) {
+                return workResult;
+              }
+              if (workResult.status === 'succeeded') {
+                await retryCycle.recordSuccess({
+                  assignmentId,
+                  initialExecutionEpoch,
+                  attempt: attemptNumber,
+                  executionEpoch: attemptEpoch,
+                  bindingId: attemptBindingId,
+                  evidenceRefs: workResult.evidenceRefs,
+                });
+                return workResult;
+              }
+              if (workResult.status === 'failed' && closure?.state === 'failed') {
+                const failure = await retryCycle.recordFailure({
+                  assignmentId,
+                  initialExecutionEpoch,
+                  attempt: attemptNumber,
+                  executionEpoch: attemptEpoch,
+                  bindingId: attemptBindingId,
+                  failureRef: workResult.failureRef ?? `operation://${operation.operationId.value}/failed`,
+                  evidenceRefs: workResult.evidenceRefs,
+                  settleState: 'retry-safe',
+                });
+                if (failure.kind === 'dispatch') {
+                  attemptBindingId = failure.candidate.binding.bindingId;
+                  attemptEpoch = failure.executionEpoch;
+                  attemptNumber = failure.attempt;
+                  continue;
+                }
+                const blockedResult: WorkResult = {
+                  ...workResult,
+                  status: 'blocked',
+                  nextAction: 'attention',
+                  summary: failure.issue.reason,
+                  evidenceRefs: [...workResult.evidenceRefs, ...failure.issue.evidenceRefs],
+                  ...(failure.issue.nextAction.ref
+                    ? { conditionRef: failure.issue.nextAction.ref }
+                    : {}),
+                };
+                return blockedResult;
+              }
+              await retryCycle.recordFailure({
+                assignmentId,
+                initialExecutionEpoch,
+                attempt: attemptNumber,
+                executionEpoch: attemptEpoch,
+                bindingId: attemptBindingId,
+                failureRef: workResult.failureRef ?? `operation://${operation.operationId.value}/failed`,
+                evidenceRefs: workResult.evidenceRefs,
+                settleState: closure?.state === 'unknown' ? 'unknown' : closure?.state === 'cancelled' ? 'cancelled' : 'unsettled',
+              });
+              return workResult;
             }
-            if (record.postCommitRecoveryPending) {
-              return {
-                taskId: input.assignment.taskId,
-                pipelineNodeId: input.assignment.pipelineNodeId,
-                agentId: input.agentId,
-                assignmentId: input.assignment.assignmentId,
-                attempt: input.assignment.attempt,
-                executionEpoch: input.assignment.executionEpoch,
-                inputRevision: input.assignment.inputRevision,
-                producedArtifactRefs: [],
-                producedArtifactDigests: [],
-                status: 'blocked',
-                summary: 'provider execution reached post-commit recovery',
-                outputRefs: [],
-                evidenceRefs: [],
-                nextAction: 'attention',
-                conditionRef: `operation://${operation.operationId.value}/recovery`,
-              };
-            }
-            if (runtime!.snapshot().state === 'stopped' || record.stopping) {
-              closure = runtime!.snapshot().closure;
-              return {
-                taskId: input.assignment.taskId,
-                pipelineNodeId: input.assignment.pipelineNodeId,
-                agentId: input.agentId,
-                assignmentId: input.assignment.assignmentId,
-                attempt: input.assignment.attempt,
-                executionEpoch: input.assignment.executionEpoch,
-                inputRevision: input.assignment.inputRevision,
-                producedArtifactRefs: [],
-                producedArtifactDigests: [],
-                status: 'cancelled',
-                summary: 'provider execution was stopped during observation',
-                outputRefs: [],
-                evidenceRefs: closure?.evidenceRefs ?? [],
-                nextAction: 'settle',
-              };
-            }
-            coordinator.pushEvent(record, operation, 'execution.settling', 'settling', 'execution settling', []);
-            record.state = 'settling';
-            record.currentState = '收拢中';
-            record.nextStep = '等待编排审查和 checkpoint';
-            record.allowedActions = [];
-            closure = await composition!.settle();
-            const status: WorkResult['status'] = closure.state === 'succeeded'
-              ? 'succeeded'
-              : closure.state === 'waiting'
-                ? 'incomplete'
-                : closure.state === 'blocked'
-                  ? 'blocked'
-                  : closure.state === 'failed' || closure.state === 'unknown'
-                    ? 'failed'
-                    : 'cancelled';
-            const nextAction: WorkResult['nextAction'] = closure.state === 'succeeded'
-              ? 'review'
-              : closure.state === 'waiting'
-                ? 'wait'
-                : closure.state === 'blocked' || closure.state === 'failed' || closure.state === 'unknown'
-                  ? 'attention'
-                  : 'settle';
-            const workResult: WorkResult & { readonly executorEvidence?: readonly ExecutorReviewEvidence[] } = {
-              taskId: input.assignment.taskId,
-              pipelineNodeId: input.assignment.pipelineNodeId,
-              agentId: input.agentId,
-              assignmentId: input.assignment.assignmentId,
-              attempt: input.assignment.attempt,
-              executionEpoch: input.assignment.executionEpoch,
-              inputRevision: input.assignment.inputRevision,
-              producedArtifactRefs: [outputRef],
-              // The digest of what this attempt produced, not of shared
-              // mutable state that a later attempt may already have reset.
-              producedArtifactDigests: [digestOf(producedOutput)],
-              producedArtifactBodies: [producedOutput],
-              executorEvidence,
-              status,
-              summary: `provider execution ${closure.state}`,
-              outputRefs: [outputRef],
-              evidenceRefs: closure.evidenceRefs,
-              nextAction,
-              ...(nextAction === 'wait'
-                ? { conditionRef: closure.conditionRef ?? `operation://${operation.operationId.value}/waiting` }
-                : {}),
-              ...(status === 'failed'
-                ? { failureRef: closure.failureRef ?? `operation://${operation.operationId.value}/failed` }
-                : {}),
-            };
-            return workResult;
           },
         };
         record.taskAssembly = this.options.createTaskAssembly({
@@ -1595,6 +1799,14 @@ export class RuntimeTaskCoordinator {
           }
         }
       } else {
+        if (this.options.providerRetry) {
+          throw new RuntimeTaskControlError(
+            'execution.retry.wiring.invalid',
+            RUNTIME_OWNER,
+            'provider retry must use the orchestrated provider execution path',
+            'bind a task assembly for retry-10 provider execution',
+          );
+        }
         if (this.options.createTaskAssembly) {
           record.taskAssembly = this.options.createTaskAssembly({
             task: {
@@ -1610,12 +1822,12 @@ export class RuntimeTaskCoordinator {
             checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
           });
         }
-        await composition.start();
-        await composition.submit(prompt);
+        await composition!.start();
+        await composition!.submit(prompt);
         record.resolveExecutionReady?.(true);
         record.resolveExecutionReady = undefined;
         if (record.stopping || record.postCommitRecoveryPending) return;
-        for await (const observation of composition.observe()) {
+        for await (const observation of composition!.observe()) {
           if (record.postCommitRecoveryPending) return;
           if (!observation.accepted) {
             this.pushEvent(record, operation, 'provider.error', 'stale', `late event rejected: ${observation.rejection.reason}`, [], RUNTIME_OWNER, false, 'ignore stale execution event');
@@ -1626,7 +1838,7 @@ export class RuntimeTaskCoordinator {
           this.recordProviderEvent(record, operation, event.providerEvent);
         }
         if (record.postCommitRecoveryPending) return;
-        if (runtime.snapshot().state === 'stopped') {
+        if (runtime!.snapshot().state === 'stopped') {
           this.finalize(record, 'stopped');
           return;
         }
@@ -1637,7 +1849,7 @@ export class RuntimeTaskCoordinator {
         record.currentState = '收拢中';
         record.nextStep = '等待 checkpoint';
         record.allowedActions = [];
-        closure = await composition.settle();
+        closure = await composition!.settle();
       }
       if (record.postCommitRecoveryPending || !closure) return;
       record.running = false;
@@ -1645,7 +1857,16 @@ export class RuntimeTaskCoordinator {
       record.nextStep = '等待 checkpoint';
       record.allowedActions = [];
       await this.commitBusinessCheckpoint(record, scope, closure.state);
-      const close = await this.closeForExecution(operation.operationId, driver, closure.evidenceRefs);
+      const closeDriver = driver ?? record.driver;
+      if (!closeDriver) {
+        throw new RuntimeTaskControlError(
+          'provider.close.driver.missing',
+          RUNTIME_OWNER,
+          'provider execution closed without a driver to release',
+          'inspect the executed provider binding',
+        );
+      }
+      const close = await this.closeForExecution(operation.operationId, closeDriver, closure.evidenceRefs);
       if (close.state !== 'closed') {
         throw new RuntimeTaskControlError('provider.close.failed', close.ownerId ?? RUNTIME_OWNER, `provider close is ${close.state}`, toNextActionText(close.nextAction) ?? 'inspect provider close evidence');
       }

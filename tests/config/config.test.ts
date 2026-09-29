@@ -522,6 +522,54 @@ test('validates a global provider separately from the agent driver and rejects u
   }), /unsupported provider protocol: custom/);
 });
 
+test('validates explicit provider retry candidates under user execution config and rejects them from project override', async () => {
+  const agents = [{
+    agentId: 'interaction-default',
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef: 'fake',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  }];
+  const valid = validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    provider: {
+      provider: 'rcc',
+      binding: 'rcc-entry',
+      protocol: 'responses',
+      model: 'MiniMax-M3',
+      route: 'default',
+      baseUrl: 'http://127.0.0.1:4444',
+    },
+    execution: {
+      providerRetry: {
+        candidates: [
+          { provider: 'rcc', binding: 'provider-a', protocol: 'responses', model: 'model-a', route: 'route-a', baseUrl: 'http://127.0.0.1:4444' },
+          { provider: 'rcc', binding: 'provider-b', protocol: 'responses', model: 'model-b', route: 'route-b', baseUrl: 'http://127.0.0.1:4444' },
+        ],
+      },
+    },
+  });
+  assert.equal(valid.execution?.providerRetry?.candidates.length, 2);
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    execution: { providerRetry: { candidates: [] } },
+  }), /candidates must include at least one provider candidate/);
+
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-config-provider-retry-project-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
+  await ensureControlLayout(paths);
+  await writeFile(join(paths.projectRoot, 'config.toml'), '[execution.providerRetry]\ncandidates = []\n', 'utf8');
+  await assert.rejects(() => loadConfiguration(paths), /project execution config contains unsupported key: providerRetry/);
+});
+
 test('rejects misspelled user and project configuration keys', async () => {
   assert.throws(() => validateUserConfig({
     schemaVersion: 1,

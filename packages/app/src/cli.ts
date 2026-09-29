@@ -33,6 +33,7 @@ import {
 } from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
+import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
   createFakeExecutionPort,
   FakeProviderAgentDriver,
@@ -949,6 +950,12 @@ export async function main(args: readonly string[]): Promise<void> {
             checkpointRoot,
             interactionRoot: paths.mainRoot,
             evidenceRoot,
+            ...(providerRetryConfigFromEffective(configuration) === undefined ? {} : {
+              providerRetryConfig: {
+                config: providerRetryConfigFromEffective(configuration)!,
+                journalRoot: join(paths.journalRoot, 'ui-runtime'),
+              },
+            }),
             uiRoot,
             ...(process.env.HUMANAGENT_TEMPLATE_ROOT === undefined ? {} : {
               explicitBrainTemplateRoot: process.env.HUMANAGENT_TEMPLATE_ROOT,
