@@ -658,7 +658,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
                 {
                   outputRefs: [artifactRef(raw.type, `tool/${callId}`, evidenceRefs[0].digest)],
                   evidenceRefs,
-                  summary: `${name} succeeded`,
+                  summary: `调用工具：${name}`,
                   toolCall: { callId, toolId: name, arguments: args as BusinessPayload, continuationRef },
                 },
               ),

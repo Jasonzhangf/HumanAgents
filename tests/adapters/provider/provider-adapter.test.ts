@@ -440,6 +440,7 @@ test('responses codec maps terminal, tool, and error wire events', async () => {
     item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'file.read', arguments: '{"path":"README.md"}' },
   }, context);
   assert.equal(tool.events[0].kind, 'tool');
+  assert.equal(tool.events[0].summary, '调用工具：file.read');
   assert.deepEqual(tool.events[0].toolCall, {
     callId: 'call-1',
     toolId: 'file.read',
