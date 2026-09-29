@@ -1869,6 +1869,34 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   assert.equal(journal.includes('"source":"humanagent.fake-provider"'), false);
 });
 
+test('provider tool-result output stays out of task output while remaining visible in the event stream', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-tool-result-output-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      { kind: 'tool', state: 'tool', summary: 'file.read', outputRefs: ['fake://tool/1'] },
+      { kind: 'tool', state: 'tool', summary: 'file.read succeeded', outputRefs: ['fake://tool-result/1'] },
+      { kind: 'output', state: 'output', summary: 'REAL_FILE_CONTENT', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  }));
+  const task = service.createTask({ title: 'provider tool result', directive: 'keep tool completions out of task output' });
+  const started = service.startExecution(task.taskId, { prompt: 'read a file and return it' });
+
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  assert.equal(dashboard.output, 'REAL_FILE_CONTENT');
+  assert.equal(dashboard.output.includes('file.read succeeded'), false);
+  assert.deepEqual(dashboard.checkpoint?.outcome, 'succeeded');
+
+  const events = service.eventsSince(started.operationId);
+  assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read'), true);
+  assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read succeeded'), true);
+  assert.equal(events.some((event) => event.kind === 'provider.output' && event.summary === 'REAL_FILE_CONTENT'), true);
+});
+
 test('observation projects all thirteen registry nodes in registry order with agent-frame ownership and real tool steps', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-observation-thirteen-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({

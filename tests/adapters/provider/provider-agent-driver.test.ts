@@ -400,8 +400,8 @@ test('provider agent driver executes a complete Responses tool call once and con
   assert.deepEqual(events.map((event) => [event.kind, event.summary, event.terminalState]), [
     ['provider.tool', 'file.read', undefined],
     ['provider.tool', 'file.read', undefined],
-    ['provider.output', 'file.read succeeded', undefined],
-    ['provider.output', 'file.read succeeded', undefined],
+    ['provider.tool', 'file.read succeeded', undefined],
+    ['provider.tool', 'file.read succeeded', undefined],
     ['provider.output', 'Checklist from REAL_FILE_CONTENT', undefined],
     ['provider.terminal', undefined, 'succeeded'],
   ]);
