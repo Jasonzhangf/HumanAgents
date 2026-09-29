@@ -1010,6 +1010,7 @@ export interface ProviderSubmitResult extends ProviderExecutionIdentityRef {
 export interface ProviderEvent extends ProviderExecutionIdentityRef {
   readonly eventId: string;
   readonly kind: ProviderEventKind;
+  readonly toolPhase?: 'invoke' | 'result';
   readonly terminalState?: ProviderTerminalState;
   readonly outputRefs?: readonly string[];
   readonly summary?: string;
@@ -1338,6 +1339,9 @@ export function validateProviderEvent(input: ProviderEvent): void {
   assertProviderExecutionIdentity(input);
   assertNonEmptyReference(input.eventId, 'provider eventId');
   if (!PROVIDER_EVENT_KINDS.has(input.kind)) throw new ContractError('provider event kind is invalid');
+  if (input.toolPhase !== undefined && input.kind !== 'tool') throw new ContractError('provider tool phase requires tool event kind');
+  if (input.kind === 'tool' && input.toolCall && input.toolPhase === 'result') throw new ContractError('provider tool result cannot carry a tool call');
+  if (input.kind === 'tool' && !input.toolCall && input.toolPhase === undefined) throw new ContractError('provider tool event requires a phase when it is not a tool call');
   if (input.terminalState && !PROVIDER_TERMINAL_STATES.has(input.terminalState)) throw new ContractError('provider terminal state is invalid');
   if (input.terminalState && input.kind !== 'terminal') throw new ContractError('provider terminal state requires terminal event kind');
   if (input.kind === 'terminal' && !input.terminalState) throw new ContractError('provider terminal event requires terminal state');

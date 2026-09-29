@@ -85,6 +85,7 @@ export type RuntimeTaskEventKind =
   | 'provider.model'
   | 'provider.output'
   | 'provider.tool'
+  | 'provider.tool-result'
   | 'provider.error'
   | 'execution.settling'
   | 'checkpoint.committed'
@@ -477,6 +478,10 @@ function providerEventSummary(event: ProviderEvent): string {
   if (event.summary) return event.summary;
   if (event.outputRefs && event.outputRefs.length > 0) return `${event.kind}: ${event.outputRefs.join(', ')}`;
   return event.kind;
+}
+function runtimeProviderEventKind(event: ProviderEvent): RuntimeTaskEventKind {
+  if (event.kind === 'tool' && event.toolPhase === 'result') return 'provider.tool-result';
+  return mapProviderEventKind(event.kind);
 }
 
 function appendOutput(current: string, next: string): string {
@@ -2275,7 +2280,7 @@ export class RuntimeTaskCoordinator {
   }
 
   private recordProviderEvent(record: TaskRecord, operation: OperationRecord, event: ProviderEvent): void {
-    const kind = mapProviderEventKind(event.kind);
+    const kind = runtimeProviderEventKind(event);
     const state = event.terminalState ?? (event.error ? 'failed' : event.kind);
     const summary = providerEventSummary(event);
     const error = event.kind === 'error' && event.error ? providerErrorProjection(event.error) : undefined;

@@ -114,11 +114,11 @@ export interface DecodeContext {
   readonly responsesRequestStartEmitted: Map<string, boolean>;
 }
 
+const REQUEST_START_SUMMARY = 'provider requested model work';
+
 export interface ProviderDecodedEvent {
   readonly events: readonly ProviderEvent[];
 }
-
-const REQUEST_START_SUMMARY = 'provider requested model work';
 
 export interface ProviderCodec<W extends ProviderWireRequest = ProviderWireRequest> {
   readonly protocol: 'responses' | 'anthropic' | 'openai';
@@ -227,14 +227,40 @@ function eventBase(
   };
 }
 
-function modelEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, type: string, eventId: string, evidenceRefs?: readonly EvidenceRef[], forcedSummary?: string): ProviderEvent {
-  const summary: string | undefined = type === 'message_start'
-    ? REQUEST_START_SUMMARY
-    : forcedSummary;
+function semanticModelSummary(type: string): string {
+  switch (type) {
+    case 'response.created':
+    case 'response.in_progress':
+    case 'message_start':
+      return 'provider requested model work';
+    case 'response.output_item.added':
+    case 'response.output_item.done':
+      return 'provider prepared model output';
+    case 'response.reasoning_summary_part.added':
+    case 'response.reasoning_summary_part.delta':
+    case 'response.reasoning_summary_part.done':
+    case 'response.reasoning_summary_text.delta':
+    case 'response.reasoning_summary_text.done':
+    case 'content_block_start':
+      return 'provider provided model reasoning';
+    case 'response.function_call_arguments.delta':
+    case 'response.function_call_arguments.done':
+    case 'content_block_delta':
+      return 'provider completed tool request details';
+    case 'message_delta':
+      return 'provider completed model turn details';
+    case 'ping':
+      return 'provider sent heartbeat';
+    default:
+      return 'provider processed model event';
+  }
+}
+
+function modelEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, type: string, eventId: string, evidenceRefs?: readonly EvidenceRef[], summary?: string): ProviderEvent {
   return {
     ...eventBase(execution, scope, type, eventId, type, evidenceRefs),
     kind: 'model',
-    ...(summary === undefined ? {} : { summary }),
+    summary: summary ?? semanticModelSummary(type),
   };
 }
 
@@ -1100,7 +1126,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const message = requireObject(record, 'message', context.execution, raw.type);
         const messageId = requireString(message, 'id', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `message/${messageId}`)];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs)] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs, 'provider requested model work')] };
       }
       case 'content_block_start': {
         requireNumber(record, 'index', context.execution, raw.type);
@@ -1157,17 +1183,17 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         if (deltaType === 'thinking_delta') {
           const thinking = requireStringValue(deltaRecord, 'thinking', context.execution, raw.type);
           const evidenceRefs = [await captureEvidence(context, raw.type, `thinking/${String(record.index)}`, thinking)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs)] };
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `thinking/${String(record.index)}`), evidenceRefs, 'provider provided model reasoning')] };
         }
         if (deltaType === 'signature_delta') {
           const signature = requireStringValue(deltaRecord, 'signature', context.execution, raw.type);
           const evidenceRefs = [await captureEvidence(context, raw.type, `signature/${String(record.index)}`, signature)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `signature/${String(record.index)}`), evidenceRefs)] };
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `signature/${String(record.index)}`), evidenceRefs, 'provider completed reasoning signature')] };
         }
         if (deltaType === 'input_json_delta') {
           const partialJson = requireStringValue(deltaRecord, 'partial_json', context.execution, raw.type);
           const evidenceRefs = [await captureEvidence(context, raw.type, `input-json/${String(record.index)}`, partialJson)];
-          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `input-json/${String(record.index)}`), evidenceRefs)] };
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `input-json/${String(record.index)}`), evidenceRefs, 'provider completed tool request details')] };
         }
         throw new ProviderAdapterError({
           code: 'unknown.event',
@@ -1185,7 +1211,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const delta = requireObject(record, 'delta', context.execution, raw.type);
         const stopReason = typeof delta.stop_reason === 'string' ? delta.stop_reason : undefined;
         if (stopReason) this.stopReasons.set(this.stopReasonKey(context.execution), stopReason);
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `delta/${stopReason ?? 'none'}`), [await captureEvidence(context, raw.type, `delta/${stopReason ?? 'none'}`)])] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `delta/${stopReason ?? 'none'}`), [await captureEvidence(context, raw.type, `delta/${stopReason ?? 'none'}`)], 'provider completed model turn details')] };
       }
       case 'message_stop': {
         const stopReason = this.stopReasons.get(this.stopReasonKey(context.execution));
@@ -1209,7 +1235,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
       }
       case 'ping': {
         const evidenceRefs = [await captureEvidence(context, raw.type, 'ping')];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, 'ping'), evidenceRefs)] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, 'ping'), evidenceRefs, 'provider sent heartbeat')] };
       }
       case 'error': {
         const errorRecord = requireObject(record, 'error', context.execution, raw.type);

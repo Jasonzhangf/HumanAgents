@@ -335,8 +335,8 @@ test('openai chat codec maps text, tool calls, finish reason, and error events',
       finish_reason: null,
     }],
   }, context);
-  assert.equal(tool.events[0].summary, '调用工具：lookup');
   assert.equal(tool.events[0].kind, 'tool');
+  assert.equal(tool.events[0].summary, '调用工具：lookup');
 
   const terminal = await codec.decodeEvent({
     protocol: 'openai',
@@ -528,7 +528,7 @@ test('responses reasoning output item remains model evidence and does not become
     item: { type: 'reasoning', id: 'reasoning-1', summary: [] },
   } as unknown as ProviderWireEvent, context);
   assert.equal(decoded.events[0].kind, 'model');
-  assert.equal(decoded.events[0].summary, undefined);
+  assert.equal(decoded.events[0].summary, 'provider prepared model output');
 });
 
 test('responses codec maps reasoning summary wire events as model evidence', async () => {
@@ -604,9 +604,45 @@ test('responses codec maps reasoning summary wire events as model evidence', asy
     const decoded = await codec.decodeEvent(event, context);
     assert.equal(decoded.events.length, 1);
     assert.equal(decoded.events[0].kind, 'model');
-    assert.equal(decoded.events[0].summary, undefined);
+    assert.match(decoded.events[0].summary ?? '', /^provider (prepared|provided) model /);
     assert.equal(decoded.events[0].evidenceRefs.length, 1);
   }
+});
+
+test('responses codec gives every visible model event a semantic summary', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+
+  const created = await codec.decodeEvent({ protocol: 'responses', type: 'response.created', response: { id: 'response-semantic-1' } }, context);
+  assert.equal(created.events[0].summary, 'provider requested model work');
+
+  const inProgress = await codec.decodeEvent({ protocol: 'responses', type: 'response.in_progress', response: { id: 'response-semantic-2' } }, context);
+  assert.equal(inProgress.events[0].summary, 'provider requested model work');
+
+  const outputAdded = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'reasoning', id: 'reasoning-semantic' },
+  } as unknown as ProviderWireEvent, context);
+  assert.equal(outputAdded.events[0].summary, 'provider prepared model output');
+
+  const functionArgsDelta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.function_call_arguments.delta',
+    call_id: 'call-semantic',
+    delta: '{"path":',
+  }, context);
+  assert.equal(functionArgsDelta.events[0].summary, 'provider completed tool request details');
+
+  const functionArgsDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.function_call_arguments.done',
+    call_id: 'call-semantic',
+    arguments: '{"path":"README.md"}',
+  }, context);
+  assert.equal(functionArgsDone.events[0].kind, 'output');
+  assert.equal(functionArgsDone.events[0].outputRefs?.length, 1);
 });
 
 test('responses codec accepts RCC transparent-proxy events with empty response and message ids', async () => {
@@ -656,8 +692,7 @@ test('responses codec emits each output item text exactly once across delta and 
   const summaries: string[] = [];
   for (const event of events) {
     const decoded = await codec.decodeEvent(event, context);
-    const summary = decoded.events[0]?.summary;
-    if (summary) summaries.push(summary);
+    if (decoded.events[0]?.kind === 'output' && decoded.events[0].summary) summaries.push(decoded.events[0].summary);
   }
   assert.deepEqual(summaries, ['hello ', 'world']);
   assert.equal(summaries.join(''), 'hello world');
@@ -722,8 +757,31 @@ test('anthropic codec maps terminal, tool, and error wire events', async () => {
     index: 0,
     content_block: { type: 'tool_use', id: 'tool-1', name: 'lookup', input: {} },
   }, context);
-  assert.equal(tool.events[0].summary, '调用工具：lookup');
   assert.equal(tool.events[0].kind, 'tool');
+  assert.equal(tool.events[0].summary, '调用工具：lookup');
+
+  const signature = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_delta',
+    index: 1,
+    delta: { type: 'signature_delta', signature: 'sig' },
+  } as unknown as ProviderWireEvent, context);
+  assert.equal(signature.events[0].summary, 'provider completed reasoning signature');
+
+  const inputJson = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'content_block_delta',
+    index: 2,
+    delta: { type: 'input_json_delta', partial_json: '{"q":' },
+  }, context);
+  assert.equal(inputJson.events[0].summary, 'provider completed tool request details');
+
+  const messageDelta = await codec.decodeEvent({
+    protocol: 'anthropic',
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn' },
+  }, context);
+  assert.equal(messageDelta.events[0].summary, 'provider completed model turn details');
 
   const error = await codec.decodeEvent({ protocol: 'anthropic', type: 'error', error: { type: 'wire_error', message: 'boom' } }, context);
   assert.equal(error.events[0].kind, 'error');
@@ -1101,6 +1159,7 @@ test('codecs consume legal wire events and preserve real error fields', async ()
   const anthropicContext = codecContext();
   const ping = await anthropic.decodeEvent({ protocol: 'anthropic', type: 'ping' }, anthropicContext);
   assert.equal(ping.events[0].kind, 'model');
+  assert.equal(ping.events[0].summary, 'provider sent heartbeat');
 });
 
 test('codec evidence refs remain readable through the injected content sink', async () => {

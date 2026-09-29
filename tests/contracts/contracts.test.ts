@@ -731,7 +731,7 @@ test('tool, error, and terminal events preserve evidence refs and owner', () => 
   assert.throws(() => validateProviderEvent(providerEvent({ kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [] })), ContractError);
   assert.throws(() => validateProviderEvent(providerEvent({ kind: 'tool', ownerId: 'owner', nextAction: { kind: 'continue' }, evidenceRefs: [] })), ContractError);
   assert.throws(() => validateProviderToolResult({ ...toolResult(), status: 'failed', error: undefined, ownerId: 'owner', nextAction: { kind: 'recover', ref: 'provider-adapter' } }), ContractError);
-  assert.doesNotThrow(() => validateProviderEvent(providerEvent({ kind: 'tool', ownerId: 'owner', nextAction: { kind: 'continue' }, evidenceRefs: [providerEvidence('tool-event')] })));
+  assert.doesNotThrow(() => validateProviderEvent(providerEvent({ kind: 'tool', toolPhase: 'result', ownerId: 'owner', nextAction: { kind: 'continue' }, evidenceRefs: [providerEvidence('tool-event')] })));
 });
 
 test('failure and attention results cannot be represented as successful output without required refs', () => {
