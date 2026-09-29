@@ -206,6 +206,7 @@ export type RuntimeSseEventKind =
   | 'provider.model'
   | 'provider.output'
   | 'provider.tool'
+  | 'provider.tool-result'
   | 'provider.error'
   | 'execution.settling'
   | 'checkpoint.committed'

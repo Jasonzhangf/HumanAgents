@@ -28,6 +28,7 @@ interface FakeReplayStep {
   readonly kind: ProviderEvent['kind'];
   readonly state: string;
   readonly summary: string;
+  readonly toolPhase?: ProviderEvent['toolPhase'];
   readonly terminalState?: ProviderEvent['terminalState'];
   readonly outputRefs?: readonly string[];
 }
@@ -243,6 +244,7 @@ export class FakeReplayExecutionRuntimePort implements ExecutionRuntimePort {
       executionEpoch: input.executionEpoch,
       eventId: `fake-${input.operationId.value}-${index}`,
       kind: step.kind,
+      ...(step.toolPhase === undefined ? {} : { toolPhase: step.toolPhase }),
       evidenceRefs,
       ...(summary === undefined ? {} : { summary }),
     } as const;

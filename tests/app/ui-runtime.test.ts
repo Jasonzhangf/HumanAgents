@@ -1876,7 +1876,7 @@ test('provider tool-result output stays out of task output while remaining visib
     stepDelayMs: 1,
     replay: [
       { kind: 'tool', state: 'tool', summary: 'file.read', outputRefs: ['fake://tool/1'] },
-      { kind: 'tool', state: 'tool', summary: 'file.read succeeded', outputRefs: ['fake://tool-result/1'] },
+      { kind: 'tool', state: 'tool', toolPhase: 'result', summary: 'file.read succeeded', outputRefs: ['fake://tool-result/1'] },
       { kind: 'output', state: 'output', summary: 'REAL_FILE_CONTENT', outputRefs: ['fake://output/1'] },
       { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
     ],
@@ -1893,7 +1893,8 @@ test('provider tool-result output stays out of task output while remaining visib
 
   const events = service.eventsSince(started.operationId);
   assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read'), true);
-  assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read succeeded'), true);
+  assert.equal(events.some((event) => event.kind === 'provider.tool-result' && event.summary === 'file.read succeeded'), true);
+  assert.equal(events.some((event) => event.kind === 'provider.tool' && event.summary === 'file.read succeeded'), false);
   assert.equal(events.some((event) => event.kind === 'provider.output' && event.summary === 'REAL_FILE_CONTENT'), true);
 });
 

@@ -233,6 +233,7 @@ export class ProviderAgentDriver implements AgentDriver {
           ...identity(this.options),
           eventId: `event-tool-result-${call.callId}-${rounds}`,
           kind: 'tool',
+          toolPhase: 'result',
           outputRefs: result.outputRefs,
           summary: `${call.toolId} succeeded`,
           evidenceRefs: result.evidenceRefs,
