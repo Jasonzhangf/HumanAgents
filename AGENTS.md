@@ -79,3 +79,4 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 3. Journal、checkpoint、steer、错误升级、恢复和窗口装配必须有 focused tests。
 4. Provider 直连路径必须通过 fake contract、Responses/Anthropic 录制 replay 和真实 RCC 4444 同入口；DSH bridge 在此基础上另行通过真实 DSH 同入口。只有声称 Provider+DSH 组合交付时，四层证据才必须同时齐全；单一 TypeScript 编译不算任一路径接入完成。
 5. review 要检查唯一 owner、控制/业务隔离、Journal/Index 真源关系、失败可见性和删除/压缩的数据完整性。
+6. Dashboard 输入、确认、turn 展示和结果展示的浏览器验收与清理统一按 [`docs/ui/dashboard-e2e-acceptance.md`](docs/ui/dashboard-e2e-acceptance.md) 执行；缺任一真实任务 receipt 或资源清理核对时标记 `INCOMPLETE`。
