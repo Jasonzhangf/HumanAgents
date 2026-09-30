@@ -1,0 +1,27 @@
+{
+  "contract_version": "1",
+  "scope": {
+    "mode": "base",
+    "commit": null,
+    "base": "b097bb2b47fc25c41d459fe81fd8bc32c3b8c152"
+  },
+  "module_boundary_evidence": [
+    {
+      "module": "Shared browser status projection and chip styling",
+      "owner": "HumanAgent UI product shell; docs/ui/runtime-api.js owns state-to-tone mapping, docs/ui/state-colors.css owns chip tone definitions",
+      "paths": "docs/ui/runtime-api.js; docs/ui/state-colors.css; docs/ui/runtime.css; docs/ui/interaction.css; consumers in entry.js, tasks.js, task.js, task-dashboard.js, interaction.js, observation.js and memory.js",
+      "edges": "Reviewed base-to-HEAD scope at clean HEAD 2c0843a6db7f8c4a3a83ef543820a5c0c0a802cd; typed API projections -> existing browser renderers -> stateTone -> state-chip data-tone -> shared CSS -> visible status colors; runtime.css and interaction.css both import state-colors.css, with their duplicated tone rules removed; running/settling map to active green, created/admitted/waiting to blue, blocked to warning yellow, failed to danger red, succeeded/stopped to success green, and cancelled/unknown/stale/unavailable or unrecognized states to gray; this presentation path does not mutate task state, Journal, provider requests or runtime control resources",
+      "resources": "Both stylesheet imports resolve beside their existing UI assets; scripts/copy-ui-assets.mjs recursively copies docs/ui into dist/app/ui, including the new stylesheet; packages/app/src/ui-runtime/server.ts serves CSS within the UI root with text/css and no-store; reviewer verified source/build SHA-256 equality for all four affected browser assets; acceptance consumers are read-only, sample states are explicitly labeled component fixtures, and live task-list evidence uses unchanged canonical GET projections; receipts explicitly retain installation and consumer/process/worktree cleanup as pending delivery stages rather than claiming completion",
+      "gates": "Candidate 854e34d9802d7df366686a108eb0553834363a84 and its browser asset hashes are identified in consumer-repair-receipt.md; those hashes match the current reviewed source and built assets; interaction-green-facts.json and runtime-shared-green-facts.json record computed tone/foreground/background/border values for all 13 sample states; live-shared-green-facts.json records actual blocked/completed task rendering without horizontal overflow; the changed scope concerns status color presentation, so the three full Dashboard execution scenarios do not validate a newly changed input, confirmation, scheduling or tool-execution path here; receipts expressly leave those broader scenarios unverified; canonical installation, installed-page verification, merge/push and final cleanup remain subsequent delivery gates"
+    },
+    {
+      "module": "UI status mapping regression verification and candidate evidence",
+      "owner": "tests/ui/runtime-projection.test.ts for mapping verification; candidate delivery owner for docs/evidence receipts and raw gate logs",
+      "paths": "tests/ui/runtime-projection.test.ts; docs/evidence/runtime-status-colors-delivery-20260930/; docs/evidence/status-color-consumer-repair-20260930/",
+      "edges": "Status-color contract -> direct import of actual docs/ui/runtime-api.js -> assertions for 13 declared states and an unknown state -> existing test:ui build and test entry; tests/ui/tsconfig.json emits into dist/tests, where the new four-level relative module URL resolves to the repository browser module; recorded red Interaction colors -> shared-owner CSS repair -> recorded green Interaction and Runtime consumer colors -> actual task-list rendering evidence",
+      "resources": "Evidence logs, JSON facts and screenshots are committed review inputs; compressed build/typecheck logs preserve the recorded raw output; reviewer performed read-only execution of existing compiled UI tests without rebuilding or altering evidence; repository status remained clean; no review-owned runtime, worktree or generated artifact was created",
+      "gates": "Author receipts record build:contracts and typecheck exit 0, plus test:ui with 37 tests and zero failures/skips; reviewer independently ran node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js: exit 0, 37 passed, zero failed/cancelled/skipped; reviewer verified the mapper and test source hashes against the initial receipt, and repaired stylesheet hashes against the consumer repair receipt; git diff --check against the supplied base reported no whitespace errors; recorded browser evidence distinguishes fixture rendering from business execution and does not claim provider execution, final installation or cleanup completion"
+    }
+  ],
+  "findings": []
+}

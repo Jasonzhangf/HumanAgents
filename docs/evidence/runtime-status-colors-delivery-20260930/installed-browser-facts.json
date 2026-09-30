@@ -1,0 +1,38 @@
+{
+  "tasks": {
+    "overflow": false,
+    "states": [
+      {
+        "background": "rgb(255, 240, 214)",
+        "color": "rgb(138, 75, 0)",
+        "text": "受阻",
+        "tone": "warning"
+      },
+      {
+        "background": "rgb(225, 242, 231)",
+        "color": "rgb(40, 98, 63)",
+        "text": "已完成",
+        "tone": "success"
+      }
+    ],
+    "url": "http://127.0.0.1:10086/tasks.html"
+  },
+  "interaction": {
+    "states": [
+      {
+        "background": "rgb(255, 240, 214)",
+        "color": "rgb(138, 75, 0)",
+        "text": "受阻",
+        "tone": "warning"
+      },
+      {
+        "background": "rgb(225, 242, 231)",
+        "color": "rgb(40, 98, 63)",
+        "text": "已完成",
+        "tone": "success"
+      }
+    ],
+    "url": "http://127.0.0.1:10086/interaction.html"
+  },
+  "mutations": 0
+}

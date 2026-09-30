@@ -1,0 +1,27 @@
+{
+  "time": "2026-09-30T14:32:33.457Z",
+  "facts": [
+    {
+      "file": "runtime-api.js",
+      "main": "c62375057de33429200912fc3aaed5102aaae14da27468615ebaf5bfe7a8c711",
+      "installed": "c62375057de33429200912fc3aaed5102aaae14da27468615ebaf5bfe7a8c711",
+      "http": "c62375057de33429200912fc3aaed5102aaae14da27468615ebaf5bfe7a8c711",
+      "cacheControl": "no-store"
+    },
+    {
+      "file": "runtime.css",
+      "main": "938a6e4057d46c8dbfd748422ecc2394a3a340fe53f7f8cd9ea6480666a18886",
+      "installed": "938a6e4057d46c8dbfd748422ecc2394a3a340fe53f7f8cd9ea6480666a18886",
+      "http": "938a6e4057d46c8dbfd748422ecc2394a3a340fe53f7f8cd9ea6480666a18886",
+      "cacheControl": "no-store"
+    },
+    {
+      "file": "interaction.css",
+      "main": "e5573d54364db605ed12b5687bb91fb004b4fdfba80d19f923bc319583b9f37e",
+      "installed": "e5573d54364db605ed12b5687bb91fb004b4fdfba80d19f923bc319583b9f37e",
+      "http": "e5573d54364db605ed12b5687bb91fb004b4fdfba80d19f923bc319583b9f37e",
+      "cacheControl": "no-store"
+    }
+  ],
+  "unchangedServerDigest": "5f942639a7e6e54c55c1b4a51802238a3373b3f671ed4b4cf9e8ac6497d37b12"
+}

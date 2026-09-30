@@ -1,0 +1,40 @@
+{
+  "candidate": "2c0843a6db7f8c4a3a83ef543820a5c0c0a802cd",
+  "time": "2026-09-30T14:36:50.026Z",
+  "facts": [
+    {
+      "file": "state-colors.css",
+      "sourceDigest": "a43804fd10058efbd833a8fd459728a029bd3c0db329412cdf0381c65f2de2c0",
+      "buildDigest": "a43804fd10058efbd833a8fd459728a029bd3c0db329412cdf0381c65f2de2c0",
+      "installedDigest": "a43804fd10058efbd833a8fd459728a029bd3c0db329412cdf0381c65f2de2c0",
+      "httpDigest": "a43804fd10058efbd833a8fd459728a029bd3c0db329412cdf0381c65f2de2c0",
+      "cacheControl": "no-store"
+    },
+    {
+      "file": "runtime.css",
+      "sourceDigest": "be8868d5a8f099c53286796700cba85937d4927dbf37166eb3c5890de04f9852",
+      "buildDigest": "be8868d5a8f099c53286796700cba85937d4927dbf37166eb3c5890de04f9852",
+      "installedDigest": "be8868d5a8f099c53286796700cba85937d4927dbf37166eb3c5890de04f9852",
+      "httpDigest": "be8868d5a8f099c53286796700cba85937d4927dbf37166eb3c5890de04f9852",
+      "cacheControl": "no-store"
+    },
+    {
+      "file": "interaction.css",
+      "sourceDigest": "da690614832cae9f45b161eca36dd5c597016996b0480a37da95f4ceb4b135b1",
+      "buildDigest": "da690614832cae9f45b161eca36dd5c597016996b0480a37da95f4ceb4b135b1",
+      "installedDigest": "da690614832cae9f45b161eca36dd5c597016996b0480a37da95f4ceb4b135b1",
+      "httpDigest": "da690614832cae9f45b161eca36dd5c597016996b0480a37da95f4ceb4b135b1",
+      "cacheControl": "no-store"
+    },
+    {
+      "file": "runtime-api.js",
+      "sourceDigest": "dc148ea9fb00d9bc75a6aba3a71f254703391208d6b8d4bed2e3adb36b5f4133",
+      "buildDigest": "dc148ea9fb00d9bc75a6aba3a71f254703391208d6b8d4bed2e3adb36b5f4133",
+      "installedDigest": "dc148ea9fb00d9bc75a6aba3a71f254703391208d6b8d4bed2e3adb36b5f4133",
+      "httpDigest": "dc148ea9fb00d9bc75a6aba3a71f254703391208d6b8d4bed2e3adb36b5f4133",
+      "cacheControl": "no-store"
+    }
+  ],
+  "serverDigest": "5f942639a7e6e54c55c1b4a51802238a3373b3f671ed4b4cf9e8ac6497d37b12",
+  "restart": "not applicable: static assets read per request; server unchanged"
+}
