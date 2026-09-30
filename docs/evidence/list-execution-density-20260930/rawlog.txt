@@ -1,22 +1,21 @@
+=== node --check docs/ui/tasks.js ===
+OK exit=0
 
-$ node --check docs/ui/tasks.js
-exit_code=0
-
-$ pnpm build:contracts
+=== pnpm build:contracts ===
 
 > humanagent@0.1.10 build:contracts /Volumes/Intel/playground/humanagent/orch-list-execution-density-20260930
 > tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json
 
-exit_code=0
+build:contracts exit=0
 
-$ pnpm typecheck
+=== pnpm typecheck ===
 
 > humanagent@0.1.10 typecheck /Volumes/Intel/playground/humanagent/orch-list-execution-density-20260930
 > tsc --noEmit
 
-exit_code=0
+typecheck exit=0
 
-$ pnpm test:ui
+=== pnpm test:ui ===
 
 > humanagent@0.1.10 test:ui /Volumes/Intel/playground/humanagent/orch-list-execution-density-20260930
 > pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js
@@ -29,217 +28,217 @@ TAP version 13
 # Subtest: runtime task list classifies every task into a visible projection group
 ok 1 - runtime task list classifies every task into a visible projection group
   ---
-  duration_ms: 1.359833
+  duration_ms: 1.245167
   type: 'test'
   ...
 # Subtest: runtime dashboard only reports hasRunning for execution-active tasks
 ok 2 - runtime dashboard only reports hasRunning for execution-active tasks
   ---
-  duration_ms: 0.113917
+  duration_ms: 0.104708
   type: 'test'
   ...
 # Subtest: observation projection groups nodes into stable agent frames and ordered tool steps
 ok 3 - observation projection groups nodes into stable agent frames and ordered tool steps
   ---
-  duration_ms: 0.551958
+  duration_ms: 0.50975
   type: 'test'
   ...
 # Subtest: observation projection carries the declared agent role and iteration without inventing them
 ok 4 - observation projection carries the declared agent role and iteration without inventing them
   ---
-  duration_ms: 0.145334
+  duration_ms: 0.139666
   type: 'test'
   ...
 # Subtest: observation projection fails explicitly on unknown nodes, undeclared owners, and unknown roles
 ok 5 - observation projection fails explicitly on unknown nodes, undeclared owners, and unknown roles
   ---
-  duration_ms: 0.375459
+  duration_ms: 0.36575
   type: 'test'
   ...
 # Subtest: dashboard projection keeps concise status entry points
 ok 6 - dashboard projection keeps concise status entry points
   ---
-  duration_ms: 1.363459
+  duration_ms: 1.538792
   type: 'test'
   ...
 # Subtest: task list keeps running, decisions, and history separate
 ok 7 - task list keeps running, decisions, and history separate
   ---
-  duration_ms: 0.157584
+  duration_ms: 0.219833
   type: 'test'
   ...
 # Subtest: task detail projection exposes only required user decisions
 ok 8 - task detail projection exposes only required user decisions
   ---
-  duration_ms: 0.104709
+  duration_ms: 0.121333
   type: 'test'
   ...
 # Subtest: task dashboard maps agent roles without organ presentation language
 ok 9 - task dashboard maps agent roles without organ presentation language
   ---
-  duration_ms: 0.203125
+  duration_ms: 0.224625
   type: 'test'
   ...
 # Subtest: task dashboard projects execution steps, checkpoint, and stop/recovery evidence
 ok 10 - task dashboard projects execution steps, checkpoint, and stop/recovery evidence
   ---
-  duration_ms: 0.276875
+  duration_ms: 0.235208
   type: 'test'
   ...
 # Subtest: task dashboard projects runtime pool, assignment graph, agent previews, and feedback
 ok 11 - task dashboard projects runtime pool, assignment graph, agent previews, and feedback
   ---
-  duration_ms: 0.4405
+  duration_ms: 0.293583
   type: 'test'
   ...
 # Subtest: task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage
 ok 12 - task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage
   ---
-  duration_ms: 0.183542
+  duration_ms: 0.14375
   type: 'test'
   ...
 # Subtest: UI projection code does not read Journal or DSH session logs
 ok 13 - UI projection code does not read Journal or DSH session logs
   ---
-  duration_ms: 4.537625
+  duration_ms: 4.326541
   type: 'test'
   ...
 # Subtest: UI projection stays a typed read-only adapter and hides internal presentation language
 ok 14 - UI projection stays a typed read-only adapter and hides internal presentation language
   ---
-  duration_ms: 0.767875
+  duration_ms: 0.851959
   type: 'test'
   ...
 # Subtest: observation projection supports recursion, drawer details, return, and read-only rules
 ok 15 - observation projection supports recursion, drawer details, return, and read-only rules
   ---
-  duration_ms: 1.125958
+  duration_ms: 1.04825
   type: 'test'
   ...
 # Subtest: observation drawer maps assignment, feedback, and reconcile while staying read-only
 ok 16 - observation drawer maps assignment, feedback, and reconcile while staying read-only
   ---
-  duration_ms: 0.236375
+  duration_ms: 0.229167
   type: 'test'
   ...
 # Subtest: observation node detail carries the typed tool steps and owner role the drawer panes read
 ok 17 - observation node detail carries the typed tool steps and owner role the drawer panes read
   ---
-  duration_ms: 0.261375
+  duration_ms: 0.251958
   type: 'test'
   ...
 # Subtest: memory interaction surface keeps candidates behind explicit review
 ok 18 - memory interaction surface keeps candidates behind explicit review
   ---
-  duration_ms: 0.128417
+  duration_ms: 0.10875
   type: 'test'
   ...
 # Subtest: command validation keeps observation read-only and decisions on explicit interaction surfaces
 ok 19 - command validation keeps observation read-only and decisions on explicit interaction surfaces
   ---
-  duration_ms: 0.217542
+  duration_ms: 0.208416
   type: 'test'
   ...
 # Subtest: runtime UI consumes typed API without hardcoded success or direct source access
 ok 20 - runtime UI consumes typed API without hardcoded success or direct source access
   ---
-  duration_ms: 1.9095
+  duration_ms: 1.890167
   type: 'test'
   ...
 # Subtest: dashboard progress copy does not expose internal identifiers or protocol names
 ok 21 - dashboard progress copy does not expose internal identifiers or protocol names
   ---
-  duration_ms: 0.480875
+  duration_ms: 0.381125
   type: 'test'
   ...
 # Subtest: explicit requirement checkbox stays compact under the shared input style
 ok 22 - explicit requirement checkbox stays compact under the shared input style
   ---
-  duration_ms: 0.982209
+  duration_ms: 0.907
   type: 'test'
   ...
 # Subtest: task dashboard event rows do not render internal owner or next action details
 ok 23 - task dashboard event rows do not render internal owner or next action details
   ---
-  duration_ms: 0.333959
+  duration_ms: 0.318417
   type: 'test'
   ...
 # Subtest: dashboard confirmation waits on user without continuing a provider timer
 ok 24 - dashboard confirmation waits on user without continuing a provider timer
   ---
-  duration_ms: 0.353042
+  duration_ms: 0.252583
   type: 'test'
   ...
 # Subtest: memory review button exposes typed API failure and becomes usable again
 ok 25 - memory review button exposes typed API failure and becomes usable again
   ---
-  duration_ms: 0.584875
+  duration_ms: 0.56125
   type: 'test'
   ...
 # Subtest: observation page reads only typed pipeline fields and owns no node-order table
 ok 26 - observation page reads only typed pipeline fields and owns no node-order table
   ---
-  duration_ms: 0.544583
+  duration_ms: 0.493834
   type: 'test'
   ...
 # Subtest: UI index is the task input entry with explicit draft, confirmation gate, and runtime status
 ok 27 - UI index is the task input entry with explicit draft, confirmation gate, and runtime status
   ---
-  duration_ms: 0.625708
+  duration_ms: 0.604667
   type: 'test'
   ...
 # Subtest: explicit interaction UI uses typed brain routes and keeps control separate
 ok 28 - explicit interaction UI uses typed brain routes and keeps control separate
   ---
-  duration_ms: 0.625375
+  duration_ms: 0.64375
   type: 'test'
   ...
 # Subtest: explicit interaction UI executes route order and confirmation gate
 ok 29 - explicit interaction UI executes route order and confirmation gate
   ---
-  duration_ms: 88.74375
+  duration_ms: 79.694417
   type: 'test'
   ...
 # Subtest: task detail UI consumes typed task-detail projection fields
 ok 30 - task detail UI consumes typed task-detail projection fields
   ---
-  duration_ms: 0.49075
+  duration_ms: 0.464458
   type: 'test'
   ...
 # Subtest: task clarification handler retries interpretation by typed state without resubmitting the answer
 ok 31 - task clarification handler retries interpretation by typed state without resubmitting the answer
   ---
-  duration_ms: 0.497083
+  duration_ms: 0.446416
   type: 'test'
   ...
 # Subtest: new task form blocks duplicate submissions and retries retained input after failure
 ok 32 - new task form blocks duplicate submissions and retries retained input after failure
   ---
-  duration_ms: 0.867125
+  duration_ms: 0.860333
   type: 'test'
   ...
 # Subtest: new task form blocks duplicate submissions and retries retained clarification after failure
 ok 33 - new task form blocks duplicate submissions and retries retained clarification after failure
   ---
-  duration_ms: 0.600167
+  duration_ms: 0.579792
   type: 'test'
   ...
 # Subtest: new task UI sends one natural-language input to the explicit brain
 ok 34 - new task UI sends one natural-language input to the explicit brain
   ---
-  duration_ms: 0.555667
+  duration_ms: 0.493834
   type: 'test'
   ...
 # Subtest: explicit confirmation stays on the interaction page and exposes the FIFO receipt
 ok 35 - explicit confirmation stays on the interaction page and exposes the FIFO receipt
   ---
-  duration_ms: 0.615583
+  duration_ms: 0.597875
   type: 'test'
   ...
 # Subtest: runtime task dashboard is observational and has no second execution-input form
 ok 36 - runtime task dashboard is observational and has no second execution-input form
   ---
-  duration_ms: 0.379125
+  duration_ms: 0.358833
   type: 'test'
   ...
 1..36
@@ -250,8 +249,5 @@ ok 36 - runtime task dashboard is observational and has no second execution-inpu
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 194.599709
-exit_code=0
-
---- git diff --check ---
-exit_code=0
+# duration_ms 184.250833
+test:ui exit=0

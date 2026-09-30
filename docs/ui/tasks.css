@@ -5,7 +5,7 @@
     minmax(0, 1fr)
     84px
     108px
-    auto;
+    116px;
   --task-gap: 8px 12px;
   width: min(1160px, calc(100% - 32px));
   padding-top: 28px;
@@ -157,20 +157,24 @@
   display: block;
 }
 
+.task-row--head:first-child .task-cell-label:first-child {
+  grid-column: 2;
+}
+
 .task-row-link {
   display: grid;
   grid-column: 2 / 5;
-  display: subgrid;
   grid-auto-flow: column;
+  grid-template-columns: subgrid;
   align-items: center;
 }
 
 .task-row-link .task-cell--status {
-  grid-column: 3;
+  grid-column: 2;
 }
 
 .task-row-link .task-cell--time {
-  grid-column: 4;
+  grid-column: 3;
 }
 
 .task-cell--time {
