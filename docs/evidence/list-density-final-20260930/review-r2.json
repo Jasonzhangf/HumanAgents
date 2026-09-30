@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "scope": {
+    "mode": "base",
+    "commit": null,
+    "base": "b7dd425c3b3c9df64128e4b757cb8c995a742d97"
+  },
+  "module_boundary_evidence": [
+    {
+      "module": "Task List rendering and responsive layout",
+      "owner": "UI 产品壳拥有列表展示；Runtime task projection 继续拥有任务数据和状态，本次未改变控制真源",
+      "paths": "docs/ui/tasks.js; docs/ui/tasks.css; 相关只读调用链：docs/ui/tasks.html、docs/ui/runtime-shell.js、docs/ui/runtime.css、packages/app/src/ui-runtime/server.ts、scripts/copy-ui-assets.mjs",
+      "edges": "tasks.html 按 runtime.css → tasks.css 顺序加载样式，并加载任务列表 renderer；load() → typed API listTasks/runtimeStatus → 六类任务分组 → renderRuntimeRow → 标题、状态、更新时间、操作；waiting/blocked 链接到 Task Detail，其他状态链接到 Task Dashboard；列表布局使用统一五轨定义，链接通过 subgrid 对齐标题/状态/更新时间，560px 以下转为单列内容和独立操作行；未新增跨组件生命周期副作用、状态回边或业务 payload 控制字段",
+      "resources": "渲染节点、事件监听器和选择集合仅属于页面内存；本次未增加持久化状态、后台进程或订阅；编辑、删除、批量停止的 API 调用和错误反馈未改变；浏览器收据记录本轮五个页面已关闭、两个精确 PID 已退出、对应端口连接拒绝；候选 worktree 保留至集成，收据明确未声称交付资源清理完成",
+      "gates": "审查锚点 HEAD=2fdaac03e4c5bc85b1420d9b14f002f93b759b92，工作树 clean；产品文件相对已验 104b04ea1a25636c16ca24923438a4fd7fdf624c 无变化；本次只读执行 node --check docs/ui/tasks.js 和 base diff --check 均退出 0；作者日志记录 build:contracts/typecheck/test:ui 成功，最终 test:ui 37/37；候选浏览器截图覆盖 1280/768/390 布局，收据覆盖长标题、路由、全选及清除；Dashboard 输入、工具执行和结果链未改变，三类执行 E2E 不适用于本次布局审查；安装、merge、push 及最终 worktree 回收属于后续交付，当前证据未将其计为完成"
+    },
+    {
+      "module": "Candidate browser acceptance evidence",
+      "owner": "作者负责开发 gate；delivery/root 负责候选组合、真实浏览器检查和验收收据",
+      "paths": "docs/evidence/list-density-final-20260930/; docs/evidence/list-execution-density-20260930/; docs/evidence/list-mobile-close-20260930/gate-raw.log",
+      "edges": "指定 base → 候选 UI 改动 → 作者开发 gate → 静态候选 consumer 读取 canonical GET API → 浏览器 DOM/交互检查 → 截图和 final-browser-receipt.md；收据绑定 product candidate 104b04ea1a25636c16ca24923438a4fd7fdf624c，并明确区分旧候选、响应式 iframe 和实际移动设备证据；HEAD 仅追加验收证据，产品源文件保持等价",
+      "resources": "截图与原始 gate 日志作为审查证据保留；consumer 服务与页面释放情况由收据记录；本次审查未创建服务、浏览器上下文、构建产物或临时文件",
+      "gates": "实读三张最终截图，桌面/中间宽度表头与数据列对齐，390px 隐藏桌面表头并保持任务内容和操作可见；实测源码 SHA-256 与收据一致：tasks.js=211ea53b6069f0e30aa2365adcfbf3b131385b864973b27f2505c43749e67140，tasks.css=eee1e2b6a425d28bf66075dfb10934312ad103f1a0f8eb27781e54c81ea9ed13；浏览器交互及 consumer 关闭结果采用作者收据，审查未重新启动浏览器或服务；收据明确不证明独立编排、停止语义或正式安装交付"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P2",
+      "file": "docs/ui/tasks.js",
+      "line": 235,
+      "rule": "当前 UI 契约文档与实现保持一致",
+      "evidence": "本次 renderer 删除负责 agent、当前节点、正在处理、第几轮、进度及“尚未投影”占位，状态单元格之后直接渲染更新时间；docs/ui/README.md:34、38、40、120 和 task-flow-transparency-implementation.md 仍把这些字段描述为当前列表展示或已实现能力。新布局已有候选浏览器证据，此处属于文档同步建议，但现有说明会误导后续维护和验收。",
+      "remediation": "按本次列表密度目标同步相关 UI 文档，说明首页保留的字段，以及 agent/node/round/progress 信息实际应在哪个详情或观测入口查看；无需为文档一致性恢复已删除列。"
+    }
+  ]
+}
