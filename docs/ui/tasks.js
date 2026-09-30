@@ -242,7 +242,6 @@ function renderRuntimeRow(row) {
   link.append(stateCell)
 
   link.append(cell('负责 agent', 'task-cell--owner', row.agent ?? row.owner ?? row.agentId))
-  link.append(cell('需求准入', 'task-cell--admission', row.requirementAdmissionLabel))
   link.append(cell('当前节点', 'task-cell--node', row.currentNode ?? row.currentNodeId ?? row.nodeId))
   link.append(cell('正在处理', 'task-cell--work', row.currentWork ?? row.currentState))
   const round = row.round ?? row.executionEpoch
@@ -281,7 +280,7 @@ function renderTasks() {
       const header = element('div', undefined, 'task-row task-row--head')
       header.setAttribute('role', 'row')
       header.setAttribute('aria-hidden', 'true')
-      for (const label of ['任务', '状态', '负责 agent', '需求准入', '当前节点', '正在处理', '第几轮', '进度', '最近更新', '操作']) {
+      for (const label of ['任务', '状态', '负责 agent', '当前节点', '正在处理', '第几轮', '进度', '最近更新', '操作']) {
         header.append(element('span', label, 'task-cell-label'))
       }
       panel.append(header)

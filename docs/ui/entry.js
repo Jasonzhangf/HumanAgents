@@ -153,7 +153,7 @@ function renderStatus(summary, rows) {
     const stateChip = element('span', row.stateLabel, 'state-chip')
     stateChip.dataset.tone = stateTone(row.state)
     const meta = element('div', undefined, 'item-meta')
-    meta.append(element('span', row.requirementAdmissionLabel || row.stateLabel), element('time', formatTime(row.updatedAt)))
+    meta.append(element('time', formatTime(row.updatedAt)))
     link.append(copy, stateChip, meta)
     link.style.textDecoration = 'none'
     list.append(link)
