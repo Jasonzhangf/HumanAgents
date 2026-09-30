@@ -126,10 +126,9 @@
   border-radius: 9px;
 }
 
-/* Dense desktop runtime table: checkbox, task, state, agent, node, work, round, progress, update. */
 .task-row {
   display: grid;
-  grid-template-columns: var(--task-columns);
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: var(--task-gap);
   align-items: center;
   padding: 11px 0;
@@ -141,17 +140,7 @@
 }
 
 .task-row--head {
-  grid-template-columns:
-    44px
-    minmax(140px, 1.5fr)
-    minmax(74px, 0.5fr)
-    minmax(92px, 0.85fr)
-    minmax(104px, 1fr)
-    minmax(132px, 1.25fr)
-    minmax(58px, 0.4fr)
-    minmax(104px, 0.8fr)
-    minmax(96px, 0.7fr)
-    auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto auto;
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
@@ -159,7 +148,7 @@
   font-weight: 700;
 }
 
-.task-row--head .task-cell-label:nth-last-child(2) {
+.task-row--head .task-cell-label:last-child {
   justify-self: end;
 }
 
@@ -167,24 +156,26 @@
   display: block;
 }
 
-.task-row--head .task-cell-label:first-child {
-  grid-column: 2;
-}
-
 .task-row-link {
   display: grid;
   grid-column: 2;
-  grid-template-columns:
-    minmax(140px, 1.5fr)
-    minmax(74px, 0.5fr)
-    minmax(92px, 0.85fr)
-    minmax(104px, 1fr)
-    minmax(132px, 1.25fr)
-    minmax(58px, 0.4fr)
-    minmax(104px, 0.8fr)
-    minmax(96px, 0.7fr);
-  column-gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  column-gap: 20px;
   align-items: center;
+}
+
+.task-row-link .task-cell--status {
+  grid-column: 2;
+}
+
+.task-row-link .task-cell--time {
+  grid-column: 3;
+}
+
+.task-cell--time {
+  justify-self: start;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .task-cell {
@@ -216,35 +207,11 @@
   overflow-wrap: anywhere;
 }
 
-.task-cell--title small,
-.task-cell--work .task-cell-value {
+.task-status {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
-}
-
-.task-cell--owner .task-cell-value,
-.task-cell--node .task-cell-value {
-  font-weight: 650;
-}
-
-.task-cell--round .task-cell-value {
-  font-variant-numeric: tabular-nums;
-}
-
-.task-cell--time {
-  justify-self: end;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.task-cell--status .state-chip {
-  justify-self: start;
-}
-
-.row-unknown {
-  color: var(--muted);
-  font-style: italic;
+  overflow-wrap: anywhere;
 }
 
 .task-row-actions {
@@ -294,35 +261,7 @@
   font-size: 13px;
 }
 
-/* Dense table needs 44 + (8 minima + 7 gaps) + 116 actions + 24 row gaps + 28
-   panel padding + 32 page margin = 1128px, so wrap below 1130px. */
-@media (max-width: 1129px) {
-  .task-row:not(.task-row--head) {
-    align-items: start;
-  }
-
-  /* Below the dense desktop table the link wraps to four equal tracks and the
-     title takes the full width, so long titles stay readable without overflow. */
-  .task-row-link {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .task-cell--title {
-    grid-column: 1 / -1;
-  }
-
-  .task-row--head {
-    display: none;
-  }
-}
-
-@media (min-width: 1130px) {
-  .task-cell--time {
-    grid-column: 8;
-  }
-}
-
-@media (max-width: 800px) {
+@media (max-width: 560px) {
   .page-heading {
     display: block;
   }
@@ -363,21 +302,24 @@
     padding: 0;
   }
 
-  /* Mobile: single column per task, with field labels restored above each value. */
   .task-row {
-    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-columns: 44px minmax(0, 1fr) auto;
     align-items: start;
     gap: 10px;
     padding-block: 15px;
   }
 
   .task-row-link {
-    display: grid;
     grid-column: 2;
     grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
+    column-gap: 10px;
     color: inherit;
     text-decoration: none;
+  }
+
+  .task-row-link .task-cell--title,
+  .task-row-link .task-cell--status {
+    grid-column: 1;
   }
 
   .task-cell {
@@ -400,9 +342,13 @@
     margin-bottom: 4px;
   }
 
-  .task-cell--time {
-    grid-column: auto;
-    justify-self: start;
+  .task-cell--title .task-cell-value {
+    display: grid;
+    gap: 2px;
+  }
+
+  .task-status {
+    display: block;
   }
 
   .task-row-actions {

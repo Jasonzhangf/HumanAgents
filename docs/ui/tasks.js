@@ -195,19 +195,6 @@ function renderRequirementDispatch(runtimeStatus) {
   else main.append(panel)
 }
 
-function unknown(text) {
-  const node = element('span', text, 'row-unknown')
-  node.dataset.empty = 'true'
-  return node
-}
-
-function cell(label, className, value) {
-  const wrapper = element('div', undefined, `task-cell ${className}`)
-  wrapper.append(element('span', label, 'task-cell-label'))
-  wrapper.append(value === undefined || value === null || value === '' ? unknown('尚未投影') : element('span', value, 'task-cell-value'))
-  return wrapper
-}
-
 function renderRuntimeRow(row) {
   const item = element('article', undefined, 'task-row')
   item.setAttribute('role', 'row')
@@ -231,8 +218,12 @@ function renderRuntimeRow(row) {
   const title = element('div', undefined, 'task-cell task-cell--title')
   title.append(element('span', '任务', 'task-cell-label'))
   const titleValue = element('span', undefined, 'task-cell-value')
-  titleValue.append(element('strong', row.title), element('small', row.currentState || '状态未投影'))
+  titleValue.append(element('strong', row.title))
+  if (row.currentState && row.currentState !== row.stateLabel) {
+    titleValue.append(element('span', row.currentState, 'task-status'))
+  }
   title.append(titleValue)
+  title.setAttribute('title', row.title)
   link.append(title)
 
   const chip = element('span', row.stateLabel, 'state-chip')
@@ -240,13 +231,6 @@ function renderRuntimeRow(row) {
   const stateCell = element('div', undefined, 'task-cell task-cell--status')
   stateCell.append(element('span', '状态', 'task-cell-label'), chip)
   link.append(stateCell)
-
-  link.append(cell('负责 agent', 'task-cell--owner', row.agent ?? row.owner ?? row.agentId))
-  link.append(cell('当前节点', 'task-cell--node', row.currentNode ?? row.currentNodeId ?? row.nodeId))
-  link.append(cell('正在处理', 'task-cell--work', row.currentWork ?? row.currentState))
-  const round = row.round ?? row.executionEpoch
-  link.append(cell('第几轮', 'task-cell--round', round === undefined || round === null ? undefined : `第 ${round} 轮`))
-  link.append(cell('进度', 'task-cell--progress', row.progress ?? row.nextStep))
 
   const timeCell = element('div', undefined, 'task-cell task-cell--time')
   timeCell.append(element('span', '最近更新', 'task-cell-label'), element('time', formatTime(row.updatedAt)))
@@ -280,7 +264,7 @@ function renderTasks() {
       const header = element('div', undefined, 'task-row task-row--head')
       header.setAttribute('role', 'row')
       header.setAttribute('aria-hidden', 'true')
-      for (const label of ['任务', '状态', '负责 agent', '当前节点', '正在处理', '第几轮', '进度', '最近更新', '操作']) {
+      for (const label of ['任务', '状态', '最近更新', '操作']) {
         header.append(element('span', label, 'task-cell-label'))
       }
       panel.append(header)
