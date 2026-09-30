@@ -33,14 +33,18 @@ updated, and action cells keep matching parent track sizes.
 
 ## Result
 
-- Raw command log: docs/evidence/list-execution-density-20260930/rawlog.txt
+- Raw command log: docs/evidence/list-execution-density-20260930/rawlog.txt,
+  this round only; earlier rounds keep their results in rawgate.md and
+  header-alignment-rawgate.md
 - node --check docs/ui/tasks.js: exit 0
 - pnpm build:contracts: exit 0
 - pnpm typecheck: exit 0
 - pnpm test:ui: exit 0
 - git diff --check: exit 0, no trailing whitespace findings
 - node:test summary: tests 36, pass 36, fail 0, cancelled 0, skipped 0, todo 0
-- Raw log retained byte-exact from the tracked output; no raw output semantics removed
+- Raw log retained uncompressed and byte-exact from the tracked output; no raw
+  output semantics removed. gzip fallback was not needed because git diff --check
+  reported no trailing whitespace
 
 ## Boundary
 
