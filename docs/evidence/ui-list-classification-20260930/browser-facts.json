@@ -1,0 +1,38 @@
+{
+  "sourceCandidate": "846ec4af5c0d71e50f5bb21bf57d7add4eadf123",
+  "listScope": "candidate renderer with unmodified live runtime GET data; no mutation",
+  "entryScope": "real public UiRuntimeService component in declared fake mode; deterministic status-query interpreter; no task execution or Provider acceptance",
+  "listFacts": {
+    "admissionColumnVisible": false,
+    "legacyClassificationVisible": false,
+    "rows": [
+      {
+        "cells": 8,
+        "hasTime": true,
+        "overflow": false,
+        "state": "受阻",
+        "title": "列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。"
+      },
+      {
+        "cells": 8,
+        "hasTime": true,
+        "overflow": false,
+        "state": "已完成",
+        "title": "列出当前工作区根目录中的 Markdown 文件，不做修改。"
+      }
+    ]
+  },
+  "entryFacts": {
+    "legacyClassificationVisible": false,
+    "rowCount": 1,
+    "rows": [
+      {
+        "hasTime": true,
+        "metaSpans": 0,
+        "nextStep": "已创建 · 下一步：选择模式并发起执行",
+        "state": "已创建",
+        "title": "UI 列表展示验收；不执行任务"
+      }
+    ]
+  }
+}

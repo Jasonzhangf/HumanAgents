@@ -1,0 +1,18 @@
+{
+  "sourceCandidate": "846ec4af5c0d71e50f5bb21bf57d7add4eadf123",
+  "scope": "renderer component, fake mode, no task execution",
+  "pid": 9033,
+  "port": 56074,
+  "entryRetryFacts": {
+    "legacy": false,
+    "rows": [
+      {
+        "hasTime": true,
+        "metaSpans": 0,
+        "nextStep": "已创建 · 下一步：选择模式并发起执行",
+        "state": "已创建",
+        "title": "UI 列表展示验收；不执行任务"
+      }
+    ]
+  }
+}

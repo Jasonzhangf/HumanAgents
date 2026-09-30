@@ -1,0 +1,234 @@
+
+> humanagent@0.1.10 test:ui /Volumes/Intel/playground/humanagent/orch-list-delivery-20260930
+> pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js
+
+
+> humanagent@0.1.10 build:app /Volumes/Intel/playground/humanagent/orch-list-delivery-20260930
+> tsc -p packages/app/tsconfig.json && node scripts/copy-template-assets.mjs && node scripts/copy-ui-assets.mjs
+
+TAP version 13
+# Subtest: runtime task list classifies every task into a visible projection group
+ok 1 - runtime task list classifies every task into a visible projection group
+  ---
+  duration_ms: 1.360917
+  type: 'test'
+  ...
+# Subtest: runtime dashboard only reports hasRunning for execution-active tasks
+ok 2 - runtime dashboard only reports hasRunning for execution-active tasks
+  ---
+  duration_ms: 0.115334
+  type: 'test'
+  ...
+# Subtest: observation projection groups nodes into stable agent frames and ordered tool steps
+ok 3 - observation projection groups nodes into stable agent frames and ordered tool steps
+  ---
+  duration_ms: 0.562584
+  type: 'test'
+  ...
+# Subtest: observation projection carries the declared agent role and iteration without inventing them
+ok 4 - observation projection carries the declared agent role and iteration without inventing them
+  ---
+  duration_ms: 0.147458
+  type: 'test'
+  ...
+# Subtest: observation projection fails explicitly on unknown nodes, undeclared owners, and unknown roles
+ok 5 - observation projection fails explicitly on unknown nodes, undeclared owners, and unknown roles
+  ---
+  duration_ms: 0.382208
+  type: 'test'
+  ...
+# Subtest: dashboard projection keeps concise status entry points
+ok 6 - dashboard projection keeps concise status entry points
+  ---
+  duration_ms: 1.446125
+  type: 'test'
+  ...
+# Subtest: task list keeps running, decisions, and history separate
+ok 7 - task list keeps running, decisions, and history separate
+  ---
+  duration_ms: 0.173542
+  type: 'test'
+  ...
+# Subtest: task detail projection exposes only required user decisions
+ok 8 - task detail projection exposes only required user decisions
+  ---
+  duration_ms: 0.110833
+  type: 'test'
+  ...
+# Subtest: task dashboard maps agent roles without organ presentation language
+ok 9 - task dashboard maps agent roles without organ presentation language
+  ---
+  duration_ms: 0.217458
+  type: 'test'
+  ...
+# Subtest: task dashboard projects execution steps, checkpoint, and stop/recovery evidence
+ok 10 - task dashboard projects execution steps, checkpoint, and stop/recovery evidence
+  ---
+  duration_ms: 0.702625
+  type: 'test'
+  ...
+# Subtest: task dashboard projects runtime pool, assignment graph, agent previews, and feedback
+ok 11 - task dashboard projects runtime pool, assignment graph, agent previews, and feedback
+  ---
+  duration_ms: 0.337875
+  type: 'test'
+  ...
+# Subtest: task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage
+ok 12 - task dashboard keeps stale, blocked, and reconcile states visible without raw control leakage
+  ---
+  duration_ms: 0.162208
+  type: 'test'
+  ...
+# Subtest: UI projection code does not read Journal or DSH session logs
+ok 13 - UI projection code does not read Journal or DSH session logs
+  ---
+  duration_ms: 4.42175
+  type: 'test'
+  ...
+# Subtest: UI projection stays a typed read-only adapter and hides internal presentation language
+ok 14 - UI projection stays a typed read-only adapter and hides internal presentation language
+  ---
+  duration_ms: 0.767083
+  type: 'test'
+  ...
+# Subtest: observation projection supports recursion, drawer details, return, and read-only rules
+ok 15 - observation projection supports recursion, drawer details, return, and read-only rules
+  ---
+  duration_ms: 1.0065
+  type: 'test'
+  ...
+# Subtest: observation drawer maps assignment, feedback, and reconcile while staying read-only
+ok 16 - observation drawer maps assignment, feedback, and reconcile while staying read-only
+  ---
+  duration_ms: 0.218167
+  type: 'test'
+  ...
+# Subtest: observation node detail carries the typed tool steps and owner role the drawer panes read
+ok 17 - observation node detail carries the typed tool steps and owner role the drawer panes read
+  ---
+  duration_ms: 0.241334
+  type: 'test'
+  ...
+# Subtest: memory interaction surface keeps candidates behind explicit review
+ok 18 - memory interaction surface keeps candidates behind explicit review
+  ---
+  duration_ms: 0.113625
+  type: 'test'
+  ...
+# Subtest: command validation keeps observation read-only and decisions on explicit interaction surfaces
+ok 19 - command validation keeps observation read-only and decisions on explicit interaction surfaces
+  ---
+  duration_ms: 0.205708
+  type: 'test'
+  ...
+# Subtest: runtime UI consumes typed API without hardcoded success or direct source access
+ok 20 - runtime UI consumes typed API without hardcoded success or direct source access
+  ---
+  duration_ms: 1.913
+  type: 'test'
+  ...
+# Subtest: dashboard progress copy does not expose internal identifiers or protocol names
+ok 21 - dashboard progress copy does not expose internal identifiers or protocol names
+  ---
+  duration_ms: 0.38875
+  type: 'test'
+  ...
+# Subtest: explicit requirement checkbox stays compact under the shared input style
+ok 22 - explicit requirement checkbox stays compact under the shared input style
+  ---
+  duration_ms: 0.997667
+  type: 'test'
+  ...
+# Subtest: task dashboard event rows do not render internal owner or next action details
+ok 23 - task dashboard event rows do not render internal owner or next action details
+  ---
+  duration_ms: 0.286
+  type: 'test'
+  ...
+# Subtest: dashboard confirmation waits on user without continuing a provider timer
+ok 24 - dashboard confirmation waits on user without continuing a provider timer
+  ---
+  duration_ms: 0.399292
+  type: 'test'
+  ...
+# Subtest: memory review button exposes typed API failure and becomes usable again
+ok 25 - memory review button exposes typed API failure and becomes usable again
+  ---
+  duration_ms: 0.9405
+  type: 'test'
+  ...
+# Subtest: observation page reads only typed pipeline fields and owns no node-order table
+ok 26 - observation page reads only typed pipeline fields and owns no node-order table
+  ---
+  duration_ms: 0.738166
+  type: 'test'
+  ...
+# Subtest: UI index is the task input entry with explicit draft, confirmation gate, and runtime status
+ok 27 - UI index is the task input entry with explicit draft, confirmation gate, and runtime status
+  ---
+  duration_ms: 0.678917
+  type: 'test'
+  ...
+# Subtest: explicit interaction UI uses typed brain routes and keeps control separate
+ok 28 - explicit interaction UI uses typed brain routes and keeps control separate
+  ---
+  duration_ms: 0.70275
+  type: 'test'
+  ...
+# Subtest: explicit interaction UI executes route order and confirmation gate
+ok 29 - explicit interaction UI executes route order and confirmation gate
+  ---
+  duration_ms: 80.495416
+  type: 'test'
+  ...
+# Subtest: task detail UI consumes typed task-detail projection fields
+ok 30 - task detail UI consumes typed task-detail projection fields
+  ---
+  duration_ms: 1.048625
+  type: 'test'
+  ...
+# Subtest: task clarification handler retries interpretation by typed state without resubmitting the answer
+ok 31 - task clarification handler retries interpretation by typed state without resubmitting the answer
+  ---
+  duration_ms: 0.524333
+  type: 'test'
+  ...
+# Subtest: new task form blocks duplicate submissions and retries retained input after failure
+ok 32 - new task form blocks duplicate submissions and retries retained input after failure
+  ---
+  duration_ms: 0.882875
+  type: 'test'
+  ...
+# Subtest: new task form blocks duplicate submissions and retries retained clarification after failure
+ok 33 - new task form blocks duplicate submissions and retries retained clarification after failure
+  ---
+  duration_ms: 0.470208
+  type: 'test'
+  ...
+# Subtest: new task UI sends one natural-language input to the explicit brain
+ok 34 - new task UI sends one natural-language input to the explicit brain
+  ---
+  duration_ms: 0.538625
+  type: 'test'
+  ...
+# Subtest: explicit confirmation stays on the interaction page and exposes the FIFO receipt
+ok 35 - explicit confirmation stays on the interaction page and exposes the FIFO receipt
+  ---
+  duration_ms: 0.755542
+  type: 'test'
+  ...
+# Subtest: runtime task dashboard is observational and has no second execution-input form
+ok 36 - runtime task dashboard is observational and has no second execution-input form
+  ---
+  duration_ms: 0.396042
+  type: 'test'
+  ...
+1..36
+# tests 36
+# suites 0
+# pass 36
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 191.871292
