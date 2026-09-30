@@ -115,11 +115,34 @@ export function formatTime(value) {
   }).format(date)
 }
 
+// Status chips carry the same semantic legend as the runtime dashboard: green for
+// running/settling and finished work, blue for created/admitted/waiting queues,
+// red for hard failures, yellow for blocked attention, gray for cancelled and
+// unknown/unavailable/stale states.
 export function stateTone(state) {
-  if (state === 'failed' || state === 'blocked' || state === 'cancelled' || state === 'unknown') return 'danger'
-  if (state === 'waiting' || state === 'settling') return 'warning'
-  if (state === 'succeeded' || state === 'stopped') return 'success'
-  return 'active'
+  switch (state) {
+    case 'running':
+    case 'settling':
+      return 'active'
+    case 'waiting':
+    case 'created':
+    case 'admitted':
+      return 'blue'
+    case 'blocked':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    case 'succeeded':
+    case 'stopped':
+      return 'success'
+    case 'cancelled':
+    case 'unknown':
+    case 'stale':
+    case 'unavailable':
+      return 'gray'
+    default:
+      return 'gray'
+  }
 }
 
 export function queryParam(name) {

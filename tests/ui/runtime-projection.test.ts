@@ -15,6 +15,8 @@ import {
   type RuntimeTaskSnapshotInput,
 } from '../../packages/ui/projection/runtime.js';
 
+const runtimeApiModuleUrl = new URL('../../../../docs/ui/runtime-api.js', import.meta.url).href;
+
 const observationSource: UiDataSource = { state: 'ready', label: '运行记录' };
 
 function assertProjectionRejected(run: () => unknown, expected: RegExp): void {
@@ -101,6 +103,30 @@ test('runtime task list classifies every task into a visible projection group', 
   assert.deepEqual(list.stopped.map((row) => row.taskId.value), ['task-runtime-4']);
   assert.deepEqual(list.failed.map((row) => row.taskId.value), ['task-runtime-5']);
   assert.deepEqual(list.counts, { running: 1, waiting: 0, completed: 1, stopped: 1, draft: 1, failed: 1, total: 5 });
+});
+
+test('runtime API maps every real task state to its declared chip tone', async () => {
+  const { stateTone } = await import(runtimeApiModuleUrl);
+  const expectedTones = {
+    running: 'active',
+    settling: 'active',
+    created: 'blue',
+    admitted: 'blue',
+    waiting: 'blue',
+    blocked: 'warning',
+    failed: 'danger',
+    succeeded: 'success',
+    stopped: 'success',
+    cancelled: 'gray',
+    unknown: 'gray',
+    stale: 'gray',
+    unavailable: 'gray',
+  };
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(expectedTones).map((state) => [state, stateTone(state)])),
+    expectedTones,
+  );
+  assert.equal(stateTone('mystery-state'), 'gray');
 });
 
 test('runtime dashboard only reports hasRunning for execution-active tasks', () => {

@@ -131,6 +131,18 @@ a {
   color: var(--success);
 }
 
+.state-chip[data-tone="blue"] {
+  border-color: #b6c8e8;
+  background: #eef4ff;
+  color: #246;
+}
+
+.state-chip[data-tone="gray"] {
+  border-color: #c6cfcb;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
 .page {
   width: min(1180px, calc(100% - 40px));
   margin: 0 auto;
