@@ -1,0 +1,18 @@
+{
+  "chips": [
+    {
+      "background": "rgb(255, 240, 214)",
+      "color": "rgb(138, 75, 0)",
+      "text": "受阻",
+      "tone": "warning"
+    },
+    {
+      "background": "rgb(225, 242, 231)",
+      "color": "rgb(40, 98, 63)",
+      "text": "已完成",
+      "tone": "success"
+    }
+  ],
+  "legacyClassificationVisible": false,
+  "overflow": false
+}

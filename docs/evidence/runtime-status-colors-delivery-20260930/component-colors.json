@@ -1,0 +1,80 @@
+[
+  {
+    "background": "rgb(223, 243, 238)",
+    "color": "rgb(11, 117, 103)",
+    "state": "running",
+    "tone": "active"
+  },
+  {
+    "background": "rgb(223, 243, 238)",
+    "color": "rgb(11, 117, 103)",
+    "state": "settling",
+    "tone": "active"
+  },
+  {
+    "background": "rgb(238, 244, 255)",
+    "color": "rgb(34, 68, 102)",
+    "state": "waiting",
+    "tone": "blue"
+  },
+  {
+    "background": "rgb(238, 244, 255)",
+    "color": "rgb(34, 68, 102)",
+    "state": "created",
+    "tone": "blue"
+  },
+  {
+    "background": "rgb(238, 244, 255)",
+    "color": "rgb(34, 68, 102)",
+    "state": "admitted",
+    "tone": "blue"
+  },
+  {
+    "background": "rgb(243, 246, 245)",
+    "color": "rgb(97, 112, 106)",
+    "state": "unknown",
+    "tone": "gray"
+  },
+  {
+    "background": "rgb(243, 246, 245)",
+    "color": "rgb(97, 112, 106)",
+    "state": "unavailable",
+    "tone": "gray"
+  },
+  {
+    "background": "rgb(243, 246, 245)",
+    "color": "rgb(97, 112, 106)",
+    "state": "stale",
+    "tone": "gray"
+  },
+  {
+    "background": "rgb(243, 246, 245)",
+    "color": "rgb(97, 112, 106)",
+    "state": "cancelled",
+    "tone": "gray"
+  },
+  {
+    "background": "rgb(253, 233, 231)",
+    "color": "rgb(165, 43, 39)",
+    "state": "failed",
+    "tone": "danger"
+  },
+  {
+    "background": "rgb(255, 240, 214)",
+    "color": "rgb(138, 75, 0)",
+    "state": "blocked",
+    "tone": "warning"
+  },
+  {
+    "background": "rgb(225, 242, 231)",
+    "color": "rgb(40, 98, 63)",
+    "state": "succeeded",
+    "tone": "success"
+  },
+  {
+    "background": "rgb(225, 242, 231)",
+    "color": "rgb(40, 98, 63)",
+    "state": "stopped",
+    "tone": "success"
+  }
+]
