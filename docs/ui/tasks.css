@@ -293,6 +293,11 @@
     flex-wrap: nowrap;
   }
 
+  .segment {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
   .bulk-actions {
     position: static;
     flex-wrap: wrap;
@@ -305,6 +310,10 @@
 
   .panel {
     padding: 0;
+  }
+
+  .task-row--head {
+    display: none;
   }
 
   .task-row {
