@@ -1,0 +1,24 @@
+{
+  "sourceCandidate": "7a1472d73117dff950242e61e588e90d3c41a86e",
+  "url": "http://127.0.0.1:10086/tasks.html",
+  "facts": {
+    "admissionColumnVisible": false,
+    "legacyClassificationVisible": false,
+    "rows": [
+      {
+        "cells": 8,
+        "hasTime": true,
+        "overflow": false,
+        "state": "受阻",
+        "title": "列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。"
+      },
+      {
+        "cells": 8,
+        "hasTime": true,
+        "overflow": false,
+        "state": "已完成",
+        "title": "列出当前工作区根目录中的 Markdown 文件，不做修改。"
+      }
+    ]
+  }
+}

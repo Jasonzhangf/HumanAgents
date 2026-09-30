@@ -1,0 +1,27 @@
+{
+  "contract_version": "1",
+  "scope": {
+    "mode": "base",
+    "commit": "7a1472d73117dff950242e61e588e90d3c41a86e",
+    "base": "081104b9ff6f779dc6366d4059a560ca7b62707b"
+  },
+  "module_boundary_evidence": [
+    {
+      "module": "Task List presentation",
+      "owner": "UI 产品呈现层；Runtime service 与 packages/ui/projection 保持状态及投影 owner",
+      "paths": "docs/ui/tasks.js；相关只读调用链：docs/ui/runtime-shell.js、docs/ui/tasks.css、packages/ui/projection/runtime.ts、packages/app/src/ui-runtime/service.ts、scripts/copy-ui-assets.mjs",
+      "edges": "任务列表入口 → api.listTasks() → RuntimeTaskListProjection → 生命周期分组 → renderTasks()/renderRuntimeRow() → DOM。当前变更仅移除 requirementAdmissionLabel 数据单元及对应表头；实际 task state、currentState、nextStep、更新时间、导航和操作保持原调用链。移除后每行八个数据单元与既有八列 CSS 一致，表头九个标签对应八个数据列及操作列。读取失败仍进入既有显式错误呈现；没有新增状态写入、跨组件生命周期副作用或控制状态 owner。",
+      "resources": "作者 receipt 记录候选只读 consumer 使用实际运行实例的未修改 GET 数据，并拒绝写入；浏览器验证了 blocked/completed 行及全选、清除选择。receipt 记录本轮 consumer PID、端口和浏览器 tab 已关闭，临时 consumer 文件已删除。候选 worktree 为后续 review/交付保留，最终安装、merge、push 和 worktree 回收尚未声称完成。",
+      "gates": "当前 HEAD 与请求 commit 一致，工作树 clean。node --check docs/ui/tasks.js 在本次只读审查中通过。typecheck.log 记录 exit 0；ui-gate.log 记录 36 tests、36 passed、0 failed、0 skipped。browser-facts.json、list.jpg 与 receipt.md 提供实际列表数据到浏览器 DOM 的验证证据。审查计算 tasks.js SHA-256 为 fa0a22dcb86919add56c8ba3604768f3993e756ab95df9ba879b6f794da21783，与 receipt 的已验 source candidate 846ec4af5c0d71e50f5bb21bf57d7add4eadf123 一致；后续提交只添加证据。当前 scope 未修改任务执行、Provider、工具、确认或结果路径，完整 Dashboard 三类真实执行验收不作为此列表显示片段的完成声明。"
+    },
+    {
+      "module": "Explicit Input task-status presentation",
+      "owner": "UI 产品呈现层；显式输入处理、状态查询和任务状态继续由既有 Runtime/core owner 负责",
+      "paths": "docs/ui/entry.js；相关只读调用链：docs/ui/runtime-shell.js、packages/ui/projection/runtime.ts、packages/app/src/ui-runtime/service.ts",
+      "edges": "可见输入表单 → receiveExplicitInput()/interpretExplicitInput() → refreshQueue() → api.status()/api.listTasks() → renderStatus() → DOM。当前变更仅删除 item-meta 中重复状态或内部准入分类 span；row.stateLabel 仍由独立 state chip 显示，currentState、nextStep、标题、更新时间及任务链接保留。状态读取失败仍由 refreshQueue() 显式呈现错误。未改输入、确认、队列消费、重试或执行路径。",
+      "resources": "receipt 记录通过公共 startUiRuntime service、隔离持久化 root 和真实浏览器验证 status-only 呈现；明确使用 fake mode 与确定性状态查询解释器，没有启动任务执行或 Provider 请求。验证任务通过所属 service API 删除，并确认任务总数为零；第二次 consumer 正常退出，首轮失败 consumer 的退出及资源核销另行记录。两次隔离 root、临时脚本及本轮浏览器 tabs 已按 receipt 核销；共享运行实例未被修改。",
+      "gates": "node --check docs/ui/entry.js 在本次只读审查中通过；共享 typecheck 与 36 项 UI gate 有附带原始日志。entry-retry-facts.json、browser-facts.json、entry.jpg 及 receipt.md 记录真实浏览器经公共 service 到 renderStatus 的组件路径，断言标题、已创建状态、下一步和时间保留，metaSpans 为零。审查计算 entry.js SHA-256 为 0060a2bf10a47a52c4e3a378df8eb1631edc78351ea9c5ebb4102597f0181b7a，与已验 source candidate 的 receipt 一致。该组件验证覆盖当前移除显示字段的行为；receipt 明确未提供完整 Dashboard、真实 RCC、搜索或 AItest 执行验收，未将组件证据冒充这些交付终点。"
+    }
+  ],
+  "findings": []
+}
