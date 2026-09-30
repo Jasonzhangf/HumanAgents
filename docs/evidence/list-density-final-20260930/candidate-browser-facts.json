@@ -1,0 +1,71 @@
+{
+  "candidate": "cbcf565a13b87a8dfcbf31c4bd80302ea067a0b5",
+  "desktop": {
+    "checked": 0,
+    "headers": [
+      {
+        "columns": "44px 730px 84px 108px 116px",
+        "labels": [
+          {
+            "text": "任务",
+            "x": 131
+          },
+          {
+            "text": "状态",
+            "x": 873
+          },
+          {
+            "text": "最近更新",
+            "x": 969
+          },
+          {
+            "text": "操作",
+            "x": 1183
+          }
+        ]
+      },
+      {
+        "columns": "44px 730px 84px 108px 116px",
+        "labels": [
+          {
+            "text": "任务",
+            "x": 131
+          },
+          {
+            "text": "状态",
+            "x": 873
+          },
+          {
+            "text": "最近更新",
+            "x": 969
+          },
+          {
+            "text": "操作",
+            "x": 1183
+          }
+        ]
+      }
+    ],
+    "rows": [
+      {
+        "columns": "44px 730px 84px 108px 116px",
+        "href": "./task.html?task=ui-task-implicit-draft-32",
+        "stateX": 876,
+        "timeX": 972,
+        "titleX": 131
+      },
+      {
+        "columns": "44px 730px 84px 108px 116px",
+        "href": "./task-dashboard.html?task=ui-task-implicit-draft-31",
+        "stateX": 876,
+        "timeX": 972,
+        "titleX": 131
+      }
+    ],
+    "scrollWidth": 1280,
+    "width": 1280
+  },
+  "selectedSnapshot": "- banner:\n  - link \"HumanAgent\":\n    - /url: ./dashboard.html\n  - navigation \"主导航\":\n    - link \"Dashboard\":\n      - /url: dashboard.html\n    - link \"Task List\":\n      - /url: tasks.html\n    - link \"新建 Task\":\n      - /url: task.html?task=new\n    - link \"Memory\":\n      - /url: memory.html\n- main:\n  - paragraph: Runtime\n  - heading \"任务列表\" [level=1]\n  - paragraph: 运行中、等待决策、已完成和失败任务都来自 Runtime projection。\n  - status:\n    - strong: mode=rcc\n    - text: · provider=ready · connected\n  - button \"全部\" [pressed]\n  - button \"执行中\"\n  - button \"受阻/等待\"\n  - button \"已完成\"\n  - button \"已停止\"\n  - button \"排队/准入\"\n  - button \"失败\"\n  - checkbox \"选择全部任务\" [checked]\n  - generic: 2 项已选择\n  - button \"停止选中\"\n  - button \"删除选中\"\n  - button \"清除选择\"\n  - heading \"执行中任务\" [level=2]\n  - generic: 0 项\n  - table \"执行中任务\":\n    - paragraph: 当前没有执行中的任务。\n  - heading \"受阻或等待决策任务\" [level=2]\n  - generic: 1 项\n  - table \"受阻或等待决策任务\":\n    - row:\n      - generic: 任务\n      - generic: 状态\n      - generic: 最近更新\n      - generic: 操作\n    - row \"选择任务 列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。 列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。 失败收拢未完成 受阻 09/29 18:10 编辑 删除\":\n      - checkbox \"选择任务 列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。\" [checked]\n      - link \"列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。 失败收拢未完成 受阻 09/29 18:10\":\n        - /url: ./task.html?task=ui-task-implicit-draft-32\n        - generic \"列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。\":\n          - strong: 列出 ~/github/routecodex 的 git worktree 列表；对每个 worktree 输出路径、关联分支/提交、上次活动时间及可删除原因；仅生成清理候选清单，不执行删除。\n          - generic: 失败收拢未完成\n        - generic: 受阻\n        - time: 09/29 18:10\n      - cell \"编辑 删除\":\n        - button \"编辑\"\n        - button \"删除\"\n  - heading \"已完成任务\" [level=2]\n  - generic: 1 项\n  - table \"已完成任务\":\n    - row:\n      - generic: 任务\n      - generic: 状态\n      - generic: 最近更新\n      - generic: 操作\n    - row \"选择任务 列出当前工作区根目录中的 Markdown 文件，不做修改。 列出当前工作区根目录中的 Markdown 文件，不做修改。 已完成 09/29 10:02 编辑 删除\":\n      - checkbox \"选择任务 列出当前工作区根目录中的 Markdown 文件，不做修改。\" [checked]\n      - link \"列出当前工作区根目录中的 Markdown 文件，不做修改。 已完成 09/29 10:02\":\n        - /url: ./task-dashboard.html?task=ui-task-implicit-draft-31\n        - generic \"列出当前工作区根目录中的 Markdown 文件，不做修改。\":\n          - strong: 列出当前工作区根目录中的 Markdown 文件，不做修改。\n        - generic: 已完成\n        - time: 09/29 10:02\n      - cell \"编辑 删除\":\n        - button \"编辑\"\n        - button \"删除\"\n  - heading \"已停止任务\" [level=2]\n  - generic: 0 项\n  - table \"已停止任务\":\n    - paragraph: 当前没有已停止的任务。\n  - heading \"排队与准入任务\" [level=2]\n  - generic: 0 项\n  - table \"排队与准入任务\":\n    - paragraph: 当前没有排队或已准入但未执行的任务。\n  - heading \"失败任务\" [level=2]\n  - generic: 0 项\n  - table \"失败任务\":\n    - paragraph: 当前没有失败的任务。",
+  "mobileResult": "FAIL: mobile table header retained and filter labels wrap vertically",
+  "mediumResult": "PASS: 768px layout readable"
+}

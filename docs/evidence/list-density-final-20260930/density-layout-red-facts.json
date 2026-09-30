@@ -1,0 +1,73 @@
+{
+  "desktop": {
+    "overflow": false,
+    "rows": [
+      {
+        "cells": [
+          {
+            "class": "task-cell task-cell--title",
+            "column": "2",
+            "height": 58.796875,
+            "width": 926,
+            "x": 151,
+            "y": 511.328125
+          },
+          {
+            "class": "task-cell task-cell--status",
+            "column": "2",
+            "height": 28,
+            "width": 926,
+            "x": 151,
+            "y": 588.125
+          },
+          {
+            "class": "task-cell task-cell--time",
+            "column": "auto",
+            "height": 16,
+            "width": 76.15625,
+            "x": 131,
+            "y": 634.125
+          }
+        ],
+        "clientWidth": 1130,
+        "grid": "44px 946px 116px",
+        "linkGrid": "0px 926px",
+        "scrollWidth": 1130
+      },
+      {
+        "cells": [
+          {
+            "class": "task-cell task-cell--title",
+            "column": "2",
+            "height": 38.796875,
+            "width": 358.875,
+            "x": 718.125,
+            "y": 742.71875
+          },
+          {
+            "class": "task-cell task-cell--status",
+            "column": "2",
+            "height": 28,
+            "width": 358.875,
+            "x": 718.125,
+            "y": 799.515625
+          },
+          {
+            "class": "task-cell task-cell--time",
+            "column": "auto",
+            "height": 16,
+            "width": 76.15625,
+            "x": 131,
+            "y": 845.515625
+          }
+        ],
+        "clientWidth": 1130,
+        "grid": "44px 946px 116px",
+        "linkGrid": "567.125px 358.875px",
+        "scrollWidth": 1130
+      }
+    ],
+    "viewport": 1280
+  },
+  "scope": "Read-only actual 10086 task projection through candidate renderer"
+}
