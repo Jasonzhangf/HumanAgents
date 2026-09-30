@@ -11,8 +11,8 @@ Deletions:
 - docs/ui/interaction.css: 4 old .state-chip[data-tone] rules removed.
 
 Validation:
-- pnpm build:contracts: exit 0; raw log: build-contracts.log
-- pnpm typecheck: exit 0; raw log: typecheck.log
+- pnpm build:contracts: exit 0; losslessly compressed raw log: build-contracts.log.gz
+- pnpm typecheck: exit 0; losslessly compressed raw log: typecheck.log.gz
 - pnpm test:ui: exit 0; 37 tests, 0 fail, 0 skip; raw log: test-ui.log
 - pnpm install --offline was required to restore missing local node_modules in this clean worktree; raw log: pnpm-install-offline.log
 

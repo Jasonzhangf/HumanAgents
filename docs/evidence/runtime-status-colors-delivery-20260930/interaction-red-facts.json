@@ -1,0 +1,98 @@
+{
+  "url": "http://127.0.0.1:50060/interaction.html",
+  "fixture": true,
+  "scope": "Actual interaction.js renderer; CSS samples only; no task execution",
+  "facts": [
+    {
+      "background": "rgb(238, 244, 255)",
+      "border": "rgb(34, 68, 102)",
+      "color": "rgb(0, 34, 68)",
+      "state": "running",
+      "tone": "active"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "waiting",
+      "tone": "blue"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "cancelled",
+      "tone": "gray"
+    },
+    {
+      "background": "rgb(253, 236, 234)",
+      "border": "rgb(204, 68, 68)",
+      "color": "rgb(136, 0, 0)",
+      "state": "failed",
+      "tone": "danger"
+    },
+    {
+      "background": "rgb(255, 248, 225)",
+      "border": "rgb(204, 153, 51)",
+      "color": "rgb(102, 68, 0)",
+      "state": "blocked",
+      "tone": "warning"
+    },
+    {
+      "background": "rgb(238, 244, 255)",
+      "border": "rgb(34, 68, 102)",
+      "color": "rgb(0, 34, 68)",
+      "state": "settling",
+      "tone": "active"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "created",
+      "tone": "blue"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "admitted",
+      "tone": "blue"
+    },
+    {
+      "background": "rgb(236, 248, 238)",
+      "border": "rgb(85, 187, 136)",
+      "color": "rgb(0, 102, 0)",
+      "state": "succeeded",
+      "tone": "success"
+    },
+    {
+      "background": "rgb(236, 248, 238)",
+      "border": "rgb(85, 187, 136)",
+      "color": "rgb(0, 102, 0)",
+      "state": "stopped",
+      "tone": "success"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "unknown",
+      "tone": "gray"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "stale",
+      "tone": "gray"
+    },
+    {
+      "background": "rgba(0, 0, 0, 0)",
+      "border": "rgb(119, 119, 119)",
+      "color": "rgb(32, 32, 32)",
+      "state": "unavailable",
+      "tone": "gray"
+    }
+  ]
+}

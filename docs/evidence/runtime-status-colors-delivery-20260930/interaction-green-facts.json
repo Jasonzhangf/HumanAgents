@@ -1,0 +1,98 @@
+{
+  "url": "http://127.0.0.1:50060/interaction.html",
+  "fixture": true,
+  "scope": "Actual interaction.js renderer; CSS sample states only; no task execution",
+  "facts": [
+    {
+      "background": "rgb(223, 243, 238)",
+      "border": "rgb(157, 207, 198)",
+      "color": "rgb(11, 117, 103)",
+      "state": "running",
+      "tone": "active"
+    },
+    {
+      "background": "rgb(238, 244, 255)",
+      "border": "rgb(182, 200, 232)",
+      "color": "rgb(34, 68, 102)",
+      "state": "waiting",
+      "tone": "blue"
+    },
+    {
+      "background": "rgb(243, 246, 245)",
+      "border": "rgb(198, 207, 203)",
+      "color": "rgb(97, 112, 106)",
+      "state": "cancelled",
+      "tone": "gray"
+    },
+    {
+      "background": "rgb(253, 233, 231)",
+      "border": "rgb(229, 170, 166)",
+      "color": "rgb(165, 43, 39)",
+      "state": "failed",
+      "tone": "danger"
+    },
+    {
+      "background": "rgb(255, 240, 214)",
+      "border": "rgb(226, 189, 123)",
+      "color": "rgb(138, 75, 0)",
+      "state": "blocked",
+      "tone": "warning"
+    },
+    {
+      "background": "rgb(223, 243, 238)",
+      "border": "rgb(157, 207, 198)",
+      "color": "rgb(11, 117, 103)",
+      "state": "settling",
+      "tone": "active"
+    },
+    {
+      "background": "rgb(238, 244, 255)",
+      "border": "rgb(182, 200, 232)",
+      "color": "rgb(34, 68, 102)",
+      "state": "created",
+      "tone": "blue"
+    },
+    {
+      "background": "rgb(238, 244, 255)",
+      "border": "rgb(182, 200, 232)",
+      "color": "rgb(34, 68, 102)",
+      "state": "admitted",
+      "tone": "blue"
+    },
+    {
+      "background": "rgb(225, 242, 231)",
+      "border": "rgb(167, 207, 181)",
+      "color": "rgb(40, 98, 63)",
+      "state": "succeeded",
+      "tone": "success"
+    },
+    {
+      "background": "rgb(225, 242, 231)",
+      "border": "rgb(167, 207, 181)",
+      "color": "rgb(40, 98, 63)",
+      "state": "stopped",
+      "tone": "success"
+    },
+    {
+      "background": "rgb(243, 246, 245)",
+      "border": "rgb(198, 207, 203)",
+      "color": "rgb(97, 112, 106)",
+      "state": "unknown",
+      "tone": "gray"
+    },
+    {
+      "background": "rgb(243, 246, 245)",
+      "border": "rgb(198, 207, 203)",
+      "color": "rgb(97, 112, 106)",
+      "state": "stale",
+      "tone": "gray"
+    },
+    {
+      "background": "rgb(243, 246, 245)",
+      "border": "rgb(198, 207, 203)",
+      "color": "rgb(97, 112, 106)",
+      "state": "unavailable",
+      "tone": "gray"
+    }
+  ]
+}
