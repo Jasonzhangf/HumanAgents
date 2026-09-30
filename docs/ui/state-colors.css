@@ -1,0 +1,35 @@
+.state-chip[data-tone="active"] {
+  background: #dff3ee;
+  color: #0b7567;
+  border-color: #9dcfc6;
+}
+
+.state-chip[data-tone="warning"] {
+  background: #fff0d6;
+  color: #8a4b00;
+  border-color: #e2bd7b;
+}
+
+.state-chip[data-tone="danger"] {
+  background: #fde9e7;
+  color: #a52b27;
+  border-color: #e5aaa6;
+}
+
+.state-chip[data-tone="success"] {
+  background: #e1f2e7;
+  color: #28623f;
+  border-color: #a7cfb5;
+}
+
+.state-chip[data-tone="blue"] {
+  background: #eef4ff;
+  color: #246;
+  border-color: #b6c8e8;
+}
+
+.state-chip[data-tone="gray"] {
+  background: #f3f6f5;
+  color: #61706a;
+  border-color: #c6cfcb;
+}

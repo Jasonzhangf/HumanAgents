@@ -1,0 +1,4 @@
+
+> humanagent@0.1.10 build:contracts /Volumes/Intel/playground/humanagent/orch-status-consumer-colors-20260930
+> tsc -p packages/contracts/tsconfig.json && tsc -p tests/contracts/tsconfig.json
+

@@ -1,3 +1,4 @@
+@import "./state-colors.css";
 :root {
   color-scheme: light;
   --ink: #17201d;
@@ -105,42 +106,6 @@ a {
   font-size: 12px;
   line-height: 1.3;
   white-space: nowrap;
-}
-
-.state-chip[data-tone="active"] {
-  border-color: #9dcfc6;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.state-chip[data-tone="warning"] {
-  border-color: #e2bd7b;
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-
-.state-chip[data-tone="danger"] {
-  border-color: #e5aaa6;
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.state-chip[data-tone="success"] {
-  border-color: #a7cfb5;
-  background: var(--success-soft);
-  color: var(--success);
-}
-
-.state-chip[data-tone="blue"] {
-  border-color: #b6c8e8;
-  background: #eef4ff;
-  color: #246;
-}
-
-.state-chip[data-tone="gray"] {
-  border-color: #c6cfcb;
-  background: var(--surface-soft);
-  color: var(--muted);
 }
 
 .page {
