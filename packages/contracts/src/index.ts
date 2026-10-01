@@ -1348,7 +1348,13 @@ export function validateProviderEvent(input: ProviderEvent): void {
   if (input.kind === 'terminal') assertProviderEvidenceRefsPresent(input.evidenceRefs, 'provider terminal event');
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider event evidenceRefs');
   if (input.outputRefs !== undefined) assertRefList(input.outputRefs, 'provider event outputRefs');
-  if (input.summary !== undefined && input.summary.trim() === '') throw new ContractError('provider event summary must be non-empty');
+  // `output` events carry provider text in `summary`, so a whitespace-only
+  // delta (a standalone space token) is real content rather than an empty
+  // label. Other event kinds use `summary` as a human-readable description and
+  // must not be blank.
+  if (input.summary !== undefined && input.summary.trim() === '' && input.kind !== 'output') {
+    throw new ContractError('provider event summary must be non-empty');
+  }
   if (input.error) validateProviderError(input.error);
   if (input.kind === 'error' && !input.error) throw new ContractError('provider error event requires error');
   if (input.error && input.kind !== 'error') throw new ContractError('provider error payload requires error event kind');

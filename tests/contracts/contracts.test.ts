@@ -734,6 +734,15 @@ test('tool, error, and terminal events preserve evidence refs and owner', () => 
   assert.doesNotThrow(() => validateProviderEvent(providerEvent({ kind: 'tool', toolPhase: 'result', ownerId: 'owner', nextAction: { kind: 'continue' }, evidenceRefs: [providerEvidence('tool-event')] })));
 });
 
+test('output events carry provider text so a whitespace-only delta is valid content', () => {
+  // Live providers stream a standalone space as its own output delta; that text
+  // must survive validation rather than aborting the observation stream.
+  assert.doesNotThrow(() => validateProviderEvent(providerEvent({ kind: 'output', summary: ' ' })));
+  assert.doesNotThrow(() => validateProviderEvent(providerEvent({ kind: 'output', summary: '\n' })));
+  assert.throws(() => validateProviderEvent(providerEvent({ kind: 'model', summary: ' ' })), ContractError);
+  assert.throws(() => validateProviderEvent(providerEvent({ kind: 'model', summary: '' })), ContractError);
+});
+
 test('failure and attention results cannot be represented as successful output without required refs', () => {
   assert.throws(() => validateProviderSubmitResult({ ...submitResult(), status: 'completed', outputRefs: [], error: providerError() }), ContractError);
   assert.throws(() => validateProviderSubmitResult({ ...submitResult(), status: 'failed', error: undefined }), ContractError);

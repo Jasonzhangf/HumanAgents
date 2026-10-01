@@ -32,9 +32,11 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.added'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
   | { readonly protocol: 'responses'; readonly type: 'response.output_text.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
   | { readonly protocol: 'responses'; readonly type: 'response.output_text.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly text: string }
-  | { readonly protocol: 'responses'; readonly type: 'response.content_part.added'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
-  | { readonly protocol: 'responses'; readonly type: 'response.content_part.done'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] } }
+  | { readonly protocol: 'responses'; readonly type: 'response.content_part.added'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: ResponsesWireContentPart }
+  | { readonly protocol: 'responses'; readonly type: 'response.content_part.done'; readonly item_id: string; readonly output_index: number; readonly content_index: number; readonly part: ResponsesWireContentPart }
   | { readonly protocol: 'responses'; readonly type: 'response.output_item.done'; readonly output_index: number; readonly item: ResponsesWireOutputItem }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_text.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: string }
+  | { readonly protocol: 'responses'; readonly type: 'response.reasoning_text.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly text: string }
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.added'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly part: ResponsesWireReasoningSummaryPart }
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.delta'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly delta: ResponsesWireReasoningSummaryDelta }
   | { readonly protocol: 'responses'; readonly type: 'response.reasoning_summary_part.done'; readonly item_id: string; readonly output_index?: number; readonly content_index?: number; readonly part: ResponsesWireReasoningSummaryPart }
@@ -47,6 +49,10 @@ export type ResponsesWireEvent =
   | { readonly protocol: 'responses'; readonly type: 'response.incomplete'; readonly response: { readonly id: string; readonly incomplete_details?: { readonly reason: string } } }
   | { readonly protocol: 'responses'; readonly type: 'response.failed'; readonly response: { readonly id: string; readonly error: ResponsesWireError } }
   | { readonly protocol: 'responses'; readonly type: 'error'; readonly error: ResponsesWireError };
+
+export type ResponsesWireContentPart =
+  | { readonly type: 'output_text'; readonly text: string; readonly annotations?: readonly unknown[] }
+  | { readonly type: 'reasoning_text'; readonly text: string; readonly logprobs?: readonly unknown[] };
 
 export type ResponsesWireOutputItem =
   | {

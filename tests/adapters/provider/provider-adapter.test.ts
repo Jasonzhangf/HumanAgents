@@ -698,6 +698,70 @@ test('responses codec emits each output item text exactly once across delta and 
   assert.equal(summaries.join(''), 'hello world');
 });
 
+test('responses codec projects live reasoning_text parts as model events without aborting the stream', async () => {
+  const codec = new ResponsesProviderCodec();
+  const context = codecContext();
+  // Exact shape captured from the live RCC 4444 responses stream: a reasoning
+  // content part interleaved before the assistant output message.
+  const reasoningAdded = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.content_part.added',
+    item_id: 'reason-1',
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'reasoning_text', text: '' },
+  } as unknown as ProviderWireEvent, context);
+  const reasoningDelta = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_text.delta',
+    item_id: 'reason-1',
+    output_index: 0,
+    content_index: 0,
+    delta: 'The user wants me to reply with exactly "OK".',
+  } as unknown as ProviderWireEvent, context);
+  const reasoningDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.reasoning_text.done',
+    item_id: 'reason-1',
+    output_index: 0,
+    content_index: 0,
+    text: 'The user wants me to reply with exactly "OK".',
+  } as unknown as ProviderWireEvent, context);
+  const reasoningPartDone = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.content_part.done',
+    item_id: 'reason-1',
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'reasoning_text', text: 'The user wants me to reply with exactly "OK".' },
+  } as unknown as ProviderWireEvent, context);
+  const outputPartAdded = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.content_part.added',
+    item_id: 'item-1',
+    output_index: 1,
+    content_index: 0,
+    part: { type: 'output_text', text: '' },
+  } as unknown as ProviderWireEvent, context);
+  const outputText = await codec.decodeEvent({
+    protocol: 'responses',
+    type: 'response.output_text.delta',
+    item_id: 'item-1',
+    delta: 'OK',
+  } as unknown as ProviderWireEvent, context);
+
+  assert.equal(reasoningAdded.events[0].kind, 'model');
+  assert.equal(reasoningAdded.events[0].summary, 'provider provided model reasoning');
+  assert.equal(reasoningDelta.events[0].kind, 'model');
+  assert.equal(reasoningDone.events[0].kind, 'model');
+  assert.equal(reasoningPartDone.events[0].kind, 'model');
+  // Reasoning text must never leak into business output.
+  assert.equal(outputPartAdded.events[0].kind, 'output');
+  assert.equal(outputPartAdded.events[0].summary, undefined);
+  assert.equal(outputText.events[0].kind, 'output');
+  assert.equal(outputText.events[0].summary, 'OK');
+});
+
 test('responses and anthropic resume codecs keep checkpoint control truth off business payload', () => {
   const responses = new ResponsesProviderCodec();
   const anthropic = new AnthropicProviderCodec(4096);

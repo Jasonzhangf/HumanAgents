@@ -159,6 +159,11 @@ function responsesTextSummary(context: DecodeContext, itemId: string, text: stri
   return delta.length > 0 ? delta : undefined;
 }
 
+// Reasoning content parts expose provider chain-of-thought. They are projected
+// as model-class events (never business output) so a real provider stream that
+// interleaves reasoning with output text cannot abort the execution.
+const RESPONSES_REASONING_CONTENT_PART = 'reasoning_text';
+
 function responsesReasoningSummaryText(record: Record<string, unknown>): string {
   if (typeof record.text === 'string') return record.text;
   const summary = record.summary;
@@ -241,6 +246,10 @@ function semanticModelSummary(type: string): string {
     case 'response.reasoning_summary_part.done':
     case 'response.reasoning_summary_text.delta':
     case 'response.reasoning_summary_text.done':
+    case 'response.reasoning_text.delta':
+    case 'response.reasoning_text.done':
+    case 'response.content_part.added':
+    case 'response.content_part.done':
     case 'content_block_start':
       return 'provider provided model reasoning';
     case 'response.function_call_arguments.delta':
@@ -577,6 +586,11 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         requireNumber(record, 'content_index', context.execution, raw.type);
         const part = requireObject(record, 'part', context.execution, raw.type);
         const partType = requireString(part, 'type', context.execution, raw.type);
+        const text = requireStringValue(part, 'text', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
+        if (partType === RESPONSES_REASONING_CONTENT_PART) {
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        }
         if (partType !== 'output_text') {
           throw new ProviderAdapterError({
             code: 'unknown.content.part',
@@ -586,8 +600,6 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
             scope: context.execution,
           });
         }
-        const text = requireStringValue(part, 'text', context.execution, raw.type);
-        const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
         return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.content_part.done': {
@@ -598,6 +610,9 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const partType = requireString(part, 'type', context.execution, raw.type);
         const text = requireStringValue(part, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `part/${itemId}`, { type: partType, text })];
+        if (partType === RESPONSES_REASONING_CONTENT_PART) {
+          return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+        }
         return { events: [outputEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `part/${itemId}`), [artifactRef(raw.type, `part/${itemId}`, evidenceRefs[0].digest)], evidenceRefs, responsesTextSummary(context, itemId, text, 'snapshot'))] };
       }
       case 'response.output_item.done': {
@@ -702,6 +717,18 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
       }
       case 'response.reasoning_summary_text.done': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const text = requireStringValue(record, 'text', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+      }
+      case 'response.reasoning_text.delta': {
+        const itemId = requireString(record, 'item_id', context.execution, raw.type);
+        const delta = requireStringValue(record, 'delta', context.execution, raw.type);
+        const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, delta })];
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `reasoning/${itemId}`), evidenceRefs)] };
+      }
+      case 'response.reasoning_text.done': {
         const itemId = requireString(record, 'item_id', context.execution, raw.type);
         const text = requireStringValue(record, 'text', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `reasoning/${itemId}`, { type: raw.type, text })];
