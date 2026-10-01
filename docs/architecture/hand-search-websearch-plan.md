@@ -183,20 +183,31 @@ interface WebSearchProvider {
     recency: 'day' | 'week' | 'month' | 'year' | 'any';
     signal: AbortSignal;
   }): Promise<{
-    results: readonly WebSearchResult[];
+    /** Raw page entries, exactly as the provider rendered them. NOT validated. */
+    entries: readonly unknown[];
     pagesFetched: number;
     exhausted: boolean;
-    unresolvedSources: readonly string[];
+    /** Pages the adapter could not retrieve at all, verbatim. Not a validation result. */
+    pageErrors: readonly string[];
   }>;
 }
 ```
 
+There is exactly **one validator**, and it is the service, not the adapter: the
+adapter only fetches pages and hands back raw entries, while
+`WebSearchService` performs every acceptance decision (URL validation, required
+fields, de-duplication, rank normalization) and composes the final
+`unresolvedSources` from its own rejected entries plus the adapter's
+`pageErrors`. This removes the ambiguity of a port that returns
+"validated matches" while the service is also documented as the validator.
+
 The exact relationship between the provider output and the report fields is:
 
-- `validMatches` is the provider's `results` after the service's URL validation,
-  de-duplication and rank normalization; it is never bounded by `maxResults`.
-- `resultsFound = validMatches.length` — the number of valid matches the provider
-  actually returned for this scope. It is explicitly **matches returned**, not
+- `validMatches` is the service's accepted subset of the adapter's `entries`,
+  after URL validation, required-field checks, de-duplication and rank
+  normalization; it is never bounded by `maxResults`.
+- `resultsFound = validMatches.length` — the number of valid matches the adapter
+  actually collected for this scope. It is explicitly **matches returned**, not
   "all matches on the web"; the report carries `resultsScope: 'provider-pages'`
   so no reader can mistake it for a global count.
 - `results = validMatches.slice(0, maxResults)`; therefore
@@ -211,8 +222,10 @@ The exact relationship between the provider output and the report fields is:
   and the report says more pages may exist.
 - `providerPagesFetched` is recorded in the report so the paging work is auditable
   and replayable.
-- `unresolvedSources` lists the entries the adapter could not validate (missing or
-  blank `url`/`title`) verbatim as received; it is not a truncation signal.
+- `unresolvedSources` is composed by the service: the entries it rejected during
+  validation (missing or blank `url`/`title`) plus the adapter's `pageErrors`
+  (pages that could not be retrieved at all), all verbatim as received. It is not
+  a truncation signal.
 
 A provider that cannot return a paged result set with a per-page bound cannot
 satisfy this contract and must fail with `provider-failed` rather than silently
@@ -231,12 +244,33 @@ a terminal status inside the window, the adapter raises a typed
 There is exactly one port, and `packages/runtime/src/hand/web-search.ts` owns it.
 This change therefore also edits that owner: `WebSearchProviderInput` loses its
 `maxResults` field (the service applies the bound after validation), and
-`WebSearchProviderOutput` carries `results`, `pagesFetched`, `exhausted` and
-`unresolvedSources` with the semantics above. `WebSearchService` consumes the
-port; the production adapter in
+`WebSearchProviderOutput` carries `entries`, `pagesFetched`, `exhausted` and
+`pageErrors` with the semantics above. `WebSearchService` consumes the port and is
+the single validator; the production adapter in
 `packages/adapters/operations/src/web-search-provider.ts` implements it. No second
 provider input/output contract is introduced anywhere, and no caller is wired
 before the owner's port is updated.
+
+The adapter is constructed from a control-plane-injected typed config rather than
+from constants in the source, so provider slug, CLI path, endpoint, page ceiling,
+poll interval and poll timeout are read from the then-current source of truth at
+execution time and are never copied into business payloads or into this
+repository:
+
+```ts
+interface WebSearchProviderBackendConfig {
+  readonly provider: string;
+  readonly command: string;
+  readonly endpoint: string;
+  readonly pageCeiling: number;
+  readonly pollIntervalMs: number;
+  readonly pollTimeoutMs: number;
+}
+
+function createAgentReachWebSearchProvider(
+  config: WebSearchProviderBackendConfig,
+): WebSearchProvider;
+```
 
 The normalized business constraints are part of the report (`domains` and
 `recency`) so the verifier can bind the complete request without copying any
@@ -341,8 +375,11 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
 
 1. tool registration / capability exposure: register `web.search` in the provider
    tool list assembled by `packages/app/src/ui-runtime/index.ts` (the file that
-   currently builds `providerTools`) and expose it to the Responses and Anthropic
-   protocol projections. `packages/app/src/provider-tool-execution.ts` declares
+   currently builds `providerTools`) and expose it to the **Responses protocol
+   projection only**. The same runtime wiring condition is why it is Responses
+   only: `providerTools` is installed only when the binding protocol is
+   `responses`, so there is no executable Anthropic registration path and none is
+   claimed. `packages/app/src/provider-tool-execution.ts` declares
    the tool definition and executes it; it does not register the tool.
 2. provider tool-call projection: `packages/adapters/provider/src/agent-driver.ts`
    projects the provider's tool call into `ProviderEvent.toolCall` (`callId`,
