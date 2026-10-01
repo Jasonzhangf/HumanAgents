@@ -1069,6 +1069,7 @@ test('CLI version exits before default serve routing', async () => {
 });
 
 test('CLI serve --help prints help and exits without booting the server', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-cli-help-serve-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
   const runCli = (args: readonly string[], timeoutMs = 15_000): Promise<{ stdout: string; status: number }> => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1089,12 +1090,22 @@ test('CLI serve --help prints help and exits without booting the server', async 
       resolve({ stdout, status: code ?? -1 });
     });
   });
-  for (const flag of ['--help', '-h']) {
-    const run = await runCli(['serve', flag]);
-    assert.equal(run.status, 0, `serve ${flag} should exit 0`);
-    assert.match(run.stdout, /用法：humanagent/);
-    // The serve startup banner must not be emitted on the help path.
-    assert.ok(!run.stdout.includes('"url":'), `serve ${flag} must not boot the server`);
+  try {
+    for (const flag of ['--help', '-h']) {
+      // A regression would boot serve; keep it off the real default control root and port.
+      const run = await runCli([
+        'serve', flag,
+        '--workspace', workspace,
+        '--control-root', controlRoot,
+        '--port', '0',
+      ]);
+      assert.equal(run.status, 0, `serve ${flag} should exit 0`);
+      assert.match(run.stdout, /用法：humanagent/);
+      // The serve startup banner must not be emitted on the help path.
+      assert.ok(!run.stdout.includes('"url":'), `serve ${flag} must not boot the server`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
