@@ -6,44 +6,124 @@
   },
   "nodes": {
     "candidate_binding": {
-      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
-      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+      "ownerPath": "tests/app/dashboard-e2e/lib/binding.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/binding.mjs"
     },
-    "browser_entry": {
-      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
-      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    "web_search_entry": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"
     },
-    "runtime_execution": {
+    "web_search_execution": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "web_search_provider_tool": {
+      "ownerPath": "packages/runtime/src/hand/web-search.ts",
+      "ownerRel": "packages/runtime/src/hand/web-search.ts"
+    },
+    "web_search_terminal": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"
+    },
+    "web_search_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "web_search_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "local_search_entry": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/local-file-search.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/local-file-search.mjs"
+    },
+    "local_search_execution": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "local_search_invoke": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "local_search_result_contract": {
+      "ownerPath": "packages/adapters/provider/src/agent-driver.ts",
+      "ownerRel": "packages/adapters/provider/src/agent-driver.ts"
+    },
+    "local_search_journal_projection": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
     },
-    "scenario_dispatch": {
-      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
-      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    "local_search_tool_output_endpoint": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts"
     },
-    "web_search_capability": {
-      "ownerPath": "packages/app/src/provider-tool-execution.ts",
-      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    "local_search_browser_assertion": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/local-file-search.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/local-file-search.mjs"
     },
-    "local_file_search_capability": {
-      "ownerPath": "packages/app/src/provider-tool-execution.ts",
-      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    "local_search_terminal": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/journal.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/journal.mjs"
+    },
+    "local_search_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "local_search_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "aitest_entry": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
+    },
+    "aitest_execution": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
     },
     "aitest_capability": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
+    },
+    "aitest_checker": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
+    },
+    "aitest_terminal": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/journal.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/journal.mjs"
+    },
+    "aitest_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "aitest_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_failure_detect": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "attempt_stop_settle": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_incomplete_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "attempt_settled_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_unsettled_recovery": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "dashboard_e2e_closure": {
       "ownerPath": "docs/ui/dashboard-e2e-acceptance.md",
       "ownerRel": "docs/ui/dashboard-e2e-acceptance.md"
-    },
-    "terminal_assertion": {
-      "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
-    },
-    "receipt_emission": {
-      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
-      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
-    },
-    "cleanup_closure": {
-      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
-      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
     }
   }
 }

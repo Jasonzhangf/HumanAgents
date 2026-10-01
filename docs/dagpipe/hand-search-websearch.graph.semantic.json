@@ -1,0 +1,14 @@
+{
+  "graph": "humanagent-hand-search-websearch",
+  "labels": {
+    "tool_registration": "注册 Dashboard 网络搜索 Provider 工具并暴露能力",
+    "tool_call_projection": "从原始调用上下文投影 Provider 工具调用事件",
+    "provider_invoke": "发起 web.search 工具调用并转发到后端",
+    "backend_search": "经 Agent Reach 路由到 Monid TinyFish 执行真实只读搜索",
+    "typed_result": "校验并归一化 Provider 输出为 typed 工具结果",
+    "report_persistence": "持久化报告并生成 outputRef 与 outputDigest 摘要",
+    "report_retrieval": "按 task/operation/epoch/seq 与摘要校验后读取报告",
+    "cancel_settlement": "任务级停止后中止并排空 Provider 再结算，不伪造 cancelled",
+    "cleanup_closure": "收口资源释放并核对终态证据"
+  }
+}

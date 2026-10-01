@@ -1,0 +1,45 @@
+{
+  "graph": "humanagent-hand-search-websearch",
+  "operator": {
+    "operator": "humanagent-hand-search-websearch",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "tool_registration": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "tool_call_projection": {
+      "ownerPath": "packages/adapters/provider/src/agent-driver.ts",
+      "ownerRel": "packages/adapters/provider/src/agent-driver.ts"
+    },
+    "provider_invoke": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "backend_search": {
+      "ownerPath": "packages/adapters/operations/src/web-search-route.ts",
+      "ownerRel": "packages/adapters/operations/src/web-search-route.ts"
+    },
+    "typed_result": {
+      "ownerPath": "packages/runtime/src/hand/web-search.ts",
+      "ownerRel": "packages/runtime/src/hand/web-search.ts"
+    },
+    "report_persistence": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "report_retrieval": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "cancel_settlement": {
+      "ownerPath": "packages/adapters/operations/src/web-search-route.ts",
+      "ownerRel": "packages/adapters/operations/src/web-search-route.ts"
+    },
+    "cleanup_closure": {
+      "ownerPath": "docs/ui/dashboard-e2e-acceptance.md",
+      "ownerRel": "docs/ui/dashboard-e2e-acceptance.md"
+    }
+  }
+}

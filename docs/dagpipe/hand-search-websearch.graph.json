@@ -1,0 +1,115 @@
+{
+  "id": "humanagent-hand-search-websearch",
+  "version": "1",
+  "meta": {
+    "title": "Dashboard web.search 工具：注册、调用、取消、结果、报告与收口",
+    "baseline": "cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2"
+  },
+  "inputs": [
+    { "id": "web_search_tool_request", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "tool_registration",
+      "operator": "humanagent-hand-search-websearch-tool-registration",
+      "operator_version": "1",
+      "inputs": ["web_search_tool_request"],
+      "output": { "id": "registered_tool", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "tool_call_projection",
+      "operator": "humanagent-hand-search-websearch-tool-call-projection",
+      "operator_version": "1",
+      "inputs": ["registered_tool"],
+      "output": { "id": "projected_call", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "provider_invoke",
+      "operator": "humanagent-hand-search-websearch-provider-invoke",
+      "operator_version": "1",
+      "inputs": ["projected_call"],
+      "output": { "id": "invoke_request", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "backend_search",
+      "operator": "humanagent-hand-search-websearch-backend-search",
+      "operator_version": "1",
+      "inputs": ["invoke_request"],
+      "output": { "id": "provider_output", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "typed_result",
+      "operator": "humanagent-hand-search-websearch-typed-result",
+      "operator_version": "1",
+      "inputs": ["provider_output"],
+      "output": { "id": "typed_tool_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "report_persistence",
+      "operator": "humanagent-hand-search-websearch-report-persistence",
+      "operator_version": "1",
+      "inputs": ["typed_tool_result"],
+      "output": { "id": "report_descriptor", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "report_retrieval",
+      "operator": "humanagent-hand-search-websearch-report-retrieval",
+      "operator_version": "1",
+      "inputs": ["report_descriptor"],
+      "output": { "id": "retrieved_report", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "cancel_settlement",
+      "operator": "humanagent-hand-search-websearch-cancel-settlement",
+      "operator_version": "1",
+      "inputs": ["invoke_request"],
+      "output": { "id": "settled_terminal", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "cleanup_closure",
+      "operator": "humanagent-hand-search-websearch-cleanup-closure",
+      "operator_version": "1",
+      "inputs": ["retrieved_report", "settled_terminal"],
+      "output": { "id": "web_search_cleanup_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "tool_registration", "to": "tool_call_projection", "arc_id": "registered_tool" },
+    { "from": "tool_call_projection", "to": "provider_invoke", "arc_id": "projected_call" },
+    { "from": "provider_invoke", "to": "backend_search", "arc_id": "invoke_request" },
+    { "from": "backend_search", "to": "typed_result", "arc_id": "provider_output" },
+    { "from": "typed_result", "to": "report_persistence", "arc_id": "typed_tool_result" },
+    { "from": "report_persistence", "to": "report_retrieval", "arc_id": "report_descriptor" },
+    { "from": "report_retrieval", "to": "cleanup_closure", "arc_id": "retrieved_report" },
+    { "from": "provider_invoke", "to": "cancel_settlement", "arc_id": "invoke_request" },
+    { "from": "cancel_settlement", "to": "cleanup_closure", "arc_id": "settled_terminal" }
+  ],
+  "outputs": ["web_search_cleanup_closure"]
+}
