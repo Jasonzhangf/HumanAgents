@@ -1098,6 +1098,27 @@ test('CLI serve --help prints help and exits without booting the server', async 
   }
 });
 
+test('CLI --help inside an option value stays payload, not a help request', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-cli-help-value-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  try {
+    for (const value of ['-h', '--help']) {
+      const output = execFileSync(process.execPath, [
+        cli,
+        'run',
+        '--plan', 'default',
+        '--prompt', value,
+        '--workspace', workspace,
+        '--control-root', controlRoot,
+      ], { encoding: 'utf8', stdio: 'pipe' });
+      assert.ok(!output.includes('用法：humanagent'), `--prompt ${value} must not print help`);
+      assert.match(output, /"command": "run"/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('CLI entry uses one typed invalid-prompt error', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-errors-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
