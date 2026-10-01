@@ -1,0 +1,57 @@
+{
+  "graph": "humanagent-dashboard-e2e-web-search",
+  "operator": {
+    "operator": "humanagent-dashboard-e2e-web-search",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "candidate_binding": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/binding.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/binding.mjs"
+    },
+    "web_search_entry": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"
+    },
+    "web_search_execution": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "web_search_provider_tool": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "web_search_terminal": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"
+    },
+    "web_search_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "attempt_failure_detect": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "attempt_stop_settle": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_incomplete_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "attempt_settled_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_unsettled_recovery": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "web_search_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    }
+  }
+}

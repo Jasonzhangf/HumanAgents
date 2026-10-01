@@ -1,0 +1,61 @@
+{
+  "graph": "humanagent-dashboard-e2e-aitest",
+  "operator": {
+    "operator": "humanagent-dashboard-e2e-aitest",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "candidate_binding": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/binding.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/binding.mjs"
+    },
+    "aitest_entry": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
+    },
+    "aitest_execution": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "aitest_capability": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
+    },
+    "aitest_checker": {
+      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
+    },
+    "aitest_terminal": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/journal.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/journal.mjs"
+    },
+    "aitest_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "attempt_failure_detect": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "attempt_stop_settle": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_incomplete_receipt": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
+    },
+    "attempt_settled_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "attempt_unsettled_recovery": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    },
+    "aitest_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
+    }
+  }
+}

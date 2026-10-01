@@ -1,0 +1,194 @@
+{
+  "id": "humanagent-dashboard-e2e-local-file-search",
+  "version": "1",
+  "meta": {
+    "title": "Dashboard 本地只读搜索 E2E：契约、读取入口、清单证据与收口",
+    "baseline": "cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2"
+  },
+  "inputs": [
+    { "id": "candidate_revision", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "candidate_binding",
+      "operator": "humanagent-dashboard-e2e-candidate-binding",
+      "operator_version": "1",
+      "inputs": ["candidate_revision"],
+      "output": { "id": "isolated_attempt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_entry",
+      "operator": "humanagent-dashboard-e2e-local-search-entry",
+      "operator_version": "1",
+      "inputs": ["isolated_attempt"],
+      "output": { "id": "local_search_confirmed_task", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_execution",
+      "operator": "humanagent-dashboard-e2e-local-search-execution",
+      "operator_version": "1",
+      "inputs": ["local_search_confirmed_task"],
+      "output": { "id": "local_search_turns", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_invoke",
+      "operator": "humanagent-dashboard-e2e-local-search-invoke",
+      "operator_version": "1",
+      "inputs": ["local_search_turns"],
+      "output": { "id": "local_search_invocation", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_result_contract",
+      "operator": "humanagent-dashboard-e2e-local-search-result-contract",
+      "operator_version": "1",
+      "inputs": ["local_search_invocation"],
+      "output": { "id": "local_search_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_journal_projection",
+      "operator": "humanagent-dashboard-e2e-local-search-journal-projection",
+      "operator_version": "1",
+      "inputs": ["local_search_result"],
+      "output": { "id": "local_search_projection", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_tool_output_endpoint",
+      "operator": "humanagent-dashboard-e2e-local-search-tool-output",
+      "operator_version": "1",
+      "inputs": ["local_search_projection"],
+      "output": { "id": "local_search_report", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_browser_assertion",
+      "operator": "humanagent-dashboard-e2e-local-search-assertion",
+      "operator_version": "1",
+      "inputs": ["local_search_report"],
+      "output": { "id": "local_search_verified", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_terminal",
+      "operator": "humanagent-dashboard-e2e-local-search-terminal",
+      "operator_version": "1",
+      "inputs": ["local_search_verified"],
+      "output": { "id": "local_search_terminal_state", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_receipt",
+      "operator": "humanagent-dashboard-e2e-local-search-receipt",
+      "operator_version": "1",
+      "inputs": ["local_search_terminal_state"],
+      "output": { "id": "local_search_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_failure_detect",
+      "operator": "humanagent-dashboard-e2e-failure-detect",
+      "operator_version": "1",
+      "inputs": ["local_search_turns", "local_search_verified"],
+      "output": { "id": "attempt_deviation", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_stop_settle",
+      "operator": "humanagent-dashboard-e2e-stop-settle",
+      "operator_version": "1",
+      "inputs": ["attempt_deviation"],
+      "output": { "id": "attempt_settlement", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_incomplete_receipt",
+      "operator": "humanagent-dashboard-e2e-incomplete-receipt",
+      "operator_version": "1",
+      "inputs": ["attempt_settlement"],
+      "output": { "id": "incomplete_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_settled_cleanup",
+      "operator": "humanagent-dashboard-e2e-settled-cleanup",
+      "operator_version": "1",
+      "inputs": ["incomplete_receipt"],
+      "output": { "id": "settled_failure_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_unsettled_recovery",
+      "operator": "humanagent-dashboard-e2e-unsettled-recovery",
+      "operator_version": "1",
+      "inputs": ["incomplete_receipt"],
+      "output": { "id": "unsettled_recovery_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_cleanup",
+      "operator": "humanagent-dashboard-e2e-local-search-cleanup",
+      "operator_version": "1",
+      "inputs": ["local_search_receipt", "settled_failure_closure", "unsettled_recovery_closure"],
+      "output": { "id": "local_search_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "candidate_binding", "to": "local_search_entry", "arc_id": "isolated_attempt" },
+    { "from": "local_search_entry", "to": "local_search_execution", "arc_id": "local_search_confirmed_task" },
+    { "from": "local_search_execution", "to": "local_search_invoke", "arc_id": "local_search_turns" },
+    { "from": "local_search_invoke", "to": "local_search_result_contract", "arc_id": "local_search_invocation" },
+    { "from": "local_search_result_contract", "to": "local_search_journal_projection", "arc_id": "local_search_result" },
+    { "from": "local_search_journal_projection", "to": "local_search_tool_output_endpoint", "arc_id": "local_search_projection" },
+    { "from": "local_search_tool_output_endpoint", "to": "local_search_browser_assertion", "arc_id": "local_search_report" },
+    { "from": "local_search_browser_assertion", "to": "local_search_terminal", "arc_id": "local_search_verified" },
+    { "from": "local_search_terminal", "to": "local_search_receipt", "arc_id": "local_search_terminal_state" },
+    { "from": "local_search_receipt", "to": "local_search_cleanup", "arc_id": "local_search_receipt" },
+    { "from": "local_search_execution", "to": "attempt_failure_detect", "arc_id": "local_search_turns" },
+    { "from": "local_search_browser_assertion", "to": "attempt_failure_detect", "arc_id": "local_search_verified" },
+    { "from": "attempt_failure_detect", "to": "attempt_stop_settle", "arc_id": "attempt_deviation" },
+    { "from": "attempt_stop_settle", "to": "attempt_incomplete_receipt", "arc_id": "attempt_settlement" },
+    { "from": "attempt_incomplete_receipt", "to": "attempt_settled_cleanup", "arc_id": "incomplete_receipt" },
+    { "from": "attempt_incomplete_receipt", "to": "attempt_unsettled_recovery", "arc_id": "incomplete_receipt" },
+    { "from": "attempt_settled_cleanup", "to": "local_search_cleanup", "arc_id": "settled_failure_closure" },
+    { "from": "attempt_unsettled_recovery", "to": "local_search_cleanup", "arc_id": "unsettled_recovery_closure" }
+  ],
+  "outputs": ["local_search_closure"]
+}

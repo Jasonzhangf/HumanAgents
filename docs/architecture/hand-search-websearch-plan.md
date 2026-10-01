@@ -256,28 +256,37 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    failure and cancellation produce a typed failure/cancel result with the same
    `callId`, never a fabricated success and never a `toolCall` masquerading as a
    result.
-5. report persistence: write the report to the immutable asset store and attach
+5. failure terminal: when the provider is unavailable, the backend errors, or the
+   output fails validation, the call reaches an explicit failure terminal that
+   carries a typed failure result with the same `callId` and the real provider
+   error. A provider failure never continues down the success path and is never
+   converted into a complete zero-result report.
+6. report persistence: write the report to the immutable asset store and attach
    the unique typed descriptor `{ outputRef, outputDigest }`, where
    `outputDigest` is `sha256:<64 lowercase hex>`; the digest is recomputed on
    read.
-6. report retrieval: the task-scoped read endpoint
+7. report retrieval: the task-scoped read endpoint
    `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
    validates task/operation/epoch/seq and the descriptor digest, then returns the
    report. It never exposes artifact file paths and never looks up by `callId`
    alone.
-7. cancel path: a task-scoped stop reaches the route, aborts the
+8. cancel path: a task-scoped stop reaches the route, aborts the
    operation-scoped controller, drains the provider call, and settles. A stop
    that cannot prove drain reaches `failed` or `reconcile_required`; it is never
    reported as `cancelled`, and abort/drain failure never yields a false
    `cancelled` terminal.
-8. cleanup: after settlement the run releases its resources (isolated
+9. cleanup: after settlement the run releases its resources (isolated
    workspace/control root, server PID/port, temporary files) and records the
    release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
    resources.
 
-The DAG has one source (tool registration) and one sink (cleanup). The result
-and cancel branches both converge on cleanup, so every path has a single entry
-and a single exit.
+The DAG has one source (tool registration) and one sink (cleanup). Success
+(`retrieved_report`), cancellation (`settled_terminal`) and failure
+(`failure_result`) are three mutually exclusive terminals; all three converge on
+the single cleanup sink, which closes over whichever terminal was selected. No
+node requires two mutually exclusive terminals at once, so a successful search, a
+settled cancellation and a provider failure are each a complete,
+single-entry/single-exit path.
 
 ## Implementation DAG
 

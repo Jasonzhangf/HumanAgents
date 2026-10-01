@@ -1,0 +1,18 @@
+{
+  "graph": "humanagent-dashboard-e2e-aitest",
+  "labels": {
+    "candidate_binding": "绑定候选 SHA 并登记本轮隔离资源",
+    "aitest_entry": "AItest：真实页面输入、草稿与确认",
+    "aitest_execution": "AItest：运行队列执行多个 turn",
+    "aitest_capability": "AItest：新建隔离 run 并产出产物",
+    "aitest_checker": "AItest：运行 task checker 与人工观察",
+    "aitest_terminal": "AItest：从权威 journal 断言终态",
+    "aitest_receipt": "AItest：绑定候选的 receipt",
+    "attempt_failure_detect": "失败、超时或取消的首次偏离识别",
+    "attempt_stop_settle": "任务级停止与 settle 证明",
+    "attempt_incomplete_receipt": "写入 INCOMPLETE receipt 与原始错误",
+    "attempt_settled_cleanup": "已 settle 的失败收口与资源释放",
+    "attempt_unsettled_recovery": "未 settle 的恢复资源保留与归属",
+    "aitest_cleanup": "AItest：按所选终态收口并核验资源"
+  }
+}

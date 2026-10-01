@@ -1,0 +1,150 @@
+{
+  "id": "humanagent-dashboard-e2e-web-search",
+  "version": "1",
+  "meta": {
+    "title": "Dashboard 网络搜索 E2E：独立 run、来源证据、终态与收口",
+    "baseline": "cc5f3f0d49d98a414abcdc7f7bcc814c80cdbb2"
+  },
+  "inputs": [
+    { "id": "candidate_revision", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "candidate_binding",
+      "operator": "humanagent-dashboard-e2e-candidate-binding",
+      "operator_version": "1",
+      "inputs": ["candidate_revision"],
+      "output": { "id": "isolated_attempt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_entry",
+      "operator": "humanagent-dashboard-e2e-web-search-entry",
+      "operator_version": "1",
+      "inputs": ["isolated_attempt"],
+      "output": { "id": "web_search_confirmed_task", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_execution",
+      "operator": "humanagent-dashboard-e2e-web-search-execution",
+      "operator_version": "1",
+      "inputs": ["web_search_confirmed_task"],
+      "output": { "id": "web_search_turns", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_provider_tool",
+      "operator": "humanagent-dashboard-e2e-web-search-provider-tool",
+      "operator_version": "1",
+      "inputs": ["web_search_turns"],
+      "output": { "id": "web_search_sources", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_terminal",
+      "operator": "humanagent-dashboard-e2e-web-search-terminal",
+      "operator_version": "1",
+      "inputs": ["web_search_sources"],
+      "output": { "id": "web_search_terminal_state", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_receipt",
+      "operator": "humanagent-dashboard-e2e-web-search-receipt",
+      "operator_version": "1",
+      "inputs": ["web_search_terminal_state"],
+      "output": { "id": "web_search_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_failure_detect",
+      "operator": "humanagent-dashboard-e2e-failure-detect",
+      "operator_version": "1",
+      "inputs": ["web_search_turns", "web_search_sources"],
+      "output": { "id": "attempt_deviation", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_stop_settle",
+      "operator": "humanagent-dashboard-e2e-stop-settle",
+      "operator_version": "1",
+      "inputs": ["attempt_deviation"],
+      "output": { "id": "attempt_settlement", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_incomplete_receipt",
+      "operator": "humanagent-dashboard-e2e-incomplete-receipt",
+      "operator_version": "1",
+      "inputs": ["attempt_settlement"],
+      "output": { "id": "incomplete_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_settled_cleanup",
+      "operator": "humanagent-dashboard-e2e-settled-cleanup",
+      "operator_version": "1",
+      "inputs": ["incomplete_receipt"],
+      "output": { "id": "settled_failure_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "attempt_unsettled_recovery",
+      "operator": "humanagent-dashboard-e2e-unsettled-recovery",
+      "operator_version": "1",
+      "inputs": ["incomplete_receipt"],
+      "output": { "id": "unsettled_recovery_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_cleanup",
+      "operator": "humanagent-dashboard-e2e-web-search-cleanup",
+      "operator_version": "1",
+      "inputs": ["web_search_receipt", "settled_failure_closure", "unsettled_recovery_closure"],
+      "output": { "id": "web_search_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "candidate_binding", "to": "web_search_entry", "arc_id": "isolated_attempt" },
+    { "from": "web_search_entry", "to": "web_search_execution", "arc_id": "web_search_confirmed_task" },
+    { "from": "web_search_execution", "to": "web_search_provider_tool", "arc_id": "web_search_turns" },
+    { "from": "web_search_provider_tool", "to": "web_search_terminal", "arc_id": "web_search_sources" },
+    { "from": "web_search_terminal", "to": "web_search_receipt", "arc_id": "web_search_terminal_state" },
+    { "from": "web_search_receipt", "to": "web_search_cleanup", "arc_id": "web_search_receipt" },
+    { "from": "web_search_execution", "to": "attempt_failure_detect", "arc_id": "web_search_turns" },
+    { "from": "web_search_provider_tool", "to": "attempt_failure_detect", "arc_id": "web_search_sources" },
+    { "from": "attempt_failure_detect", "to": "attempt_stop_settle", "arc_id": "attempt_deviation" },
+    { "from": "attempt_stop_settle", "to": "attempt_incomplete_receipt", "arc_id": "attempt_settlement" },
+    { "from": "attempt_incomplete_receipt", "to": "attempt_settled_cleanup", "arc_id": "incomplete_receipt" },
+    { "from": "attempt_incomplete_receipt", "to": "attempt_unsettled_recovery", "arc_id": "incomplete_receipt" },
+    { "from": "attempt_settled_cleanup", "to": "web_search_cleanup", "arc_id": "settled_failure_closure" },
+    { "from": "attempt_unsettled_recovery", "to": "web_search_cleanup", "arc_id": "unsettled_recovery_closure" }
+  ],
+  "outputs": ["web_search_closure"]
+}

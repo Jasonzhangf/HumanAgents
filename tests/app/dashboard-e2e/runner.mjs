@@ -19,6 +19,8 @@
  * scenario can report a false pass.
  */
 
+import { pathToFileURL } from 'node:url';
+
 export const SCENARIOS = Object.freeze(['web-search', 'local-file-search', 'aitest']);
 
 export function parseScenario(argv) {
@@ -37,4 +39,17 @@ function notImplemented(name) {
   return new Error(
     `dashboard-e2e runner.${name} is not implemented yet; see docs/ui/dashboard-e2e-runner-design.md`,
   );
+}
+
+// Fail closed: a direct `node runner.mjs --scenario <name>` invocation must exit
+// non-zero until the behavior exists, so no scenario can report a false pass.
+const invokedDirectly = process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  try {
+    await main(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

@@ -2,7 +2,10 @@
 
 Status: design candidate（等待独立 review）
 Baseline: `cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2`
-Graph: [`docs/dagpipe/dashboard-e2e.graph.json`](../dagpipe/dashboard-e2e.graph.json)
+Graphs: 每条命令一个独立 SESE 图
+[`dashboard-e2e-web-search.graph.json`](../dagpipe/dashboard-e2e-web-search.graph.json)、
+[`dashboard-e2e-local-file-search.graph.json`](../dagpipe/dashboard-e2e-local-file-search.graph.json)、
+[`dashboard-e2e-aitest.graph.json`](../dagpipe/dashboard-e2e-aitest.graph.json)
 Contract: [`docs/ui/dashboard-e2e-acceptance.md`](dashboard-e2e-acceptance.md)
 Web-search gate: [`docs/architecture/hand-search-websearch-plan.md`](../architecture/hand-search-websearch-plan.md)
 
@@ -17,8 +20,8 @@ pnpm e2e:dashboard:aitest
 ```
 
 三次 attempt 是三条互相独立的链路：各自新的 task/run ID、独立的隔离 runtime/workspace、独立的
-receipt 与独立收口。三者只在终点汇总，不共享运行状态（见 graph 中 `candidate_binding` 之后的三条分支
-与唯一 sink `dashboard_e2e_closure`）。
+receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源单汇），不把三条命令 AND-join 到一个终点：
+单独跑一条命令时，另外两条的产物根本不存在，任何要求"三条同时成立"的汇合节点都无法满足。
 
 范围内：统一 runner 与 lib、三个场景断言、为本地搜索补齐 typed 结果契约与读取入口、receipt/截图、
 失败/超时/取消两条收口分支。
@@ -69,9 +72,12 @@ scenarios/aitest.mjs
 "e2e:dashboard:aitest": "node tests/app/dashboard-e2e/runner.mjs --scenario aitest"
 ```
 
-DAG 节点与 owner 的绑定见 `docs/dagpipe/dashboard-e2e.graph.binding.json`：runner 步骤绑定到本轮新增的
-runner/lib/scenario 模块，产品步骤绑定到真实产品 owner（`provider-tool-execution.ts`、`agent-driver.ts`、
-`ui-runtime/coordinator.ts`、`ui-runtime/server.ts`、`hand/web-search.ts`），终点绑定到验收合同本身。
+DAG 节点与 owner 的绑定见三张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
+runner/lib/scenario 模块，产品步骤绑定到真实产品 owner（`packages/app/src/provider-tool-execution.ts`
+是 Dashboard 工具注册/调用/typed 结果/失败终态/report 的唯一 owner；`agent-driver.ts` 负责结果关联；
+`ui-runtime/coordinator.ts` 负责投影；`ui-runtime/server.ts` 负责读取入口）。Hand gateway 的
+`packages/runtime/src/hand/web-search.ts` 只在 Hand service 自身在范围内时绑定，不承担 Dashboard 工具的
+typed 结果语义。
 
 ## 5. 网络搜索门禁（阻塞项）
 
@@ -142,22 +148,28 @@ runner 断言：
 - 运行 task 指定 checker，保存原始 stdout 与 exit code；按 task 人工观察要求记录截图与结论。
 - 仅存在 HTML/SVG/动画标签不构成 task 完成；checker 通过也不替代语义验收。
 
-## 7. 失败、超时与取消收口（SESE 终点）
+## 7. 失败、超时与取消收口（每条命令图内的终点）
 
-`attempt_failure_detect` 从三条分支的执行/能力节点接入；之后：
+每张图里，`attempt_failure_detect` 只从**本命令**的执行/能力节点接入；之后：
 
 ```text
-attempt_failure_detect
-  -> attempt_stop_settle          POST /api/tasks/{id}/stop，轮询 Dashboard 与 Journal 至 settled
-  -> attempt_incomplete_receipt   写 INCOMPLETE receipt：首次偏离、原始错误、task/operation/tool-call ID
-  -> attempt_settled_cleanup      已 settled：关闭本轮 browser context、按精确 PID 停本轮服务、
-                                  核验 PID 退出/端口关闭/路径删除，附原始退出码
-  -> attempt_unsettled_recovery   未 settled：保留恢复所需 PID/端口/路径，记录唯一 recovery owner
-                                  与下一步，标 INCOMPLETE，不得宣称清理完成
+<本命令的 execution 或能力节点>
+  -> attempt_failure_detect        首次偏离识别（失败 / 超时 / 取消）
+  -> attempt_stop_settle           POST /api/tasks/{id}/stop，轮询 Dashboard 与 Journal 至 settled
+  -> attempt_incomplete_receipt    写 INCOMPLETE receipt：首次偏离、原始错误、task/operation/tool-call ID
+  -> attempt_settled_cleanup       已 settled：关闭本轮 browser context、按精确 PID 停本轮服务、
+                                   核验 PID 退出/端口关闭/路径删除，附原始退出码
+  -> attempt_unsettled_recovery    未 settled：保留恢复所需 PID/端口/路径，记录唯一 recovery owner
+                                   与下一步，标 INCOMPLETE，不得宣称清理完成
 ```
 
-两条分支都汇入唯一 sink。禁止 `pkill`、`killall`、`kill $(...)`、`xargs kill` 或端口扫描后批量终止；
-只允许显式 PID 或服务级操作。成功路径不提供"保留临时 root"的开关。
+成功路径（`*_receipt`）、已 settle 的失败路径（`settled_failure_closure`）与未 settle 的恢复路径
+（`unsettled_recovery_closure`）是**互斥终态**，都只汇入本命令唯一的 sink（`*_cleanup`），由该 sink
+按被选中的那个终态收口；三条路径不会同时产生。
+
+禁止 `pkill`、`killall`、`kill $(...)`、`xargs kill` 或端口扫描后批量终止；只允许显式 PID 或服务级操作。
+成功路径不提供"保留临时 root"的开关。runner 入口在行为实现前必须 fail closed：`node runner.mjs --scenario <name>`
+现在直接以非零退出，不允许出现"命令返回 0 但没有跑任何场景"的假通过。
 
 ## 8. 非目标与风险
 

@@ -1,0 +1,21 @@
+{
+  "graph": "humanagent-dashboard-e2e-local-file-search",
+  "labels": {
+    "candidate_binding": "绑定候选 SHA 并登记本轮隔离资源",
+    "local_search_entry": "本地搜索：真实页面输入、草稿与确认",
+    "local_search_execution": "本地搜索：运行队列执行多个 turn",
+    "local_search_invoke": "本地搜索：file.search 调用 ID 与参数真源",
+    "local_search_result_contract": "本地搜索：typed 结果与不可变 descriptor",
+    "local_search_journal_projection": "本地搜索：调用与结果投影到 Journal",
+    "local_search_tool_output_endpoint": "本地搜索：task-scoped 工具输出读取入口",
+    "local_search_browser_assertion": "本地搜索：API/SSE/DOM 关联与清单比对",
+    "local_search_terminal": "本地搜索：从权威 journal 断言终态",
+    "local_search_receipt": "本地搜索：绑定候选的 receipt",
+    "attempt_failure_detect": "失败、超时或取消的首次偏离识别",
+    "attempt_stop_settle": "任务级停止与 settle 证明",
+    "attempt_incomplete_receipt": "写入 INCOMPLETE receipt 与原始错误",
+    "attempt_settled_cleanup": "已 settle 的失败收口与资源释放",
+    "attempt_unsettled_recovery": "未 settle 的恢复资源保留与归属",
+    "local_search_cleanup": "本地搜索：按所选终态收口并核验资源"
+  }
+}

@@ -22,8 +22,12 @@
       "ownerRel": "packages/adapters/operations/src/web-search-route.ts"
     },
     "typed_result": {
-      "ownerPath": "packages/runtime/src/hand/web-search.ts",
-      "ownerRel": "packages/runtime/src/hand/web-search.ts"
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "failure_terminal": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
     },
     "report_persistence": {
       "ownerPath": "packages/app/src/provider-tool-execution.ts",

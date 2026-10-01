@@ -1,37 +1,13 @@
 {
-  "graph": "humanagent-dashboard-e2e",
+  "graph": "humanagent-dashboard-e2e-local-file-search",
   "operator": {
-    "operator": "humanagent-dashboard-e2e",
+    "operator": "humanagent-dashboard-e2e-local-file-search",
     "operator_version": "1"
   },
   "nodes": {
     "candidate_binding": {
       "ownerPath": "tests/app/dashboard-e2e/lib/binding.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/binding.mjs"
-    },
-    "web_search_entry": {
-      "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"
-    },
-    "web_search_execution": {
-      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
-    },
-    "web_search_provider_tool": {
-      "ownerPath": "packages/runtime/src/hand/web-search.ts",
-      "ownerRel": "packages/runtime/src/hand/web-search.ts"
-    },
-    "web_search_terminal": {
-      "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"
-    },
-    "web_search_receipt": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
-    },
-    "web_search_cleanup": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
     },
     "local_search_entry": {
       "ownerPath": "tests/app/dashboard-e2e/scenarios/local-file-search.mjs",
@@ -69,38 +45,6 @@
       "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
     },
-    "local_search_cleanup": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
-    },
-    "aitest_entry": {
-      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
-    },
-    "aitest_execution": {
-      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
-    },
-    "aitest_capability": {
-      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
-    },
-    "aitest_checker": {
-      "ownerPath": "tests/app/dashboard-e2e/scenarios/aitest.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/scenarios/aitest.mjs"
-    },
-    "aitest_terminal": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/journal.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/journal.mjs"
-    },
-    "aitest_receipt": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
-    },
-    "aitest_cleanup": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
-    },
     "attempt_failure_detect": {
       "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
       "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
@@ -121,9 +65,9 @@
       "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
     },
-    "dashboard_e2e_closure": {
-      "ownerPath": "docs/ui/dashboard-e2e-acceptance.md",
-      "ownerRel": "docs/ui/dashboard-e2e-acceptance.md"
+    "local_search_cleanup": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
     }
   }
 }
