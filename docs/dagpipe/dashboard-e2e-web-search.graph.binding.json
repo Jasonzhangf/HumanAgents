@@ -9,6 +9,10 @@
       "ownerPath": "tests/app/dashboard-e2e/lib/binding.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/binding.mjs"
     },
+    "browser_session": {
+      "ownerPath": "tests/app/dashboard-e2e/lib/browser.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/browser.mjs"
+    },
     "web_search_entry": {
       "ownerPath": "tests/app/dashboard-e2e/scenarios/web-search.mjs",
       "ownerRel": "tests/app/dashboard-e2e/scenarios/web-search.mjs"

@@ -2,6 +2,7 @@
   "graph": "humanagent-dashboard-e2e-local-file-search",
   "labels": {
     "candidate_binding": "绑定候选 SHA 并登记本轮隔离资源",
+    "browser_session": "启动本轮 serve 与真实浏览器会话并登记 PID 与端口",
     "local_search_entry": "本地搜索：真实页面输入、草稿与确认",
     "local_search_execution": "本地搜索：运行队列执行多个 turn 并累积尝试记录",
     "local_search_invoke": "本地搜索：file.search 调用 ID 与参数真源",

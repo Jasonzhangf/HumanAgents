@@ -20,10 +20,20 @@
       "iterator": "Whole"
     },
     {
+      "id": "browser_session",
+      "operator": "humanagent-dashboard-e2e-browser-session",
+      "operator_version": "1",
+      "inputs": ["bound_attempt"],
+      "output": { "id": "browser_ready", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "web_search_entry",
       "operator": "humanagent-dashboard-e2e-web-search-entry",
       "operator_version": "1",
-      "inputs": ["bound_attempt"],
+      "inputs": ["browser_ready"],
       "output": { "id": "entry_record", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -111,7 +121,8 @@
     }
   ],
   "edges": [
-    { "from": "candidate_binding", "to": "web_search_entry", "arc_id": "bound_attempt" },
+    { "from": "candidate_binding", "to": "browser_session", "arc_id": "bound_attempt" },
+    { "from": "browser_session", "to": "web_search_entry", "arc_id": "browser_ready" },
     { "from": "web_search_entry", "to": "web_search_execution", "arc_id": "entry_record" },
     { "from": "web_search_execution", "to": "web_search_provider_tool", "arc_id": "execution_record" },
     { "from": "web_search_provider_tool", "to": "web_search_terminal", "arc_id": "capability_record" },

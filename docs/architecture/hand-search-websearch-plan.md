@@ -284,58 +284,73 @@ is
 [`docs/dagpipe/hand-search-websearch.graph.json`](../dagpipe/hand-search-websearch.graph.json),
 validated by `pnpm dagpipe:validate`. Nodes, in order:
 
-1. tool registration / capability exposure: register `web.search` in the
-   Provider tool table and expose it to the Responses and Anthropic protocol
-   projections.
-2. provider tool-call projection: project `ProviderEvent.toolCall`
-   (`callId`, `toolId`, arguments) into the runtime task event / journal from the
-   original call context.
-3. invoke: dispatch the call through the operations web-search route to the
-   injected Agent Reach / Monid TinyFish provider.
-4. backend search: run the real read-only TinyFish `/search` call. An unavailable
+1. tool registration / capability exposure: register `web.search` in the provider
+   tool list assembled by `packages/app/src/ui-runtime/index.ts` (the file that
+   currently builds `providerTools`) and expose it to the Responses and Anthropic
+   protocol projections. `packages/app/src/provider-tool-execution.ts` declares
+   the tool definition and executes it; it does not register the tool.
+2. provider tool-call projection: `packages/adapters/provider/src/agent-driver.ts`
+   projects the provider's tool call into `ProviderEvent.toolCall` (`callId`,
+   `toolId`, arguments) from the original call context, for both the Responses and
+   Anthropic protocols. This is the protocol-level source of call identity.
+3. journal call projection: `packages/runtime/src/ui-runtime/coordinator.ts`
+   records that call event into `RuntimeTaskEvent` / Journal **before** the tool
+   executes, so a call that is later cancelled or fails is still observable. This
+   is the existing observe-time path, not a new post-hoc projector.
+4. invoke: the Dashboard `web.search` Provider tool dispatches the call to the
+   shared Agent Reach / Monid TinyFish provider adapter
+   (`packages/adapters/operations/src/web-search-provider.ts`) directly. It does
+   **not** dispatch through `packages/adapters/operations/src/web-search-route.ts`;
+   going through the Hand gateway route would make that route a second report
+   writer and a second settlement owner for the same Dashboard tool call.
+5. backend search: run the real read-only TinyFish `/search` call. An unavailable
    or failing backend records an explicit `provider-unavailable` /
    `provider-failed` error in the attempt record instead of aborting the chain.
-5. typed result: validate and normalize the provider output into a typed result;
+6. typed result: validate and normalize the provider output into a typed result;
    failure and cancellation produce a typed failure/cancel result with the same
    `callId`, never a fabricated success and never a `toolCall` masquerading as a
    result. A provider failure is never converted into a complete zero-result
    report.
-6. report persistence (success only): the Dashboard tool writes the report to the
+7. report persistence (success only): the Dashboard tool writes the report to the
    immutable asset store and attaches the unique typed descriptor
    `{ outputRef, outputDigest }`, where `outputDigest` is
    `sha256:<64 lowercase hex>`; the digest is recomputed on read. On failure or
    cancellation this stage passes the attempt record through unchanged. The
    descriptor must exist before projection, because projection renders it.
-7. journal projection: `packages/runtime/src/ui-runtime/coordinator.ts` is the
-   single projector that turns the tool call and the persisted typed result —
-   success, provider failure, and cancellation alike — into `RuntimeTaskEvent` /
-   Journal records, so the Dashboard can render the call, the typed result, the
-   failure or cancellation status, and the descriptor through GET / SSE / DOM. A
-   result that is never projected is not observable evidence, so this stage is on
-   the chain rather than optional.
-8. report retrieval (success only): the task-scoped read endpoint
+8. result projection: `packages/runtime/src/ui-runtime/coordinator.ts` records the
+   persisted typed **result** — success, provider failure, and cancellation alike —
+   into `RuntimeTaskEvent` / Journal, including the descriptor, so the Dashboard
+   can render the typed result, the failure or cancellation status, and the
+   descriptor through GET / SSE / DOM. This is the post-execution half; the call
+   half is node 3, and the two are separate nodes with separate edges so no single
+   node claims to project both. A result that is never projected is not observable
+   evidence, so this stage is on the chain rather than optional.
+9. report retrieval (success only): the task-scoped read endpoint
    `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
    validates task/operation/epoch/seq and the descriptor digest, then returns the
    report. It never exposes artifact file paths and never looks up by `callId`
    alone. On failure or cancellation this stage passes the record through.
-9. outcome selection: the single explicit terminal selector. It reads the attempt
-   record and emits exactly one terminal — success, explicit provider failure, or
-   cancellation. It never emits two, and it is the only node whose output is a
-   terminal.
-10. terminal settlement: settle the selected terminal. For a cancellation a
-    task-scoped stop reaches the route, aborts the operation-scoped controller,
-    drains the provider call, and settles; a stop that cannot prove drain reaches
-    `failed` or `reconcile_required`, is never reported as `cancelled`, and never
-    yields a false `cancelled` terminal. For success and failure it confirms the
-    operation is settled before cleanup.
-11. cleanup closure: release this attempt's resources (isolated
+10. outcome selection: the single explicit terminal selector. It reads the attempt
+    record and emits exactly one terminal — success, explicit provider failure, or
+    cancellation. It never emits two, and it is the only node whose output is a
+    terminal.
+11. terminal settlement: settle the selected terminal. For a cancellation a
+    task-scoped stop reaches the Dashboard stop dispatch
+    (`packages/app/src/ui-runtime/service.ts` / `server.ts`), aborts the
+    in-flight provider call through the shared provider adapter, drains it, and
+    settles; a stop that cannot prove drain reaches `failed` or
+    `reconcile_required`, is never reported as `cancelled`, and never yields a
+    false `cancelled` terminal. For success and failure it confirms the operation
+    is settled before cleanup. This path never goes through
+    `web-search-route.ts`.
+12. cleanup closure: release this attempt's resources (isolated
     workspace/control root, server PID/port, temporary files) and record the
     release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
     resources.
 
 The DAG has one source (tool registration) and one sink (cleanup closure), and
 success, provider failure and cancellation are mutually exclusive terminals
-selected by node 9, so each of the three outcomes is a complete
+selected by node 10, so each of the three outcomes is a complete
 single-entry/single-exit path and no node ever requires two of them at once.
 
 ## Implementation DAG
@@ -428,6 +443,9 @@ Terminal states:
   reused; this work does not add another dispatcher. A non-cancellable route
   receives a stop receipt with `stopped=false` and `sideEffectState='possible'`,
   which the existing gateway maps to recovery rather than false cancellation.
+- `packages/app/src/ui-runtime/index.ts`: assembles the `providerTools` list, so
+  it is the tool registration/capability-exposure owner for the Dashboard
+  `web.search` Provider tool.
 - `packages/app/src/provider-tool-execution.ts`: the Dashboard `web.search`
   Provider tool declaration, dispatch, typed tool result, and report
   persistence/digest (single owner). It is a different owner from the Hand

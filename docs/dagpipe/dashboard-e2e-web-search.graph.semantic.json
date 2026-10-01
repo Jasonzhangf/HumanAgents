@@ -2,6 +2,7 @@
   "graph": "humanagent-dashboard-e2e-web-search",
   "labels": {
     "candidate_binding": "绑定候选 SHA 并登记本轮隔离资源",
+    "browser_session": "启动本轮 serve 与真实浏览器会话并登记 PID 与端口",
     "web_search_entry": "网络搜索：真实页面输入、草稿与确认",
     "web_search_execution": "网络搜索：运行队列执行多个 turn 并累积尝试记录",
     "web_search_provider_tool": "网络搜索：Dashboard 工具调用与真实来源",

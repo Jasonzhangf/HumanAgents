@@ -6,12 +6,16 @@
   },
   "nodes": {
     "tool_registration": {
-      "ownerPath": "packages/app/src/provider-tool-execution.ts",
-      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+      "ownerPath": "packages/app/src/ui-runtime/index.ts",
+      "ownerRel": "packages/app/src/ui-runtime/index.ts"
     },
     "tool_call_projection": {
       "ownerPath": "packages/adapters/provider/src/agent-driver.ts",
       "ownerRel": "packages/adapters/provider/src/agent-driver.ts"
+    },
+    "journal_call_projection": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
     },
     "provider_invoke": {
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
@@ -25,7 +29,7 @@
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
       "ownerRel": "packages/app/src/provider-tool-execution.ts"
     },
-    "journal_projection": {
+    "result_projection": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
     },

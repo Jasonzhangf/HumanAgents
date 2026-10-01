@@ -30,10 +30,20 @@
       "iterator": "Whole"
     },
     {
+      "id": "journal_call_projection",
+      "operator": "humanagent-hand-search-websearch-journal-call-projection",
+      "operator_version": "1",
+      "inputs": ["projected_call"],
+      "output": { "id": "journaled_call", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "provider_invoke",
       "operator": "humanagent-hand-search-websearch-provider-invoke",
       "operator_version": "1",
-      "inputs": ["projected_call"],
+      "inputs": ["journaled_call"],
       "output": { "id": "invoke_request", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -70,8 +80,8 @@
       "iterator": "Whole"
     },
     {
-      "id": "journal_projection",
-      "operator": "humanagent-hand-search-websearch-journal-projection",
+      "id": "result_projection",
+      "operator": "humanagent-hand-search-websearch-result-projection",
       "operator_version": "1",
       "inputs": ["report_descriptor"],
       "output": { "id": "projected_result", "schema": "Object" },
@@ -122,12 +132,13 @@
   ],
   "edges": [
     { "from": "tool_registration", "to": "tool_call_projection", "arc_id": "registered_tool" },
-    { "from": "tool_call_projection", "to": "provider_invoke", "arc_id": "projected_call" },
+    { "from": "tool_call_projection", "to": "journal_call_projection", "arc_id": "projected_call" },
+    { "from": "journal_call_projection", "to": "provider_invoke", "arc_id": "journaled_call" },
     { "from": "provider_invoke", "to": "backend_search", "arc_id": "invoke_request" },
     { "from": "backend_search", "to": "typed_result", "arc_id": "provider_output" },
     { "from": "typed_result", "to": "report_persistence", "arc_id": "typed_tool_result" },
-    { "from": "report_persistence", "to": "journal_projection", "arc_id": "report_descriptor" },
-    { "from": "journal_projection", "to": "report_retrieval", "arc_id": "projected_result" },
+    { "from": "report_persistence", "to": "result_projection", "arc_id": "report_descriptor" },
+    { "from": "result_projection", "to": "report_retrieval", "arc_id": "projected_result" },
     { "from": "report_retrieval", "to": "outcome_select", "arc_id": "retrieved_report" },
     { "from": "outcome_select", "to": "terminal_settlement", "arc_id": "selected_terminal" },
     { "from": "terminal_settlement", "to": "cleanup_closure", "arc_id": "settled_terminal" }

@@ -73,7 +73,9 @@ scenarios/aitest.mjs
 ```
 
 DAG 节点与 owner 的绑定见四张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
-runner/lib/scenario 模块，产品步骤绑定到真实产品 owner。Dashboard `web.search` 工具链上，
+runner/lib/scenario 模块——`browser_session` 绑定 `lib/browser.mjs`（真实浏览器与 serve 生命周期），
+`candidate_binding` 绑定 `lib/binding.mjs`，失败/收口链路绑定 `runner.mjs`、`lib/journal.mjs`、
+`lib/receipt.mjs`、`lib/cleanup.mjs`——产品步骤绑定到真实产品 owner。Dashboard `web.search` 工具链上，
 `packages/app/src/provider-tool-execution.ts` 是工具注册、调用、typed 结果与 report/digest 的唯一
 owner；`packages/adapters/operations/src/web-search-provider.ts` 是 Agent Reach/TinyFish provider
 调用的唯一 owner，被 Hand service 与 Dashboard 工具共同复用；`agent-driver.ts` 负责结果关联；

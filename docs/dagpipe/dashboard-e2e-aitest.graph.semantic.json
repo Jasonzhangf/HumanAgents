@@ -2,6 +2,7 @@
   "graph": "humanagent-dashboard-e2e-aitest",
   "labels": {
     "candidate_binding": "绑定候选 SHA 并登记本轮隔离资源",
+    "browser_session": "启动本轮 serve 与真实浏览器会话并登记 PID 与端口",
     "aitest_entry": "AItest：真实页面输入、草稿与确认",
     "aitest_execution": "AItest：运行队列执行多个 turn 并累积尝试记录",
     "aitest_capability": "AItest：新建隔离 run 并产出产物",

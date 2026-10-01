@@ -3,11 +3,12 @@
   "labels": {
     "tool_registration": "注册 Dashboard 网络搜索 Provider 工具并暴露能力",
     "tool_call_projection": "从原始调用上下文投影 Provider 工具调用事件",
+    "journal_call_projection": "调用执行前把工具调用记录进 RuntimeTaskEvent 与 Journal",
     "provider_invoke": "发起 web.search 工具调用并转发到后端",
     "backend_search": "经 Agent Reach 路由到 Monid TinyFish 执行真实只读搜索",
     "typed_result": "校验并归一化 Provider 输出为 typed 工具结果",
-    "journal_projection": "把工具调用与 typed 结果（含失败与取消）投影到 RuntimeTaskEvent 与 Journal",
     "report_persistence": "持久化报告并生成 outputRef 与 outputDigest 摘要",
+    "result_projection": "持久化之后把 typed 结果与 descriptor（含失败与取消）投影到 Journal",
     "report_retrieval": "按 task/operation/epoch/seq 与摘要校验后读取报告",
     "outcome_select": "唯一终态选择节点：只发出成功或 Provider 失败或取消之一",
     "terminal_settlement": "按所选终态结算：取消须中止并排空 Provider，不伪造 cancelled",
