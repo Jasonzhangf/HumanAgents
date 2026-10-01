@@ -93,11 +93,13 @@ type WebSearchRequest = {
 ```
 
 The report is intentionally simple and model-readable. `resultsFound` is the
-number of valid provider matches before the requested result bound is applied;
-`resultsTruncated` is true when that bound removes valid matches. The service,
-not the provider, owns URL validation, de-duplication, rank normalization and
-applying the result bound; the completeness value is the provider's own
-`complete` signal, which the service records and, together with
+number of valid matches collected from the fetched provider pages before the
+requested result bound is applied — it is never a claim about how many matches
+exist on the web; `resultsScope` says so explicitly. `resultsTruncated` is true
+when the requested bound removes valid matches. The service, not the provider,
+owns URL validation, de-duplication, rank normalization and applying the result
+bound; the completeness value is the provider's own `exhausted` signal together
+with `pagesFetched`, which the service records and, together with
 `requireComplete`, turns into the success/failure decision (see the exact field
 relationships at the provider boundary below). `domains` and `recency` are passed
 to the provider as search constraints; this MVP does not claim to independently
@@ -269,8 +271,23 @@ The production `WebSearchProvider` binding is the Agent Reach route, which
 forwards web search to Monid TinyFish. A search is invoked as:
 
 ```sh
-monid run -p tinyfish -e /search --query '{"query":"<query>","purpose":"<purpose>"}' -w
+# start the run without -w so the run id is capturable before the call finishes
+monid run -p tinyfish -e /search --query '{"query":"<query>","purpose":"<purpose>","page":<n>}' -j
+# then poll it to a terminal status (and stop it on cancellation)
+monid runs get  -r <runId> -j
+monid runs stop -r <runId> -j
 ```
+
+The adapter must not invoke the blocking `-w` form, because `-w` waits for
+completion and leaves no window in which the `runId` can be captured for the
+required cancellation path. The start command prints the run record immediately,
+including `runId` and `status`; the adapter records that id, then polls
+`monid runs get` for each page and for the terminal status. Cancellation tests
+cover three cases: `runs stop` on a live run followed by polling to a terminal
+status; `CONFLICT ... already COMPLETED` treated as already settled rather than a
+stop failure; and a run that never reaches a terminal status inside the poll
+window mapping to `provider-unsettled` → `failed`/`reconcile_required`, never
+`cancelled`.
 
 The backend is read-only and free (price 0). It returns real result sources
 (`url`, `title`, `snippet`), which the service validates and normalizes before
@@ -502,10 +519,13 @@ Terminal states:
   report/artifact and verifier semantics.
 - `packages/adapters/operations/src/web-search-provider.ts`: the real Agent Reach
   / Monid TinyFish `WebSearchProvider` adapter, and the single
-  provider-invocation owner for web search. It returns every validated match and
-  does not apply `maxResults`. It is the shared boundary that both the Hand
-  gateway `web.search` service and the Dashboard `web.search` Provider tool call;
-  neither of them re-implements provider invocation.
+  provider-invocation owner for web search. It returns the validated matches it
+  collected from provider pages 0..10, stopping at the first short page, with no
+  claim of all web matches and with explicit ceiling behavior when it stops at
+  page 10 with full pages (`exhausted=false`). It does not apply `maxResults`. It
+  is the shared boundary that both the Hand gateway `web.search` service and the
+  Dashboard `web.search` Provider tool call; neither of them re-implements
+  provider invocation.
 - `packages/app`: explicit route registration, execution-epoch forwarding, and
   route-specific stop settlement. Existing `code.search` registration is
   reused; this work does not add another dispatcher. A non-cancellable route

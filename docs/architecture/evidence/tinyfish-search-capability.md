@@ -10,7 +10,10 @@ of an unbounded "all matches on the web" claim it cannot support.
 ## Endpoint
 
 ```bash
+# one-shot observation (waits for completion, so no run id is capturable in time)
 monid run -p tinyfish -e /search --query '{"query":"...","purpose":"..."}' -w -j
+# the form the adapter must use: start without -w, capture runId, then poll
+monid run -p tinyfish -e /search --query '{"query":"...","purpose":"...","page":0}' -j
 monid inspect -p tinyfish -e /search
 ```
 
