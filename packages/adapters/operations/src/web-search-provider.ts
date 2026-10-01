@@ -13,11 +13,14 @@
  * them re-implements provider invocation, and neither of them writes the
  * other's report.
  *
- * This file defines no second contract: the input/output shapes come from the
- * port owner. The design also removes `maxResults` from `WebSearchProviderInput`
- * in that owner, because this adapter must return every validated match and the
- * caller must apply the result bound to keep the pre-bound match count and the
- * truncation signal recoverable.
+ * Bounded collection contract. It pages `page` 0..10 and stops at the first
+ * page shorter than the per-page bound (observed bound: 10), returning the
+ * validated matches collected from those pages together with `pagesFetched` and
+ * `exhausted`. It makes no claim of returning every match on the web, because
+ * the provider exposes neither a global match count nor a completeness flag. If
+ * it stops at the page ceiling with full pages, `exhausted` is false so the
+ * caller knows more pages may exist. Callers apply the result bound themselves;
+ * this adapter never applies `maxResults`.
  *
  * Behavior is implemented only after the design DAG passes independent review;
  * until then the factory throws, so no caller can observe a fabricated result.
