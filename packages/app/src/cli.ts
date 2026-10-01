@@ -59,9 +59,49 @@ import { createServeRuntimeComposition, type ServeRuntimeComposition } from './s
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
 import type { ProviderConfig } from '../../config/src/index.js';
 
+// Options that consume the following argument as their value. `--help`/`-h`
+// appearing in such a value position is payload (for example
+// `run --plan default --prompt -h`), not a help request.
+const VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  '--binding',
+  '--capability-digest',
+  '--config-digest',
+  '--control-root',
+  '--endpoint',
+  '--fake-scenario',
+  '--fake-step-delay-ms',
+  '--host',
+  '--max-tokens',
+  '--memory',
+  '--mode',
+  '--model',
+  '--plan',
+  '--port',
+  '--prompt',
+  '--protocol',
+  '--provider',
+  '--rcc-base-url',
+  '--route',
+  '--session',
+  '--ui-root',
+  '--workspace',
+]);
+
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
+}
+
+function helpRequested(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (VALUE_OPTIONS.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg === '--help' || arg === '-h') return true;
+  }
+  return false;
 }
 
 function required(value: string | undefined, name: string): string {
@@ -486,7 +526,7 @@ export async function main(args: readonly string[]): Promise<void> {
     console.log(packageVersion());
     return;
   }
-  if (requestedCommand === '--help' || requestedCommand === '-h' || requestedCommand === 'help') {
+  if (helpRequested(args) || requestedCommand === 'help') {
     console.log(helpText());
     return;
   }

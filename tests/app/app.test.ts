@@ -1068,6 +1068,68 @@ test('CLI version exits before default serve routing', async () => {
   assert.match(output.trim(), /^\d+\.\d+\.\d+$/);
 });
 
+test('CLI serve --help prints help and exits without booting the server', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-cli-help-serve-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const runCli = (args: readonly string[], timeoutMs = 15_000): Promise<{ stdout: string; status: number }> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`cli did not exit before the server-boot timeout: ${stderr.slice(0, 400)}`));
+    }, timeoutMs);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, status: code ?? -1 });
+    });
+  });
+  try {
+    for (const flag of ['--help', '-h']) {
+      // A regression would boot serve; keep it off the real default control root and port.
+      const run = await runCli([
+        'serve', flag,
+        '--workspace', workspace,
+        '--control-root', controlRoot,
+        '--port', '0',
+      ]);
+      assert.equal(run.status, 0, `serve ${flag} should exit 0`);
+      assert.match(run.stdout, /用法：humanagent/);
+      // The serve startup banner must not be emitted on the help path.
+      assert.ok(!run.stdout.includes('"url":'), `serve ${flag} must not boot the server`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI --help inside an option value stays payload, not a help request', async () => {
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-cli-help-value-');
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  try {
+    for (const value of ['-h', '--help']) {
+      const output = execFileSync(process.execPath, [
+        cli,
+        'run',
+        '--plan', 'default',
+        '--prompt', value,
+        '--workspace', workspace,
+        '--control-root', controlRoot,
+      ], { encoding: 'utf8', stdio: 'pipe' });
+      assert.ok(!output.includes('用法：humanagent'), `--prompt ${value} must not print help`);
+      assert.match(output, /"command": "run"/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('CLI entry uses one typed invalid-prompt error', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-errors-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
