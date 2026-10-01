@@ -486,7 +486,7 @@ export async function main(args: readonly string[]): Promise<void> {
     console.log(packageVersion());
     return;
   }
-  if (requestedCommand === '--help' || requestedCommand === '-h' || requestedCommand === 'help') {
+  if (args.includes('--help') || args.includes('-h') || requestedCommand === 'help') {
     console.log(helpText());
     return;
   }
