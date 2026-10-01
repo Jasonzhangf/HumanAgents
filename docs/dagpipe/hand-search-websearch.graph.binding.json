@@ -37,6 +37,10 @@
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
       "ownerRel": "packages/app/src/provider-tool-execution.ts"
     },
+    "provider_result_projection": {
+      "ownerPath": "packages/adapters/provider/src/agent-driver.ts",
+      "ownerRel": "packages/adapters/provider/src/agent-driver.ts"
+    },
     "report_retrieval": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts"

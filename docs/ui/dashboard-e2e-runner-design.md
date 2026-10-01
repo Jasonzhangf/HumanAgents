@@ -75,12 +75,22 @@ scenarios/aitest.mjs
 DAG 节点与 owner 的绑定见四张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
 runner/lib/scenario 模块——`browser_session` 绑定 `lib/browser.mjs`（真实浏览器与 serve 生命周期），
 `candidate_binding` 绑定 `lib/binding.mjs`，失败/收口链路绑定 `runner.mjs`、`lib/journal.mjs`、
-`lib/receipt.mjs`、`lib/cleanup.mjs`——产品步骤绑定到真实产品 owner。Dashboard `web.search` 工具链上，
-`packages/app/src/provider-tool-execution.ts` 是工具注册、调用、typed 结果与 report/digest 的唯一
-owner；`packages/adapters/operations/src/web-search-provider.ts` 是 Agent Reach/TinyFish provider
-调用的唯一 owner，被 Hand service 与 Dashboard 工具共同复用；`agent-driver.ts` 负责结果关联；
-`ui-runtime/coordinator.ts` 负责投影（必须发生在 report descriptor 生成之后）；`ui-runtime/server.ts`
-负责读取入口。Hand gateway 的 `packages/runtime/src/hand/web-search.ts` 与
+`lib/receipt.mjs`、`lib/cleanup.mjs`——产品步骤绑定到真实产品 owner。Dashboard `web.search` 工具链上：
+
+- `packages/app/src/ui-runtime/index.ts` 是**工具注册/能力暴露**的唯一 owner（它组装 `providerTools`）；
+- `packages/app/src/provider-tool-execution.ts` 拥有工具声明、派发、typed 结果与 report/digest 持久化，
+  **不**注册工具；
+- `packages/adapters/operations/src/web-search-provider.ts` 是 Agent Reach/TinyFish provider 调用的唯一
+  owner，被 Hand service 与 Dashboard 工具共同复用；
+- `packages/adapters/provider/src/agent-driver.ts` 在 report/digest 生成之后把 typed 结果投影为 Provider
+  结果事件（含 `callId`、status、error、`outputDigest`），停止/取消时也必须发出同一 `callId` 的 typed
+  结果事件，不能静默吞掉；
+- `packages/contracts` 拥有该结果事件与 `ProviderToolResult` 的字段与 validator；
+- `packages/runtime/src/ui-runtime/coordinator.ts` 负责把调用与结果投影进 Journal/SSE/DOM（结果投影必须
+  发生在 report descriptor 生成之后）；
+- `packages/app/src/ui-runtime/server.ts` 负责读取入口与任务级停止派发。
+
+Hand gateway 的 `packages/runtime/src/hand/web-search.ts` 与
 `packages/adapters/operations/src/web-search-route.ts` 只在 Hand service 自身在范围内时绑定，不承担
 Dashboard 工具的 typed 结果与 report 语义；Dashboard 工具不得经由 `web-search-route.ts` 派发，否则
 同一个调用会出现两个 report writer。

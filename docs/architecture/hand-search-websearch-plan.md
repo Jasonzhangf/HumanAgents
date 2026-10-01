@@ -317,24 +317,35 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    `sha256:<64 lowercase hex>`; the digest is recomputed on read. On failure or
    cancellation this stage passes the attempt record through unchanged. The
    descriptor must exist before projection, because projection renders it.
-8. result projection: `packages/runtime/src/ui-runtime/coordinator.ts` records the
-   persisted typed **result** — success, provider failure, and cancellation alike —
+8. provider result projection: `packages/adapters/provider/src/agent-driver.ts`
+   turns the Dashboard tool's typed result into the provider result event that
+   carries `callId`, status, error, and the `{ outputRef, outputDigest }`
+   descriptor, from the original call context, for both the Responses and
+   Anthropic protocols. A stop or cancellation must still emit a typed result
+   event with the same `callId`; the driver must not return silently and swallow
+   the result, because the typed cancellation result is required evidence.
+   `packages/contracts` owns these fields and their validator: this change extends
+   `ProviderToolExecutionResult`, `ProviderEvent`, and `ProviderToolResult` with
+   status, error, `callId`, and `outputDigest` so the descriptor can cross this
+   boundary at all.
+9. result projection: `packages/runtime/src/ui-runtime/coordinator.ts` records that
+   provider result event — success, provider failure, and cancellation alike —
    into `RuntimeTaskEvent` / Journal, including the descriptor, so the Dashboard
    can render the typed result, the failure or cancellation status, and the
    descriptor through GET / SSE / DOM. This is the post-execution half; the call
    half is node 3, and the two are separate nodes with separate edges so no single
    node claims to project both. A result that is never projected is not observable
    evidence, so this stage is on the chain rather than optional.
-9. report retrieval (success only): the task-scoped read endpoint
-   `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
-   validates task/operation/epoch/seq and the descriptor digest, then returns the
-   report. It never exposes artifact file paths and never looks up by `callId`
-   alone. On failure or cancellation this stage passes the record through.
-10. outcome selection: the single explicit terminal selector. It reads the attempt
+10. report retrieval (success only): the task-scoped read endpoint
+    `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
+    validates task/operation/epoch/seq and the descriptor digest, then returns the
+    report. It never exposes artifact file paths and never looks up by `callId`
+    alone. On failure or cancellation this stage passes the record through.
+11. outcome selection: the single explicit terminal selector. It reads the attempt
     record and emits exactly one terminal — success, explicit provider failure, or
     cancellation. It never emits two, and it is the only node whose output is a
     terminal.
-11. terminal settlement: settle the selected terminal. For a cancellation a
+12. terminal settlement: settle the selected terminal. For a cancellation a
     task-scoped stop reaches the Dashboard stop dispatch
     (`packages/app/src/ui-runtime/service.ts` / `server.ts`), aborts the
     in-flight provider call through the shared provider adapter, drains it, and
@@ -343,14 +354,14 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
     false `cancelled` terminal. For success and failure it confirms the operation
     is settled before cleanup. This path never goes through
     `web-search-route.ts`.
-12. cleanup closure: release this attempt's resources (isolated
+13. cleanup closure: release this attempt's resources (isolated
     workspace/control root, server PID/port, temporary files) and record the
     release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
     resources.
 
 The DAG has one source (tool registration) and one sink (cleanup closure), and
 success, provider failure and cancellation are mutually exclusive terminals
-selected by node 10, so each of the three outcomes is a complete
+selected by node 11, so each of the three outcomes is a complete
 single-entry/single-exit path and no node ever requires two of them at once.
 
 ## Implementation DAG
@@ -425,7 +436,11 @@ Terminal states:
 
 ## Ownership and file plan
 
-- `packages/contracts`: public request/report/result types and exports.
+- `packages/contracts`: public request/report/result types, the
+  `ProviderToolResult` / `ProviderEvent` shapes and their validators, and
+  exports. This change extends them with status, error, `callId`, and
+  `outputDigest` so the typed result and its descriptor can cross the provider
+  boundary.
 - `packages/runtime/src/hand`: semantic service validation, normalization, and
   provider port.
 - `packages/adapters/operations/src/web-search-route.ts`: the Hand gateway
@@ -453,11 +468,14 @@ Terminal states:
   Dashboard tool calls the shared provider adapter above and writes its own
   report, and it must not dispatch through `web-search-route.ts`, which would
   make the Hand route a second report writer for the same call.
-- `packages/adapters/provider/src/agent-driver.ts`: projects tool calls and
+- `packages/adapters/provider/src/agent-driver.ts`: projects tool calls and typed
   results from the original call context for the Responses and Anthropic
-  protocols.
-- `packages/runtime/src/ui-runtime/coordinator.ts`: projects calls and results
-  into `RuntimeTaskEvent` / Journal.
+  protocols, including the descriptor, failure and cancellation results. A stop
+  or cancellation still emits a typed result event with the same `callId`; it
+  does not return silently.
+- `packages/runtime/src/ui-runtime/coordinator.ts`: records the projected call
+  before execution and the projected typed result after persistence into
+  `RuntimeTaskEvent` / Journal.
 - `packages/app/src/ui-runtime/service.ts` and `server.ts`: the task-scoped
   tool-output read endpoint and the task-scoped stop dispatch. They own the
   Dashboard `web.search` terminal settlement: a stop for this task aborts the

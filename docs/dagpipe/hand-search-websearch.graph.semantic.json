@@ -8,6 +8,7 @@
     "backend_search": "经 Agent Reach 路由到 Monid TinyFish 执行真实只读搜索",
     "typed_result": "校验并归一化 Provider 输出为 typed 工具结果",
     "report_persistence": "持久化报告并生成 outputRef 与 outputDigest 摘要",
+    "provider_result_projection": "由 agent-driver 把 typed 结果投影为 Provider 结果事件（含取消与失败）",
     "result_projection": "持久化之后把 typed 结果与 descriptor（含失败与取消）投影到 Journal",
     "report_retrieval": "按 task/operation/epoch/seq 与摘要校验后读取报告",
     "outcome_select": "唯一终态选择节点：只发出成功或 Provider 失败或取消之一",
