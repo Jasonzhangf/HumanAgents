@@ -192,6 +192,15 @@ A provider that cannot return an unbounded match list cannot satisfy this
 contract and must fail with `provider-failed` rather than silently applying its
 own bound.
 
+There is exactly one port, and `packages/runtime/src/hand/web-search.ts` owns it.
+This change therefore also edits that owner: `WebSearchProviderInput` loses its
+`maxResults` field (the service applies the bound after validation), and
+`WebSearchProviderOutput` keeps `results`, `complete` and `unresolvedSources`
+with the semantics above. `WebSearchService` consumes the port; the production
+adapter in `packages/adapters/operations/src/web-search-provider.ts` implements
+it. No second provider input/output contract is introduced anywhere, and no
+caller is wired before the owner's port is updated.
+
 The normalized business constraints are part of the report (`domains` and
 `recency`) so the verifier can bind the complete request without copying any
 provider/model control binding. The report also carries the normalized
@@ -432,7 +441,12 @@ Terminal states:
 - `packages/runtime/src/ui-runtime/coordinator.ts`: projects calls and results
   into `RuntimeTaskEvent` / Journal.
 - `packages/app/src/ui-runtime/service.ts` and `server.ts`: the task-scoped
-  tool-output read endpoint and the task-scoped stop dispatch.
+  tool-output read endpoint and the task-scoped stop dispatch. They own the
+  Dashboard `web.search` terminal settlement: a stop for this task aborts the
+  in-flight provider call through the shared provider adapter above and drains it
+  before settling. The Dashboard settlement path never goes through
+  `web-search-route.ts`, so the Hand gateway route is not a second settlement
+  owner for the same call.
 - `tests/runtime/hand`: service behavior and failure matrix.
 - `tests/app`: registered gateway end-to-end assembly and report verification.
 

@@ -42,8 +42,8 @@
       "ownerRel": "packages/app/src/provider-tool-execution.ts"
     },
     "terminal_settlement": {
-      "ownerPath": "packages/adapters/operations/src/web-search-route.ts",
-      "ownerRel": "packages/adapters/operations/src/web-search-route.ts"
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
     "cleanup_closure": {
       "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
