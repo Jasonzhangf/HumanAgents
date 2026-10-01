@@ -242,14 +242,21 @@ a terminal status inside the window, the adapter raises a typed
 `reconcile_required`; it is never reported as `cancelled`.
 
 There is exactly one port, and `packages/runtime/src/hand/web-search.ts` owns it.
-This change therefore also edits that owner: `WebSearchProviderInput` loses its
-`maxResults` field (the service applies the bound after validation), and
-`WebSearchProviderOutput` carries `entries`, `pagesFetched`, `exhausted` and
-`pageErrors` with the semantics above. `WebSearchService` consumes the port and is
-the single validator; the production adapter in
-`packages/adapters/operations/src/web-search-provider.ts` implements it. No second
-provider input/output contract is introduced anywhere, and no caller is wired
-before the owner's port is updated.
+
+**The port edit is a pending, declared change of this design, not yet applied to
+that file.** Current state of `packages/runtime/src/hand/web-search.ts`:
+`WebSearchProviderInput` carries `maxResults`; `WebSearchProviderOutput` carries
+`results`, `complete`, `unresolvedSources`. Target state, applied in the same
+candidate together with the service implementation, per this plan:
+`WebSearchProviderInput.maxResults` is removed (the service applies the bound
+after validation) and `WebSearchProviderOutput` carries `entries`,
+`pagesFetched`, `exhausted`, `pageErrors` with the semantics above.
+`WebSearchService` consumes the port and is the single validator; the production
+adapter in `packages/adapters/operations/src/web-search-provider.ts` implements
+it. No second provider input/output contract is introduced anywhere, and no
+caller is wired before the owner's port is updated. Until the candidate applies
+the edit, the executable owner still exposes the current contract, so neither the
+design nor the code can diverge silently.
 
 The adapter is constructed from a control-plane-injected typed config rather than
 from constants in the source, so provider slug, CLI path, endpoint, page ceiling,
