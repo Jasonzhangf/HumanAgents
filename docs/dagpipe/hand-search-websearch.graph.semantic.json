@@ -6,6 +6,7 @@
     "provider_invoke": "发起 web.search 工具调用并转发到后端",
     "backend_search": "经 Agent Reach 路由到 Monid TinyFish 执行真实只读搜索",
     "typed_result": "校验并归一化 Provider 输出为 typed 工具结果",
+    "journal_projection": "把工具调用与 typed 结果（含失败与取消）投影到 RuntimeTaskEvent 与 Journal",
     "report_persistence": "持久化报告并生成 outputRef 与 outputDigest 摘要",
     "report_retrieval": "按 task/operation/epoch/seq 与摘要校验后读取报告",
     "outcome_select": "唯一终态选择节点：只发出成功或 Provider 失败或取消之一",

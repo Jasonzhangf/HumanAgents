@@ -3,7 +3,7 @@
   "version": "1",
   "meta": {
     "title": "Dashboard AItest E2E：隔离 run、checker 证据、终态与收口",
-    "baseline": "cc5f3f0d49d98a414abcdc7f7bcc814c80cdbb2"
+    "baseline": "cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2"
   },
   "inputs": [
     { "id": "candidate_revision", "schema": "Object" }

@@ -25,6 +25,10 @@
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
       "ownerRel": "packages/app/src/provider-tool-execution.ts"
     },
+    "journal_projection": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+    },
     "report_persistence": {
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
       "ownerRel": "packages/app/src/provider-tool-execution.ts"

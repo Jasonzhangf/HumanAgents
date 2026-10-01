@@ -95,10 +95,13 @@ type WebSearchRequest = {
 The report is intentionally simple and model-readable. `resultsFound` is the
 number of valid provider matches before the requested result bound is applied;
 `resultsTruncated` is true when that bound removes valid matches. The service,
-not the provider, owns URL validation, de-duplication, rank normalization, and
-the completeness decision. `domains` and `recency` are passed to the provider
-as search constraints; this MVP does not claim to independently verify
-provider-side recency or domain filtering.
+not the provider, owns URL validation, de-duplication, rank normalization and
+applying the result bound; the completeness value is the provider's own
+`complete` signal, which the service records and, together with
+`requireComplete`, turns into the success/failure decision (see the exact field
+relationships at the provider boundary below). `domains` and `recency` are passed
+to the provider as search constraints; this MVP does not claim to independently
+verify provider-side recency or domain filtering.
 
 ```ts
 type WebSearchReport = {
@@ -148,7 +151,11 @@ set with more valid provider matches is a successful truncated report. The
 verifier binds `query`, normalized `domains`, normalized `recency`, and the
 requested result bound, not only the query string.
 
-The provider boundary is control-plane injected:
+The provider boundary is control-plane injected. The provider returns **every
+validated match it found for the requested scope**; it does not apply
+`maxResults`, because a provider-side bound would make the pre-bound match count
+unrecoverable and the service could not compute `resultsFound` or
+`resultsTruncated`:
 
 ```ts
 interface WebSearchProvider {
@@ -156,7 +163,6 @@ interface WebSearchProvider {
     query: string;
     domains: readonly string[];
     recency: 'day' | 'week' | 'month' | 'year' | 'any';
-    maxResults: number;
     signal: AbortSignal;
   }): Promise<{
     results: readonly WebSearchResult[];
@@ -165,6 +171,26 @@ interface WebSearchProvider {
   }>;
 }
 ```
+
+The exact relationship between the provider output and the report fields is:
+
+- `validMatches` is the provider's `results` after the service's URL validation,
+  de-duplication and rank normalization; it is never bounded by `maxResults`.
+- `resultsFound = validMatches.length` — the number of valid matches before the
+  requested bound is applied.
+- `results = validMatches.slice(0, maxResults)`; therefore
+  `results.length === Math.min(resultsFound, maxResults)`.
+- `resultsTruncated === resultsFound > maxResults` — a pure bound signal, and the
+  only thing that sets it.
+- `searchComplete === provider.complete` — whether the provider covered the whole
+  requested scope. It is independent of `maxResults`: a search can be complete
+  and truncated at the same time, and incomplete without being truncated.
+- `unresolvedSources` is copied verbatim from the provider and lists the sources
+  the provider could not cover; it is not a truncation signal.
+
+A provider that cannot return an unbounded match list cannot satisfy this
+contract and must fail with `provider-failed` rather than silently applying its
+own bound.
 
 The normalized business constraints are part of the report (`domains` and
 `recency`) so the verifier can bind the complete request without copying any
@@ -265,34 +291,41 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    `callId`, never a fabricated success and never a `toolCall` masquerading as a
    result. A provider failure is never converted into a complete zero-result
    report.
-6. report persistence (success only): write the report to the immutable asset
+6. journal projection: `packages/runtime/src/ui-runtime/coordinator.ts` is the
+   single projector that turns the tool call and the typed result — success,
+   provider failure, and cancellation alike — into `RuntimeTaskEvent` / Journal
+   records, so the Dashboard can render the call, the typed result, the failure
+   or cancellation status, and the descriptor through GET / SSE / DOM. A result
+   that is never projected is not observable evidence, so this stage is on the
+   chain rather than optional.
+7. report persistence (success only): write the report to the immutable asset
    store and attach the unique typed descriptor `{ outputRef, outputDigest }`,
    where `outputDigest` is `sha256:<64 lowercase hex>`; the digest is recomputed
    on read. On failure or cancellation this stage passes the attempt record
    through unchanged.
-7. report retrieval (success only): the task-scoped read endpoint
+8. report retrieval (success only): the task-scoped read endpoint
    `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
    validates task/operation/epoch/seq and the descriptor digest, then returns the
    report. It never exposes artifact file paths and never looks up by `callId`
    alone. On failure or cancellation this stage passes the record through.
-8. outcome selection: the single explicit terminal selector. It reads the attempt
+9. outcome selection: the single explicit terminal selector. It reads the attempt
    record and emits exactly one terminal — success, explicit provider failure, or
    cancellation. It never emits two, and it is the only node whose output is a
    terminal.
-9. terminal settlement: settle the selected terminal. For a cancellation a
-   task-scoped stop reaches the route, aborts the operation-scoped controller,
-   drains the provider call, and settles; a stop that cannot prove drain reaches
-   `failed` or `reconcile_required`, is never reported as `cancelled`, and never
-   yields a false `cancelled` terminal. For success and failure it confirms the
-   operation is settled before cleanup.
-10. cleanup closure: release this attempt's resources (isolated
+10. terminal settlement: settle the selected terminal. For a cancellation a
+    task-scoped stop reaches the route, aborts the operation-scoped controller,
+    drains the provider call, and settles; a stop that cannot prove drain reaches
+    `failed` or `reconcile_required`, is never reported as `cancelled`, and never
+    yields a false `cancelled` terminal. For success and failure it confirms the
+    operation is settled before cleanup.
+11. cleanup closure: release this attempt's resources (isolated
     workspace/control root, server PID/port, temporary files) and record the
     release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
     resources.
 
 The DAG has one source (tool registration) and one sink (cleanup closure), and
 success, provider failure and cancellation are mutually exclusive terminals
-selected by node 8, so each of the three outcomes is a complete
+selected by node 9, so each of the three outcomes is a complete
 single-entry/single-exit path and no node ever requires two of them at once.
 
 ## Implementation DAG

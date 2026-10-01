@@ -3,7 +3,7 @@
   "version": "1",
   "meta": {
     "title": "Dashboard web.search 工具：注册、调用、取消、结果、报告与收口",
-    "baseline": "cc5f3f0d49d98a414abcdc7f7bcc814c80cdbb2"
+    "baseline": "cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2"
   },
   "inputs": [
     { "id": "web_search_tool_request", "schema": "Object" }
@@ -60,10 +60,20 @@
       "iterator": "Whole"
     },
     {
+      "id": "journal_projection",
+      "operator": "humanagent-hand-search-websearch-journal-projection",
+      "operator_version": "1",
+      "inputs": ["typed_tool_result"],
+      "output": { "id": "projected_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "report_persistence",
       "operator": "humanagent-hand-search-websearch-report-persistence",
       "operator_version": "1",
-      "inputs": ["typed_tool_result"],
+      "inputs": ["projected_result"],
       "output": { "id": "report_descriptor", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -115,7 +125,8 @@
     { "from": "tool_call_projection", "to": "provider_invoke", "arc_id": "projected_call" },
     { "from": "provider_invoke", "to": "backend_search", "arc_id": "invoke_request" },
     { "from": "backend_search", "to": "typed_result", "arc_id": "provider_output" },
-    { "from": "typed_result", "to": "report_persistence", "arc_id": "typed_tool_result" },
+    { "from": "typed_result", "to": "journal_projection", "arc_id": "typed_tool_result" },
+    { "from": "journal_projection", "to": "report_persistence", "arc_id": "projected_result" },
     { "from": "report_persistence", "to": "report_retrieval", "arc_id": "report_descriptor" },
     { "from": "report_retrieval", "to": "outcome_select", "arc_id": "retrieved_report" },
     { "from": "outcome_select", "to": "terminal_settlement", "arc_id": "selected_terminal" },
