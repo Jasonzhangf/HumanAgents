@@ -1,0 +1,127 @@
+{
+  "id": "humanagent-dashboard-e2e",
+  "version": "1",
+  "meta": {
+    "title": "Dashboard 三类真实浏览器 E2E：候选绑定到收据与清理闭环",
+    "baseline": "cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2"
+  },
+  "inputs": [
+    { "id": "candidate_revision", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "candidate_binding",
+      "operator": "humanagent-dashboard-e2e-candidate-binding",
+      "operator_version": "1",
+      "inputs": ["candidate_revision"],
+      "output": { "id": "isolated_run", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "browser_entry",
+      "operator": "humanagent-dashboard-e2e-browser-entry",
+      "operator_version": "1",
+      "inputs": ["isolated_run"],
+      "output": { "id": "confirmed_task", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "runtime_execution",
+      "operator": "humanagent-dashboard-e2e-runtime-execution",
+      "operator_version": "1",
+      "inputs": ["confirmed_task"],
+      "output": { "id": "executed_turns", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "scenario_dispatch",
+      "operator": "humanagent-dashboard-e2e-scenario-dispatch",
+      "operator_version": "1",
+      "inputs": ["executed_turns"],
+      "output": { "id": "scenario_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "web_search_capability",
+      "operator": "humanagent-dashboard-e2e-web-search",
+      "operator_version": "1",
+      "inputs": ["scenario_evidence"],
+      "output": { "id": "web_search_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_file_search_capability",
+      "operator": "humanagent-dashboard-e2e-local-file-search",
+      "operator_version": "1",
+      "inputs": ["scenario_evidence"],
+      "output": { "id": "local_search_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "aitest_capability",
+      "operator": "humanagent-dashboard-e2e-aitest",
+      "operator_version": "1",
+      "inputs": ["scenario_evidence"],
+      "output": { "id": "aitest_evidence", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "terminal_assertion",
+      "operator": "humanagent-dashboard-e2e-terminal-assertion",
+      "operator_version": "1",
+      "inputs": ["web_search_evidence", "local_search_evidence", "aitest_evidence"],
+      "output": { "id": "verified_terminal", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "receipt_emission",
+      "operator": "humanagent-dashboard-e2e-receipt",
+      "operator_version": "1",
+      "inputs": ["verified_terminal"],
+      "output": { "id": "dashboard_e2e_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "cleanup_closure",
+      "operator": "humanagent-dashboard-e2e-cleanup",
+      "operator_version": "1",
+      "inputs": ["dashboard_e2e_receipt"],
+      "output": { "id": "dashboard_e2e_closure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "candidate_binding", "to": "browser_entry", "arc_id": "isolated_run" },
+    { "from": "browser_entry", "to": "runtime_execution", "arc_id": "confirmed_task" },
+    { "from": "runtime_execution", "to": "scenario_dispatch", "arc_id": "executed_turns" },
+    { "from": "scenario_dispatch", "to": "web_search_capability", "arc_id": "scenario_evidence" },
+    { "from": "scenario_dispatch", "to": "local_file_search_capability", "arc_id": "scenario_evidence" },
+    { "from": "scenario_dispatch", "to": "aitest_capability", "arc_id": "scenario_evidence" },
+    { "from": "web_search_capability", "to": "terminal_assertion", "arc_id": "web_search_evidence" },
+    { "from": "local_file_search_capability", "to": "terminal_assertion", "arc_id": "local_search_evidence" },
+    { "from": "aitest_capability", "to": "terminal_assertion", "arc_id": "aitest_evidence" },
+    { "from": "terminal_assertion", "to": "receipt_emission", "arc_id": "verified_terminal" },
+    { "from": "receipt_emission", "to": "cleanup_closure", "arc_id": "dashboard_e2e_receipt" }
+  ],
+  "outputs": ["dashboard_e2e_closure"]
+}

@@ -1,0 +1,49 @@
+{
+  "graph": "humanagent-dashboard-e2e",
+  "operator": {
+    "operator": "humanagent-dashboard-e2e",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "candidate_binding": {
+      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
+      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    },
+    "browser_entry": {
+      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
+      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    },
+    "runtime_execution": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+    },
+    "scenario_dispatch": {
+      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
+      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    },
+    "web_search_capability": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "local_file_search_capability": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "aitest_capability": {
+      "ownerPath": "docs/ui/dashboard-e2e-acceptance.md",
+      "ownerRel": "docs/ui/dashboard-e2e-acceptance.md"
+    },
+    "terminal_assertion": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    },
+    "receipt_emission": {
+      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
+      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    },
+    "cleanup_closure": {
+      "ownerPath": "tests/app/real-browser-explicit-implicit-e2e.mjs",
+      "ownerRel": "tests/app/real-browser-explicit-implicit-e2e.mjs"
+    }
+  }
+}

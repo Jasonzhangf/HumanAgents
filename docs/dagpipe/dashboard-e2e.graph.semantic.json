@@ -1,0 +1,15 @@
+{
+  "graph": "humanagent-dashboard-e2e",
+  "labels": {
+    "candidate_binding": "绑定候选 SHA 并建立隔离 runtime 与 workspace",
+    "browser_entry": "真实 Dashboard 输入任务、生成草稿并取得用户确认",
+    "runtime_execution": "运行队列执行多个 turn 与工具步骤",
+    "scenario_dispatch": "按场景选择并装载对应能力断言",
+    "web_search_capability": "经 TinyFish 执行真实网络搜索并保留来源证据",
+    "local_file_search_capability": "执行本地文件搜索并保留匹配路径与命中证据",
+    "aitest_capability": "在 AItest 新建 run 并运行任务自带 checker",
+    "terminal_assertion": "从权威 journal 断言终态、turn 与工具证据",
+    "receipt_emission": "产出绑定候选 SHA 的 receipt 与必要截图",
+    "cleanup_closure": "按 settled 分支收口并核对资源释放"
+  }
+}
