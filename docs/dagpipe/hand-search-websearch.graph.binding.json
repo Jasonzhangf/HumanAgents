@@ -25,10 +25,6 @@
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
       "ownerRel": "packages/app/src/provider-tool-execution.ts"
     },
-    "failure_terminal": {
-      "ownerPath": "packages/app/src/provider-tool-execution.ts",
-      "ownerRel": "packages/app/src/provider-tool-execution.ts"
-    },
     "report_persistence": {
       "ownerPath": "packages/app/src/provider-tool-execution.ts",
       "ownerRel": "packages/app/src/provider-tool-execution.ts"
@@ -37,13 +33,17 @@
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
-    "cancel_settlement": {
+    "outcome_select": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
+    "terminal_settlement": {
       "ownerPath": "packages/adapters/operations/src/web-search-route.ts",
       "ownerRel": "packages/adapters/operations/src/web-search-route.ts"
     },
     "cleanup_closure": {
-      "ownerPath": "docs/ui/dashboard-e2e-acceptance.md",
-      "ownerRel": "docs/ui/dashboard-e2e-acceptance.md"
+      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
     }
   }
 }

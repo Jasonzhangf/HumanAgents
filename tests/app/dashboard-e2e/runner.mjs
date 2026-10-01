@@ -4,7 +4,9 @@
  *
  * Design:   docs/ui/dashboard-e2e-runner-design.md
  * Contract: docs/ui/dashboard-e2e-acceptance.md
- * Graph:    docs/dagpipe/dashboard-e2e.graph.json
+ * Graphs:   docs/dagpipe/dashboard-e2e-web-search.graph.json
+ *           docs/dagpipe/dashboard-e2e-local-file-search.graph.json
+ *           docs/dagpipe/dashboard-e2e-aitest.graph.json
  *
  * Single entry for the three acceptance commands:
  *   pnpm e2e:dashboard:web-search

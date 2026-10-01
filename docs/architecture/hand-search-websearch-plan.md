@@ -240,7 +240,12 @@ distinct owners and semantics:
 - the Dashboard `web.search` Provider tool owns tool registration, the typed
   tool result, report persistence/digest, and the tool-output retrieval edge.
 
-The lifecycle is a single-entry/single-exit DAG. Its project graph artifact is
+The lifecycle is a single-entry/single-exit DAG, and it is a **single chain**:
+every node has exactly one input and one output, so the graph contains no
+conjunctive (AND) join anywhere. Each stage emits a typed attempt record that is
+either a success or an explicit error, and passes it to the next stage; a failure
+at any stage therefore still reaches the closure tail. Its project graph artifact
+is
 [`docs/dagpipe/hand-search-websearch.graph.json`](../dagpipe/hand-search-websearch.graph.json),
 validated by `pnpm dagpipe:validate`. Nodes, in order:
 
@@ -252,41 +257,43 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    original call context.
 3. invoke: dispatch the call through the operations web-search route to the
    injected Agent Reach / Monid TinyFish provider.
-4. typed result: validate and normalize the provider output into a typed result;
+4. backend search: run the real read-only TinyFish `/search` call. An unavailable
+   or failing backend records an explicit `provider-unavailable` /
+   `provider-failed` error in the attempt record instead of aborting the chain.
+5. typed result: validate and normalize the provider output into a typed result;
    failure and cancellation produce a typed failure/cancel result with the same
    `callId`, never a fabricated success and never a `toolCall` masquerading as a
-   result.
-5. failure terminal: when the provider is unavailable, the backend errors, or the
-   output fails validation, the call reaches an explicit failure terminal that
-   carries a typed failure result with the same `callId` and the real provider
-   error. A provider failure never continues down the success path and is never
-   converted into a complete zero-result report.
-6. report persistence: write the report to the immutable asset store and attach
-   the unique typed descriptor `{ outputRef, outputDigest }`, where
-   `outputDigest` is `sha256:<64 lowercase hex>`; the digest is recomputed on
-   read.
-7. report retrieval: the task-scoped read endpoint
+   result. A provider failure is never converted into a complete zero-result
+   report.
+6. report persistence (success only): write the report to the immutable asset
+   store and attach the unique typed descriptor `{ outputRef, outputDigest }`,
+   where `outputDigest` is `sha256:<64 lowercase hex>`; the digest is recomputed
+   on read. On failure or cancellation this stage passes the attempt record
+   through unchanged.
+7. report retrieval (success only): the task-scoped read endpoint
    `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
    validates task/operation/epoch/seq and the descriptor digest, then returns the
    report. It never exposes artifact file paths and never looks up by `callId`
-   alone.
-8. cancel path: a task-scoped stop reaches the route, aborts the
-   operation-scoped controller, drains the provider call, and settles. A stop
-   that cannot prove drain reaches `failed` or `reconcile_required`; it is never
-   reported as `cancelled`, and abort/drain failure never yields a false
-   `cancelled` terminal.
-9. cleanup: after settlement the run releases its resources (isolated
-   workspace/control root, server PID/port, temporary files) and records the
-   release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
-   resources.
+   alone. On failure or cancellation this stage passes the record through.
+8. outcome selection: the single explicit terminal selector. It reads the attempt
+   record and emits exactly one terminal — success, explicit provider failure, or
+   cancellation. It never emits two, and it is the only node whose output is a
+   terminal.
+9. terminal settlement: settle the selected terminal. For a cancellation a
+   task-scoped stop reaches the route, aborts the operation-scoped controller,
+   drains the provider call, and settles; a stop that cannot prove drain reaches
+   `failed` or `reconcile_required`, is never reported as `cancelled`, and never
+   yields a false `cancelled` terminal. For success and failure it confirms the
+   operation is settled before cleanup.
+10. cleanup closure: release this attempt's resources (isolated
+    workspace/control root, server PID/port, temporary files) and record the
+    release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
+    resources.
 
-The DAG has one source (tool registration) and one sink (cleanup). Success
-(`retrieved_report`), cancellation (`settled_terminal`) and failure
-(`failure_result`) are three mutually exclusive terminals; all three converge on
-the single cleanup sink, which closes over whichever terminal was selected. No
-node requires two mutually exclusive terminals at once, so a successful search, a
-settled cancellation and a provider failure are each a complete,
-single-entry/single-exit path.
+The DAG has one source (tool registration) and one sink (cleanup closure), and
+success, provider failure and cancellation are mutually exclusive terminals
+selected by node 8, so each of the three outcomes is a complete
+single-entry/single-exit path and no node ever requires two of them at once.
 
 ## Implementation DAG
 

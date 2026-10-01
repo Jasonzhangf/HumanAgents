@@ -3,7 +3,7 @@
   "version": "1",
   "meta": {
     "title": "Dashboard web.search 工具：注册、调用、取消、结果、报告与收口",
-    "baseline": "cc5f3f0d49d98a4148abcdc7f7bcc814c80cdbb2"
+    "baseline": "cc5f3f0d49d98a414abcdc7f7bcc814c80cdbb2"
   },
   "inputs": [
     { "id": "web_search_tool_request", "schema": "Object" }
@@ -80,21 +80,21 @@
       "iterator": "Whole"
     },
     {
-      "id": "cancel_settlement",
-      "operator": "humanagent-hand-search-websearch-cancel-settlement",
+      "id": "outcome_select",
+      "operator": "humanagent-hand-search-websearch-outcome-select",
       "operator_version": "1",
-      "inputs": ["invoke_request"],
-      "output": { "id": "settled_terminal", "schema": "Object" },
+      "inputs": ["retrieved_report"],
+      "output": { "id": "selected_terminal", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "failure_terminal",
-      "operator": "humanagent-hand-search-websearch-failure-terminal",
+      "id": "terminal_settlement",
+      "operator": "humanagent-hand-search-websearch-cancel-settlement",
       "operator_version": "1",
-      "inputs": ["provider_output", "typed_tool_result"],
-      "output": { "id": "failure_result", "schema": "Object" },
+      "inputs": ["selected_terminal"],
+      "output": { "id": "settled_terminal", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -103,7 +103,7 @@
       "id": "cleanup_closure",
       "operator": "humanagent-hand-search-websearch-cleanup-closure",
       "operator_version": "1",
-      "inputs": ["retrieved_report", "settled_terminal", "failure_result"],
+      "inputs": ["settled_terminal"],
       "output": { "id": "web_search_cleanup_closure", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -117,12 +117,9 @@
     { "from": "backend_search", "to": "typed_result", "arc_id": "provider_output" },
     { "from": "typed_result", "to": "report_persistence", "arc_id": "typed_tool_result" },
     { "from": "report_persistence", "to": "report_retrieval", "arc_id": "report_descriptor" },
-    { "from": "report_retrieval", "to": "cleanup_closure", "arc_id": "retrieved_report" },
-    { "from": "provider_invoke", "to": "cancel_settlement", "arc_id": "invoke_request" },
-    { "from": "cancel_settlement", "to": "cleanup_closure", "arc_id": "settled_terminal" },
-    { "from": "backend_search", "to": "failure_terminal", "arc_id": "provider_output" },
-    { "from": "typed_result", "to": "failure_terminal", "arc_id": "typed_tool_result" },
-    { "from": "failure_terminal", "to": "cleanup_closure", "arc_id": "failure_result" }
+    { "from": "report_retrieval", "to": "outcome_select", "arc_id": "retrieved_report" },
+    { "from": "outcome_select", "to": "terminal_settlement", "arc_id": "selected_terminal" },
+    { "from": "terminal_settlement", "to": "cleanup_closure", "arc_id": "settled_terminal" }
   ],
   "outputs": ["web_search_cleanup_closure"]
 }

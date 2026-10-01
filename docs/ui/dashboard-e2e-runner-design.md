@@ -108,7 +108,11 @@ hand-search plan 更新（覆盖 TinyFish + Dashboard 生命周期边）
 - 计数与终态只取自权威 journal：`<controlRoot>/sessions/<workspace-key>/checkpoints/ui-runtime/<provider>/ui-runtime-journal.jsonl`
   的 `operation.event` 记录；断言 `execution.terminal` 为成功终态、`provider.tool` 轮数 ≥ 2、
   每轮有配对的 `provider.tool-result`。UI 侧另行断言事件行、状态 chip 与终态文案。
-- 每个场景分别断言适用的成功路径；失败/取消路径由 §7 的分支统一断言。
+- 每个场景分别断言适用的成功路径；失败/取消路径由 §7 的链路统一断言。
+- **尝试记录链**：每条命令的图是一条单链。每个阶段节点都产出"成功或错误"的 typed 尝试记录并把它
+  交给下一节点，因此**任一阶段先失败时，失败收口依然可达**：不存在"必须先拿到后面的成功产物才能
+  触发失败检测"的断边。整图没有任何合取（AND）汇合节点，唯一的终态选择节点 `attempt_outcome_select`
+  只接收上一步的记录，并只发出**一个**终态（成功 / 失败 / 取消）。
 
 ### 6.2 网络搜索
 
@@ -148,24 +152,27 @@ runner 断言：
 - 运行 task 指定 checker，保存原始 stdout 与 exit code；按 task 人工观察要求记录截图与结论。
 - 仅存在 HTML/SVG/动画标签不构成 task 完成；checker 通过也不替代语义验收。
 
-## 7. 失败、超时与取消收口（每条命令图内的终点）
+## 7. 失败、超时与取消收口（每条命令图内的链路）
 
-每张图里，`attempt_failure_detect` 只从**本命令**的执行/能力节点接入；之后：
+每张图是一条单链，每个节点恰好一个入口、一个出口，全图没有合取汇合：
 
 ```text
-<本命令的 execution 或能力节点>
-  -> attempt_failure_detect        首次偏离识别（失败 / 超时 / 取消）
-  -> attempt_stop_settle           POST /api/tasks/{id}/stop，轮询 Dashboard 与 Journal 至 settled
-  -> attempt_incomplete_receipt    写 INCOMPLETE receipt：首次偏离、原始错误、task/operation/tool-call ID
-  -> attempt_settled_cleanup       已 settled：关闭本轮 browser context、按精确 PID 停本轮服务、
-                                   核验 PID 退出/端口关闭/路径删除，附原始退出码
-  -> attempt_unsettled_recovery    未 settled：保留恢复所需 PID/端口/路径，记录唯一 recovery owner
-                                   与下一步，标 INCOMPLETE，不得宣称清理完成
+candidate_binding                    绑定候选并登记本轮资源
+  -> <本命令的阶段节点…>              每阶段产出 typed 尝试记录（成功或错误）并向下传递
+  -> attempt_failure_detect          从尝试记录识别首次偏离（失败 / 超时 / 取消）
+  -> attempt_outcome_select          唯一终态选择节点：只发出成功 或 失败 或 取消 之一
+  -> attempt_stop_settle             按所选终态证明 settle：成功也须确认已 settle；
+                                     失败/取消则 POST /api/tasks/{id}/stop 并轮询 Dashboard 与 Journal
+  -> attempt_receipt                 成功写成功 receipt；失败/取消写 INCOMPLETE receipt
+                                     （首次偏离、原始错误、task/operation/tool-call ID）
+  -> <cmd>_cleanup (sink)            已 settle：关闭本轮 browser context、按精确 PID 停本轮服务、
+                                     核验 PID 退出/端口关闭/路径删除，附原始退出码
+                                     未 settle：保留恢复所需 PID/端口/路径，记录唯一 recovery owner
+                                     与下一步，标 INCOMPLETE，不得宣称清理完成
 ```
 
-成功路径（`*_receipt`）、已 settle 的失败路径（`settled_failure_closure`）与未 settle 的恢复路径
-（`unsettled_recovery_closure`）是**互斥终态**，都只汇入本命令唯一的 sink（`*_cleanup`），由该 sink
-按被选中的那个终态收口；三条路径不会同时产生。
+阶段节点在失败时把错误放进尝试记录继续下传，因此**任一阶段先失败时收口链路依然可达**；成功、失败
+与取消三种终态由 `attempt_outcome_select` 互斥选择，只有被选中的那一个进入收口，不会同时产生。
 
 禁止 `pkill`、`killall`、`kill $(...)`、`xargs kill` 或端口扫描后批量终止；只允许显式 PID 或服务级操作。
 成功路径不提供"保留临时 root"的开关。runner 入口在行为实现前必须 fail closed：`node runner.mjs --scenario <name>`

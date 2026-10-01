@@ -41,11 +41,11 @@
       "ownerPath": "tests/app/dashboard-e2e/lib/journal.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/journal.mjs"
     },
-    "local_search_receipt": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
-    },
     "attempt_failure_detect": {
+      "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
+      "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
+    },
+    "attempt_outcome_select": {
       "ownerPath": "tests/app/dashboard-e2e/runner.mjs",
       "ownerRel": "tests/app/dashboard-e2e/runner.mjs"
     },
@@ -53,17 +53,9 @@
       "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
     },
-    "attempt_incomplete_receipt": {
+    "attempt_receipt": {
       "ownerPath": "tests/app/dashboard-e2e/lib/receipt.mjs",
       "ownerRel": "tests/app/dashboard-e2e/lib/receipt.mjs"
-    },
-    "attempt_settled_cleanup": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
-    },
-    "attempt_unsettled_recovery": {
-      "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",
-      "ownerRel": "tests/app/dashboard-e2e/lib/cleanup.mjs"
     },
     "local_search_cleanup": {
       "ownerPath": "tests/app/dashboard-e2e/lib/cleanup.mjs",

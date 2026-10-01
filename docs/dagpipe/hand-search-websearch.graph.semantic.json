@@ -6,10 +6,10 @@
     "provider_invoke": "发起 web.search 工具调用并转发到后端",
     "backend_search": "经 Agent Reach 路由到 Monid TinyFish 执行真实只读搜索",
     "typed_result": "校验并归一化 Provider 输出为 typed 工具结果",
-    "failure_terminal": "显式 Provider 失败终态，附同一 callId 的 typed 失败结果",
     "report_persistence": "持久化报告并生成 outputRef 与 outputDigest 摘要",
     "report_retrieval": "按 task/operation/epoch/seq 与摘要校验后读取报告",
-    "cancel_settlement": "任务级停止后中止并排空 Provider 再结算，不伪造 cancelled",
-    "cleanup_closure": "收口资源释放并核对终态证据"
+    "outcome_select": "唯一终态选择节点：只发出成功或 Provider 失败或取消之一",
+    "terminal_settlement": "按所选终态结算：取消须中止并排空 Provider，不伪造 cancelled",
+    "cleanup_closure": "按所选终态收口资源释放并核对终态证据"
   }
 }
