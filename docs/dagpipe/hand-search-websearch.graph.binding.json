@@ -50,8 +50,8 @@
       "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
     "outcome_select": {
-      "ownerPath": "packages/app/src/provider-tool-execution.ts",
-      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
     },
     "terminal_settlement": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",

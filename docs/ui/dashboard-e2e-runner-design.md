@@ -36,6 +36,8 @@ receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源�
 | 真实 Provider | RCC `127.0.0.1:4444`；journal 记录 11 次 `provider.tool` 执行 | 可用 |
 | `file.search` Provider 工具 | `packages/app/src/provider-tool-execution.ts:192` 已注册并接线 | 可用 |
 | 网络搜索后端 | `monid run -p tinyfish -e /search` → HTTP 200，返回真实 title/url/snippet，价格 0 | 可用 |
+| 网络搜索后端的分页与完整性语义 | 已按真实 provider 复核并记录：`docs/architecture/evidence/tinyfish-search-capability.md`。实测 `page` 为 0–10 的零基分页，每页恰 10 条且 `position` 每页从 1 重排；`total_results === results.length`，不是全局命中数；唯一可观测的完整性信号是"某页少于每页上限"。因此契约改为 provider 自己翻页 0–10、在首个短页停止，并记录 `providerPagesFetched` / `exhausted`，不再声称"网络上全部匹配" | 可用（契约已按实测修正） |
+| 网络搜索的取消语义 | 同上证据文档：`monid runs get -r <runId>` / `monid runs stop -r <runId>` 存在；对已结束 run 调 stop 返回 `CONFLICT ... already COMPLETED`。本地 abort 不证明远端 run 已停 | 可用（契约已按实测修正） |
 | 网络搜索 Provider 工具 | 不存在；`web.search` 目前只是 Hand gateway service | **缺口，见 §5 门禁** |
 | AItest 任务与 checker | `AItest/tasks/pelican-bicycle/`：`prepare-run.sh`（run 已存在即失败，天然不覆盖）与 `inspect-result.mjs`（exit 0 要求非空 + html root + 恰好 1 个内联 SVG + 存在动画） | 可用 |
 
@@ -150,11 +152,13 @@ hand-search plan 更新（覆盖 TinyFish + Dashboard 生命周期边）
 | task-scoped 读取入口 `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output` | `packages/app/src/ui-runtime/service.ts` + `server.ts` | 由 `UiRuntimeService` 校验 task/operation/epoch/seq 对应的成功 `file.search` 结果及 descriptor digest 后返回报告；不得用 task 内不保证唯一的 callId 单独查找，不得暴露 artifact 文件路径 |
 | Dashboard renderer 投影 | `packages/ui` | GET/SSE/DOM 三处一致 |
 
-对应到图上是三个独立节点，不是同一个节点：`local_search_result_contract`（`packages/adapters/provider/src/agent-driver.ts`
-从原始调用上下文产出 typed `ProviderToolResult`）→ `local_search_report_persistence`
-（`packages/app/src/provider-tool-execution.ts` 持久化报告并生成 `{outputRef, outputDigest}` descriptor）→
-`local_search_journal_projection`（`packages/runtime/src/ui-runtime/coordinator.ts`）。descriptor 的产出 owner
-有独立节点与边，因此读取入口校验的 digest 来源在这条链上是闭合的。
+对应到图上是三个独立节点，且顺序与真实执行方向一致：`local_search_invoke`
+（`packages/app/src/provider-tool-execution.ts` 执行 `file.search`）→ `local_search_report_persistence`
+（同一 owner 持久化报告并生成 `{outputRef, outputDigest}` descriptor）→ `local_search_result_contract`
+（`packages/adapters/provider/src/agent-driver.ts` 在 `executeTool` 返回之后，从原始调用上下文构造携带
+descriptor 的 typed `ProviderToolResult` 结果事件）→ `local_search_journal_projection`
+（`packages/runtime/src/ui-runtime/coordinator.ts`）。descriptor 必须先生成再跨回 driver，因此持久化节点在
+typed 结果节点之前，读取入口校验的 digest 来源在这条链上是闭合的。
 
 runner 断言：
 

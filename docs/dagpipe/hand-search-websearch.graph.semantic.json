@@ -12,8 +12,8 @@
     "result_projection": "持久化之后把 typed 结果与 descriptor（含失败与取消）投影到 Journal",
     "continuation_submit": "回传同一 callId 的工具结果并观测后续 Provider 响应直至任务可终态",
     "report_retrieval": "按 task/operation/epoch/seq 与摘要校验后读取报告",
-    "outcome_select": "唯一终态选择节点：只发出成功或 Provider 失败或取消之一",
-    "terminal_settlement": "按所选终态结算：取消须中止并排空 Provider，不伪造 cancelled",
+    "outcome_select": "运行时生命周期 owner 选择唯一终态：只发出成功或 Provider 失败或取消之一",
+    "terminal_settlement": "按所选终态结算：取消须 stop 远端 run 并轮询至终态，不伪造 cancelled",
     "cleanup_closure": "按所选终态收口资源释放并核对终态证据"
   }
 }

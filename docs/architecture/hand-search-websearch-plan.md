@@ -115,6 +115,8 @@ type WebSearchReport = {
   requireComplete: boolean;
   results: readonly WebSearchResult[];
   resultsFound: number;
+  resultsScope: 'provider-pages';
+  providerPagesFetched: number;
   resultsTruncated: boolean;
   searchComplete: boolean;
   unresolvedSources: readonly string[];
@@ -124,6 +126,7 @@ type WebSearchReport = {
       | 'invalid-request'
       | 'provider-unavailable'
       | 'provider-failed'
+      | 'provider-unsettled'
       | 'invalid-result'
       | 'search-incomplete';
     message: string;
@@ -151,11 +154,24 @@ set with more valid provider matches is a successful truncated report. The
 verifier binds `query`, normalized `domains`, normalized `recency`, and the
 requested result bound, not only the query string.
 
-The provider boundary is control-plane injected. The provider returns **every
-validated match it found for the requested scope**; it does not apply
-`maxResults`, because a provider-side bound would make the pre-bound match count
-unrecoverable and the service could not compute `resultsFound` or
-`resultsTruncated`:
+The provider boundary is control-plane injected. Capability was verified against
+the real provider before coding; the raw evidence (endpoint schema, two real run
+ids, the page-0 vs page-1 window diff, and the stop semantics) is recorded in
+`docs/architecture/evidence/tinyfish-search-capability.md`. The verified facts
+that shape the contract are:
+
+- TinyFish `/search` exposes a **paged** ranked result set: `page` is 0..10
+  (zero-indexed) and each observed page returned exactly 10 results, with
+  `position` restarting at 1 per page.
+- There is no global match count and no completeness flag. `total_results` equals
+  the number of results returned **for that page**, so it cannot be used to claim
+  how many matches exist overall.
+- The only observable completeness signal is a page that returns **fewer than the
+  per-page bound** (observed bound 10).
+
+The provider therefore owns result collection and must not pass a caller bound
+downstream. It pages `0..10`, stops at the first short page, and reports what it
+actually did:
 
 ```ts
 interface WebSearchProvider {
@@ -166,7 +182,8 @@ interface WebSearchProvider {
     signal: AbortSignal;
   }): Promise<{
     results: readonly WebSearchResult[];
-    complete: boolean;
+    pagesFetched: number;
+    exhausted: boolean;
     unresolvedSources: readonly string[];
   }>;
 }
@@ -176,30 +193,48 @@ The exact relationship between the provider output and the report fields is:
 
 - `validMatches` is the provider's `results` after the service's URL validation,
   de-duplication and rank normalization; it is never bounded by `maxResults`.
-- `resultsFound = validMatches.length` — the number of valid matches before the
-  requested bound is applied.
+- `resultsFound = validMatches.length` — the number of valid matches the provider
+  actually returned for this scope. It is explicitly **matches returned**, not
+  "all matches on the web"; the report carries `resultsScope: 'provider-pages'`
+  so no reader can mistake it for a global count.
 - `results = validMatches.slice(0, maxResults)`; therefore
   `results.length === Math.min(resultsFound, maxResults)`.
 - `resultsTruncated === resultsFound > maxResults` — a pure bound signal, and the
   only thing that sets it.
-- `searchComplete === provider.complete` — whether the provider covered the whole
-  requested scope. It is independent of `maxResults`: a search can be complete
-  and truncated at the same time, and incomplete without being truncated.
-- `unresolvedSources` is copied verbatim from the provider and lists the sources
-  the provider could not cover; it is not a truncation signal.
+- `searchComplete === provider.exhausted` — true only when the adapter reached a
+  page shorter than the per-page bound, i.e. the provider had no further page to
+  give. It is independent of `maxResults`: a search can be complete and truncated
+  at the same time, and incomplete without being truncated. When the adapter stops
+  because it hit the page ceiling (11 pages) with full pages, `exhausted` is false
+  and the report says more pages may exist.
+- `providerPagesFetched` is recorded in the report so the paging work is auditable
+  and replayable.
+- `unresolvedSources` lists the entries the adapter could not validate (missing or
+  blank `url`/`title`) verbatim as received; it is not a truncation signal.
 
-A provider that cannot return an unbounded match list cannot satisfy this
-contract and must fail with `provider-failed` rather than silently applying its
-own bound.
+A provider that cannot return a paged result set with a per-page bound cannot
+satisfy this contract and must fail with `provider-failed` rather than silently
+applying its own bound.
+
+**Cancellation is part of the same port.** Aborting a local promise or killing the
+child process does not prove the remote run stopped, so the adapter keeps the
+`runId` printed by `monid run`, and on abort: calls `monid runs stop -r <runId>`,
+then polls `monid runs get -r <runId>` until a terminal status or the bounded poll
+window expires. A `CONFLICT ... already COMPLETED` response means the run already
+settled and is treated as settled, not as a stop failure. If the run never reaches
+a terminal status inside the window, the adapter raises a typed
+`provider-unsettled` error, which the settlement node maps to `failed` /
+`reconcile_required`; it is never reported as `cancelled`.
 
 There is exactly one port, and `packages/runtime/src/hand/web-search.ts` owns it.
 This change therefore also edits that owner: `WebSearchProviderInput` loses its
 `maxResults` field (the service applies the bound after validation), and
-`WebSearchProviderOutput` keeps `results`, `complete` and `unresolvedSources`
-with the semantics above. `WebSearchService` consumes the port; the production
-adapter in `packages/adapters/operations/src/web-search-provider.ts` implements
-it. No second provider input/output contract is introduced anywhere, and no
-caller is wired before the owner's port is updated.
+`WebSearchProviderOutput` carries `results`, `pagesFetched`, `exhausted` and
+`unresolvedSources` with the semantics above. `WebSearchService` consumes the
+port; the production adapter in
+`packages/adapters/operations/src/web-search-provider.ts` implements it. No second
+provider input/output contract is introduced anywhere, and no caller is wired
+before the owner's port is updated.
 
 The normalized business constraints are part of the report (`domains` and
 `recency`) so the verifier can bind the complete request without copying any
