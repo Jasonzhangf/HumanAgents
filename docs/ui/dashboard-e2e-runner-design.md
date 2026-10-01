@@ -72,12 +72,16 @@ scenarios/aitest.mjs
 "e2e:dashboard:aitest": "node tests/app/dashboard-e2e/runner.mjs --scenario aitest"
 ```
 
-DAG 节点与 owner 的绑定见三张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
-runner/lib/scenario 模块，产品步骤绑定到真实产品 owner（`packages/app/src/provider-tool-execution.ts`
-是 Dashboard 工具注册/调用/typed 结果/失败终态/report 的唯一 owner；`agent-driver.ts` 负责结果关联；
-`ui-runtime/coordinator.ts` 负责投影；`ui-runtime/server.ts` 负责读取入口）。Hand gateway 的
-`packages/runtime/src/hand/web-search.ts` 只在 Hand service 自身在范围内时绑定，不承担 Dashboard 工具的
-typed 结果语义。
+DAG 节点与 owner 的绑定见四张图的 `.graph.binding.json`：runner 步骤绑定到本轮新增的
+runner/lib/scenario 模块，产品步骤绑定到真实产品 owner。Dashboard `web.search` 工具链上，
+`packages/app/src/provider-tool-execution.ts` 是工具注册、调用、typed 结果与 report/digest 的唯一
+owner；`packages/adapters/operations/src/web-search-provider.ts` 是 Agent Reach/TinyFish provider
+调用的唯一 owner，被 Hand service 与 Dashboard 工具共同复用；`agent-driver.ts` 负责结果关联；
+`ui-runtime/coordinator.ts` 负责投影（必须发生在 report descriptor 生成之后）；`ui-runtime/server.ts`
+负责读取入口。Hand gateway 的 `packages/runtime/src/hand/web-search.ts` 与
+`packages/adapters/operations/src/web-search-route.ts` 只在 Hand service 自身在范围内时绑定，不承担
+Dashboard 工具的 typed 结果与 report 语义；Dashboard 工具不得经由 `web-search-route.ts` 派发，否则
+同一个调用会出现两个 report writer。
 
 ## 5. 网络搜索门禁（阻塞项）
 

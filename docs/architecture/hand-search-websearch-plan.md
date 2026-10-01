@@ -291,18 +291,19 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    `callId`, never a fabricated success and never a `toolCall` masquerading as a
    result. A provider failure is never converted into a complete zero-result
    report.
-6. journal projection: `packages/runtime/src/ui-runtime/coordinator.ts` is the
-   single projector that turns the tool call and the typed result — success,
-   provider failure, and cancellation alike — into `RuntimeTaskEvent` / Journal
-   records, so the Dashboard can render the call, the typed result, the failure
-   or cancellation status, and the descriptor through GET / SSE / DOM. A result
-   that is never projected is not observable evidence, so this stage is on the
-   chain rather than optional.
-7. report persistence (success only): write the report to the immutable asset
-   store and attach the unique typed descriptor `{ outputRef, outputDigest }`,
-   where `outputDigest` is `sha256:<64 lowercase hex>`; the digest is recomputed
-   on read. On failure or cancellation this stage passes the attempt record
-   through unchanged.
+6. report persistence (success only): the Dashboard tool writes the report to the
+   immutable asset store and attaches the unique typed descriptor
+   `{ outputRef, outputDigest }`, where `outputDigest` is
+   `sha256:<64 lowercase hex>`; the digest is recomputed on read. On failure or
+   cancellation this stage passes the attempt record through unchanged. The
+   descriptor must exist before projection, because projection renders it.
+7. journal projection: `packages/runtime/src/ui-runtime/coordinator.ts` is the
+   single projector that turns the tool call and the persisted typed result —
+   success, provider failure, and cancellation alike — into `RuntimeTaskEvent` /
+   Journal records, so the Dashboard can render the call, the typed result, the
+   failure or cancellation status, and the descriptor through GET / SSE / DOM. A
+   result that is never projected is not observable evidence, so this stage is on
+   the chain rather than optional.
 8. report retrieval (success only): the task-scoped read endpoint
    `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
    validates task/operation/epoch/seq and the descriptor digest, then returns the
@@ -403,10 +404,16 @@ Terminal states:
 - `packages/contracts`: public request/report/result types and exports.
 - `packages/runtime/src/hand`: semantic service validation, normalization, and
   provider port.
-- `packages/adapters/operations`: artifact-backed operation route, verifier,
-  abort/drain adapter, and filesystem boundary checks; the real Agent Reach /
-  Monid TinyFish `WebSearchProvider` adapter lives here as the single
-  provider-invocation owner.
+- `packages/adapters/operations/src/web-search-route.ts`: the Hand gateway
+  `web.search` service's artifact-backed operation route, verifier, abort/drain
+  adapter, and filesystem boundary checks. It keeps the Hand gateway service's own
+  report/artifact and verifier semantics.
+- `packages/adapters/operations/src/web-search-provider.ts`: the real Agent Reach
+  / Monid TinyFish `WebSearchProvider` adapter, and the single
+  provider-invocation owner for web search. It returns every validated match and
+  does not apply `maxResults`. It is the shared boundary that both the Hand
+  gateway `web.search` service and the Dashboard `web.search` Provider tool call;
+  neither of them re-implements provider invocation.
 - `packages/app`: explicit route registration, execution-epoch forwarding, and
   route-specific stop settlement. Existing `code.search` registration is
   reused; this work does not add another dispatcher. A non-cancellable route
@@ -415,7 +422,10 @@ Terminal states:
 - `packages/app/src/provider-tool-execution.ts`: the Dashboard `web.search`
   Provider tool declaration, dispatch, typed tool result, and report
   persistence/digest (single owner). It is a different owner from the Hand
-  gateway `web.search` service and must not reuse its report semantics.
+  gateway `web.search` service and must not reuse its report semantics: the
+  Dashboard tool calls the shared provider adapter above and writes its own
+  report, and it must not dispatch through `web-search-route.ts`, which would
+  make the Hand route a second report writer for the same call.
 - `packages/adapters/provider/src/agent-driver.ts`: projects tool calls and
   results from the original call context for the Responses and Anthropic
   protocols.
