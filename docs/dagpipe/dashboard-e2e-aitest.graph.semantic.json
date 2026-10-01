@@ -11,7 +11,7 @@
     "attempt_failure_detect": "从尝试记录识别失败、超时或取消的首次偏离",
     "attempt_outcome_select": "唯一终态选择节点：只发出成功或失败或取消之一",
     "attempt_stop_settle": "按所选终态证明任务已 settle",
-    "attempt_receipt": "按所选终态写成功 receipt 或 INCOMPLETE receipt",
-    "aitest_cleanup": "按所选终态释放资源；未 settle 则保留恢复资源"
+    "aitest_cleanup": "按所选终态释放资源；未 settle 则保留恢复资源",
+    "attempt_receipt": "收口记账：在清理之后写含 PID 退出、端口关闭与路径移除证据的最终 receipt"
   }
 }

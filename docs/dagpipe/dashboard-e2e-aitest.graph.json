@@ -113,7 +113,7 @@
       "id": "attempt_receipt",
       "operator": "humanagent-dashboard-e2e-receipt",
       "operator_version": "1",
-      "inputs": ["attempt_settlement"],
+      "inputs": ["aitest_closure"],
       "output": { "id": "attempt_receipt", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -123,7 +123,7 @@
       "id": "aitest_cleanup",
       "operator": "humanagent-dashboard-e2e-aitest-cleanup",
       "operator_version": "1",
-      "inputs": ["attempt_receipt"],
+      "inputs": ["attempt_settlement"],
       "output": { "id": "aitest_closure", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -140,8 +140,8 @@
     { "from": "aitest_terminal", "to": "attempt_failure_detect", "arc_id": "terminal_record" },
     { "from": "attempt_failure_detect", "to": "attempt_outcome_select", "arc_id": "attempt_deviation" },
     { "from": "attempt_outcome_select", "to": "attempt_stop_settle", "arc_id": "selected_terminal" },
-    { "from": "attempt_stop_settle", "to": "attempt_receipt", "arc_id": "attempt_settlement" },
-    { "from": "attempt_receipt", "to": "aitest_cleanup", "arc_id": "attempt_receipt" }
+    { "from": "attempt_stop_settle", "to": "aitest_cleanup", "arc_id": "attempt_settlement" },
+    { "from": "aitest_cleanup", "to": "attempt_receipt", "arc_id": "aitest_closure" }
   ],
-  "outputs": ["aitest_closure"]
+  "outputs": ["attempt_receipt"]
 }

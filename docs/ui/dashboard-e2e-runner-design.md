@@ -150,6 +150,12 @@ hand-search plan 更新（覆盖 TinyFish + Dashboard 生命周期边）
 | task-scoped 读取入口 `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output` | `packages/app/src/ui-runtime/service.ts` + `server.ts` | 由 `UiRuntimeService` 校验 task/operation/epoch/seq 对应的成功 `file.search` 结果及 descriptor digest 后返回报告；不得用 task 内不保证唯一的 callId 单独查找，不得暴露 artifact 文件路径 |
 | Dashboard renderer 投影 | `packages/ui` | GET/SSE/DOM 三处一致 |
 
+对应到图上是三个独立节点，不是同一个节点：`local_search_result_contract`（`packages/adapters/provider/src/agent-driver.ts`
+从原始调用上下文产出 typed `ProviderToolResult`）→ `local_search_report_persistence`
+（`packages/app/src/provider-tool-execution.ts` 持久化报告并生成 `{outputRef, outputDigest}` descriptor）→
+`local_search_journal_projection`（`packages/runtime/src/ui-runtime/coordinator.ts`）。descriptor 的产出 owner
+有独立节点与边，因此读取入口校验的 digest 来源在这条链上是闭合的。
+
 runner 断言：
 
 1. 通过页面实际使用的 `GET /api/tasks/{taskId}/dashboard` 与 SSE 验证同一 `file.search` invoke/result 的
@@ -179,13 +185,17 @@ candidate_binding                    绑定候选并登记本轮资源
   -> attempt_outcome_select          唯一终态选择节点：只发出成功 或 失败 或 取消 之一
   -> attempt_stop_settle             按所选终态证明 settle：成功也须确认已 settle；
                                      失败/取消则 POST /api/tasks/{id}/stop 并轮询 Dashboard 与 Journal
-  -> attempt_receipt                 成功写成功 receipt；失败/取消写 INCOMPLETE receipt
-                                     （首次偏离、原始错误、task/operation/tool-call ID）
-  -> <cmd>_cleanup (sink)            已 settle：关闭本轮 browser context、按精确 PID 停本轮服务、
+  -> <cmd>_cleanup                   已 settle：关闭本轮 browser context、按精确 PID 停本轮服务、
                                      核验 PID 退出/端口关闭/路径删除，附原始退出码
                                      未 settle：保留恢复所需 PID/端口/路径，记录唯一 recovery owner
                                      与下一步，标 INCOMPLETE，不得宣称清理完成
+  -> attempt_receipt (sink)          收口记账，必须在清理之后：成功写成功 receipt，失败/取消写 INCOMPLETE
+                                     receipt，两者都包含清理与核验结论（PID 是否退出、端口是否关闭、
+                                     路径是否移除、退出码）以及首次偏离与 task/operation/tool-call ID
 ```
+
+`attempt_receipt` 是唯一的 sink：receipt 在 cleanup 之后写，清理结论因此必然进入唯一被持久化的 receipt，
+清理失败不会被一条已经写好的 receipt 掩盖。
 
 阶段节点在失败时把错误放进尝试记录继续下传，因此**任一阶段先失败时收口链路依然可达**；成功、失败
 与取消三种终态由 `attempt_outcome_select` 互斥选择，只有被选中的那一个进入收口，不会同时产生。

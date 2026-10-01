@@ -29,6 +29,10 @@
       "ownerPath": "packages/adapters/provider/src/agent-driver.ts",
       "ownerRel": "packages/adapters/provider/src/agent-driver.ts"
     },
+    "local_search_report_persistence": {
+      "ownerPath": "packages/app/src/provider-tool-execution.ts",
+      "ownerRel": "packages/app/src/provider-tool-execution.ts"
+    },
     "local_search_journal_projection": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"

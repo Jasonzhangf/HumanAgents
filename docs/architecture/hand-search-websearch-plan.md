@@ -272,8 +272,11 @@ distinct owners and semantics:
 
 - the Hand gateway `web.search` service owns operation intent, the typed
   `WebSearchReport`, the artifact, and the verifier (above);
-- the Dashboard `web.search` Provider tool owns tool registration, the typed
-  tool result, report persistence/digest, and the tool-output retrieval edge.
+- the Dashboard `web.search` Provider tool owns tool declaration, dispatch, the
+  typed tool result, report persistence/digest, and the provider result
+  projection boundary; tool registration belongs to
+  `packages/app/src/ui-runtime/index.ts` and tool-output retrieval belongs to
+  `packages/app/src/ui-runtime/service.ts` / `server.ts`.
 
 The lifecycle is a single-entry/single-exit DAG, and it is a **single chain**:
 every node has exactly one input and one output, so the graph contains no
@@ -291,8 +294,16 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    the tool definition and executes it; it does not register the tool.
 2. provider tool-call projection: `packages/adapters/provider/src/agent-driver.ts`
    projects the provider's tool call into `ProviderEvent.toolCall` (`callId`,
-   `toolId`, arguments) from the original call context, for both the Responses and
-   Anthropic protocols. This is the protocol-level source of call identity.
+   `toolId`, arguments) from the original call context. This is the protocol-level
+   source of call identity. **Protocol scope: Responses only.** The Dashboard
+   `web.search` Provider tool is wired only when the binding protocol is
+   `responses` (`packages/app/src/ui-runtime/index.ts`); the Responses codec is the
+   only codec that populates `ProviderEvent.toolCall`
+   (`packages/adapters/provider/src/codecs.ts`), and the rcc-v3 transport rejects
+   non-Responses submissions. The Anthropic codec emits tool events without
+   `toolCall`, so an Anthropic edge would have no owner or executable path and is
+   explicitly out of scope for this change; adding it later requires its own
+   codec, transport and executor work plus tests, and is not claimed here.
 3. journal call projection: `packages/runtime/src/ui-runtime/coordinator.ts`
    records that call event into `RuntimeTaskEvent` / Journal **before** the tool
    executes, so a call that is later cancelled or fails is still observable. This
@@ -320,8 +331,9 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
 8. provider result projection: `packages/adapters/provider/src/agent-driver.ts`
    turns the Dashboard tool's typed result into the provider result event that
    carries `callId`, status, error, and the `{ outputRef, outputDigest }`
-   descriptor, from the original call context, for both the Responses and
-   Anthropic protocols. A stop or cancellation must still emit a typed result
+   descriptor, from the original call context. Protocol scope is the same as node
+   2 (Responses only).
+   A stop or cancellation must still emit a typed result
    event with the same `callId`; the driver must not return silently and swallow
    the result, because the typed cancellation result is required evidence.
    `packages/contracts` owns these fields and their validator: this change extends
@@ -336,16 +348,22 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
    half is node 3, and the two are separate nodes with separate edges so no single
    node claims to project both. A result that is never projected is not observable
    evidence, so this stage is on the chain rather than optional.
-10. report retrieval (success only): the task-scoped read endpoint
+10. provider continuation submit: `packages/adapters/provider/src/agent-driver.ts`
+    submits the same-`callId` tool continuations back to the provider and observes
+    the follow-up response before the task can reach a terminal. Without this
+    stage the graph would declare a success terminal that the real flow cannot
+    reach from the tool result alone. The E2E asserts the follow-up provider
+    request.
+11. report retrieval (success only): the task-scoped read endpoint
     `GET /api/tasks/{taskId}/operations/{operationId}/executions/{executionEpoch}/events/{seq}/tool-output`
     validates task/operation/epoch/seq and the descriptor digest, then returns the
     report. It never exposes artifact file paths and never looks up by `callId`
     alone. On failure or cancellation this stage passes the record through.
-11. outcome selection: the single explicit terminal selector. It reads the attempt
+12. outcome selection: the single explicit terminal selector. It reads the attempt
     record and emits exactly one terminal — success, explicit provider failure, or
     cancellation. It never emits two, and it is the only node whose output is a
     terminal.
-12. terminal settlement: settle the selected terminal. For a cancellation a
+13. terminal settlement: settle the selected terminal. For a cancellation a
     task-scoped stop reaches the Dashboard stop dispatch
     (`packages/app/src/ui-runtime/service.ts` / `server.ts`), aborts the
     in-flight provider call through the shared provider adapter, drains it, and
@@ -354,14 +372,14 @@ validated by `pnpm dagpipe:validate`. Nodes, in order:
     false `cancelled` terminal. For success and failure it confirms the operation
     is settled before cleanup. This path never goes through
     `web-search-route.ts`.
-13. cleanup closure: release this attempt's resources (isolated
+14. cleanup closure: release this attempt's resources (isolated
     workspace/control root, server PID/port, temporary files) and record the
     release evidence; an unsettled run stays `INCOMPLETE` and keeps the recovery
     resources.
 
 The DAG has one source (tool registration) and one sink (cleanup closure), and
 success, provider failure and cancellation are mutually exclusive terminals
-selected by node 11, so each of the three outcomes is a complete
+selected by node 12, so each of the three outcomes is a complete
 single-entry/single-exit path and no node ever requires two of them at once.
 
 ## Implementation DAG
@@ -469,10 +487,10 @@ Terminal states:
   report, and it must not dispatch through `web-search-route.ts`, which would
   make the Hand route a second report writer for the same call.
 - `packages/adapters/provider/src/agent-driver.ts`: projects tool calls and typed
-  results from the original call context for the Responses and Anthropic
-  protocols, including the descriptor, failure and cancellation results. A stop
-  or cancellation still emits a typed result event with the same `callId`; it
-  does not return silently.
+  results from the original call context for the Responses protocol (the only
+  protocol in scope; see node 2), including the descriptor, failure and
+  cancellation results. A stop or cancellation still emits a typed result event
+  with the same `callId`; it does not return silently.
 - `packages/runtime/src/ui-runtime/coordinator.ts`: records the projected call
   before execution and the projected typed result after persistence into
   `RuntimeTaskEvent` / Journal.

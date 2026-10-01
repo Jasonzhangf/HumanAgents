@@ -64,7 +64,17 @@
       "operator": "humanagent-dashboard-e2e-local-search-result-contract",
       "operator_version": "1",
       "inputs": ["invocation_record"],
-      "output": { "id": "result_record", "schema": "Object" },
+      "output": { "id": "typed_tool_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "local_search_report_persistence",
+      "operator": "humanagent-dashboard-e2e-local-search-report-persistence",
+      "operator_version": "1",
+      "inputs": ["typed_tool_result"],
+      "output": { "id": "output_descriptor", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -73,7 +83,7 @@
       "id": "local_search_journal_projection",
       "operator": "humanagent-dashboard-e2e-local-search-journal-projection",
       "operator_version": "1",
-      "inputs": ["result_record"],
+      "inputs": ["output_descriptor"],
       "output": { "id": "projection_record", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -143,7 +153,7 @@
       "id": "attempt_receipt",
       "operator": "humanagent-dashboard-e2e-receipt",
       "operator_version": "1",
-      "inputs": ["attempt_settlement"],
+      "inputs": ["local_search_closure"],
       "output": { "id": "attempt_receipt", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -153,7 +163,7 @@
       "id": "local_search_cleanup",
       "operator": "humanagent-dashboard-e2e-local-search-cleanup",
       "operator_version": "1",
-      "inputs": ["attempt_receipt"],
+      "inputs": ["attempt_settlement"],
       "output": { "id": "local_search_closure", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -166,15 +176,16 @@
     { "from": "local_search_entry", "to": "local_search_execution", "arc_id": "entry_record" },
     { "from": "local_search_execution", "to": "local_search_invoke", "arc_id": "execution_record" },
     { "from": "local_search_invoke", "to": "local_search_result_contract", "arc_id": "invocation_record" },
-    { "from": "local_search_result_contract", "to": "local_search_journal_projection", "arc_id": "result_record" },
+    { "from": "local_search_result_contract", "to": "local_search_report_persistence", "arc_id": "typed_tool_result" },
+    { "from": "local_search_report_persistence", "to": "local_search_journal_projection", "arc_id": "output_descriptor" },
     { "from": "local_search_journal_projection", "to": "local_search_tool_output_endpoint", "arc_id": "projection_record" },
     { "from": "local_search_tool_output_endpoint", "to": "local_search_browser_assertion", "arc_id": "report_record" },
     { "from": "local_search_browser_assertion", "to": "local_search_terminal", "arc_id": "assertion_record" },
     { "from": "local_search_terminal", "to": "attempt_failure_detect", "arc_id": "terminal_record" },
     { "from": "attempt_failure_detect", "to": "attempt_outcome_select", "arc_id": "attempt_deviation" },
     { "from": "attempt_outcome_select", "to": "attempt_stop_settle", "arc_id": "selected_terminal" },
-    { "from": "attempt_stop_settle", "to": "attempt_receipt", "arc_id": "attempt_settlement" },
-    { "from": "attempt_receipt", "to": "local_search_cleanup", "arc_id": "attempt_receipt" }
+    { "from": "attempt_stop_settle", "to": "local_search_cleanup", "arc_id": "attempt_settlement" },
+    { "from": "local_search_cleanup", "to": "attempt_receipt", "arc_id": "local_search_closure" }
   ],
-  "outputs": ["local_search_closure"]
+  "outputs": ["attempt_receipt"]
 }
