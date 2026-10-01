@@ -1068,6 +1068,36 @@ test('CLI version exits before default serve routing', async () => {
   assert.match(output.trim(), /^\d+\.\d+\.\d+$/);
 });
 
+test('CLI serve --help prints help and exits without booting the server', async () => {
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  const runCli = (args: readonly string[], timeoutMs = 15_000): Promise<{ stdout: string; status: number }> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`cli did not exit before the server-boot timeout: ${stderr.slice(0, 400)}`));
+    }, timeoutMs);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, status: code ?? -1 });
+    });
+  });
+  for (const flag of ['--help', '-h']) {
+    const run = await runCli(['serve', flag]);
+    assert.equal(run.status, 0, `serve ${flag} should exit 0`);
+    assert.match(run.stdout, /用法：humanagent/);
+    // The serve startup banner must not be emitted on the help path.
+    assert.ok(!run.stdout.includes('"url":'), `serve ${flag} must not boot the server`);
+  }
+});
+
 test('CLI entry uses one typed invalid-prompt error', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-entry-errors-');
   const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
