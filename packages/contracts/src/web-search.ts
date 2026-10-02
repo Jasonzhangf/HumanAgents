@@ -27,6 +27,7 @@ export type WebSearchFailureCode =
   | 'invalid-request'
   | 'provider-unavailable'
   | 'provider-failed'
+  | 'provider-unsettled'
   | 'invalid-result'
   | 'search-incomplete';
 
@@ -46,6 +47,8 @@ export interface WebSearchReport {
   readonly requireComplete: boolean;
   readonly results: readonly WebSearchResult[];
   readonly resultsFound: number;
+  readonly resultsScope: 'provider-pages';
+  readonly providerPagesFetched: number;
   readonly resultsTruncated: boolean;
   readonly searchComplete: boolean;
   readonly unresolvedSources: readonly string[];
@@ -89,6 +92,8 @@ export function validateWebSearchReport(input: WebSearchReport): void {
     requireComplete: input.requireComplete,
   });
   if (!Number.isSafeInteger(input.resultsFound) || input.resultsFound < 0) throw new ContractError('reported result count is invalid');
+  if (input.resultsScope !== 'provider-pages') throw new ContractError('reported result scope is invalid');
+  if (!Number.isSafeInteger(input.providerPagesFetched) || input.providerPagesFetched < 0) throw new ContractError('reported provider page count is invalid');
   if (input.results.length > input.maxResults) throw new ContractError('reported results exceed maxResults');
   if (input.resultsFound < input.results.length) throw new ContractError('reported result count is smaller than returned results');
   if (input.resultsTruncated !== (input.resultsFound > input.maxResults)) throw new ContractError('reported truncation state is inconsistent');

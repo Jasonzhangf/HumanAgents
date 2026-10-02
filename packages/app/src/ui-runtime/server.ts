@@ -567,6 +567,17 @@ async function handleRequest(
       writeJson(response, receipt.httpStatus, receipt.body);
       return;
     }
+    const taskToolOutput = /^\/api\/tasks\/([^/]+)\/operations\/([^/]+)\/executions\/(\d+)\/events\/(\d+)\/tool-output$/.exec(path);
+    if (taskToolOutput && method === 'GET') {
+      const report = await service.toolOutput(
+        id('task', decodeURIComponent(taskToolOutput[1]!)),
+        id('operation', decodeURIComponent(taskToolOutput[2]!)),
+        Number(taskToolOutput[3]!),
+        Number(taskToolOutput[4]!),
+      );
+      writeJson(response, 200, report);
+      return;
+    }
     if (path.startsWith('/api/')) {
       writeError(response, new UiRuntimeApiError('route.not-found', APP_OWNER, `no runtime route for ${method} ${path}`, 'use a documented runtime endpoint', 404));
       return;

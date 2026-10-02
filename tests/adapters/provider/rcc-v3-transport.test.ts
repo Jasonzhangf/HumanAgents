@@ -53,6 +53,44 @@ function evidence(label: string): EvidenceRef {
   };
 }
 
+test('RCC v3 transport recovers a harness servertool shell call as the owned web.search function call', async () => {
+  // The backend harness answers a server-side tool request with its own shell
+  // invocation. This Harness owns tool execution, so the equivalent function
+  // call must be recovered instead of surfacing an unexecutable shell call.
+  const streams = [
+    chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-servertool' } })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          type: 'function_call',
+          call_id: 'call-servertool',
+          name: 'exec_command',
+          arguments: JSON.stringify({ cmd: "routecodex servertool run web_search --input-json '{\"maxResults\":10,\"query\":\"Rust async runtime tokio\"}'" }),
+        },
+      })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-servertool' } })}\n\n`,
+    ]),
+  ];
+  const built = adapter(async () => {
+    const body = streams.shift();
+    if (!body) throw new Error('unexpected provider round');
+    return response(body);
+  });
+  await built.adapter.start({
+    ...startInput(),
+    tools: [{ toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } }],
+  });
+  const events = [];
+  for await (const event of built.adapter.observe(execution)) events.push(event);
+  const toolCall = events.find((event) => event.kind === 'tool')?.toolCall;
+  assert.equal(toolCall?.callId, 'call-servertool');
+  assert.equal(toolCall?.toolId, 'web.search');
+  assert.deepEqual(toolCall?.arguments, { maxResults: 10, query: 'Rust async runtime tokio' });
+  assert.equal(events.at(-1)?.terminalState, 'waiting');
+});
+
 test('RCC v3 Responses submit opens a second stream bound to the completed tool call', async () => {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const streams = [

@@ -108,6 +108,13 @@ export interface RuntimeTaskEvent {
   readonly retryable?: boolean;
   readonly nextAction?: string;
   readonly terminalPhase?: 'provider' | 'final';
+  readonly callId?: string;
+  readonly toolId?: string;
+  readonly arguments?: unknown;
+  readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+  readonly error?: RuntimeTaskError;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
 }
 
 export interface RuntimeTaskSnapshot {
@@ -2291,6 +2298,22 @@ export class RuntimeTaskCoordinator {
       taskOutput = record.output;
       record.updatedAt = this.now().toISOString();
     }
+    const toolProjection = event.toolCall !== undefined
+      ? {
+        callId: event.toolCall.callId,
+        toolId: event.toolCall.toolId,
+        arguments: event.toolCall.arguments,
+      }
+      : event.toolResult !== undefined
+        ? {
+          callId: event.toolResult.callId,
+          toolId: event.toolResult.toolId,
+          status: event.toolResult.status,
+          ...(event.toolResult.outputRef === undefined ? {} : { outputRef: event.toolResult.outputRef }),
+          ...(event.toolResult.outputDigest === undefined ? {} : { outputDigest: event.toolResult.outputDigest }),
+          ...(event.toolResult.error === undefined ? {} : { error: providerErrorProjection(event.toolResult.error) }),
+        }
+        : undefined;
     this.pushEvent(
       record,
       operation,
@@ -2301,7 +2324,7 @@ export class RuntimeTaskCoordinator {
       event.ownerId,
       event.error ? event.error.retryable === 'retryable' : undefined,
       toNextActionText(event.nextAction),
-      { taskOutput, error },
+      { taskOutput, error, tool: toolProjection },
       event.kind === 'terminal' ? 'provider' : undefined,
     );
     if (event.kind === 'tool') record.currentNode = RUNTIME_NODE_MARKERS.providerTool;
@@ -2520,7 +2543,19 @@ export class RuntimeTaskCoordinator {
     ownerId?: string,
     retryable?: boolean,
     nextAction?: string,
-    details?: { readonly taskOutput?: string; readonly error?: RuntimeTaskError },
+    details?: {
+      readonly taskOutput?: string;
+      readonly error?: RuntimeTaskError;
+      readonly tool?: {
+        readonly callId: string;
+        readonly toolId: string;
+        readonly arguments?: unknown;
+        readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+        readonly error?: RuntimeTaskError;
+        readonly outputRef?: string;
+        readonly outputDigest?: string;
+      };
+    },
     terminalPhase?: 'provider' | 'final',
   ): void {
     operation.seq += 1;
@@ -2539,6 +2574,15 @@ export class RuntimeTaskCoordinator {
       retryable,
       nextAction,
       ...(terminalPhase === undefined ? {} : { terminalPhase }),
+      ...(details?.tool === undefined ? {} : {
+        callId: details.tool.callId,
+        toolId: details.tool.toolId,
+        ...(details.tool.arguments === undefined ? {} : { arguments: details.tool.arguments }),
+        ...(details.tool.status === undefined ? {} : { status: details.tool.status }),
+        ...(details.tool.error === undefined ? {} : { error: details.tool.error }),
+        ...(details.tool.outputRef === undefined ? {} : { outputRef: details.tool.outputRef }),
+        ...(details.tool.outputDigest === undefined ? {} : { outputDigest: details.tool.outputDigest }),
+      }),
     };
     operation.events.push(event);
     record.events.push(event);

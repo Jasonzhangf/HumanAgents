@@ -15,11 +15,14 @@ import {
   type ProviderBinding,
   type ProviderCloseResult,
   type ProviderEvent,
+  type ProviderError,
   type ProviderExecutionIdentityRef,
   type ProviderSettlement,
   type ProviderStartInput,
   type ProviderSubmitResult,
   type ProviderToolCall,
+  type ProviderToolResult,
+  type ProviderToolStatus,
   type ScopeRef,
   type StopRequestReceipt,
   type TaskId,
@@ -46,6 +49,10 @@ export interface ProviderToolExecutionResult {
   readonly output: string;
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly status?: ProviderToolStatus;
+  readonly error?: ProviderError;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
 }
 
 export interface ProviderToolExecutionPort {
@@ -174,6 +181,11 @@ export class ProviderAgentDriver implements AgentDriver {
       throw this.error('runtime.identity.mismatch', 'provider observe is not bound to the current execution', 'observe', 'runtime');
     }
     let rounds = 0;
+    // A Responses continuation has no server-side conversation state here, so
+    // the request must replay the whole tool history. Carrying only the current
+    // round would hide every earlier round from the model, which makes a
+    // multi-round task rewrite its own deliverables forever.
+    const toolHistory: Array<{ readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }> = [];
     while (true) {
       const toolCalls: ProviderToolCall[] = [];
       let terminal: ProviderEvent | undefined;
@@ -201,9 +213,18 @@ export class ProviderAgentDriver implements AgentDriver {
       if (rounds > (this.options.maxToolRounds ?? 8)) {
         throw this.error('tool.round-limit', 'provider tool round limit was exceeded', 'observe', 'runtime');
       }
-      const toolResults: Array<{ readonly call: ProviderToolCall; readonly result: ProviderToolExecutionResult }> = [];
       for (const call of toolCalls) {
         if (this.stopping) return;
+        // The declared tool list IS this Harness's tool surface. A backend
+        // harness tool the model reached for anyway (for example a shell or
+        // exec_command) must come back as a typed observation the model can
+        // correct, not as a fatal error that strands the execution.
+        if (!(this.options.tools ?? []).some((tool) => tool.toolId === call.toolId)) {
+          const unowned = this.unownedToolResult(call);
+          yield* this.toolResultEvents(call, this.toolResult(call, unowned, 'failed'), `${call.toolId} unavailable`);
+          toolHistory.push({ call, result: unowned });
+          continue;
+        }
         this.toolController = new AbortController();
         const toolController = this.toolController;
         let completeTool!: () => void;
@@ -220,8 +241,14 @@ export class ProviderAgentDriver implements AgentDriver {
         } catch (cause) {
           // A stop aborts the tool signal; an executor that rejects with that
           // abort must drain as the same clean stopped closure as a normal
-          // return. Real tool failures stay visible.
-          if (this.stopping && isExpectedStopAbort(cause, toolController)) return;
+          // return. A tool failure or cancellation is evidence, so it must emit
+          // a typed result bound to the same callId instead of only throwing.
+          if (this.stopping) {
+            if (isExpectedStopAbort(cause, toolController)) return;
+            yield* this.toolFailedEvents(call, cause, 'cancelled');
+            return;
+          }
+          yield* this.toolFailedEvents(call, cause, 'failed');
           throw cause;
         } finally {
           this.toolController = undefined;
@@ -229,19 +256,18 @@ export class ProviderAgentDriver implements AgentDriver {
           if (this.toolCompletion === toolCompletion) this.toolCompletion = undefined;
         }
         if (this.stopping) return;
-        const toolResultEvent: ProviderEvent = {
-          ...identity(this.options),
-          eventId: `event-tool-result-${call.callId}-${rounds}`,
-          kind: 'tool',
-          toolPhase: 'result',
-          outputRefs: result.outputRefs,
-          summary: `${call.toolId} succeeded`,
-          evidenceRefs: result.evidenceRefs,
-          ownerId: this.options.ownerId ?? 'humanagent.provider-agent-driver',
-          nextAction: { kind: 'continue', ref: call.continuationRef },
-        };
-        yield this.agentEvent(toolResultEvent);
-        toolResults.push({ call, result });
+        const status: ProviderToolStatus = result.error !== undefined
+          ? result.status === 'cancelled' ? 'cancelled' : 'failed'
+          : result.status === 'cancelled'
+            ? 'cancelled'
+            : 'succeeded';
+        const toolResult: ProviderToolResult = this.toolResult(call, result, status);
+        if (status !== 'succeeded') {
+          yield* this.toolResultEvents(call, toolResult, `${call.toolId} ${status}`);
+          throw toolResult.error ?? this.error('tool.result.failed', 'provider tool executor returned a failed result', 'observe', 'runtime');
+        }
+        yield* this.toolResultEvents(call, toolResult, `${call.toolId} succeeded`);
+        toolHistory.push({ call, result });
       }
       if (this.stopping) return;
       let completeContinuation!: () => void;
@@ -252,10 +278,10 @@ export class ProviderAgentDriver implements AgentDriver {
         submitted = await this.options.port.submit({
           ...identity(this.options),
           inputRefs: [...this.options.inputRefs],
-          evidenceRefs: toolResults.flatMap(({ result }) => result.evidenceRefs),
+          evidenceRefs: toolHistory.flatMap(({ result }) => result.evidenceRefs),
           payload: this.initialPayload ?? inputPayloadMissing(),
           tools: this.options.tools,
-          toolContinuations: toolResults.map(({ call, result }) => ({
+          toolContinuations: toolHistory.map(({ call, result }) => ({
             callId: call.callId,
             toolId: call.toolId,
             arguments: call.arguments,
@@ -331,6 +357,75 @@ export class ProviderAgentDriver implements AgentDriver {
       summary: providerEvent.summary,
       ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
       providerEvent,
+    };
+  }
+
+  private toolResultEvents(
+    call: ProviderToolCall,
+    result: ProviderToolResult,
+    summary: string,
+  ): Iterable<ProviderAgentEvent> {
+    return [this.agentEvent({
+      ...identity(this.options),
+      eventId: `event-tool-result-${call.callId}`,
+      kind: 'tool',
+      toolPhase: 'result',
+      outputRefs: result.outputRefs,
+      summary,
+      evidenceRefs: result.evidenceRefs,
+      ...(result.error === undefined ? {} : { error: result.error }),
+      ownerId: this.options.ownerId ?? 'humanagent.provider-agent-driver',
+      nextAction: { kind: 'continue', ref: call.continuationRef },
+      toolResult: result,
+    })];
+  }
+
+  private toolFailedEvents(
+    call: ProviderToolCall,
+    cause: unknown,
+    status: 'failed' | 'cancelled',
+  ): Iterable<ProviderAgentEvent> {
+    return this.toolResultEvents(call, this.toolFailureResult(call, cause, status), `${call.toolId} ${status}`);
+  }
+
+  private toolResult(call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult {
+    return {
+      ...identity(this.options),
+      toolId: call.toolId,
+      callId: call.callId,
+      status,
+      outputRefs: result.outputRefs,
+      evidenceRefs: result.evidenceRefs,
+      ...(result.outputRef === undefined ? {} : { outputRef: result.outputRef }),
+      ...(result.outputDigest === undefined ? {} : { outputDigest: result.outputDigest }),
+      ...(result.error === undefined ? {} : { error: result.error }),
+    };
+  }
+
+  private toolFailureResult(call: ProviderToolCall, cause: unknown, status: 'failed' | 'cancelled'): ProviderToolResult {
+    const error = cause instanceof ProviderAdapterError
+      ? cause.providerError
+      : this.error('tool.result.failure', cause instanceof Error ? cause.message : 'provider tool execution failed', 'observe').providerError;
+    return {
+      ...identity(this.options),
+      toolId: call.toolId,
+      callId: call.callId,
+      status,
+      outputRefs: [],
+      evidenceRefs: error.evidenceRefs,
+      error,
+    };
+  }
+
+  private unownedToolResult(call: ProviderToolCall): ProviderToolExecutionResult {
+    const available = (this.options.tools ?? []).map((tool) => tool.toolId).join(', ');
+    const message = `${call.toolId} is not available in this Harness; only these function tools can be called: ${available}`;
+    return {
+      output: message,
+      outputRefs: [],
+      evidenceRefs: [],
+      status: 'failed',
+      error: this.error('tool.not.owned', message, 'observe', 'capability').providerError,
     };
   }
 

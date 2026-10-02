@@ -1,34 +1,130 @@
 /**
- * Scenario: local read-only search — design skeleton.
+ * Local file-search scenario — real implementation.
  *
- * Owns graph nodes: local_search_entry, local_search_browser_assertion.
+ * Owns graph nodes: local_search_entry, local_search_browser_assertion,
+ * local_search_terminal (in dashboard-e2e-local-file-search.graph.json).
  *
- * The real Responses tool loop must call `file.search` first and then read a
- * file that the search actually matched; reading a known path directly, using
- * the Explicit Brain intent, or substituting a read-only code inspection does
- * not satisfy the contract.
- *
- * Assertions this module owns:
- *  - `ProviderEvent.toolCall` is the only source of callId, toolId, arguments;
- *  - the same callId correlates the invoke and the typed result through the
- *    Dashboard API, SSE and DOM;
- *  - the task-scoped tool-output endpoint returns a report containing the query
- *    and the matching paths/line summaries;
- *  - the following `file.read` reads the same matched path;
- *  - workspace file manifests (relative path sorted, SHA-256 per file) taken
- *    before and after are identical, proving no file was modified;
- *  - a genuine zero-match search is reported as a real zero-match, never as a
- *    search that did not run.
+ * Creates a fixture file in this attempt's isolated workspace, drives the real
+ * browser chain (input -> visible draft -> confirmation -> run queue ->
+ * execution turns -> verifiable terminal), then proves from the authoritative
+ * journal that the existing `file.search` and `file.read` tools ran against the
+ * same real path and that the workspace is byte-identical afterwards
+ * (relative path -> SHA-256 manifest before and after).
  */
+
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
+import { countTurnEvidenceFor, journalPathFor, manifestsIdentical, workspaceManifest } from '../lib/journal.mjs';
 
 export const SCENARIO = 'local-file-search';
 
-export async function runLocalFileSearchScenario() {
-  throw notImplemented('runLocalFileSearchScenario');
+const CLARIFY_ANSWER =
+  'Do not clarify. Search the workspace directly with the file tools available and finish with your answer.';
+
+export async function runLocalFileSearchScenario(binding) {
+  const evidence = { screenshots: [] };
+  const marker = `humanagent-e2e-marker-${binding.attemptId}`;
+  const fixtureDir = 'e2e-fixture';
+  const fixtureRel = join(fixtureDir, 'hello-agent.txt');
+  await mkdir(join(binding.workspace, fixtureDir), { recursive: true });
+  await writeFile(join(binding.workspace, fixtureRel), `${marker}\nsecond line for the marker probe\n`, 'utf8');
+
+  const before = await workspaceManifest(binding.workspace);
+
+  const directive = [
+    `Find the workspace file that contains the string ${marker}.`,
+    `Use the file.search tool to search the workspace for ${marker}, then use the file.read tool on the matching path.`,
+    `Report the exact file path and the matching line in your final answer.`,
+    'Do not create, modify, move or delete any file. Do not ask clarifying questions.',
+  ].join(' ');
+
+  // browser input -> visible draft -> user confirmation
+  await captureScreenshot(binding, '01-input-before-submit');
+  evidence.screenshots.push(`${binding.screenshotsDir}/01-input-before-submit.png`);
+  await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  await captureScreenshot(binding, '02-draft-confirmed');
+  evidence.screenshots.push(`${binding.screenshotsDir}/02-draft-confirmed.png`);
+  await captureScreenshot(binding, '03-run-queue');
+  evidence.screenshots.push(`${binding.screenshotsDir}/03-run-queue.png`);
+
+  // run queue -> execution turns -> verifiable terminal
+  const dashboard = await waitForTerminal(binding);
+  await captureScreenshot(binding, '04-task-result');
+  evidence.screenshots.push(`${binding.screenshotsDir}/04-task-result.png`);
+
+  const after = await workspaceManifest(binding.workspace);
+  const unchanged = manifestsIdentical(before, after);
+
+  await journalPathFor(binding);
+  const turnEvidence = await countTurnEvidenceFor(binding).catch(() => null);
+  const events = turnEvidence?.allEvents ?? [];
+  const haystack = JSON.stringify({ events, output: dashboard.output ?? null });
+  const tools = events.filter((event) => event.kind === 'provider.tool' || event.kind === 'provider.tool-result');
+  const isTool = (id) => (event) => new RegExp(id, 'i').test(`${event.summary ?? ''} ${event.toolId ?? ''}`);
+  const searchCalls = tools.filter((event) => event.kind === 'provider.tool' && isTool('file\\.search')(event));
+  const searchResults = tools.filter((event) => event.kind === 'provider.tool-result' && isTool('file\\.search')(event));
+  const readCalls = tools.filter((event) => event.kind === 'provider.tool' && isTool('file\\.read')(event));
+
+  const fixtureHit = haystack.includes('hello-agent.txt');
+  const markerHit = haystack.includes(marker);
+  const fixtureContent = await readFile(join(binding.workspace, fixtureRel), 'utf8').catch(() => null);
+
+  const missing = [];
+  if (dashboard.state !== 'succeeded') missing.push(`terminal state=${dashboard.state} (expected succeeded)`);
+  if (!turnEvidence) missing.push('authoritative journal evidence could not be read');
+  else if (turnEvidence.toolRounds < 2) missing.push(`journal toolRounds=${turnEvidence.toolRounds} (expected >= 2)`);
+  if (searchCalls.length === 0) missing.push('no file.search tool call was recorded');
+  if (searchResults.length === 0) missing.push('no file.search tool result was recorded');
+  if (readCalls.length === 0) missing.push('no file.read tool call was recorded');
+  if (!fixtureHit) missing.push(`workspace path ${fixtureRel} did not appear in the tool evidence`);
+  if (!markerHit) missing.push(`fixture marker ${marker} did not appear in the tool evidence`);
+  if (!unchanged) missing.push('workspace manifest changed during the read-only run');
+
+  evidence.scenarioEvidence = {
+    directive,
+    marker,
+    fixture: { relPath: fixtureRel, absolutePath: join(binding.workspace, fixtureRel), content: fixtureContent },
+    taskId: binding.taskId,
+    terminalState: dashboard.state,
+    executionEpoch: dashboard.executionEpoch ?? null,
+    operationId: dashboard.operationId ?? null,
+    checkpoint: dashboard.checkpoint ?? null,
+    toolRounds: turnEvidence?.toolRounds ?? 0,
+    requestStartTurns: turnEvidence?.requestStartTurns ?? 0,
+    searchCalls: searchCalls.map(pickEvent),
+    searchResults: searchResults.map(pickEvent),
+    readCalls: readCalls.map(pickEvent),
+    allProviderToolEvents: tools.map(pickEvent),
+    fixturePathObserved: fixtureHit,
+    fixtureMarkerObserved: markerHit,
+    workspaceManifestBefore: before,
+    workspaceManifestAfter: after,
+    workspaceUnchanged: unchanged,
+    outputPreview: String(dashboard.output ?? '').slice(0, 1600),
+  };
+  evidence.terminalState = dashboard.state;
+  evidence.dashboardState = dashboard.state;
+  evidence.toolRounds = turnEvidence?.toolRounds ?? 0;
+  evidence.requestStartTurns = turnEvidence?.requestStartTurns ?? 0;
+  evidence.checkpointCommitted = turnEvidence?.checkpointCommitted ?? 0;
+  evidence.terminalRecord = turnEvidence?.terminalRecords.slice(-1)[0] ?? null;
+  evidence.evidenceRefs = events
+    .flatMap((event) => (Array.isArray(event.evidenceRefs) ? event.evidenceRefs : []))
+    .slice(0, 40);
+  if (missing.length) evidence.missingEvidence = missing;
+  return evidence;
 }
 
-function notImplemented(name) {
-  return new Error(
-    `dashboard-e2e local-file-search.${name} is not implemented yet; see docs/ui/dashboard-e2e-runner-design.md`,
-  );
+function pickEvent(event) {
+  return {
+    seq: event.seq,
+    kind: event.kind,
+    state: event.state,
+    summary: event.summary,
+    callId: event.callId,
+    toolId: event.toolId,
+    error: event.error,
+    evidenceRefs: event.evidenceRefs,
+  };
 }

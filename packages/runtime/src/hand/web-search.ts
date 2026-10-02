@@ -13,14 +13,14 @@ export interface WebSearchProviderInput {
   readonly query: string;
   readonly domains: readonly string[];
   readonly recency: WebSearchRecency;
-  readonly maxResults: number;
   readonly signal: AbortSignal;
 }
 
 export interface WebSearchProviderOutput {
-  readonly results: readonly WebSearchResult[];
-  readonly complete: boolean;
-  readonly unresolvedSources: readonly string[];
+  readonly entries: unknown[];
+  readonly pagesFetched: number;
+  readonly exhausted: boolean;
+  readonly pageErrors: readonly string[];
 }
 
 export interface WebSearchProvider {
@@ -28,7 +28,10 @@ export interface WebSearchProvider {
 }
 
 export class WebSearchHarnessError extends Error {
-  constructor(readonly code: 'provider-unavailable' | 'provider-failed', message: string) {
+  constructor(
+    readonly code: 'provider-unavailable' | 'provider-failed' | 'provider-unsettled',
+    message: string,
+  ) {
     super(message);
     this.name = 'WebSearchHarnessError';
   }
@@ -56,7 +59,12 @@ export class WebSearchService {
     if (options.signal?.aborted) throw abortError();
     let providerOutput: WebSearchProviderOutput;
     try {
-      providerOutput = await this.provider.search({ ...normalized, signal: options.signal ?? new AbortController().signal });
+      providerOutput = await this.provider.search({
+        query: normalized.query,
+        domains: normalized.domains,
+        recency: normalized.recency,
+        signal: options.signal ?? new AbortController().signal,
+      });
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw abortError();
       const code = error instanceof WebSearchHarnessError ? error.code : 'provider-failed';
@@ -65,45 +73,51 @@ export class WebSearchService {
     if (options.signal?.aborted) throw abortError();
 
     let results: WebSearchResult[];
-    let complete: boolean;
-    let unresolvedSources: string[];
+    let exhausted: boolean;
+    let pagesFetched: number;
+    let pageErrors: string[];
     try {
-      if (!providerOutput || typeof providerOutput !== 'object' || !Array.isArray(providerOutput.results)) {
-        throw new Error('provider returned an invalid result list');
+      if (!providerOutput || typeof providerOutput !== 'object' || !Array.isArray(providerOutput.entries)) {
+        throw new Error('provider returned an invalid entry list');
       }
-      if (typeof providerOutput.complete !== 'boolean') {
-        throw new Error('provider returned an invalid completion flag');
+      if (!Number.isSafeInteger(providerOutput.pagesFetched) || providerOutput.pagesFetched < 0) {
+        throw new Error('provider returned an invalid page count');
       }
-      if (!Array.isArray(providerOutput.unresolvedSources)
-        || providerOutput.unresolvedSources.some((source) => typeof source !== 'string' || !source.trim())) {
-        throw new Error('provider returned invalid unresolved sources');
+      if (typeof providerOutput.exhausted !== 'boolean') {
+        throw new Error('provider returned an invalid exhaustion flag');
       }
-      results = normalizeResults(providerOutput.results);
-      complete = providerOutput.complete;
-      unresolvedSources = [...new Set(providerOutput.unresolvedSources.map((source) => source.trim()))].sort();
+      if (!Array.isArray(providerOutput.pageErrors)
+        || providerOutput.pageErrors.some((source) => typeof source !== 'string' || !source.trim())) {
+        throw new Error('provider returned invalid page errors');
+      }
+      results = normalizeResults(providerOutput.entries);
+      pagesFetched = providerOutput.pagesFetched;
+      exhausted = providerOutput.exhausted;
+      pageErrors = [...new Set(providerOutput.pageErrors.map((source) => source.trim()))].sort();
     } catch (error) {
       return this.failedReport(input, normalizeFailure('invalid-result', error));
     }
     const resultsFound = results.length;
     const resultsTruncated = resultsFound > normalized.maxResults;
     const boundedResults = results.slice(0, normalized.maxResults);
-    const searchComplete = complete && unresolvedSources.length === 0;
-    const base = this.baseReport(normalized, boundedResults, resultsFound, resultsTruncated, searchComplete, unresolvedSources);
+    const searchComplete = exhausted && pageErrors.length === 0;
+    const base = this.baseReport(normalized, boundedResults, resultsFound, pagesFetched, resultsTruncated, searchComplete, pageErrors);
     if (normalized.requireComplete && !searchComplete) {
-      return { ...base, status: 'failed', summary: `search incomplete: ${unresolvedSources.length} source(s) unresolved`, failure: {
+      return { ...base, status: 'failed', summary: `search incomplete: ${pageErrors.length} page error(s) unresolved`, failure: {
         code: 'search-incomplete',
         message: 'the requested web search was not fully completed',
       } };
     }
     return { ...base, status: 'succeeded', summary: searchComplete
-      ? `searched web sources, found ${resultsFound} result(s)`
-      : `partial web search: found ${resultsFound} result(s)` };
+      ? `searched web sources, found ${resultsFound} result(s) from ${pagesFetched} provider page(s)`
+      : `partial web search: found ${resultsFound} result(s) from ${pagesFetched} provider page(s)` };
   }
 
   private baseReport(
     request: NormalizedWebSearchRequest,
     results: readonly WebSearchResult[],
     resultsFound: number,
+    providerPagesFetched: number,
     resultsTruncated: boolean,
     searchComplete: boolean,
     unresolvedSources: readonly string[],
@@ -118,6 +132,8 @@ export class WebSearchService {
       requireComplete: request.requireComplete,
       results,
       resultsFound,
+      resultsScope: 'provider-pages',
+      providerPagesFetched,
       resultsTruncated,
       searchComplete,
       unresolvedSources,
@@ -137,6 +153,8 @@ export class WebSearchService {
       requireComplete: normalized.requireComplete,
       results: [],
       resultsFound: 0,
+      resultsScope: 'provider-pages',
+      providerPagesFetched: 0,
       resultsTruncated: false,
       searchComplete: false,
       unresolvedSources: [],
@@ -166,28 +184,44 @@ function normalizeRequestForFailure(input: WebSearchRequest): NormalizedWebSearc
   };
 }
 
-function normalizeResults(results: readonly WebSearchResult[]): WebSearchResult[] {
+function normalizeResults(entries: unknown[]): WebSearchResult[] {
   const seen = new Set<string>();
   const normalized: WebSearchResult[] = [];
-  for (const result of [...results].sort((left, right) => left.rank - right.rank || left.url.localeCompare(right.url))) {
-    if (!Number.isSafeInteger(result.rank) || result.rank < 1) throw new Error('provider returned an invalid result rank');
-    let url: URL;
-    try { url = new URL(result.url); } catch { throw new Error('provider returned an invalid URL'); }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('provider returned a URL with an unsupported protocol');
-    const canonicalUrl = url.toString();
+  for (const [index, entry] of entries.entries()) {
+    const value = isRecord(entry) ? entry : {};
+    const url = stringField(value, 'url');
+    const title = stringField(value, 'title');
+    const snippet = stringField(value, 'snippet');
+    if (!url) throw new Error(`provider entry ${index + 1} is missing url`);
+    if (!title) throw new Error(`provider entry ${index + 1} is missing title`);
+    if (!snippet) throw new Error(`provider entry ${index + 1} is missing snippet`);
+    let parsedUrl: URL;
+    try { parsedUrl = new URL(url); } catch { throw new Error('provider returned an invalid URL'); }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') throw new Error('provider returned a URL with an unsupported protocol');
+    const canonicalUrl = parsedUrl.toString();
     if (seen.has(canonicalUrl)) continue;
-    if (!result.title.trim() || !result.snippet.trim()) throw new Error('provider returned an empty result title or snippet');
     seen.add(canonicalUrl);
     normalized.push({
       url: canonicalUrl,
-      title: result.title.trim(),
-      snippet: result.snippet.trim(),
-      ...(result.sourceName?.trim() ? { sourceName: result.sourceName.trim() } : {}),
-      ...(result.publishedAt ? { publishedAt: result.publishedAt } : {}),
+      title,
+      snippet,
+      ...(stringField(value, 'site_name') ? { sourceName: stringField(value, 'site_name')! } : {}),
+      ...(stringField(value, 'publishedAt') ? { publishedAt: stringField(value, 'publishedAt')! } : {}),
       rank: normalized.length + 1,
     });
   }
   return normalized;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function normalizeFailure(code: WebSearchFailure['code'], error: unknown): WebSearchFailure {

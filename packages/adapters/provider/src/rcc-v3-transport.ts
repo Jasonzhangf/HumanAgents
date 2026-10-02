@@ -239,6 +239,49 @@ function readRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** Server-side tools whose execution this Harness owns. */
+const OWNED_SERVERTOOL_NAMES = new Set<string>(['web_search']);
+
+/**
+ * RCC's backend harness can answer a server-side tool request with its own
+ * shell invocation, for example
+ * `routecodex servertool run web_search --input-json '{"query":"..."}'`.
+ * This Harness owns tool execution and never runs a shell, so the equivalent
+ * function call is recovered here and the shell form never reaches the Harness
+ * as a tool call it cannot execute.
+ */
+function normalizeServertoolCall(record: Record<string, unknown>): Record<string, unknown> {
+  const item = optionalRecord(record.item);
+  if (item === undefined || item.type !== 'function_call' || typeof item.name !== 'string') return record;
+  const itemArguments = typeof item.arguments === 'string' ? item.arguments : '';
+  let args: Record<string, unknown> | undefined;
+  try {
+    args = optionalRecord(JSON.parse(itemArguments || '{}'));
+  } catch {
+    return record;
+  }
+  if (args === undefined) return record;
+  const command = typeof args.cmd === 'string' ? args.cmd : typeof args.command === 'string' ? args.command : undefined;
+  if (command === undefined) return record;
+  const invocation = /\broutecodex\s+servertool\s+run\s+([A-Za-z0-9_.-]+)\b([\s\S]*)$/.exec(command);
+  if (invocation === null || !OWNED_SERVERTOOL_NAMES.has(invocation[1])) return record;
+  const payload = /\s--input-json\s+(?:'([^']*)'|"([^"]*)"|(\{[\s\S]*\}))/.exec(invocation[2]);
+  const rawPayload = payload?.[1] ?? payload?.[2] ?? payload?.[3];
+  if (rawPayload === undefined) return record;
+  let parsed: Record<string, unknown> | undefined;
+  try {
+    parsed = optionalRecord(JSON.parse(rawPayload));
+  } catch {
+    return record;
+  }
+  if (parsed === undefined) return record;
+  return { ...record, item: { ...item, name: invocation[1], arguments: JSON.stringify(parsed) } };
+}
+
 async function* parseSse(
   body: AsyncIterable<Uint8Array>,
   maxEventBytes: number,
@@ -575,9 +618,12 @@ export class RccV3ProviderTransport implements ProviderTransport {
         if (!type) throw new ProviderAdapterError({ code: 'protocol.missing-event-type', category: 'protocol', phase: 'observe', message: 'RCC v3 SSE event has no type', scope: input });
         if (active.protocol === 'responses' && type === 'response.done') continue;
         if (active.protocol === 'openai' && type !== 'openai.chat.completion' && type !== 'error') continue;
-        const raw = { protocol: active.protocol, ...record, type } as unknown as ProviderWireEvent;
+        const normalized = active.protocol === 'responses' && type === 'response.output_item.done'
+          ? normalizeServertoolCall(record)
+          : record;
+        const raw = { protocol: active.protocol, ...normalized, type } as unknown as ProviderWireEvent;
         if (active.protocol === 'responses' && type === 'response.output_item.done') {
-          const item = readRecord(record.item);
+          const item = readRecord(normalized.item);
           if (item.type === 'function_call') active.responsesToolCallsPending = true;
         }
         if (isTerminalEvent(active.protocol, type)) {

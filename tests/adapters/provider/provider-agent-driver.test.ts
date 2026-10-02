@@ -18,7 +18,7 @@ import {
   type ProviderSubmitInput,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
-import { ProviderAgentDriver, ProviderAdapterError } from '../../../packages/adapters/provider/src/index.js';
+import { ProviderAgentDriver, ProviderAdapterError, type ProviderAgentEvent } from '../../../packages/adapters/provider/src/index.js';
 
 const organ = id('organ', 'organ-a');
 const taskId = id('task', 'task-a');
@@ -407,6 +407,160 @@ test('provider agent driver executes a complete Responses tool call once and con
   ]);
 });
 
+test('provider agent driver reports an unowned tool call as an observation instead of stranding the execution', async () => {
+  // The backend harness can advertise its own tool (for example exec_command).
+  // The model reaching for it must not kill the task: the failure is fed back
+  // so the model can retry with a tool this Harness actually owns.
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const executions: string[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round === 1) {
+        yield {
+          ...identity,
+          eventId: 'event-unowned-tool',
+          kind: 'tool',
+          summary: 'exec_command',
+          outputRefs: ['artifact://exec-command'],
+          evidenceRefs: [evidence],
+          toolCall: {
+            callId: 'call-unowned',
+            toolId: 'exec_command',
+            arguments: { command: 'ls' },
+            continuationRef: 'response-round-1',
+          },
+        };
+        yield {
+          ...identity,
+          eventId: 'event-unowned-waiting',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-final', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute({ call }) {
+        executions.push(call.toolId);
+        return { output: 'file body', outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'list the directory' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  // The executor is never asked to run a tool this Harness does not own.
+  assert.deepEqual(executions, []);
+  assert.deepEqual(events.map((event) => event.kind), ['provider.tool', 'provider.tool-result', 'provider.terminal']);
+  const failed = events[1]?.providerEvent?.toolResult;
+  assert.equal(failed?.callId, 'call-unowned');
+  assert.equal(failed?.toolId, 'exec_command');
+  assert.equal(failed?.status, 'failed');
+  assert.match(String(failed?.error?.message ?? ''), /not available in this Harness/);
+  assert.match(String(failed?.error?.message ?? ''), /file\.read/);
+  // The observation reaches the model on the continuation instead of a fatal error.
+  assert.deepEqual(submissions[0]?.toolContinuations?.map((continuation) => continuation.callId), ['call-unowned']);
+  assert.match(String(submissions[0]?.toolContinuations?.[0]?.output ?? ''), /not available in this Harness/);
+});
+
+test('provider agent driver replays the whole tool history into every continuation', async () => {  // The provider has no server-side conversation state, so a continuation that
+  // carried only the current round would hide every earlier round from the
+  // model and make a multi-round task repeat itself indefinitely.
+  let round = 0;
+  const submissions: ProviderSubmitInput[] = [];
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      round += 1;
+      if (round <= 3) {
+        yield {
+          ...identity,
+          eventId: `event-tool-call-${round}`,
+          kind: 'tool',
+          summary: 'file.write',
+          outputRefs: [`artifact://tool-call-${round}`],
+          evidenceRefs: [evidence],
+          toolCall: {
+            callId: `call-${round}`,
+            toolId: 'file.write',
+            arguments: { file_path: `file-${round}.txt` },
+            continuationRef: `response-round-${round}`,
+          },
+        };
+        yield {
+          ...identity,
+          eventId: `event-tool-waiting-${round}`,
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+        return;
+      }
+      yield { ...identity, eventId: 'event-final', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence] };
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      submissions.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.write', description: 'write file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute({ call }) {
+        return { output: `wrote ${String(call.arguments.file_path)}`, outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'write three files' } });
+  for await (const _event of instance.observe({ runtimeId: identity.runtimeId })) {
+    // Drain the execution to its terminal state.
+  }
+  assert.equal(submissions.length, 3);
+  assert.deepEqual(submissions.map((input) => input.toolContinuations?.map((c) => c.callId)), [
+    ['call-1'],
+    ['call-1', 'call-2'],
+    ['call-1', 'call-2', 'call-3'],
+  ]);
+  assert.deepEqual(submissions[2]?.toolContinuations?.map((c) => c.output), [
+    'wrote file-1.txt',
+    'wrote file-2.txt',
+    'wrote file-3.txt',
+  ]);
+});
+
 test('provider agent driver waits for a stopped tool to settle and never submits its late result', async () => {
   let enteredTool!: () => void;
   const toolEntered = new Promise<void>((resolve) => { enteredTool = resolve; });
@@ -600,5 +754,73 @@ test('provider agent driver still surfaces a non-abort tool failure during a too
   await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
   const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
   assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  // The typed failure must cross the driver as evidence bound to the same
+  // callId before the executor error propagates: a consumer that records the
+  // round needs the descriptor, and the error must still fail the execution.
+  const failed = await iterator.next();
+  assert.equal(failed.value?.kind, 'provider.tool-result');
+  assert.equal(failed.value?.summary, 'file.read failed');
+  assert.equal(failed.value?.providerEvent?.toolResult?.callId, 'call-failure');
+  assert.equal(failed.value?.providerEvent?.toolResult?.status, 'failed');
+  assert.match(String(failed.value?.providerEvent?.toolResult?.error?.message ?? ''), /file\.read failed for real/);
   await assert.rejects(() => iterator.next(), /file.read failed for real/);
+});
+
+test('provider agent driver honors the configured tool round limit', async () => {
+  // The provider always asks for another tool round, so only the configured
+  // bound can stop the loop. A long-horizon task needs a bound larger than the
+  // adapter default, so the limit must come from the assembly decision.
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-tool-call-loop',
+        kind: 'tool',
+        summary: 'file.read',
+        outputRefs: ['artifact://tool-call-loop'],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-loop', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-round-1' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-tool-waiting-loop',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+    submit: async (): Promise<ProviderSubmitResult> => ({ ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] }),
+  });
+  let executions = 0;
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    maxToolRounds: 3,
+    executeTool: {
+      async execute() {
+        executions += 1;
+        return { output: 'file body', outputRefs: [], evidenceRefs: [evidence] };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  await assert.rejects(
+    (async () => {
+      for await (const _event of instance.observe({ runtimeId: identity.runtimeId })) {
+        // Drain until the bound stops the loop.
+      }
+    })(),
+    /tool round limit was exceeded/,
+  );
+  assert.equal(executions, 3);
 });

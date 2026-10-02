@@ -1019,6 +1019,7 @@ export interface ProviderEvent extends ProviderExecutionIdentityRef {
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
   readonly toolCall?: ProviderToolCall;
+  readonly toolResult?: ProviderToolResult;
 }
 
 export interface ProviderToolResult extends ProviderExecutionIdentityRef {
@@ -1027,6 +1028,8 @@ export interface ProviderToolResult extends ProviderExecutionIdentityRef {
   readonly status: ProviderToolStatus;
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
@@ -1367,6 +1370,11 @@ export function validateProviderEvent(input: ProviderEvent): void {
     assertBusinessPayload(input.toolCall.arguments);
     assertNonEmptyReference(input.toolCall.continuationRef, 'provider tool continuation ref');
   }
+  if (input.toolResult !== undefined) {
+    if (input.kind !== 'tool' || input.toolPhase !== 'result') throw new ContractError('provider tool result payload requires a tool result event');
+    if (input.toolCall !== undefined) throw new ContractError('provider tool result event cannot carry a tool call');
+    validateProviderToolResult(input.toolResult);
+  }
   assertOptionalProviderOwner(input);
 }
 export function checkProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): ProviderEventEpochDecision {
@@ -1385,6 +1393,12 @@ export function validateProviderToolResult(input: ProviderToolResult): void {
   if (!PROVIDER_TOOL_STATES.has(input.status)) throw new ContractError('provider tool status is invalid');
   assertRefList(input.outputRefs, 'provider tool outputRefs');
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider tool evidenceRefs');
+  if (input.outputRef !== undefined || input.outputDigest !== undefined) {
+    if (typeof input.outputRef !== 'string' || input.outputRef.trim() === '') throw new ContractError('provider tool outputRef must be a non-empty string');
+    if (typeof input.outputDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(input.outputDigest)) {
+      throw new ContractError('provider tool outputDigest must be sha256:<64 lowercase hex>');
+    }
+  }
   if (input.error) validateProviderError(input.error);
   if (input.status !== 'succeeded' && !input.error) throw new ContractError('provider non-success tool result requires error');
   if (input.status !== 'succeeded' && input.evidenceRefs.length === 0) throw new ContractError('provider non-success tool result requires evidence refs');

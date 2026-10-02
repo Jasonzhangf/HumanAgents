@@ -43,6 +43,28 @@ import type {
 const SOURCE = 'humanagent.provider-adapter';
 const OWNER = SOURCE;
 
+/** The Harness owns tool execution. A provider backend that also runs its own
+ *  agent harness (for example a coding route that exposes `exec_command`) must
+ *  not hand the model tools this Harness does not execute: a call to one is not
+ *  executable and only burns the tool round budget. Declaring the exact tool
+ *  surface keeps the model on the Harness-owned functions. Requests without
+ *  tools keep the empty instructions they had before. */
+function harnessToolSurfaceInstructions(
+  tools: readonly { readonly toolId: string }[] | undefined,
+): string {
+  if (tools === undefined || tools.length === 0) return '';
+  const names = tools.map((tool) => responsesWireToolName(tool.toolId)).join(', ');
+  return [
+    'You are executing one turn of a HumanAgent task.',
+    'This Harness owns tool execution: the function tools declared in this request are the complete tool surface.',
+    'A backend harness tool such as exec_command, a shell, or a server-side servertool is not available in this Harness and always fails.',
+    `Only these function tools can be called: ${names}.`,
+    'Each round only carries the tool calls and results of the previous round, so keep the remaining work in mind.',
+    'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
+    'Call a tool only when it makes concrete progress; a tool call with missing or empty arguments is a failed round.',
+  ].join(' ');
+}
+
 function businessText(
   execution: ProviderExecutionIdentityRef,
   payload: ProviderStartInput['payload'],
@@ -65,6 +87,7 @@ const RESPONSES_TOOL_ID_TO_WIRE_NAME = new Map<string, string>([
   ['file.search', 'file_search'],
   ['file.write', 'file_write'],
   ['file.edit', 'file_edit'],
+  ['web.search', 'web_search'],
   ['bash', 'bash'],
   ['todo_write', 'todo_write'],
   ['get_goal', 'get_goal'],
@@ -78,6 +101,7 @@ const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['file_search', 'file.search'],
   ['file_write', 'file.write'],
   ['file_edit', 'file.edit'],
+  ['web_search', 'web.search'],
   ['bash', 'bash'],
   ['todo_write', 'todo_write'],
   ['get_goal', 'get_goal'],
@@ -86,8 +110,8 @@ const RESPONSES_WIRE_NAME_TO_TOOL_ID = new Map<string, string>([
   ['present', 'present'],
 ]);
 
-function responsesWireToolName(toolId: string): string {
-  const name = RESPONSES_TOOL_ID_TO_WIRE_NAME.get(toolId) ?? toolId;
+/** Server-side tools the backend harness may invoke on the model's behalf. */
+function responsesWireToolName(toolId: string): string {  const name = RESPONSES_TOOL_ID_TO_WIRE_NAME.get(toolId) ?? toolId;
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
     throw new ProviderAdapterError({
       code: 'tool.name.unsupported',
@@ -482,7 +506,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         type: 'responses.request',
         route: routeFor(binding, routeRef),
         model: binding.modelRef,
-        instructions: '',
+        instructions: harnessToolSurfaceInstructions(input.tools),
         input: [
           { type: 'message', role: 'user', content: businessText(input, input.payload) },
           ...input.toolContinuations.flatMap((continuation) => ([{
@@ -834,7 +858,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
       type: 'responses.request',
       route: routeFor(binding, routeRef),
       model: binding.modelRef,
-      instructions: '',
+      instructions: harnessToolSurfaceInstructions(execution.tools),
       input,
       execution,
       ...(checkpointId === undefined ? {} : { checkpointId }),

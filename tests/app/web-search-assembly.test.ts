@@ -23,7 +23,7 @@ test('app assembly registers web.search as one provider-backed gateway operation
     async readReport(input) { const report = reports.get(input.outputRef); if (!report || input.outputDigest !== 'sha256:web-search-report') throw new Error('missing web search report'); return report; },
   };
   const provider: WebSearchProvider = {
-    async search(input) { assert.deepEqual(input.domains, ['example.com']); return { complete: true, unresolvedSources: [], results: [{ url: 'https://example.com/result', title: 'Result', snippet: 'Snippet', rank: 1 }] }; },
+    async search(input) { assert.deepEqual(input.domains, ['example.com']); return { exhausted: true, pageErrors: [], pagesFetched: 1, entries: [{ url: 'https://example.com/result', title: 'Result', snippet: 'Snippet', site_name: 'example.com' }] }; },
   };
   const route = new WebSearchRoute({ provider, artifacts, now: () => '2026-09-20T00:00:00.000Z' });
   const hand = createHandOperationRuntime({

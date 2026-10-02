@@ -154,7 +154,7 @@ test('Responses built-in tools execute write, edit, bash, todo, goal, and presen
   const root = await mkdtemp(join(process.cwd(), 'tmp-provider-builtin-tools-'));
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
-  const executor = createResponsesFileToolExecutor({
+  const { executor } = createResponsesFileToolExecutor({
     workspaceRoot,
     projectKey: 'builtin-tools-project',
     artifactRoot: join(root, 'artifacts'),
@@ -247,7 +247,7 @@ test('Responses file.read executes through Hand and returns actual bound-workspa
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
   await writeFile(join(workspaceRoot, 'README.md'), 'REAL_README_CONTENT\n', 'utf8');
-  const executor = createResponsesFileToolExecutor({
+  const { executor } = createResponsesFileToolExecutor({
     workspaceRoot,
     projectKey: 'fixture-project',
     artifactRoot: join(root, 'artifacts'),
@@ -283,7 +283,7 @@ test('Responses file.read rejects an already-aborted call before Hand admission'
   await mkdir(workspaceRoot, { recursive: true });
   await writeFile(join(workspaceRoot, 'README.md'), 'MUST_NOT_BE_READ\n', 'utf8');
   const artifactRoot = join(root, 'artifacts');
-  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'fixture-project', artifactRoot });
+  const { executor } = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'fixture-project', artifactRoot });
   const controller = new AbortController();
   controller.abort();
   try {

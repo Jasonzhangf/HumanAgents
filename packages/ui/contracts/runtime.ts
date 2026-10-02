@@ -155,6 +155,13 @@ export interface RuntimeTaskEventProjection {
   readonly summary: string;
   readonly occurredAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly callId?: string;
+  readonly toolId?: string;
+  readonly arguments?: unknown;
+  readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+  readonly error?: RuntimeTaskErrorProjection;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
   readonly ownerId?: string;
   readonly retryable?: boolean;
   readonly nextAction?: string;
@@ -225,6 +232,13 @@ export interface RuntimeSseEvent {
   readonly state: string;
   readonly summary: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly callId?: string;
+  readonly toolId?: string;
+  readonly arguments?: unknown;
+  readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+  readonly error?: RuntimeTaskErrorProjection;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
   readonly ownerId?: string;
   readonly retryable?: boolean;
   readonly nextAction?: string;

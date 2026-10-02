@@ -49,6 +49,7 @@ import {
   RESPONSES_PRESENT_TOOL,
   RESPONSES_TODO_WRITE_TOOL,
   RESPONSES_UPDATE_GOAL_TOOL,
+  RESPONSES_WEB_SEARCH_TOOL,
 } from '../provider-tool-execution.js';
 
 export interface RccModeConfig {
@@ -134,6 +135,13 @@ function providerErrorFromReadiness(readiness: ProviderReadiness): {
   };
 }
 
+/**
+ * Upper bound on provider tool rounds per execution. A real long-horizon task
+ * legitimately inspects, writes and verifies, so the bound must leave room for
+ * that while still terminating a runaway round loop.
+ */
+const PROVIDER_TOOL_ROUND_LIMIT = 32;
+
 export function buildRccExecutionPort(config: RccModeConfig, evidenceRoot: string): ExecutionRuntimePort {
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
   const transport = new V3ProviderHttpTransport({ binding: config.binding, baseUrl: config.baseUrl, evidence });
@@ -200,11 +208,23 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     && options.binding.protocol === 'responses'
     && options.workspaceRoot !== undefined
     && options.projectKey !== undefined
-    ? createResponsesFileToolExecutor({
-        workspaceRoot: options.workspaceRoot,
-        projectKey: options.projectKey,
-        artifactRoot: join(options.evidenceRoot, 'provider-tools'),
-      })
+    ? (() => {
+        const built = createResponsesFileToolExecutor({
+          workspaceRoot: options.workspaceRoot,
+          projectKey: options.projectKey,
+          artifactRoot: join(options.evidenceRoot, 'provider-tools'),
+          webSearchProviderConfig: {
+            provider: 'tinyfish',
+            command: process.env.HUMANAGENT_WEB_SEARCH_COMMAND ?? 'monid',
+            endpoint: '/search',
+            pageCeiling: 10,
+            pollIntervalMs: 2000,
+            pollTimeoutMs: 30000,
+            purpose: 'humanagent dashboard web.search tool',
+          },
+        });
+        return { executor: built.executor, searchReports: built.searchReports };
+      })()
     : undefined;
   const service = new UiRuntimeService({
     mode: options.mode,
@@ -233,8 +253,11 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         RESPONSES_CREATE_GOAL_TOOL,
         RESPONSES_UPDATE_GOAL_TOOL,
         RESPONSES_PRESENT_TOOL,
+        RESPONSES_WEB_SEARCH_TOOL,
       ],
-      providerToolExecutor,
+      providerToolExecutor: providerToolExecutor.executor,
+      toolOutputStore: providerToolExecutor.searchReports,
+      providerToolRoundLimit: PROVIDER_TOOL_ROUND_LIMIT,
     }),
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),
     ...(options.explicitBrainAgentMessage === undefined ? {} : { explicitBrainAgentMessage: options.explicitBrainAgentMessage }),

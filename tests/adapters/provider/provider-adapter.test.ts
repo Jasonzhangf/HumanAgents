@@ -480,6 +480,33 @@ test('responses codec keeps tool control typed and encodes a call-bound continua
   ]);
 });
 
+test('responses codec declares the Harness tool surface and keeps tool-less requests instruction-free', () => {
+  const codec = new ResponsesProviderCodec();
+  const tools = [
+    { toolId: 'file.read', description: 'read one file', inputSchema: { type: 'object' } },
+    { toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } },
+  ];
+  const withTools = codec.encodeStart(startInput({ tools }), ccBinding, 'cc-route');
+  assert.match(withTools.instructions, /This Harness owns tool execution/);
+  assert.match(withTools.instructions, /exec_command/);
+  assert.match(withTools.instructions, /Only these function tools can be called: file_read, web_search\./);
+
+  const withoutTools = codec.encodeStart(startInput(), ccBinding, 'cc-route');
+  assert.equal(withoutTools.instructions, '');
+
+  const continued = codec.encodeSubmit(submitInput({
+    tools,
+    toolContinuations: [{
+      callId: 'call-1',
+      toolId: 'web.search',
+      arguments: { query: 'tokio' },
+      continuationRef: 'response-1',
+      output: 'web.search failed',
+    }],
+  }), ccBinding, 'cc-route');
+  assert.match(continued.instructions, /Only these function tools can be called: file_read, web_search\./);
+});
+
 test('responses codec marks request starts once per response id regardless of lifecycle order', async () => {
   const codec = new ResponsesProviderCodec();
   const createdFirst = codecContext();

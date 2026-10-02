@@ -212,6 +212,13 @@ export interface UiRuntimeServiceOptions {
   readonly workspaceRoot?: string;
   readonly providerTools?: import('../../../contracts/src/index.js').ProviderToolDefinition[];
   readonly providerToolExecutor?: ProviderToolExecutionPort;
+  /**
+   * Upper bound on provider tool rounds per execution. Real long-horizon tasks
+   * need more than a couple of rounds, so the bound is an explicit assembly
+   * decision rather than an adapter default.
+   */
+  readonly providerToolRoundLimit?: number;
+  readonly toolOutputStore?: import('../provider-tool-execution.js').UiRuntimeToolOutputStore;
   readonly explicitBrainAgentMessage?: (input: {
     readonly recipientRef: string;
     readonly messageRef: string;
@@ -916,6 +923,63 @@ export class UiRuntimeService {
     };
   }
 
+  /**
+   * Task-scoped tool output read. The descriptor is looked up through the
+   * (taskId, operationId, executionEpoch, seq) event identity — never through a
+   * bare callId — and the report is re-verified against its sha256 digest before
+   * it is returned. The response carries only the report body, never artifact
+   * file paths on the host.
+   */
+  async toolOutput(taskId: TaskId, operationId: OperationId, executionEpoch: number, seq: number): Promise<unknown> {
+    const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+    const event = task.events.find((candidate) => (
+      candidate.operationId === operationId.value
+      && candidate.executionEpoch === executionEpoch
+      && candidate.seq === seq
+    ));
+    if (event === undefined) {
+      throw new UiRuntimeApiError(
+        'tool-output.event-not-found',
+        RUNTIME_OWNER,
+        `no event ${seq} on operation ${operationId.value} for task ${taskId.value}`,
+        'select a recorded tool result event',
+        404,
+      );
+    }
+    if (event.toolId === undefined || event.status !== 'succeeded' || event.outputRef === undefined || event.outputDigest === undefined) {
+      throw new UiRuntimeApiError(
+        'tool-output.not-available',
+        RUNTIME_OWNER,
+        'the event is not a succeeded tool result with an immutable output descriptor',
+        'select a succeeded file.search result event',
+        409,
+      );
+    }
+    if (this.options.toolOutputStore === undefined) {
+      throw new UiRuntimeApiError(
+        'tool-output.reader-unavailable',
+        RUNTIME_OWNER,
+        'the tool output report store is not bound',
+        'restart the runtime with the provider tool report store',
+        501,
+      );
+    }
+    try {
+      return await this.options.toolOutputStore.readReport({
+        outputRef: event.outputRef,
+        outputDigest: event.outputDigest,
+      });
+    } catch (error) {
+      throw new UiRuntimeApiError(
+        'tool-output.report-missing-or-changed',
+        RUNTIME_OWNER,
+        error instanceof Error ? error.message : 'the tool output report could not be verified against its digest',
+        'inspect the report store for the descriptor',
+        409,
+      );
+    }
+  }
+
   private now(): Date {
     return this.options.now?.() ?? new Date();
   }
@@ -1141,6 +1205,7 @@ export class UiRuntimeService {
       ownerId: input.ownerId,
       ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
       ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
+      ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
     });
     return new MemoryBoundExecutionDriver(driver, input, this.memory, this.memoryInjection, (bound) => {
       this.memoryContexts.set(input.operationId.value, bound);
@@ -1166,6 +1231,7 @@ export class UiRuntimeService {
           ownerId: RUNTIME_OWNER,
           ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
           ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
+          ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
         });
         activeDrivers.set(input.assignment.assignmentId, driver);
         let started = false;

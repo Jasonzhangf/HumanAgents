@@ -13,16 +13,22 @@ import {
   type OperationIntent,
   type ProviderToolDefinition,
   type Scope,
+  type WebSearchRequest,
+  type WebSearchRecency,
+  WEB_SEARCH_SERVICE_ID,
+  WEB_SEARCH_CONTRACT_VERSION,
 } from '../../contracts/src/index.js';
 import { ImmutableAssetStore, type AssetReference } from '../../adapters/filesystem/src/index.js';
 import {
   FileReadRoute,
   WorkspaceCodeSearchFunctions,
+  createAgentReachWebSearchProvider,
   type FileReadArtifactStore,
   type FileReadReport,
   type FileReadRequest,
+  type WebSearchProviderBackendConfig,
 } from '../../adapters/operations/src/index.js';
-import { CodeSearchService } from '../../runtime/src/hand/index.js';
+import { CodeSearchService, WebSearchService, type WebSearchProvider } from '../../runtime/src/hand/index.js';
 import type { ProviderToolExecutionPort } from '../../adapters/provider/src/index.js';
 import type { OperationJournalPort } from '../../runtime/src/gateway/index.js';
 import { createHandOperationRuntime } from './tool-execution-gateway.js';
@@ -205,7 +211,34 @@ export const RESPONSES_FILE_SEARCH_TOOL: ProviderToolDefinition = {
   },
 };
 
+export const RESPONSES_WEB_SEARCH_TOOL: ProviderToolDefinition = {
+  toolId: 'web.search',
+  description: 'Search the public web for current sources via the bound search provider. Use it for live references, news, or facts that are not present in the bound workspace. Pass `query`; optionally narrow by `domains` or `recency`. The returned results carry `url`, `title`, `snippet`, and `sourceName` so you can cite them directly.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'Free-text query; the adapter pages pages 0..pageCeiling and stops at the first short page.' },
+      domains: { type: 'array', items: { type: 'string' }, description: 'Optional include_domains; passed through to the provider as `include_domains`.' },
+      recency: { type: 'string', enum: ['day', 'week', 'month', 'year', 'any'], description: 'Recency window; defaults to "any".' },
+      maxResults: { type: 'integer', minimum: 1, maximum: 50, description: 'Cap on the validated result list returned to the model; defaults to 10.' },
+      requireComplete: { type: 'boolean', description: 'If true, the call fails when any page error is unresolved or the provider did not exhaust its pages.' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+};
+
 export interface ResponsesFileToolExecutor extends ProviderToolExecutionPort {}
+
+/** Read-only view over persisted provider tool reports, addressed by the typed
+ *  `{ outputRef, outputDigest }` descriptor carried on a tool result event.
+ *  Reports are stored as JSON documents under `ImmutableAssetStore`, so the
+ *  store never exposes host file paths. */
+export interface UiRuntimeToolOutputStore {
+  readonly store: ImmutableAssetStore;
+  writeReport(input: { readonly outputId: string; readonly report: unknown }): Promise<{ readonly outputRef: string; readonly outputDigest: string }>;
+  readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<unknown>;
+}
 
 function digest(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -323,18 +356,43 @@ function providerTaskStatePath(root: string, request: ToolExecRequest): string {
   return join(root, 'task-state', `${request.execution.taskId.value}.json`);
 }
 
-class FileReadAssets implements FileReadArtifactStore {
-  private readonly requests = new Map<string, { readonly digest: string; readonly request: FileReadRequest }>();
+class ToolOutputAssets implements UiRuntimeToolOutputStore {
+  readonly store: ImmutableAssetStore;
   private readonly reports = new Map<string, AssetReference>();
 
-  constructor(private readonly store: ImmutableAssetStore) {}
+  constructor(store: ImmutableAssetStore) {
+    this.store = store;
+  }
+
+  async writeReport(input: { readonly outputId: string; readonly report: unknown }): Promise<{ readonly outputRef: string; readonly outputDigest: string }> {
+    const content = JSON.stringify(input.report);
+    const reference = await this.store.write(
+      safeId(`provider-tool-output-${input.outputId}-${digest(content).slice(-12)}`),
+      new TextEncoder().encode(content),
+    );
+    const outputRef = `asset://provider-tool/output/${encodeURIComponent(input.outputId)}`;
+    this.reports.set(outputRef, reference);
+    return { outputRef, outputDigest: reference.digest };
+  }
+
+  async readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<unknown> {
+    const reference = this.reports.get(input.outputRef);
+    if (!reference || reference.digest !== input.outputDigest) throw new Error('tool output report is missing or changed');
+    return JSON.parse(new TextDecoder().decode(await this.store.read(reference))) as unknown;
+  }
+}
+
+class FileReadAssets implements FileReadArtifactStore {
+  private readonly requests = new Map<string, { readonly digest: string; readonly request: FileReadRequest }>();
+
+  constructor(private readonly output: ToolOutputAssets) {}
 
   async writeRequest(callId: string, request: FileReadRequest): Promise<{ readonly inputRef: string; readonly inputDigest: string }> {
     const content = JSON.stringify(request);
     const inputDigest = digest(content);
     const inputRef = `asset://provider-tool/input/${encodeURIComponent(callId)}`;
     this.requests.set(inputRef, { digest: inputDigest, request });
-    await this.store.write(safeId(`provider-tool-input-${callId}-${inputDigest.slice(-12)}`), new TextEncoder().encode(content));
+    await this.output.store.write(safeId(`provider-tool-input-${callId}-${inputDigest.slice(-12)}`), new TextEncoder().encode(content));
     return { inputRef, inputDigest };
   }
 
@@ -345,20 +403,11 @@ class FileReadAssets implements FileReadArtifactStore {
   }
 
   async writeReport(input: { readonly operationId: OperationId; readonly report: FileReadReport }): Promise<{ readonly outputRef: string; readonly outputDigest: string }> {
-    const content = JSON.stringify(input.report);
-    const reference = await this.store.write(
-      safeId(`provider-tool-output-${input.operationId.value}-${digest(content).slice(-12)}`),
-      new TextEncoder().encode(content),
-    );
-    const outputRef = `asset://provider-tool/output/${encodeURIComponent(input.operationId.value)}`;
-    this.reports.set(outputRef, reference);
-    return { outputRef, outputDigest: reference.digest };
+    return this.output.writeReport({ outputId: input.operationId.value, report: input.report });
   }
 
   async readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<FileReadReport> {
-    const reference = this.reports.get(input.outputRef);
-    if (!reference || reference.digest !== input.outputDigest) throw new Error('file read report is missing or changed');
-    return JSON.parse(new TextDecoder().decode(await this.store.read(reference))) as FileReadReport;
+    return (await this.output.readReport(input)) as FileReadReport;
   }
 }
 
@@ -374,16 +423,40 @@ class FileOperationJournal implements OperationJournalPort {
 type ToolExecRequest = Parameters<ProviderToolExecutionPort['execute']>[0];
 type ToolExecResult = ProviderToolExecutionPort['execute'] extends (input: infer _I) => Promise<infer R> ? R : never;
 
+/** Tool ids this executor owns; surfaced to the provider when it calls a tool
+ *  this Harness does not own (for example a backend harness tool such as
+ *  `exec_command`) so the model can retry with an owned tool. */
+const REGISTERED_TOOL_IDS: readonly string[] = [
+  RESPONSES_FILE_READ_TOOL.toolId,
+  RESPONSES_FILE_LIST_TOOL.toolId,
+  RESPONSES_FILE_SEARCH_TOOL.toolId,
+  RESPONSES_FILE_WRITE_TOOL.toolId,
+  RESPONSES_FILE_EDIT_TOOL.toolId,
+  RESPONSES_BASH_TOOL.toolId,
+  RESPONSES_TODO_WRITE_TOOL.toolId,
+  RESPONSES_GET_GOAL_TOOL.toolId,
+  RESPONSES_CREATE_GOAL_TOOL.toolId,
+  RESPONSES_UPDATE_GOAL_TOOL.toolId,
+  RESPONSES_PRESENT_TOOL.toolId,
+  RESPONSES_WEB_SEARCH_TOOL.toolId,
+];
+
 export function createResponsesFileToolExecutor(input: {
   readonly workspaceRoot: string;
   readonly projectKey: string;
   readonly artifactRoot: string;
-}): ResponsesFileToolExecutor {
+  readonly webSearchProviderConfig?: WebSearchProviderBackendConfig;
+}): { readonly executor: ResponsesFileToolExecutor; readonly searchReports: UiRuntimeToolOutputStore } {
   const workspaceRef = `workspace:${input.projectKey}`;
   const functions = new WorkspaceCodeSearchFunctions({ workspaceRef, workspaceRoot: input.workspaceRoot });
-  const readAssets = new FileReadAssets(new ImmutableAssetStore(join(input.artifactRoot, 'file-read')));
+  const readAssets = new FileReadAssets(new ToolOutputAssets(new ImmutableAssetStore(join(input.artifactRoot, 'file-read'))));
   const readRoute = new FileReadRoute({ functions, artifacts: readAssets });
   const codeSearchService = new CodeSearchService({ functions });
+  const searchReports = new ToolOutputAssets(new ImmutableAssetStore(join(input.artifactRoot, 'tool-output')));
+  const webSearchProvider: WebSearchProvider | undefined = input.webSearchProviderConfig
+    ? createAgentReachWebSearchProvider(input.webSearchProviderConfig)
+    : undefined;
+  const webSearchService = webSearchProvider ? new WebSearchService(webSearchProvider) : null;
   const hand = createHandOperationRuntime({
     fileReadRoute: readRoute,
     permissions: {
@@ -400,35 +473,42 @@ export function createResponsesFileToolExecutor(input: {
   });
 
   return {
-    async execute(request): Promise<ToolExecResult> {
-      if (request.signal.aborted) throw Object.assign(new Error('provider tool was stopped before admission'), { name: 'AbortError' });
-      switch (request.call.toolId) {
-        case RESPONSES_FILE_READ_TOOL.toolId:
-          return await executeFileRead(request, { hand, assets: readAssets, workspaceRef });
-        case RESPONSES_FILE_LIST_TOOL.toolId:
-          return await executeFileList(request, { functions, workspaceRef });
-        case RESPONSES_FILE_SEARCH_TOOL.toolId:
-          return await executeFileSearch(request, { service: codeSearchService, workspaceRef });
-        case RESPONSES_FILE_WRITE_TOOL.toolId:
-          return await executeFileWrite(request, { workspaceRoot: input.workspaceRoot });
-        case RESPONSES_FILE_EDIT_TOOL.toolId:
-          return await executeFileEdit(request, { workspaceRoot: input.workspaceRoot });
-        case RESPONSES_BASH_TOOL.toolId:
-          return await executeBash(request, { workspaceRoot: input.workspaceRoot });
-        case RESPONSES_TODO_WRITE_TOOL.toolId:
-          return await executeTodoWrite(request, { artifactRoot: input.artifactRoot });
-        case RESPONSES_GET_GOAL_TOOL.toolId:
-          return await executeGetGoal(request, { artifactRoot: input.artifactRoot });
-        case RESPONSES_CREATE_GOAL_TOOL.toolId:
-          return await executeCreateGoal(request, { artifactRoot: input.artifactRoot });
-        case RESPONSES_UPDATE_GOAL_TOOL.toolId:
-          return await executeUpdateGoal(request, { artifactRoot: input.artifactRoot });
-        case RESPONSES_PRESENT_TOOL.toolId:
-          return await executePresent(request, { workspaceRoot: input.workspaceRoot });
-        default:
-          throw new Error(`provider tool is not registered: ${request.call.toolId}`);
-      }
+    executor: {
+      async execute(request): Promise<ToolExecResult> {
+        if (request.signal.aborted) throw Object.assign(new Error('provider tool was stopped before admission'), { name: 'AbortError' });
+        switch (request.call.toolId) {
+          case RESPONSES_FILE_READ_TOOL.toolId:
+            return await executeFileRead(request, { hand, assets: readAssets, workspaceRef });
+          case RESPONSES_FILE_LIST_TOOL.toolId:
+            return await executeFileList(request, { functions, workspaceRef });
+          case RESPONSES_FILE_SEARCH_TOOL.toolId:
+            return await executeFileSearch(request, { service: codeSearchService, workspaceRef, assets: searchReports });
+          case RESPONSES_FILE_WRITE_TOOL.toolId:
+            return await executeFileWrite(request, { workspaceRoot: input.workspaceRoot });
+          case RESPONSES_FILE_EDIT_TOOL.toolId:
+            return await executeFileEdit(request, { workspaceRoot: input.workspaceRoot });
+          case RESPONSES_BASH_TOOL.toolId:
+            return await executeBash(request, { workspaceRoot: input.workspaceRoot });
+          case RESPONSES_TODO_WRITE_TOOL.toolId:
+            return await executeTodoWrite(request, { artifactRoot: input.artifactRoot });
+          case RESPONSES_GET_GOAL_TOOL.toolId:
+            return await executeGetGoal(request, { artifactRoot: input.artifactRoot });
+          case RESPONSES_CREATE_GOAL_TOOL.toolId:
+            return await executeCreateGoal(request, { artifactRoot: input.artifactRoot });
+          case RESPONSES_UPDATE_GOAL_TOOL.toolId:
+            return await executeUpdateGoal(request, { artifactRoot: input.artifactRoot });
+          case RESPONSES_PRESENT_TOOL.toolId:
+            return await executePresent(request, { workspaceRoot: input.workspaceRoot });
+          case RESPONSES_WEB_SEARCH_TOOL.toolId:
+            return await executeWebSearch(request, { service: webSearchService, assets: searchReports });
+          default:
+            throw new Error(
+              `provider tool is not registered: ${request.call.toolId}; tools this Harness owns: ${REGISTERED_TOOL_IDS.join(', ')}`,
+            );
+        }
+      },
     },
+    searchReports,
   };
 }
 
@@ -477,6 +557,8 @@ async function executeFileRead(
   return {
     output: JSON.stringify(report),
     outputRefs: [result.operation.result.outputRef],
+    outputRef: result.operation.result.outputRef,
+    outputDigest: result.operation.result.outputDigest,
     evidenceRefs: result.operation.result.evidenceRefs,
   };
 }
@@ -523,7 +605,7 @@ async function executeFileList(
 
 async function executeFileSearch(
   request: ToolExecRequest,
-  params: { readonly service: CodeSearchService; readonly workspaceRef: string },
+  params: { readonly service: CodeSearchService; readonly workspaceRef: string; readonly assets: ToolOutputAssets },
 ): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('file.search was stopped before admission'), { name: 'AbortError' });
   const args = request.call.arguments;
@@ -584,9 +666,12 @@ async function executeFileSearch(
     cycleId,
     operationId,
   };
+  const descriptor = await params.assets.writeReport({ outputId: operationId.value, report: output });
   return {
     output: JSON.stringify(output),
-    outputRefs: [],
+    outputRefs: [descriptor.outputRef],
+    outputRef: descriptor.outputRef,
+    outputDigest: descriptor.outputDigest,
     evidenceRefs: [evidence(scope, 'file-search')],
   };
 }
@@ -772,4 +857,88 @@ async function executePresent(request: ToolExecRequest, params: { readonly works
     await assertRegularWorkspaceFile(target);
   }
   return { output: JSON.stringify({ turn: request.execution.executionEpoch, files }), outputRefs: [], evidenceRefs: [taskEvidence(request, 'present')] };
+}
+
+async function executeWebSearch(
+  request: ToolExecRequest,
+  params: {
+    readonly service: WebSearchService | null;
+    readonly assets: UiRuntimeToolOutputStore;
+  },
+): Promise<ToolExecResult> {
+  if (!params.service) throw new Error('web.search is not configured for this serve: provider adapter was not injected');
+  if (request.signal.aborted) throw Object.assign(new Error('web.search was stopped before admission'), { name: 'AbortError' });
+  const args = request.call.arguments;
+  if (typeof args.query !== 'string' || args.query.trim() === '') throw new Error('web.search requires a non-empty query');
+  const input: WebSearchRequest = {
+    serviceId: WEB_SEARCH_SERVICE_ID,
+    contractVersion: WEB_SEARCH_CONTRACT_VERSION,
+    query: args.query,
+    ...(Array.isArray(args.domains) ? { domains: args.domains.filter((domain): domain is string => typeof domain === 'string' && domain.trim() !== '') } : {}),
+    ...(typeof args.recency === 'string' ? { recency: args.recency as WebSearchRecency } : {}),
+    ...(typeof args.maxResults === 'number' && Number.isInteger(args.maxResults) && args.maxResults > 0
+      ? { maxResults: Math.min(args.maxResults, 50) }
+      : {}),
+    ...(typeof args.requireComplete === 'boolean' ? { requireComplete: args.requireComplete } : {}),
+  };
+  const report = await params.service.execute(input, { signal: request.signal });
+  const outputId = safeId(`provider-tool-web-search-${request.execution.taskId.value}-${request.call.callId}`);
+  const { outputRef, outputDigest } = await params.assets.writeReport({ outputId, report });
+  const summary = {
+    status: report.status,
+    resultsFound: report.resultsFound,
+    providerPagesFetched: report.providerPagesFetched,
+    resultsScope: report.resultsScope,
+    searchComplete: report.searchComplete,
+    unresolvedSources: report.unresolvedSources,
+    summary: report.summary,
+  };
+  const top = report.results.slice(0, 5).map((result) => ({
+    url: result.url,
+    title: result.title,
+    snippet: result.snippet,
+    sourceName: result.sourceName ?? null,
+  }));
+  const evidenceRefs = [taskEvidence(request, 'web-search')];
+  if (report.status === 'succeeded') {
+    return {
+      output: JSON.stringify({ ...summary, top }),
+      outputRefs: [outputRef],
+      evidenceRefs,
+      status: 'succeeded',
+      outputRef,
+      outputDigest,
+    };
+  }
+  return {
+    output: JSON.stringify({ ...summary, top }),
+    outputRefs: [outputRef],
+    evidenceRefs,
+    status: 'failed',
+    outputRef,
+    outputDigest,
+    error: {
+      errorId: `provider-tool-web-search-${request.call.callId}`,
+      code: report.failure?.code ?? 'provider-failed',
+      category: webSearchErrorCategory(report.failure?.code),
+      phase: 'tool',
+      message: report.failure?.message ?? report.summary,
+      ownerId: OWNER,
+      retryable: report.failure?.code === 'provider-unsettled' ? 'manual' : 'retryable',
+      attention: 'foreground',
+      evidenceRefs,
+      nextAction: { kind: 'recover', ref: RESPONSES_WEB_SEARCH_TOOL.toolId },
+    },
+  };
+}
+
+function webSearchErrorCategory(code: string | undefined): 'provider' | 'transport' | 'timeout' | 'validation' | 'runtime' {
+  switch (code) {
+    case 'provider-unavailable': return 'transport';
+    case 'provider-unsettled': return 'timeout';
+    case 'invalid-request':
+    case 'invalid-result': return 'validation';
+    case 'provider-failed': return 'provider';
+    default: return 'runtime';
+  }
 }
