@@ -156,6 +156,7 @@ export async function countTurnEvidence(journalPath, options = {}) {
       summary: event.summary ?? null,
       callId: event.callId ?? null,
       toolId: event.toolId ?? null,
+      arguments: event.arguments ?? null,
       error: event.error ?? null,
       outputRef: event.outputRef ?? null,
       outputDigest: event.outputDigest ?? null,
@@ -261,3 +262,51 @@ export function manifestsIdentical(before, after) {
 }
 
 export { basename as baseName };
+
+/**
+ * Read the immutable report behind every succeeded tool result.
+ *
+ * The authoritative journal records the tool output descriptor (`outputRef` +
+ * `outputDigest`), not the report body. The body is read back through the
+ * runtime's task-scoped tool-output route, which re-verifies the digest before
+ * returning it, so a report returned here is the one the execution produced.
+ * The route is addressed by task/operation/epoch/seq, never by `callId` alone.
+ */
+export async function readToolOutputReports(binding, dashboard, events) {
+  const operationId = dashboard?.operationId;
+  const executionEpoch = dashboard?.executionEpoch;
+  if (typeof operationId !== 'string' || typeof executionEpoch !== 'number') return [];
+  const reports = [];
+  for (const event of events) {
+    if (event.kind !== 'provider.tool-result' || event.status !== 'succeeded') continue;
+    if (typeof event.outputRef !== 'string' || typeof event.seq !== 'number') continue;
+    const path = `/api/tasks/${encodeURIComponent(binding.taskId)}/operations/${encodeURIComponent(operationId)}`
+      + `/executions/${executionEpoch}/events/${event.seq}/tool-output`;
+    try {
+      const response = await fetch(`${binding.serveBaseUrl}${path}`);
+      const body = await response.json().catch(() => null);
+      reports.push({
+        seq: event.seq,
+        callId: event.callId ?? null,
+        toolId: event.toolId ?? null,
+        path,
+        ok: response.ok,
+        status: response.status,
+        report: response.ok ? body : null,
+        error: response.ok ? null : (body?.error?.message ?? `HTTP ${response.status}`),
+      });
+    } catch (error) {
+      reports.push({
+        seq: event.seq,
+        callId: event.callId ?? null,
+        toolId: event.toolId ?? null,
+        path,
+        ok: false,
+        status: null,
+        report: null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return reports;
+}

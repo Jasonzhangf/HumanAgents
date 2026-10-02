@@ -89,13 +89,25 @@ export function createAgentReachWebSearchProvider(
 
       for (let page = 0; page <= pageCeiling; page += 1) {
         assertSignal(input.signal);
-        const pageResult = await fetchPage(config, {
-          query: input.query,
-          purpose: config.purpose ?? 'web search by HumanAgent',
-          page,
-          domains: input.domains,
-          recency: input.recency,
-        }, input.signal, pollIntervalMs, pollTimeoutMs);
+        let pageResult: { results: unknown[] };
+        try {
+          pageResult = await fetchPage(config, {
+            query: input.query,
+            purpose: config.purpose ?? 'web search by HumanAgent',
+            page,
+            domains: input.domains,
+            recency: input.recency,
+          }, input.signal, pollIntervalMs, pollTimeoutMs);
+        } catch (cause) {
+          if (input.signal.aborted || isAbortError(cause)) throw cause;
+          // A page the adapter could not retrieve at all is recorded verbatim so
+          // the search stays visibly partial. With nothing collected yet there
+          // is no partial result to report, so the failure stays explicit.
+          if (pagesFetched === 0) throw cause;
+          pageErrors.push(cause instanceof Error ? cause.message : String(cause));
+          exhausted = false;
+          break;
+        }
         pagesFetched += 1;
         const results = pageResult.results;
         entries.push(...results);
@@ -276,6 +288,10 @@ function assertSignal(signal: AbortSignal): void {
   if (signal.aborted) {
     throw Object.assign(new Error('web search was stopped before admission'), { name: 'AbortError' });
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 function parseJson<T>(text: string): T {

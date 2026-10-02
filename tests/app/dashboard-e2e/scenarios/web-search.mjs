@@ -13,7 +13,7 @@
  */
 
 import { captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
-import { countTurnEvidenceFor, journalPathFor } from '../lib/journal.mjs';
+import { countTurnEvidenceFor, journalPathFor, readToolOutputReports } from '../lib/journal.mjs';
 
 export const SCENARIO = 'web-search';
 
@@ -125,49 +125,6 @@ function urlsInEvents(events) {
     collectUrls(JSON.stringify(event), urls);
   }
   return urls;
-}
-
-/**
- * Read the immutable report behind every succeeded tool result.
- *
- * The authoritative journal records the tool output descriptor (`outputRef` +
- * `outputDigest`); the report body (for `web.search`: the provider page results
- * with `url`, `title`, `snippet`, `sourceName`) is read back through the
- * runtime's tool-output route, which re-verifies the digest before returning it.
- */
-async function readToolOutputReports(binding, dashboard, events) {
-  const operationId = dashboard?.operationId;
-  const executionEpoch = dashboard?.executionEpoch;
-  if (typeof operationId !== 'string' || typeof executionEpoch !== 'number') return [];
-  const reports = [];
-  for (const event of events) {
-    if (event.kind !== 'provider.tool-result' || event.status !== 'succeeded') continue;
-    if (typeof event.outputRef !== 'string' || typeof event.seq !== 'number') continue;
-    const path = `/api/tasks/${encodeURIComponent(binding.taskId)}/operations/${encodeURIComponent(operationId)}`
-      + `/executions/${executionEpoch}/events/${event.seq}/tool-output`;
-    try {
-      const response = await fetch(`${binding.serveBaseUrl}${path}`);
-      const body = await response.json().catch(() => null);
-      reports.push({
-        seq: event.seq,
-        toolId: event.toolId ?? null,
-        ok: response.ok,
-        status: response.status,
-        report: response.ok ? body : null,
-        error: response.ok ? null : (body?.error?.message ?? `HTTP ${response.status}`),
-      });
-    } catch (error) {
-      reports.push({
-        seq: event.seq,
-        toolId: event.toolId ?? null,
-        ok: false,
-        status: null,
-        report: null,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return reports;
 }
 
 function urlsInReports(reports) {

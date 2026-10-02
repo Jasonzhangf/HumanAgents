@@ -15,7 +15,13 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
-import { countTurnEvidenceFor, journalPathFor, manifestsIdentical, workspaceManifest } from '../lib/journal.mjs';
+import {
+  countTurnEvidenceFor,
+  journalPathFor,
+  manifestsIdentical,
+  readToolOutputReports,
+  workspaceManifest,
+} from '../lib/journal.mjs';
 
 export const SCENARIO = 'local-file-search';
 
@@ -66,6 +72,24 @@ export async function runLocalFileSearchScenario(binding) {
   const searchResults = tools.filter((event) => event.kind === 'provider.tool-result' && isTool('file\\.search')(event));
   const readCalls = tools.filter((event) => event.kind === 'provider.tool' && isTool('file\\.read')(event));
 
+  // The journal carries the tool output descriptor, not the report body: read the
+  // immutable report behind each succeeded result through the task-scoped
+  // tool-output route (the route re-verifies the descriptor digest) and assert
+  // the report really contains the query and the matching path/line.
+  const reports = await readToolOutputReports(binding, dashboard, events);
+  const searchReportEntries = reports.filter((entry) => entry.toolId === 'file.search');
+  const searchReports = searchReportEntries.filter((entry) => entry.ok).map((entry) => entry.report);
+  const reportHaystacks = searchReports.map((report) => JSON.stringify(report ?? null));
+  const reportHasQuery = reportHaystacks.some((text) => text.includes(marker));
+  const reportHasPath = reportHaystacks.some((text) => text.includes('hello-agent.txt'));
+  const reportHasLine = reportHaystacks.some((text) => /"(line|lineNumber|line_number)"\s*:\s*\d+/.test(text))
+    || reportHaystacks.some((text) => /"(summary|snippet|preview|text)"\s*:\s*"[^"]*humanagent-e2e-marker/.test(text));
+
+  // The read must target the path the search hit, not a path known up front.
+  const searchQueryObserved = searchCalls.some((event) => JSON.stringify(event.arguments ?? {}).includes(marker));
+  const readTargets = readCalls.map((event) => readPathFromEvent(event)).filter((value) => typeof value === 'string');
+  const readTargetedHit = readTargets.some((target) => target.includes('hello-agent.txt'));
+
   const fixtureHit = haystack.includes('hello-agent.txt');
   const markerHit = haystack.includes(marker);
   const fixtureContent = await readFile(join(binding.workspace, fixtureRel), 'utf8').catch(() => null);
@@ -75,8 +99,14 @@ export async function runLocalFileSearchScenario(binding) {
   if (!turnEvidence) missing.push('authoritative journal evidence could not be read');
   else if (turnEvidence.toolRounds < 2) missing.push(`journal toolRounds=${turnEvidence.toolRounds} (expected >= 2)`);
   if (searchCalls.length === 0) missing.push('no file.search tool call was recorded');
+  else if (!searchQueryObserved) missing.push(`no file.search call carried the query marker ${marker}`);
   if (searchResults.length === 0) missing.push('no file.search tool result was recorded');
   if (readCalls.length === 0) missing.push('no file.read tool call was recorded');
+  if (searchReports.length === 0) missing.push('no succeeded file.search tool-output report could be read back');
+  if (!reportHasQuery) missing.push(`the file.search report did not contain the query marker ${marker}`);
+  if (!reportHasPath) missing.push(`the file.search report did not contain the matching path ${fixtureRel}`);
+  if (!reportHasLine) missing.push('the file.search report did not contain a matching line or summary');
+  if (!readTargetedHit) missing.push(`no file.read call targeted the search-hit path ${fixtureRel}`);
   if (!fixtureHit) missing.push(`workspace path ${fixtureRel} did not appear in the tool evidence`);
   if (!markerHit) missing.push(`fixture marker ${marker} did not appear in the tool evidence`);
   if (!unchanged) missing.push('workspace manifest changed during the read-only run');
@@ -96,6 +126,13 @@ export async function runLocalFileSearchScenario(binding) {
     searchResults: searchResults.map(pickEvent),
     readCalls: readCalls.map(pickEvent),
     allProviderToolEvents: tools.map(pickEvent),
+    toolOutputReports: reports.map(pickReport),
+    searchReportHasQuery: reportHasQuery,
+    searchReportHasPath: reportHasPath,
+    searchReportHasLine: reportHasLine,
+    searchQueryObserved,
+    readTargets,
+    readTargetedSearchHit: readTargetedHit,
     fixturePathObserved: fixtureHit,
     fixtureMarkerObserved: markerHit,
     workspaceManifestBefore: before,
@@ -124,7 +161,31 @@ function pickEvent(event) {
     summary: event.summary,
     callId: event.callId,
     toolId: event.toolId,
+    arguments: event.arguments,
     error: event.error,
     evidenceRefs: event.evidenceRefs,
   };
+}
+
+function pickReport(entry) {
+  return {
+    seq: entry.seq,
+    callId: entry.callId,
+    toolId: entry.toolId,
+    path: entry.path,
+    ok: entry.ok,
+    status: entry.status,
+    error: entry.error,
+    report: entry.report,
+  };
+}
+
+/** The workspace path a file tool call targeted, taken from its own arguments. */
+function readPathFromEvent(event) {
+  const args = event.arguments;
+  if (args === null || typeof args !== 'object') return null;
+  for (const key of ['path', 'file_path']) {
+    if (typeof args[key] === 'string' && args[key].trim()) return args[key];
+  }
+  return null;
 }

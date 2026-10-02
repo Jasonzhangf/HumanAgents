@@ -98,12 +98,6 @@ function identity(options: ProviderAgentDriverOptions): ProviderExecutionIdentit
   };
 }
 
-function isExpectedStopAbort(cause: unknown, controller: AbortController): boolean {
-  if (!controller.signal.aborted) return false;
-  if (cause === controller.signal.reason) return true;
-  return cause instanceof Error && cause.name === 'AbortError';
-}
-
 export class ProviderAgentDriver implements AgentDriver {
   readonly kind = 'humanagent.provider-agent-driver';
 
@@ -239,12 +233,12 @@ export class ProviderAgentDriver implements AgentDriver {
             signal: toolController.signal,
           });
         } catch (cause) {
-          // A stop aborts the tool signal; an executor that rejects with that
-          // abort must drain as the same clean stopped closure as a normal
-          // return. A tool failure or cancellation is evidence, so it must emit
-          // a typed result bound to the same callId instead of only throwing.
+          // A stop aborts the tool signal. Whether the executor rejected with
+          // that abort or with its own failure, the outcome is evidence: it must
+          // emit a typed result bound to the same callId instead of only
+          // returning or throwing, so a cancelled tool never disappears from
+          // the journal.
           if (this.stopping) {
-            if (isExpectedStopAbort(cause, toolController)) return;
             yield* this.toolFailedEvents(call, cause, 'cancelled');
             return;
           }

@@ -50,10 +50,26 @@ test('web.search distinguishes partial success from strict incomplete failure', 
   assert.equal(strict.requireComplete, true);
 });
 
-test('web.search rejects invalid provider results and provider unavailability explicitly', async () => {
-  const invalid = await new WebSearchService(new FixtureProvider({ entries: [entry('file:///secret', 'Secret', 'Snippet')], pagesFetched: 1, exhausted: true })).execute(request());
-  assert.equal(invalid.status, 'failed');
-  assert.equal(invalid.failure?.code, 'invalid-result');
+test('web.search reports a rejected entry as a partial result and keeps provider unavailability explicit', async () => {
+  const partial = await new WebSearchService(new FixtureProvider({
+    entries: [entry('https://example.com/ok', 'OK', 'Snippet OK'), entry('file:///secret', 'Secret', 'Snippet')],
+    pagesFetched: 1,
+    exhausted: true,
+  })).execute(request());
+  assert.equal(partial.status, 'succeeded');
+  assert.equal(partial.searchComplete, false);
+  assert.deepEqual(partial.results.map((item) => item.url), ['https://example.com/ok']);
+  assert.equal(partial.unresolvedSources.length, 1);
+  assert.match(String(partial.unresolvedSources[0]), /file:\/\/\/secret/);
+
+  const strictPartial = await new WebSearchService(new FixtureProvider({
+    entries: [entry('file:///secret', 'Secret', 'Snippet')],
+    pagesFetched: 1,
+    exhausted: true,
+  })).execute(request({ requireComplete: true }));
+  assert.equal(strictPartial.status, 'failed');
+  assert.equal(strictPartial.failure?.code, 'search-incomplete');
+
   const unavailable = await new WebSearchService({ async search() { throw new WebSearchHarnessError('provider-unavailable', 'no web provider is configured'); } }).execute(request());
   assert.equal(unavailable.status, 'failed');
   assert.equal(unavailable.failure?.code, 'provider-unavailable');

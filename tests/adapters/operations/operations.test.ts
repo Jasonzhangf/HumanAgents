@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +15,7 @@ import {
   LegacyInternalRouteAdapter,
   OperationAdapterError,
   WorkspaceCodeSearchFunctions,
+  createAgentReachWebSearchProvider,
   type LegacyInternalExecutionContext,
   type OperationExecutionRequest,
 } from '../../../packages/adapters/operations/src/index.js';
@@ -369,3 +370,83 @@ test('legacy adapter rejects evidence with a broader scope than the operation', 
       && /scope/.test(error.failure.message),
   );
 });
+
+/**
+ * A page the adapter cannot retrieve at all is recorded verbatim in
+ * `pageErrors` so the search stays visibly partial; a first-page failure has no
+ * partial result to report and stays explicit.
+ */
+test('agent reach web search records a later page failure as a page error and keeps the first-page failure fatal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-web-search-adapter-'));
+  try {
+    const command = join(root, 'fake-monid.mjs');
+    await writeFile(command, FAKE_MONID, 'utf8');
+    await chmod(command, 0o755);
+    const provider = createAgentReachWebSearchProvider({
+      provider: 'tinyfish',
+      command,
+      endpoint: '/search',
+      pageCeiling: 3,
+      pollIntervalMs: 100,
+      pollTimeoutMs: 5_000,
+    });
+    const input = { query: 'partial page probe', domains: [], recency: 'any' as const, signal: new AbortController().signal };
+
+    const partial = await provider.search(input);
+    assert.equal(partial.pagesFetched, 1);
+    assert.equal(partial.entries.length, 10);
+    assert.equal(partial.exhausted, false);
+    assert.equal(partial.pageErrors.length, 1);
+    assert.match(String(partial.pageErrors[0]), /page 1 exploded/);
+
+    const firstPageFailure = createAgentReachWebSearchProvider({
+      provider: 'tinyfish',
+      command,
+      endpoint: '/search',
+      pageCeiling: 3,
+      pollIntervalMs: 100,
+      pollTimeoutMs: 5_000,
+      purpose: 'fail-first-page',
+    });
+    await assert.rejects(() => firstPageFailure.search(input), /first page exploded/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Stands in for the `monid` CLI: page 0 returns a full page, page 1 fails with a
+ * terminal provider error, and the `fail-first-page` purpose makes page 0 fail.
+ */
+const FAKE_MONID = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const value = (flag) => args[args.indexOf(flag) + 1];
+if (args[0] === 'run') {
+  const query = JSON.parse(value('--query'));
+  const failFirst = String(query.purpose ?? '').includes('fail-first-page');
+  console.log(JSON.stringify({ runId: failFirst ? 'run-fail-0' : \`run-page-\${query.page}\` }));
+  process.exit(0);
+}
+if (args[0] === 'runs' && args[1] === 'get') {
+  const runId = value('-r');
+  if (runId === 'run-fail-0') {
+    console.log(JSON.stringify({ runId, status: 'FAILED', error: { code: 'BOOM', message: 'first page exploded' } }));
+    process.exit(0);
+  }
+  const page = Number(String(runId).replace('run-page-', ''));
+  if (page === 1) {
+    console.log(JSON.stringify({ runId, status: 'FAILED', error: { code: 'BOOM', message: 'page 1 exploded' } }));
+    process.exit(0);
+  }
+  const results = Array.from({ length: 10 }, (_, index) => ({
+    url: \`https://example.com/p\${page}-\${index}\`,
+    title: \`Title \${page}-\${index}\`,
+    snippet: \`Snippet \${page}-\${index}\`,
+    site_name: 'example.com',
+    position: index + 1,
+  }));
+  console.log(JSON.stringify({ runId, status: 'COMPLETED', output: { results } }));
+  process.exit(0);
+}
+process.exit(1);
+`;

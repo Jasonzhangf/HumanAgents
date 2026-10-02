@@ -705,7 +705,13 @@ test('provider agent driver drains cleanly when a stopped tool executor rejects 
   assert.equal(toolSignal?.aborted, true);
   const pendingSettlement = instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
   const observation = await pendingObservation;
-  assert.equal(observation.done, true);
+  assert.equal(observation.done, false);
+  assert.equal(observation.value?.kind, 'provider.tool-result');
+  assert.equal(observation.value?.providerEvent.toolPhase, 'result');
+  assert.equal(observation.value?.providerEvent.toolResult?.callId, 'call-abort');
+  assert.equal(observation.value?.providerEvent.toolResult?.toolId, 'file.read');
+  assert.equal(observation.value?.providerEvent.toolResult?.status, 'cancelled');
+  assert.equal((await iterator.next()).done, true);
   assert.equal((await pendingSettlement).state, 'stopped');
   assert.equal(providerSettled, true);
   assert.equal(submissions.length, 0);

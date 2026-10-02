@@ -72,7 +72,7 @@ export class WebSearchService {
     }
     if (options.signal?.aborted) throw abortError();
 
-    let results: WebSearchResult[];
+    let entries: unknown[];
     let exhausted: boolean;
     let pagesFetched: number;
     let pageErrors: string[];
@@ -90,20 +90,26 @@ export class WebSearchService {
         || providerOutput.pageErrors.some((source) => typeof source !== 'string' || !source.trim())) {
         throw new Error('provider returned invalid page errors');
       }
-      results = normalizeResults(providerOutput.entries);
+      entries = providerOutput.entries;
       pagesFetched = providerOutput.pagesFetched;
       exhausted = providerOutput.exhausted;
-      pageErrors = [...new Set(providerOutput.pageErrors.map((source) => source.trim()))].sort();
+      pageErrors = providerOutput.pageErrors.map((source) => source.trim());
     } catch (error) {
       return this.failedReport(input, normalizeFailure('invalid-result', error));
     }
+    // A single unusable entry is a partial result, not a malformed envelope: it
+    // is rejected and reported as an unresolved source so the search stays
+    // visibly incomplete instead of collapsing into invalid-result.
+    const normalizedEntries = normalizeResults(entries);
+    const results = normalizedEntries.results;
+    const unresolvedSources = [...new Set([...pageErrors, ...normalizedEntries.rejected])].sort();
     const resultsFound = results.length;
     const resultsTruncated = resultsFound > normalized.maxResults;
     const boundedResults = results.slice(0, normalized.maxResults);
-    const searchComplete = exhausted && pageErrors.length === 0;
-    const base = this.baseReport(normalized, boundedResults, resultsFound, pagesFetched, resultsTruncated, searchComplete, pageErrors);
+    const searchComplete = exhausted && unresolvedSources.length === 0;
+    const base = this.baseReport(normalized, boundedResults, resultsFound, pagesFetched, resultsTruncated, searchComplete, unresolvedSources);
     if (normalized.requireComplete && !searchComplete) {
-      return { ...base, status: 'failed', summary: `search incomplete: ${pageErrors.length} page error(s) unresolved`, failure: {
+      return { ...base, status: 'failed', summary: `search incomplete: ${unresolvedSources.length} unresolved source(s)`, failure: {
         code: 'search-incomplete',
         message: 'the requested web search was not fully completed',
       } };
@@ -184,33 +190,44 @@ function normalizeRequestForFailure(input: WebSearchRequest): NormalizedWebSearc
   };
 }
 
-function normalizeResults(entries: unknown[]): WebSearchResult[] {
+interface NormalizedEntries {
+  readonly results: WebSearchResult[];
+  /** Rejected entries, verbatim as received, so the search stays visibly partial. */
+  readonly rejected: string[];
+}
+
+function normalizeResults(entries: readonly unknown[]): NormalizedEntries {
   const seen = new Set<string>();
-  const normalized: WebSearchResult[] = [];
-  for (const [index, entry] of entries.entries()) {
+  const results: WebSearchResult[] = [];
+  const rejected: string[] = [];
+  for (const entry of entries) {
     const value = isRecord(entry) ? entry : {};
     const url = stringField(value, 'url');
     const title = stringField(value, 'title');
     const snippet = stringField(value, 'snippet');
-    if (!url) throw new Error(`provider entry ${index + 1} is missing url`);
-    if (!title) throw new Error(`provider entry ${index + 1} is missing title`);
-    if (!snippet) throw new Error(`provider entry ${index + 1} is missing snippet`);
+    if (!url || !title || !snippet) {
+      rejected.push(JSON.stringify(entry));
+      continue;
+    }
     let parsedUrl: URL;
-    try { parsedUrl = new URL(url); } catch { throw new Error('provider returned an invalid URL'); }
-    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') throw new Error('provider returned a URL with an unsupported protocol');
+    try { parsedUrl = new URL(url); } catch { rejected.push(JSON.stringify(entry)); continue; }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      rejected.push(JSON.stringify(entry));
+      continue;
+    }
     const canonicalUrl = parsedUrl.toString();
     if (seen.has(canonicalUrl)) continue;
     seen.add(canonicalUrl);
-    normalized.push({
+    results.push({
       url: canonicalUrl,
       title,
       snippet,
       ...(stringField(value, 'site_name') ? { sourceName: stringField(value, 'site_name')! } : {}),
       ...(stringField(value, 'publishedAt') ? { publishedAt: stringField(value, 'publishedAt')! } : {}),
-      rank: normalized.length + 1,
+      rank: results.length + 1,
     });
   }
-  return normalized;
+  return { results, rejected };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

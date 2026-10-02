@@ -125,6 +125,7 @@ declare module "node:fs/promises" {
   function readdir(path: string | URL, options: { withFileTypes: true }): Promise<Dirent[]>;
   function rename(oldPath: string | URL, newPath: string | URL): Promise<void>;
   function rm(path: string | URL, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  function chmod(path: string | URL, mode: number): Promise<void>;
 }
 
 declare module "node:zlib" {
