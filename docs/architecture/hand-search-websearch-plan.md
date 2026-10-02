@@ -279,6 +279,16 @@ function createAgentReachWebSearchProvider(
 ): WebSearchProvider;
 ```
 
+The control-plane entry resolves that config with
+`resolveWebSearchBackendConfig()` (`packages/config`) and injects it into the
+runtime assembly, so no provider route is hardcoded in the assembly. Every field
+is read from the environment at execution time — `HUMANAGENT_WEB_SEARCH_PROVIDER`,
+`HUMANAGENT_WEB_SEARCH_COMMAND`, `HUMANAGENT_WEB_SEARCH_ENDPOINT`,
+`HUMANAGENT_WEB_SEARCH_PAGE_CEILING`, `HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS`,
+`HUMANAGENT_WEB_SEARCH_POLL_TIMEOUT_MS`, `HUMANAGENT_WEB_SEARCH_PURPOSE` — and an
+empty route or out-of-range bound fails configuration instead of silently
+selecting another provider route.
+
 The normalized business constraints are part of the report (`domains` and
 `recency`) so the verifier can bind the complete request without copying any
 provider/model control binding. The report also carries the normalized

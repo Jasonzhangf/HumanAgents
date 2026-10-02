@@ -4,6 +4,7 @@ import {
   ensureControlLayout,
   loadConfiguration,
   resolveRuntimePaths,
+  resolveWebSearchBackendConfig,
   type LoadedConfiguration,
   type RuntimePaths,
 } from '../../config/src/index.js';
@@ -997,6 +998,10 @@ export async function main(args: readonly string[]): Promise<void> {
               },
             }),
             uiRoot,
+            // The provider route binding is control-plane configuration: it is
+            // resolved here, at the entry that owns configuration, and injected
+            // into the runtime assembly instead of being hardcoded there.
+            webSearchProviderConfig: resolveWebSearchBackendConfig(),
             ...(process.env.HUMANAGENT_TEMPLATE_ROOT === undefined ? {} : {
               explicitBrainTemplateRoot: process.env.HUMANAGENT_TEMPLATE_ROOT,
             }),

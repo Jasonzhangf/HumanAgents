@@ -258,7 +258,7 @@ export class ProviderAgentDriver implements AgentDriver {
         const toolResult: ProviderToolResult = this.toolResult(call, result, status);
         if (status !== 'succeeded') {
           yield* this.toolResultEvents(call, toolResult, `${call.toolId} ${status}`);
-          throw toolResult.error ?? this.error('tool.result.failed', 'provider tool executor returned a failed result', 'observe', 'runtime');
+          throw this.toolResultFailure(toolResult);
         }
         yield* this.toolResultEvents(call, toolResult, `${call.toolId} succeeded`);
         toolHistory.push({ call, result });
@@ -394,6 +394,31 @@ export class ProviderAgentDriver implements AgentDriver {
       ...(result.outputDigest === undefined ? {} : { outputDigest: result.outputDigest }),
       ...(result.error === undefined ? {} : { error: result.error }),
     };
+  }
+
+  /**
+   * A failed tool result is fatal for the execution, and its provider error is
+   * the real failure cause. Rethrow it as a ProviderAdapterError: the downstream
+   * projections read `providerError`, so throwing the bare ProviderError object
+   * would degrade the task terminal to String(plainObject) and lose the code,
+   * category, retryability and next action of the actual failure.
+   */
+  private toolResultFailure(toolResult: ProviderToolResult): ProviderAdapterError {
+    const failure = toolResult.error;
+    if (failure === undefined) {
+      return this.error('tool.result.failed', 'provider tool executor returned a failed result', 'observe', 'runtime');
+    }
+    return new ProviderAdapterError({
+      code: failure.code,
+      category: failure.category,
+      phase: failure.phase,
+      message: failure.message,
+      scope: this.options.scope,
+      retryable: failure.retryable,
+      attention: failure.attention,
+      nextAction: failure.nextAction,
+      evidenceRefs: failure.evidenceRefs,
+    });
   }
 
   private toolFailureResult(call: ProviderToolCall, cause: unknown, status: 'failed' | 'cancelled'): ProviderToolResult {

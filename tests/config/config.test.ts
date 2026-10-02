@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
+import { ensureControlLayout, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveWebSearchBackendConfig, validateInternalConfig, validateUserConfig } from '../../packages/config/src/index.js';
 
 test('parses agent array tables and sections', () => {
   const value = parseToml('schemaVersion = 1\n[[agents]]\nagentId = "one"\nroleId = "interaction"\ntemplateRef = "t"\ndriverRef = "fake"\nskills = ["a"]\ntools = ["b"]\npermissions = ["c"]\nmemoryScopes = ["task"]\nresourceClass = "foreground"\n[project]\nreviewRequired = true\n');
@@ -682,4 +682,51 @@ test('project memory overrides remain project-scoped and explicit', async () => 
 
   await writeFile(join(paths.projectRoot, 'config.toml'), '[memory.update]\nauto = true\ntarget = "global"\n', 'utf8');
   await assert.rejects(() => loadConfiguration(paths), /memory.update contains unsupported key: target/);
+});
+
+test('web search backend binding is read from the environment at execution time', () => {
+  const configured = resolveWebSearchBackendConfig({
+    HUMANAGENT_WEB_SEARCH_PROVIDER: 'other-provider',
+    HUMANAGENT_WEB_SEARCH_COMMAND: '/opt/bin/other-cli',
+    HUMANAGENT_WEB_SEARCH_ENDPOINT: '/v2/lookup',
+    HUMANAGENT_WEB_SEARCH_PAGE_CEILING: '4',
+    HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS: '250',
+    HUMANAGENT_WEB_SEARCH_POLL_TIMEOUT_MS: '45000',
+    HUMANAGENT_WEB_SEARCH_PURPOSE: 'humanagent test route',
+  });
+  assert.deepEqual(configured, {
+    provider: 'other-provider',
+    command: '/opt/bin/other-cli',
+    endpoint: '/v2/lookup',
+    pageCeiling: 4,
+    pollIntervalMs: 250,
+    pollTimeoutMs: 45_000,
+    purpose: 'humanagent test route',
+  });
+  // An unconfigured environment keeps the documented local binding so the bare
+  // entry stays usable; every field above still overrides it without a source edit.
+  assert.deepEqual(resolveWebSearchBackendConfig({}), {
+    provider: 'tinyfish',
+    command: 'monid',
+    endpoint: '/search',
+    pageCeiling: 10,
+    pollIntervalMs: 2000,
+    pollTimeoutMs: 30_000,
+    purpose: 'humanagent web.search tool',
+  });
+});
+
+test('web search backend binding rejects an empty route or an out-of-range bound', () => {
+  assert.throws(
+    () => resolveWebSearchBackendConfig({ HUMANAGENT_WEB_SEARCH_ENDPOINT: '   ' }),
+    /HUMANAGENT_WEB_SEARCH_ENDPOINT must not be empty/,
+  );
+  assert.throws(
+    () => resolveWebSearchBackendConfig({ HUMANAGENT_WEB_SEARCH_PAGE_CEILING: '11' }),
+    /HUMANAGENT_WEB_SEARCH_PAGE_CEILING must be an integer between 0 and 10/,
+  );
+  assert.throws(
+    () => resolveWebSearchBackendConfig({ HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS: 'ten' }),
+    /HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS must be an integer between 100 and 30000/,
+  );
 });

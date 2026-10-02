@@ -7409,3 +7409,25 @@ test('produced artifact reader returns written files and reports paths it cannot
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('produced artifact truncation honours its byte bound for multibyte content', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-produced-artifacts-bytes-'));
+  try {
+    // 90k three-byte characters exceed the 256KiB per-file bound; slicing the
+    // decoded string by that number would emit three times the declared bytes.
+    await writeFile(join(root, 'wide.txt'), '中'.repeat(90_000), 'utf8');
+    const files = await readProducedArtifacts(root, ['wide.txt']);
+    const content = String(files[0]?.content);
+    const marker = content.indexOf('\n[truncated at ');
+    assert.ok(marker > 0, 'the per-file byte bound must be reached');
+    const prefix = content.slice(0, marker);
+    assert.ok(
+      new TextEncoder().encode(prefix).length <= 262_144,
+      `truncated prefix is ${new TextEncoder().encode(prefix).length} bytes`,
+    );
+    assert.equal(prefix.includes('\uFFFD'), false, 'the cut must not split a multi-byte sequence');
+    assert.match(content, /\[truncated at 262144 bytes\]$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

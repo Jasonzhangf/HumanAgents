@@ -925,3 +925,82 @@ export async function loadConfiguration(paths: RuntimePaths): Promise<LoadedConf
   }
   return { paths, internal, user, projectOverride, effective, agentRoster: [...effective.agents], promptCatalog, projectSourceManifest };
 }
+
+/**
+ * Control-plane binding for the external web-search backend.
+ *
+ * Provider slug, CLI path, route name, page ceiling and poll bounds are read
+ * from the environment at execution time, so the deployment that owns the
+ * provider route can change it without editing or redeploying this repository,
+ * and none of it is copied into a request or report business payload. The
+ * defaults exist so the documented bare entry (`humanagent serve`) keeps a
+ * working local binding; every field is overridable and a malformed value fails
+ * configuration instead of silently selecting another provider route.
+ */
+export interface WebSearchBackendConfig {
+  readonly provider: string;
+  readonly command: string;
+  readonly endpoint: string;
+  readonly pageCeiling: number;
+  readonly pollIntervalMs: number;
+  readonly pollTimeoutMs: number;
+  readonly purpose: string;
+}
+
+export const WEB_SEARCH_ENV_KEYS = {
+  provider: 'HUMANAGENT_WEB_SEARCH_PROVIDER',
+  command: 'HUMANAGENT_WEB_SEARCH_COMMAND',
+  endpoint: 'HUMANAGENT_WEB_SEARCH_ENDPOINT',
+  pageCeiling: 'HUMANAGENT_WEB_SEARCH_PAGE_CEILING',
+  pollIntervalMs: 'HUMANAGENT_WEB_SEARCH_POLL_INTERVAL_MS',
+  pollTimeoutMs: 'HUMANAGENT_WEB_SEARCH_POLL_TIMEOUT_MS',
+  purpose: 'HUMANAGENT_WEB_SEARCH_PURPOSE',
+} as const;
+
+const WEB_SEARCH_DEFAULTS = {
+  provider: 'tinyfish',
+  command: 'monid',
+  endpoint: '/search',
+  pageCeiling: 10,
+  pollIntervalMs: 2000,
+  pollTimeoutMs: 30_000,
+  purpose: 'humanagent web.search tool',
+} as const;
+
+export function resolveWebSearchBackendConfig(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): WebSearchBackendConfig {
+  return {
+    provider: envText(env, WEB_SEARCH_ENV_KEYS.provider, WEB_SEARCH_DEFAULTS.provider),
+    command: envText(env, WEB_SEARCH_ENV_KEYS.command, WEB_SEARCH_DEFAULTS.command),
+    endpoint: envText(env, WEB_SEARCH_ENV_KEYS.endpoint, WEB_SEARCH_DEFAULTS.endpoint),
+    pageCeiling: envInteger(env, WEB_SEARCH_ENV_KEYS.pageCeiling, WEB_SEARCH_DEFAULTS.pageCeiling, 0, 10),
+    pollIntervalMs: envInteger(env, WEB_SEARCH_ENV_KEYS.pollIntervalMs, WEB_SEARCH_DEFAULTS.pollIntervalMs, 100, 30_000),
+    pollTimeoutMs: envInteger(env, WEB_SEARCH_ENV_KEYS.pollTimeoutMs, WEB_SEARCH_DEFAULTS.pollTimeoutMs, 100, 600_000),
+    purpose: envText(env, WEB_SEARCH_ENV_KEYS.purpose, WEB_SEARCH_DEFAULTS.purpose),
+  };
+}
+
+function envText(env: Readonly<Record<string, string | undefined>>, key: string, fallback: string): string {
+  const value = env[key];
+  if (value === undefined) return fallback;
+  const trimmed = value.trim();
+  if (trimmed === '') fail('config-invalid', `${key} must not be empty`, `set ${key} to the current provider value or unset it`);
+  return trimmed;
+}
+
+function envInteger(
+  env: Readonly<Record<string, string | undefined>>,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = env[key];
+  if (raw === undefined) return fallback;
+  const value = Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    fail('config-invalid', `${key} must be an integer between ${min} and ${max}`, `set ${key} to a value in range or unset it`);
+  }
+  return value;
+}

@@ -277,6 +277,44 @@ test('Responses file.read executes through Hand and returns actual bound-workspa
   }
 });
 
+test('every provider tool report reads back from its descriptor alone, so a restarted store still serves file.read', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'tmp-provider-tool-report-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'README.md'), 'REPORT_MARKER\n', 'utf8');
+  const artifactRoot = join(root, 'artifacts');
+  const first = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot });
+  try {
+    const run = (toolId: string, arguments_: BusinessPayload, callId: string) => first.executor.execute({
+      execution: { runtimeId: 'runtime-tool-report', taskId: task, operationId: operation, executionEpoch: 1 },
+      scope,
+      call: { callId, toolId, arguments: arguments_, continuationRef: 'response-report' },
+      signal: new AbortController().signal,
+    });
+    const read = await run('file.read', { path: 'README.md' }, 'call-report-read');
+    const search = await run('file.search', { path: '.', query: 'REPORT_MARKER', queryKind: 'literal' }, 'call-report-search');
+    const readRef = read.outputRef;
+    const readDigest = read.outputDigest;
+    const searchRef = search.outputRef;
+    const searchDigest = search.outputDigest;
+    if (readRef === undefined || readDigest === undefined || searchRef === undefined || searchDigest === undefined) {
+      throw new Error('both provider tool results must carry an immutable report descriptor');
+    }
+
+    // A second executor over the same artifact root holds no in-process report
+    // index. Both reports must resolve from their descriptor, so a restarted
+    // runtime can still serve the task-scoped tool-output route for file.read
+    // exactly as it does for file.search.
+    const restarted = createResponsesFileToolExecutor({ workspaceRoot, projectKey: 'report-project', artifactRoot });
+    const readReport = await restarted.toolOutputs.readReport({ outputRef: readRef, outputDigest: readDigest });
+    assert.match(JSON.stringify(readReport), /REPORT_MARKER/);
+    const searchReport = await restarted.toolOutputs.readReport({ outputRef: searchRef, outputDigest: searchDigest });
+    assert.match(JSON.stringify(searchReport), /REPORT_MARKER/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Responses file.read rejects an already-aborted call before Hand admission', async () => {
   const root = await mkdtemp(join(process.cwd(), 'tmp-provider-file-tool-abort-'));
   const workspaceRoot = join(root, 'workspace');

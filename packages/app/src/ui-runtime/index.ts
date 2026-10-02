@@ -20,6 +20,7 @@ import {
   filesystemProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
+import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
 import {
@@ -73,6 +74,12 @@ export interface UiRuntimeLaunchOptions {
   readonly portNumber?: number;
   readonly projectKey?: string;
   readonly workspaceRoot?: string;
+  /**
+   * Control-plane binding for the external web-search backend. It is injected by
+   * the entry that owns configuration, so the runtime assembly never hardcodes a
+   * provider route; without it the web.search tool is not wired at all.
+   */
+  readonly webSearchProviderConfig?: WebSearchBackendConfig;
   readonly providerRetryConfig?: {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
@@ -213,17 +220,9 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
           workspaceRoot: options.workspaceRoot,
           projectKey: options.projectKey,
           artifactRoot: join(options.evidenceRoot, 'provider-tools'),
-          webSearchProviderConfig: {
-            provider: 'tinyfish',
-            command: process.env.HUMANAGENT_WEB_SEARCH_COMMAND ?? 'monid',
-            endpoint: '/search',
-            pageCeiling: 10,
-            pollIntervalMs: 2000,
-            pollTimeoutMs: 30000,
-            purpose: 'humanagent dashboard web.search tool',
-          },
+          ...(options.webSearchProviderConfig === undefined ? {} : { webSearchProviderConfig: options.webSearchProviderConfig }),
         });
-        return { executor: built.executor, searchReports: built.searchReports };
+        return { executor: built.executor, toolOutputs: built.toolOutputs };
       })()
     : undefined;
   const service = new UiRuntimeService({
@@ -256,7 +255,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         RESPONSES_WEB_SEARCH_TOOL,
       ],
       providerToolExecutor: providerToolExecutor.executor,
-      toolOutputStore: providerToolExecutor.searchReports,
+      toolOutputStore: providerToolExecutor.toolOutputs,
       providerToolRoundLimit: PROVIDER_TOOL_ROUND_LIMIT,
     }),
     ...(options.explicitBrainAgentQuery === undefined ? {} : { explicitBrainAgentQuery: options.explicitBrainAgentQuery }),

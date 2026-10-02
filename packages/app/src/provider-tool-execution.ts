@@ -18,7 +18,7 @@ import {
   WEB_SEARCH_SERVICE_ID,
   WEB_SEARCH_CONTRACT_VERSION,
 } from '../../contracts/src/index.js';
-import { ImmutableAssetStore, type AssetReference } from '../../adapters/filesystem/src/index.js';
+import { ImmutableAssetStore } from '../../adapters/filesystem/src/index.js';
 import {
   FileReadRoute,
   WorkspaceCodeSearchFunctions,
@@ -336,14 +336,33 @@ export async function readProducedArtifacts(
     }
     const limit = Math.min(PRODUCED_ARTIFACT_MAX_FILE_BYTES, PRODUCED_ARTIFACT_MAX_TOTAL_BYTES - total);
     const byteLength = new TextEncoder().encode(content).length;
-    if (byteLength > limit) content = `${content.slice(0, limit)}\n[truncated at ${limit} bytes]`;
+    if (byteLength > limit) content = `${utf8Prefix(content, limit)}\n[truncated at ${limit} bytes]`;
     total += Math.min(byteLength, limit);
     files.push({ path, content });
   }
   return files;
 }
 
-function workspaceRelative(root: string, target: string): string {  const rel = relative(root, target);
+/**
+ * Cut UTF-8 content at a byte bound. `String.prototype.slice` counts UTF-16 code
+ * units, so slicing the decoded string could emit more bytes than the bound it
+ * reports; cut the encoded bytes instead and back off any split multi-byte
+ * sequence so the bound and its label always agree.
+ */
+function utf8Prefix(content: string, limit: number): string {
+  const bytes = new TextEncoder().encode(content).slice(0, limit);
+  for (let end = bytes.length; end > 0; end -= 1) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes.slice(0, end));
+    } catch {
+      continue;
+    }
+  }
+  return '';
+}
+
+function workspaceRelative(root: string, target: string): string {
+  const rel = relative(root, target);
   if (rel === '') return '.';
   if (rel.startsWith('..') || rel.startsWith(sep)) throw new Error(`path escapes workspace: ${target}`);
   return rel;
@@ -400,9 +419,14 @@ function providerTaskStatePath(root: string, request: ToolExecRequest): string {
   return join(root, 'task-state', `${request.execution.taskId.value}.json`);
 }
 
+/**
+ * Immutable report store behind every succeeded provider tool result. Both the
+ * producer and the task-scoped readback route share one instance, and the report
+ * is located from the descriptor alone, so a runtime restart that replays the
+ * event still resolves the persisted bytes instead of a process-local index.
+ */
 class ToolOutputAssets implements UiRuntimeToolOutputStore {
   readonly store: ImmutableAssetStore;
-  private readonly reports = new Map<string, AssetReference>();
 
   constructor(store: ImmutableAssetStore) {
     this.store = store;
@@ -410,20 +434,34 @@ class ToolOutputAssets implements UiRuntimeToolOutputStore {
 
   async writeReport(input: { readonly outputId: string; readonly report: unknown }): Promise<{ readonly outputRef: string; readonly outputDigest: string }> {
     const content = JSON.stringify(input.report);
-    const reference = await this.store.write(
-      safeId(`provider-tool-output-${input.outputId}-${digest(content).slice(-12)}`),
-      new TextEncoder().encode(content),
-    );
-    const outputRef = `asset://provider-tool/output/${encodeURIComponent(input.outputId)}`;
-    this.reports.set(outputRef, reference);
-    return { outputRef, outputDigest: reference.digest };
+    const reference = await this.store.write(reportAssetId(input.outputId, digest(content)), new TextEncoder().encode(content));
+    return { outputRef: reportOutputRef(input.outputId), outputDigest: reference.digest };
   }
 
   async readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<unknown> {
-    const reference = this.reports.get(input.outputRef);
-    if (!reference || reference.digest !== input.outputDigest) throw new Error('tool output report is missing or changed');
-    return JSON.parse(new TextDecoder().decode(await this.store.read(reference))) as unknown;
+    const outputId = outputIdFromRef(input.outputRef);
+    if (outputId === undefined) throw new Error('tool output report reference is not a provider tool output');
+    const data = await this.store.readByDigest(reportAssetId(outputId, input.outputDigest), input.outputDigest);
+    return JSON.parse(new TextDecoder().decode(data)) as unknown;
   }
+}
+
+function reportOutputRef(outputId: string): string {
+  return `asset://provider-tool/output/${encodeURIComponent(outputId)}`;
+}
+
+/**
+ * The asset id is derived from the descriptor (output id + content digest), so
+ * the readback route can resolve a report without any in-process bookkeeping.
+ */
+function reportAssetId(outputId: string, contentDigest: string): string {
+  return safeId(`provider-tool-output-${outputId}-${contentDigest.slice(-12)}`);
+}
+
+function outputIdFromRef(outputRef: string): string | undefined {
+  const prefix = 'asset://provider-tool/output/';
+  if (!outputRef.startsWith(prefix)) return undefined;
+  return decodeURIComponent(outputRef.slice(prefix.length));
 }
 
 class FileReadAssets implements FileReadArtifactStore {
@@ -490,13 +528,16 @@ export function createResponsesFileToolExecutor(input: {
   readonly projectKey: string;
   readonly artifactRoot: string;
   readonly webSearchProviderConfig?: WebSearchProviderBackendConfig;
-}): { readonly executor: ResponsesFileToolExecutor; readonly searchReports: UiRuntimeToolOutputStore } {
+}): { readonly executor: ResponsesFileToolExecutor; readonly toolOutputs: UiRuntimeToolOutputStore } {
   const workspaceRef = `workspace:${input.projectKey}`;
   const functions = new WorkspaceCodeSearchFunctions({ workspaceRef, workspaceRoot: input.workspaceRoot });
-  const readAssets = new FileReadAssets(new ToolOutputAssets(new ImmutableAssetStore(join(input.artifactRoot, 'file-read'))));
+  // One report store owns every provider tool report, so the task-scoped
+  // readback route can resolve a file.read report exactly like a file.search or
+  // web.search report instead of only the store it happens to be bound to.
+  const toolOutputs = new ToolOutputAssets(new ImmutableAssetStore(join(input.artifactRoot, 'tool-output')));
+  const readAssets = new FileReadAssets(toolOutputs);
   const readRoute = new FileReadRoute({ functions, artifacts: readAssets });
   const codeSearchService = new CodeSearchService({ functions });
-  const searchReports = new ToolOutputAssets(new ImmutableAssetStore(join(input.artifactRoot, 'tool-output')));
   const webSearchProvider: WebSearchProvider | undefined = input.webSearchProviderConfig
     ? createAgentReachWebSearchProvider(input.webSearchProviderConfig)
     : undefined;
@@ -526,7 +567,7 @@ export function createResponsesFileToolExecutor(input: {
           case RESPONSES_FILE_LIST_TOOL.toolId:
             return await executeFileList(request, { functions, workspaceRef });
           case RESPONSES_FILE_SEARCH_TOOL.toolId:
-            return await executeFileSearch(request, { service: codeSearchService, workspaceRef, assets: searchReports });
+            return await executeFileSearch(request, { service: codeSearchService, workspaceRef, assets: toolOutputs });
           case RESPONSES_FILE_WRITE_TOOL.toolId:
             return await executeFileWrite(request, { workspaceRoot: input.workspaceRoot });
           case RESPONSES_FILE_EDIT_TOOL.toolId:
@@ -544,7 +585,7 @@ export function createResponsesFileToolExecutor(input: {
           case RESPONSES_PRESENT_TOOL.toolId:
             return await executePresent(request, { workspaceRoot: input.workspaceRoot });
           case RESPONSES_WEB_SEARCH_TOOL.toolId:
-            return await executeWebSearch(request, { service: webSearchService, assets: searchReports });
+            return await executeWebSearch(request, { service: webSearchService, assets: toolOutputs });
           default:
             throw new Error(
               `provider tool is not registered: ${request.call.toolId}; tools this Harness owns: ${REGISTERED_TOOL_IDS.join(', ')}`,
@@ -552,7 +593,7 @@ export function createResponsesFileToolExecutor(input: {
         }
       },
     },
-    searchReports,
+    toolOutputs,
   };
 }
 

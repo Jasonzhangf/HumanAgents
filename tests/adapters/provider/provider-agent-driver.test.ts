@@ -772,6 +772,89 @@ test('provider agent driver still surfaces a non-abort tool failure during a too
   await assert.rejects(() => iterator.next(), /file.read failed for real/);
 });
 
+test('provider agent driver rethrows an executor-returned failure as a typed provider error', async () => {
+  // The web-search executor reports an unavailable backend by RETURNING a failed
+  // result, not by throwing. Throwing the bare ProviderError object would make
+  // every downstream projection degrade to String(plainObject) and lose the real
+  // code, category, retryability and next action of the failure.
+  const runtimePort = port({
+    observe: async function* (): AsyncIterable<ProviderEvent> {
+      yield {
+        ...identity,
+        eventId: 'event-tool-call-returned-failure',
+        kind: 'tool',
+        summary: 'web.search',
+        outputRefs: ['artifact://tool-call-returned-failure'],
+        evidenceRefs: [evidence],
+        toolCall: { callId: 'call-returned-failure', toolId: 'web.search', arguments: { query: 'rust' }, continuationRef: 'response-round-1' },
+      };
+      yield {
+        ...identity,
+        eventId: 'event-tool-waiting-returned-failure',
+        kind: 'terminal',
+        terminalState: 'waiting',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+      };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute() {
+        return {
+          output: '{"code":"provider-unavailable"}',
+          outputRefs: [],
+          evidenceRefs: [evidence],
+          status: 'failed' as const,
+          error: {
+            errorId: 'provider.observe.provider-unavailable',
+            code: 'provider-unavailable',
+            category: 'provider' as const,
+            phase: 'observe' as const,
+            message: 'the provider backend is unavailable',
+            ownerId: 'humanagent.provider-adapter',
+            retryable: 'retryable' as const,
+            attention: 'foreground' as const,
+            evidenceRefs: [evidence],
+            nextAction: { kind: 'recover' as const, ref: 'provider.retry' },
+          },
+        };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'search the web for rust' } });
+  const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+  const failed = await iterator.next();
+  assert.equal(failed.value?.kind, 'provider.tool-result');
+  assert.equal(failed.value?.providerEvent?.toolResult?.status, 'failed');
+  assert.equal(failed.value?.providerEvent?.toolResult?.error?.code, 'provider-unavailable');
+  await assert.rejects(
+    () => iterator.next(),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderAdapterError, 'the failure must stay an Error instance');
+      assert.equal(error.providerError.code, 'provider-unavailable');
+      assert.equal(error.providerError.category, 'provider');
+      assert.equal(error.providerError.message, 'the provider backend is unavailable');
+      assert.equal(error.providerError.retryable, 'retryable');
+      assert.equal(error.providerError.nextAction.ref, 'provider.retry');
+      assert.notEqual(String(error), '[object Object]');
+      return true;
+    },
+  );
+});
+
 test('provider agent driver honors the configured tool round limit', async () => {
   // The provider always asks for another tool round, so only the configured
   // bound can stop the loop. A long-horizon task needs a bound larger than the

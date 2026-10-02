@@ -59,7 +59,7 @@ function harnessToolSurfaceInstructions(
     'This Harness owns tool execution: the function tools declared in this request are the complete tool surface.',
     'A backend harness tool such as exec_command, a shell, or a server-side servertool is not available in this Harness and always fails.',
     `Only these function tools can be called: ${names}.`,
-    'Each round only carries the tool calls and results of the previous round, so keep the remaining work in mind.',
+    'Every round re-sends the complete tool history of this execution, so earlier calls and their results are still available to you.',
     'When the requirement is satisfied, reply with your final answer as plain text and call no further tool: an external checker validates the result, so do not re-verify a completed deliverable by rewriting or re-reading it.',
     'Call a tool only when it makes concrete progress; a tool call with missing or empty arguments is a failed round.',
   ].join(' ');
