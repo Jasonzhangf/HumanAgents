@@ -31,6 +31,9 @@ interface FakeReplayStep {
   readonly toolPhase?: ProviderEvent['toolPhase'];
   readonly terminalState?: ProviderEvent['terminalState'];
   readonly outputRefs?: readonly string[];
+  /** Tool call this step reports, when the replay models a tool round. */
+  readonly toolCall?: ProviderEvent['toolCall'];
+  readonly nextAction?: ProviderEvent['nextAction'];
 }
 
 const DEFAULT_REPLAY: readonly FakeReplayStep[] = [
@@ -46,6 +49,8 @@ interface FakeSession {
   readonly scope: ScopeRef;
   output: string;
   stopRequested: boolean;
+  /** How much of the replay this session already consumed. */
+  cursor: number;
   terminalState?: ProviderEvent['terminalState'];
 }
 
@@ -126,7 +131,7 @@ export class FakeReplayExecutionRuntimePort implements ExecutionRuntimePort {
     const key = executionKey(input);
     if (this.sessions.has(key)) throw new UiRuntimeApiError('fake.already.started', FAKE_OWNER, 'fake execution is already active', 'start a new operation');
     const scope = scopeFor(input);
-    this.sessions.set(key, { executionKey: key, scope, output: '', stopRequested: false });
+    this.sessions.set(key, { executionKey: key, scope, output: '', stopRequested: false, cursor: 0 });
     return {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
@@ -156,8 +161,10 @@ export class FakeReplayExecutionRuntimePort implements ExecutionRuntimePort {
 
   async *observe(input: ProviderObserveInput): AsyncIterable<ProviderEvent> {
     const session = this.requireSession(input);
-    let index = 0;
-    for (const step of this.replay) {
+    // A session resumes where its previous round stopped, so a replay can model
+    // several provider rounds separated by tool rounds.
+    let index = session.cursor;
+    for (const step of this.replay.slice(index)) {
       if (session.stopRequested) {
         yield this.event(input, session, index, {
           kind: 'terminal',
@@ -173,6 +180,7 @@ export class FakeReplayExecutionRuntimePort implements ExecutionRuntimePort {
       if (event.kind === 'terminal') session.terminalState = event.terminalState;
       yield event;
       index += 1;
+      session.cursor = index;
       if (step.kind === 'terminal') return;
     }
   }
@@ -249,11 +257,13 @@ export class FakeReplayExecutionRuntimePort implements ExecutionRuntimePort {
       ...(step.toolPhase === undefined ? {} : { toolPhase: step.toolPhase }),
       evidenceRefs,
       ...(summary === undefined ? {} : { summary }),
+      ...(step.nextAction === undefined ? {} : { nextAction: step.nextAction }),
     } as const;
     if (step.kind === 'output') return { ...base, kind: 'output', outputRefs: step.outputRefs };
     if (step.kind === 'terminal') {
       return { ...base, terminalState: step.terminalState ?? 'succeeded' };
     }
+    if (step.toolCall !== undefined) return { ...base, toolCall: step.toolCall };
     if (step.outputRefs) return { ...base, outputRefs: step.outputRefs };
     return base;
   }

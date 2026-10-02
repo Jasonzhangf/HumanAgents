@@ -17,6 +17,7 @@ import {
   type ProviderCloseResult,
   type ProviderError,
   type ProviderEvent,
+  type ProviderToolCall,
   type ScopeRef,
   type Task,
   type TaskId,
@@ -315,6 +316,13 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly organId: OrganId;
   readonly createDriver: RuntimeExecutionDriverFactory;
   /**
+   * Reads back the files an execution produced, so the quality reviewer is
+   * handed the artifact itself. A provider text summary cannot be verified
+   * against acceptance criteria that describe file content, which leaves every
+   * file-producing assignment stuck on an inconclusive review.
+   */
+  readonly producedArtifacts?: ProducedArtifactPort;
+  /**
    * Optional Retry-10 provider avoidance. When present, provider execution is
    * chosen through a durable retry cycle before each attempt and the selected
    * binding drives the actual provider runtime. Absent config keeps the
@@ -348,8 +356,29 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly implicitSubtaskExecutionAgent?: ExecutionAgentPort;
 }
 
-export interface RuntimeTaskAssembly {
-  readonly orchestration: OrchestrationManager;
+/** One file an execution wrote, as the reviewer must see it. */
+export interface ProducedArtifactFile {
+  readonly path: string;
+  readonly content: string;
+}
+
+export interface ProducedArtifactReadRequest {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  /** Workspace-relative paths the execution wrote, in tool-call order. */
+  readonly paths: readonly string[];
+}
+
+/**
+ * Reads produced files back for review. The runtime owns which paths count as
+ * produced; the assembly owns how they are resolved and bounded.
+ */
+export interface ProducedArtifactPort {
+  read(request: ProducedArtifactReadRequest): Promise<readonly ProducedArtifactFile[]>;
+}
+
+export interface RuntimeTaskAssembly {  readonly orchestration: OrchestrationManager;
   readonly runtimePool: AgentRuntimePoolManager;
 }
 
@@ -485,6 +514,46 @@ function providerEventSummary(event: ProviderEvent): string {
   if (event.summary) return event.summary;
   if (event.outputRefs && event.outputRefs.length > 0) return `${event.kind}: ${event.outputRefs.join(', ')}`;
   return event.kind;
+}
+
+/** Tools whose successful call writes a file into the bound workspace. */
+const FILE_PRODUCING_TOOL_IDS = new Set<string>(['file.write', 'file.edit']);
+
+/**
+ * The workspace-relative path a file-producing tool call targets, or undefined
+ * for any other call.
+ */
+function producedFilePath(call: ProviderToolCall | undefined): string | undefined {
+  if (call === undefined || !FILE_PRODUCING_TOOL_IDS.has(call.toolId)) return undefined;
+  const filePath = call.arguments.file_path;
+  return typeof filePath === 'string' && filePath.trim() !== '' ? filePath : undefined;
+}
+
+/**
+ * The workspace-relative paths an observed execution wrote, in call order and
+ * without repeats. Only this narrow set counts as produced material: a read or
+ * a search call must never be mistaken for the deliverable.
+ */
+export function producedArtifactPaths(
+  events: Iterable<{ readonly providerEvent?: ProviderEvent }>,
+): readonly string[] {
+  const paths: string[] = [];
+  for (const event of events) {
+    const path = producedFilePath(event.providerEvent?.toolCall);
+    if (path !== undefined && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/**
+ * Compose the artifact body handed to the reviewer: what the executor reported
+ * plus the produced files themselves, so acceptance criteria about file content
+ * can actually be checked.
+ */
+export function producedArtifactBody(output: string, files: readonly ProducedArtifactFile[]): string {
+  if (files.length === 0) return output;
+  const sections = files.map((file) => `--- file: ${file.path} ---\n${file.content}`);
+  return `${output}\n\n--- produced files ---\n${sections.join('\n')}\n`;
 }
 function runtimeProviderEventKind(event: ProviderEvent): RuntimeTaskEventKind {
   if (event.kind === 'tool' && event.toolPhase === 'result') return 'provider.tool-result';
@@ -1417,6 +1486,7 @@ export class RuntimeTaskCoordinator {
     const coordinator = this;
     let producedOutput = '';
     const executorEvidence: ExecutorReviewEvidence[] = [];
+    const producedPaths: string[] = [];
     await composition.start();
     await composition.submit(prompt);
     record.resolveExecutionReady?.(true);
@@ -1477,6 +1547,8 @@ export class RuntimeTaskCoordinator {
           summary: providerEventSummary(event.providerEvent),
           evidenceRefs: [...event.providerEvent.evidenceRefs],
         });
+        const producedPath = producedFilePath(event.providerEvent.toolCall);
+        if (producedPath !== undefined && !producedPaths.includes(producedPath)) producedPaths.push(producedPath);
       }
       coordinator.recordProviderEvent(record, operation, event.providerEvent);
     }
@@ -1529,6 +1601,15 @@ export class RuntimeTaskCoordinator {
     record.nextStep = '等待编排审查和 checkpoint';
     record.allowedActions = [];
     const closure = await composition.settle();
+    const producedArtifacts = this.options.producedArtifacts !== undefined && producedPaths.length > 0
+      ? await this.options.producedArtifacts.read({
+          taskId: report.taskId,
+          operationId: operation.operationId,
+          executionEpoch: report.executionEpoch,
+          paths: [...producedPaths],
+        })
+      : [];
+    const artifactBody = producedArtifactBody(producedOutput, producedArtifacts);
     const status: WorkResult['status'] = closure.state === 'succeeded'
       ? 'succeeded'
       : closure.state === 'waiting'
@@ -1554,8 +1635,8 @@ export class RuntimeTaskCoordinator {
       executionEpoch: report.executionEpoch,
       inputRevision: report.inputRevision,
       producedArtifactRefs: [outputRef],
-      producedArtifactDigests: [digestOf(producedOutput)],
-      producedArtifactBodies: [producedOutput],
+      producedArtifactDigests: [digestOf(artifactBody)],
+      producedArtifactBodies: [artifactBody],
       executorEvidence,
       status,
       summary: `provider execution ${closure.state}`,

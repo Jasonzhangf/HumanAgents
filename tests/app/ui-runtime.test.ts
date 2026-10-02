@@ -50,6 +50,8 @@ import { createHookRegistry, type AgentHookRegistry } from '../../packages/runti
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  producedArtifactBody,
+  producedArtifactPaths,
   type RuntimeCheckpointBoundary,
   type RuntimeCheckpointBoundaryPort,
   type RuntimeTaskJournalRecord,
@@ -73,7 +75,7 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
-import { RESPONSES_FILE_READ_TOOL } from '../../packages/app/src/provider-tool-execution.js';
+import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createProviderExplicitBrainInterpreter,
@@ -7195,4 +7197,215 @@ test('multiple appended inputs drain FIFO across successive executions of one ta
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).executionEpoch, 3);
   await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+});
+
+test('produced artifact paths count only file-producing calls, in order and without repeats', () => {
+  const providerEvent = (toolId: string, argumentsValue: Record<string, string>) => ({
+    providerEvent: {
+      runtimeId: 'runtime-produced-artifact',
+      taskId: id('task', 'task-produced-artifact'),
+      operationId: id('operation', 'operation-produced-artifact'),
+      executionEpoch: 1,
+      eventId: `event-${toolId}`,
+      kind: 'tool' as const,
+      evidenceRefs: [],
+      toolCall: { callId: `call-${toolId}`, toolId, arguments: argumentsValue, continuationRef: 'response-1' },
+    },
+  });
+  assert.deepEqual(
+    producedArtifactPaths([
+      providerEvent('file.read', { path: 'result.html' }),
+      providerEvent('file.search', { query: 'pelican' }),
+      providerEvent('web.search', { query: 'pelican' }),
+      providerEvent('file.write', { file_path: 'result.html', content: '<html></html>' }),
+      providerEvent('file.edit', { file_path: 'artifact.svg', old_string: 'a', new_string: 'b' }),
+      providerEvent('file.write', { file_path: 'result.html', content: '<html>again</html>' }),
+      providerEvent('file.write', { file_path: '   ' }),
+      providerEvent('bash', { command: 'touch x' }),
+    ]),
+    ['result.html', 'artifact.svg'],
+  );
+  assert.deepEqual(producedArtifactPaths([]), []);
+});
+
+test('produced artifact body carries the produced files so a reviewer can check file content', () => {
+  const output = 'Both files are written.';
+  assert.equal(producedArtifactBody(output, []), output);
+  const body = producedArtifactBody(output, [
+    { path: 'result.html', content: '<html><svg></svg></html>' },
+    { path: 'artifact.svg', content: '<svg animate="1"></svg>' },
+  ]);
+  assert.match(body, /^Both files are written\./);
+  assert.match(body, /--- file: result\.html ---\n<html><svg><\/svg><\/html>/);
+  assert.match(body, /--- file: artifact\.svg ---\n<svg animate="1"><\/svg>/);
+});
+
+test('orchestrated review is handed the produced file bodies, not only the executor summary', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-produced-artifacts-'));
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'artifact.svg'), '<svg id="pelican">animated</svg>', 'utf8');
+  const port = new CountingFakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      { kind: 'model', state: 'model', summary: 'fake replay: model accepted the request' },
+      { kind: 'output', state: 'output', summary: 'fake replay: draft output chunk 1', outputRefs: ['fake://output/1'] },
+      {
+        kind: 'tool',
+        state: 'tool',
+        summary: 'file.write',
+        toolCall: {
+          callId: 'call-write-artifact',
+          toolId: 'file.write',
+          arguments: { file_path: 'artifact.svg', content: '<svg id="pelican">animated</svg>' },
+          continuationRef: 'response-1',
+        },
+      },
+      { kind: 'terminal', state: 'tool-waiting', summary: 'provider awaits the tool result', terminalState: 'waiting', nextAction: { kind: 'wait', ref: 'responses-tool-call' } },
+      { kind: 'output', state: 'output', summary: 'fake replay: final output chunk 2', outputRefs: ['fake://output/2'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'fake replay: execution succeeded', terminalState: 'succeeded' },
+    ],
+  });
+  const subjectBodies: string[] = [];
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    workspaceRoot,
+    providerTools: [RESPONSES_FILE_WRITE_TOOL],
+    providerToolExecutor: {
+      async execute(request) {
+        return {
+          output: JSON.stringify({ path: request.call.arguments.file_path, operation: 'write' }),
+          outputRefs: [],
+          evidenceRefs: [],
+        };
+      },
+    },
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    closurePort: new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')),
+    memory: testMemory('project-ui-produced-artifacts'),
+    runtimeComposition: {
+      createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
+        const runtimePool = new AgentRuntimePoolManager({
+          maxRuntimes: 4,
+          factory: {
+            async start(request) {
+              return { runtimeId: request.runtimeId, generation: request.generation, capabilities: [...request.requiredCapabilities] };
+            },
+            async dispose() {},
+          },
+          ownerId: 'ui-runtime-test',
+          initialRuntimes: [{
+            runtimeId: 'ui-runtime-test-0',
+            generation: 1,
+            capabilities: ['code.search', 'file.checkpoint', 'provider.execution'],
+          }],
+        });
+        const reviewAgent: ReviewAgentPort = {
+          async review(input) {
+            for (const subject of input.reviewMaterial?.subjects ?? []) subjectBodies.push(subject.body);
+            return {
+              resultId: `review-${input.reviewAssignment.assignmentId}`,
+              assignmentId: input.reviewAssignment.assignmentId,
+              taskId: input.reviewAssignment.taskId,
+              workerAgentId: input.reviewAssignment.workerAgentId,
+              reviewKind: input.reviewAssignment.reviewKind,
+              attempt: input.reviewAssignment.attempt,
+              executionEpoch: input.reviewAssignment.executionEpoch,
+              inputRevision: input.reviewAssignment.inputRevision,
+              acceptanceCriteriaDigest: input.reviewAssignment.acceptanceCriteriaDigest,
+              subjectRefs: [...input.reviewAssignment.subjectRefs],
+              subjectDigests: [...input.reviewAssignment.subjectDigests],
+              status: 'passed' as const,
+              findings: [],
+              evidenceRefs: [evidence('produced-artifacts-review', input.scope)],
+            };
+          },
+        };
+        const mergeCoordinator: MergeCoordinatorPort = {
+          async merge(request) {
+            return {
+              status: 'merged',
+              evidenceRefs: [
+                ...request.workerResult.evidenceRefs,
+                ...request.reviewResults.flatMap((review) => review.evidenceRefs),
+                evidence(`produced-artifacts-merge-${request.workerAssignment.assignmentId}`, request.scope),
+              ],
+            };
+          },
+        };
+        const orchestration = new OrchestrationManager({
+          ownerId: 'ui-runtime-test',
+          runtimePool,
+          executionAgent,
+          reviewAgent,
+          mergeCoordinator,
+          maxAttempts: maxAttempts ?? 1,
+        });
+        return { orchestration, runtimePool };
+      },
+    },
+  });
+  service.startImplicitConsumer();
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:produced-artifacts',
+    rawInput: 'produce the animated artifact',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'produce the animated artifact',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'produce the animated artifact',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:produced-artifacts',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-02T00:00:00.000Z',
+    payloadRef: 'asset://requirements/produced-artifacts',
+  });
+  await waitFor(() => assert.equal(
+    service.listTasks().completed[0]?.state,
+    'succeeded',
+    JSON.stringify(service.listTasks().counts),
+  ));
+  assert.ok(subjectBodies.length > 0, 'the review agent was invoked');
+  // The reviewer must see the artifact itself: the executor summary alone
+  // cannot be checked against acceptance criteria that describe file content.
+  assert.match(subjectBodies[0]!, /--- file: artifact\.svg ---/);
+  assert.match(subjectBodies[0]!, /<svg id="pelican">animated<\/svg>/);
+  assert.match(subjectBodies[0]!, /fake replay: final output chunk 2/);
+});
+
+test('produced artifact reader returns written files and reports paths it cannot hand over', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-produced-artifacts-'));
+  try {
+    await mkdir(join(root, 'nested'), { recursive: true });
+    await writeFile(join(root, 'nested', 'artifact.svg'), '<svg>animated</svg>', 'utf8');
+    const files = await readProducedArtifacts(root, [
+      'nested/artifact.svg',
+      'missing.html',
+      '../outside.txt',
+    ]);
+    assert.equal(files[0]?.path, 'nested/artifact.svg');
+    assert.equal(files[0]?.content, '<svg>animated</svg>');
+    assert.match(String(files[1]?.content), /^\[unreadable: /);
+    assert.match(String(files[2]?.content), /^\[unreadable: path escapes workspace/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

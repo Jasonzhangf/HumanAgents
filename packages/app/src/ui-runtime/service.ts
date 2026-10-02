@@ -36,6 +36,7 @@ import {
   type ScopeRef,
   type ProviderBinding,
   type ProviderCloseResult,
+  type ProviderEvent,
   type StopRequestReceipt,
   type TaskId,
   type InteractionDecision,
@@ -87,6 +88,8 @@ import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  producedArtifactBody,
+  producedArtifactPaths,
   type RuntimeCheckpointBoundaryPort,
   type RuntimeExecutionDriver,
   type RuntimeExecutionDriverInput,
@@ -149,6 +152,7 @@ import type { RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js
 import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/nodes/node-registry.js';
 import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
+import { readProducedArtifacts } from '../provider-tool-execution.js';
 import type { UiRuntimeJournal } from './journal.js';
 import { digestOf, type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
@@ -792,6 +796,11 @@ export class UiRuntimeService {
         }),
       }),
       implicitSubtaskExecutionAgent: this.createImplicitSubtaskExecutionAgent(),
+      ...(options.workspaceRoot === undefined ? {} : {
+        producedArtifacts: {
+          read: (request) => readProducedArtifacts(options.workspaceRoot!, request.paths),
+        },
+      }),
       ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
     });
     this.implicitBrain = new ImplicitBrainFifo({
@@ -1235,7 +1244,7 @@ export class UiRuntimeService {
         });
         activeDrivers.set(input.assignment.assignmentId, driver);
         let started = false;
-        const events: AgentEvent[] = [];
+        const events: Array<AgentEvent & { readonly providerEvent?: ProviderEvent }> = [];
         try {
           await driver.start({
             runtimeId,
@@ -1302,6 +1311,11 @@ export class UiRuntimeService {
         const outputRefs = input.assignment.expectedOutputRefs.length > 0
           ? [...input.assignment.expectedOutputRefs]
           : [...input.assignment.targetRefs];
+        const producedPaths = producedArtifactPaths(events);
+        const producedFiles = this.options.workspaceRoot === undefined || producedPaths.length === 0
+          ? []
+          : await readProducedArtifacts(this.options.workspaceRoot, producedPaths);
+        const artifactBody = producedArtifactBody(producedOutput, producedFiles);
         return {
           taskId: input.assignment.taskId,
           pipelineNodeId: input.assignment.pipelineNodeId,
@@ -1311,8 +1325,8 @@ export class UiRuntimeService {
           executionEpoch: input.executionEpoch,
           inputRevision: input.assignment.inputRevision,
           producedArtifactRefs: outputRefs,
-          producedArtifactDigests: outputRefs.map(() => digestOf(producedOutput)),
-          producedArtifactBodies: outputRefs.map(() => producedOutput),
+          producedArtifactDigests: outputRefs.map(() => digestOf(artifactBody)),
+          producedArtifactBodies: outputRefs.map(() => artifactBody),
           status,
           summary: producedOutput.trim() === ''
             ? `implicit executor ${input.agentId} ${status}`

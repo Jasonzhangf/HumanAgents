@@ -298,8 +298,52 @@ async function resolveWorkspacePath(root: string, inputPath: string): Promise<st
   return candidate;
 }
 
-function workspaceRelative(root: string, target: string): string {
-  const rel = relative(root, target);
+/** Per-file bound on material handed to the reviewer. */
+const PRODUCED_ARTIFACT_MAX_FILE_BYTES = 262_144;
+/** Whole-artifact bound so one execution cannot consume the review prompt. */
+const PRODUCED_ARTIFACT_MAX_TOTAL_BYTES = 1_048_576;
+
+/**
+ * Read back the files an execution wrote so the quality reviewer is handed the
+ * artifact itself. Paths use the same workspace rule the file tools use, and a
+ * path that cannot be read is reported in the body rather than dropped, so a
+ * missing artifact is visible to the reviewer instead of silently absent.
+ */
+export async function readProducedArtifacts(
+  workspaceRoot: string,
+  paths: readonly string[],
+): Promise<readonly { readonly path: string; readonly content: string }[]> {
+  const files: { path: string; content: string }[] = [];
+  let total = 0;
+  for (const path of paths) {
+    if (total >= PRODUCED_ARTIFACT_MAX_TOTAL_BYTES) {
+      files.push({ path, content: '[omitted: review material size bound reached]' });
+      continue;
+    }
+    let target: string;
+    try {
+      target = await resolveWorkspacePath(workspaceRoot, path);
+    } catch (cause) {
+      files.push({ path, content: `[unreadable: ${cause instanceof Error ? cause.message : 'path rejected'}]` });
+      continue;
+    }
+    let content: string;
+    try {
+      content = await readFile(target, 'utf8');
+    } catch (cause) {
+      files.push({ path, content: `[unreadable: ${cause instanceof Error ? cause.message : 'read failed'}]` });
+      continue;
+    }
+    const limit = Math.min(PRODUCED_ARTIFACT_MAX_FILE_BYTES, PRODUCED_ARTIFACT_MAX_TOTAL_BYTES - total);
+    const byteLength = new TextEncoder().encode(content).length;
+    if (byteLength > limit) content = `${content.slice(0, limit)}\n[truncated at ${limit} bytes]`;
+    total += Math.min(byteLength, limit);
+    files.push({ path, content });
+  }
+  return files;
+}
+
+function workspaceRelative(root: string, target: string): string {  const rel = relative(root, target);
   if (rel === '') return '.';
   if (rel.startsWith('..') || rel.startsWith(sep)) throw new Error(`path escapes workspace: ${target}`);
   return rel;
