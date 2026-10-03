@@ -3,6 +3,7 @@ import type {
   ChannelBinding,
   ConfirmedRequirementRevision,
   DraftConfirmation,
+  DraftRejectClosure,
   ExistingTaskChangeSubmit,
   ExecutionPolicyDefinition,
   FinalSubmit,
@@ -26,6 +27,7 @@ import {
 } from '../../../contracts/src/index.js';
 import { createHash } from 'node:crypto';
 import type { RequirementEnvelope } from '../../../contracts/src/index.js';
+import type { ExplicitIntake, RejectDraftInput } from '../intake/explicit-intake.js';
 import type { RequirementInbox } from '../intake/requirement-inbox.js';
 import { stableIdentity } from './idempotency.js';
 
@@ -130,6 +132,7 @@ export interface ConfirmationLedgerState {
   readonly confirmations: readonly ConfirmedRequirementRevision[];
   readonly revisions?: readonly RegisteredDraftRevision[];
   readonly revisionConfirmations?: readonly DraftConfirmation[];
+  readonly closedDraftIds?: readonly string[];
 }
 
 export interface PersistedSubmittedReceipt extends RequirementSubmitReceipt {
@@ -145,7 +148,14 @@ export interface PersistedFinalSubmitReceipt {
   readonly idempotencyKey: string;
   readonly revisionKey: string;
   readonly requestDigest: string;
+  readonly requestIdentity: string;
   readonly requirement: AuthorizedRequirement;
+}
+
+function finalSubmitIdentity(input: FinalSubmit | ExistingTaskChangeSubmit): string {
+  return input.requestKind === 'existing-task-change'
+    ? `${input.requestKind}:${input.taskId.scope}:${input.taskId.value}`
+    : input.requestKind;
 }
 
 export class ChannelRouter {
@@ -248,8 +258,12 @@ export class ConfirmationLedger {
   private readonly confirmations = new Map<string, ConfirmedRequirementRevision>();
   private readonly revisions = new Map<string, RegisteredDraftRevision>();
   private readonly revisionConfirmations = new Map<string, DraftConfirmation>();
+  private readonly closedDrafts = new Set<string>();
 
   registerDraft(draft: RequirementDraftRevision): void {
+    if (this.closedDrafts.has(draft.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${draft.draftId}`);
+    }
     const existing = this.drafts.get(draft.draftId);
     if (existing && JSON.stringify(existing) !== JSON.stringify(draft)) {
       throw new ExplicitBrainRouterError('confirmation-stale', `draft revision changed: ${draft.draftId}`);
@@ -266,6 +280,9 @@ export class ConfirmationLedger {
   }
 
   confirm(input: ConfirmedRequirementRevision): void {
+    if (this.closedDrafts.has(input.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${input.draftId}`);
+    }
     const draft = this.drafts.get(input.draftId);
     if (!draft) throw new ExplicitBrainRouterError('confirmation-required', `draft is not registered: ${input.draftId}`);
     if (draft.interactionId !== input.interactionId || draft.inputRevision !== input.inputRevision) {
@@ -290,6 +307,9 @@ export class ConfirmationLedger {
   }
 
   registerRevision(input: RegisteredDraftRevision): void {
+    if (this.closedDrafts.has(input.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${input.draftId}`);
+    }
     if (!Number.isSafeInteger(input.draftRevisionVersion) || input.draftRevisionVersion < 1) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'draft revision version must be a positive integer');
     }
@@ -310,6 +330,9 @@ export class ConfirmationLedger {
    */
   confirmRevision(input: DraftConfirmation): void {
     validateDraftConfirmation(input);
+    if (this.closedDrafts.has(input.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${input.draftId}`);
+    }
     const revision = this.revisions.get(input.draftId);
     if (!revision) {
       throw new ExplicitBrainRouterError('confirmation-required', `draft revision is not registered: ${input.draftId}`);
@@ -368,6 +391,9 @@ export class ConfirmationLedger {
   assertFinalSubmit(
     input: FinalSubmit | ExistingTaskChangeSubmit,
   ): { readonly revision: RegisteredDraftRevision; readonly confirmation: DraftConfirmation } {
+    if (this.closedDrafts.has(input.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${input.draftId}`);
+    }
     if (input.requestKind === 'new-task-create') validateFinalSubmit(input);
     else validateExistingTaskChangeSubmit(input);
     const revision = this.revisions.get(input.draftId);
@@ -399,6 +425,14 @@ export class ConfirmationLedger {
     return { revision: { ...revision }, confirmation: { ...confirmation } };
   }
 
+  closeRevision(draftId: string): void {
+    this.closedDrafts.add(draftId);
+    this.drafts.delete(draftId);
+    this.confirmations.delete(draftId);
+    this.revisions.delete(draftId);
+    this.revisionConfirmations.delete(draftId);
+  }
+
   confirmation(draftId: string): ConfirmedRequirementRevision | undefined {
     const confirmation = this.confirmations.get(draftId);
     return confirmation ? { ...confirmation } : undefined;
@@ -410,6 +444,7 @@ export class ConfirmationLedger {
       confirmations: [...this.confirmations.values()].map((confirmation) => structuredClone(confirmation)),
       revisions: [...this.revisions.values()].map((revision) => structuredClone(revision)),
       revisionConfirmations: [...this.revisionConfirmations.values()].map((confirmation) => structuredClone(confirmation)),
+      closedDraftIds: [...this.closedDrafts],
     };
   }
 
@@ -418,6 +453,7 @@ export class ConfirmationLedger {
     this.confirmations.clear();
     this.revisions.clear();
     this.revisionConfirmations.clear();
+    this.closedDrafts.clear();
     for (const draft of state.drafts) this.drafts.set(draft.draftId, structuredClone(draft));
     for (const confirmation of state.confirmations) {
       this.confirmations.set(confirmation.draftId, structuredClone(confirmation));
@@ -426,9 +462,19 @@ export class ConfirmationLedger {
     for (const confirmation of state.revisionConfirmations ?? []) {
       this.revisionConfirmations.set(confirmation.draftId, structuredClone(confirmation));
     }
+    for (const draftId of state.closedDraftIds ?? []) this.closedDrafts.add(draftId);
   }
 
   assertSubmission(input: RequirementSubmitArguments): ConfirmedRequirementRevision {
+    if (this.closedDrafts.has(input.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${input.draftId}`);
+    }
+    if (this.revisions.has(input.draftId)) {
+      throw new ExplicitBrainRouterError(
+        'unauthorized-final-submit',
+        'typed draft revisions must use submitFinal with an exact request kind',
+      );
+    }
     const draft = this.drafts.get(input.draftId);
     if (!draft || draft.interactionId !== input.interactionId || draft.inputRevision !== input.inputRevision) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'requirement submission is not for the current draft revision');
@@ -445,6 +491,9 @@ export class ConfirmationLedger {
   }
 
   requireDraft(input: RequirementSubmitArguments): RequirementDraftRevision {
+    if (this.closedDrafts.has(input.draftId)) {
+      throw new ExplicitBrainRouterError('confirmation-stale', `draft is closed: ${input.draftId}`);
+    }
     const draft = this.drafts.get(input.draftId);
     if (!draft || draft.interactionId !== input.interactionId || draft.inputRevision !== input.inputRevision) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'requirement submission is not for the current draft revision');
@@ -457,6 +506,21 @@ export class ConfirmationLedger {
   }
 }
 
+/**
+ * Close both the draft session and its confirmation ledger entry. This is the
+ * public rejection boundary: after it returns, the exact revision cannot be
+ * submitted even if a confirmation was issued before the rejection.
+ */
+export async function rejectDraftRevision(
+  intake: ExplicitIntake,
+  ledger: ConfirmationLedger,
+  input: RejectDraftInput,
+): Promise<DraftRejectClosure> {
+  const closure = await intake.rejectDraft(input);
+  ledger.closeRevision(closure.draftId);
+  return closure;
+}
+
 export interface RequirementSubmitPort {
   submit(input: RequirementEnvelope): Promise<{ readonly requirementId: string }>;
 }
@@ -464,6 +528,7 @@ export interface RequirementSubmitPort {
 export class RequirementSubmissionOwner {
   private readonly submitted = new Map<string, PersistedSubmittedReceipt>();
   private readonly finalSubmissions = new Map<string, AuthorizedRequirement>();
+  private readonly finalSubmissionIdentities = new Map<string, string>();
   private readonly finalIdempotency = new Map<string, { readonly requestDigest: string; readonly revisionKey: string }>();
   private readonly pending = new Map<string, {
     readonly envelope: RequirementEnvelope;
@@ -496,16 +561,19 @@ export class RequirementSubmissionOwner {
       idempotencyKey,
       revisionKey: entry.revisionKey,
       requestDigest: entry.requestDigest,
+      requestIdentity: this.finalSubmissionIdentities.get(entry.revisionKey)!,
       requirement: structuredClone(this.finalSubmissions.get(entry.revisionKey)!),
     }));
   }
 
   restoreFinalReceipts(receipts: readonly PersistedFinalSubmitReceipt[]): void {
     this.finalSubmissions.clear();
+    this.finalSubmissionIdentities.clear();
     this.finalIdempotency.clear();
     for (const receipt of receipts) {
       const requirement = structuredClone(receipt.requirement);
       this.finalSubmissions.set(receipt.revisionKey, requirement);
+      this.finalSubmissionIdentities.set(receipt.revisionKey, receipt.requestIdentity);
       this.finalIdempotency.set(receipt.idempotencyKey, {
         requestDigest: receipt.requestDigest,
         revisionKey: receipt.revisionKey,
@@ -534,6 +602,7 @@ export class RequirementSubmissionOwner {
   private async submitFinalSerialized(input: FinalSubmit | ExistingTaskChangeSubmit): Promise<FinalSubmitReceipt> {
     const { revision, confirmation } = this.ledger.assertFinalSubmit(input);
     const revisionKey = `${revision.draftId}:${revision.draftRevisionVersion}:${revision.draftRevisionHash}`;
+    const requestIdentity = finalSubmitIdentity(input);
     const requestDigest = canonicalJsonStringify({
       interactionId: input.interactionId,
       draftId: input.draftId,
@@ -542,6 +611,7 @@ export class RequirementSubmissionOwner {
       draftRevisionHash: input.draftRevisionHash,
       confirmationRef: input.confirmationRef,
       requestKind: input.requestKind,
+      ...(input.requestKind === 'existing-task-change' ? { taskId: input.taskId } : {}),
     });
     const prior = this.finalIdempotency.get(input.idempotencyKey);
     if (prior) {
@@ -552,6 +622,12 @@ export class RequirementSubmissionOwner {
     }
     const existing = this.finalSubmissions.get(revisionKey);
     if (existing) {
+      if (this.finalSubmissionIdentities.get(revisionKey) !== requestIdentity) {
+        throw new ExplicitBrainRouterError(
+          'duplicate-submit',
+          `draft revision was already submitted with a different request identity: ${revision.draftId}`,
+        );
+      }
       this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
       return { status: 'duplicate', requirement: structuredClone(existing) };
     }
@@ -594,6 +670,7 @@ export class RequirementSubmissionOwner {
       payloadRef: envelope.payloadRef,
     };
     this.finalSubmissions.set(revisionKey, requirement);
+    this.finalSubmissionIdentities.set(revisionKey, requestIdentity);
     this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
     return { status: 'submitted', requirement: structuredClone(requirement) };
   }

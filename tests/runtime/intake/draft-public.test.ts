@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -22,6 +22,7 @@ import { RequirementInbox } from '../../../packages/runtime/src/intake/requireme
 import {
   ConfirmationLedger,
   RequirementSubmissionOwner,
+  rejectDraftRevision,
   type RegisteredDraftRevision,
 } from '../../../packages/runtime/src/explicit-brain/router.js';
 
@@ -131,6 +132,27 @@ test('new-task-preview creates an editable draft without dispatching; status sta
   assert.equal(inbox.size, 0);
 });
 
+test('typed request kinds are validated and unconfirmed drafts cannot be marked submitted', async () => {
+  const intake = new ExplicitIntake();
+  await assert.rejects(
+    () => intake.receive({
+      sourceRef: 'ui:new-task-form',
+      rawInput: 'summarize the current task evidence',
+      channel: 'business',
+      requestKind: 'not-a-request-kind' as never,
+    }),
+    (error) => error instanceof ExplicitIntakeError && error.code === 'invalid-request-kind',
+  );
+
+  const interaction = await receivePreview(intake);
+  await intake.createDraft(interaction, draftIntent());
+  await assert.rejects(
+    () => intake.markRevisionSubmitted(interaction),
+    (error) => error instanceof ExplicitIntakeError && error.code === 'invalid-state',
+  );
+  assert.equal((await intake.inspect(interaction)).revision?.state, 'draft');
+});
+
 test('refinement updates revision hash and normalized input; stale base is rejected and preserves the edit', async () => {
   const intake = new ExplicitIntake();
   const interaction = await receivePreview(intake);
@@ -163,6 +185,7 @@ test('refinement updates revision hash and normalized input; stale base is rejec
 
 test('final submit is the only authorization: duplicate is idempotent, reject never dispatches', async () => {
   const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-'));
+  try {
   const journal = new FileIntakeJournal(journalPath(root));
   const intake = new ExplicitIntake(journal);
   const interaction = await receivePreview(intake);
@@ -182,6 +205,24 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
     payloadRef: 'asset://requirements/req-1',
   });
   assert.equal(confirmation.draftRevisionHash, refined.revisionHash);
+
+  // A second confirmation reference cannot authorize the same revision.
+  let secondConfirmationCode = '';
+  try {
+    await intake.confirmDraftRevision({
+      interactionId: interaction,
+      draftId: refined.draftId,
+      draftRevisionVersion: refined.revisionVersion,
+      draftRevisionHash: refined.revisionHash,
+      confirmationRef: 'confirm-2',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-02T00:00:00.000Z',
+      payloadRef: 'asset://requirements/req-2',
+    });
+  } catch (error) {
+    secondConfirmationCode = error instanceof ExplicitIntakeError ? error.code : 'not-intake-error';
+  }
+  assert.equal(secondConfirmationCode, 'confirmation-stale');
 
   // A stale confirmation for the earlier revision is rejected.
   let staleRejected = false;
@@ -284,6 +325,9 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
   assert.equal(restored.revision?.revisionHash, refined.revisionHash);
   assert.equal(restored.confirmations?.[0].confirmationRef, 'confirm-1');
   assert.ok(journal.recordCount() >= 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('reject closes the draft durably without creating an authorized requirement', async () => {
@@ -293,8 +337,39 @@ test('reject closes the draft durably without creating an authorized requirement
   await intake.createDraft(interaction, draftIntent());
   const draft = intake.currentDraftRevision(interaction);
   assert.ok(draft);
+  const confirmation = await intake.confirmDraftRevision({
+    interactionId: interaction,
+    draftId: draft.draftId,
+    draftRevisionVersion: draft.revisionVersion,
+    draftRevisionHash: draft.revisionHash,
+    confirmationRef: 'confirm-before-reject',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-02T00:00:00.000Z',
+    payloadRef: 'asset://requirements/req-rejected',
+  });
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision({
+    interactionId: interaction,
+    draftId: draft.draftId,
+    inputRevision: draft.inputRevision,
+    draftRevisionVersion: draft.revisionVersion,
+    draftRevisionHash: draft.revisionHash,
+    normalizedInput: draft.normalizedInput,
+    intent: draft.proposedIntent,
+    taskRef: currentTask,
+    payloadRef: 'asset://requirements/req-rejected',
+    requestKind: 'new-task-create',
+  });
+  ledger.confirmRevision(confirmation);
+  const dispatched: RequirementEnvelope[] = [];
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      dispatched.push(envelope);
+      return { requirementId: envelope.requirementId };
+    },
+  });
 
-  const closure = await intake.rejectDraft({
+  const closure = await rejectDraftRevision(intake, ledger, {
     interactionId: interaction,
     reason: 'user abandoned the draft',
     rejectionId: 'reject-1',
@@ -305,6 +380,20 @@ test('reject closes the draft durably without creating an authorized requirement
   assert.equal(closure.draftRevisionHash, draft.revisionHash);
   assert.equal((await intake.inspect(interaction)).state, 'rejected');
   assert.equal(inbox.size, 0);
+  await assert.rejects(
+    () => owner.submitFinal({
+      interactionId: interaction,
+      draftId: draft.draftId,
+      inputRevision: draft.inputRevision,
+      draftRevisionVersion: draft.revisionVersion,
+      draftRevisionHash: draft.revisionHash,
+      confirmationRef: 'confirm-before-reject',
+      idempotencyKey: 'submit-after-reject',
+      requestKind: 'new-task-create',
+    }),
+    (error) => (error as { code?: string }).code === 'confirmation-stale',
+  );
+  assert.equal(dispatched.length, 0);
 
   // A rejected draft cannot be confirmed afterward.
   let rejectCode = '';

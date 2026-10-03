@@ -20,12 +20,21 @@ import {
 } from '../../../core/src/index.js';
 import { ExplicitIntakeError } from './errors.js';
 
-const DRAFT_REQUEST_KINDS: readonly InteractionRequestKind[] = [
+const INTERACTION_REQUEST_KINDS: ReadonlySet<InteractionRequestKind> = new Set([
+  'new-task-create',
+  'new-task-preview',
+  'existing-task-change',
+  'status-query',
+  'clarification',
+  'refinement',
+]);
+
+const DRAFT_REQUEST_KINDS: ReadonlySet<InteractionRequestKind> = new Set([
   'new-task-preview',
   'new-task-create',
   'existing-task-change',
   'refinement',
-];
+]);
 
 /**
  * Durable store for the explicit-intake snapshot. The host already persists the
@@ -326,10 +335,10 @@ export class ExplicitIntake {
         },
       );
     }
-    if (input.requestKind !== undefined && (typeof input.requestKind !== 'string' || input.requestKind.trim() === '')) {
+    if (input.requestKind !== undefined && !INTERACTION_REQUEST_KINDS.has(input.requestKind)) {
       throw new ExplicitIntakeError(
-        'input-required',
-        'explicit input requestKind must be a non-empty string when provided',
+        'invalid-request-kind',
+        'explicit input requestKind must be one of the typed interaction request kinds',
         {
           owner: 'explicit-intake',
           nextAction: 'provide-a-typed-request-kind',
@@ -840,6 +849,17 @@ export class ExplicitIntake {
         },
       );
     }
+    if (interaction.state === 'confirmed') {
+      throw new ExplicitIntakeError(
+        'confirmation-stale',
+        'draft revision already has a different confirmation',
+        {
+          owner: 'human',
+          nextAction: 'reconfirm-the-current-draft-revision',
+          condition: 'same-confirmation-identity',
+        },
+      );
+    }
     if (interaction.state === 'dispatched' || interaction.state === 'rejected') {
       throw new ExplicitIntakeError(
         'draft-not-confirmable',
@@ -944,19 +964,20 @@ export class ExplicitIntake {
   async markRevisionSubmitted(interactionId: InteractionId): Promise<void> {
     const interaction = this.requireInteraction(interactionId);
     if (interaction.state === 'dispatched') return;
-    if (interaction.revision && interaction.revision.state !== 'submitted') {
-      interaction.revision = { ...interaction.revision, state: 'submitted' };
+    if (interaction.state !== 'confirmed' || interaction.revision?.state !== 'confirmed') {
+      throw this.invalidState(
+        'mark requirement submitted',
+        `cannot mark requirement submitted from ${interaction.state}`,
+        'complete-the-authorized-final-submit-first',
+      );
     }
-    if (interaction.state !== 'confirmed') {
-      this.persist();
-      return;
-    }
+    interaction.revision = { ...interaction.revision, state: 'submitted' };
     this.transition(interaction, 'dispatched', 'runtime-coordinator', 'consume-inbox');
   }
 
   private requireDraftRequestKind(interaction: InteractionRecord, action: string): void {
     const kind = interaction.requestKind;
-    if (kind === undefined || !DRAFT_REQUEST_KINDS.includes(kind)) {
+    if (kind === undefined || !DRAFT_REQUEST_KINDS.has(kind)) {
       throw new ExplicitIntakeError(
         'typed-request-kind-required',
         `${action} requires a typed draft requestKind`,
