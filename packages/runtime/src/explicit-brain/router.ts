@@ -342,6 +342,12 @@ export class ConfirmationLedger {
       || revision.draftRevisionHash !== input.draftRevisionHash) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'confirmation does not match the registered draft revision');
     }
+    if (revision.payloadRef !== input.payloadRef) {
+      throw new ExplicitBrainRouterError(
+        'confirmation-stale',
+        'confirmation payload does not match the registered draft revision',
+      );
+    }
     const existing = this.revisionConfirmations.get(input.draftId);
     if (existing && JSON.stringify(existing) !== JSON.stringify(input)) {
       throw new ExplicitBrainRouterError('confirmation-stale', `draft confirmation changed: ${input.draftId}`);
@@ -421,6 +427,9 @@ export class ConfirmationLedger {
     }
     if (confirmation.draftRevisionVersion !== revision.draftRevisionVersion || confirmation.draftRevisionHash !== revision.draftRevisionHash) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'confirmation is not bound to the current draft revision');
+    }
+    if (confirmation.payloadRef !== revision.payloadRef) {
+      throw new ExplicitBrainRouterError('confirmation-stale', 'confirmation payload is not bound to the current draft revision');
     }
     if (input.requestKind === 'existing-task-change'
       && (revision.taskRef === undefined

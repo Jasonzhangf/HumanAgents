@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   DraftConfirmation,
   DraftPreviewReceipt,
@@ -9,6 +10,7 @@ import type {
   TaskId,
 } from '../../../contracts/src/index.js';
 import {
+  canonicalJsonStringify,
   validateDraftConfirmation,
   validateDraftPreviewReceipt,
   validateDraftRejectClosure,
@@ -225,7 +227,12 @@ interface InteractionRecord {
 
 interface RevisionEditRecord {
   readonly idempotencyKey: string;
+  readonly requestDigest: string;
   readonly revision: DraftRevision;
+}
+
+function revisionEditRequestDigest(input: DraftRevisionInput): string {
+  return `sha256:${createHash('sha256').update(canonicalJsonStringify(input)).digest('hex')}`;
 }
 
 /**
@@ -778,22 +785,40 @@ export class ExplicitIntake {
         },
       );
     }
+    const requestDigest = revisionEditRequestDigest(input);
     const replayed = (interaction.revisionEdits ?? []).find((entry) => entry.idempotencyKey === input.idempotencyKey);
-    if (replayed) return structuredClone(replayed.revision);
+    if (replayed) {
+      if (replayed.requestDigest !== requestDigest) {
+        throw new ExplicitIntakeError(
+          'idempotency-conflict',
+          'draft refinement idempotency key was reused with different content',
+          {
+            owner: 'explicit-intake',
+            nextAction: 'use-a-new-idempotency-key',
+            condition: 'same-complete-refinement-request',
+          },
+        );
+      }
+      return structuredClone(replayed.revision);
+    }
 
     const next = refineDraftRevision(revision, input);
-    interaction.revisionEdits = [...(interaction.revisionEdits ?? []), { idempotencyKey: input.idempotencyKey, revision: next }];
-    interaction.revision = next;
-    if (interaction.draft) {
-      interaction.draft = {
-        ...interaction.draft,
-        normalizedInput: next.normalizedInput,
-        proposedIntent: next.proposedIntent,
-        proposal: next.proposal,
-        knownFacts: [...next.knownFacts],
-      };
-    }
-    this.persist();
+    this.persistMutation(() => {
+      interaction.revisionEdits = [
+        ...(interaction.revisionEdits ?? []),
+        { idempotencyKey: input.idempotencyKey, requestDigest, revision: next },
+      ];
+      interaction.revision = next;
+      if (interaction.draft) {
+        interaction.draft = {
+          ...interaction.draft,
+          normalizedInput: next.normalizedInput,
+          proposedIntent: next.proposedIntent,
+          proposal: next.proposal,
+          knownFacts: [...next.knownFacts],
+        };
+      }
+    });
     return structuredClone(next);
   }
 
@@ -882,21 +907,22 @@ export class ExplicitIntake {
       interactionId: interaction.interactionId,
     };
     validateDraftConfirmation(confirmation);
-    interaction.confirmations = [...(interaction.confirmations ?? []), confirmation];
-    interaction.revision = { ...revision, state: 'confirmed' };
-    interaction.confirmation = {
-      interactionId: interaction.interactionId,
-      draftId: revision.draftId,
-      inputRevision: revision.inputRevision,
-      normalizedInput: revision.normalizedInput,
-      intent: revision.proposedIntent,
-      taskRef: interaction.draft?.matchedTasks.find((task) => task.relation === 'current')?.taskId,
-      payloadRef: input.payloadRef,
-      confirmationRef: input.confirmationRef,
-      confirmedBy: input.confirmedBy,
-      confirmedAt: input.confirmedAt,
-    };
-    this.transition(interaction, 'confirmed', 'human', 'submit-final-create');
+    this.transition(interaction, 'confirmed', 'human', 'submit-final-create', undefined, (candidate) => {
+      candidate.confirmations = [...(candidate.confirmations ?? []), confirmation];
+      candidate.revision = { ...revision, state: 'confirmed' };
+      candidate.confirmation = {
+        interactionId: candidate.interactionId,
+        draftId: revision.draftId,
+        inputRevision: revision.inputRevision,
+        normalizedInput: revision.normalizedInput,
+        intent: revision.proposedIntent,
+        taskRef: candidate.draft?.matchedTasks.find((task) => task.relation === 'current')?.taskId,
+        payloadRef: input.payloadRef,
+        confirmationRef: input.confirmationRef,
+        confirmedBy: input.confirmedBy,
+        confirmedAt: input.confirmedAt,
+      };
+    });
     return structuredClone(confirmation);
   }
 
@@ -1032,15 +1058,29 @@ export class ExplicitIntake {
     owner: 'explicit-intake' | 'human' | 'runtime-coordinator',
     nextAction: string,
     condition?: string,
+    mutateBeforeTransition?: (interaction: InteractionRecord) => void,
   ): void {
-    interaction.state = state;
-    interaction.owner = owner;
-    interaction.nextAction = nextAction;
-    interaction.condition = condition;
-    interaction.history.push(state);
-    if (interaction.draft) {
-      interaction.draft = { ...interaction.draft, state };
+    this.persistMutation(() => {
+      mutateBeforeTransition?.(interaction);
+      interaction.state = state;
+      interaction.owner = owner;
+      interaction.nextAction = nextAction;
+      interaction.condition = condition;
+      interaction.history.push(state);
+      if (interaction.draft) {
+        interaction.draft = { ...interaction.draft, state };
+      }
+    });
+  }
+
+  private persistMutation(mutate: () => void): void {
+    const previous = this.exportState();
+    try {
+      mutate();
+      this.persist();
+    } catch (error) {
+      this.restoreState(previous);
+      throw error;
     }
-    this.persist();
   }
 }

@@ -66,6 +66,18 @@ class FileIntakeJournal implements ExplicitIntakeJournalPort {
   }
 }
 
+class FlakyFileIntakeJournal extends FileIntakeJournal {
+  failNextSave = false;
+
+  override save(state: ExplicitIntakeState): void {
+    if (this.failNextSave) {
+      this.failNextSave = false;
+      throw new Error('journal unavailable');
+    }
+    super.save(state);
+  }
+}
+
 class CountingRequirementInbox extends RequirementInbox {
   appendCount = 0;
 
@@ -186,6 +198,35 @@ test('refinement updates revision hash and normalized input; stale base is rejec
   const replay = await intake.refineDraft(interaction, edit(first));
   assert.equal(replay.revisionHash, refined.revisionHash);
 
+  // Reusing the key for different edit content, instruction, base, hash, or
+  // draft is a typed conflict and must not replace the original receipt.
+  const conflicts: readonly DraftRevisionInput[] = [
+    edit(first, {
+      idempotencyKey: 'edit-1',
+      fields: { normalizedInput: 'different edit content', scope: 'different-scope' },
+    }),
+    edit(first, {
+      idempotencyKey: 'edit-1',
+      instructionRef: 'user-edit-2',
+    }),
+    edit(first, {
+      idempotencyKey: 'edit-1',
+      baseRevisionVersion: refined.revisionVersion,
+      requestedRevisionHash: refined.revisionHash,
+    }),
+    edit(first, {
+      idempotencyKey: 'edit-1',
+      draftId: 'draft-other',
+    }),
+  ];
+  for (const conflict of conflicts) {
+    await assert.rejects(
+      () => intake.refineDraft(interaction, conflict),
+      (error) => error instanceof ExplicitIntakeError && error.code === 'idempotency-conflict',
+    );
+    assert.equal(intake.currentDraftRevision(interaction)?.revisionHash, refined.revisionHash);
+  }
+
   // An old-hash edit is rejected and leaves the current revision untouched.
   let staleCode = '';
   try {
@@ -195,6 +236,81 @@ test('refinement updates revision hash and normalized input; stale base is rejec
   }
   assert.equal(staleCode, 'stale-revision');
   assert.equal(intake.currentDraftRevision(interaction)?.revisionHash, refined.revisionHash);
+});
+
+test('confirmation ledger binds the exact payload reference before final submit', async () => {
+  const revision: RegisteredDraftRevision = {
+    interactionId: 'interaction-payload-binding',
+    draftId: 'draft-payload-binding',
+    inputRevision: 1,
+    draftRevisionVersion: 1,
+    draftRevisionHash: 'sha256:payload-binding',
+    normalizedInput: 'bind the exact payload',
+    intent: 'create',
+    payloadRef: 'asset://requirements/payload-a',
+    requestKind: 'new-task-create',
+  };
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+
+  let mismatchCode = '';
+  try {
+    ledger.confirmRevision({
+      confirmationRef: 'confirm-payload-binding',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-03T00:00:00.000Z',
+      payloadRef: 'asset://requirements/payload-b',
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.draftRevisionVersion,
+      draftRevisionHash: revision.draftRevisionHash,
+      interactionId: revision.interactionId,
+    });
+  } catch (error) {
+    mismatchCode = error instanceof ExplicitBrainRouterError ? error.code : 'not-router-error';
+  }
+  assert.equal(mismatchCode, 'confirmation-stale');
+  assert.equal(ledger.revisionConfirmation(revision.draftId), undefined);
+
+  const inbox = new CountingRequirementInbox();
+  const dispatched: RequirementEnvelope[] = [];
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      dispatched.push(envelope);
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  const submit: FinalSubmit = {
+    interactionId: revision.interactionId,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-payload-binding',
+    idempotencyKey: 'submit-payload-binding',
+    requestKind: 'new-task-create',
+  };
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    (error) => error instanceof ExplicitBrainRouterError && error.code === 'confirmation-required',
+  );
+  assert.equal(inbox.appendCount, 0);
+  assert.equal(dispatched.length, 0);
+
+  ledger.confirmRevision({
+    confirmationRef: 'confirm-payload-binding',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: revision.payloadRef,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    interactionId: revision.interactionId,
+  });
+  const receipt = await owner.submitFinal(submit);
+  assert.equal(receipt.status, 'submitted');
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]?.payloadRef, revision.payloadRef);
 });
 
 test('final submit is the only authorization: duplicate is idempotent, reject never dispatches', async () => {
@@ -378,6 +494,90 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
   assert.equal(restored.revision?.revisionHash, refined.revisionHash);
   assert.equal(restored.confirmations?.[0].confirmationRef, 'confirm-1');
   assert.ok(journal.recordCount() >= 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('failed confirmation persistence keeps the prior state and retry commits durably', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-persistence-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await receivePreview(intake);
+    await intake.createDraft(interaction, draftIntent());
+    const revision = intake.currentDraftRevision(interaction);
+    assert.ok(revision);
+
+    const confirmationInput = {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      confirmationRef: 'confirm-durable-retry',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-03T00:00:00.000Z',
+      payloadRef: 'asset://requirements/durable-confirmation',
+    };
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => intake.confirmDraftRevision(confirmationInput),
+      /journal unavailable/,
+    );
+
+    const afterFailure = await intake.inspect(interaction);
+    assert.equal(afterFailure.state, 'awaiting-confirmation');
+    assert.equal(afterFailure.revision?.state, 'draft');
+    assert.equal(afterFailure.confirmation, undefined);
+    assert.equal(afterFailure.confirmations?.length ?? 0, 0);
+
+    const reloadedAfterFailure = new ExplicitIntake(journal);
+    const durableAfterFailure = await reloadedAfterFailure.inspect(interaction);
+    assert.equal(durableAfterFailure.state, 'awaiting-confirmation');
+    assert.equal(durableAfterFailure.revision?.state, 'draft');
+    assert.equal(durableAfterFailure.confirmation, undefined);
+
+    const confirmation = await intake.confirmDraftRevision(confirmationInput);
+    assert.equal(confirmation.confirmationRef, 'confirm-durable-retry');
+    assert.equal(confirmation.payloadRef, 'asset://requirements/durable-confirmation');
+
+    const reloadedAfterRetry = new ExplicitIntake(journal);
+    const durableAfterRetry = await reloadedAfterRetry.inspect(interaction);
+    assert.equal(durableAfterRetry.state, 'confirmed');
+    assert.equal(durableAfterRetry.revision?.state, 'confirmed');
+    assert.equal(durableAfterRetry.revision?.revisionHash, revision.revisionHash);
+    assert.equal(durableAfterRetry.confirmation?.confirmationRef, 'confirm-durable-retry');
+    assert.equal(durableAfterRetry.confirmation?.payloadRef, 'asset://requirements/durable-confirmation');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('failed refinement persistence keeps the prior revision and retry commits durably', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-refinement-persistence-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await receivePreview(intake);
+    await intake.createDraft(interaction, draftIntent());
+    const first = intake.currentDraftRevision(interaction);
+    assert.ok(first);
+
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => intake.refineDraft(interaction, edit(first)),
+      /journal unavailable/,
+    );
+    assert.equal(intake.currentDraftRevision(interaction)?.revisionHash, first.revisionHash);
+
+    const reloadedAfterFailure = new ExplicitIntake(journal);
+    assert.equal(reloadedAfterFailure.currentDraftRevision(interaction)?.revisionHash, first.revisionHash);
+
+    const refined = await intake.refineDraft(interaction, edit(first));
+    assert.notEqual(refined.revisionHash, first.revisionHash);
+
+    const reloadedAfterRetry = new ExplicitIntake(journal);
+    assert.equal(reloadedAfterRetry.currentDraftRevision(interaction)?.revisionHash, refined.revisionHash);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
