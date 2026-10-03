@@ -1,0 +1,39 @@
+{
+  "graph": "humanagent-subscription-control",
+  "operator": {
+    "operator": "humanagent-subscription-control",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "accept_subscription_control_request": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "plannedOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending"
+    },
+    "orchestrate_subscription_control": {
+      "ownerPath": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
+      "plannedOwnerPath": "packages/runtime/src/subscriptions/control.ts",
+      "implementationStatus": "pending"
+    },
+    "begin_subscription_control_transaction": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts",
+      "plannedOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "implementationStatus": "pending"
+    },
+    "decide_subscription_control": {
+      "ownerPath": "packages/core/src/index.ts",
+      "ownerRel": "packages/core/src/index.ts",
+      "plannedOwnerPath": "packages/core/src/subscription.ts",
+      "implementationStatus": "pending"
+    },
+    "commit_subscription_control": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts",
+      "plannedOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "implementationStatus": "pending"
+    }
+  }
+}

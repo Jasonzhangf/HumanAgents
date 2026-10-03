@@ -13,49 +13,29 @@
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
       "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
     },
-    "explicit_confirm": {
+    "create_reviewable_draft": {
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
       "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
     },
-    "implicit_classify": {
-      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
-      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    "revise_draft_to_approval": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
     },
-    "interactive_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "validate_draft_revision": {
+      "ownerPath": "packages/core/src/index.ts",
+      "ownerRel": "packages/core/src/index.ts"
     },
-    "execution_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "submit_single_authorization": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
-    "research_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "compile_execution_policy": {
+      "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/router.ts"
     },
-    "maintenance_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
-    },
-    "task_correlate_or_create": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
-    },
-    "resource_admission": {
-      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
-      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
-    },
-    "pipeline_execute": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
-    },
-    "settle": {
-      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
-    },
-    "task_output": {
-      "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
+    "persist_authorized_plan": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts"
     }
   }
 }

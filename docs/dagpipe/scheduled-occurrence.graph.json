@@ -1,0 +1,247 @@
+{
+  "id": "humanagent-scheduled-occurrence",
+  "version": "1",
+  "meta": {
+    "title": "周期任务单个到期 occurrence 从已提交订阅状态到结果投影",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "controlContract": {
+      "request": "SubscriptionControlRequest = ModifySubscriptionControlRequest | PauseSubscriptionControlRequest | ResumeSubscriptionControlRequest | CancelFutureSubscriptionControlRequest",
+      "receipt": "SubscriptionControlReceipt { subscriptionId, action, status, policyRevision, scheduleRevision, idempotencyKey, requestHash, supersededUnclaimedOccurrences, controlRef }",
+      "sharedTransactionResource": "packages/adapters/jsonl/src/index.ts:transaction",
+      "competition": "subscription-control commits typed state and receipt; this graph reads committed subscription state and rechecks state/revision in the same JSONL transaction before claim; no cross-graph edge or second control truth",
+      "linearization": [
+        "control committed before claim supersedes old unclaimed occurrences; claim returns typed stale/conflict and cannot start new execution",
+        "claim committed before control keeps the authorized immutable policy snapshot for that executionEpoch; future pause/cancel-future does not stop in-flight execution",
+        "two modifies from the same base revision produce exactly one applied receipt and typed stale/conflict for the losers",
+        "duplicate idempotencyKey with the same requestHash returns the existing receipt; different content returns conflict",
+        "resume generates deterministic future slots and never reissues superseded occurrences",
+        "journal restart replay restores committed subscription state and receipts"
+      ]
+    },
+    "executionContract": {
+      "callee": "humanagent-serve-task@2",
+      "entry": "persisted_execution_plan",
+      "exit": "task_terminal_projection",
+      "executeNode": "execute_occurrence_task",
+      "settleNode": "settle_occurrence",
+      "requiredReceipt": "ServeTaskTerminalReceipt { taskId, operationId, executionEpoch, inputArtifactDigest, verification: TaskVerificationResult, terminalCheckpointRef, settlementReceiptRef, recoveryResponsibility }",
+      "verificationAuthority": "W3 public task-verification bridge in packages/runtime/src/ui-runtime/task-verification.ts; scheduler does not own a second verifier",
+      "settlementRule": "settle_occurrence consumes only a verified serve-task terminal/settlement receipt; checker failed/missing/rejected, identity mismatch, stale executionEpoch, or pending verification cannot be projected as occurrence success; cancelled requires a settled stop",
+      "identityFencing": "core validates task/operation/executionEpoch/inputArtifactDigest; JSONL atomically commits occurrence settle and receipt",
+      "crossGraph": "typed invocation of the public serve-task input/output contract; no cross-graph node edge, back-edge, second lifecycle, or second persistence truth"
+    },
+    "terminalContract": {
+      "success": "publish_occurrence_result only after verified serve-task terminal/settlement receipt and atomic occurrence settle",
+      "failure": "non-success verification remains a non-success occurrence outcome with recovery responsibility; attention.opened with retry-scheduler-patrol",
+      "blocked": "attention.opened with resource-waiting",
+      "cancelFuture": "subscription cancelled before occurrence claim; in-flight stop is separate",
+      "cleanup": "occurrence consumed or invalidated, lease released, journal receipt retained"
+    }
+  },
+  "inputs": [
+    {
+      "id": "due_occurrence",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "read_committed_subscription_state",
+      "operator": "humanagent-schedule-subscription-read",
+      "operator_version": "1",
+      "inputs": [
+        "due_occurrence"
+      ],
+      "output": {
+        "id": "committed_subscription_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "claim_due_occurrence",
+      "operator": "humanagent-schedule-occurrence-claim",
+      "operator_version": "1",
+      "inputs": [
+        "committed_subscription_state"
+      ],
+      "output": {
+        "id": "claimed_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_occurrence_domain",
+      "operator": "humanagent-occurrence-invariants",
+      "operator_version": "1",
+      "inputs": [
+        "claimed_occurrence"
+      ],
+      "output": {
+        "id": "validated_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "admit_occurrence_execution",
+      "operator": "humanagent-schedule-admission",
+      "operator_version": "1",
+      "inputs": [
+        "validated_occurrence"
+      ],
+      "output": {
+        "id": "admitted_execution",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "execute_occurrence_task",
+      "operator": "humanagent-schedule-execute",
+      "operator_version": "1",
+      "inputs": [
+        "admitted_execution"
+      ],
+      "output": {
+        "id": "verified_task_terminal_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "settle_occurrence",
+      "operator": "humanagent-schedule-settle",
+      "operator_version": "1",
+      "inputs": [
+        "verified_task_terminal_receipt"
+      ],
+      "output": {
+        "id": "consumed_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_occurrence_result",
+      "operator": "humanagent-schedule-result",
+      "operator_version": "1",
+      "inputs": [
+        "consumed_occurrence"
+      ],
+      "output": {
+        "id": "occurrence_result_projection",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "read_committed_subscription_state",
+      "to": "claim_due_occurrence",
+      "arc_id": "committed_subscription_state"
+    },
+    {
+      "from": "claim_due_occurrence",
+      "to": "validate_occurrence_domain",
+      "arc_id": "claimed_occurrence"
+    },
+    {
+      "from": "validate_occurrence_domain",
+      "to": "admit_occurrence_execution",
+      "arc_id": "validated_occurrence"
+    },
+    {
+      "from": "admit_occurrence_execution",
+      "to": "execute_occurrence_task",
+      "arc_id": "admitted_execution"
+    },
+    {
+      "from": "execute_occurrence_task",
+      "to": "settle_occurrence",
+      "arc_id": "verified_task_terminal_receipt"
+    },
+    {
+      "from": "settle_occurrence",
+      "to": "publish_occurrence_result",
+      "arc_id": "consumed_occurrence"
+    }
+  ],
+  "outputs": [
+    "occurrence_result_projection"
+  ]
+}

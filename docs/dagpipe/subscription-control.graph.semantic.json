@@ -1,0 +1,10 @@
+{
+  "graph": "humanagent-subscription-control",
+  "labels": {
+    "accept_subscription_control_request": "接收并解析订阅控制请求",
+    "orchestrate_subscription_control": "编排控制事务且不复制领域规则",
+    "begin_subscription_control_transaction": "在 JSONL 事务临界区锁定订阅状态",
+    "decide_subscription_control": "按 core 不变量裁决控制与版本",
+    "commit_subscription_control": "原子提交状态与持久化控制回执"
+  }
+}

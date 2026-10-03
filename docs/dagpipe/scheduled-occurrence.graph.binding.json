@@ -1,0 +1,41 @@
+{
+  "graph": "humanagent-scheduled-occurrence",
+  "operator": {
+    "operator": "humanagent-scheduled-occurrence",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "read_committed_subscription_state": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts",
+      "plannedOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "implementationStatus": "pending"
+    },
+    "claim_due_occurrence": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts"
+    },
+    "validate_occurrence_domain": {
+      "ownerPath": "packages/core/src/index.ts",
+      "ownerRel": "packages/core/src/index.ts"
+    },
+    "admit_occurrence_execution": {
+      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
+      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    },
+    "execute_occurrence_task": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "plannedOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending"
+    },
+    "settle_occurrence": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts"
+    },
+    "publish_occurrence_result": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    }
+  }
+}
