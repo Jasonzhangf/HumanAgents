@@ -622,7 +622,10 @@ export class RequirementSubmissionOwner {
     }
     const existing = this.finalSubmissions.get(revisionKey);
     if (existing) {
-      if (this.finalSubmissionIdentities.get(revisionKey) !== requestIdentity) {
+      const canonical = [...this.finalIdempotency.values()]
+        .find((entry) => entry.revisionKey === revisionKey);
+      if (this.finalSubmissionIdentities.get(revisionKey) !== requestIdentity
+        || canonical?.requestDigest !== requestDigest) {
         throw new ExplicitBrainRouterError(
           'duplicate-submit',
           `draft revision was already submitted with a different request identity: ${revision.draftId}`,

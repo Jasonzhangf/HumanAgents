@@ -23,8 +23,11 @@ import {
   ConfirmationLedger,
   RequirementSubmissionOwner,
   rejectDraftRevision,
+  type ConfirmationLedgerState,
+  type PersistedFinalSubmitReceipt,
   type RegisteredDraftRevision,
 } from '../../../packages/runtime/src/explicit-brain/router.js';
+import type { RequirementInboxState } from '../../../packages/runtime/src/intake/requirement-inbox.js';
 
 const currentTask: TaskId = id('task', 'task-current');
 
@@ -187,6 +190,7 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
   const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-'));
   try {
   const journal = new FileIntakeJournal(journalPath(root));
+  const receiptPath = join(root, 'final-submit-receipts.json');
   const intake = new ExplicitIntake(journal);
   const interaction = await receivePreview(intake);
   await intake.createDraft(interaction, draftIntent());
@@ -287,9 +291,15 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
 
   const firstReceipt = await owner.submitFinal(submit);
   assert.equal(firstReceipt.status, 'submitted');
+  assert.equal(submitted[0]?.draftId, refined.draftId);
+  assert.equal(submitted[0]?.normalizedInput, refined.normalizedInput);
+  assert.equal(submitted[0]?.fifoSeq, firstReceipt.requirement.fifoSeq);
   const duplicate = await owner.submitFinal(submit);
   assert.equal(duplicate.status, 'duplicate');
   assert.equal(duplicate.requirement.requirementId, firstReceipt.requirement.requirementId);
+  const distinctKeyReplay = await owner.submitFinal({ ...submit, idempotencyKey: 'submit-1-distinct' });
+  assert.equal(distinctKeyReplay.status, 'duplicate');
+  assert.equal(distinctKeyReplay.requirement.requirementId, firstReceipt.requirement.requirementId);
   // Exactly one requirement was dispatched and the durable inbox holds one.
   assert.equal(submitted.length, 1);
   assert.equal(inbox.size, 1);
@@ -318,7 +328,39 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
   }
   assert.equal(conflictCode, 'duplicate-submit');
 
-  // Persistence boundary: reloading the journal reconstructs the same state.
+  // Persist the public final receipt contract and restore it into fresh owners:
+  // the same-key replay stays a duplicate and never invokes the downstream port.
+  appendFileSync(receiptPath, `${JSON.stringify({
+    ledger: ledger.exportState(),
+    inbox: inbox.exportState(),
+    finalReceipts: owner.finalReceipts(),
+  })}\n`, 'utf8');
+  const restoredReceipts = JSON.parse(readFileSync(receiptPath, 'utf8')) as {
+    ledger: ConfirmationLedgerState;
+    inbox: RequirementInboxState;
+    finalReceipts: readonly PersistedFinalSubmitReceipt[];
+  };
+  const restoredLedger = new ConfirmationLedger();
+  restoredLedger.restoreState(restoredReceipts.ledger);
+  const restoredInbox = new RequirementInbox();
+  restoredInbox.restoreState(restoredReceipts.inbox);
+  const restoredDispatches: RequirementEnvelope[] = [];
+  const restoredOwner = new RequirementSubmissionOwner(restoredLedger, restoredInbox, {
+    async submit(envelope) {
+      restoredDispatches.push(envelope);
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  restoredOwner.restoreFinalReceipts(restoredReceipts.finalReceipts);
+  const restoredReplay = await restoredOwner.submitFinal(submit);
+  assert.equal(restoredReplay.status, 'duplicate');
+  assert.equal(restoredReplay.requirement.requirementId, firstReceipt.requirement.requirementId);
+  const restoredDistinctKeyReplay = await restoredOwner.submitFinal({ ...submit, idempotencyKey: 'submit-1-distinct' });
+  assert.equal(restoredDistinctKeyReplay.status, 'duplicate');
+  assert.equal(restoredDistinctKeyReplay.requirement.requirementId, firstReceipt.requirement.requirementId);
+  assert.equal(restoredDispatches.length, 0);
+
+  // Persistence boundary: reloading the journal reconstructs the same intake state.
   const reloaded = new ExplicitIntake(journal);
   const restored = await reloaded.inspect(interaction);
   assert.equal(restored.state, 'dispatched');

@@ -3403,6 +3403,11 @@ test('exact submit authorizes the confirmed revision once and rejects stale hash
   const duplicate = await owner.submitFinal(typedSubmit(revision));
   assert.equal(duplicate.status, 'duplicate');
   assert.equal(duplicate.requirement.requirementId, first.requirement.requirementId);
+  const distinctKeyReplay = await owner.submitFinal(typedSubmit(revision, {
+    idempotencyKey: 'submit-typed-distinct',
+  }));
+  assert.equal(distinctKeyReplay.status, 'duplicate');
+  assert.equal(distinctKeyReplay.requirement.requirementId, first.requirement.requirementId);
   assert.equal(dispatched.length, 1);
 });
 
