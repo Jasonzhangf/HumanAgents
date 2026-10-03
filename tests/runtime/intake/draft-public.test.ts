@@ -91,6 +91,7 @@ interface ExplicitBrainJournalState {
     readonly finalSubmitBindings?: readonly PublicFinalSubmitBinding[];
   };
   readonly inbox: RequirementInboxState;
+  readonly finalReceipts?: readonly PersistedFinalSubmitReceipt[];
 }
 
 class FileExplicitBrainJournal {
@@ -1039,6 +1040,99 @@ test('final submit waits for append persistence acknowledgement before downstrea
     assert.equal(dispatches[0]?.fifoSeq, originalEnvelope.fifoSeq);
     assert.equal(inbox.appendCount, 1);
     assert.equal(owner.finalReceipts().length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('completed revision alias is acknowledged before duplicate replay and survives reload', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-final-alias-'));
+  try {
+    const intake = new ExplicitIntake();
+    const first = await confirmedDraftFixture(intake, 'asset://requirements/alias-a');
+    const second = await confirmedDraftFixture(intake, 'asset://requirements/alias-b');
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(first.registered);
+    ledger.confirmRevision(first.confirmation);
+    ledger.registerRevision(second.registered);
+    ledger.confirmRevision(second.confirmation);
+    const inbox = new CountingRequirementInbox();
+    const journal = new FileExplicitBrainJournal(join(root, 'explicit-brain.jsonl'));
+    const dispatches: RequirementEnvelope[] = [];
+    let persistenceAvailable = true;
+    let owner!: RequirementSubmissionOwner;
+    const persist = () => {
+      if (!persistenceAvailable) throw new Error('journal unavailable');
+      journal.save({
+        ledger: ledger.exportState(),
+        inbox: inbox.exportState(),
+        finalReceipts: owner.finalReceipts(),
+      });
+    };
+    owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        dispatches.push(structuredClone(envelope));
+        return { requirementId: envelope.requirementId };
+      },
+    }, persist, persist);
+    const submitFirst = finalSubmitFor(first.registered, first.confirmation.confirmationRef, 'key-a');
+    const submitAlias = finalSubmitFor(first.registered, first.confirmation.confirmationRef, 'alias');
+
+    const firstReceipt = await owner.submitFinal(submitFirst);
+    assert.equal(firstReceipt.status, 'submitted');
+    assert.equal(dispatches.length, 1);
+
+    persistenceAvailable = false;
+    const persistenceErrors: unknown[] = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const error = await owner.submitFinal(submitAlias).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'journal unavailable');
+      persistenceErrors.push(error);
+    }
+    assert.equal(persistenceErrors[0], persistenceErrors[1]);
+    assert.equal(dispatches.length, 1);
+    assert.deepEqual(
+      journal.load()?.finalReceipts?.map((receipt) => receipt.idempotencyKey),
+      ['key-a'],
+    );
+
+    persistenceAvailable = true;
+    const aliasReceipt = await owner.submitFinal(submitAlias);
+    assert.equal(aliasReceipt.status, 'duplicate');
+    assert.equal(aliasReceipt.requirement.requirementId, firstReceipt.requirement.requirementId);
+    assert.equal(dispatches.length, 1);
+    assert.equal(inbox.appendCount, 1);
+    assert.deepEqual(
+      journal.load()?.finalReceipts?.map((receipt) => receipt.idempotencyKey).sort(),
+      ['alias', 'key-a'],
+    );
+
+    const durable = journal.load();
+    assert.ok(durable);
+    const restoredLedger = new ConfirmationLedger();
+    restoredLedger.restoreState(durable.ledger);
+    const restoredInbox = new CountingRequirementInbox();
+    restoredInbox.restoreState(durable.inbox);
+    const restoredDispatches: RequirementEnvelope[] = [];
+    const restoredOwner = new RequirementSubmissionOwner(restoredLedger, restoredInbox, {
+      async submit(envelope) {
+        restoredDispatches.push(structuredClone(envelope));
+        return { requirementId: envelope.requirementId };
+      },
+    });
+    restoredOwner.restoreFinalReceipts(durable.finalReceipts ?? []);
+    await assert.rejects(
+      () => restoredOwner.submitFinal(
+        finalSubmitFor(second.registered, second.confirmation.confirmationRef, 'alias'),
+      ),
+      (error) => error instanceof ExplicitBrainRouterError && error.code === 'duplicate-submit',
+    );
+    assert.equal(restoredDispatches.length, 0);
+    assert.equal(restoredInbox.appendCount, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

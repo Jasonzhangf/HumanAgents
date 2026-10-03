@@ -615,7 +615,12 @@ export class RequirementSubmissionOwner {
   private readonly submitted = new Map<string, PersistedSubmittedReceipt>();
   private readonly finalSubmissions = new Map<string, AuthorizedRequirement>();
   private readonly finalSubmissionIdentities = new Map<string, string>();
-  private readonly finalIdempotency = new Map<string, { readonly requestDigest: string; readonly revisionKey: string }>();
+  private readonly finalIdempotency = new Map<string, {
+    readonly requestDigest: string;
+    readonly revisionKey: string;
+    persistenceAcknowledged: boolean;
+    persistenceError?: unknown;
+  }>();
   private readonly finalPending = new Map<string, {
     readonly envelope: RequirementEnvelope;
     persistenceAcknowledged: boolean;
@@ -674,6 +679,7 @@ export class RequirementSubmissionOwner {
       this.finalIdempotency.set(receipt.idempotencyKey, {
         requestDigest: receipt.requestDigest,
         revisionKey: receipt.revisionKey,
+        persistenceAcknowledged: true,
       });
     }
   }
@@ -735,6 +741,9 @@ export class RequirementSubmissionOwner {
           `final submission binding is incomplete: ${input.idempotencyKey}`,
         );
       }
+      if (!completedByKey.persistenceAcknowledged) {
+        this.acknowledgeFinalIdempotency(completedByKey, revision.draftId);
+      }
       return { status: 'duplicate', requirement: structuredClone(completed) };
     }
 
@@ -760,7 +769,19 @@ export class RequirementSubmissionOwner {
       const completed = this.finalSubmissions.get(revisionKey);
       if (completed) {
         this.ledger.reserveFinalSubmit(binding, true);
-        this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
+        const alias = {
+          requestDigest,
+          revisionKey,
+          persistenceAcknowledged: false,
+          persistenceError: undefined as unknown,
+        };
+        this.finalIdempotency.set(input.idempotencyKey, alias);
+        try {
+          this.acknowledgeFinalIdempotency(alias, revision.draftId);
+        } catch (error) {
+          alias.persistenceError ??= error;
+          throw error;
+        }
         return { status: 'duplicate', requirement: structuredClone(completed) };
       }
       throw new ExplicitBrainRouterError(
@@ -824,7 +845,11 @@ export class RequirementSubmissionOwner {
     };
     this.finalSubmissions.set(revisionKey, requirement);
     this.finalSubmissionIdentities.set(revisionKey, requestIdentity);
-    this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
+    this.finalIdempotency.set(input.idempotencyKey, {
+      requestDigest,
+      revisionKey,
+      persistenceAcknowledged: true,
+    });
     try {
       this.onSubmitted?.(structuredClone(persistedReceipt));
     } catch (error) {
@@ -853,6 +878,32 @@ export class RequirementSubmissionOwner {
     } catch (error) {
       pending.persistenceError ??= error;
       throw pending.persistenceError;
+    }
+  }
+
+  private acknowledgeFinalIdempotency(
+    entry: { persistenceAcknowledged: boolean; persistenceError?: unknown },
+    draftId: string,
+  ): void {
+    if (entry.persistenceAcknowledged) return;
+    if (!this.onEnvelopeAppended) {
+      entry.persistenceAcknowledged = true;
+      return;
+    }
+    const envelope = this.inbox.find(draftId);
+    if (!envelope) {
+      throw new ExplicitBrainRouterError(
+        'duplicate-submit',
+        `final submission receipt is not backed by a durable requirement: ${draftId}`,
+      );
+    }
+    try {
+      this.onEnvelopeAppended(structuredClone(envelope));
+      entry.persistenceAcknowledged = true;
+      delete entry.persistenceError;
+    } catch (error) {
+      entry.persistenceError ??= error;
+      throw entry.persistenceError;
     }
   }
 
