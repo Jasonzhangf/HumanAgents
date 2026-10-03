@@ -1476,6 +1476,202 @@ test('confirmed revision views cannot retarget an existing-task-change submissio
   assert.equal(dispatched.length, 1);
 });
 
+test('createDraft input cannot retarget an existing-task-change confirmation after submit', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-input-alias-'));
+  try {
+    const taskA = id('task', 'task-input-target-a');
+    const taskB = id('task', 'task-input-target-b');
+    const taskAValue = taskA.value;
+    const journal = new FileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await intake.receive({
+      sourceRef: 'ui:existing-task-change',
+      rawInput: 'change the approved task target',
+      channel: 'business',
+      requestKind: 'existing-task-change',
+      occurredAt: '2026-10-03T00:00:00.000Z',
+    });
+    const intent = draftIntent({
+      normalizedInput: 'change the approved task target',
+      proposedIntent: 'change',
+      proposal: 'change the approved task target',
+      matchedTasks: [{ taskId: taskA, relation: 'current', status: 'running' }],
+    });
+    await intake.createDraft(interaction, intent);
+    const revision = intake.currentDraftRevision(interaction);
+    assert.ok(revision);
+    const confirmation = await intake.confirmDraftRevision({
+      interactionId: interaction,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      confirmationRef: 'confirm-input-target',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-03T00:00:00.000Z',
+      payloadRef: 'asset://requirements/input-target',
+    });
+    // Public readonly types do not prevent a JavaScript caller from mutating
+    // a nested DraftIntent object it retained before confirmation.
+    (intent.matchedTasks![0] as { relation: string; status: string; taskId: { scope: string; value: string } }).relation = 'historical';
+    (intent.matchedTasks![0] as { relation: string; status: string; taskId: { scope: string; value: string } }).status = 'done';
+    (intent.matchedTasks![0].taskId as { scope: string; value: string }).value = taskB.value;
+
+    // Register the exact public confirmation target exposed after the
+    // original input mutation. In the buggy state this is B, which lets the
+    // unchanged hash and confirmation drive B through the real submission path.
+    const inspectedAfterMutation = await intake.inspect(interaction);
+    assert.ok(inspectedAfterMutation.confirmation);
+    const registered: RegisteredDraftRevision = {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: inspectedAfterMutation.confirmation.taskRef,
+      payloadRef: confirmation.payloadRef,
+      requestKind: 'existing-task-change',
+    };
+
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(registered);
+    ledger.confirmRevision(confirmation);
+    const inbox = new CountingRequirementInbox();
+    const dispatched: RequirementEnvelope[] = [];
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        dispatched.push(structuredClone(envelope));
+        return { requirementId: envelope.requirementId };
+      },
+    });
+    const submitFor = (taskId: TaskId, idempotencyKey: string): ExistingTaskChangeSubmit => ({
+      interactionId: interaction,
+      taskId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      confirmationRef: confirmation.confirmationRef,
+      idempotencyKey,
+      requestKind: 'existing-task-change',
+    });
+    type SubmitOutcome =
+      | { readonly status: 'submitted'; readonly receipt: Awaited<ReturnType<typeof owner.submitFinal>> }
+      | { readonly status: 'rejected'; readonly error: unknown };
+    const unauthorized: SubmitOutcome = await owner.submitFinal(submitFor(taskB, 'unauthorized-input-target')).then<
+      SubmitOutcome,
+      SubmitOutcome
+    >(
+      (receipt) => ({ status: 'submitted', receipt }),
+      (error: unknown) => ({ status: 'rejected', error }),
+    );
+    if (unauthorized.status === 'submitted') {
+      const envelope = inbox.find(revision.draftId);
+      throw new Error(`unapproved input target redirected real public envelope: ${JSON.stringify({
+        receiptFifoSeq: unauthorized.receipt.requirement.fifoSeq,
+        envelopeTaskRef: envelope?.taskRef,
+        dispatchedTaskRef: dispatched[0]?.taskRef,
+        revisionHash: revision.revisionHash,
+        confirmationRef: confirmation.confirmationRef,
+        appendCount: inbox.appendCount,
+      })}`);
+    }
+    assert.ok(unauthorized.error instanceof ExplicitBrainRouterError);
+    assert.equal(unauthorized.error.code, 'unauthorized-final-submit');
+    assert.equal(inbox.appendCount, 0);
+    assert.equal(inbox.size, 0);
+    assert.equal(dispatched.length, 0);
+
+    const inspected = await intake.inspect(interaction);
+    assert.deepEqual(inspected.revision?.matchedTasks, [taskAValue]);
+    assert.equal(inspected.revision?.revisionHash, revision.revisionHash);
+    assert.deepEqual(inspected.draft?.matchedTasks?.[0], {
+      taskId: { scope: 'task', value: taskAValue },
+      relation: 'current',
+      status: 'running',
+    });
+    assert.deepEqual(inspected.confirmation, {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: { scope: 'task', value: taskAValue },
+      payloadRef: confirmation.payloadRef,
+      confirmationRef: confirmation.confirmationRef,
+      confirmedBy: confirmation.confirmedBy,
+      confirmedAt: confirmation.confirmedAt,
+    });
+
+    const exported = intake.exportState();
+    const exportedInteraction = interactionState(exported, interaction);
+    assert.equal(exportedInteraction?.revision?.revisionHash, revision.revisionHash);
+    assert.deepEqual(exportedInteraction?.draft?.matchedTasks?.[0], {
+      taskId: { scope: 'task', value: taskAValue },
+      relation: 'current',
+      status: 'running',
+    });
+    assert.deepEqual(exportedInteraction?.confirmation, {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: { scope: 'task', value: taskAValue },
+      payloadRef: confirmation.payloadRef,
+      confirmationRef: confirmation.confirmationRef,
+      confirmedBy: confirmation.confirmedBy,
+      confirmedAt: confirmation.confirmedAt,
+    });
+    const restoredIntake = new ExplicitIntake(journal);
+    const restored = await restoredIntake.inspect(interaction);
+    assert.equal(restored.revision?.revisionHash, revision.revisionHash);
+    assert.deepEqual(restored.draft?.matchedTasks?.[0], {
+      taskId: { scope: 'task', value: taskAValue },
+      relation: 'current',
+      status: 'running',
+    });
+    assert.deepEqual(restored.confirmation, {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: { scope: 'task', value: taskAValue },
+      payloadRef: confirmation.payloadRef,
+      confirmationRef: confirmation.confirmationRef,
+      confirmedBy: confirmation.confirmedBy,
+      confirmedAt: confirmation.confirmedAt,
+    });
+
+    const submitted = await owner.submitFinal(submitFor({ scope: 'task', value: taskAValue }, 'approved-input-target'));
+    assert.equal(submitted.status, 'submitted');
+    assert.equal(inbox.appendCount, 1);
+    assert.equal(inbox.size, 1);
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual(dispatched[0]?.taskRef, { scope: 'task', value: taskAValue });
+    const duplicate = await owner.submitFinal(submitFor({ scope: 'task', value: taskAValue }, 'approved-input-target'));
+    assert.equal(duplicate.status, 'duplicate');
+    assert.equal(inbox.appendCount, 1);
+    assert.equal(dispatched.length, 1);
+    assert.deepEqual((await restoredIntake.inspect(interaction)).confirmation, {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: { scope: 'task', value: taskAValue },
+      payloadRef: confirmation.payloadRef,
+      confirmationRef: confirmation.confirmationRef,
+      confirmedBy: confirmation.confirmedBy,
+      confirmedAt: confirmation.confirmedAt,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('reject closes the draft durably without creating an authorized requirement', async () => {
   const inbox = new RequirementInbox();
   const intake = new ExplicitIntake();

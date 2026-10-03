@@ -739,7 +739,9 @@ export class ExplicitIntake {
         },
       );
     }
-    const matchedTasks = [...(intent.matchedTasks ?? [])];
+    // Own the nested task identity before it becomes durable intake state;
+    // callers may mutate their original DraftIntent after confirmation.
+    const matchedTasks = structuredClone(intent.matchedTasks ?? []);
     const revision = createDraftRevision({
       draftId: `draft-${this.nextDraftSeq}`,
       inputRevision: interaction.inputRevision,
@@ -970,6 +972,7 @@ export class ExplicitIntake {
       interactionId: interaction.interactionId,
     };
     validateDraftConfirmation(confirmation);
+    const taskRef = interaction.draft?.matchedTasks.find((task) => task.relation === 'current')?.taskId;
     this.transition(interaction, 'confirmed', 'human', 'submit-final-create', undefined, (candidate) => {
       candidate.confirmations = [...(candidate.confirmations ?? []), confirmation];
       candidate.revision = { ...revision, state: 'confirmed' };
@@ -979,7 +982,7 @@ export class ExplicitIntake {
         inputRevision: revision.inputRevision,
         normalizedInput: revision.normalizedInput,
         intent: revision.proposedIntent,
-        taskRef: candidate.draft?.matchedTasks.find((task) => task.relation === 'current')?.taskId,
+        taskRef,
         payloadRef: input.payloadRef,
         confirmationRef: input.confirmationRef,
         confirmedBy: input.confirmedBy,
