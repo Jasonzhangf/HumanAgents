@@ -120,6 +120,225 @@ export interface OperationResult {
   readonly completedAt: string;
 }
 
+export interface TaskExecutionEvidence {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly inputArtifactDigest: string;
+  readonly stdout: string;
+  readonly exitCode: number | null;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export type TaskVerificationStatus = 'success' | 'failed' | 'rejected' | 'missing' | 'blocked' | 'cancelled';
+export type TaskVerificationRejectionCode = 'identity-mismatch' | 'stale-epoch' | 'checker-rejected';
+
+export interface TaskVerificationResult {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly inputArtifactDigest: string;
+  readonly status: TaskVerificationStatus;
+  readonly rejectionCode?: TaskVerificationRejectionCode;
+  readonly checkerStdout?: string;
+  readonly checkerExitCode?: number | null;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+export interface ServeTaskTerminalReceipt {
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly inputArtifactDigest: string;
+  readonly verification: TaskVerificationResult;
+  readonly terminalCheckpointRef: string;
+  readonly settlementReceiptRef: string;
+  readonly recoveryResponsibility?: string;
+}
+
+export interface OccurrenceTaskBinding {
+  readonly occurrenceId: string;
+  readonly subscriptionId: string;
+  readonly scheduleRevision: number;
+  readonly occurrenceOrdinal: number;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly inputArtifactDigest: string;
+}
+
+export type OccurrenceSettlementOutcome = 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'skipped-busy';
+
+export interface OccurrenceSettlementInput {
+  readonly binding: OccurrenceTaskBinding;
+  readonly terminalReceipt: ServeTaskTerminalReceipt;
+  readonly outcome: OccurrenceSettlementOutcome;
+}
+
+export interface OccurrenceResult {
+  readonly binding: OccurrenceTaskBinding;
+  readonly outcome: OccurrenceSettlementOutcome;
+  readonly terminalReceiptRef: string;
+  readonly settlementReceiptRef: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly completedAt: string;
+}
+
+export type ToolTraceStatus = 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+
+export interface ToolTraceError {
+  readonly code: string;
+  readonly message: string;
+  readonly ownerId?: string;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export interface ToolTraceDescriptor {
+  readonly callId: string;
+  readonly toolId: string;
+  readonly argumentsRef?: string;
+  readonly argumentsDigest?: string;
+  readonly status: ToolTraceStatus;
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
+  readonly error?: ToolTraceError;
+  readonly startedAt?: string;
+  readonly durationMs?: number;
+}
+
+export interface TraceDependencyEdge {
+  readonly source: string;
+  readonly target: string;
+  readonly ref?: string;
+  readonly reason?: string;
+}
+
+export interface InteractionTraceAuthorization {
+  readonly scope: Scope;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly requestedCapabilities: readonly string[];
+  readonly permissionRefs: readonly string[];
+  readonly toolOutputRef: string;
+}
+
+export interface InteractionTraceProvider {
+  readonly state: string;
+  readonly lastEventAt: string;
+}
+
+export interface InteractionTraceTransport {
+  readonly connected: boolean;
+  readonly lastSyncedAt: string;
+  readonly stale?: boolean;
+  readonly replayed?: boolean;
+  readonly cursor?: string;
+}
+
+export interface InteractionTraceSettlement {
+  readonly providerStopped: boolean;
+  readonly checkpointCommitted: boolean;
+  readonly stoppedAt?: string;
+  readonly resultRef?: string;
+}
+
+export interface InteractionTraceLastBusiness {
+  readonly kind: string;
+  readonly at: string;
+  readonly ref: string;
+}
+
+export type InteractionTraceKind =
+  | 'user'
+  | 'assistant'
+  | 'tool-call'
+  | 'tool-result'
+  | 'status'
+  | 'decision'
+  | 'failure'
+  | 'cancel';
+
+export interface InteractionTraceEntry {
+  readonly turnId: string;
+  readonly requestId: string;
+  readonly parentRequestId?: string;
+  readonly seq: number;
+  readonly occurredAt: string;
+  readonly kind: InteractionTraceKind;
+  readonly modelRef?: string;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly tool?: ToolTraceDescriptor;
+  readonly authorization: InteractionTraceAuthorization;
+  readonly dependencyEdge?: TraceDependencyEdge;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly state: string;
+  readonly allowedActions: readonly string[];
+  readonly provider: InteractionTraceProvider;
+  readonly transport: InteractionTraceTransport;
+  readonly settlement: InteractionTraceSettlement;
+  readonly lastBusiness: InteractionTraceLastBusiness;
+}
+
+export interface InteractionHistoryFilter {
+  readonly kinds?: readonly InteractionTraceKind[];
+  readonly taskId?: TaskId;
+  readonly operationId?: OperationId;
+  readonly executionEpoch?: number;
+  readonly callId?: string;
+  readonly fromSeq?: number;
+  readonly toSeq?: number;
+}
+
+export interface InteractionHistoryQuery {
+  readonly cursor?: string;
+  readonly filter?: InteractionHistoryFilter;
+  readonly search?: string;
+  readonly replay?: boolean;
+  readonly limit: number;
+}
+
+export interface InteractionHistoryFailure {
+  readonly code: 'stale-cursor' | 'scope-mismatch' | 'not-found' | 'unavailable';
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export interface InteractionHistoryPage {
+  readonly cursor?: string;
+  readonly hasMore: boolean;
+  readonly items: readonly InteractionTraceEntry[];
+  readonly filter?: InteractionHistoryFilter;
+  readonly replay?: boolean;
+}
+
+export type InteractionHistoryResult =
+  | { readonly ok: true; readonly page: InteractionHistoryPage }
+  | { readonly ok: false; readonly failure: InteractionHistoryFailure };
+
+export interface InteractionWorkCard {
+  readonly source: {
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+    readonly requestId: string;
+    readonly turnId: string;
+  };
+  readonly currentNode: string;
+  readonly ownerId: string;
+  readonly nextStep: string;
+  readonly nextAction: string;
+  readonly waitingOn?: string;
+  readonly startedAt: string;
+  readonly provider: InteractionTraceProvider;
+  readonly transport: InteractionTraceTransport;
+  readonly settlement: InteractionTraceSettlement;
+  readonly lastBusiness: InteractionTraceLastBusiness;
+}
+
 export interface RouteSelection {
   readonly operationId: OperationId;
   readonly routeId: string;
@@ -253,6 +472,10 @@ function assertNonEmpty(value: string, label: string): void {
 
 function assertValidTime(value: string, label: string): void {
   if (!value || !Number.isFinite(Date.parse(value))) throw new ContractError(`${label} must be a valid timestamp`);
+}
+
+function assertNonNegativeSafeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new ContractError(`${label} must be a non-negative safe integer`);
 }
 
 function assertOperationKind(value: OperationKind): void {
@@ -687,4 +910,300 @@ export function validateOperationEvent(input: OperationEvent): void {
 export function operationStatusForEventKind(kind: OperationEventKind): OperationStatus {
   if (!(kind in OPERATION_EVENT_STATUS)) throw new ContractError('operation event kind is invalid');
   return OPERATION_EVENT_STATUS[kind];
+}
+
+function sameExecutionIdentity(
+  left: {
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+    readonly inputArtifactDigest: string;
+  },
+  right: {
+    readonly taskId: TaskId;
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+    readonly inputArtifactDigest: string;
+  },
+): boolean {
+  return sameScopedId(left.taskId, right.taskId)
+    && sameScopedId(left.operationId, right.operationId)
+    && left.executionEpoch === right.executionEpoch
+    && left.inputArtifactDigest === right.inputArtifactDigest;
+}
+
+export function validateTaskExecutionEvidence(input: TaskExecutionEvidence): void {
+  assertScope(input.taskId, 'task');
+  assertNonEmpty(input.taskId.value, 'task execution evidence taskId');
+  assertScope(input.operationId, 'operation');
+  assertNonEmpty(input.operationId.value, 'task execution evidence operationId');
+  assertExecutionEpoch(input.executionEpoch);
+  assertNonEmpty(input.inputArtifactDigest, 'task execution evidence inputArtifactDigest');
+  if (typeof input.stdout !== 'string') throw new ContractError('task execution evidence stdout must be a string');
+  if (input.exitCode !== null && (!Number.isSafeInteger(input.exitCode) || input.exitCode < 0)) {
+    throw new ContractError('task execution evidence exitCode must be a non-negative safe integer or null');
+  }
+  if (input.evidenceRefs.length === 0) throw new ContractError('task execution evidence requires evidence');
+  for (const evidence of input.evidenceRefs) assertEvidenceRef(evidence);
+}
+
+export function validateTaskVerificationResult(input: TaskVerificationResult): void {
+  assertScope(input.taskId, 'task');
+  assertNonEmpty(input.taskId.value, 'task verification taskId');
+  assertScope(input.operationId, 'operation');
+  assertNonEmpty(input.operationId.value, 'task verification operationId');
+  assertExecutionEpoch(input.executionEpoch);
+  assertNonEmpty(input.inputArtifactDigest, 'task verification inputArtifactDigest');
+  if (!['success', 'failed', 'rejected', 'missing', 'blocked', 'cancelled'].includes(input.status)) {
+    throw new ContractError('task verification status is invalid');
+  }
+  if (input.rejectionCode !== undefined) {
+    if (!['identity-mismatch', 'stale-epoch', 'checker-rejected'].includes(input.rejectionCode)) {
+      throw new ContractError('task verification rejectionCode is invalid');
+    }
+    if (input.status === 'success') throw new ContractError('successful task verification cannot carry rejectionCode');
+  }
+  if (input.checkerStdout !== undefined && typeof input.checkerStdout !== 'string') {
+    throw new ContractError('task verification checkerStdout must be a string');
+  }
+  if (input.checkerExitCode !== undefined && input.checkerExitCode !== null
+    && (!Number.isSafeInteger(input.checkerExitCode) || input.checkerExitCode < 0)) {
+    throw new ContractError('task verification checkerExitCode must be a non-negative safe integer or null');
+  }
+  if (input.status === 'success') {
+    if (input.checkerStdout === undefined) throw new ContractError('successful task verification requires checkerStdout');
+    if (input.checkerExitCode !== 0) throw new ContractError('successful task verification requires checkerExitCode 0');
+    if (input.evidenceRefs.length === 0) throw new ContractError('successful task verification requires evidence');
+  }
+  if (input.status === 'failed' && input.checkerExitCode === undefined) {
+    throw new ContractError('failed task verification requires checkerExitCode');
+  }
+  if (input.status === 'rejected' && input.rejectionCode === undefined) {
+    throw new ContractError('rejected task verification requires rejectionCode');
+  }
+  for (const evidence of input.evidenceRefs) assertEvidenceRef(evidence);
+}
+
+export function validateServeTaskTerminalReceipt(input: ServeTaskTerminalReceipt): void {
+  validateTaskVerificationResult(input.verification);
+  if (!sameExecutionIdentity(input, input.verification)) {
+    throw new ContractError('serve-task terminal receipt identity does not match verification');
+  }
+  assertNonEmpty(input.terminalCheckpointRef, 'serve-task terminalCheckpointRef');
+  assertNonEmpty(input.settlementReceiptRef, 'serve-task settlementReceiptRef');
+  if (input.recoveryResponsibility !== undefined) {
+    assertNonEmpty(input.recoveryResponsibility, 'serve-task recoveryResponsibility');
+  }
+}
+
+export function validateOccurrenceTaskBinding(input: OccurrenceTaskBinding): void {
+  assertNonEmpty(input.occurrenceId, 'occurrence binding occurrenceId');
+  assertNonEmpty(input.subscriptionId, 'occurrence binding subscriptionId');
+  assertExecutionEpoch(input.scheduleRevision);
+  assertExecutionEpoch(input.occurrenceOrdinal);
+  assertScope(input.taskId, 'task');
+  assertNonEmpty(input.taskId.value, 'occurrence binding taskId');
+  assertScope(input.operationId, 'operation');
+  assertNonEmpty(input.operationId.value, 'occurrence binding operationId');
+  assertExecutionEpoch(input.executionEpoch);
+  assertNonEmpty(input.inputArtifactDigest, 'occurrence binding inputArtifactDigest');
+  if (input.occurrenceId !== `${input.subscriptionId}::${input.scheduleRevision}::${input.occurrenceOrdinal}`) {
+    throw new ContractError('occurrence binding id does not match subscription schedule identity');
+  }
+}
+
+export function validateOccurrenceSettlementInput(input: OccurrenceSettlementInput): void {
+  validateOccurrenceTaskBinding(input.binding);
+  validateServeTaskTerminalReceipt(input.terminalReceipt);
+  if (!sameExecutionIdentity(input.binding, input.terminalReceipt)) {
+    throw new ContractError('occurrence settlement receipt identity does not match binding');
+  }
+  if (!['succeeded', 'failed', 'blocked', 'cancelled', 'skipped-busy'].includes(input.outcome)) {
+    throw new ContractError('occurrence settlement outcome is invalid');
+  }
+  if (input.outcome === 'succeeded' && input.terminalReceipt.verification.status !== 'success') {
+    throw new ContractError('occurrence success requires a successful verified terminal receipt');
+  }
+  if (input.outcome === 'cancelled' && input.terminalReceipt.verification.status !== 'cancelled') {
+    throw new ContractError('occurrence cancellation requires a cancelled verified terminal receipt');
+  }
+  if (input.outcome === 'failed' && input.terminalReceipt.verification.status === 'success') {
+    throw new ContractError('occurrence failure cannot consume a successful verified terminal receipt');
+  }
+}
+
+export function validateOccurrenceResult(input: OccurrenceResult): void {
+  validateOccurrenceTaskBinding(input.binding);
+  if (!['succeeded', 'failed', 'blocked', 'cancelled', 'skipped-busy'].includes(input.outcome)) {
+    throw new ContractError('occurrence result outcome is invalid');
+  }
+  assertNonEmpty(input.terminalReceiptRef, 'occurrence result terminalReceiptRef');
+  assertNonEmpty(input.settlementReceiptRef, 'occurrence result settlementReceiptRef');
+  if (input.evidenceRefs.length === 0) throw new ContractError('occurrence result requires evidence');
+  for (const evidence of input.evidenceRefs) assertEvidenceRef(evidence);
+  assertValidTime(input.completedAt, 'occurrence result completedAt');
+}
+
+function validateToolTraceDescriptor(input: ToolTraceDescriptor): void {
+  assertNonEmpty(input.callId, 'tool trace callId');
+  assertNonEmpty(input.toolId, 'tool trace toolId');
+  if (input.argumentsRef !== undefined) assertNonEmpty(input.argumentsRef, 'tool trace argumentsRef');
+  if (input.argumentsDigest !== undefined) assertNonEmpty(input.argumentsDigest, 'tool trace argumentsDigest');
+  if (!['running', 'succeeded', 'failed', 'blocked', 'cancelled', 'unknown'].includes(input.status)) {
+    throw new ContractError('tool trace status is invalid');
+  }
+  if ((input.outputRef === undefined) !== (input.outputDigest === undefined)) {
+    throw new ContractError('tool trace outputRef and outputDigest must be provided together');
+  }
+  if (input.outputRef !== undefined) assertNonEmpty(input.outputRef, 'tool trace outputRef');
+  if (input.outputDigest !== undefined) assertNonEmpty(input.outputDigest, 'tool trace outputDigest');
+  if (input.error !== undefined) {
+    assertNonEmpty(input.error.code, 'tool trace error code');
+    assertNonEmpty(input.error.message, 'tool trace error message');
+    if (input.status !== 'failed' && input.status !== 'blocked' && input.status !== 'cancelled') {
+      throw new ContractError('tool trace error requires a non-success status');
+    }
+  }
+  if (input.startedAt !== undefined) assertValidTime(input.startedAt, 'tool trace startedAt');
+  if (input.durationMs !== undefined) assertNonNegativeSafeInteger(input.durationMs, 'tool trace durationMs');
+}
+
+export function validateInteractionTraceEntry(input: InteractionTraceEntry): void {
+  assertNonEmpty(input.turnId, 'trace turnId');
+  assertNonEmpty(input.requestId, 'trace requestId');
+  if (input.parentRequestId !== undefined) assertNonEmpty(input.parentRequestId, 'trace parentRequestId');
+  assertExecutionEpoch(input.seq);
+  assertValidTime(input.occurredAt, 'trace occurredAt');
+  if (![
+    'user',
+    'assistant',
+    'tool-call',
+    'tool-result',
+    'status',
+    'decision',
+    'failure',
+    'cancel',
+  ].includes(input.kind)) {
+    throw new ContractError('trace kind is invalid');
+  }
+  if (input.modelRef !== undefined) assertNonEmpty(input.modelRef, 'trace modelRef');
+  assertScope(input.taskId, 'task');
+  assertNonEmpty(input.taskId.value, 'trace taskId');
+  assertScope(input.operationId, 'operation');
+  assertNonEmpty(input.operationId.value, 'trace operationId');
+  assertExecutionEpoch(input.executionEpoch);
+  if (input.tool !== undefined) validateToolTraceDescriptor(input.tool);
+  if (input.authorization.executionEpoch !== input.executionEpoch
+    || !sameScopedId(input.authorization.taskId, input.taskId)
+    || !sameScopedId(input.authorization.operationId, input.operationId)) {
+    throw new ContractError('trace authorization identity does not match trace');
+  }
+  validateScope(input.authorization.scope, 'trace authorization scope');
+  for (const capability of input.authorization.requestedCapabilities) {
+    assertNonEmpty(capability, 'trace requested capability');
+  }
+  for (const permission of input.authorization.permissionRefs) {
+    assertNonEmpty(permission, 'trace permissionRef');
+  }
+  assertNonEmpty(input.authorization.toolOutputRef, 'trace toolOutputRef');
+  if (input.dependencyEdge !== undefined) {
+    assertNonEmpty(input.dependencyEdge.source, 'trace dependency source');
+    assertNonEmpty(input.dependencyEdge.target, 'trace dependency target');
+    if (input.dependencyEdge.ref !== undefined) assertNonEmpty(input.dependencyEdge.ref, 'trace dependency ref');
+    if (input.dependencyEdge.reason !== undefined) assertNonEmpty(input.dependencyEdge.reason, 'trace dependency reason');
+  }
+  for (const evidence of input.evidenceRefs) assertEvidenceRef(evidence);
+  assertNonEmpty(input.state, 'trace state');
+  for (const action of input.allowedActions) assertNonEmpty(action, 'trace allowed action');
+  assertNonEmpty(input.provider.state, 'trace provider state');
+  assertValidTime(input.provider.lastEventAt, 'trace provider lastEventAt');
+  if (typeof input.transport.connected !== 'boolean') throw new ContractError('trace transport connected must be boolean');
+  assertValidTime(input.transport.lastSyncedAt, 'trace transport lastSyncedAt');
+  if (input.transport.cursor !== undefined) assertNonEmpty(input.transport.cursor, 'trace transport cursor');
+  if (input.settlement.stoppedAt !== undefined) assertValidTime(input.settlement.stoppedAt, 'trace settlement stoppedAt');
+  if (input.settlement.resultRef !== undefined) assertNonEmpty(input.settlement.resultRef, 'trace settlement resultRef');
+  assertNonEmpty(input.lastBusiness.kind, 'trace lastBusiness kind');
+  assertValidTime(input.lastBusiness.at, 'trace lastBusiness at');
+  assertNonEmpty(input.lastBusiness.ref, 'trace lastBusiness ref');
+}
+
+export function validateInteractionHistoryQuery(input: InteractionHistoryQuery): void {
+  if (input.cursor !== undefined) assertNonEmpty(input.cursor, 'history cursor');
+  if (input.search !== undefined) assertNonEmpty(input.search, 'history search');
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 500) {
+    throw new ContractError('history limit must be a safe integer from 1 to 500');
+  }
+  if (input.filter !== undefined) {
+    validateInteractionHistoryFilter(input.filter);
+  }
+}
+
+function validateInteractionHistoryFilter(input: InteractionHistoryFilter): void {
+  if (input.kinds !== undefined) {
+    if (input.kinds.length === 0) throw new ContractError('history filter kinds cannot be empty');
+    for (const kind of input.kinds) {
+      if (!['user', 'assistant', 'tool-call', 'tool-result', 'status', 'decision', 'failure', 'cancel'].includes(kind)) {
+        throw new ContractError('history filter kind is invalid');
+      }
+    }
+  }
+  if (input.taskId !== undefined) {
+    assertScope(input.taskId, 'task');
+    assertNonEmpty(input.taskId.value, 'history filter taskId');
+  }
+  if (input.operationId !== undefined) {
+    assertScope(input.operationId, 'operation');
+    assertNonEmpty(input.operationId.value, 'history filter operationId');
+  }
+  if (input.executionEpoch !== undefined) assertExecutionEpoch(input.executionEpoch);
+  if (input.callId !== undefined) assertNonEmpty(input.callId, 'history filter callId');
+  if (input.fromSeq !== undefined) assertExecutionEpoch(input.fromSeq);
+  if (input.toSeq !== undefined) assertExecutionEpoch(input.toSeq);
+  if (input.fromSeq !== undefined && input.toSeq !== undefined && input.fromSeq > input.toSeq) {
+    throw new ContractError('history filter fromSeq cannot exceed toSeq');
+  }
+}
+
+export function validateInteractionHistoryResult(input: InteractionHistoryResult): void {
+  if (input.ok) {
+    if (!input.page || typeof input.page !== 'object') throw new ContractError('history result requires a page');
+    if (input.page.cursor !== undefined) assertNonEmpty(input.page.cursor, 'history page cursor');
+    if (typeof input.page.hasMore !== 'boolean') throw new ContractError('history page hasMore must be boolean');
+    if (input.page.filter !== undefined) validateInteractionHistoryFilter(input.page.filter);
+    for (const entry of input.page.items) validateInteractionTraceEntry(entry);
+    return;
+  }
+  if (!input.failure || typeof input.failure !== 'object') throw new ContractError('history failure requires a typed failure');
+  if (!['stale-cursor', 'scope-mismatch', 'not-found', 'unavailable'].includes(input.failure.code)) {
+    throw new ContractError('history failure code is invalid');
+  }
+  assertNonEmpty(input.failure.message, 'history failure message');
+  if (typeof input.failure.retryable !== 'boolean') throw new ContractError('history failure retryable must be boolean');
+  for (const evidence of input.failure.evidenceRefs ?? []) assertEvidenceRef(evidence);
+}
+
+export function validateInteractionWorkCard(input: InteractionWorkCard): void {
+  assertScope(input.source.taskId, 'task');
+  assertNonEmpty(input.source.taskId.value, 'work card taskId');
+  assertScope(input.source.operationId, 'operation');
+  assertNonEmpty(input.source.operationId.value, 'work card operationId');
+  assertExecutionEpoch(input.source.executionEpoch);
+  assertNonEmpty(input.source.requestId, 'work card requestId');
+  assertNonEmpty(input.source.turnId, 'work card turnId');
+  assertNonEmpty(input.currentNode, 'work card currentNode');
+  assertNonEmpty(input.ownerId, 'work card ownerId');
+  assertNonEmpty(input.nextStep, 'work card nextStep');
+  assertNonEmpty(input.nextAction, 'work card nextAction');
+  if (input.waitingOn !== undefined) assertNonEmpty(input.waitingOn, 'work card waitingOn');
+  assertValidTime(input.startedAt, 'work card startedAt');
+  assertNonEmpty(input.provider.state, 'work card provider state');
+  assertValidTime(input.provider.lastEventAt, 'work card provider lastEventAt');
+  if (typeof input.transport.connected !== 'boolean') throw new ContractError('work card transport connected must be boolean');
+  assertValidTime(input.transport.lastSyncedAt, 'work card transport lastSyncedAt');
+  if (input.transport.cursor !== undefined) assertNonEmpty(input.transport.cursor, 'work card transport cursor');
+  if (input.settlement.stoppedAt !== undefined) assertValidTime(input.settlement.stoppedAt, 'work card settlement stoppedAt');
+  if (input.settlement.resultRef !== undefined) assertNonEmpty(input.settlement.resultRef, 'work card settlement resultRef');
+  assertNonEmpty(input.lastBusiness.kind, 'work card lastBusiness kind');
+  assertValidTime(input.lastBusiness.at, 'work card lastBusiness at');
+  assertNonEmpty(input.lastBusiness.ref, 'work card lastBusiness ref');
 }

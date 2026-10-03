@@ -4,7 +4,9 @@ import type {
   MemoryKind,
   MemoryNamespace,
   OperationId,
+  RequirementIntent,
   ScopeRef,
+  TaskId,
 } from './index.js';
 import { assertEvidenceRef } from './index.js';
 import { ContractError } from './errors.js';
@@ -144,6 +146,14 @@ export interface ChannelBinding {
   readonly errorPolicy: 'attention' | 'reject' | 'retry';
 }
 
+export type InteractionRequestKind =
+  | 'new-task-create'
+  | 'new-task-preview'
+  | 'existing-task-change'
+  | 'status-query'
+  | 'clarification'
+  | 'refinement';
+
 export interface InteractionInput {
   readonly interactionId: string;
   readonly sourceRef: string;
@@ -152,6 +162,11 @@ export interface InteractionInput {
   readonly idempotencyKey: string;
   readonly rawInputRef: string;
   readonly occurredAt: string;
+  readonly requestKind?: InteractionRequestKind;
+}
+
+export interface InteractionRequest extends InteractionInput {
+  readonly requestKind: InteractionRequestKind;
 }
 
 export interface NormalizedInteractionInput {
@@ -270,6 +285,94 @@ export interface SubscriptionRequestArguments {
   readonly skillDigest: string;
 }
 
+export type ExecutionMode = 'once' | 'scheduled' | 'recurring';
+export type ExecutionFrequency = 'interval' | 'daily' | 'weekly';
+export type DstMode = 'wall' | 'absolute';
+export type DstMissedPolicy = 'shift-forward';
+export type DstAmbiguousPolicy = 'earlier-offset';
+export type LatePolicy = 'run-once' | 'skip';
+export type BusyPolicy = 'skip' | 'idle-reminder';
+
+export interface ExecutionPolicyBase {
+  readonly policyId: string;
+  readonly policyRevision: number;
+  readonly timezone: string;
+  readonly canonicalInstant: string;
+  readonly dstMode: DstMode;
+  readonly dstMissedPolicy: DstMissedPolicy;
+  readonly dstAmbiguousPolicy: DstAmbiguousPolicy;
+  readonly latePolicy: LatePolicy;
+  readonly busyPolicy: BusyPolicy;
+}
+
+export type ExecutionPolicyDefinition =
+  | (ExecutionPolicyBase & {
+      readonly executionMode: 'once';
+      readonly dueAt: string;
+    })
+  | (ExecutionPolicyBase & {
+      readonly executionMode: 'scheduled';
+      readonly startAt: string;
+      readonly endAt?: string;
+      readonly maxOccurrences?: number;
+    })
+  | (ExecutionPolicyBase & {
+      readonly executionMode: 'recurring';
+      readonly startAt: string;
+      readonly endAt?: string;
+      readonly maxOccurrences?: number;
+      readonly frequency: ExecutionFrequency;
+      readonly intervalMinutes?: number;
+      readonly timeOfDay?: string;
+      readonly weekDays?: readonly number[];
+    });
+
+export interface SubscriptionControlBase {
+  readonly subscriptionId: string;
+  readonly expectedPolicyRevision: number;
+  readonly expectedScheduleRevision?: number;
+  readonly idempotencyKey: string;
+  readonly requestedAt: string;
+}
+
+export interface ModifySubscriptionControlRequest extends SubscriptionControlBase {
+  readonly action: 'modify';
+  readonly expectedScheduleRevision: number;
+  readonly newPolicy: ExecutionPolicyDefinition;
+  readonly newPolicyHash: string;
+  readonly confirmationRef: string;
+}
+
+export interface PauseSubscriptionControlRequest extends SubscriptionControlBase {
+  readonly action: 'pause';
+}
+
+export interface ResumeSubscriptionControlRequest extends SubscriptionControlBase {
+  readonly action: 'resume';
+}
+
+export interface CancelFutureSubscriptionControlRequest extends SubscriptionControlBase {
+  readonly action: 'cancel-future';
+}
+
+export type SubscriptionControlRequest =
+  | ModifySubscriptionControlRequest
+  | PauseSubscriptionControlRequest
+  | ResumeSubscriptionControlRequest
+  | CancelFutureSubscriptionControlRequest;
+
+export interface SubscriptionControlReceipt {
+  readonly subscriptionId: string;
+  readonly action: SubscriptionControlRequest['action'];
+  readonly status: 'applied' | 'duplicate' | 'stale' | 'conflict';
+  readonly policyRevision: number;
+  readonly scheduleRevision: number;
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+  readonly supersededUnclaimedOccurrences: readonly string[];
+  readonly controlRef: string;
+}
+
 export interface ConfirmedRequirementRevision {
   readonly draftId: string;
   readonly interactionId: string;
@@ -277,6 +380,141 @@ export interface ConfirmedRequirementRevision {
   readonly confirmationRef: string;
   readonly confirmedBy: string;
   readonly confirmedAt: string;
+}
+
+export type DraftRevisionState = 'draft' | 'confirmed' | 'submitted' | 'rejected' | 'stale';
+
+export interface DraftRevisionRef {
+  readonly draftId: string;
+  readonly revisionVersion: number;
+  readonly revisionHash: string;
+}
+
+export interface DraftRevision {
+  readonly draftId: string;
+  readonly revisionVersion: number;
+  readonly inputRevision: number;
+  readonly goal: string;
+  readonly scope: string;
+  readonly constraints: readonly string[];
+  readonly deliverables: readonly string[];
+  readonly normalizedInput: string;
+  readonly proposedIntent: RequirementIntent;
+  readonly proposal: string;
+  readonly matchedTasks: readonly string[];
+  readonly knownFacts: readonly string[];
+  readonly executionControlRef?: string;
+  readonly decisionRefs: readonly string[];
+  readonly supersededBy?: string;
+  readonly staleReason?: string;
+  readonly state: DraftRevisionState;
+  readonly history: readonly DraftRevisionRef[];
+  readonly revisionHash: string;
+  readonly immutableOriginalRef: string;
+  readonly previousRevisionRef?: string;
+}
+
+export interface DraftRevisionInput {
+  readonly draftId: string;
+  readonly baseRevisionVersion: number;
+  readonly requestedRevisionHash: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly instructionRef: string;
+  readonly idempotencyKey: string;
+}
+
+export interface PreviewContext {
+  readonly requestKind: 'new-task-preview';
+  readonly interactionId: string;
+  readonly inputRevision: number;
+  readonly sourceRef: string;
+  readonly channelId: string;
+  readonly createdAt: string;
+  readonly authorized: false;
+}
+
+export interface DraftPreviewReceipt {
+  readonly previewId: string;
+  readonly interactionId: string;
+  readonly draftId: string;
+  readonly revisionVersion: number;
+  readonly revisionHash: string;
+  readonly createdAt: string;
+  readonly authorized: false;
+  readonly context: PreviewContext;
+}
+
+export interface DraftConfirmation {
+  readonly confirmationRef: string;
+  readonly confirmedBy: string;
+  readonly confirmedAt: string;
+  readonly payloadRef: string;
+  readonly draftId: string;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+  readonly interactionId: string;
+}
+
+export interface FinalSubmit {
+  readonly interactionId: string;
+  readonly draftId: string;
+  readonly inputRevision: number;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+  readonly confirmationRef: string;
+  readonly idempotencyKey: string;
+  readonly requestKind: 'new-task-create';
+}
+
+export interface AuthorizedRequirement {
+  readonly requirementId: string;
+  readonly draftId: string;
+  readonly inputRevision: number;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+  readonly confirmationRef: string;
+  readonly fifoSeq: number;
+  readonly payloadRef: string;
+}
+
+export interface ExistingTaskChangeSubmit {
+  readonly interactionId: string;
+  readonly taskId: TaskId;
+  readonly draftId: string;
+  readonly inputRevision: number;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+  readonly confirmationRef: string;
+  readonly idempotencyKey: string;
+  readonly requestKind: 'existing-task-change';
+}
+
+export interface DraftRejectClosure {
+  readonly rejectionId: string;
+  readonly reason: string;
+  readonly closedAt: string;
+  readonly durable: true;
+  readonly draftId: string;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+}
+
+export type DraftRevisionFailureCode =
+  | 'stale-revision'
+  | 'revision-hash-mismatch'
+  | 'confirmation-stale'
+  | 'unauthorized-final-submit'
+  | 'duplicate-submit'
+  | 'invalid-refinement';
+
+export interface DraftRevisionFailure {
+  readonly code: DraftRevisionFailureCode;
+  readonly message: string;
+  readonly draftId: string;
+  readonly expectedRevisionVersion?: number;
+  readonly expectedRevisionHash?: string;
+  readonly actualRevisionVersion?: number;
+  readonly actualRevisionHash?: string;
 }
 
 export type AttentionImpact = 'none' | 'low' | 'medium' | 'high' | 'critical';
@@ -522,6 +760,336 @@ function nonEmpty(value: string | undefined, label: string): asserts value is st
 
 function validTime(value: string, label: string): void {
   if (!Number.isFinite(Date.parse(value))) throw new ContractError(`${label} must be a valid timestamp`);
+}
+
+function positiveInteger(value: unknown, label: string): void {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new ContractError(`${label} must be a positive safe integer`);
+  }
+}
+
+function stringArray(value: unknown, label: string): asserts value is readonly string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || !entry.trim())) {
+    throw new ContractError(`${label} must be a non-empty string array`);
+  }
+}
+
+function isIanaTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isCanonicalInstant(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (day < 1 || day > daysInMonth) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
+function canonicalInstant(value: unknown, label: string): asserts value is string {
+  if (!isCanonicalInstant(value)) throw new ContractError(`${label} must be a canonical UTC instant`);
+}
+
+function assertNoField(value: Record<string, unknown>, field: string, label: string): void {
+  if (value[field] !== undefined) throw new ContractError(`${label} does not accept ${field}`);
+}
+
+export function canonicalJsonStringify(value: unknown): string {
+  const visit = (candidate: unknown): string => {
+    if (candidate === null || typeof candidate === 'string' || typeof candidate === 'boolean') {
+      return JSON.stringify(candidate);
+    }
+    if (typeof candidate === 'number') {
+      if (!Number.isFinite(candidate)) throw new ContractError('canonical JSON does not accept non-finite numbers');
+      return JSON.stringify(candidate);
+    }
+    if (Array.isArray(candidate)) return `[${candidate.map(visit).join(',')}]`;
+    if (typeof candidate === 'object') {
+      const entries = Object.entries(candidate as Record<string, unknown>)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right));
+      return `{${entries.map(([key, nested]) => `${JSON.stringify(key)}:${visit(nested)}`).join(',')}}`;
+    }
+    throw new ContractError('canonical JSON only accepts JSON values');
+  };
+  return visit(value);
+}
+
+export function validateExecutionPolicyDefinition(input: ExecutionPolicyDefinition): void {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ContractError('execution policy must be an object');
+  }
+  const value = input as unknown as Record<string, unknown>;
+  nonEmpty(typeof value.policyId === 'string' ? value.policyId : undefined, 'execution policy policyId');
+  positiveInteger(value.policyRevision, 'execution policy policyRevision');
+  const timezone = typeof value.timezone === 'string' ? value.timezone : '';
+  nonEmpty(timezone, 'execution policy timezone');
+  if (!isIanaTimeZone(timezone)) throw new ContractError(`execution policy timezone is not a valid IANA zone: ${timezone}`);
+  canonicalInstant(value.canonicalInstant, 'execution policy canonicalInstant');
+  includesValue(['wall', 'absolute'] as const, value.dstMode, 'execution policy dstMode');
+  includesValue(['shift-forward'] as const, value.dstMissedPolicy, 'execution policy dstMissedPolicy');
+  includesValue(['earlier-offset'] as const, value.dstAmbiguousPolicy, 'execution policy dstAmbiguousPolicy');
+  includesValue(['run-once', 'skip'] as const, value.latePolicy, 'execution policy latePolicy');
+  includesValue(['skip', 'idle-reminder'] as const, value.busyPolicy, 'execution policy busyPolicy');
+  includesValue(['once', 'scheduled', 'recurring'] as const, value.executionMode, 'execution policy executionMode');
+
+  if (value.executionMode === 'once') {
+    assertNoField(value, 'startAt', 'once policy');
+    assertNoField(value, 'endAt', 'once policy');
+    assertNoField(value, 'maxOccurrences', 'once policy');
+    assertNoField(value, 'frequency', 'once policy');
+    assertNoField(value, 'intervalMinutes', 'once policy');
+    assertNoField(value, 'timeOfDay', 'once policy');
+    assertNoField(value, 'weekDays', 'once policy');
+    canonicalInstant(value.dueAt, 'once policy dueAt');
+    return;
+  }
+
+  canonicalInstant(value.startAt, `${value.executionMode} policy startAt`);
+  if (value.endAt !== undefined) {
+    canonicalInstant(value.endAt, `${value.executionMode} policy endAt`);
+    if (Date.parse(value.endAt) <= Date.parse(value.startAt as string)) {
+      throw new ContractError(`${value.executionMode} policy endAt must be later than startAt`);
+    }
+  }
+  if (value.maxOccurrences !== undefined) {
+    positiveInteger(value.maxOccurrences, 'execution policy maxOccurrences');
+  }
+
+  if (value.executionMode === 'scheduled') {
+    assertNoField(value, 'frequency', 'scheduled policy');
+    assertNoField(value, 'intervalMinutes', 'scheduled policy');
+    assertNoField(value, 'timeOfDay', 'scheduled policy');
+    assertNoField(value, 'weekDays', 'scheduled policy');
+    return;
+  }
+
+  includesValue(['interval', 'daily', 'weekly'] as const, value.frequency, 'recurring policy frequency');
+  if (value.frequency === 'interval') {
+    positiveInteger(value.intervalMinutes, 'recurring intervalMinutes');
+    assertNoField(value, 'timeOfDay', 'interval policy');
+    assertNoField(value, 'weekDays', 'interval policy');
+    return;
+  }
+  assertNoField(value, 'intervalMinutes', `${value.frequency} policy`);
+  const timeOfDay = typeof value.timeOfDay === 'string' ? value.timeOfDay : '';
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(timeOfDay)) {
+    throw new ContractError(`${value.frequency} policy timeOfDay must be HH:mm`);
+  }
+  if (value.frequency === 'weekly') {
+    if (!Array.isArray(value.weekDays) || value.weekDays.length === 0) {
+      throw new ContractError('weekly policy weekDays must be a non-empty array');
+    }
+    const weekDays = value.weekDays as readonly unknown[];
+    if (weekDays.some((day) => !Number.isSafeInteger(day) || (day as number) < 0 || (day as number) > 6)
+      || new Set(weekDays).size !== weekDays.length) {
+      throw new ContractError('weekly policy weekDays must contain unique integers from 0 to 6');
+    }
+  } else {
+    assertNoField(value, 'weekDays', 'daily policy');
+  }
+}
+
+export function validateSubscriptionControlRequest(input: unknown): asserts input is SubscriptionControlRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new ContractError('subscription control request must be an object');
+  }
+  const value = input as Record<string, unknown>;
+  nonEmpty(typeof value.subscriptionId === 'string' ? value.subscriptionId : undefined, 'subscription control subscriptionId');
+  positiveInteger(value.expectedPolicyRevision, 'subscription control expectedPolicyRevision');
+  if (value.expectedScheduleRevision !== undefined) {
+    positiveInteger(value.expectedScheduleRevision, 'subscription control expectedScheduleRevision');
+  }
+  nonEmpty(typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined, 'subscription control idempotencyKey');
+  canonicalInstant(value.requestedAt, 'subscription control requestedAt');
+  includesValue(['modify', 'pause', 'resume', 'cancel-future'] as const, value.action, 'subscription control action');
+
+  if (value.action !== 'modify') {
+    assertNoField(value, 'newPolicy', `${value.action} control`);
+    assertNoField(value, 'newPolicyHash', `${value.action} control`);
+    assertNoField(value, 'confirmationRef', `${value.action} control`);
+    return;
+  }
+
+  positiveInteger(value.expectedScheduleRevision, 'modify control expectedScheduleRevision');
+  nonEmpty(typeof value.newPolicyHash === 'string' ? value.newPolicyHash : undefined, 'modify control newPolicyHash');
+  nonEmpty(typeof value.confirmationRef === 'string' ? value.confirmationRef : undefined, 'modify control confirmationRef');
+  validateExecutionPolicyDefinition(value.newPolicy as ExecutionPolicyDefinition);
+}
+
+export function subscriptionControlRequestFingerprint(input: SubscriptionControlRequest): string {
+  validateSubscriptionControlRequest(input);
+  const content: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input as unknown as Record<string, unknown>)) {
+    if (key !== 'idempotencyKey') content[key] = value;
+  }
+  return canonicalJsonStringify(content);
+}
+
+export function validateSubscriptionControlReceipt(input: SubscriptionControlReceipt): void {
+  nonEmpty(input.subscriptionId, 'subscription control receipt subscriptionId');
+  includesValue(['modify', 'pause', 'resume', 'cancel-future'] as const, input.action, 'subscription control receipt action');
+  includesValue(['applied', 'duplicate', 'stale', 'conflict'] as const, input.status, 'subscription control receipt status');
+  positiveInteger(input.policyRevision, 'subscription control receipt policyRevision');
+  positiveInteger(input.scheduleRevision, 'subscription control receipt scheduleRevision');
+  nonEmpty(input.idempotencyKey, 'subscription control receipt idempotencyKey');
+  nonEmpty(input.requestHash, 'subscription control receipt requestHash');
+  stringArray(input.supersededUnclaimedOccurrences, 'subscription control receipt supersededUnclaimedOccurrences');
+  nonEmpty(input.controlRef, 'subscription control receipt controlRef');
+}
+
+export function validateDraftRevision(input: DraftRevision): void {
+  nonEmpty(input.draftId, 'draftId');
+  positiveInteger(input.revisionVersion, 'draft revisionVersion');
+  positiveInteger(input.inputRevision, 'draft inputRevision');
+  nonEmpty(input.goal, 'draft goal');
+  nonEmpty(input.scope, 'draft scope');
+  stringArray(input.constraints, 'draft constraints');
+  stringArray(input.deliverables, 'draft deliverables');
+  nonEmpty(input.normalizedInput, 'draft normalizedInput');
+  includesValue(['append', 'change', 'create'] as const, input.proposedIntent, 'draft proposedIntent');
+  nonEmpty(input.proposal, 'draft proposal');
+  stringArray(input.matchedTasks, 'draft matchedTasks');
+  stringArray(input.knownFacts, 'draft knownFacts');
+  if (input.executionControlRef !== undefined) nonEmpty(input.executionControlRef, 'draft executionControlRef');
+  stringArray(input.decisionRefs, 'draft decisionRefs');
+  if (input.supersededBy !== undefined) nonEmpty(input.supersededBy, 'draft supersededBy');
+  if (input.staleReason !== undefined) nonEmpty(input.staleReason, 'draft staleReason');
+  includesValue(['draft', 'confirmed', 'submitted', 'rejected', 'stale'] as const, input.state, 'draft state');
+  if (!Array.isArray(input.history)) throw new ContractError('draft history must be an array');
+  for (const revision of input.history) validateDraftRevisionRef(revision);
+  nonEmpty(input.revisionHash, 'draft revisionHash');
+  nonEmpty(input.immutableOriginalRef, 'draft immutableOriginalRef');
+  if (input.previousRevisionRef !== undefined) nonEmpty(input.previousRevisionRef, 'draft previousRevisionRef');
+}
+
+function validateDraftRevisionRef(input: DraftRevisionRef): void {
+  nonEmpty(input.draftId, 'draft history draftId');
+  positiveInteger(input.revisionVersion, 'draft history revisionVersion');
+  nonEmpty(input.revisionHash, 'draft history revisionHash');
+}
+
+export function validateDraftRevisionInput(input: DraftRevisionInput): void {
+  nonEmpty(input.draftId, 'draft input draftId');
+  positiveInteger(input.baseRevisionVersion, 'draft input baseRevisionVersion');
+  nonEmpty(input.requestedRevisionHash, 'draft input requestedRevisionHash');
+  if (!input.fields || typeof input.fields !== 'object' || Array.isArray(input.fields)) {
+    throw new ContractError('draft input fields must be an object');
+  }
+  nonEmpty(input.instructionRef, 'draft input instructionRef');
+  nonEmpty(input.idempotencyKey, 'draft input idempotencyKey');
+}
+
+function validatePreviewContext(input: PreviewContext): void {
+  if (input.requestKind !== 'new-task-preview' || input.authorized !== false) {
+    throw new ContractError('preview context must be unauthorized new-task-preview');
+  }
+  nonEmpty(input.interactionId, 'preview context interactionId');
+  positiveInteger(input.inputRevision, 'preview context inputRevision');
+  nonEmpty(input.sourceRef, 'preview context sourceRef');
+  nonEmpty(input.channelId, 'preview context channelId');
+  canonicalInstant(input.createdAt, 'preview context createdAt');
+}
+
+export function validateDraftPreviewReceipt(input: DraftPreviewReceipt): void {
+  nonEmpty(input.previewId, 'previewId');
+  nonEmpty(input.interactionId, 'preview interactionId');
+  nonEmpty(input.draftId, 'preview draftId');
+  positiveInteger(input.revisionVersion, 'preview revisionVersion');
+  nonEmpty(input.revisionHash, 'preview revisionHash');
+  canonicalInstant(input.createdAt, 'preview createdAt');
+  if (input.authorized !== false) throw new ContractError('preview cannot carry authorization');
+  validatePreviewContext(input.context);
+}
+
+export function validateDraftConfirmation(input: DraftConfirmation): void {
+  nonEmpty(input.confirmationRef, 'confirmationRef');
+  nonEmpty(input.confirmedBy, 'confirmedBy');
+  canonicalInstant(input.confirmedAt, 'confirmedAt');
+  nonEmpty(input.payloadRef, 'confirmation payloadRef');
+  nonEmpty(input.draftId, 'confirmation draftId');
+  positiveInteger(input.draftRevisionVersion, 'confirmation draftRevisionVersion');
+  nonEmpty(input.draftRevisionHash, 'confirmation draftRevisionHash');
+  nonEmpty(input.interactionId, 'confirmation interactionId');
+}
+
+export function validateFinalSubmit(input: FinalSubmit): void {
+  if (input.requestKind !== 'new-task-create') throw new ContractError('new task final submit requires new-task-create');
+  nonEmpty(input.interactionId, 'final submit interactionId');
+  nonEmpty(input.draftId, 'final submit draftId');
+  positiveInteger(input.inputRevision, 'final submit inputRevision');
+  positiveInteger(input.draftRevisionVersion, 'final submit draftRevisionVersion');
+  nonEmpty(input.draftRevisionHash, 'final submit draftRevisionHash');
+  nonEmpty(input.confirmationRef, 'final submit confirmationRef');
+  nonEmpty(input.idempotencyKey, 'final submit idempotencyKey');
+}
+
+export function validateAuthorizedRequirement(input: AuthorizedRequirement): void {
+  nonEmpty(input.requirementId, 'authorized requirementId');
+  nonEmpty(input.draftId, 'authorized draftId');
+  positiveInteger(input.inputRevision, 'authorized inputRevision');
+  positiveInteger(input.draftRevisionVersion, 'authorized draftRevisionVersion');
+  nonEmpty(input.draftRevisionHash, 'authorized draftRevisionHash');
+  nonEmpty(input.confirmationRef, 'authorized confirmationRef');
+  positiveInteger(input.fifoSeq, 'authorized fifoSeq');
+  nonEmpty(input.payloadRef, 'authorized payloadRef');
+}
+
+export function validateExistingTaskChangeSubmit(input: ExistingTaskChangeSubmit): void {
+  if (input.requestKind !== 'existing-task-change') {
+    throw new ContractError('existing task change requires existing-task-change');
+  }
+  nonEmpty(input.interactionId, 'existing change interactionId');
+  if (input.taskId.scope !== 'task' || !input.taskId.value.trim()) {
+    throw new ContractError('existing change taskId must be a non-empty task id');
+  }
+  nonEmpty(input.draftId, 'existing change draftId');
+  positiveInteger(input.inputRevision, 'existing change inputRevision');
+  positiveInteger(input.draftRevisionVersion, 'existing change draftRevisionVersion');
+  nonEmpty(input.draftRevisionHash, 'existing change draftRevisionHash');
+  nonEmpty(input.confirmationRef, 'existing change confirmationRef');
+  nonEmpty(input.idempotencyKey, 'existing change idempotencyKey');
+}
+
+export function validateDraftRejectClosure(input: DraftRejectClosure): void {
+  nonEmpty(input.rejectionId, 'rejectionId');
+  nonEmpty(input.reason, 'rejection reason');
+  canonicalInstant(input.closedAt, 'rejection closedAt');
+  if (input.durable !== true) throw new ContractError('rejection closure must be durable');
+  nonEmpty(input.draftId, 'rejection draftId');
+  positiveInteger(input.draftRevisionVersion, 'rejection draftRevisionVersion');
+  nonEmpty(input.draftRevisionHash, 'rejection draftRevisionHash');
+}
+
+export function validateDraftRevisionFailure(input: DraftRevisionFailure): void {
+  includesValue([
+    'stale-revision',
+    'revision-hash-mismatch',
+    'confirmation-stale',
+    'unauthorized-final-submit',
+    'duplicate-submit',
+    'invalid-refinement',
+  ] as const, input.code, 'draft revision failure code');
+  nonEmpty(input.message, 'draft revision failure message');
+  nonEmpty(input.draftId, 'draft revision failure draftId');
+  if (input.expectedRevisionVersion !== undefined) positiveInteger(input.expectedRevisionVersion, 'failure expectedRevisionVersion');
+  if (input.expectedRevisionHash !== undefined) nonEmpty(input.expectedRevisionHash, 'failure expectedRevisionHash');
+  if (input.actualRevisionVersion !== undefined) positiveInteger(input.actualRevisionVersion, 'failure actualRevisionVersion');
+  if (input.actualRevisionHash !== undefined) nonEmpty(input.actualRevisionHash, 'failure actualRevisionHash');
 }
 
 export function validateToolIntent(input: ToolIntent): void {

@@ -775,11 +775,26 @@ export interface Subscription {
 export type OccurrenceState = 'due' | 'skipped-busy' | 'reminder-pending' | 'claimed' | 'consumed' | 'invalidated';
 
 export interface Occurrence {
+  readonly occurrenceId?: string;
   readonly subscriptionId: string;
   readonly scheduleRevision: number;
   readonly occurrenceOrdinal: number;
   readonly state: OccurrenceState;
   readonly dueAt: string;
+}
+
+export interface OccurrenceClaim {
+  readonly occurrenceId: string;
+  readonly subscriptionId: string;
+  readonly scheduleRevision: number;
+  readonly occurrenceOrdinal: number;
+  readonly claimedBy: string;
+  readonly leaseId: string;
+  readonly schedulerInstanceId: string;
+  readonly generation: number;
+  readonly executionEpoch: number;
+  readonly acquiredAt: string;
+  readonly expiresAt: string;
 }
 
 export type ReminderState = 'pending' | 'consumed' | 'invalidated';
@@ -1266,11 +1281,32 @@ export function validateSubscription(input: Subscription): void {
 }
 
 export function validateOccurrence(input: Occurrence): void {
+  if (input.occurrenceId !== undefined) nonEmpty(input.occurrenceId, 'occurrenceId');
   nonEmpty(input.subscriptionId, 'subscriptionId');
   assertPositiveSafeInteger(input.scheduleRevision, 'scheduleRevision');
   assertPositiveSafeInteger(input.occurrenceOrdinal, 'occurrenceOrdinal');
   if (!OCCURRENCE_STATES.includes(input.state)) throw new ContractError(`unknown occurrence state: ${input.state}`);
   assertValidTime(input.dueAt, 'dueAt');
+}
+
+export function validateOccurrenceClaim(input: OccurrenceClaim): void {
+  nonEmpty(input.occurrenceId, 'occurrence claim occurrenceId');
+  nonEmpty(input.subscriptionId, 'occurrence claim subscriptionId');
+  assertPositiveSafeInteger(input.scheduleRevision, 'occurrence claim scheduleRevision');
+  assertPositiveSafeInteger(input.occurrenceOrdinal, 'occurrence claim occurrenceOrdinal');
+  nonEmpty(input.claimedBy, 'occurrence claim claimedBy');
+  nonEmpty(input.leaseId, 'occurrence claim leaseId');
+  nonEmpty(input.schedulerInstanceId, 'occurrence claim schedulerInstanceId');
+  assertPositiveSafeInteger(input.generation, 'occurrence claim generation');
+  assertPositiveSafeInteger(input.executionEpoch, 'occurrence claim executionEpoch');
+  assertValidTime(input.acquiredAt, 'occurrence claim acquiredAt');
+  assertValidTime(input.expiresAt, 'occurrence claim expiresAt');
+  if (Date.parse(input.expiresAt) <= Date.parse(input.acquiredAt)) {
+    throw new ContractError('occurrence claim expiresAt must be later than acquiredAt');
+  }
+  if (input.occurrenceId !== `${input.subscriptionId}::${input.scheduleRevision}::${input.occurrenceOrdinal}`) {
+    throw new ContractError('occurrence claim id does not match subscription schedule identity');
+  }
 }
 
 export function validateReminder(input: Reminder): void {
