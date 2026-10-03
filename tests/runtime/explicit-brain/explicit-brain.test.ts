@@ -3444,7 +3444,8 @@ test('typed revisions cannot use the legacy untyped submit path', async () => {
 });
 
 test('existing-task-change cannot be authorized as a new task and execution policy compiles to a control ref', () => {
-  const revision = typedRevisionFixture({ requestKind: 'existing-task-change' });
+  const targetTask = id('task', 'task-target');
+  const revision = typedRevisionFixture({ requestKind: 'existing-task-change', taskRef: targetTask });
   const ledger = new ConfirmationLedger();
   ledger.registerRevision(revision);
   ledger.confirmRevision(typedConfirmation(revision));
@@ -3457,7 +3458,7 @@ test('existing-task-change cannot be authorized as a new task and execution poli
   // But it is valid as its own request kind (taskRef is the target task).
   const existingAcceptance = ledger.assertFinalSubmit({
     interactionId: revision.interactionId,
-    taskId: id('task', 'task-target'),
+    taskId: targetTask,
     draftId: revision.draftId,
     inputRevision: revision.inputRevision,
     draftRevisionVersion: revision.draftRevisionVersion,
@@ -3487,8 +3488,9 @@ test('existing-task-change cannot be authorized as a new task and execution poli
   assert.equal(compiled.definition.executionMode, 'once');
 });
 
-test('existing-task-change target task is part of final submit identity', async () => {
-  const revision = typedRevisionFixture({ requestKind: 'existing-task-change' });
+test('existing-task-change target is bound to the confirmed revision before first submit', async () => {
+  const targetA = id('task', 'task-target-a');
+  const revision = typedRevisionFixture({ requestKind: 'existing-task-change', taskRef: targetA });
   const ledger = new ConfirmationLedger();
   ledger.registerRevision(revision);
   ledger.confirmRevision(typedConfirmation(revision));
@@ -3508,7 +3510,7 @@ test('existing-task-change target task is part of final submit identity', async 
   });
   const submit = {
     interactionId: revision.interactionId,
-    taskId: id('task', 'task-target-a'),
+    taskId: id('task', 'task-target-b'),
     draftId: revision.draftId,
     inputRevision: revision.inputRevision,
     draftRevisionVersion: revision.draftRevisionVersion,
@@ -3518,16 +3520,18 @@ test('existing-task-change target task is part of final submit identity', async 
     requestKind: 'existing-task-change' as const,
   };
 
-  const first = await owner.submitFinal(submit);
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  assert.equal(dispatched.length, 0);
+
+  const first = await owner.submitFinal({ ...submit, taskId: targetA, idempotencyKey: 'submit-existing-a' });
   assert.equal(first.status, 'submitted');
   assert.equal(dispatched.length, 1);
   await assert.rejects(
-    () => owner.submitFinal({
-      ...submit,
-      taskId: id('task', 'task-target-b'),
-      idempotencyKey: 'submit-existing-b',
-    }),
-    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'duplicate-submit',
+    () => owner.submitFinal(submit),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
   );
   assert.equal(dispatched.length, 1);
 });

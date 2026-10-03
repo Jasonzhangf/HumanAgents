@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type {
   DraftRevisionInput,
+  ExistingTaskChangeSubmit,
   FinalSubmit,
   RequirementEnvelope,
   TaskId,
@@ -21,6 +22,7 @@ import { ExplicitIntakeError } from '../../../packages/runtime/src/intake/errors
 import { RequirementInbox } from '../../../packages/runtime/src/intake/requirement-inbox.js';
 import {
   ConfirmationLedger,
+  ExplicitBrainRouterError,
   RequirementSubmissionOwner,
   rejectDraftRevision,
   type ConfirmationLedgerState,
@@ -61,6 +63,15 @@ class FileIntakeJournal implements ExplicitIntakeJournalPort {
 
   recordCount(): number {
     return readFileSync(this.filePath, 'utf8').split('\n').filter((line) => line.trim().length > 0).length;
+  }
+}
+
+class CountingRequirementInbox extends RequirementInbox {
+  appendCount = 0;
+
+  override async append(input: RequirementEnvelope) {
+    this.appendCount += 1;
+    return super.append(input);
   }
 }
 
@@ -370,6 +381,232 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('final submit recovery reuses the durable FIFO after callback/downstream failure and fresh owner restart', async () => {
+  const revision: RegisteredDraftRevision = {
+    interactionId: 'interaction-durable-retry',
+    draftId: 'draft-durable-retry',
+    inputRevision: 1,
+    draftRevisionVersion: 1,
+    draftRevisionHash: 'sha256:durable-retry',
+    normalizedInput: 'recover the confirmed requirement',
+    intent: 'create',
+    payloadRef: 'asset://requirements/durable-retry',
+    requestKind: 'new-task-create',
+  };
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision({
+    confirmationRef: 'confirm-durable-retry',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: revision.payloadRef,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    interactionId: revision.interactionId,
+  });
+  const inbox = new CountingRequirementInbox();
+  let downstreamCalls = 0;
+  let appendCallbackCalls = 0;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      downstreamCalls += 1;
+      if (downstreamCalls === 1) throw new Error('transport lost after durable append');
+      return { requirementId: envelope.requirementId };
+    },
+  }, () => {
+    appendCallbackCalls += 1;
+    if (appendCallbackCalls === 1) throw new Error('append callback failed');
+  });
+  const submit: FinalSubmit = {
+    interactionId: revision.interactionId,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-durable-retry',
+    idempotencyKey: 'submit-durable-retry',
+    requestKind: 'new-task-create',
+  };
+
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    /append callback failed/,
+  );
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.size, 1);
+  assert.equal(inbox.expectedNextFifoSeq, 2);
+  assert.equal(inbox.find(revision.draftId)?.fifoSeq, 1);
+  assert.equal(downstreamCalls, 0);
+
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    /transport lost after durable append/,
+  );
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.size, 1);
+  assert.equal(inbox.expectedNextFifoSeq, 2);
+  assert.equal(inbox.find(revision.draftId)?.fifoSeq, 1);
+  assert.equal(downstreamCalls, 1);
+  const persistedAfterFailure = JSON.parse(JSON.stringify({
+    ledger: ledger.exportState(),
+    inbox: inbox.exportState(),
+  })) as { ledger: ConfirmationLedgerState; inbox: RequirementInboxState };
+
+  const retry = await owner.submitFinal(submit);
+  assert.equal(retry.status, 'submitted');
+  assert.equal(retry.requirement.fifoSeq, 1);
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.size, 1);
+  assert.equal(inbox.expectedNextFifoSeq, 2);
+  assert.equal(downstreamCalls, 2);
+
+  const restoredLedger = new ConfirmationLedger();
+  restoredLedger.restoreState(persistedAfterFailure.ledger);
+  const restoredInbox = new CountingRequirementInbox();
+  restoredInbox.restoreState(persistedAfterFailure.inbox);
+  let restoredCalls = 0;
+  const restoredOwner = new RequirementSubmissionOwner(restoredLedger, restoredInbox, {
+    async submit(envelope) {
+      restoredCalls += 1;
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  const restored = await restoredOwner.submitFinal(submit);
+  assert.equal(restored.status, 'submitted');
+  assert.equal(restored.requirement.requirementId, retry.requirement.requirementId);
+  assert.equal(restored.requirement.fifoSeq, 1);
+  assert.equal(restoredInbox.appendCount, 0);
+  assert.equal(restoredInbox.size, 1);
+  assert.equal(restoredInbox.expectedNextFifoSeq, 2);
+  assert.equal(restoredCalls, 1);
+});
+
+test('final submit recovery reuses the durable FIFO after a mismatching downstream receipt', async () => {
+  const revision: RegisteredDraftRevision = {
+    interactionId: 'interaction-receipt-retry',
+    draftId: 'draft-receipt-retry',
+    inputRevision: 1,
+    draftRevisionVersion: 1,
+    draftRevisionHash: 'sha256:receipt-retry',
+    normalizedInput: 'recover the confirmed receipt',
+    intent: 'create',
+    payloadRef: 'asset://requirements/receipt-retry',
+    requestKind: 'new-task-create',
+  };
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision({
+    confirmationRef: 'confirm-receipt-retry',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: revision.payloadRef,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    interactionId: revision.interactionId,
+  });
+  const inbox = new CountingRequirementInbox();
+  let downstreamCalls = 0;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      downstreamCalls += 1;
+      return {
+        requirementId: downstreamCalls === 1 ? 'requirement:other' : envelope.requirementId,
+      };
+    },
+  });
+  const submit: FinalSubmit = {
+    interactionId: revision.interactionId,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-receipt-retry',
+    idempotencyKey: 'submit-receipt-retry',
+    requestKind: 'new-task-create',
+  };
+
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    /requirement submission receipt mismatch: requirement:other/,
+  );
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.find(revision.draftId)?.fifoSeq, 1);
+
+  const retry = await owner.submitFinal(submit);
+  assert.equal(retry.status, 'submitted');
+  assert.equal(retry.requirement.fifoSeq, 1);
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.size, 1);
+  assert.equal(inbox.expectedNextFifoSeq, 2);
+  assert.equal(downstreamCalls, 2);
+});
+
+test('existing-task-change first submit cannot retarget the confirmed task', async () => {
+  const taskA = id('task', 'task-existing-a');
+  const taskB = id('task', 'task-existing-b');
+  const revision: RegisteredDraftRevision = {
+    interactionId: 'interaction-existing-target',
+    draftId: 'draft-existing-target',
+    inputRevision: 1,
+    draftRevisionVersion: 1,
+    draftRevisionHash: 'sha256:existing-target',
+    normalizedInput: 'change task A',
+    intent: 'change',
+    taskRef: taskA,
+    payloadRef: 'asset://requirements/existing-target',
+    requestKind: 'existing-task-change',
+  };
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision({
+    confirmationRef: 'confirm-existing-target',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: revision.payloadRef,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    interactionId: revision.interactionId,
+  });
+  const inbox = new CountingRequirementInbox();
+  const downstream: RequirementEnvelope[] = [];
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      downstream.push(envelope);
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  const submit: ExistingTaskChangeSubmit = {
+    interactionId: revision.interactionId,
+    taskId: taskB,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-existing-target',
+    idempotencyKey: 'submit-existing-b',
+    requestKind: 'existing-task-change',
+  };
+
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    (error) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  assert.equal(inbox.appendCount, 0);
+  assert.equal(inbox.size, 0);
+  assert.equal(downstream.length, 0);
+
+  const receipt = await owner.submitFinal({ ...submit, taskId: taskA, idempotencyKey: 'submit-existing-a' });
+  assert.equal(receipt.status, 'submitted');
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.find(revision.draftId)?.taskRef?.scope, taskA.scope);
+  assert.equal(inbox.find(revision.draftId)?.taskRef?.value, taskA.value);
+  assert.equal(downstream.length, 1);
+  assert.equal(downstream[0]?.taskRef?.value, taskA.value);
 });
 
 test('reject closes the draft durably without creating an authorized requirement', async () => {

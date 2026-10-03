@@ -422,6 +422,15 @@ export class ConfirmationLedger {
     if (confirmation.draftRevisionVersion !== revision.draftRevisionVersion || confirmation.draftRevisionHash !== revision.draftRevisionHash) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'confirmation is not bound to the current draft revision');
     }
+    if (input.requestKind === 'existing-task-change'
+      && (revision.taskRef === undefined
+        || revision.taskRef.scope !== input.taskId.scope
+        || revision.taskRef.value !== input.taskId.value)) {
+      throw new ExplicitBrainRouterError(
+        'unauthorized-final-submit',
+        'final submit target does not match the confirmed draft revision',
+      );
+    }
     return { revision: { ...revision }, confirmation: { ...confirmation } };
   }
 
@@ -635,21 +644,22 @@ export class RequirementSubmissionOwner {
       return { status: 'duplicate', requirement: structuredClone(existing) };
     }
 
+    // Reuse the durable append identity before allocating a new FIFO. If the
+    // append succeeded but dispatch was uncertain, the retry must reach the
+    // downstream idempotency boundary with the original requirement identity.
+    const durable = this.inbox.find(revision.draftId);
     const envelope: RequirementEnvelope = {
       requirementId: `requirement:${revision.draftId}:${revision.draftRevisionVersion}`,
       draftId: revision.draftId,
       inputRevision: revision.inputRevision,
       intent: revision.intent,
-      ...(input.requestKind === 'existing-task-change'
-        ? { taskRef: input.taskId }
-        : revision.taskRef === undefined ? {} : { taskRef: revision.taskRef }),
+      ...(revision.taskRef === undefined ? {} : { taskRef: revision.taskRef }),
       normalizedInput: revision.normalizedInput,
       confirmedBy: confirmation.confirmedBy,
       confirmedAt: confirmation.confirmedAt,
-      fifoSeq: this.inbox.expectedNextFifoSeq,
+      fifoSeq: durable?.fifoSeq ?? this.inbox.expectedNextFifoSeq,
       payloadRef: revision.payloadRef,
     };
-    const durable = this.inbox.find(revision.draftId);
     if (durable && JSON.stringify(durable) !== JSON.stringify(envelope)) {
       throw new ExplicitBrainRouterError('duplicate-submit', `durable requirement submission differs from the current revision: ${revision.draftId}`);
     }
