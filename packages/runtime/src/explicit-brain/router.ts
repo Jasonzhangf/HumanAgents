@@ -134,6 +134,7 @@ export interface ConfirmationLedgerState {
   readonly revisions?: readonly RegisteredDraftRevision[];
   readonly revisionConfirmations?: readonly DraftConfirmation[];
   readonly closedDraftIds?: readonly string[];
+  readonly finalSubmitBindings?: readonly FinalSubmitBinding[];
 }
 
 export interface PersistedSubmittedReceipt extends RequirementSubmitReceipt {
@@ -151,6 +152,13 @@ export interface PersistedFinalSubmitReceipt {
   readonly requestDigest: string;
   readonly requestIdentity: string;
   readonly requirement: AuthorizedRequirement;
+}
+
+export interface FinalSubmitBinding {
+  readonly idempotencyKey: string;
+  readonly revisionKey: string;
+  readonly requestDigest: string;
+  readonly requestIdentity: string;
 }
 
 function finalSubmitIdentity(input: FinalSubmit | ExistingTaskChangeSubmit): string {
@@ -260,6 +268,7 @@ export class ConfirmationLedger {
   private readonly revisions = new Map<string, RegisteredDraftRevision>();
   private readonly revisionConfirmations = new Map<string, DraftConfirmation>();
   private readonly closedDrafts = new Set<string>();
+  private readonly finalSubmitBindings = new Map<string, FinalSubmitBinding>();
 
   registerDraft(draft: RequirementDraftRevision): void {
     if (this.closedDrafts.has(draft.draftId)) {
@@ -388,6 +397,52 @@ export class ConfirmationLedger {
     return confirmation ? { ...confirmation } : undefined;
   }
 
+  finalSubmitBinding(idempotencyKey: string): FinalSubmitBinding | undefined {
+    const binding = this.finalSubmitBindings.get(idempotencyKey);
+    return binding ? { ...binding } : undefined;
+  }
+
+  finalSubmitBindingForRevision(revisionKey: string): FinalSubmitBinding | undefined {
+    for (const binding of this.finalSubmitBindings.values()) {
+      if (binding.revisionKey === revisionKey) return { ...binding };
+    }
+    return undefined;
+  }
+
+  hasFinalSubmitBinding(draftId: string): boolean {
+    for (const binding of this.finalSubmitBindings.values()) {
+      if (binding.revisionKey.startsWith(`${draftId}:`)) return true;
+    }
+    return false;
+  }
+
+  reserveFinalSubmit(binding: FinalSubmitBinding, allowRevisionReuse = false): void {
+    const existingByKey = this.finalSubmitBindings.get(binding.idempotencyKey);
+    if (existingByKey) {
+      if (JSON.stringify(existingByKey) !== JSON.stringify(binding)) {
+        throw new ExplicitBrainRouterError(
+          'duplicate-submit',
+          `idempotency key was reused with different content: ${binding.idempotencyKey}`,
+        );
+      }
+      return;
+    }
+    const existingByRevision = [...this.finalSubmitBindings.values()]
+      .find((candidate) => candidate.revisionKey === binding.revisionKey);
+    if (existingByRevision) {
+      if (!allowRevisionReuse || existingByRevision.idempotencyKey === binding.idempotencyKey) {
+        if (JSON.stringify(existingByRevision) !== JSON.stringify(binding)) {
+          throw new ExplicitBrainRouterError(
+            'duplicate-submit',
+            `draft revision was already submitted with a different request identity: ${binding.revisionKey}`,
+          );
+        }
+        return;
+      }
+    }
+    this.finalSubmitBindings.set(binding.idempotencyKey, { ...binding });
+  }
+
   /**
    * Validate a final submit against the exact registered revision and its
    * confirmation. A new-task-create and an existing-task-change are separate
@@ -473,6 +528,7 @@ export class ConfirmationLedger {
       revisions: [...this.revisions.values()].map((revision) => structuredClone(revision)),
       revisionConfirmations: [...this.revisionConfirmations.values()].map((confirmation) => structuredClone(confirmation)),
       closedDraftIds: [...this.closedDrafts],
+      finalSubmitBindings: [...this.finalSubmitBindings.values()].map((binding) => structuredClone(binding)),
     };
   }
 
@@ -482,6 +538,7 @@ export class ConfirmationLedger {
     this.revisions.clear();
     this.revisionConfirmations.clear();
     this.closedDrafts.clear();
+    this.finalSubmitBindings.clear();
     for (const draft of state.drafts) this.drafts.set(draft.draftId, structuredClone(draft));
     for (const confirmation of state.confirmations) {
       this.confirmations.set(confirmation.draftId, structuredClone(confirmation));
@@ -491,6 +548,9 @@ export class ConfirmationLedger {
       this.revisionConfirmations.set(confirmation.draftId, structuredClone(confirmation));
     }
     for (const draftId of state.closedDraftIds ?? []) this.closedDrafts.add(draftId);
+    for (const binding of state.finalSubmitBindings ?? []) {
+      this.reserveFinalSubmit(binding, true);
+    }
   }
 
   assertSubmission(input: RequirementSubmitArguments): ConfirmedRequirementRevision {
@@ -556,6 +616,11 @@ export class RequirementSubmissionOwner {
   private readonly finalSubmissions = new Map<string, AuthorizedRequirement>();
   private readonly finalSubmissionIdentities = new Map<string, string>();
   private readonly finalIdempotency = new Map<string, { readonly requestDigest: string; readonly revisionKey: string }>();
+  private readonly finalPending = new Map<string, {
+    readonly envelope: RequirementEnvelope;
+    persistenceAcknowledged: boolean;
+    persistenceError?: unknown;
+  }>();
   private readonly pending = new Map<string, {
     readonly envelope: RequirementEnvelope;
     appended: boolean;
@@ -598,6 +663,12 @@ export class RequirementSubmissionOwner {
     this.finalIdempotency.clear();
     for (const receipt of receipts) {
       const requirement = structuredClone(receipt.requirement);
+      this.ledger.reserveFinalSubmit({
+        idempotencyKey: receipt.idempotencyKey,
+        revisionKey: receipt.revisionKey,
+        requestDigest: receipt.requestDigest,
+        requestIdentity: receipt.requestIdentity,
+      }, true);
       this.finalSubmissions.set(receipt.revisionKey, requirement);
       this.finalSubmissionIdentities.set(receipt.revisionKey, receipt.requestIdentity);
       this.finalIdempotency.set(receipt.idempotencyKey, {
@@ -646,33 +717,66 @@ export class RequirementSubmissionOwner {
       requestKind: input.requestKind,
       ...(input.requestKind === 'existing-task-change' ? { taskId: input.taskId } : {}),
     });
-    const prior = this.finalIdempotency.get(input.idempotencyKey);
-    if (prior) {
-      if (prior.requestDigest !== requestDigest) {
+    const binding: FinalSubmitBinding = {
+      idempotencyKey: input.idempotencyKey,
+      revisionKey,
+      requestDigest,
+      requestIdentity,
+    };
+    const completedByKey = this.finalIdempotency.get(input.idempotencyKey);
+    if (completedByKey) {
+      if (completedByKey.requestDigest !== requestDigest) {
         throw new ExplicitBrainRouterError('duplicate-submit', `idempotency key was reused with different content: ${input.idempotencyKey}`);
       }
-      return { status: 'duplicate', requirement: structuredClone(this.finalSubmissions.get(prior.revisionKey)!) };
+      const completed = this.finalSubmissions.get(completedByKey.revisionKey);
+      if (!completed) {
+        throw new ExplicitBrainRouterError(
+          'duplicate-submit',
+          `final submission binding is incomplete: ${input.idempotencyKey}`,
+        );
+      }
+      return { status: 'duplicate', requirement: structuredClone(completed) };
     }
-    const existing = this.finalSubmissions.get(revisionKey);
-    if (existing) {
-      const canonical = [...this.finalIdempotency.values()]
-        .find((entry) => entry.revisionKey === revisionKey);
-      if (this.finalSubmissionIdentities.get(revisionKey) !== requestIdentity
-        || canonical?.requestDigest !== requestDigest) {
+
+    const bindingByKey = this.ledger.finalSubmitBinding(input.idempotencyKey);
+    const bindingByRevision = this.ledger.finalSubmitBindingForRevision(revisionKey);
+    if (bindingByKey) {
+      if (bindingByKey.revisionKey !== revisionKey
+        || bindingByKey.requestDigest !== requestDigest
+        || bindingByKey.requestIdentity !== requestIdentity) {
+        throw new ExplicitBrainRouterError(
+          'duplicate-submit',
+          `idempotency key was reused with different content: ${input.idempotencyKey}`,
+        );
+      }
+    } else if (bindingByRevision) {
+      if (bindingByRevision.requestDigest !== requestDigest
+        || bindingByRevision.requestIdentity !== requestIdentity) {
         throw new ExplicitBrainRouterError(
           'duplicate-submit',
           `draft revision was already submitted with a different request identity: ${revision.draftId}`,
         );
       }
-      this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
-      return { status: 'duplicate', requirement: structuredClone(existing) };
+      const completed = this.finalSubmissions.get(revisionKey);
+      if (completed) {
+        this.ledger.reserveFinalSubmit(binding, true);
+        this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
+        return { status: 'duplicate', requirement: structuredClone(completed) };
+      }
+      throw new ExplicitBrainRouterError(
+        'duplicate-submit',
+        `final submission is already pending for draft revision: ${revision.draftId}`,
+      );
+    } else {
+      this.ledger.reserveFinalSubmit(binding);
     }
 
     // Reuse the durable append identity before allocating a new FIFO. If the
     // append succeeded but dispatch was uncertain, the retry must reach the
     // downstream idempotency boundary with the original requirement identity.
+    const pending = this.finalPending.get(revisionKey);
     const durable = this.inbox.find(revision.draftId);
-    const envelope: RequirementEnvelope = {
+    const envelope: RequirementEnvelope = pending?.envelope ?? durable ?? {
       requirementId: `requirement:${revision.draftId}:${revision.draftRevisionVersion}`,
       draftId: revision.draftId,
       inputRevision: revision.inputRevision,
@@ -681,17 +785,22 @@ export class RequirementSubmissionOwner {
       normalizedInput: revision.normalizedInput,
       confirmedBy: confirmation.confirmedBy,
       confirmedAt: confirmation.confirmedAt,
-      fifoSeq: durable?.fifoSeq ?? this.inbox.expectedNextFifoSeq,
+      fifoSeq: this.inbox.expectedNextFifoSeq,
       payloadRef: revision.payloadRef,
     };
     if (durable && JSON.stringify(durable) !== JSON.stringify(envelope)) {
       throw new ExplicitBrainRouterError('duplicate-submit', `durable requirement submission differs from the current revision: ${revision.draftId}`);
     }
+    const pendingState = pending ?? {
+      envelope: structuredClone(envelope),
+      persistenceAcknowledged: durable !== undefined && (bindingByKey !== undefined || bindingByRevision !== undefined),
+    };
+    this.finalPending.set(revisionKey, pendingState);
     if (!durable) {
       this.inbox.markConfirmed(envelope);
       await this.inbox.append(envelope);
-      this.onEnvelopeAppended?.(structuredClone(envelope));
     }
+    this.acknowledgeFinalEnvelope(pendingState);
     const downstream = await this.port.submit(envelope);
     if (downstream.requirementId !== envelope.requirementId) {
       throw new ExplicitBrainRouterError('duplicate-submit', `requirement submission receipt mismatch: ${downstream.requirementId}`);
@@ -706,10 +815,45 @@ export class RequirementSubmissionOwner {
       fifoSeq: envelope.fifoSeq,
       payloadRef: envelope.payloadRef,
     };
+    const persistedReceipt: PersistedSubmittedReceipt = {
+      interactionId: input.interactionId,
+      status: 'submitted',
+      requirementId: envelope.requirementId,
+      draftId: envelope.draftId,
+      inputRevision: envelope.inputRevision,
+    };
     this.finalSubmissions.set(revisionKey, requirement);
     this.finalSubmissionIdentities.set(revisionKey, requestIdentity);
     this.finalIdempotency.set(input.idempotencyKey, { requestDigest, revisionKey });
+    try {
+      this.onSubmitted?.(structuredClone(persistedReceipt));
+    } catch (error) {
+      this.finalSubmissions.delete(revisionKey);
+      this.finalSubmissionIdentities.delete(revisionKey);
+      this.finalIdempotency.delete(input.idempotencyKey);
+      throw error;
+    }
     return { status: 'submitted', requirement: structuredClone(requirement) };
+  }
+
+  private acknowledgeFinalEnvelope(pending: {
+    readonly envelope: RequirementEnvelope;
+    persistenceAcknowledged: boolean;
+    persistenceError?: unknown;
+  }): void {
+    if (pending.persistenceAcknowledged) return;
+    if (!this.onEnvelopeAppended) {
+      pending.persistenceAcknowledged = true;
+      return;
+    }
+    try {
+      this.onEnvelopeAppended(structuredClone(pending.envelope));
+      pending.persistenceAcknowledged = true;
+      delete pending.persistenceError;
+    } catch (error) {
+      pending.persistenceError ??= error;
+      throw pending.persistenceError;
+    }
   }
 
   async submit(input: RequirementSubmitArguments): Promise<RequirementSubmitReceipt> {
@@ -742,6 +886,7 @@ export class RequirementSubmissionOwner {
     for (const entry of this.finalIdempotency.values()) {
       if (entry.revisionKey.startsWith(`${draftId}:`)) return true;
     }
+    if (this.ledger.hasFinalSubmitBinding(draftId)) return true;
     return false;
   }
 

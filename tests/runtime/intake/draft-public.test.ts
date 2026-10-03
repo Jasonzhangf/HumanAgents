@@ -79,6 +79,42 @@ class FlakyFileIntakeJournal extends FileIntakeJournal {
   }
 }
 
+interface PublicFinalSubmitBinding {
+  readonly idempotencyKey: string;
+  readonly revisionKey: string;
+  readonly requestDigest: string;
+  readonly requestIdentity: string;
+}
+
+interface ExplicitBrainJournalState {
+  readonly ledger: ConfirmationLedgerState & {
+    readonly finalSubmitBindings?: readonly PublicFinalSubmitBinding[];
+  };
+  readonly inbox: RequirementInboxState;
+}
+
+class FileExplicitBrainJournal {
+  constructor(private readonly filePath: string) {}
+
+  save(state: ExplicitBrainJournalState): void {
+    appendFileSync(this.filePath, `${JSON.stringify({ kind: 'explicit-brain.state', state })}\n`, 'utf8');
+  }
+
+  load(): ExplicitBrainJournalState | undefined {
+    let raw = '';
+    try {
+      raw = readFileSync(this.filePath, 'utf8');
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    const records = raw.split('\n').filter((line) => line.trim().length > 0);
+    if (records.length === 0) return undefined;
+    const latest = JSON.parse(records[records.length - 1]) as { state: ExplicitBrainJournalState };
+    return structuredClone(latest.state);
+  }
+}
+
 class CountingRequirementInbox extends RequirementInbox {
   appendCount = 0;
 
@@ -916,6 +952,176 @@ test('final submit recovery reuses the durable FIFO after callback/downstream fa
   assert.equal(restoredInbox.size, 1);
   assert.equal(restoredInbox.expectedNextFifoSeq, 2);
   assert.equal(restoredCalls, 1);
+});
+
+test('final submit waits for append persistence acknowledgement before downstream dispatch', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-final-append-ack-'));
+  try {
+    const revision: RegisteredDraftRevision = {
+      interactionId: 'interaction-final-append-ack',
+      draftId: 'draft-final-append-ack',
+      inputRevision: 1,
+      draftRevisionVersion: 1,
+      draftRevisionHash: 'sha256:final-append-ack',
+      normalizedInput: 'persist the exact confirmed envelope',
+      intent: 'create',
+      payloadRef: 'asset://requirements/final-append-ack',
+      requestKind: 'new-task-create',
+    };
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(revision);
+    ledger.confirmRevision({
+      confirmationRef: 'confirm-final-append-ack',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-03T00:00:00.000Z',
+      payloadRef: revision.payloadRef,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.draftRevisionVersion,
+      draftRevisionHash: revision.draftRevisionHash,
+      interactionId: revision.interactionId,
+    });
+    const inbox = new CountingRequirementInbox();
+    const journal = new FileExplicitBrainJournal(join(root, 'explicit-brain.jsonl'));
+    let persistenceAvailable = false;
+    let persistenceCalls = 0;
+    const persistenceErrors: unknown[] = [];
+    const dispatches: RequirementEnvelope[] = [];
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        const persisted = journal.load();
+        assert.ok(persisted);
+        assert.equal(persisted.ledger.finalSubmitBindings?.length, 1);
+        assert.equal(persisted.inbox.envelopes.length, 1);
+        assert.deepEqual(persisted.inbox.envelopes[0], envelope);
+        dispatches.push(structuredClone(envelope));
+        return { requirementId: envelope.requirementId };
+      },
+    }, () => {
+      persistenceCalls += 1;
+      if (!persistenceAvailable) throw new Error('journal unavailable');
+      journal.save({ ledger: ledger.exportState(), inbox: inbox.exportState() });
+    });
+    const submit: FinalSubmit = {
+      interactionId: revision.interactionId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.draftRevisionVersion,
+      draftRevisionHash: revision.draftRevisionHash,
+      confirmationRef: 'confirm-final-append-ack',
+      idempotencyKey: 'submit-final-append-ack',
+      requestKind: 'new-task-create',
+    };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const error = await owner.submitFinal(submit).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'journal unavailable');
+      persistenceErrors.push(error);
+    }
+    assert.equal(persistenceErrors[0], persistenceErrors[1]);
+    assert.equal(persistenceCalls, 2);
+    assert.equal(inbox.appendCount, 1);
+    assert.equal(inbox.size, 1);
+    assert.equal(dispatches.length, 0);
+    assert.equal(owner.finalReceipts().length, 0);
+    const originalEnvelope = inbox.find(revision.draftId);
+    assert.ok(originalEnvelope);
+
+    persistenceAvailable = true;
+    const receipt = await owner.submitFinal(submit);
+    assert.equal(receipt.status, 'submitted');
+    assert.equal(persistenceCalls, 3);
+    assert.equal(dispatches.length, 1);
+    assert.deepEqual(dispatches[0], originalEnvelope);
+    assert.equal(dispatches[0]?.fifoSeq, originalEnvelope.fifoSeq);
+    assert.equal(inbox.appendCount, 1);
+    assert.equal(owner.finalReceipts().length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('final submit reserves shared idempotency before dispatch and survives durable replay', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-final-reservation-'));
+  try {
+    const intake = new ExplicitIntake();
+    const first = await confirmedDraftFixture(intake, 'asset://requirements/reservation-a');
+    const second = await confirmedDraftFixture(intake, 'asset://requirements/reservation-b');
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(first.registered);
+    ledger.confirmRevision(first.confirmation);
+    ledger.registerRevision(second.registered);
+    ledger.confirmRevision(second.confirmation);
+    const inbox = new CountingRequirementInbox();
+    const journal = new FileExplicitBrainJournal(join(root, 'explicit-brain.jsonl'));
+    const dispatches: RequirementEnvelope[] = [];
+    let responseLosses = 2;
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        dispatches.push(structuredClone(envelope));
+        if (responseLosses > 0) {
+          responseLosses -= 1;
+          throw new Error('response lost after execution');
+        }
+        return { requirementId: envelope.requirementId };
+      },
+    }, () => {
+      journal.save({ ledger: ledger.exportState(), inbox: inbox.exportState() });
+    });
+    const submitFirst = finalSubmitFor(first.registered, first.confirmation.confirmationRef, 'shared-reservation-key');
+    const submitSecond = finalSubmitFor(second.registered, second.confirmation.confirmationRef, 'shared-reservation-key');
+
+    await assert.rejects(() => owner.submitFinal(submitFirst), /response lost after execution/);
+    const originalEnvelope = inbox.find(first.registered.draftId);
+    assert.ok(originalEnvelope);
+    await assert.rejects(() => owner.submitFinal(submitFirst), /response lost after execution/);
+    assert.equal(dispatches.length, 2);
+    assert.deepEqual(dispatches[1], originalEnvelope);
+
+    await assert.rejects(
+      () => owner.submitFinal(submitSecond),
+      (error) => error instanceof ExplicitBrainRouterError && error.code === 'duplicate-submit',
+    );
+    assert.equal(dispatches.length, 2);
+    assert.equal(inbox.appendCount, 1);
+    assert.equal(inbox.find(second.registered.draftId), undefined);
+
+    const persisted = journal.load();
+    assert.ok(persisted);
+    assert.equal(persisted.ledger.finalSubmitBindings?.length, 1);
+    assert.equal(persisted.ledger.finalSubmitBindings?.[0]?.idempotencyKey, 'shared-reservation-key');
+    assert.deepEqual(persisted.inbox.envelopes, [originalEnvelope]);
+
+    const restoredLedger = new ConfirmationLedger();
+    restoredLedger.restoreState(persisted.ledger);
+    const restoredInbox = new CountingRequirementInbox();
+    restoredInbox.restoreState(persisted.inbox);
+    const restoredDispatches: RequirementEnvelope[] = [];
+    const restoredOwner = new RequirementSubmissionOwner(restoredLedger, restoredInbox, {
+      async submit(envelope) {
+        restoredDispatches.push(structuredClone(envelope));
+        return { requirementId: envelope.requirementId };
+      },
+    });
+
+    await assert.rejects(
+      () => restoredOwner.submitFinal(submitSecond),
+      (error) => error instanceof ExplicitBrainRouterError && error.code === 'duplicate-submit',
+    );
+    assert.equal(restoredDispatches.length, 0);
+    const resumed = await restoredOwner.submitFinal(submitFirst);
+    assert.equal(resumed.status, 'submitted');
+    assert.equal(resumed.requirement.requirementId, originalEnvelope.requirementId);
+    assert.equal(resumed.requirement.fifoSeq, originalEnvelope.fifoSeq);
+    assert.deepEqual(restoredDispatches, [originalEnvelope]);
+    assert.equal(restoredInbox.appendCount, 0);
+    assert.equal(restoredInbox.size, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('final submit recovery reuses the durable FIFO after a mismatching downstream receipt', async () => {
