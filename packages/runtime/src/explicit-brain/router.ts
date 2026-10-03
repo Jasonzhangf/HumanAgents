@@ -330,7 +330,7 @@ export class ConfirmationLedger {
     if (existing && JSON.stringify(existing) !== JSON.stringify(input)) {
       throw new ExplicitBrainRouterError('confirmation-stale', `draft revision changed: ${input.draftId}`);
     }
-    this.revisions.set(input.draftId, { ...input });
+    this.revisions.set(input.draftId, structuredClone(input));
   }
 
   /**
@@ -389,7 +389,7 @@ export class ConfirmationLedger {
 
   currentRevision(draftId: string): RegisteredDraftRevision | undefined {
     const revision = this.revisions.get(draftId);
-    return revision ? { ...revision } : undefined;
+    return revision ? structuredClone(revision) : undefined;
   }
 
   revisionConfirmation(draftId: string): DraftConfirmation | undefined {
@@ -505,7 +505,10 @@ export class ConfirmationLedger {
         'final submit target does not match the confirmed draft revision',
       );
     }
-    return { revision: { ...revision }, confirmation: { ...confirmation } };
+    return {
+      revision: structuredClone(revision),
+      confirmation: structuredClone(confirmation),
+    };
   }
 
   closeRevision(draftId: string): void {

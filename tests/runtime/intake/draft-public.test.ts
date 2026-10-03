@@ -1290,7 +1290,7 @@ test('existing-task-change first submit cannot retarget the confirmed task', asy
     draftRevisionHash: 'sha256:existing-target',
     normalizedInput: 'change task A',
     intent: 'change',
-    taskRef: taskA,
+    taskRef: { ...taskA },
     payloadRef: 'asset://requirements/existing-target',
     requestKind: 'existing-task-change',
   };
@@ -1341,6 +1341,139 @@ test('existing-task-change first submit cannot retarget the confirmed task', asy
   assert.equal(inbox.find(revision.draftId)?.taskRef?.value, taskA.value);
   assert.equal(downstream.length, 1);
   assert.equal(downstream[0]?.taskRef?.value, taskA.value);
+});
+
+test('confirmed revision views cannot retarget an existing-task-change submission', async () => {
+  const taskA = id('task', 'task-view-target-a');
+  const taskB = id('task', 'task-view-target-b');
+  const intake = new ExplicitIntake();
+  const interaction = await intake.receive({
+    sourceRef: 'ui:existing-task-change',
+    rawInput: 'change the approved task target',
+    channel: 'business',
+    requestKind: 'existing-task-change',
+    occurredAt: '2026-10-03T00:00:00.000Z',
+  });
+  await intake.createDraft(interaction, draftIntent({
+    normalizedInput: 'change the approved task target',
+    proposedIntent: 'change',
+    proposal: 'change the approved task target',
+    matchedTasks: [{ taskId: taskA, relation: 'current', status: 'running' }],
+  }));
+  const draft = intake.currentDraftRevision(interaction);
+  assert.ok(draft);
+  const confirmation = await intake.confirmDraftRevision({
+    interactionId: interaction,
+    draftId: draft.draftId,
+    draftRevisionVersion: draft.revisionVersion,
+    draftRevisionHash: draft.revisionHash,
+    confirmationRef: 'confirm-view-target',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: 'asset://requirements/view-target',
+  });
+  const registered: RegisteredDraftRevision = {
+    interactionId: interaction,
+    draftId: draft.draftId,
+    inputRevision: draft.inputRevision,
+    draftRevisionVersion: draft.revisionVersion,
+    draftRevisionHash: draft.revisionHash,
+    normalizedInput: draft.normalizedInput,
+    intent: draft.proposedIntent,
+    taskRef: { ...taskA },
+    payloadRef: confirmation.payloadRef,
+    requestKind: 'existing-task-change',
+  };
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(registered);
+  ledger.confirmRevision(confirmation);
+  const inbox = new CountingRequirementInbox();
+  const dispatched: RequirementEnvelope[] = [];
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      dispatched.push(structuredClone(envelope));
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  const submitFor = (taskId: TaskId, idempotencyKey: string): ExistingTaskChangeSubmit => ({
+    interactionId: interaction,
+    taskId,
+    draftId: draft.draftId,
+    inputRevision: draft.inputRevision,
+    draftRevisionVersion: draft.revisionVersion,
+    draftRevisionHash: draft.revisionHash,
+    confirmationRef: confirmation.confirmationRef,
+    idempotencyKey,
+    requestKind: 'existing-task-change',
+  });
+  type MutableTaskRef = { scope: string; value: string };
+
+  // Public readonly types do not prevent a JavaScript caller from mutating
+  // the nested task reference they retained or received.
+  (registered.taskRef as unknown as MutableTaskRef).value = taskB.value;
+  const currentView = ledger.currentRevision(draft.draftId);
+  assert.ok(currentView?.taskRef);
+  (currentView.taskRef as unknown as MutableTaskRef).value = taskB.value;
+  const assertedRegistration: RegisteredDraftRevision = { ...registered, taskRef: { ...taskA } };
+  const assertedLedger = new ConfirmationLedger();
+  assertedLedger.registerRevision(assertedRegistration);
+  assertedLedger.confirmRevision(confirmation);
+  const assertedView = assertedLedger.assertFinalSubmit(submitFor(taskA, 'assert-view'));
+  assert.ok(assertedView.revision.taskRef);
+  (assertedView.revision.taskRef as unknown as MutableTaskRef).value = taskB.value;
+  assert.equal(assertedLedger.currentRevision(draft.draftId)?.taskRef?.value, taskA.value);
+
+  type SubmitOutcome =
+    | { readonly status: 'submitted'; readonly receipt: Awaited<ReturnType<typeof owner.submitFinal>> }
+    | { readonly status: 'rejected'; readonly error: unknown };
+  const unauthorized: SubmitOutcome = await owner.submitFinal(submitFor(taskB, 'unauthorized-target')).then<
+    SubmitOutcome,
+    SubmitOutcome
+  >(
+    (receipt) => ({ status: 'submitted', receipt }),
+    (error: unknown) => ({ status: 'rejected', error }),
+  );
+  if (unauthorized.status === 'submitted') {
+    const envelope = inbox.find(draft.draftId);
+    throw new Error(`unapproved target redirected real public envelope: ${JSON.stringify({
+      receiptFifoSeq: unauthorized.receipt.requirement.fifoSeq,
+      envelopeTaskRef: envelope?.taskRef,
+      dispatchedTaskRef: dispatched[0]?.taskRef,
+      appendCount: inbox.appendCount,
+    })}`);
+  }
+  assert.ok(unauthorized.error instanceof ExplicitBrainRouterError);
+  assert.equal(unauthorized.error.code, 'unauthorized-final-submit');
+  assert.equal(inbox.appendCount, 0);
+  assert.equal(inbox.size, 0);
+  assert.equal(dispatched.length, 0);
+  assert.equal(ledger.currentRevision(draft.draftId)?.taskRef?.value, taskA.value);
+
+  const exported = ledger.exportState();
+  const exportedRevision = exported.revisions?.find((revision) => revision.draftId === draft.draftId);
+  assert.ok(exportedRevision?.taskRef);
+  (exportedRevision.taskRef as unknown as MutableTaskRef).value = taskB.value;
+  assert.equal(ledger.currentRevision(draft.draftId)?.taskRef?.value, taskA.value);
+
+  const restoredInput = ledger.exportState();
+  const restoredLedger = new ConfirmationLedger();
+  restoredLedger.restoreState(restoredInput);
+  const restoredRevision = restoredInput.revisions?.find((revision) => revision.draftId === draft.draftId);
+  assert.ok(restoredRevision?.taskRef);
+  (restoredRevision.taskRef as unknown as MutableTaskRef).value = taskB.value;
+  assert.equal(restoredLedger.currentRevision(draft.draftId)?.taskRef?.value, taskA.value);
+
+  const submitted = await owner.submitFinal(submitFor(taskA, 'approved-target'));
+  assert.equal(submitted.status, 'submitted');
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(inbox.size, 1);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]?.taskRef?.scope, taskA.scope);
+  assert.equal(dispatched[0]?.taskRef?.value, taskA.value);
+  const duplicate = await owner.submitFinal(submitFor(taskA, 'approved-target'));
+  assert.equal(duplicate.status, 'duplicate');
+  assert.equal(inbox.appendCount, 1);
+  assert.equal(dispatched.length, 1);
 });
 
 test('reject closes the draft durably without creating an authorized requirement', async () => {
