@@ -1055,6 +1055,9 @@ function validateToolTraceDescriptor(input: ToolTraceDescriptor): void {
   if ((input.outputRef === undefined) !== (input.outputDigest === undefined)) {
     throw new ContractError('tool trace outputRef and outputDigest must be provided together');
   }
+  if (input.status === 'succeeded' && input.outputRef === undefined) {
+    throw new ContractError('succeeded tool trace requires outputRef and outputDigest');
+  }
   if (input.outputRef !== undefined) assertNonEmpty(input.outputRef, 'tool trace outputRef');
   if (input.outputDigest !== undefined) assertNonEmpty(input.outputDigest, 'tool trace outputDigest');
   if (input.error !== undefined) {
@@ -1092,6 +1095,9 @@ export function validateInteractionTraceEntry(input: InteractionTraceEntry): voi
   assertScope(input.operationId, 'operation');
   assertNonEmpty(input.operationId.value, 'trace operationId');
   assertExecutionEpoch(input.executionEpoch);
+  if ((input.kind === 'tool-call' || input.kind === 'tool-result') && input.tool === undefined) {
+    throw new ContractError('tool trace kind requires a tool descriptor');
+  }
   if (input.tool !== undefined) validateToolTraceDescriptor(input.tool);
   if (input.authorization.executionEpoch !== input.executionEpoch
     || !sameScopedId(input.authorization.taskId, input.taskId)
@@ -1099,6 +1105,14 @@ export function validateInteractionTraceEntry(input: InteractionTraceEntry): voi
     throw new ContractError('trace authorization identity does not match trace');
   }
   validateScope(input.authorization.scope, 'trace authorization scope');
+  if (input.authorization.scope.taskId !== undefined
+    && !sameScopedId(input.authorization.scope.taskId, input.taskId)) {
+    throw new ContractError('trace authorization scope taskId does not match trace');
+  }
+  if (input.authorization.scope.operationId !== undefined
+    && !sameScopedId(input.authorization.scope.operationId, input.operationId)) {
+    throw new ContractError('trace authorization scope operationId does not match trace');
+  }
   for (const capability of input.authorization.requestedCapabilities) {
     assertNonEmpty(capability, 'trace requested capability');
   }
@@ -1106,6 +1120,9 @@ export function validateInteractionTraceEntry(input: InteractionTraceEntry): voi
     assertNonEmpty(permission, 'trace permissionRef');
   }
   assertNonEmpty(input.authorization.toolOutputRef, 'trace toolOutputRef');
+  if (input.tool?.outputRef !== undefined && input.authorization.toolOutputRef !== input.tool.outputRef) {
+    throw new ContractError('trace authorization toolOutputRef does not match tool outputRef');
+  }
   if (input.dependencyEdge !== undefined) {
     assertNonEmpty(input.dependencyEdge.source, 'trace dependency source');
     assertNonEmpty(input.dependencyEdge.target, 'trace dependency target');

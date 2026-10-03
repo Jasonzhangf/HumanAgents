@@ -413,6 +413,119 @@ test('public contract consumer rejects incomplete revisions, tool identities, an
   assert.throws(() => validateInteractionHistoryResult({ ok: false } as never), ContractError);
 });
 
+test('public consumer rejects a tool-call without a typed descriptor', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    kind: 'tool-call',
+    tool: undefined,
+  }), ContractError);
+});
+
+test('public consumer rejects a tool-result without a typed descriptor', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    tool: undefined,
+  }), ContractError);
+});
+
+test('public consumer rejects a succeeded tool descriptor without verifiable output evidence', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    tool: {
+      ...traceEntry.tool!,
+      outputRef: undefined,
+      outputDigest: undefined,
+    },
+  }), ContractError);
+});
+
+test('public consumer rejects history pages containing invalid trace entries', () => {
+  assert.throws(() => validateInteractionHistoryResult({
+    ok: true,
+    page: {
+      hasMore: false,
+      items: [{ ...traceEntry, tool: undefined }],
+    },
+  }), ContractError);
+});
+
+test('public consumer accepts legal tool calls and succeeded tool results', () => {
+  assert.doesNotThrow(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    kind: 'assistant',
+    tool: undefined,
+  }));
+  assert.doesNotThrow(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    kind: 'tool-call',
+    tool: {
+      callId: 'call-a',
+      toolId: 'file.read',
+      argumentsRef: 'asset://call-a/arguments',
+      argumentsDigest: 'sha256:call-a-arguments',
+      status: 'running',
+    },
+  }));
+  assert.doesNotThrow(() => validateInteractionTraceEntry(traceEntry));
+});
+
+test('public consumer rejects authorization scope task conflicts', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    authorization: {
+      ...traceEntry.authorization,
+      scope: { ...scope, taskId: id('task', 'task-b') },
+    },
+  }), ContractError);
+});
+
+test('public consumer rejects authorization scope operation conflicts', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    authorization: {
+      ...traceEntry.authorization,
+      scope: { ...scope, operationId: id('operation', 'operation-b') },
+    },
+  }), ContractError);
+});
+
+test('public consumer rejects authorization output reference conflicts', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    authorization: {
+      ...traceEntry.authorization,
+      toolOutputRef: 'asset://call-a/other-output',
+    },
+  }), ContractError);
+});
+
+test('public consumer rejects missing required authorization output reference', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    authorization: {
+      ...traceEntry.authorization,
+      toolOutputRef: undefined as unknown as string,
+    },
+  }), ContractError);
+});
+
+test('public consumer accepts broader and matching authorization scopes', () => {
+  assert.doesNotThrow(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    authorization: {
+      ...traceEntry.authorization,
+      scope: { organId: scope.organId },
+    },
+  }));
+  assert.doesNotThrow(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    authorization: {
+      ...traceEntry.authorization,
+      scope,
+    },
+  }));
+});
+
 test('control-plane fields cannot leak into business payloads', () => {
   assert.throws(() => assertBusinessPayload({ executionMode: 'recurring' } as never), ContractError);
   assert.throws(() => assertBusinessPayload({ newPolicy: { executionMode: 'once' } } as never), ContractError);
