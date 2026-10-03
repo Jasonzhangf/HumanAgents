@@ -128,6 +128,63 @@ function edit(base: { draftId: string; revisionVersion: number; revisionHash: st
   };
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function confirmedDraftFixture(intake: ExplicitIntake, payloadRef: string) {
+  const interaction = await receivePreview(intake);
+  await intake.createDraft(interaction, draftIntent());
+  const revision = intake.currentDraftRevision(interaction);
+  assert.ok(revision);
+  const confirmation = await intake.confirmDraftRevision({
+    interactionId: interaction,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.revisionVersion,
+    draftRevisionHash: revision.revisionHash,
+    confirmationRef: `confirm-${payloadRef}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef,
+  });
+  const registered: RegisteredDraftRevision = {
+    interactionId: interaction,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.revisionVersion,
+    draftRevisionHash: revision.revisionHash,
+    normalizedInput: revision.normalizedInput,
+    intent: revision.proposedIntent,
+    taskRef: currentTask,
+    payloadRef,
+    requestKind: 'new-task-create',
+  };
+  return { interaction, revision, confirmation, registered };
+}
+
+function finalSubmitFor(
+  registered: RegisteredDraftRevision,
+  confirmationRef: string,
+  idempotencyKey: string,
+): FinalSubmit {
+  return {
+    interactionId: registered.interactionId,
+    draftId: registered.draftId,
+    inputRevision: registered.inputRevision,
+    draftRevisionVersion: registered.draftRevisionVersion,
+    draftRevisionHash: registered.draftRevisionHash,
+    confirmationRef,
+    idempotencyKey,
+    requestKind: 'new-task-create',
+  };
+}
+
 test('new-task-preview creates an editable draft without dispatching; status stays status-only', async () => {
   const inbox = new RequirementInbox();
   const intake = new ExplicitIntake();
@@ -848,7 +905,7 @@ test('reject closes the draft durably without creating an authorized requirement
     },
   });
 
-  const closure = await rejectDraftRevision(intake, ledger, {
+  const closure = await rejectDraftRevision(intake, owner, {
     interactionId: interaction,
     reason: 'user abandoned the draft',
     rejectionId: 'reject-1',
@@ -891,4 +948,342 @@ test('reject closes the draft durably without creating an authorized requirement
     rejectCode = error instanceof DraftRevisionError ? error.code : error instanceof ExplicitIntakeError ? error.code : 'unknown';
   }
   assert.notEqual(rejectCode, '');
+});
+
+test('failed draft creation persistence preserves prior state, lookup, sequence, and durable retry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-create-failure-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await receivePreview(intake);
+
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => intake.createDraft(interaction, draftIntent()),
+      /journal unavailable/,
+    );
+
+    const afterFailure = await intake.inspect(interaction);
+    assert.equal(afterFailure.state, 'received');
+    assert.equal(afterFailure.revision, undefined);
+    assert.equal(afterFailure.draft, undefined);
+    assert.equal(afterFailure.preview, undefined);
+    await assert.rejects(
+      () => intake.prepareConfirmation({
+        draftId: 'draft-1',
+        inputRevision: 1,
+        confirmationRef: 'confirm-after-failed-create',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-10-03T00:00:00.000Z',
+        payloadRef: 'asset://requirements/failed-create',
+      }),
+      (error) => error instanceof ExplicitIntakeError && error.code === 'draft-not-found',
+    );
+
+    const reloadedAfterFailure = new ExplicitIntake(journal);
+    const durableAfterFailure = await reloadedAfterFailure.inspect(interaction);
+    assert.equal(durableAfterFailure.state, 'received');
+    assert.equal(durableAfterFailure.revision, undefined);
+
+    const preview = await intake.createDraft(interaction, draftIntent());
+    assert.equal(preview.draftId, 'draft-1');
+    const secondInteraction = await receivePreview(intake);
+    const secondPreview = await intake.createDraft(secondInteraction, draftIntent());
+    assert.equal(secondPreview.draftId, 'draft-2');
+
+    const reloadedAfterRetry = new ExplicitIntake(journal);
+    assert.equal((await reloadedAfterRetry.inspect(interaction)).revision?.draftId, 'draft-1');
+    assert.equal((await reloadedAfterRetry.inspect(secondInteraction)).revision?.draftId, 'draft-2');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('failed rejection persistence preserves prior state, retries once, and replays the same closure', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-rejection-failure-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await receivePreview(intake);
+    await intake.createDraft(interaction, draftIntent());
+    const revision = intake.currentDraftRevision(interaction);
+    assert.ok(revision);
+
+    const rejectionInput = {
+      interactionId: interaction,
+      reason: 'user abandoned the draft',
+      rejectionId: 'reject-durable-retry',
+      closedAt: '2026-10-03T00:00:00.000Z',
+    };
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => intake.rejectDraft(rejectionInput),
+      /journal unavailable/,
+    );
+
+    const afterFailure = await intake.inspect(interaction);
+    assert.equal(afterFailure.state, 'awaiting-confirmation');
+    assert.equal(afterFailure.revision?.state, 'draft');
+    assert.equal(afterFailure.reason, undefined);
+    assert.equal(afterFailure.rejections?.length ?? 0, 0);
+
+    const reloadedAfterFailure = new ExplicitIntake(journal);
+    const durableAfterFailure = await reloadedAfterFailure.inspect(interaction);
+    assert.equal(durableAfterFailure.state, 'awaiting-confirmation');
+    assert.equal(durableAfterFailure.revision?.state, 'draft');
+    assert.equal(durableAfterFailure.rejections?.length ?? 0, 0);
+
+    const closure = await intake.rejectDraft(rejectionInput);
+    assert.equal(closure.durable, true);
+    const duplicate = await intake.rejectDraft(rejectionInput);
+    assert.deepEqual(duplicate, closure);
+
+    const afterRetry = await intake.inspect(interaction);
+    assert.equal(afterRetry.state, 'rejected');
+    assert.equal(afterRetry.revision?.state, 'rejected');
+    assert.equal(afterRetry.rejections?.length, 1);
+    assert.deepEqual(afterRetry.rejections?.[0], closure);
+
+    const reloadedAfterRetry = new ExplicitIntake(journal);
+    const durableAfterRetry = await reloadedAfterRetry.inspect(interaction);
+    assert.equal(durableAfterRetry.state, 'rejected');
+    assert.equal(durableAfterRetry.revision?.state, 'rejected');
+    assert.equal(durableAfterRetry.rejections?.length, 1);
+    assert.deepEqual(durableAfterRetry.rejections?.[0], closure);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('failed submitted-marker persistence preserves confirmed state and retry dispatches once', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-submitted-failure-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const { interaction } = await confirmedDraftFixture(intake, 'asset://requirements/submitted-retry');
+
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => intake.markRevisionSubmitted(interaction),
+      /journal unavailable/,
+    );
+
+    const afterFailure = await intake.inspect(interaction);
+    assert.equal(afterFailure.state, 'confirmed');
+    assert.equal(afterFailure.revision?.state, 'confirmed');
+    const reloadedAfterFailure = new ExplicitIntake(journal);
+    const durableAfterFailure = await reloadedAfterFailure.inspect(interaction);
+    assert.equal(durableAfterFailure.state, 'confirmed');
+    assert.equal(durableAfterFailure.revision?.state, 'confirmed');
+
+    await intake.markRevisionSubmitted(interaction);
+    await intake.markRevisionSubmitted(interaction);
+    const afterRetry = await intake.inspect(interaction);
+    assert.equal(afterRetry.state, 'dispatched');
+    assert.equal(afterRetry.revision?.state, 'submitted');
+    const reloadedAfterRetry = new ExplicitIntake(journal);
+    const durableAfterRetry = await reloadedAfterRetry.inspect(interaction);
+    assert.equal(durableAfterRetry.state, 'dispatched');
+    assert.equal(durableAfterRetry.revision?.state, 'submitted');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('rejection before append persists first, retries after save failure, and fences final submit', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-rejection-before-append-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const { interaction, confirmation, registered } = await confirmedDraftFixture(
+      intake,
+      'asset://requirements/rejection-before-append',
+    );
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(registered);
+    ledger.confirmRevision(confirmation);
+    const inbox = new CountingRequirementInbox();
+    let portCalls = 0;
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        portCalls += 1;
+        return { requirementId: envelope.requirementId };
+      },
+    });
+    const submitInput = finalSubmitFor(registered, confirmation.confirmationRef, 'submit-rejected-before-append');
+    const rejectionInput = {
+      interactionId: interaction,
+      reason: 'user abandoned the draft',
+      rejectionId: 'reject-before-append',
+      closedAt: '2026-10-03T00:00:00.000Z',
+    };
+
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => rejectDraftRevision(intake, owner, rejectionInput),
+      /journal unavailable/,
+    );
+    const afterFailure = await intake.inspect(interaction);
+    assert.equal(afterFailure.state, 'confirmed');
+    assert.equal(afterFailure.revision?.state, 'confirmed');
+    assert.equal(afterFailure.rejections?.length ?? 0, 0);
+    assert.doesNotThrow(() => ledger.assertFinalSubmit(submitInput));
+    assert.equal(inbox.size, 0);
+    assert.equal(portCalls, 0);
+
+    const closure = await rejectDraftRevision(intake, owner, rejectionInput);
+    assert.equal(closure.durable, true);
+    assert.equal((await intake.inspect(interaction)).state, 'rejected');
+    assert.equal(inbox.size, 0);
+    assert.equal(portCalls, 0);
+    await assert.rejects(
+      () => owner.submitFinal(submitInput),
+      (error) => error instanceof ExplicitBrainRouterError && error.code === 'confirmation-stale',
+    );
+    assert.equal(inbox.size, 0);
+    assert.equal(portCalls, 0);
+
+    const duplicate = await rejectDraftRevision(intake, owner, {
+      interactionId: interaction,
+      reason: rejectionInput.reason,
+      rejectionId: rejectionInput.rejectionId,
+    });
+    assert.deepEqual(duplicate, closure);
+    assert.equal((await intake.inspect(interaction)).rejections?.length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('rejection queued behind a held final submit cannot close after durable dispatch', async () => {
+  const intake = new ExplicitIntake();
+  const { interaction, confirmation, registered } = await confirmedDraftFixture(
+    intake,
+    'asset://requirements/rejection-race',
+  );
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(registered);
+  ledger.confirmRevision(confirmation);
+  const inbox = new CountingRequirementInbox();
+  const portEntered = deferred<void>();
+  const releasePort = deferred<void>();
+  let portCalls = 0;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) {
+      portCalls += 1;
+      portEntered.resolve();
+      await releasePort.promise;
+      return { requirementId: envelope.requirementId };
+    },
+  });
+  const submitInput = finalSubmitFor(registered, confirmation.confirmationRef, 'submit-rejection-race');
+  const submitting = owner.submitFinal(submitInput);
+  await portEntered.promise;
+  assert.equal(inbox.size, 1);
+
+  let rejectionSettled = false;
+  const rejectionPromise = rejectDraftRevision(intake, owner, {
+    interactionId: interaction,
+    reason: 'user abandoned the draft',
+    rejectionId: 'reject-race',
+    closedAt: '2026-10-03T00:00:00.000Z',
+  }).then(
+    () => {
+      rejectionSettled = true;
+      return undefined;
+    },
+    (error: unknown) => {
+      rejectionSettled = true;
+      return error;
+    },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(rejectionSettled, false);
+
+  releasePort.resolve();
+  const receipt = await submitting;
+  const rejection = await rejectionPromise;
+  assert.equal(receipt.status, 'submitted');
+  assert.ok(rejection instanceof ExplicitBrainRouterError);
+  assert.equal(rejection.code, 'rejection-blocked');
+  const after = await intake.inspect(interaction);
+  assert.equal(after.state, 'confirmed');
+  assert.equal(after.revision?.state, 'confirmed');
+  assert.equal(after.rejections?.length ?? 0, 0);
+  assert.equal(inbox.size, 1);
+  assert.equal(portCalls, 1);
+});
+
+test('uncertain final-submit failure and restart retain durable inbox fencing for rejection', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-rejection-restart-'));
+  try {
+    const journal = new FileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const { interaction, confirmation, registered } = await confirmedDraftFixture(
+      intake,
+      'asset://requirements/rejection-restart',
+    );
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(registered);
+    ledger.confirmRevision(confirmation);
+    const inbox = new CountingRequirementInbox();
+    let portCalls = 0;
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        portCalls += 1;
+        throw new Error(`transport lost after durable append: ${envelope.requirementId}`);
+      },
+    });
+    const submitInput = finalSubmitFor(registered, confirmation.confirmationRef, 'submit-rejection-restart');
+    await assert.rejects(
+      () => owner.submitFinal(submitInput),
+      /transport lost after durable append/,
+    );
+    assert.equal(portCalls, 1);
+    assert.equal(inbox.appendCount, 1);
+    assert.equal(inbox.size, 1);
+
+    const rejectionInput = {
+      interactionId: interaction,
+      reason: 'user abandoned the draft',
+      rejectionId: 'reject-restart',
+      closedAt: '2026-10-03T00:00:00.000Z',
+    };
+    const rejection = await rejectDraftRevision(intake, owner, rejectionInput).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    assert.ok(rejection instanceof ExplicitBrainRouterError);
+    assert.equal(rejection.code, 'rejection-blocked');
+    assert.equal((await intake.inspect(interaction)).state, 'confirmed');
+
+    const ledgerState = ledger.exportState();
+    const inboxState = inbox.exportState();
+    const restoredIntake = new ExplicitIntake(journal);
+    const restoredLedger = new ConfirmationLedger();
+    restoredLedger.restoreState(ledgerState);
+    const restoredInbox = new CountingRequirementInbox();
+    restoredInbox.restoreState(inboxState);
+    const restoredOwner = new RequirementSubmissionOwner(restoredLedger, restoredInbox, {
+      async submit(envelope) {
+        return { requirementId: envelope.requirementId };
+      },
+    });
+
+    const restoredRejection = await rejectDraftRevision(restoredIntake, restoredOwner, rejectionInput).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    assert.ok(restoredRejection instanceof ExplicitBrainRouterError);
+    assert.equal(restoredRejection.code, 'rejection-blocked');
+    assert.equal((await restoredIntake.inspect(interaction)).state, 'confirmed');
+
+    const retry = await restoredOwner.submitFinal(submitInput);
+    assert.equal(retry.status, 'submitted');
+    assert.equal(restoredInbox.appendCount, 0);
+    assert.equal(restoredInbox.size, 1);
+    assert.equal(restoredInbox.find(registered.draftId)?.fifoSeq, retry.requirement.fifoSeq);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

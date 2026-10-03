@@ -712,24 +712,6 @@ export class ExplicitIntake {
       executionControlRef: intent.executionControlRef,
       immutableOriginalRef: `raw-input:${interaction.interactionId}:${interaction.inputRevision}`,
     });
-    this.nextDraftSeq += 1;
-    interaction.revision = revision;
-    interaction.revisionEdits = [];
-    interaction.confirmations = [];
-    interaction.rejections = [];
-    interaction.draft = {
-      draftId: revision.draftId,
-      inputRevision: revision.inputRevision,
-      sourceRef: interaction.sourceRef,
-      normalizedInput: revision.normalizedInput,
-      matchedTasks,
-      knownFacts: [...(intent.knownFacts ?? [])],
-      proposedIntent: revision.proposedIntent,
-      proposal: revision.proposal,
-      decisionRefs: [...(intent.decisionRefs ?? [])],
-      state: 'awaiting-intent',
-    };
-    this.draftInteractions.set(revision.draftId, interaction.interactionId);
     const createdAt = interaction.occurredAt ?? new Date().toISOString();
     const preview: DraftPreviewReceipt = {
       previewId: `preview:${revision.draftId}:${revision.revisionVersion}`,
@@ -750,8 +732,34 @@ export class ExplicitIntake {
       },
     };
     validateDraftPreviewReceipt(preview);
-    interaction.preview = preview;
-    this.transition(interaction, 'awaiting-confirmation', 'human', 'edit-refine-confirm-or-reject', 'explicit-user-confirmation');
+    this.transition(
+      interaction,
+      'awaiting-confirmation',
+      'human',
+      'edit-refine-confirm-or-reject',
+      'explicit-user-confirmation',
+      (candidate) => {
+        this.nextDraftSeq += 1;
+        candidate.revision = revision;
+        candidate.revisionEdits = [];
+        candidate.confirmations = [];
+        candidate.rejections = [];
+        candidate.draft = {
+          draftId: revision.draftId,
+          inputRevision: revision.inputRevision,
+          sourceRef: candidate.sourceRef,
+          normalizedInput: revision.normalizedInput,
+          matchedTasks,
+          knownFacts: [...(intent.knownFacts ?? [])],
+          proposedIntent: revision.proposedIntent,
+          proposal: revision.proposal,
+          decisionRefs: [...(intent.decisionRefs ?? [])],
+          state: 'awaiting-intent',
+        };
+        this.draftInteractions.set(revision.draftId, candidate.interactionId);
+        candidate.preview = preview;
+      },
+    );
     return structuredClone(preview);
   }
 
@@ -966,8 +974,28 @@ export class ExplicitIntake {
         },
       );
     }
+    const rejectionId = input.rejectionId ?? `rejection:${revision.draftId}:${revision.revisionVersion}`;
+    const existing = (interaction.rejections ?? []).find((entry) => entry.rejectionId === rejectionId);
+    if (existing) {
+      if (existing.reason === input.reason
+        && existing.draftId === revision.draftId
+        && existing.draftRevisionVersion === revision.revisionVersion
+        && existing.draftRevisionHash === revision.revisionHash
+        && (input.closedAt === undefined || existing.closedAt === input.closedAt)) {
+        return structuredClone(existing);
+      }
+      throw new ExplicitIntakeError(
+        'rejection-conflict',
+        'rejection reference was reused with different content',
+        {
+          owner: 'human',
+          nextAction: 'inspect-the-recorded-rejection',
+          condition: 'same-rejection-identity',
+        },
+      );
+    }
     const closure: DraftRejectClosure = {
-      rejectionId: input.rejectionId ?? `rejection:${revision.draftId}:${revision.revisionVersion}`,
+      rejectionId,
       reason: input.reason,
       closedAt: input.closedAt ?? new Date().toISOString(),
       durable: true,
@@ -976,10 +1004,29 @@ export class ExplicitIntake {
       draftRevisionHash: revision.revisionHash,
     };
     validateDraftRejectClosure(closure);
-    interaction.rejections = [...(interaction.rejections ?? []), closure];
-    interaction.revision = { ...revision, state: 'rejected' };
-    interaction.reason = input.reason;
-    this.transition(interaction, 'rejected', 'explicit-intake', 'close-interaction', 'rejection-recorded');
+    if (interaction.state === 'rejected') {
+      throw new ExplicitIntakeError(
+        'draft-not-rejectable',
+        'draft already has a different rejection closure',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'single-rejection-closure',
+        },
+      );
+    }
+    this.transition(
+      interaction,
+      'rejected',
+      'explicit-intake',
+      'close-interaction',
+      'rejection-recorded',
+      (candidate) => {
+        candidate.rejections = [...(candidate.rejections ?? []), closure];
+        candidate.revision = { ...revision, state: 'rejected' };
+        candidate.reason = input.reason;
+      },
+    );
     return structuredClone(closure);
   }
 
@@ -990,15 +1037,17 @@ export class ExplicitIntake {
   async markRevisionSubmitted(interactionId: InteractionId): Promise<void> {
     const interaction = this.requireInteraction(interactionId);
     if (interaction.state === 'dispatched') return;
-    if (interaction.state !== 'confirmed' || interaction.revision?.state !== 'confirmed') {
+    const revision = interaction.revision;
+    if (interaction.state !== 'confirmed' || !revision || revision.state !== 'confirmed') {
       throw this.invalidState(
         'mark requirement submitted',
         `cannot mark requirement submitted from ${interaction.state}`,
         'complete-the-authorized-final-submit-first',
       );
     }
-    interaction.revision = { ...interaction.revision, state: 'submitted' };
-    this.transition(interaction, 'dispatched', 'runtime-coordinator', 'consume-inbox');
+    this.transition(interaction, 'dispatched', 'runtime-coordinator', 'consume-inbox', undefined, (candidate) => {
+      candidate.revision = { ...revision, state: 'submitted' };
+    });
   }
 
   private requireDraftRequestKind(interaction: InteractionRecord, action: string): void {

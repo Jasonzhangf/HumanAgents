@@ -39,7 +39,8 @@ export class ExplicitBrainRouterError extends Error {
     | 'confirmation-required'
     | 'confirmation-stale'
     | 'unauthorized-final-submit'
-    | 'duplicate-submit';
+    | 'duplicate-submit'
+    | 'rejection-blocked';
 
   constructor(code: ExplicitBrainRouterError['code'], message: string) {
     super(message);
@@ -531,12 +532,10 @@ export class ConfirmationLedger {
  */
 export async function rejectDraftRevision(
   intake: ExplicitIntake,
-  ledger: ConfirmationLedger,
+  owner: RequirementSubmissionOwner,
   input: RejectDraftInput,
 ): Promise<DraftRejectClosure> {
-  const closure = await intake.rejectDraft(input);
-  ledger.closeRevision(closure.draftId);
-  return closure;
+  return owner.rejectDraftRevision(intake, input);
 }
 
 export interface RequirementSubmitPort {
@@ -599,6 +598,21 @@ export class RequirementSubmissionOwner {
     }
   }
 
+  async rejectDraftRevision(intake: ExplicitIntake, input: RejectDraftInput): Promise<DraftRejectClosure> {
+    return this.serialize(async () => {
+      const revision = intake.currentDraftRevision(input.interactionId);
+      if (revision && this.hasOwnedSubmission(revision.draftId)) {
+        throw new ExplicitBrainRouterError(
+          'rejection-blocked',
+          `draft rejection cannot close after requirement submission entered the inbox or dispatch: ${revision.draftId}`,
+        );
+      }
+      const closure = await intake.rejectDraft(input);
+      this.ledger.closeRevision(closure.draftId);
+      return closure;
+    });
+  }
+
   /**
    * The single authorization point for a new task. Repeated submission of the
    * same revision returns the existing receipt and appends the requirement to
@@ -606,15 +620,7 @@ export class RequirementSubmissionOwner {
    * a typed conflict, never a silent second dispatch.
    */
   async submitFinal(input: FinalSubmit | ExistingTaskChangeSubmit): Promise<FinalSubmitReceipt> {
-    let release!: () => void;
-    const previous = this.submissionTail;
-    this.submissionTail = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      return await this.submitFinalSerialized(input);
-    } finally {
-      release();
-    }
+    return this.serialize(() => this.submitFinalSerialized(input));
   }
 
   private async submitFinalSerialized(input: FinalSubmit | ExistingTaskChangeSubmit): Promise<FinalSubmitReceipt> {
@@ -698,15 +704,36 @@ export class RequirementSubmissionOwner {
   }
 
   async submit(input: RequirementSubmitArguments): Promise<RequirementSubmitReceipt> {
+    return this.serialize(() => this.submitSerialized(input));
+  }
+
+  private async serialize<T>(operation: () => Promise<T>): Promise<T> {
     let release!: () => void;
     const previous = this.submissionTail;
     this.submissionTail = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      return await this.submitSerialized(input);
+      return await operation();
     } finally {
       release();
     }
+  }
+
+  private hasOwnedSubmission(draftId: string): boolean {
+    if (this.inbox.find(draftId)) return true;
+    for (const pending of this.pending.values()) {
+      if (pending.envelope.draftId === draftId) return true;
+    }
+    for (const receipt of this.submitted.values()) {
+      if (receipt.draftId === draftId) return true;
+    }
+    for (const revisionKey of this.finalSubmissions.keys()) {
+      if (revisionKey.startsWith(`${draftId}:`)) return true;
+    }
+    for (const entry of this.finalIdempotency.values()) {
+      if (entry.revisionKey.startsWith(`${draftId}:`)) return true;
+    }
+    return false;
   }
 
   private async submitSerialized(input: RequirementSubmitArguments): Promise<RequirementSubmitReceipt> {
