@@ -11,7 +11,10 @@ import {
   validateBugReport,
   validateChannelBinding,
   type BugReportArguments,
+  type DraftConfirmation,
   type EvidenceRef,
+  type ExecutionPolicyDefinition,
+  type FinalSubmit,
   type MemoryInteractionPort,
   type MemoryOperationRequestedEvent,
   type RequirementEnvelope,
@@ -51,6 +54,7 @@ import {
   resolveBugOwner,
   stableBugSubmissionId,
   submitMemorySaveCandidate,
+  ExecutionPolicyCompiler,
   type ExplicitBrainRuntimeBinding,
   type ExplicitBrainOperationalToolPorts,
   type GitBugPort,
@@ -3319,3 +3323,142 @@ test('Decision Trace stores denied and unknown execution outcomes for later quer
   });
   assert.equal(traces.query({ interactionRef: 'interaction-a', admission: 'permission-denied' }).length, 1);
 });
+
+function typedRevisionFixture(overrides: Partial<Parameters<ConfirmationLedger['registerRevision']>[0]> = {}) {
+  return {
+    interactionId: 'interaction-typed',
+    draftId: 'draft-typed',
+    inputRevision: 1,
+    draftRevisionVersion: 2,
+    draftRevisionHash: 'sha256:typed-revision-2',
+    normalizedInput: 'apply the refined directive',
+    intent: 'change' as const,
+    payloadRef: 'asset://requirements/typed',
+    requestKind: 'new-task-create' as const,
+    ...overrides,
+  };
+}
+
+function typedConfirmation(revision: ReturnType<typeof typedRevisionFixture>): DraftConfirmation {
+  return {
+    confirmationRef: 'confirm-typed',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: revision.payloadRef,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    interactionId: revision.interactionId,
+  };
+}
+
+function typedSubmit(revision: ReturnType<typeof typedRevisionFixture>, overrides: Partial<FinalSubmit> = {}): FinalSubmit {
+  return {
+    interactionId: revision.interactionId,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    idempotencyKey: 'submit-typed',
+    requestKind: 'new-task-create',
+    ...overrides,
+  };
+}
+
+test('exact submit authorizes the confirmed revision once and rejects stale hash and reused idempotency', async () => {
+  const revision = typedRevisionFixture();
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision(typedConfirmation(revision));
+
+  // A stale hash is rejected with a typed error, not accepted silently.
+  assert.throws(
+    () => ledger.assertFinalSubmit(typedSubmit(revision, { draftRevisionHash: 'sha256:stale' })),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'confirmation-stale',
+  );
+  // A mismatched confirmation ref is a typed confirmation-required rejection.
+  assert.throws(
+    () => ledger.assertFinalSubmit(typedSubmit(revision, { confirmationRef: 'confirm-other' })),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'confirmation-required',
+  );
+
+  const dispatched: string[] = [];
+  const inbox = {
+    get expectedNextFifoSeq() { return 1; },
+    markConfirmed() {},
+    find() { return undefined; },
+    async append(envelope: RequirementEnvelope) {
+      dispatched.push(envelope.requirementId);
+      return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+    },
+  } as unknown as Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) { return { requirementId: envelope.requirementId }; },
+  });
+
+  const first = await owner.submitFinal(typedSubmit(revision));
+  assert.equal(first.status, 'submitted');
+  assert.equal(first.requirement.draftRevisionHash, revision.draftRevisionHash);
+  const duplicate = await owner.submitFinal(typedSubmit(revision));
+  assert.equal(duplicate.status, 'duplicate');
+  assert.equal(duplicate.requirement.requirementId, first.requirement.requirementId);
+  assert.equal(dispatched.length, 1);
+});
+
+test('existing-task-change cannot be authorized as a new task and execution policy compiles to a control ref', () => {
+  const revision = typedRevisionFixture({ requestKind: 'existing-task-change' });
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision(typedConfirmation(revision));
+
+  // The same confirmed revision cannot be dispatched as a new-task-create.
+  assert.throws(
+    () => ledger.assertFinalSubmit(typedSubmit(revision)),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  // But it is valid as its own request kind (taskRef is the target task).
+  const existingAcceptance = ledger.assertFinalSubmit({
+    interactionId: revision.interactionId,
+    taskId: id('task', 'task-target'),
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    idempotencyKey: 'submit-existing',
+    requestKind: 'existing-task-change',
+  });
+  assert.equal(existingAcceptance.revision.draftId, revision.draftId);
+
+  const policy: ExecutionPolicyDefinition = {
+    policyId: 'policy-a',
+    policyRevision: 1,
+    executionMode: 'once',
+    timezone: 'America/Los_Angeles',
+    canonicalInstant: '2026-10-03T12:00:00.000Z',
+    dstMode: 'wall',
+    dstMissedPolicy: 'shift-forward',
+    dstAmbiguousPolicy: 'earlier-offset',
+    latePolicy: 'run-once',
+    busyPolicy: 'skip',
+    dueAt: '2026-10-03T12:00:00.000Z',
+  };
+  const compiled = new ExecutionPolicyCompiler().compile(firstRequirement(revision), policy);
+  assert.equal(compiled.executionControlRef, 'execution-policy:policy-a:1');
+  assert.equal(compiled.policyHash.startsWith('sha256:'), true);
+  assert.equal(compiled.definition.executionMode, 'once');
+});
+
+function firstRequirement(revision: ReturnType<typeof typedRevisionFixture>) {
+  return {
+    requirementId: 'requirement:typed',
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    fifoSeq: 1,
+    payloadRef: revision.payloadRef,
+  };
+}

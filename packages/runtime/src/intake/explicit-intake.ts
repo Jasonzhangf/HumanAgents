@@ -1,8 +1,43 @@
 import type {
+  DraftConfirmation,
+  DraftPreviewReceipt,
+  DraftRejectClosure,
+  DraftRevision,
+  DraftRevisionInput,
+  InteractionRequestKind,
   RequirementIntent,
   TaskId,
 } from '../../../contracts/src/index.js';
+import {
+  validateDraftConfirmation,
+  validateDraftPreviewReceipt,
+  validateDraftRejectClosure,
+} from '../../../contracts/src/index.js';
+import {
+  assertDraftRevisionCurrent,
+  createDraftRevision,
+  refineDraftRevision,
+} from '../../../core/src/index.js';
 import { ExplicitIntakeError } from './errors.js';
+
+const DRAFT_REQUEST_KINDS: readonly InteractionRequestKind[] = [
+  'new-task-preview',
+  'new-task-create',
+  'existing-task-change',
+  'refinement',
+];
+
+/**
+ * Durable store for the explicit-intake snapshot. The host already persists the
+ * same snapshot inside its `explicit-brain.state` record (`intake:
+ * exportState()`), so this port is the narrow boundary a host wires to that
+ * existing journal. It stores the existing ExplicitIntakeState shape; it does
+ * not define a second journal format.
+ */
+export interface ExplicitIntakeJournalPort {
+  save(state: ExplicitIntakeState): void;
+  load(): ExplicitIntakeState | undefined;
+}
 
 export type InteractionId = string;
 export type ExplicitInteractionState =
@@ -22,6 +57,13 @@ export interface ExplicitInput {
   readonly rawInput: string;
   readonly channel: 'business' | 'control';
   readonly controlCommand?: 'steer' | 'stop' | 'revoke-permission';
+  /**
+   * Typed creation/query identity carried from the real entry point. A
+   * `new-task-preview` must never be collapsed into a generic status query;
+   * only the final `new-task-create` submit authorizes a new task.
+   */
+  readonly requestKind?: InteractionRequestKind;
+  readonly occurredAt?: string;
 }
 
 export interface MatchedTask {
@@ -60,6 +102,8 @@ export interface ExplicitInteractionSnapshot {
   readonly state: ExplicitInteractionState;
   readonly sourceRef: string;
   readonly rawInput: string;
+  readonly requestKind?: InteractionRequestKind;
+  readonly occurredAt?: string;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
   readonly condition?: string;
@@ -67,6 +111,10 @@ export interface ExplicitInteractionSnapshot {
   readonly reply?: string;
   readonly clarifications?: readonly ClarificationExchange[];
   readonly draft?: RequirementDraft;
+  readonly revision?: DraftRevision;
+  readonly preview?: DraftPreviewReceipt;
+  readonly confirmations?: readonly DraftConfirmation[];
+  readonly rejections?: readonly DraftRejectClosure[];
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
 }
@@ -123,6 +171,8 @@ interface ExplicitInteractionRecordState {
   readonly inputRevision: number;
   readonly sourceRef: string;
   readonly rawInput: string;
+  readonly requestKind?: InteractionRequestKind;
+  readonly occurredAt?: string;
   readonly state: ExplicitInteractionState;
   readonly owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   readonly nextAction: string;
@@ -131,6 +181,11 @@ interface ExplicitInteractionRecordState {
   readonly reply?: string;
   readonly clarifications?: readonly ClarificationExchange[];
   readonly draft?: RequirementDraft;
+  readonly revision?: DraftRevision;
+  readonly preview?: DraftPreviewReceipt;
+  readonly confirmations?: readonly DraftConfirmation[];
+  readonly rejections?: readonly DraftRejectClosure[];
+  readonly revisionEdits?: readonly RevisionEditRecord[];
   readonly confirmation?: ConfirmedRequirementDraft;
   readonly history: readonly ExplicitInteractionState[];
 }
@@ -140,6 +195,8 @@ interface InteractionRecord {
   readonly inputRevision: number;
   readonly sourceRef: string;
   readonly rawInput: string;
+  readonly requestKind?: InteractionRequestKind;
+  readonly occurredAt?: string;
   state: ExplicitInteractionState;
   owner: 'explicit-intake' | 'human' | 'runtime-coordinator';
   nextAction: string;
@@ -148,8 +205,55 @@ interface InteractionRecord {
   reply?: string;
   clarifications?: ClarificationExchange[];
   draft?: RequirementDraft;
+  revision?: DraftRevision;
+  preview?: DraftPreviewReceipt;
+  confirmations?: DraftConfirmation[];
+  rejections?: DraftRejectClosure[];
+  revisionEdits?: RevisionEditRecord[];
   confirmation?: ConfirmedRequirementDraft;
   readonly history: ExplicitInteractionState[];
+}
+
+interface RevisionEditRecord {
+  readonly idempotencyKey: string;
+  readonly revision: DraftRevision;
+}
+
+/**
+ * Structured intent for the typed draft boundary. The real entry point (UI/API)
+ * supplies this after normalization; intake turns it into an immutable
+ * {@link DraftRevision} through the core invariant module.
+ */
+export interface DraftIntent {
+  readonly goal: string;
+  readonly scope: string;
+  readonly constraints?: readonly string[];
+  readonly deliverables?: readonly string[];
+  readonly normalizedInput: string;
+  readonly proposedIntent: RequirementIntent;
+  readonly proposal: string;
+  readonly matchedTasks?: readonly MatchedTask[];
+  readonly knownFacts?: readonly string[];
+  readonly decisionRefs?: readonly string[];
+  readonly executionControlRef?: string;
+}
+
+export interface ConfirmDraftRevisionInput {
+  readonly interactionId: InteractionId;
+  readonly draftId: string;
+  readonly draftRevisionVersion: number;
+  readonly draftRevisionHash: string;
+  readonly confirmationRef: string;
+  readonly confirmedBy: string;
+  readonly confirmedAt: string;
+  readonly payloadRef: string;
+}
+
+export interface RejectDraftInput {
+  readonly interactionId: InteractionId;
+  readonly reason: string;
+  readonly rejectionId?: string;
+  readonly closedAt?: string;
 }
 
 export class ExplicitIntake {
@@ -158,7 +262,10 @@ export class ExplicitIntake {
   private nextInteractionSeq = 1;
   private nextDraftSeq = 1;
 
-  constructor() {}
+  constructor(private readonly journal?: ExplicitIntakeJournalPort) {
+    const restored = journal?.load();
+    if (restored) this.restoreState(restored);
+  }
 
   exportState(): ExplicitIntakeState {
     return {
@@ -177,7 +284,12 @@ export class ExplicitIntake {
       const interaction = structuredClone(input) as InteractionRecord;
       this.interactions.set(interaction.interactionId, interaction);
       if (interaction.draft) this.draftInteractions.set(interaction.draft.draftId, interaction.interactionId);
+      if (interaction.revision) this.draftInteractions.set(interaction.revision.draftId, interaction.interactionId);
     }
+  }
+
+  private persist(): void {
+    this.journal?.save(this.exportState());
   }
 
   async receive(input: ExplicitInput, inputRevision = 1): Promise<InteractionId> {
@@ -214,6 +326,17 @@ export class ExplicitIntake {
         },
       );
     }
+    if (input.requestKind !== undefined && (typeof input.requestKind !== 'string' || input.requestKind.trim() === '')) {
+      throw new ExplicitIntakeError(
+        'input-required',
+        'explicit input requestKind must be a non-empty string when provided',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'provide-a-typed-request-kind',
+          condition: 'typed-request-kind',
+        },
+      );
+    }
 
     const interactionId = `interaction-${this.nextInteractionSeq}`;
     this.nextInteractionSeq += 1;
@@ -222,12 +345,15 @@ export class ExplicitIntake {
       inputRevision,
       sourceRef: input.sourceRef,
       rawInput: input.rawInput,
+      ...(input.requestKind === undefined ? {} : { requestKind: input.requestKind }),
+      ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
       state: 'received',
       owner: 'explicit-intake',
       nextAction: 'start-matching',
       condition: 'matching-requested',
       history: ['received'],
     });
+    this.persist();
     return interactionId;
   }
 
@@ -238,6 +364,8 @@ export class ExplicitIntake {
       state: interaction.state,
       sourceRef: interaction.sourceRef,
       rawInput: interaction.rawInput,
+      requestKind: interaction.requestKind,
+      occurredAt: interaction.occurredAt,
       owner: interaction.owner,
       nextAction: interaction.nextAction,
       condition: interaction.condition,
@@ -247,6 +375,14 @@ export class ExplicitIntake {
         ? undefined
         : structuredClone(interaction.clarifications),
       draft: interaction.draft,
+      revision: interaction.revision,
+      preview: interaction.preview,
+      confirmations: interaction.confirmations === undefined
+        ? undefined
+        : structuredClone(interaction.confirmations),
+      rejections: interaction.rejections === undefined
+        ? undefined
+        : structuredClone(interaction.rejections),
       confirmation: interaction.confirmation,
       history: [...interaction.history],
     };
@@ -503,6 +639,336 @@ export class ExplicitIntake {
     await this.markDispatched(interactionId);
   }
 
+  /**
+   * The current immutable draft revision, or undefined when this interaction
+   * has no typed draft (e.g. a plain status query).
+   */
+  currentDraftRevision(interactionId: InteractionId): DraftRevision | undefined {
+    const revision = this.requireInteraction(interactionId).revision;
+    return revision === undefined ? undefined : structuredClone(revision);
+  }
+
+  /**
+   * Create the first reviewable revision of a new-task preview. This is not an
+   * authorization point: the returned receipt is always `authorized: false`,
+   * nothing enters the requirement inbox, and only the final
+   * `new-task-create` submit may dispatch.
+   */
+  async createDraft(interactionId: InteractionId, intent: DraftIntent): Promise<DraftPreviewReceipt> {
+    const interaction = this.requireInteraction(interactionId);
+    this.requireDraftRequestKind(interaction, 'create draft');
+    if (interaction.revision) {
+      throw new ExplicitIntakeError(
+        'draft-already-created',
+        'interaction already owns a draft revision',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'refine-the-existing-draft',
+          condition: 'single-draft-per-interaction',
+        },
+      );
+    }
+    if (!intent.goal.trim() || !intent.scope.trim() || !intent.normalizedInput.trim() || !intent.proposal.trim()) {
+      throw new ExplicitIntakeError(
+        'draft-intent-incomplete',
+        'draft intent requires goal, scope, normalizedInput, and proposal',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'provide-the-complete-normalized-intent',
+          condition: 'complete-draft-intent',
+        },
+      );
+    }
+    const matchedTasks = [...(intent.matchedTasks ?? [])];
+    const revision = createDraftRevision({
+      draftId: `draft-${this.nextDraftSeq}`,
+      inputRevision: interaction.inputRevision,
+      goal: intent.goal,
+      scope: intent.scope,
+      constraints: intent.constraints,
+      deliverables: intent.deliverables,
+      normalizedInput: intent.normalizedInput,
+      proposedIntent: intent.proposedIntent,
+      proposal: intent.proposal,
+      matchedTasks: matchedTasks.map((task) => task.taskId.value),
+      knownFacts: intent.knownFacts,
+      decisionRefs: intent.decisionRefs,
+      executionControlRef: intent.executionControlRef,
+      immutableOriginalRef: `raw-input:${interaction.interactionId}:${interaction.inputRevision}`,
+    });
+    this.nextDraftSeq += 1;
+    interaction.revision = revision;
+    interaction.revisionEdits = [];
+    interaction.confirmations = [];
+    interaction.rejections = [];
+    interaction.draft = {
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      sourceRef: interaction.sourceRef,
+      normalizedInput: revision.normalizedInput,
+      matchedTasks,
+      knownFacts: [...(intent.knownFacts ?? [])],
+      proposedIntent: revision.proposedIntent,
+      proposal: revision.proposal,
+      decisionRefs: [...(intent.decisionRefs ?? [])],
+      state: 'awaiting-intent',
+    };
+    this.draftInteractions.set(revision.draftId, interaction.interactionId);
+    const createdAt = interaction.occurredAt ?? new Date().toISOString();
+    const preview: DraftPreviewReceipt = {
+      previewId: `preview:${revision.draftId}:${revision.revisionVersion}`,
+      interactionId: interaction.interactionId,
+      draftId: revision.draftId,
+      revisionVersion: revision.revisionVersion,
+      revisionHash: revision.revisionHash,
+      createdAt,
+      authorized: false,
+      context: {
+        requestKind: 'new-task-preview',
+        interactionId: interaction.interactionId,
+        inputRevision: interaction.inputRevision,
+        sourceRef: interaction.sourceRef,
+        channelId: 'explicit-intake',
+        createdAt,
+        authorized: false,
+      },
+    };
+    validateDraftPreviewReceipt(preview);
+    interaction.preview = preview;
+    this.transition(interaction, 'awaiting-confirmation', 'human', 'edit-refine-confirm-or-reject', 'explicit-user-confirmation');
+    return structuredClone(preview);
+  }
+
+  /**
+   * Apply a typed edit/refinement to the current revision. A stale base
+   * version/hash is rejected by the core invariant and the current revision is
+   * left untouched, so the user's edit is preserved for inspection.
+   */
+  async refineDraft(interactionId: InteractionId, input: DraftRevisionInput): Promise<DraftRevision> {
+    const interaction = this.requireInteraction(interactionId);
+    const revision = interaction.revision;
+    if (!revision) {
+      throw new ExplicitIntakeError(
+        'draft-not-found',
+        'interaction has no draft revision to refine',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'create-the-draft-first',
+          condition: 'existing-draft-revision',
+        },
+      );
+    }
+    if (interaction.state === 'confirmed' || interaction.state === 'dispatched' || interaction.state === 'rejected') {
+      throw new ExplicitIntakeError(
+        'draft-not-editable',
+        `cannot refine a draft from ${interaction.state}`,
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'editable-draft',
+        },
+      );
+    }
+    const replayed = (interaction.revisionEdits ?? []).find((entry) => entry.idempotencyKey === input.idempotencyKey);
+    if (replayed) return structuredClone(replayed.revision);
+
+    const next = refineDraftRevision(revision, input);
+    interaction.revisionEdits = [...(interaction.revisionEdits ?? []), { idempotencyKey: input.idempotencyKey, revision: next }];
+    interaction.revision = next;
+    if (interaction.draft) {
+      interaction.draft = {
+        ...interaction.draft,
+        normalizedInput: next.normalizedInput,
+        proposedIntent: next.proposedIntent,
+        proposal: next.proposal,
+        knownFacts: [...next.knownFacts],
+      };
+    }
+    this.persist();
+    return structuredClone(next);
+  }
+
+  /**
+   * Confirm the exact current revision. The confirmation binds the revision
+   * version and hash; an old confirmation can never authorize a newer edit.
+   * Confirming is not dispatching — the final submit does that.
+   */
+  async confirmDraftRevision(input: ConfirmDraftRevisionInput): Promise<DraftConfirmation> {
+    const interaction = this.requireInteraction(input.interactionId);
+    const revision = interaction.revision;
+    if (!revision || revision.draftId !== input.draftId) {
+      throw new ExplicitIntakeError(
+        'draft-not-found',
+        'confirmed draft does not exist on this interaction',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'existing-draft-revision',
+        },
+      );
+    }
+    assertDraftRevisionCurrent(revision, {
+      revisionVersion: input.draftRevisionVersion,
+      revisionHash: input.draftRevisionHash,
+    });
+    if (!input.confirmationRef.trim() || !input.confirmedBy.trim() || !Number.isFinite(Date.parse(input.confirmedAt))) {
+      throw new ExplicitIntakeError(
+        'explicit-confirmation-required',
+        'confirmationRef, confirmedBy, and confirmedAt are required',
+        {
+          owner: 'human',
+          nextAction: 'provide-explicit-confirmation',
+          condition: 'explicit-user-confirmation',
+        },
+      );
+    }
+    const existing = (interaction.confirmations ?? []).find((entry) => entry.confirmationRef === input.confirmationRef);
+    if (existing) {
+      if (existing.confirmedBy === input.confirmedBy
+        && existing.confirmedAt === input.confirmedAt
+        && existing.payloadRef === input.payloadRef
+        && existing.draftRevisionHash === revision.revisionHash) {
+        return structuredClone(existing);
+      }
+      throw new ExplicitIntakeError(
+        'confirmation-stale',
+        'confirmation reference was reused with different content',
+        {
+          owner: 'human',
+          nextAction: 'reconfirm-the-current-draft-revision',
+          condition: 'same-confirmation-identity',
+        },
+      );
+    }
+    if (interaction.state === 'dispatched' || interaction.state === 'rejected') {
+      throw new ExplicitIntakeError(
+        'draft-not-confirmable',
+        `cannot confirm a draft from ${interaction.state}`,
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'confirmable-draft',
+        },
+      );
+    }
+    const confirmation: DraftConfirmation = {
+      confirmationRef: input.confirmationRef,
+      confirmedBy: input.confirmedBy,
+      confirmedAt: input.confirmedAt,
+      payloadRef: input.payloadRef,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      interactionId: interaction.interactionId,
+    };
+    validateDraftConfirmation(confirmation);
+    interaction.confirmations = [...(interaction.confirmations ?? []), confirmation];
+    interaction.revision = { ...revision, state: 'confirmed' };
+    interaction.confirmation = {
+      interactionId: interaction.interactionId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      taskRef: interaction.draft?.matchedTasks.find((task) => task.relation === 'current')?.taskId,
+      payloadRef: input.payloadRef,
+      confirmationRef: input.confirmationRef,
+      confirmedBy: input.confirmedBy,
+      confirmedAt: input.confirmedAt,
+    };
+    this.transition(interaction, 'confirmed', 'human', 'submit-final-create');
+    return structuredClone(confirmation);
+  }
+
+  /**
+   * Formal reject/closure. The closure is durable and the draft never enters
+   * the requirement inbox; a rejected draft cannot later be confirmed.
+   */
+  async rejectDraft(input: RejectDraftInput): Promise<DraftRejectClosure> {
+    const interaction = this.requireInteraction(input.interactionId);
+    const revision = interaction.revision;
+    if (!revision) {
+      throw new ExplicitIntakeError(
+        'draft-not-found',
+        'interaction has no draft revision to reject',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'create-the-draft-first',
+          condition: 'existing-draft-revision',
+        },
+      );
+    }
+    if (interaction.state === 'dispatched' || revision.state === 'submitted') {
+      throw new ExplicitIntakeError(
+        'draft-not-rejectable',
+        'cannot reject a submitted draft',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'unsubmitted-draft',
+        },
+      );
+    }
+    if (!input.reason.trim()) {
+      throw new ExplicitIntakeError(
+        'rejection-reason-required',
+        'rejection reason is required',
+        {
+          owner: 'human',
+          nextAction: 'record-rejection-reason',
+          condition: 'explicit-rejection-reason',
+        },
+      );
+    }
+    const closure: DraftRejectClosure = {
+      rejectionId: input.rejectionId ?? `rejection:${revision.draftId}:${revision.revisionVersion}`,
+      reason: input.reason,
+      closedAt: input.closedAt ?? new Date().toISOString(),
+      durable: true,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+    };
+    validateDraftRejectClosure(closure);
+    interaction.rejections = [...(interaction.rejections ?? []), closure];
+    interaction.revision = { ...revision, state: 'rejected' };
+    interaction.reason = input.reason;
+    this.transition(interaction, 'rejected', 'explicit-intake', 'close-interaction', 'rejection-recorded');
+    return structuredClone(closure);
+  }
+
+  /**
+   * Mark the interaction's revision as submitted after the single authorized
+   * dispatch. Idempotent: repeated calls keep the same terminal state.
+   */
+  async markRevisionSubmitted(interactionId: InteractionId): Promise<void> {
+    const interaction = this.requireInteraction(interactionId);
+    if (interaction.state === 'dispatched') return;
+    if (interaction.revision && interaction.revision.state !== 'submitted') {
+      interaction.revision = { ...interaction.revision, state: 'submitted' };
+    }
+    if (interaction.state !== 'confirmed') {
+      this.persist();
+      return;
+    }
+    this.transition(interaction, 'dispatched', 'runtime-coordinator', 'consume-inbox');
+  }
+
+  private requireDraftRequestKind(interaction: InteractionRecord, action: string): void {
+    const kind = interaction.requestKind;
+    if (kind === undefined || !DRAFT_REQUEST_KINDS.includes(kind)) {
+      throw new ExplicitIntakeError(
+        'typed-request-kind-required',
+        `${action} requires a typed draft requestKind`,
+        {
+          owner: 'explicit-intake',
+          nextAction: 'provide-a-draft-request-kind',
+          condition: 'new-task-preview-or-create',
+        },
+      );
+    }
+  }
+
   private requireInteraction(input: InteractionId): InteractionRecord {
     const interaction = this.interactions.get(input);
     if (!interaction) {
@@ -554,5 +1020,6 @@ export class ExplicitIntake {
     if (interaction.draft) {
       interaction.draft = { ...interaction.draft, state };
     }
+    this.persist();
   }
 }
