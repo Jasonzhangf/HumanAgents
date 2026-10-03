@@ -63,6 +63,13 @@ export type ExplicitInteractionState =
   | 'status-only'
   | 'rejected';
 
+const TERMINAL_INTERACTION_STATES: ReadonlySet<ExplicitInteractionState> = new Set([
+  'confirmed',
+  'dispatched',
+  'status-only',
+  'rejected',
+]);
+
 export interface ExplicitInput {
   readonly sourceRef: string;
   readonly rawInput: string;
@@ -376,7 +383,7 @@ export class ExplicitIntake {
 
   async inspect(input: InteractionId): Promise<ExplicitInteractionSnapshot> {
     const interaction = this.requireInteraction(input);
-    return {
+    return structuredClone({
       interactionId: interaction.interactionId,
       state: interaction.state,
       sourceRef: interaction.sourceRef,
@@ -388,21 +395,15 @@ export class ExplicitIntake {
       condition: interaction.condition,
       reason: interaction.reason,
       reply: interaction.reply,
-      clarifications: interaction.clarifications === undefined
-        ? undefined
-        : structuredClone(interaction.clarifications),
+      clarifications: interaction.clarifications,
       draft: interaction.draft,
       revision: interaction.revision,
       preview: interaction.preview,
-      confirmations: interaction.confirmations === undefined
-        ? undefined
-        : structuredClone(interaction.confirmations),
-      rejections: interaction.rejections === undefined
-        ? undefined
-        : structuredClone(interaction.rejections),
+      confirmations: interaction.confirmations,
+      rejections: interaction.rejections,
       confirmation: interaction.confirmation,
-      history: [...interaction.history],
-    };
+      history: interaction.history,
+    });
   }
 
   inputRevision(input: InteractionId): number {
@@ -419,7 +420,7 @@ export class ExplicitIntake {
     if (!result.normalizedInput || !result.normalizedInput.trim()) {
       throw this.invalidState('record match', 'normalized input is required', 'request-normalized-input');
     }
-    interaction.draft = {
+    const draft: RequirementDraft = {
       draftId: `draft-${this.nextDraftSeq}`,
       inputRevision: interaction.inputRevision,
       sourceRef: interaction.sourceRef,
@@ -431,9 +432,11 @@ export class ExplicitIntake {
       decisionRefs: [],
       state: 'awaiting-intent',
     };
-    this.nextDraftSeq += 1;
-    this.draftInteractions.set(interaction.draft.draftId, input);
-    this.transition(interaction, 'awaiting-intent', 'explicit-intake', 'ask-intent', 'user-intent-choice');
+    this.transition(interaction, 'awaiting-intent', 'explicit-intake', 'ask-intent', 'user-intent-choice', (candidate) => {
+      candidate.draft = draft;
+      this.nextDraftSeq += 1;
+      this.draftInteractions.set(draft.draftId, candidate.interactionId);
+    });
   }
 
   async beginStatusCheck(input: InteractionId): Promise<void> {
@@ -445,9 +448,10 @@ export class ExplicitIntake {
     const interaction = this.requireState(input, ['status-checking'], 'complete status query');
     if (answer !== undefined) {
       if (!answer.trim()) throw this.invalidState('complete status query', 'status answer is required', 'provide-status-answer');
-      interaction.reply = answer;
     }
-    this.transition(interaction, 'status-only', 'explicit-intake', 'present-status');
+    this.transition(interaction, 'status-only', 'explicit-intake', 'present-status', undefined, (candidate) => {
+      if (answer !== undefined) candidate.reply = answer;
+    });
     return {
       kind: 'status-only',
       interactionId: interaction.interactionId,
@@ -461,9 +465,10 @@ export class ExplicitIntake {
     if (!question || !question.trim()) {
       throw this.invalidState('request clarification', 'clarification question is required', 'provide-clarification-question');
     }
-    interaction.reply = question;
-    interaction.clarifications = [...(interaction.clarifications ?? []), { question }];
-    this.transition(interaction, 'awaiting-clarification', 'human', 'provide-clarification', 'clarification-required');
+    this.transition(interaction, 'awaiting-clarification', 'human', 'provide-clarification', 'clarification-required', (candidate) => {
+      candidate.reply = question;
+      candidate.clarifications = [...(candidate.clarifications ?? []), { question }];
+    });
   }
 
   async answerClarification(input: InteractionId, answer: string): Promise<void> {
@@ -476,12 +481,13 @@ export class ExplicitIntake {
     if (!current || current.answer !== undefined) {
       throw this.invalidState('answer clarification', 'clarification question is missing', 'return-to-matching');
     }
-    interaction.clarifications = [
-      ...clarifications.slice(0, -1),
-      { question: current.question, answer },
-    ];
-    interaction.reply = undefined;
-    this.transition(interaction, 'matching', 'explicit-intake', 'interpret-clarification', 'clarification-provided');
+    this.transition(interaction, 'matching', 'explicit-intake', 'interpret-clarification', 'clarification-provided', (candidate) => {
+      candidate.clarifications = [
+        ...clarifications.slice(0, -1),
+        { question: current.question, answer },
+      ];
+      candidate.reply = undefined;
+    });
   }
 
   async propose(input: InteractionId, proposal: Proposal): Promise<void> {
@@ -493,14 +499,16 @@ export class ExplicitIntake {
     if (!draft) {
       throw this.invalidState('propose requirement', 'requirement draft is missing', 'return-to-matching');
     }
-    interaction.draft = {
+    const nextDraft: RequirementDraft = {
       ...draft,
       proposedIntent: proposal.proposedIntent,
       proposal: proposal.proposal,
       decisionRefs: [...(proposal.decisionRefs ?? [])],
       state: 'awaiting-confirmation',
     };
-    this.transition(interaction, 'awaiting-confirmation', 'human', 'confirm-or-revise', 'explicit-user-confirmation');
+    this.transition(interaction, 'awaiting-confirmation', 'human', 'confirm-or-revise', 'explicit-user-confirmation', (candidate) => {
+      candidate.draft = nextDraft;
+    });
   }
 
   async revise(input: InteractionId, proposal: Proposal): Promise<InteractionId> {
@@ -517,8 +525,9 @@ export class ExplicitIntake {
     if (!reason || !reason.trim()) {
       throw this.invalidState('reject requirement', 'rejection reason is required', 'record-rejection-reason');
     }
-    interaction.reason = reason;
-    this.transition(interaction, 'rejected', 'explicit-intake', 'close-interaction', 'rejection-recorded');
+    this.transition(interaction, 'rejected', 'explicit-intake', 'close-interaction', 'rejection-recorded', (candidate) => {
+      candidate.reason = reason;
+    });
   }
 
   async prepareConfirmation(input: ConfirmRequirementDraft): Promise<ConfirmedRequirementDraft> {
@@ -639,8 +648,9 @@ export class ExplicitIntake {
       confirmedBy: input.confirmedBy,
       confirmedAt: input.confirmedAt,
     };
-    interaction.confirmation = confirmation;
-    this.transition(interaction, 'confirmed', 'explicit-intake', 'dispatch-confirmed-requirement');
+    this.transition(interaction, 'confirmed', 'explicit-intake', 'dispatch-confirmed-requirement', undefined, (candidate) => {
+      candidate.confirmation = confirmation;
+    });
     return structuredClone(confirmation);
   }
 
@@ -704,6 +714,17 @@ export class ExplicitIntake {
           owner: 'explicit-intake',
           nextAction: 'inspect-the-confirmed-requirement',
           condition: 'unconfirmed-interaction',
+        },
+      );
+    }
+    if (TERMINAL_INTERACTION_STATES.has(interaction.state)) {
+      throw new ExplicitIntakeError(
+        'draft-not-creatable',
+        `cannot create a draft from ${interaction.state}`,
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'nonterminal-interaction',
         },
       );
     }
