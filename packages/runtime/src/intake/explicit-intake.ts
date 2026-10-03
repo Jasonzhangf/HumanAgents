@@ -550,6 +550,17 @@ export class ExplicitIntake {
     }
 
     const interaction = this.requireInteraction(interactionId);
+    if (interaction.revision) {
+      throw new ExplicitIntakeError(
+        'typed-draft-final-submit-required',
+        'typed draft revisions must use exact revision confirmation and final submission',
+        {
+          owner: 'human',
+          nextAction: 'confirm-and-submit-the-exact-draft-revision',
+          condition: 'typed-draft-final-submit-required',
+        },
+      );
+    }
     const draft = interaction.draft;
     if (!draft) {
       throw this.invalidState('confirm requirement', 'requirement draft is missing', 'return-to-matching');
@@ -681,6 +692,17 @@ export class ExplicitIntake {
           owner: 'explicit-intake',
           nextAction: 'refine-the-existing-draft',
           condition: 'single-draft-per-interaction',
+        },
+      );
+    }
+    if (interaction.confirmation) {
+      throw new ExplicitIntakeError(
+        'draft-confirmation-already-prepared',
+        'cannot create a typed draft after a legacy confirmation was prepared',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-the-confirmed-requirement',
+          condition: 'unconfirmed-interaction',
         },
       );
     }

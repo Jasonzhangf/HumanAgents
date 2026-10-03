@@ -215,6 +215,110 @@ test('new-task-preview creates an editable draft without dispatching; status sta
   assert.equal(inbox.size, 0);
 });
 
+test('typed refined preview cannot enter the legacy confirmation and submission chain', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-typed-legacy-fence-'));
+  try {
+    const journal = new FileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const interaction = await receivePreview(intake);
+    await intake.createDraft(interaction, draftIntent());
+    const first = intake.currentDraftRevision(interaction);
+    assert.ok(first);
+    const refined = await intake.refineDraft(interaction, edit(first));
+    const before = structuredClone(await intake.inspect(interaction));
+
+    const inbox = new CountingRequirementInbox();
+    const ledger = new ConfirmationLedger();
+    const dispatched: RequirementEnvelope[] = [];
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        dispatched.push(envelope);
+        return { requirementId: envelope.requirementId };
+      },
+    });
+
+    await assert.rejects(
+      async () => {
+        const confirmed = await intake.prepareConfirmation({
+          interactionId: interaction,
+          draftId: refined.draftId,
+          inputRevision: refined.inputRevision,
+          confirmationRef: 'confirm-legacy-after-refine',
+          confirmedBy: 'human:operator',
+          confirmedAt: '2026-10-03T00:00:00.000Z',
+          payloadRef: 'asset://requirements/legacy-after-refine',
+        });
+        ledger.registerDraft({
+          interactionId: confirmed.interactionId,
+          draftId: confirmed.draftId,
+          inputRevision: confirmed.inputRevision,
+          normalizedInput: confirmed.normalizedInput,
+          intent: confirmed.intent,
+          taskRef: confirmed.taskRef,
+          payloadRef: confirmed.payloadRef,
+        });
+        ledger.confirm({
+          interactionId: confirmed.interactionId,
+          draftId: confirmed.draftId,
+          inputRevision: confirmed.inputRevision,
+          confirmationRef: confirmed.confirmationRef,
+          confirmedBy: confirmed.confirmedBy,
+          confirmedAt: confirmed.confirmedAt,
+        });
+        await owner.submit({
+          interactionId: confirmed.interactionId,
+          draftId: confirmed.draftId,
+          confirmationRef: confirmed.confirmationRef,
+          inputRevision: confirmed.inputRevision,
+        });
+      },
+      (error) => error instanceof ExplicitIntakeError && error.code === 'typed-draft-final-submit-required',
+    );
+
+    const after = await intake.inspect(interaction);
+    assert.deepEqual(after, before);
+    assert.equal(inbox.size, 0);
+    assert.equal(dispatched.length, 0);
+    const reloaded = new ExplicitIntake(journal);
+    assert.deepEqual(await reloaded.inspect(interaction), before);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a prepared legacy confirmation cannot be upgraded into typed draft ownership', async () => {
+  const intake = new ExplicitIntake();
+  const interaction = await receivePreview(intake);
+  await intake.beginMatching(interaction);
+  await intake.recordMatch(interaction, {
+    normalizedInput: 'legacy confirmation first',
+    matchedTasks: [{ taskId: currentTask, relation: 'current', status: 'running' }],
+    knownFacts: ['legacy fixture'],
+  });
+  await intake.propose(interaction, {
+    proposedIntent: 'change',
+    proposal: 'prepare a legacy confirmation',
+  });
+  const snapshot = await intake.inspect(interaction);
+  assert.ok(snapshot.draft);
+  await intake.prepareConfirmation({
+    interactionId: interaction,
+    draftId: snapshot.draft.draftId,
+    inputRevision: snapshot.draft.inputRevision,
+    confirmationRef: 'confirm-before-typed-create',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: 'asset://requirements/legacy-before-typed-create',
+  });
+  const before = structuredClone(await intake.inspect(interaction));
+
+  await assert.rejects(
+    () => intake.createDraft(interaction, draftIntent()),
+    (error) => error instanceof ExplicitIntakeError && error.code === 'draft-confirmation-already-prepared',
+  );
+  assert.deepEqual(await intake.inspect(interaction), before);
+});
+
 test('typed request kinds are validated and unconfirmed drafts cannot be marked submitted', async () => {
   const intake = new ExplicitIntake();
   await assert.rejects(

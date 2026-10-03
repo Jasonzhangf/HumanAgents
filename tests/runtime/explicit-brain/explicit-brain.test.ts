@@ -13,6 +13,7 @@ import {
   type BugReportArguments,
   type DraftConfirmation,
   type EvidenceRef,
+  type ExistingTaskChangeSubmit,
   type ExecutionPolicyDefinition,
   type FinalSubmit,
   type MemoryInteractionPort,
@@ -3332,7 +3333,7 @@ function typedRevisionFixture(overrides: Partial<Parameters<ConfirmationLedger['
     draftRevisionVersion: 2,
     draftRevisionHash: 'sha256:typed-revision-2',
     normalizedInput: 'apply the refined directive',
-    intent: 'change' as const,
+    intent: 'create' as const,
     payloadRef: 'asset://requirements/typed',
     requestKind: 'new-task-create' as const,
     ...overrides,
@@ -3443,9 +3444,120 @@ test('typed revisions cannot use the legacy untyped submit path', async () => {
   assert.equal(dispatched.length, 0);
 });
 
+test('final authorization kind must match the confirmed revision intent', async () => {
+  const targetTask = id('task', 'task-intent-target');
+
+  function ownerFor(revision: ReturnType<typeof typedRevisionFixture>) {
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(revision);
+    ledger.confirmRevision(typedConfirmation(revision));
+    const appended: RequirementEnvelope[] = [];
+    let downstreamCalls = 0;
+    const owner = new RequirementSubmissionOwner(
+      ledger,
+      {
+        get expectedNextFifoSeq() { return appended.length + 1; },
+        markConfirmed() {},
+        find(draftId: string) { return appended.find((envelope) => envelope.draftId === draftId); },
+        async append(envelope: RequirementEnvelope) {
+          appended.push(envelope);
+          return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+        },
+      },
+      {
+        async submit(envelope) {
+          downstreamCalls += 1;
+          return { requirementId: envelope.requirementId };
+        },
+      },
+    );
+    return {
+      owner,
+      appended,
+      downstreamCalls: () => downstreamCalls,
+    };
+  }
+
+  const mismatches = [
+    {
+      revision: typedRevisionFixture({
+        intent: 'change',
+        taskRef: targetTask,
+      }),
+      submit: typedSubmit(typedRevisionFixture({
+        intent: 'change',
+        taskRef: targetTask,
+      })),
+    },
+    {
+      revision: typedRevisionFixture({
+        draftId: 'draft-existing-create-mismatch',
+        intent: 'create',
+        requestKind: 'existing-task-change',
+        taskRef: targetTask,
+      }),
+      submit: {
+        interactionId: 'interaction-typed',
+        taskId: targetTask,
+        draftId: 'draft-existing-create-mismatch',
+        inputRevision: 1,
+        draftRevisionVersion: 2,
+        draftRevisionHash: 'sha256:typed-revision-2',
+        confirmationRef: 'confirm-typed',
+        idempotencyKey: 'submit-existing-create-mismatch',
+        requestKind: 'existing-task-change',
+      } satisfies ExistingTaskChangeSubmit,
+    },
+  ];
+
+  for (const mismatch of mismatches) {
+    const fixture = ownerFor(mismatch.revision);
+    await assert.rejects(
+      () => fixture.owner.submitFinal(mismatch.submit),
+      (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+    );
+    assert.equal(fixture.appended.length, 0);
+    assert.equal(fixture.downstreamCalls(), 0);
+  }
+
+  const createRevision = typedRevisionFixture();
+  const createFixture = ownerFor(createRevision);
+  const created = await createFixture.owner.submitFinal(typedSubmit(createRevision));
+  assert.equal(created.status, 'submitted');
+  assert.equal(createFixture.appended.length, 1);
+  assert.equal(createFixture.appended[0]?.intent, 'create');
+  assert.equal(createFixture.downstreamCalls(), 1);
+
+  for (const intent of ['append', 'change'] as const) {
+    const revision = typedRevisionFixture({
+      draftId: `draft-existing-${intent}`,
+      intent,
+      requestKind: 'existing-task-change',
+      taskRef: targetTask,
+    });
+    const fixture = ownerFor(revision);
+    const submit: ExistingTaskChangeSubmit = {
+      interactionId: revision.interactionId,
+      taskId: targetTask,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.draftRevisionVersion,
+      draftRevisionHash: revision.draftRevisionHash,
+      confirmationRef: 'confirm-typed',
+      idempotencyKey: `submit-existing-${intent}`,
+      requestKind: 'existing-task-change',
+    };
+    const receipt = await fixture.owner.submitFinal(submit);
+    assert.equal(receipt.status, 'submitted');
+    assert.equal(fixture.appended.length, 1);
+    assert.equal(fixture.appended[0]?.intent, intent);
+    assert.equal(fixture.downstreamCalls(), 1);
+  }
+});
+
 test('existing-task-change cannot be authorized as a new task and execution policy compiles to a control ref', () => {
   const targetTask = id('task', 'task-target');
-  const revision = typedRevisionFixture({ requestKind: 'existing-task-change', taskRef: targetTask });
+  const revision = typedRevisionFixture({ intent: 'change', requestKind: 'existing-task-change', taskRef: targetTask });
   const ledger = new ConfirmationLedger();
   ledger.registerRevision(revision);
   ledger.confirmRevision(typedConfirmation(revision));
@@ -3490,7 +3602,7 @@ test('existing-task-change cannot be authorized as a new task and execution poli
 
 test('existing-task-change target is bound to the confirmed revision before first submit', async () => {
   const targetA = id('task', 'task-target-a');
-  const revision = typedRevisionFixture({ requestKind: 'existing-task-change', taskRef: targetA });
+  const revision = typedRevisionFixture({ intent: 'change', requestKind: 'existing-task-change', taskRef: targetA });
   const ledger = new ConfirmationLedger();
   ledger.registerRevision(revision);
   ledger.confirmRevision(typedConfirmation(revision));

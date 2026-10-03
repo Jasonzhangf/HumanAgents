@@ -413,6 +413,15 @@ export class ConfirmationLedger {
         `draft revision is bound to ${revision.requestKind}, not ${input.requestKind}`,
       );
     }
+    const intentMatches = input.requestKind === 'new-task-create'
+      ? revision.intent === 'create'
+      : revision.intent === 'append' || revision.intent === 'change';
+    if (!intentMatches) {
+      throw new ExplicitBrainRouterError(
+        'unauthorized-final-submit',
+        `final submit ${input.requestKind} cannot authorize revision intent ${revision.intent}`,
+      );
+    }
     if (revision.interactionId !== input.interactionId) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'final submit addresses a different interaction');
     }
