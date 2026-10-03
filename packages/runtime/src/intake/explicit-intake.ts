@@ -355,21 +355,22 @@ export class ExplicitIntake {
     }
 
     const interactionId = `interaction-${this.nextInteractionSeq}`;
-    this.nextInteractionSeq += 1;
-    this.interactions.set(interactionId, {
-      interactionId,
-      inputRevision,
-      sourceRef: input.sourceRef,
-      rawInput: input.rawInput,
-      ...(input.requestKind === undefined ? {} : { requestKind: input.requestKind }),
-      ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
-      state: 'received',
-      owner: 'explicit-intake',
-      nextAction: 'start-matching',
-      condition: 'matching-requested',
-      history: ['received'],
+    this.persistMutation(() => {
+      this.nextInteractionSeq += 1;
+      this.interactions.set(interactionId, {
+        interactionId,
+        inputRevision,
+        sourceRef: input.sourceRef,
+        rawInput: input.rawInput,
+        ...(input.requestKind === undefined ? {} : { requestKind: input.requestKind }),
+        ...(input.occurredAt === undefined ? {} : { occurredAt: input.occurredAt }),
+        state: 'received',
+        owner: 'explicit-intake',
+        nextAction: 'start-matching',
+        condition: 'matching-requested',
+        history: ['received'],
+      });
     });
-    this.persist();
     return interactionId;
   }
 
@@ -875,6 +876,17 @@ export class ExplicitIntake {
       revisionVersion: input.draftRevisionVersion,
       revisionHash: input.draftRevisionHash,
     });
+    if (interaction.state === 'rejected') {
+      throw new ExplicitIntakeError(
+        'draft-not-confirmable',
+        'cannot confirm a draft from rejected',
+        {
+          owner: 'explicit-intake',
+          nextAction: 'inspect-interaction-state',
+          condition: 'confirmable-draft',
+        },
+      );
+    }
     if (!input.confirmationRef.trim() || !input.confirmedBy.trim() || !Number.isFinite(Date.parse(input.confirmedAt))) {
       throw new ExplicitIntakeError(
         'explicit-confirmation-required',
@@ -915,7 +927,7 @@ export class ExplicitIntake {
         },
       );
     }
-    if (interaction.state === 'dispatched' || interaction.state === 'rejected') {
+    if (interaction.state === 'dispatched') {
       throw new ExplicitIntakeError(
         'draft-not-confirmable',
         `cannot confirm a draft from ${interaction.state}`,

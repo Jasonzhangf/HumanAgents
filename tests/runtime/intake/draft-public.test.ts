@@ -744,6 +744,46 @@ test('failed refinement persistence keeps the prior revision and retry commits d
   }
 });
 
+test('failed initial receive persistence preserves the prior snapshot and sequence for a later input', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-receive-failure-'));
+  try {
+    const journal = new FlakyFileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const before = structuredClone(intake.exportState());
+
+    journal.failNextSave = true;
+    await assert.rejects(
+      () => intake.receive({
+        sourceRef: 'ui:failed-new-task',
+        rawInput: 'this input must not be retained',
+        channel: 'business',
+        requestKind: 'new-task-preview',
+      }),
+      /journal unavailable/,
+    );
+    assert.deepEqual(intake.exportState(), before);
+
+    const interaction = await intake.receive({
+      sourceRef: 'ui:successful-new-task',
+      rawInput: 'retain only this input',
+      channel: 'business',
+      requestKind: 'new-task-preview',
+    });
+    assert.equal(interaction, 'interaction-1');
+    const afterSuccess = await intake.inspect(interaction);
+    assert.equal(afterSuccess.rawInput, 'retain only this input');
+    assert.equal(intake.exportState().interactions.length, 1);
+
+    const reloaded = new ExplicitIntake(journal);
+    const durable = await reloaded.inspect(interaction);
+    assert.equal(durable.rawInput, 'retain only this input');
+    assert.equal(reloaded.exportState().interactions.length, 1);
+    assert.equal(journal.recordCount(), 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('final submit recovery reuses the durable FIFO after callback/downstream failure and fresh owner restart', async () => {
   const revision: RegisteredDraftRevision = {
     interactionId: 'interaction-durable-retry',
@@ -1052,6 +1092,65 @@ test('reject closes the draft durably without creating an authorized requirement
     rejectCode = error instanceof DraftRevisionError ? error.code : error instanceof ExplicitIntakeError ? error.code : 'unknown';
   }
   assert.notEqual(rejectCode, '');
+});
+
+test('exact confirmation replay after formal rejection fails without state or downstream mutation', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-confirm-after-reject-'));
+  try {
+    const journal = new FileIntakeJournal(journalPath(root));
+    const intake = new ExplicitIntake(journal);
+    const { interaction, revision, confirmation, registered } = await confirmedDraftFixture(
+      intake,
+      'asset://requirements/confirm-after-reject',
+    );
+    const exactConfirmation = {
+      interactionId: interaction,
+      draftId: revision.draftId,
+      draftRevisionVersion: revision.revisionVersion,
+      draftRevisionHash: revision.revisionHash,
+      confirmationRef: confirmation.confirmationRef,
+      confirmedBy: confirmation.confirmedBy,
+      confirmedAt: confirmation.confirmedAt,
+      payloadRef: confirmation.payloadRef,
+    };
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(registered);
+    ledger.confirmRevision(confirmation);
+    const inbox = new CountingRequirementInbox();
+    let downstreamCalls = 0;
+    const owner = new RequirementSubmissionOwner(ledger, inbox, {
+      async submit(envelope) {
+        downstreamCalls += 1;
+        return { requirementId: envelope.requirementId };
+      },
+    });
+
+    const closure = await rejectDraftRevision(intake, owner, {
+      interactionId: interaction,
+      reason: 'user abandoned the confirmed draft',
+      rejectionId: 'reject-confirm-replay',
+      closedAt: '2026-10-03T00:00:00.000Z',
+    });
+    assert.equal(closure.durable, true);
+    const afterReject = structuredClone(await intake.inspect(interaction));
+    assert.equal(afterReject.state, 'rejected');
+    assert.equal(afterReject.revision?.state, 'rejected');
+    assert.equal(afterReject.rejections?.length, 1);
+    assert.equal(inbox.appendCount, 0);
+    assert.equal(inbox.size, 0);
+    assert.equal(downstreamCalls, 0);
+
+    await assert.rejects(
+      () => intake.confirmDraftRevision(exactConfirmation),
+      (error) => error instanceof ExplicitIntakeError && error.code === 'draft-not-confirmable',
+    );
+    assert.deepEqual(await intake.inspect(interaction), afterReject);
+    assert.equal(inbox.appendCount, 0);
+    assert.equal(inbox.size, 0);
+    assert.equal(downstreamCalls, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('failed draft creation persistence preserves prior state, lookup, sequence, and durable retry', async () => {
