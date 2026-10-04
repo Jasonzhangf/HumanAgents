@@ -12,28 +12,24 @@
       "implementationStatus": "pending"
     },
     "orchestrate_subscription_control": {
-      "ownerPath": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
-      "ownerRel": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
-      "plannedOwnerPath": "packages/runtime/src/subscriptions/control.ts",
-      "implementationStatus": "pending"
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "implemented"
     },
     "begin_subscription_control_transaction": {
-      "ownerPath": "packages/adapters/jsonl/src/index.ts",
-      "ownerRel": "packages/adapters/jsonl/src/index.ts",
-      "plannedOwnerPath": "packages/adapters/jsonl/src/index.ts",
-      "implementationStatus": "pending"
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "implemented"
     },
     "decide_subscription_control": {
-      "ownerPath": "packages/core/src/index.ts",
-      "ownerRel": "packages/core/src/index.ts",
-      "plannedOwnerPath": "packages/core/src/subscription.ts",
-      "implementationStatus": "pending"
+      "ownerPath": "packages/core/src/subscription.ts",
+      "ownerRel": "packages/core/src/subscription.ts",
+      "implementationStatus": "implemented"
     },
     "commit_subscription_control": {
-      "ownerPath": "packages/adapters/jsonl/src/index.ts",
-      "ownerRel": "packages/adapters/jsonl/src/index.ts",
-      "plannedOwnerPath": "packages/adapters/jsonl/src/index.ts",
-      "implementationStatus": "pending"
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "implemented"
     }
   }
 }

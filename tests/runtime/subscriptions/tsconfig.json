@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests-runtime-subscriptions",
+    "noEmitOnError": true
+  },
+  "include": [
+    "node-modules.d.ts",
+    "**/*.ts",
+    "../../../packages/core/src/**/*.ts",
+    "../../../packages/runtime/src/subscriptions/**/*.ts",
+    "../../../packages/adapters/jsonl/src/**/*.ts",
+    "../../../packages/contracts/src/**/*.ts"
+  ]
+}
