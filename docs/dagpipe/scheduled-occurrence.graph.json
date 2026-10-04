@@ -26,18 +26,30 @@
       "exit": "task_terminal_projection",
       "executeNode": "execute_occurrence_task",
       "settleNode": "settle_occurrence",
+      "recoveryIdentity": "OccurrenceTaskBinding { occurrenceId, subscriptionId, scheduleRevision, occurrenceOrdinal, taskId, operationId, executionEpoch, inputArtifactDigest }",
       "requiredReceipt": "ServeTaskTerminalReceipt { taskId, operationId, executionEpoch, inputArtifactDigest, verification: TaskVerificationResult, terminalCheckpointRef, settlementReceiptRef, recoveryResponsibility }",
-      "verificationAuthority": "W3 public task-verification bridge in packages/runtime/src/ui-runtime/task-verification.ts; scheduler does not own a second verifier",
+      "verificationAuthority": "W3 retained tree public task-verification bridge in packages/runtime/src/ui-runtime/task-verification.ts; the current scheduler candidate does not contain that file and scheduler does not own a second verifier",
       "settlementRule": "settle_occurrence consumes only a verified serve-task terminal/settlement receipt; checker failed/missing/rejected, identity mismatch, stale executionEpoch, or pending verification cannot be projected as occurrence success; cancelled requires a settled stop",
       "identityFencing": "core validates task/operation/executionEpoch/inputArtifactDigest; JSONL atomically commits occurrence settle and receipt",
+      "replayRule": "execute_occurrence_task executes or resumes exactly one business execution for OccurrenceTaskBinding; duplicate, concurrent, and restart calls return or await the same terminal receipt and never dispatch a second business execution; settlement and verification receipts remain authoritative",
+      "consumerCapability": "BLOCKED until a real ServeTaskConsumerPort implementation proves durable execute-or-resume over projection/correlation operation identity, authoritative checkpoint settlement, and TaskVerificationResult; an in-memory flag, replayJournal projection, or diagnostic counter is not sufficient",
       "crossGraph": "typed invocation of the public serve-task input/output contract; no cross-graph node edge, back-edge, second lifecycle, or second persistence truth"
+    },
+    "recoveryContract": {
+      "busyReminder": "schedule({busy:true}) commits occurrence=reminder-pending and reminder=pending; the same slot with schedule({busy:false}) in recover_pending_reminder atomically commits occurrence=due and reminder=consumed only for an active current revision that is not invalidated and remains allowed by late/max/end rules",
+      "slotIdentity": "recovery preserves the original occurrenceId, subscriptionId, scheduleRevision, occurrenceOrdinal, and dueAt; it never recreates the slot, bypasses claim, or introduces a browser timer",
+      "busyRetry": "a repeated busy schedule returns the existing reminder-pending occurrence and does not add a second reminder",
+      "controlCompetition": "modify, pause, and cancel-future invalidate matching unclaimed occurrences and pending reminders in the control transaction; recovery cannot revive them",
+      "restart": "JsonlOrganJournal replay restores reminder-pending, pending reminder, claim, and settlement state before recovery or claim",
+      "executionRecovery": "recovery of an interrupted execute-before-settle window is consumer-owned by OccurrenceTaskBinding; the scheduler does not add a generic execution registry or duplicate terminal truth"
     },
     "terminalContract": {
       "success": "publish_occurrence_result only after verified serve-task terminal/settlement receipt and atomic occurrence settle",
       "failure": "non-success verification remains a non-success occurrence outcome with recovery responsibility; attention.opened with retry-scheduler-patrol",
       "blocked": "attention.opened with resource-waiting",
       "cancelFuture": "subscription cancelled before occurrence claim; in-flight stop is separate",
-      "cleanup": "occurrence consumed or invalidated, lease released, journal receipt retained"
+      "cleanup": "occurrence consumed or invalidated, matching reminder consumed or invalidated, lease released, journal receipt retained",
+      "executionRecovery": "duplicate, concurrent, or restarted execute-or-resume returns the same execution terminal identity without a second business dispatch"
     }
   },
   "inputs": [
@@ -71,11 +83,34 @@
       "iterator": "Whole"
     },
     {
+      "id": "recover_pending_reminder",
+      "operator": "humanagent-schedule-reminder-recovery",
+      "operator_version": "1",
+      "inputs": [
+        "committed_subscription_state"
+      ],
+      "output": {
+        "id": "recovered_due_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
       "id": "claim_due_occurrence",
       "operator": "humanagent-schedule-occurrence-claim",
       "operator_version": "1",
       "inputs": [
-        "committed_subscription_state"
+        "recovered_due_occurrence"
       ],
       "output": {
         "id": "claimed_occurrence",
@@ -212,8 +247,13 @@
   "edges": [
     {
       "from": "read_committed_subscription_state",
-      "to": "claim_due_occurrence",
+      "to": "recover_pending_reminder",
       "arc_id": "committed_subscription_state"
+    },
+    {
+      "from": "recover_pending_reminder",
+      "to": "claim_due_occurrence",
+      "arc_id": "recovered_due_occurrence"
     },
     {
       "from": "claim_due_occurrence",

@@ -4,6 +4,8 @@
 
 本稿已把 review 反馈 1–7 落进真实字段、owner、公开 API、图和派单合同；不再输出另一层计划。产品代码、测试、脚本、配置未改。
 
+R5 恢复补充：2026-10-04 的独立 review 已终止为 `code_failure`，并确认两个 P1 缺口。当前调度 source candidate `9260f27a91e91a1cc115f2f7f9521fea96a91a52` 不获准进入组合。具体 RED 证据、唯一 owner、恢复状态机和 future source/test 合同见 [`scheduler-recovery-design-2026-10-04.md`](scheduler-recovery-design-2026-10-04.md)。该补充仍只改 docs/graph，不代表实现完成。
+
 候选身份：
 
 - worktree：`/Volumes/Intel/playground/humanagent/interaction-redesign-design-20261003`

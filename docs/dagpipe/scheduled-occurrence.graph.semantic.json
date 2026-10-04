@@ -2,10 +2,11 @@
   "graph": "humanagent-scheduled-occurrence",
   "labels": {
     "read_committed_subscription_state": "读取已提交订阅状态并复核版本",
+    "recover_pending_reminder": "空闲恢复待提醒槽位并原子收拢提醒",
     "claim_due_occurrence": "原子比较状态版本后认领到期执行",
     "validate_occurrence_domain": "校验 occurrence 领域状态与触发规则",
     "admit_occurrence_execution": "按忙闲与资源准入执行",
-    "execute_occurrence_task": "调用 serve-task 执行、验证并收拢后返回终态 receipt",
+    "execute_occurrence_task": "按唯一执行身份启动或恢复 serve-task 并返回验证终态",
     "settle_occurrence": "消费验证后终态与结算 receipt 并原子消费 occurrence",
     "publish_occurrence_result": "仅按验证终态发布周期任务结果与恢复责任"
   }

@@ -12,6 +12,7 @@
       "receipt": "SubscriptionControlReceipt { subscriptionId, action, status, policyRevision, scheduleRevision, idempotencyKey, requestHash, supersededUnclaimedOccurrences, controlRef }",
       "transactionResource": "packages/adapters/jsonl/src/index.ts:transaction",
       "criticalSection": "begin_subscription_control_transaction -> decide_subscription_control -> commit_subscription_control",
+      "reminderRecovery": "commit_subscription_control atomically invalidates each pending reminder whose subscriptionId, scheduleRevision, and occurrenceOrdinal are superseded by modify, pause, or cancel-future; reminders are not a second control truth",
       "linearization": [
         "control does not depend on due_occurrence; pause/resume/cancel-future commit a durable receipt even when no due slot exists",
         "control committed before claim supersedes old unclaimed occurrences; claim rechecks committed state and revision and returns typed stale/conflict",
@@ -27,7 +28,8 @@
       "duplicate": "durable_subscription_control_receipt(status=duplicate)",
       "stale": "durable_subscription_control_receipt(status=stale)",
       "conflict": "durable_subscription_control_receipt(status=conflict)",
-      "failure": "typed control rejection before transaction commit; subscription unchanged and no success receipt"
+      "failure": "typed control rejection before transaction commit; subscription unchanged and no success receipt",
+      "reminderInvalidation": "superseded pending reminders and their matching unclaimed occurrences become invalidated in the same transaction"
     }
   },
   "inputs": [

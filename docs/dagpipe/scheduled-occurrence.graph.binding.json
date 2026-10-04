@@ -10,6 +10,11 @@
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
       "implementationStatus": "implemented"
     },
+    "recover_pending_reminder": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "pending"
+    },
     "claim_due_occurrence": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
