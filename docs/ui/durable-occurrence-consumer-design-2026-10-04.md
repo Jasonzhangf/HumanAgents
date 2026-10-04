@@ -3,8 +3,9 @@
 状态：**PRE-CODE DESIGN CANDIDATE / BLOCKED capability**。本文是 docs-only 设计产物，
 不是 source PASS、不是独立 review、也不是已实现能力。已准入的 R3 语义保持不变：
 durable verification/receipt 的权威读写与恢复责任，以及 receipt-key/replay/checkpoint
-生命周期。真实 `ServeTaskConsumerPort` 仍不存在；owner-death/recovery-authority primitive
-仍缺失。本文只给出最小可实现 owner、typed 记录、崩溃窗口、公开验证和解除路径。
+生命周期。真实 `ServeTaskConsumerPort` 仍不存在；supervisor-authenticated
+current-owner authority 和 admitted-owner recovery authority primitive 仍缺失。本文只给出
+最小可实现 owner、typed 记录、崩溃窗口、公开验证和解除路径。
 
 Owner-binding / fenced-commit 的唯一契约是
 [`docs/ui/occurrence-owner-fence-design-2026-10-04.md`](occurrence-owner-fence-design-2026-10-04.md)。
@@ -76,7 +77,7 @@ recovery-fence primitive 当前缺失**。contract promise、内存标志、leas
 ### 3.1 Owner
 
 唯一 durable execution owner 是未来的**真实 `ServeTaskConsumerPort` adapter**，归属
-app/ui-runtime 组装边界：
+app/ui-runtime 组装边界。它只调用 supervisor-owned guard，不自行认证 caller：
 
 - 组装 owner：`packages/app/src/ui-runtime/service.ts`（app/ui-runtime assembly）。
   adapter 可在同一 owner 边界内拆成 sibling module，但 owner 不变。
@@ -92,7 +93,8 @@ app/ui-runtime 组装边界：
 ### 3.2 复用的真实原语
 
 - `JsonlOrganJournal.transaction(read, apply)`：先 `acquireLock`，再 `readVerifiedJournal`，
-  再执行 `apply` 内的 `appendLocked`。同一文件路径的并发事务串行化。
+  再执行 `apply` 内的 `appendLocked`。同一文件路径的并发事务串行化；外部 owner
+  guard 必须包住整个 `transaction`，而不是包住一次 snapshot read。
 - `JsonlOrganJournal.appendLocked` 的 `commitId` 幂等：同 `commitId` 且同 commit-fact digest
   返回已存在记录；同 `commitId` 不同 digest 抛 `JournalCommitConflictError`。
 - `FileCheckpointStore.commit(checkpoint)`：以 `checkpointCommitId(checkpoint)` 作 commitId
@@ -133,7 +135,9 @@ journal.transaction(
 ```
 
 因为 commitId 确定性且 `appendLocked` 在锁内幂等，两个进程/两个 port 竞争同一 binding 时
-只有一个能首次写入；其余读到已存在记录。admission 提交返回之后才允许 dispatch。
+只有一个能首次写入；其余读到已存在记录。admission 提交返回之后才允许 dispatch。只有
+supervisor guard 在同一个 `transaction` 外仍持有时，上述幂等事实才同时具有 owner
+授权意义；Journal 锁只序列化文件写，不认证 caller。
 
 ### 4.2 Durable verification / receipt fact
 
@@ -270,7 +274,7 @@ blocked/recovery 必须绑定**真实 core error/checkpoint/stop settlement 语�
 W3 actual verification bytes composition
   -> contracts/core occurrence executionOwner identity + typed owner/fence states
   -> existing app supervisor typed guard equivalent to
-     withCurrentDaemonOwner(paths, executionOwner, operation)
+     withCurrentDaemonOwner(paths, binding, operation)
   -> durable consumer adapter
      (ServeTaskConsumerPort + admission/receipt/replay under the same guard)
   -> scheduler recovery/call wiring
@@ -283,13 +287,13 @@ W3 actual verification bytes composition
 | 顺序 | 文件 | Owner | 内容 |
 | --- | --- | --- | --- |
 | 0 | `packages/contracts/src/tool-execution.ts` | 契约 owner（先于实现） | 新增 admission、`OccurrenceTerminalReceiptRecord`、`RecoveryResponsibilityRecord`、receipt validator |
-| 0a | `packages/contracts/src/framework.ts` | claim/fence contract owner | 最小扩展 `OccurrenceClaim`/validator 的 domain `executionOwner`；不得改称第二 lease |
+| 0a | `packages/contracts/src/framework.ts` | claim/fence contract owner | 最小扩展 `OccurrenceClaim`/validator 的 immutable admitted `executionOwner`，并新增 recovery/rejection typed records；不得改称第二 lease |
 | 0b | `packages/core/src/subscription.ts` | claim/fence core owner | typed current-live/current-caller/unproven/expired/confirmed-fenced/stale-A 状态与非成功 settle 判定；保持 core 唯一 owner |
 | 1 | W3 `packages/runtime/src/ui-runtime/task-verification.ts` | W3 bytes 组合 owner | 组合实际 W3 验证 bridge；不得以 stub 代替 |
-| 2 | `packages/app/src/supervisor/*` | existing supervisor owner | 在现有 supervisor 上增加 typed public guard `withCurrentDaemonOwner(paths, executionOwner, operation)`；内部复用 `withDaemonLeaseGuard` + `readDaemonLease`，不得新建 lease/registry |
-| 3 | `packages/app/src/ui-runtime/service.ts`（及同 owner sibling module） | 持久 consumer owner | 实现真实 `ServeTaskConsumerPort`：admission、owner guard、execute、terminal/receipt 提交 |
-| 4 | `packages/app/src/ui-runtime/journal.ts` | 持久 consumer owner | 补最小 admission/receipt event 读写；不新增 generic registry |
-| 5 | `packages/runtime/src/ui-runtime/coordinator.ts` | 持久 consumer owner | 仅当需要暴露 execute/settle seam 时最小改动 |
+| 2 | `packages/app/src/supervisor/*` | existing supervisor owner | 在现有 supervisor 上增加 typed public guard：只接收 binding；认证本进程持有的 `SupervisorLease`；向 callback 传 authenticated caller + committed-replacement predicate；内部复用 `withDaemonLeaseGuard`，不得新建 lease/registry |
+| 3 | `packages/app/src/ui-runtime/occurrence-consumer.ts` | 持久 consumer owner | 实现真实 `ServeTaskConsumerPort`：admission、owner guard、execute、terminal/receipt 提交 |
+| 4 | `packages/app/src/ui-runtime/journal.ts` | journal adapter owner | 补最小 admission/receipt event 读写；不新增 generic registry |
+| 5 | `packages/runtime/src/ui-runtime/coordinator.ts` | runtime orchestration owner | 仅当需要暴露 execute/settle seam 时最小改动 |
 | 6 | `packages/runtime/src/subscriptions/index.ts` | scheduler owner | `consumeExecution` 调用 execute-or-resume consumer 与错误码处理；不复制 owner/fence 判定 |
 
 四个独立任务、互不重叠的写入范围：
@@ -297,16 +301,17 @@ W3 actual verification bytes composition
 - **Task F（claim/fence authority）**：`packages/contracts/src/framework.ts`、
   `packages/core/src/subscription.ts`。
 - **Task G（existing supervisor guard）**：`packages/app/src/supervisor/*`。
-- **Task A（durable consumer owner）**：`packages/contracts/src/tool-execution.ts`、
-  `packages/runtime/src/ui-runtime/task-verification.ts`、`packages/app/src/ui-runtime/*`、
-  `packages/runtime/src/ui-runtime/coordinator.ts`。
+- **Task A（durable consumer owner）**：
+  `packages/app/src/ui-runtime/occurrence-consumer.ts`。
 - **Task B（scheduler call/replay）**：`packages/runtime/src/subscriptions/index.ts`。
 
-Typed handoff（F→G→A→B，不重叠）：Task F 产出 domain owner/fence contract；Task G 产出
-supervisor-owned current-owner guard；Task A 只按该 guard 执行 admission、terminal 与 recovery
-Journal mutation；Task B 只按公开 consumer/receipt 契约调用 scheduler。每个任务不修改下游
-任务的文件。Task G 不得复制 lease 到另一个 store；Task A 不得重新读取 PID、日志或本地 map
-来补 owner 真相；Task B 不得在 scheduler 重建 owner/fence 决策。
+Typed handoff（F→G→A→B，不重叠）：Task F 产出 domain owner/fence contract；
+Task G 产出 supervisor-owned current-owner guard；Task A 只按该 guard 执行 admission、
+terminal 与 recovery Journal mutation；Task B 只按公开 consumer/receipt 契约调用 scheduler。
+父任务先组合 W3 verification bytes，再按 F→G→A→B 串行派发；不允许 `packages/app/src/ui-runtime/*`
+整目录与 journal/runtime owner 并发写入。每个任务不修改下游任务的文件。Task G 不得复制
+lease 到另一个 store；Task A 不得重新读取 PID、日志或本地 map 来补 owner 真相；
+Task B 不得在 scheduler 重建 owner/fence 决策。
 
 真实 consumer 不实现前，`due -> execute -> settle` 不能验收；fake counter 不能作为 GREEN。
 
@@ -323,8 +328,13 @@ Journal mutation；Task B 只按公开 consumer/receipt 契约调用 scheduler�
 1. 同一 occurrence/task/operation/executionEpoch/inputArtifactDigest 只启动一次业务执行。
 2. execute 返回后、settle 前**同一 port** 重复调用，不第二次 dispatch。
 3. execute 返回后、settle 前**重启 port**（新进程/新 port/新端口），读取同一持久 receipt，不第二次 dispatch。
-4. **两个真实 consumer process**：A 有 live current claim 且仍在执行时，B 只能等待或返回 typed `in-progress`；不得 dispatch、不得写 recovery/terminal。A terminal 后 B 得到 byte/equality 相同的 receipt。
-5. stale claim、new port、unchanged live owner、concurrent caller 均不得写 terminal；只有 confirmed owner failure + recovery fence 才能写恢复终态，且无 phantom stop/success。
+4. **两个真实 consumer process copied identity**：A 有 live current claim 且仍在执行时，B 复制 A 的完整可读
+   daemon lease identity 并调用同一公开操作；mutation callback 不得运行，B 不得
+   dispatch、不得写 recovery/terminal。A terminal 后 B 只能读取已提交 receipt。
+5. **replacement 与 stale A**：replacement B 被 supervisor-authenticated 且 durable
+   handoff 已提交时，可为 A 的真实 admission 写一条 recovery receipt，但不重派、不
+   rebind；stale A 即使复制 B 的可读 identity 也必须被拒。current/expired/uncertain
+   路径分别返回 typed 结果，均不得 dispatch 或写 recovery。
 6. **admission 后崩溃**（模拟 admission 提交后进程中断）在重启后返回 blocked/recovery，
    不重新 dispatch，且用户可见结果与原始 error/receipt 身份一致。
 7. **verification returned before settle restart**：A 在 `settleOccurrence` 前退出；重启后 consumer 仅凭 binding 与 checkpoint 定位同一 durable receipt，不构造 verification、不 dispatch、不重新验证业务工作。scheduler 首次 settle，第二次 replay 相同 terminal/settlement。
@@ -365,9 +375,9 @@ node --test dist/tests-runtime/tests/runtime/checkpoints/public-consumer-recover
 本轮只改现有 `humanagent-serve-task` 的 docs/dagpipe 文件：
 
 - `durable_consume` 位于 `correlate_task` 与 `execute_task_turns` 之间，语义为
-  "持久准入并绑定 occurrence 到当前 daemon owner"。
+  "认证当前 daemon caller 并持久准入 occurrence 到不可变 admitted owner"。
 - `receipt_commit` 位于 `checkpoint_commit` 与 `task_terminal` 之间，语义为
-  "在同一 owner fence 下提交可重放 receipt"。
+  "在同一 owner fence 下提交正常或 replacement 可重放 receipt"。
 - 保留 retained W3 的 policy、verification、observation、settlement、checkpoint
   节点与真实 owner，不另建第二套 verification 路径。
 - meta 补 `durableConsumerCapability = BLOCKED`、`durableConsumerOwner`、
@@ -409,9 +419,12 @@ git diff --stat
   W3 验证字节组合与必要的 core 契约扩展。
 - **BLOCKED**：现有 claim/lease 没有 occurrence-to-supervisor execution-owner binding，
   也没有同 guard 的 owner 验证与 Journal mutation。最小解除方式是：
-  1. 扩展现有 `OccurrenceClaim` / core fence contract 的 domain `executionOwner`；
+  1. 扩展现有 `OccurrenceClaim` / core fence contract 的 immutable admitted
+     `executionOwner`，并定义 separate authenticated current caller + committed replacement；
   2. 在现有 app supervisor 上增加 typed guard
-     `withCurrentDaemonOwner(paths, executionOwner, operation)`；
+     `withCurrentDaemonOwner(paths, binding, operation)`；callback 接收
+     supervisor-authenticated current caller 和 supervisor-owned replacement predicate，
+     不接收 caller 自报 admitted owner 或 token；
   3. 在该 guard scope 内完成 admission、terminal、recovery Journal transaction；
   4. 用两个真实进程证明 success、live-A/B rejection、crash replacement、stale-A race 与
      external-effect inventory。

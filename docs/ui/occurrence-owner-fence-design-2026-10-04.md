@@ -14,7 +14,9 @@ Close the minimum missing boundary between an admitted occurrence and its
 execution owner:
 
 1. Bind an admitted occurrence to the existing app supervisor owner.
-2. Define recovery authority for a plausible re-entrant execution.
+2. Define recovery authority for a plausible re-entrant execution. The design
+   keeps two distinct identities: immutable admitted owner A and the
+   supervisor-authenticated current caller B.
 3. Fence admission, terminal, and recovery Journal mutation through a legal
    concurrent supervisor handoff.
 4. Keep the existing occurrence/task/operation/executionEpoch/inputArtifactDigest
@@ -53,6 +55,15 @@ startup boundary (`packages/app/src/cli.ts`). The future app adapter can inject
 that existing lease handle or a supervisor-owned authority function into the
 consumer. It must not copy a lease snapshot into a second mutable store.
 
+`SupervisorLease` is the actual local authority handle for the running process:
+`createLease()` closes over the lease record created by `acquireDaemonLease()`,
+and `assertActive()` re-reads the durable record under the same supervisor
+authority. A persisted `SupervisorLeaseRecord`, including its readable
+`leaseId`, `generation`, and `processStartToken`, is evidence of a lease, not
+proof that the caller controls that lease. The future guard must use the
+injected live lease handle for caller authentication. It must not treat a
+caller-supplied copy of those fields as authority.
+
 ## 4. Existing primitives
 
 The following primitives already exist. They are the only primitives this design
@@ -65,14 +76,15 @@ can use:
 | `assertOccurrenceClaimFence`/`assertOccurrenceClaimLease` | frozen `packages/core/src/subscription.ts` | checks subscription identity and lease expiry only |
 | `consumeExecution` | frozen `packages/runtime/src/subscriptions/index.ts` | byte-equality claim check, settlement replay, lease check, then `ServeTaskConsumerPort.executeOccurrence` |
 | `SupervisorLeaseRecord` | `packages/app/src/supervisor/supervisor.ts:35` | `leaseId`, `generation`, `pid`, `processStartToken`, `ownerId`, `acquiredAt`, `disposedAt` |
-| `assertLeaseActive` | `packages/app/src/supervisor/supervisor.ts:508` | rejects after replacement/disposal |
-| `acquireDaemonLease` | `packages/app/src/supervisor/supervisor.ts:578` | creates replacement generation on takeover |
-| `isDaemonLeaseHandoffCommitted` | `packages/app/src/supervisor/supervisor.ts:654` | confirms a different durable live replacement owner |
+| `assertLeaseActive` | `packages/app/src/supervisor/supervisor.ts:508` | compares an already-held lease record with the durable record and rejects after replacement/disposal; by itself it does not authenticate a caller |
+| `acquireDaemonLease` | `packages/app/src/supervisor/supervisor.ts:578` | creates replacement generation on takeover and returns the local `SupervisorLease` handle |
+| `isDaemonLeaseHandoffCommitted` | `packages/app/src/supervisor/supervisor.ts:654` | confirms a different durable live replacement owner with a higher generation; this is the committed-handoff predicate |
 | `withDaemonLeaseGuard` | `packages/app/src/supervisor/supervisor.ts:290` | serializes daemon lease transitions around an app-owned mutation; it does not by itself expose a typed current-owner decision |
 | `SupervisorLease.assertActive` | `packages/app/src/supervisor/supervisor.ts:68` | refreshes and validates the active lease through the existing supervisor owner |
 | `JsonlOrganJournal.transaction` | `packages/adapters/jsonl/src/index.ts:440` | acquires per-Journal lock, reads verified content, applies `appendLocked` |
 | `JournalCommitConflictError` | `packages/adapters/jsonl/src/index.ts:77` | rejects same commitId with different commit-fact digest |
 | `SessionStore.withWriteLock` pattern | `packages/app/src/session-store.ts:252` | holds `withDaemonLeaseGuard`, re-reads active fence, writes, releases |
+| `SupervisorLeaseRecord.takeover` | `packages/app/src/supervisor/supervisor.ts:54` | durable `previousLeaseId`/`previousGeneration` evidence emitted by the existing takeover path |
 
 These primitives are real. They do not yet form a demonstrated occurrence
 fence because the occurrence claim has no execution-owner fields, no existing
@@ -90,9 +102,10 @@ The missing boundary has two parts:
    claim identity plus `leaseId`, `generation`, and `executionEpoch`, but those
    are scheduler claim values. They do not bind `consumeExecution` to the app
    supervisor owner.
-2. No existing caller calls `ServeTaskConsumerPort` with a daemon-lease owner
-   and then fenced Journal mutation. `consumeExecution` only checks persisted
-   claim equality and lease expiry before dispatch.
+2. No existing caller supplies the process's acquired local lease authority when
+   it calls `ServeTaskConsumerPort` and fenced Journal mutation.
+   `consumeExecution` only checks persisted claim equality and lease expiry
+   before dispatch.
 3. Existing `withDaemonLeaseGuard` serializes the lease transition, but it does
    not return a typed owner decision or bind that decision to the Journal append.
    A raw snapshot from `readDaemonLease` before the guard is not a fence.
@@ -102,28 +115,44 @@ operation. Its exact implementation name is a source decision, but its public
 shape must be equivalent to:
 
 ```text
-withCurrentDaemonOwner(paths, executionOwner, operation) -> Promise<T>
+withCurrentDaemonOwner(paths, binding, operation) -> Promise<T>
 ```
 
 The operation must:
 
 1. enter the existing `withDaemonLeaseGuard(paths, ...)` scope;
-2. re-read the durable lease through the existing `readDaemonLease(paths)`;
-3. reject missing, disposed, replaced, or mismatched
-   `daemonLeaseId`/`daemonGeneration`/`processStartToken`;
-4. pass only the supervisor-verified current owner facts to the callback;
+2. authenticate the local caller by calling the injected
+   `SupervisorLease.assertActive()`;
+3. re-read the durable lease and require the authenticated local lease record to
+   match the durable current record, including disposed-state;
+4. pass only the supervisor-authenticated current caller and a
+   supervisor-owned replacement predicate into the callback; do not accept a
+   caller-supplied admitted owner from the operation arguments;
 5. keep the callback inside the same guard scope;
 6. release the guard in `finally` after the callback settles.
+
+The callback reads the real admission by the immutable `binding` inside the
+Journal transaction. That read supplies immutable owner A. The callback then
+uses the supervisor-owned predicate to decide whether authenticated current
+caller B is a committed replacement for A. A is never an input supplied by the
+caller.
 
 This is an extension of the existing supervisor authority. It is not a second
 registry, lease, controller, or token. Until this callable public operation
 exists, the admission/terminal/recovery fence is **BLOCKED**, and a proposed
 query or raw lease snapshot is not an atomic guarantee.
 
+The caller identity must never be accepted from the callback argument,
+persisted claim, request payload, log, or harness. A caller that only supplies
+A's readable fields, or copies B's readable fields, must fail authentication
+even when those fields match the durable lease.
+
 Because Provider/RCC resume is unsupported, transport abort is not resource
 release, and terminal absence is not interruption, the missing binding cannot
 be closed by timeout, PID probe, local maps, logs, or an invented death
-detector.
+detector. The persisted `takeover` relation proves only that a replacement was
+committed. It does not prove that an old caller is dead, so recovery still
+requires the authenticated current caller and the ordinary live-owner checks.
 
 ## 6. Domain-owned typed binding
 
@@ -131,10 +160,10 @@ Add fields to the existing `OccurrenceClaim` or to an adjacent validated domain
 record. The app adapter translates `SupervisorLeaseRecord`. Core validates the
 domain fields only and never imports `SupervisorLeaseRecord`.
 
-Proposed domain fields:
+Proposed immutable domain field on the admission record:
 
 ```text
-executionOwner: {
+admittedExecutionOwner: {
   daemonLeaseId: string
   daemonGeneration: number
   processStartToken: string
@@ -143,6 +172,12 @@ executionOwner: {
 
 Rules:
 
+- `admittedExecutionOwner` is an immutable occurrence binding. It identifies
+  the owner that admitted the occurrence. It is not a bearer token and it is
+  not evidence that the current caller owns the lease.
+- The separate authenticated caller identity is supplied by the supervisor
+  guard at execution time. It is not persisted into the occurrence claim as a
+  replacement for A.
 - Keep existing `claimedBy`, `schedulerInstanceId`, claim `leaseId`, claim
   `generation`, and `executionEpoch`.
 - Do not replace the existing `OccurrenceClaim`.
@@ -160,12 +195,13 @@ The future core validator returns typed outcomes. The table is the contract:
 | Case | Observable facts | Result |
 | --- | --- | --- |
 | No admission | no admission record and current owner available | admit once |
-| current live owner | current caller holds the active supervisor lease; `SupervisorLease.assertActive()` passes; domain `daemonLeaseId`/`daemonGeneration`/`processStartToken` match the current lease | allow mutation; same bindings only |
+| current live owner | the guard's injected `SupervisorLease.assertActive()` passes and its local record matches the durable current lease; immutable A equals the current authenticated caller | allow normal mutation; same bindings only |
 | concurrent B / live unproven | persisted claim equals admitted owner, claim unexpired, B cannot prove A is dead or fenced | typed `owner-live-unproven`/`in-progress`; no dispatch, no recovery, no terminal |
 | expired claim | claim lease expired | typed `lease-expired`; no recovery from expiry alone |
-| confirmed fenced handoff | current lease is a different live durable lease from A, and `isDaemonLeaseHandoffCommitted(paths, previous)` is true under the existing supervisor authority | replacement B may write one blocked/recovery terminal; never redispatches |
-| stale A after handoff | A holds old domain owner; current lease has new `daemonLeaseId`/`daemonGeneration`/`processStartToken` | reject terminal/recovery mutation |
-| stale A without handoff | A holds old domain owner; current lease still A; caller is not the verified active owner | reject unless confirmed replacement authority |
+| confirmed fenced handoff | the guard authenticates current caller B locally; `isDaemonLeaseHandoffCommitted(paths, A)` is true under the same daemon guard, proving the durable current lease is live, distinct from A, and at a higher generation | B may write one blocked/recovery checkpoint/receipt for A's immutable admission; never redispatch or rebind A |
+| stale A after handoff | A presents A's old admitted identity or copies B's readable fields; the guard authenticates A's local lease handle and it is not the durable current lease | reject terminal/recovery mutation; no user-supplied readable B fields can pass |
+| stale A without handoff | A holds old domain owner; current lease still A; caller is not the verified active owner | reject unless B is authenticated and a committed monotonic replacement from A is proved |
+| replacement with uncertain/expired claim | current caller B is authenticated, but A's claim is still live/uncertain or expired without a committed replacement | typed unique-owner pending/expired rejection; no recovery append, no redispatch |
 | external effects uncertain | provider/tool/browser/port release proof absent | preserve `providerEffectState: 'possible'` and resource inventory |
 
 Do not treat any of these as sufficient for external release:
@@ -182,9 +218,16 @@ All occurrence admission, terminal, and recovery mutations need the same guard
 scope. The app adapter that implements `ServeTaskConsumerPort` uses this order:
 
 ```text
-withCurrentDaemonOwner(paths, domainExecutionOwner, async (verifiedOwner) => {
-  validate persisted occurrence claim vs caller claim
-  return journal.transaction(read, apply)
+withCurrentDaemonOwner(paths, binding, async (currentCaller, proveReplacement) => {
+  // currentCaller is supervisor-authenticated by the injected local lease.
+  return journal.transaction(async ({ records }) => {
+    const admission = readAdmission(records, binding)
+    const decision = decideOwner(admission.admittedExecutionOwner, currentCaller, proveReplacement)
+    return { admission, decision }
+  }, async ({ admission, decision }, append) => {
+    if (!decision.allowed) return decision.rejected
+    return append(...)
+  })
 })
 ```
 
@@ -197,13 +240,61 @@ release.
 Why this closes the race:
 
 - `withCurrentDaemonOwner` enters the existing daemon lease transition guard.
-- It re-reads the current lease inside that guard and compares the domain owner.
+- It authenticates the injected local lease and re-reads the durable current
+  lease inside that guard. It passes only that authenticated caller plus a
+  supervisor-owned replacement predicate. It does not accept caller-supplied
+  identity as proof.
 - The Journal transaction acquires the Journal lock and appends inside the
   same guard scope.
+- The Journal read callback reads immutable A from the real admission. The
+  decision compares A with the authenticated caller or with the supervisor
+  predicate. The apply callback runs only after that read validation.
 - Validation-to-append overlap with handoff is impossible if the guard is held
   for the whole mutation.
-- A stale A that holds the guard after handoff reads the new lease and
-  fails the owner match.
+- A stale A that holds the guard after handoff cannot authenticate as the
+  current durable lease or produce B's committed replacement evidence, so it
+  fails before append.
+
+### Normal admission and terminal path
+
+For an occurrence that has no completed execution, the Journal read callback
+receives immutable A from the real persisted admission. The guard authenticates
+the local caller. The in-guard decision requires the authenticated current
+caller to equal A. Only then may it append the normal admission or terminal
+checkpoint/receipt. A mismatch returns the typed concurrent/rejected outcome
+and performs no dispatch or Journal mutation.
+
+### Replacement recovery path
+
+Recovery uses the same guard, but with two distinct identities:
+
+1. The Journal read callback reads immutable owner A from A's real admission by
+   the immutable binding. The caller does not supply A.
+2. `currentCaller` is owner B, authenticated by B's injected local lease under
+   the existing daemon guard.
+3. The guard proves A-to-B replacement with the existing
+   `isDaemonLeaseHandoffCommitted(paths, A)` predicate under the same daemon
+   guard. This requires a durable current lease that is live, distinct from A,
+   and at a higher generation. The immediate `takeover.previousLeaseId` and
+   `previousGeneration` fields may corroborate a one-step replacement, but they
+   are not sufficient for a multi-step chain; the generation/liveness predicate
+   is the actual committed-replacement basis.
+4. Inside `journal.transaction`, the read callback locates the existing
+   admission by the immutable binding-derived commit ID and validates its
+   complete binding and A identity. If the admission is absent or invalid, fail
+   closed.
+5. The apply callback appends exactly one recovery checkpoint/receipt event with
+   the original logical occurrence/task/epoch/digest/key. It does not overwrite
+   the admission, rebind A, rediscover or redispatch the occurrence, or imply
+   provider/tool/browser/port release.
+6. Replays of B's recovery use the same original binding-derived receipt key.
+   Same content returns the existing fact. Different content for the same key
+   raises `JournalCommitConflictError`.
+
+This is a future typed path. The current source has the durable takeover
+relation and Journal lock, but it does not yet have the domain record,
+authenticated caller binding, or guarded recovery operation. Those missing
+pieces are **BLOCKED** until the source tasks below are admitted and implemented.
 
 This operation is the **minimum missing primitive**. If a future implementation
 cannot keep the daemon guard and Journal transaction in the same scope, the
@@ -243,8 +334,10 @@ Order:
 
 ```text
 contracts/core owner binding + typed states
-  -> app supervisor typed withCurrentDaemonOwner + adapter fenced mutation
-  -> consumer/scheduler integration with receipt/replay
+  -> app supervisor typed withCurrentDaemonOwner
+  -> durable consumer adapter fenced mutation
+  -> journal-adapter receipt/replay seam
+  -> scheduler integration with receipt/replay
   -> public two-process proof
 ```
 
@@ -253,12 +346,15 @@ Allowed paths:
 | Task | Allowed paths |
 | --- | --- |
 | core authority | `packages/contracts/src/framework.ts`, `packages/core/src/subscription.ts` |
-| app supervisor/adapter | `packages/app/src/supervisor/*` for the typed `withCurrentDaemonOwner` operation and exports; `packages/app/src/ui-runtime/*` for the consumer adapter |
-| consumer/scheduler integration | `packages/runtime/src/ui-runtime/task-verification.ts` composition, `packages/runtime/src/subscriptions/index.ts`, `packages/app/src/ui-runtime/journal.ts`, `packages/runtime/src/ui-runtime/coordinator.ts` |
+| app supervisor authority | `packages/app/src/supervisor/*` for the typed guard, caller authentication, replacement predicate and exports; no lease duplication |
+| durable consumer | `packages/app/src/ui-runtime/occurrence-consumer.ts`; `packages/app/src/ui-runtime/journal.ts` is a separate journal-adapter write after the consumer contract is frozen |
+| scheduler integration | `packages/runtime/src/subscriptions/index.ts`; W3 `packages/runtime/src/ui-runtime/task-verification.ts` is composed by the parent before this sequence |
 | tests | `tests/app/supervisor/supervisor.test.ts` pattern, `tests/runtime/subscriptions/public-consumer.test.ts` pattern |
 
-No task owns another task's files. No task starts a second lease or second
-terminal store.
+The parent composes frozen W3 bytes before task F and dispatches F -> G -> A ->
+J -> B in that order. Tasks do not share write ranges. In particular, the
+consumer adapter and the Journal adapter are not concurrent writers. No task
+starts a second lease or second terminal store.
 
 ## 12. Public proof design
 
@@ -300,18 +396,31 @@ these commands as current evidence.
 Required public assertions:
 
 1. Same-process success: one admission, one dispatch, same receipt replay.
-2. Two-process A/B before terminal: B returns typed `in-progress` or
-   `owner-live-unproven`; B writes no terminal/recovery/dispatch.
-3. Crash after admission: replacement daemon lease B with new generation and
-   token is durable; B writes exactly one blocked/recovery terminal and does
-   not redispatch.
-4. stale A terminal/recovery after replacement is rejected even after A holds
-   the daemon guard and then reads the new lease.
-5. Same receipt key: second receipt with same binding and different evidence
-   throws `JournalCommitConflictError`.
-6. External effects: no confirmed release without provider/tool/browser/port
-   stop/settlement proof.
-7. Cleanup: only this task's fixture roots are removed.
+2. Two-process A/B before terminal: B copies A's exact readable
+   `daemonLeaseId`/`daemonGeneration`/`processStartToken`. B's mutation callback
+   never runs. Assert no dispatch, terminal, or recovery record is appended.
+3. Crash after admission: replacement daemon lease B has a new generation and
+   token. `isDaemonLeaseHandoffCommitted(paths, A)` is true inside the guard. B
+   writes exactly one recovery checkpoint/receipt for the original binding and
+   does not redispatch or rebind A.
+4. Stale A after replacement: A tries the same recovery operation but cannot
+   authenticate as the durable current lease or prove a handoff from itself.
+   The mutation callback never runs. A also copies B's readable identity and
+   must still fail.
+5. Concurrent B/uncertain/expired: while A is live, or when A's claim is expired
+   without a committed replacement, B receives typed rejection/pending and
+   writes nothing.
+6. Validation-to-append race: a handoff attempted between Journal read and
+   append cannot interleave because the guard is held across the transaction.
+   The post-guard authoritative replay returns the committed winner.
+7. Persistence/effect uncertainty: append failure is visible; a failed append
+   leaves no receipt; provider/tool/browser/port release remains `possible`
+   until real stop/settlement evidence exists.
+8. Same receipt key: second receipt with the same binding and different content
+   throws `JournalCommitConflictError`; checkpoint-only remains
+   `durable-unverified-recovery-pending`; standard stop/settlement and original
+   errors/external effects remain unchanged.
+9. Cleanup: only this task's fixture roots are removed.
 
 Fake counters are RED/control evidence only. They cannot be GREEN.
 
@@ -324,7 +433,9 @@ remove that root after the assertions and verify physical absence.
 
 - The occurrence owner binding and fenced mutation are not implemented.
 - `consumeExecution` still lacks the app supervisor authority.
-- The public `withCurrentDaemonOwner`-equivalent supervisor operation is missing.
+- The public `withCurrentDaemonOwner`-equivalent supervisor operation is
+  missing, including local caller authentication and the committed-replacement
+  recovery decision.
 - No current caller combines supervisor owner validation with occurrence
   Journal mutation in one guard scope.
 - Current canonical `main` does not contain the frozen scheduler source files.
