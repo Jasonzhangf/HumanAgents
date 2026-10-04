@@ -3,7 +3,14 @@
   "version": "1",
   "meta": {
     "title": "serve 运行时从已确认需求到任务完成投影",
-    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a",
+    "designBaseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "durableConsumerCapability": "BLOCKED",
+    "durableConsumerOwner": "packages/app/src/ui-runtime/service.ts",
+    "recoveryContract": "dispatch 之前原子持久准入；按 OccurrenceTaskBinding execute-or-resume；admission 之后不自动重派；terminal receipt 由已提交 checkpoint 组合；execute-returned/settle-pending 重启重放",
+    "stableBindingIdentity": "OccurrenceTaskBinding{occurrenceId,subscriptionId,scheduleRevision,occurrenceOrdinal,taskId,operationId,executionEpoch,inputArtifactDigest}",
+    "replayRule": "settlement 已存在 -> 重放 terminal；admission 已存在且 terminal 缺失 -> blocked/recovery，不重派；无 admission -> 准入并唯一 dispatch",
+    "capabilityResolution": "组合 W3 保留树 task-verification.ts 实际字节 + 在权威 JsonlOrganJournal/FileCheckpointStore 之上实现真实 ServeTaskConsumerPort adapter"
   },
   "inputs": [
     { "id": "confirmed_requirement", "schema": "Object" }
@@ -40,10 +47,20 @@
       "iterator": "Whole"
     },
     {
+      "id": "durable_consume",
+      "operator": "humanagent-serve-durable-consume",
+      "operator_version": "1",
+      "inputs": ["runtime_task"],
+      "output": { "id": "durable_execution_binding", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "provider_execution",
       "operator": "humanagent-serve-provider-execution",
       "operator_version": "1",
-      "inputs": ["runtime_task"],
+      "inputs": ["durable_execution_binding"],
       "output": { "id": "provider_evidence", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -73,7 +90,8 @@
   "edges": [
     { "from": "fifo_peek", "to": "admission_check", "arc_id": "fifo_envelope" },
     { "from": "admission_check", "to": "correlate_task", "arc_id": "admitted_requirement" },
-    { "from": "correlate_task", "to": "provider_execution", "arc_id": "runtime_task" },
+    { "from": "correlate_task", "to": "durable_consume", "arc_id": "runtime_task" },
+    { "from": "durable_consume", "to": "provider_execution", "arc_id": "durable_execution_binding" },
     { "from": "provider_execution", "to": "checkpoint_commit", "arc_id": "provider_evidence" },
     { "from": "checkpoint_commit", "to": "task_terminal", "arc_id": "terminal_checkpoint" }
   ],

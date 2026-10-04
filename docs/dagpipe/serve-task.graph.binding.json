@@ -17,6 +17,11 @@
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
     },
+    "durable_consume": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending"
+    },
     "provider_execution": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts"
