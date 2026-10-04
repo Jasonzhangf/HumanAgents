@@ -1347,6 +1347,42 @@ test('public daily recurrence continues beyond the former calendar horizon', asy
   });
 });
 
+test('public daily run-once recovery commits and replays the next occurrence beyond the former horizon', async () => {
+  await withStore(async (port, file) => {
+    const daily = executionPolicy({
+      executionMode: 'recurring',
+      frequency: 'daily',
+      startAt: '2026-10-03T00:00:00.000Z',
+      timeOfDay: '00:00',
+      maxOccurrences: 4000,
+      dstMode: 'absolute',
+    });
+    await port.create(initialSubscription(), daily);
+    const recovered = await port.nextOccurrence({
+      subscription: initialSubscription(),
+      policy: daily,
+      nowAt: '2036-10-10T12:00:00.000Z',
+    });
+    assert.equal(recovered.occurrenceOrdinal, 3661);
+    assert.equal(recovered.dueAt, '2036-10-10T00:00:00.000Z');
+
+    const committed = await port.snapshot('subscription-a');
+    assert.equal(committed.subscription.currentOccurrenceOrdinal, 3660);
+    assert.deepEqual(committed.occurrences, [recovered]);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const replayed = await restarted.nextOccurrence({
+      subscription: committed.subscription,
+      policy: committed.policy,
+      nowAt: '2036-10-10T12:00:00.000Z',
+    });
+    assert.deepEqual(replayed, recovered);
+    const replayedSnapshot = await restarted.snapshot('subscription-a');
+    assert.equal(replayedSnapshot.subscription.currentOccurrenceOrdinal, 3660);
+    assert.deepEqual(replayedSnapshot.occurrences, [recovered]);
+  });
+});
+
 test('public weekly recurrence continues beyond the former calendar horizon', async () => {
   await withStore(async (port) => {
     const weekly = executionPolicy({

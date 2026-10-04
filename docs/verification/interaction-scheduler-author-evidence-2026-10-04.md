@@ -337,6 +337,114 @@ Compiled after `pnpm build`:
   main checkout, not this external worktree. No MCPX session was created. A scoped local
   commit with normal hooks is the fallback.
 
+## R5 Daily Boundary Proof
+
+### Input and change scope
+
+- R5 input HEAD: `249e39ae0896053846e67a33405c0788a8fea4f5`
+- R5 input tree: `1e95e25284b634b5fabfda61b974a8f2d7e692fe`
+- R5 input parent: `18c6e53aa813e15348a7992806535c2009f9c5d8`
+- Current `origin/main`: `0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed`.
+  A direct `git ls-remote origin refs/heads/main` check matched this value. The commit is
+  an ancestor of the R5 input.
+- R5 tracked test change: `tests/runtime/subscriptions/public-consumer.test.ts`
+- Receipt change: `docs/verification/interaction-scheduler-author-evidence-2026-10-04.md`
+- The added public case uses the real `JsonlOrganJournal` through public `create`,
+  `nextOccurrence`, `snapshot`, and restart replay. The accepted UTC daily policy starts at
+  `2026-10-03T00:00:00.000Z` with `timeOfDay` `00:00`, `maxOccurrences` 4000, and
+  `dstMode` `absolute`. The probe is `2036-10-10T12:00:00.000Z`.
+- The public recovery starts from ordinal 0. It must return occurrence ordinal 3661 at
+  `2036-10-10T00:00:00.000Z`, commit progress 3660 under `run-once`, and replay the same
+  occurrence and progress after a public restart.
+- No product, package, contract, runtime, core, app, graph, lock, or package metadata file
+  changed.
+
+### RED baseline
+
+- Own experimental worktree:
+  `/Volumes/Intel/playground/humanagent/interaction-scheduler-calendar-boundary-proof-baseline-20261004`
+- Own experimental branch:
+  `codex/interaction-scheduler-calendar-boundary-proof-baseline-20261004`
+- The worktree started at current `origin/main` `0020ab4f` and used normal `--ff-only`
+  composition to the exact old-horizon input `18c6e53aa813e15348a7992806535c2009f9c5d8`,
+  tree `94c71586b4f3bd70d2ca0bcbf887b4e011108b82`.
+- Only the same new public case was added to the baseline's existing 31 public cases with
+  `apply_patch`. The baseline used its own frozen install and its own contracts and
+  subscriptions build outputs. No product code or other tree's `dist` or `node_modules`
+  was copied or used.
+- Baseline contracts build: exit 0. Raw
+  `raw/baseline-contracts-build.log`, `raw/baseline-contracts-build.exit`.
+- Baseline subscriptions compile: exit 0. Raw
+  `raw/baseline-compile.log`, `raw/baseline-compile.exit`.
+- Baseline public suite: exit 1; 32 tests, 31 pass, 1 fail, 0 skipped. The added case
+  failed at the boundary with expected `3661` and actual `3659`. Raw
+  `raw/baseline-public-red-boundary.log`, `raw/baseline-public-red-boundary.exit`.
+- After RED capture, only the added case was removed with `apply_patch`. The baseline test
+  hash matched clean `18c6e53` (`7a93e92eb76a4bddfd841d1bf4a72e99ff94669a7f63a35199c9b3f63de300d7`).
+  The worktree was removed normally, the branch was deleted, the registry no longer
+  contains the path, and `test ! -e <path>` passed. No dirty worktree was force-removed.
+
+### GREEN final
+
+- Subscriptions compile: exit 0. Raw `raw/final-subscriptions-compile.log`,
+  `raw/final-subscriptions-compile.exit`.
+- Public consumer: exit 0; 36 tests, 36 pass, 0 fail, 0 skipped. Raw
+  `raw/final-public-consumer.log`, `raw/final-public-consumer.exit`.
+- Subscription suite: exit 0; 18 tests, 18 pass, 0 fail, 0 skipped. Raw
+  `raw/final-subscriptions-suite.log`, `raw/final-subscriptions-suite.exit`.
+- `pnpm test:runtime`: exit 0; 476 tests, 476 pass, 0 fail, 0 skipped; gateway 22 tests,
+  22 pass, 0 fail, 0 skipped. The new case executed as `ok 76`. Raw
+  `raw/final-runtime.log`, `raw/final-runtime.exit`.
+- `pnpm typecheck`: exit 0. Raw `raw/final-typecheck.log`, `raw/final-typecheck.exit`.
+- `pnpm build`: exit 0. Raw `raw/final-build.log`, `raw/final-build.exit`.
+- `pnpm test:compiled`: exit 0; 738 tests, 738 pass, 0 fail, 0 skipped. The new case
+  executed as `ok 92`. Raw `raw/final-compiled.log`, `raw/final-compiled.exit`.
+- `git diff --check`: exit 0.
+
+### Targeted Proof And Source Hash Reuse
+
+- Targeted proof: the new public recovery and restart-replay case fails on the exact
+  old-horizon source and passes on the corrected source. The failure is the assigned
+  ordinal boundary, not a count-only assertion or an internal-state probe.
+- Product source aggregate hash before and after the R5 test-only change:
+  `6d1fcda58ab964b952ece8e50f656154fa0f5a1ce362919a53031d07992f8ff1`.
+  The aggregate covers tracked `packages/**/*.ts` files.
+- Product source hashes remain:
+  - `packages/core/src/subscription.ts`:
+    `788a973ac4415199dcf708ca30148965156cc40871a36519b2d5082472d9e898`
+  - `packages/runtime/src/subscriptions/index.ts`:
+    `3e91ab18e1a7b2945519e42c93139d15a30980cdb8df12519ed5818edc1f34ae`
+- New test source hash:
+  `3c0b4396b9f39ada2665d39091229317f377aadd38d68cb94074223dc23a8f6e`.
+  Compiled new test hash:
+  `53c1b3ab188435b815de0f37ea8208201c3c2688fe6093c3ab95faadb3b2b686`.
+- Product compiled hashes remain unchanged from the R4 receipt:
+  - `dist/tests-runtime-subscriptions/packages/core/src/subscription.js`:
+    `08539d07c8ebc5f2c5ef654cca40d3b8118fbbc8ee252be2eb2fbc71f655c4a0`
+  - `dist/tests-runtime-subscriptions/packages/runtime/src/subscriptions/index.js`:
+    `e363a4a171b8b78ebf58a6902795ea50daedab533df00f9de9eb0a33204ca827`
+  - `dist/tests-runtime-subscriptions/tests/runtime/subscriptions/subscriptions.test.js`:
+    `ce2a71d48fe1ebfc9484d02494899d038bf4a7704803ac0058887992d488ba6b`
+- This receipt reuses the predecessor product, build, Journal, brain, and graph evidence
+  only because the product source and compiled digests above remain unchanged. No
+  unrelated app or business gate was rerun. Synthetic consumer evidence is not Provider
+  acceptance.
+
+### R5 qualification limits
+
+- This closes only the missing public daily next-occurrence boundary proof. It does not
+  add product behavior or start R5 admission or composition.
+- No merge, push, install, restart, independent review, or formal runtime acceptance was
+  performed.
+- Formal app, HTTP/SSE, browser, business E2E, installed runtime, and real W3
+  `humanagent-serve-task@2` acceptance remain pending.
+- Predecessor cleanup correction disclosure: the predecessor removed one empty
+  pre-existing temporary directory, `humanagent-subscriptions-Ku1KBk`, created before its
+  launch. Its user filesystem ownership was not worker resource ownership. No file data
+  was observed in the empty directory. No blanket resource-closure claim follows. The
+  directory was not recreated to conceal the event, and no predecessor or other-worker
+  resource was scanned or deleted.
+
 ## Boundaries
 
 The submission journal root is derived from runtime config/environment by the existing
