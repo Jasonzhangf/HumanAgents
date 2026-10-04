@@ -224,6 +224,119 @@ these gates.
 Raw gate logs live under
 `/Users/fanzhang/.codex/visualizations/2026/10/03/01a0ff23-1b80-7f50-8087-0fd5e4819c67/interaction-redesign-run/scheduler-r3-lineage-admission-correction/raw/`.
 
+## R4 Claim And Calendar Correction
+
+### Source input and changed paths
+
+- R4 input HEAD: `18c6e53aa813e15348a7992806535c2009f9c5d8`
+- R4 input tree: `94c71586b4f3bd70d2ca0bcbf887b4e011108b82`
+- R4 input parent: `9559f5ecf47471843cd878ed15e32ca5e1ca1fc8`
+- Parent origin/main receipt: `0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed`
+  at `2026-10-04T12:44:51Z`
+- R4 product changes:
+  - `packages/core/src/subscription.ts`
+  - `packages/runtime/src/subscriptions/index.ts`
+  - `tests/runtime/subscriptions/public-consumer.test.ts`
+- Receipt change: `docs/verification/interaction-scheduler-author-evidence-2026-10-04.md`
+
+### R4 findings addressed
+
+1. A new public first claim could acquire authority for a slot at or before
+   `currentOccurrenceOrdinal`. Core now rejects such a new claim with typed
+   `invalid-occurrence`. The existing-claim replay path returns before this predicate.
+   The runtime `consumeExecution` in-flight path does not call the new-claim predicate.
+   Public regressions cover a claim after run-once recovery and a claim after same-policy
+   pause/resume. They assert typed rejection, no persisted claim, unchanged progress, no
+   execution side effect, and a valid next-slot claim.
+2. Daily and weekly generation stopped after 3,660 calendar days. The fixed day limit is
+   removed. Iteration stops from the accepted policy `endAt` or `maxOccurrences` and from
+   each caller's finite `nowAt`, count, target ordinal, or target due time. Public daily
+   and weekly tests cover beyond 3,660 days, `dueTimes`, next-occurrence eligibility,
+   policy maximums, absolute DST mode, and the retained busy/late/end paths. No fallback,
+   clamp, new counter, validation weakening, or replacement horizon was added.
+
+### Public RED and GREEN
+
+- RED compile: exit 0; raw `raw/red-compile.log`, `raw/red-compile.exit`.
+- RED public consumer: exit 1; 35 tests, 31 pass, 4 fail, 0 skipped.
+  Raw `raw/red-public.log`, `raw/red-public.exit`.
+- RED failures: old-slot claim after run-once recovery; old-slot claim after same-policy
+  pause/resume; daily `dueTimes` returned 3,659 instead of 4,000; weekly `dueTimes`
+  returned 523 instead of 600.
+- GREEN compile: exit 0; raw `raw/green-public-compile-2.log`,
+  `raw/green-public-compile-2.exit`.
+- GREEN public consumer: exit 0; 35 tests, 35 pass, 0 fail, 0 skipped.
+  Raw `raw/green-public-2.log`, `raw/green-public-2.exit`.
+- GREEN focused suites: exit 0; 53 tests, 53 pass, 0 fail, 0 skipped.
+  Raw `raw/green-focused-compile.log`, `raw/green-focused-compile.exit`,
+  `raw/green-focused.log`, `raw/green-focused.exit`.
+- The focused total contains the 49 predecessor subscription cases and four new R4
+  cases. No predecessor case was removed or skipped.
+
+### Source and compiled hashes
+
+Source on the settled candidate:
+
+- `packages/core/src/subscription.ts`:
+  `788a973ac4415199dcf708ca30148965156cc40871a36519b2d5082472d9e898`
+- `packages/runtime/src/subscriptions/index.ts`:
+  `3e91ab18e1a7b2945519e42c93139d15a30980cdb8df12519ed5818edc1f34ae`
+- `tests/runtime/subscriptions/public-consumer.test.ts`:
+  `7489cab35b20439509cdb77c5798515bca680043a21137a762bfd9bcc6b5b09c`
+- `tests/runtime/subscriptions/subscriptions.test.ts` (unchanged):
+  `ed015843070df6f39f256d437a71486efecac15de585b6aad46fe7f1db0f5781`
+- `packages/core/src/index.ts` (unchanged):
+  `54a3005a83b30ca53378767ba27f00e22c6e8bb8a22e26a7942548b125dad402`
+
+Compiled after `pnpm build`:
+
+- `dist/tests-runtime-subscriptions/packages/core/src/subscription.js`:
+  `08539d07c8ebc5f2c5ef654cca40d3b8118fbbc8ee252be2eb2fbc71f655c4a0`
+- `dist/tests-runtime-subscriptions/packages/runtime/src/subscriptions/index.js`:
+  `e363a4a171b8b78ebf58a6902795ea50daedab533df00f9de9eb0a33204ca827`
+- `dist/tests-runtime-subscriptions/tests/runtime/subscriptions/public-consumer.test.js`:
+  `70c2ce526dd4236a57c7fa66d6b041032dc4e29648287e71faea13cd000bdfad`
+- `dist/tests-runtime-subscriptions/tests/runtime/subscriptions/subscriptions.test.js`:
+  `ce2a71d48fe1ebfc9484d02494899d038bf4a7704803ac0058887992d488ba6b`
+- `dist/tests-explicit-brain/packages/runtime/src/explicit-brain/scheduler-patrol.js`:
+  `a05b1ea7ccf168388dd31b7873fb6c7036cc91cd394710844b0cbd1d418d166d`
+- `dist/tests-explicit-brain/tests/runtime/explicit-brain/explicit-brain.test.js`:
+  `b40e4bc149f80a141507107b97d7cf00825f78fe1ae830d13dc86e437377723f`
+
+### Final maintained gates
+
+- `pnpm test:explicit-brain`: exit 0; 46 tests, 46 pass, 0 fail, 0 skipped.
+  Raw `raw/gate-01-explicit-brain.log`, `raw/gate-01-explicit-brain.exit`.
+- `pnpm test:runtime`: exit 0; 475 tests, 475 pass, 0 fail, 0 skipped; gateway 22
+  tests, 22 pass, 0 fail, 0 skipped. Raw `raw/gate-02-runtime.log`,
+  `raw/gate-02-runtime.exit`.
+- `pnpm test:journal`: exit 0; 19 tests, 19 pass, 0 fail, 0 skipped.
+  Raw `raw/gate-03-journal.log`, `raw/gate-03-journal.exit`.
+- `pnpm typecheck`: exit 0. Raw `raw/gate-04-typecheck.log`,
+  `raw/gate-04-typecheck.exit`.
+- `pnpm build:app`: exit 0. Raw `raw/gate-05-build-app.log`,
+  `raw/gate-05-build-app.exit`.
+- `pnpm build`: exit 0. Raw `raw/gate-06-build.log`, `raw/gate-06-build.exit`.
+- `pnpm test:compiled`: exit 0; 737 tests, 737 pass, 0 fail, 0 skipped.
+  Raw `raw/gate-07-compiled.log`, `raw/gate-07-compiled.exit`.
+- `pnpm dagpipe:validate`: exit 0; 11 graphs validated.
+  Raw `raw/gate-08-dagpipe.log`, `raw/gate-08-dagpipe.exit`.
+- `git diff --check`: exit 0. Raw `raw/gate-09-diff-check.log`,
+  `raw/gate-09-diff-check.exit`.
+
+### R4 qualification limits
+
+- This is source and public-library evidence only. It does not install or restart the
+  formal `10086` runtime.
+- Real W3 `humanagent-serve-task@2` execution, verification, checkpoint, settlement, and
+  Provider business success remain pending. Synthetic terminal receipts are contract
+  fixtures.
+- Formal app, HTTP/SSE, browser, and business E2E acceptance remains pending.
+- Parent owns integration, independent R4 review, merge, push, and formal delivery.
+- MCPX capability discovery failed twice. The registered `humanagent` workspace is the
+  main checkout, not this external worktree. No MCPX session was created. A scoped local
+  commit with normal hooks is the fallback.
+
 ## Boundaries
 
 The submission journal root is derived from runtime config/environment by the existing

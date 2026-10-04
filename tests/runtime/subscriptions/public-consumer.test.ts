@@ -1196,6 +1196,183 @@ test('public run-once recovery catches up only the latest missed slot', async ()
   });
 });
 
+test('public claim rejects a slot older than committed recovery progress without side effects', async () => {
+  let dispatchCount = 0;
+  await withStore(async (port, file) => {
+    const recurringPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      frequency: 'interval',
+      intervalMinutes: 60,
+      latePolicy: 'run-once',
+    });
+    await port.create(initialSubscription(), recurringPolicy);
+    await port.nextOccurrence({
+      subscription: initialSubscription(),
+      policy: recurringPolicy,
+      nowAt: '2026-10-03T03:30:00.000Z',
+    });
+    const before = await port.snapshot('subscription-a');
+    assert.equal(before.subscription.currentOccurrenceOrdinal, 3);
+    assert.deepEqual(before.claims, []);
+
+    await assert.rejects(
+      () => port.claim(claimRequest({
+        occurrenceOrdinal: 1,
+        dueAt: '2026-10-03T00:00:00.000Z',
+        nowAt: '2026-10-03T03:31:00.000Z',
+        leaseUntil: '2026-10-03T03:36:00.000Z',
+      })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'invalid-occurrence',
+    );
+    assert.deepEqual((await port.snapshot('subscription-a')).claims, []);
+    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 3);
+    await assert.rejects(
+      () => port.consumeExecution('subscription-a::1::1'),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'invalid-occurrence',
+    );
+    assert.equal(dispatchCount, 0);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file, {
+      executeOccurrence: async () => {
+        dispatchCount += 1;
+        return terminalReceipt();
+      },
+    });
+    const valid = await restarted.claim(claimRequest({
+      occurrenceOrdinal: 4,
+      dueAt: '2026-10-03T03:00:00.000Z',
+      nowAt: '2026-10-03T03:32:00.000Z',
+      leaseUntil: '2026-10-03T03:37:00.000Z',
+    }));
+    assert.equal(valid.occurrenceOrdinal, 4);
+  }, {
+    executeOccurrence: async () => {
+      dispatchCount += 1;
+      return terminalReceipt();
+    },
+  });
+  assert.equal(dispatchCount, 0);
+});
+
+test('public same-policy pause and resume rejects superseded claim slots without side effects', async () => {
+  let dispatchCount = 0;
+  await withStore(async (port, file) => {
+    const recurringPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      frequency: 'interval',
+      intervalMinutes: 60,
+      maxOccurrences: 3,
+      busyPolicy: 'idle-reminder',
+    });
+    await port.create(initialSubscription({ busyPolicy: 'idle-reminder' }), recurringPolicy);
+    await port.schedule(occurrenceInput({ busy: true }));
+    await port.schedule(occurrenceInput({
+      occurrence: {
+        subscriptionId: 'subscription-a',
+        scheduleRevision: 1,
+        occurrenceOrdinal: 2,
+        state: 'due',
+        dueAt: '2026-10-03T01:00:00.000Z',
+      },
+      nowAt: '2026-10-03T01:00:00.000Z',
+      busy: true,
+    }));
+    await port.control(control({ action: 'pause', idempotencyKey: 'pause-claim-old' }));
+    await port.control(control({
+      action: 'resume',
+      idempotencyKey: 'resume-claim-old',
+      expectedScheduleRevision: 2,
+      requestedAt: '2026-10-03T01:01:00.000Z',
+    }));
+    const before = await port.snapshot('subscription-a');
+    assert.equal(before.subscription.scheduleRevision, 3);
+    assert.equal(before.subscription.currentOccurrenceOrdinal, 2);
+    assert.deepEqual(before.claims, []);
+
+    await assert.rejects(
+      () => port.claim(claimRequest({
+        scheduleRevision: 3,
+        occurrenceOrdinal: 1,
+        dueAt: '2026-10-03T00:00:00.000Z',
+        nowAt: '2026-10-03T01:02:00.000Z',
+        leaseUntil: '2026-10-03T01:07:00.000Z',
+      })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'invalid-occurrence',
+    );
+    assert.deepEqual((await port.snapshot('subscription-a')).claims, []);
+    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 2);
+
+    const valid = await port.claim(claimRequest({
+      scheduleRevision: 3,
+      occurrenceOrdinal: 3,
+      dueAt: '2026-10-03T02:00:00.000Z',
+      nowAt: '2026-10-03T02:00:00.000Z',
+      leaseUntil: '2026-10-03T02:05:00.000Z',
+    }));
+    assert.equal(valid.occurrenceOrdinal, 3);
+    assert.equal(dispatchCount, 0);
+  }, {
+    executeOccurrence: async () => {
+      dispatchCount += 1;
+      return terminalReceipt();
+    },
+  });
+  assert.equal(dispatchCount, 0);
+});
+
+test('public daily recurrence continues beyond the former calendar horizon', async () => {
+  await withStore(async (port) => {
+    const daily = executionPolicy({
+      executionMode: 'recurring',
+      frequency: 'daily',
+      startAt: '2026-10-03T00:00:00.000Z',
+      timeOfDay: '00:00',
+      maxOccurrences: 4000,
+      dstMode: 'absolute',
+    });
+    const due = await port.dueTimes({ policy: daily, nowAt: '2037-09-15T00:00:00.000Z', count: 4000 });
+    assert.equal(due.length, 4000);
+    assert.equal(due.at(-1), '2037-09-14T00:00:00.000Z');
+
+    await port.create(initialSubscription({ currentOccurrenceOrdinal: 3659 }), daily);
+    const next = await port.nextOccurrence({
+      subscription: initialSubscription({ currentOccurrenceOrdinal: 3659 }),
+      policy: daily,
+      nowAt: '2036-10-09T12:00:00.000Z',
+    });
+    assert.equal(next.occurrenceOrdinal, 3660);
+    assert.equal(next.dueAt, '2036-10-09T00:00:00.000Z');
+  });
+});
+
+test('public weekly recurrence continues beyond the former calendar horizon', async () => {
+  await withStore(async (port) => {
+    const weekly = executionPolicy({
+      executionMode: 'recurring',
+      frequency: 'weekly',
+      startAt: '2026-10-05T00:00:00.000Z',
+      timeOfDay: '00:00',
+      weekDays: [1],
+      maxOccurrences: 600,
+      dstMode: 'absolute',
+    });
+    const due = await port.dueTimes({ policy: weekly, nowAt: '2038-04-01T00:00:00.000Z', count: 600 });
+    assert.equal(due.length, 600);
+    assert.equal(due.at(-1), '2038-03-29T00:00:00.000Z');
+
+    await port.create(initialSubscription({ currentOccurrenceOrdinal: 523 }), weekly);
+    const next = await port.nextOccurrence({
+      subscription: initialSubscription({ currentOccurrenceOrdinal: 523 }),
+      policy: weekly,
+      nowAt: '2036-10-13T00:00:00.000Z',
+    });
+    assert.equal(next.occurrenceOrdinal, 524);
+    assert.equal(next.dueAt, '2036-10-13T00:00:00.000Z');
+  });
+});
+
 test('public dueTimes returns the latest eligible slots before applying count', async () => {
   await withStore(async (port) => {
     const recurringPolicy = executionPolicy({

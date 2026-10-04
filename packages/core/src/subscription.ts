@@ -297,6 +297,9 @@ export function assertOccurrenceClaimable(
   if (occurrence.state !== 'due') {
     fail('invalid-occurrence', `occurrence state ${occurrence.state} is not claimable`);
   }
+  if (occurrence.occurrenceOrdinal <= subscription.currentOccurrenceOrdinal) {
+    fail('invalid-occurrence', 'occurrence ordinal has already been consumed');
+  }
   const maxOccurrences = policy.executionMode === 'once' ? 1 : policy.maxOccurrences;
   if (maxOccurrences !== undefined && occurrence.occurrenceOrdinal > maxOccurrences) {
     fail('exhausted', 'occurrence ordinal exceeds maxOccurrences');

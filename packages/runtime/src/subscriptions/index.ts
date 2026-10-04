@@ -872,7 +872,8 @@ function* recurringDueTimeEntries(
     return `${value.year}-${value.month}-${value.day}`;
   };
   let localDate = calendarDate(start);
-  for (let day = 0; day < 3660; day += 1) {
+  // No calendar horizon: policy end/max and each caller stop iteration.
+  for (let day = 0; ; day += 1) {
     const weekday = new Date(`${localDate}T00:00:00.000Z`).getUTCDay();
     if (!weekDays || weekDays.has(weekday)) {
       const due = Date.parse(wallTimeToInstant(
