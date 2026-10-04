@@ -6,8 +6,9 @@ import {
 } from '../../../contracts/src/index.js';
 import {
   SubscriptionSchedulerError,
-  type ScheduledOccurrenceInput,
   type SubscriptionControlPort,
+  type SubscriptionControlReceipt,
+  type SubscriptionControlRequest,
 } from '../subscriptions/index.js';
 
 export class SchedulerPatrolError extends Error {
@@ -34,11 +35,6 @@ export interface SchedulerPatrolTrigger {
 }
 
 export interface SchedulerPatrolPort {
-  /** Legacy transport hook retained for source compatibility; it is never treated as execution success. */
-  submitTrigger?(input: SchedulerPatrolTrigger): Promise<{
-    readonly triggerReceiptRef: string;
-    readonly accepted: boolean;
-  }>;
   createAttention(input: {
     readonly sourceRef: string;
     readonly reason: string;
@@ -51,8 +47,14 @@ export interface SchedulerPatrolReceipt {
   readonly subscriptionId: string;
   readonly occurrence: Occurrence;
   readonly nextCheckRef: string;
-  readonly triggerReceiptRef?: string;
   readonly attentionRef?: string;
+}
+
+export interface SchedulerPatrolControlInput {
+  readonly expectedPolicyRevision: number;
+  readonly expectedScheduleRevision?: number;
+  readonly idempotencyKey: string;
+  readonly requestedAt: string;
 }
 
 export interface SchedulerPatrolOptions {
@@ -61,33 +63,26 @@ export interface SchedulerPatrolOptions {
   readonly port: SchedulerPatrolPort;
   readonly now: () => Date;
   readonly subscriptionPort?: SubscriptionControlPort;
-  readonly schedule?: Pick<ScheduledOccurrenceInput, 'occurrence'>;
 }
 
 export class SchedulerPatrol {
-  private subscription: Subscription;
+  private readonly subscriptionId: string;
 
   constructor(private readonly options: SchedulerPatrolOptions) {
     validateSubscription(options.subscription);
-    this.subscription = { ...options.subscription };
+    this.subscriptionId = options.subscription.subscriptionId;
   }
 
-  snapshot(): Subscription {
-    return { ...this.subscription };
+  async snapshot(): Promise<Subscription> {
+    return (await this.requireSubscriptionPort().snapshot(this.subscriptionId)).subscription;
   }
 
-  pause(): Subscription {
-    if (this.subscription.state !== 'active') {
-      throw new SchedulerPatrolError('subscription-state', `subscription is ${this.subscription.state}`);
-    }
-    return { ...this.subscription, state: 'suspended', scheduleRevision: this.subscription.scheduleRevision + 1 };
+  async pause(input: SchedulerPatrolControlInput): Promise<SubscriptionControlReceipt> {
+    return this.control({ ...input, subscriptionId: this.subscriptionId, action: 'pause' });
   }
 
-  resume(): Subscription {
-    if (this.subscription.state !== 'suspended') {
-      throw new SchedulerPatrolError('subscription-state', 'only a suspended subscription can be resumed');
-    }
-    return { ...this.subscription, state: 'active', scheduleRevision: this.subscription.scheduleRevision + 1 };
+  async resume(input: SchedulerPatrolControlInput): Promise<SubscriptionControlReceipt> {
+    return this.control({ ...input, subscriptionId: this.subscriptionId, action: 'resume' });
   }
 
   async run(input: {
@@ -101,51 +96,25 @@ export class SchedulerPatrol {
     if (Date.parse(input.dueAt) > now.getTime()) {
       throw new SchedulerPatrolError('subscription-state', 'scheduler patrol occurrence is not due yet');
     }
-    if (this.subscription.state !== 'active') {
-      throw new SchedulerPatrolError('subscription-state', `subscription is ${this.subscription.state}`);
-    }
-    const occurrence: Occurrence = this.options.schedule?.occurrence === undefined
-      ? {
-        subscriptionId: this.subscription.subscriptionId,
-        scheduleRevision: this.subscription.scheduleRevision,
-        occurrenceOrdinal: this.subscription.currentOccurrenceOrdinal + 1,
-        state: 'due',
-        dueAt: input.dueAt,
-      }
-      : {
-        ...this.options.schedule.occurrence,
-        subscriptionId: this.subscription.subscriptionId,
-        scheduleRevision: this.subscription.scheduleRevision,
-      };
-    validateOccurrence(occurrence);
-    if (this.options.subscriptionPort === undefined || this.options.schedule === undefined) {
-      const error = new SchedulerPatrolError('serve-task-pending', 'scheduler patrol requires the typed SubscriptionControlPort');
-      const attention = await this.options.port.createAttention({
-        sourceRef: this.options.trigger.triggerRef,
-        reason: error.message,
-        nextAction: 'retry-scheduler-patrol',
-        conditionRef: `${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`,
-      });
-      return {
-        subscriptionId: this.subscription.subscriptionId,
-        occurrence,
-        attentionRef: attention.attentionRef,
-        nextCheckRef: `next-check:${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`,
-      };
-    }
-    try {
+    if (this.options.subscriptionPort === undefined) {
+      const occurrence = this.occurrenceFor(this.options.subscription, input.dueAt);
       validateOccurrence(occurrence);
+      return this.pendingAttention(occurrence, 'scheduler patrol requires the typed SubscriptionControlPort');
+    }
+    const subscription = (await this.options.subscriptionPort.snapshot(this.subscriptionId)).subscription;
+    if (subscription.state !== 'active') {
+      throw new SchedulerPatrolError('subscription-state', `subscription is ${subscription.state}`);
+    }
+    const occurrence = this.occurrenceFor(subscription, input.dueAt);
+    validateOccurrence(occurrence);
+    try {
       const scheduled = await this.options.subscriptionPort.schedule({
         occurrence,
         nowAt: now.toISOString(),
         busy: input.busy,
       });
-      this.subscription = {
-        ...this.subscription,
-        currentOccurrenceOrdinal: scheduled.occurrenceOrdinal,
-      };
       return {
-        subscriptionId: this.subscription.subscriptionId,
+        subscriptionId: this.subscriptionId,
         occurrence: scheduled,
         nextCheckRef: `next-check:${scheduled.subscriptionId}::${scheduled.scheduleRevision}::${scheduled.occurrenceOrdinal}`,
       };
@@ -160,12 +129,49 @@ export class SchedulerPatrol {
         conditionRef: failureKey,
       });
       const receipt = {
-        subscriptionId: this.subscription.subscriptionId,
+        subscriptionId: this.subscriptionId,
         occurrence: failedOccurrence,
         attentionRef: attention.attentionRef,
         nextCheckRef: `next-check:${failureKey}`,
       };
       return { ...receipt };
     }
+  }
+
+  private requireSubscriptionPort(): SubscriptionControlPort {
+    if (this.options.subscriptionPort === undefined) {
+      throw new SchedulerPatrolError('serve-task-pending', 'scheduler patrol requires the typed SubscriptionControlPort');
+    }
+    return this.options.subscriptionPort;
+  }
+
+  private async control(request: SubscriptionControlRequest): Promise<SubscriptionControlReceipt> {
+    return this.requireSubscriptionPort().control(request);
+  }
+
+  private occurrenceFor(subscription: Subscription, dueAt: string): Occurrence {
+    return {
+      subscriptionId: subscription.subscriptionId,
+      scheduleRevision: subscription.scheduleRevision,
+      occurrenceOrdinal: subscription.currentOccurrenceOrdinal + 1,
+      state: 'due',
+      dueAt,
+    };
+  }
+
+  private async pendingAttention(occurrence: Occurrence, message: string): Promise<SchedulerPatrolReceipt> {
+    const error = new SchedulerPatrolError('serve-task-pending', message);
+    const attention = await this.options.port.createAttention({
+      sourceRef: this.options.trigger.triggerRef,
+      reason: error.message,
+      nextAction: 'retry-scheduler-patrol',
+      conditionRef: `${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`,
+    });
+    return {
+      subscriptionId: this.subscriptionId,
+      occurrence,
+      attentionRef: attention.attentionRef,
+      nextCheckRef: `next-check:${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`,
+    };
   }
 }
