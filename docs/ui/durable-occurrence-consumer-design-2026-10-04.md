@@ -139,6 +139,13 @@ journal.transaction(
 supervisor guard 在同一个 `transaction` 外仍持有时，上述幂等事实才同时具有 owner
 授权意义；Journal 锁只序列化文件写，不认证 caller。
 
+首次 admission 的 owner 规则以 owner-fence 设计第 8 节为唯一真源：无匹配记录时，
+必须在同一 daemon guard 与 Journal transaction 内，先验证完整不可变 binding 与实际
+权威输入一致，再只从 supervisor-authenticated current caller 派生初始
+`admittedExecutionOwner`，并与该唯一 admission 一起提交；append 失败不得 dispatch。
+并发或重放不得创建第二条 admission 或第二次 dispatch。已有 admission 仍由不可变
+A 的比较或 committed-replacement 判定决定后续 mutation。
+
 ### 4.2 Durable verification / receipt fact
 
 checkpoint 决定 lifecycle outcome；它不包含 `TaskVerificationResult`，且 `FileCheckpointStore.commit()` 只提交 `Checkpoint`。因此 durable consumer 必须额外提交一个**typed receipt fact**，使 restart 能从权威 Journal 读取完整 `ServeTaskTerminalReceipt`，而不能在内存里重算。
@@ -326,24 +333,28 @@ Task B 不得在 scheduler 重建 owner/fence 决策。
 必须断言的场景：
 
 1. 同一 occurrence/task/operation/executionEpoch/inputArtifactDigest 只启动一次业务执行。
-2. execute 返回后、settle 前**同一 port** 重复调用，不第二次 dispatch。
-3. execute 返回后、settle 前**重启 port**（新进程/新 port/新端口），读取同一持久 receipt，不第二次 dispatch。
-4. **两个真实 consumer process copied identity**：A 有 live current claim 且仍在执行时，B 复制 A 的完整可读
+2. **first-admission ownership**：无既有 admission 时，mutation callback 必须验证
+   完整 binding 与权威输入，并把持久化 `admittedExecutionOwner` 绑定到同一 guard 已
+   认证的 initializer。commit 后恰好一次 dispatch；append 失败、并发竞争或 replay
+   均不得产生第二条 admission 或第二次 dispatch。
+3. execute 返回后、settle 前**同一 port** 重复调用，不第二次 dispatch。
+4. execute 返回后、settle 前**重启 port**（新进程/新 port/新端口），读取同一持久 receipt，不第二次 dispatch。
+5. **两个真实 consumer process copied identity**：A 有 live current claim 且仍在执行时，B 复制 A 的完整可读
    daemon lease identity 并调用同一公开操作；mutation callback 不得运行，B 不得
    dispatch、不得写 recovery/terminal。A terminal 后 B 只能读取已提交 receipt。
-5. **replacement 与 stale A**：replacement B 被 supervisor-authenticated 且 durable
+6. **replacement 与 stale A**：replacement B 被 supervisor-authenticated 且 durable
    handoff 已提交时，可为 A 的真实 admission 写一条 recovery receipt，但不重派、不
    rebind；stale A 即使复制 B 的可读 identity 也必须被拒。current/expired/uncertain
    路径分别返回 typed 结果，均不得 dispatch 或写 recovery。
-6. **admission 后崩溃**（模拟 admission 提交后进程中断）在重启后返回 blocked/recovery，
+7. **admission 后崩溃**（模拟 admission 提交后进程中断）在重启后返回 blocked/recovery，
    不重新 dispatch，且用户可见结果与原始 error/receipt 身份一致。
-7. **verification returned before settle restart**：A 在 `settleOccurrence` 前退出；重启后 consumer 仅凭 binding 与 checkpoint 定位同一 durable receipt，不构造 verification、不 dispatch、不重新验证业务工作。scheduler 首次 settle，第二次 replay 相同 terminal/settlement。
-8. Journal write failure：terminal 成功、receipt append 失败必须暴露 `durable-unverified-recovery-pending`，不得返回 verified terminal。
-9. `success`、`failed`、`rejected`、`missing`、`blocked`、`cancelled` 和 cleanup 终点均有可断言
+8. **verification returned before settle restart**：A 在 `settleOccurrence` 前退出；重启后 consumer 仅凭 binding 与 checkpoint 定位同一 durable receipt，不构造 verification、不 dispatch、不重新验证业务工作。scheduler 首次 settle，第二次 replay 相同 terminal/settlement。
+9. Journal write failure：terminal 成功、receipt append 失败必须暴露 `durable-unverified-recovery-pending`，不得返回 verified terminal。
+10. `success`、`failed`、`rejected`、`missing`、`blocked`、`cancelled` 和 cleanup 终点均有可断言
    receipt；未释放 provider/tool/browser/port 资源进入 recovery inventory，且有实际 release/closure inventory。
-10. fixture root 必须放在本任务自有目录下，测试后只删除本轮创建的资源，核对物理 absence。
-11. **receipt key uniqueness**：两个只相差 `verification` 或 `releaseProofs` 的 receipt，若 `OccurrenceTaskBinding` 完全相同，必须生成同一 commitId，并以 `JournalCommitConflictError` 拒绝第二个 receipt；不得创建第二条 receipt。相同 receipt 的 replay 必须返回第一条记录。
-12. **restarted public consumer lookup**：从真实公开 consumer 入口重启新进程时，只给出 binding 与 authoritative terminal checkpoint 即可定位第一条 durable receipt。断言没有构造 verification、没有 dispatch、没有重新验证业务工作。该条与第 11 条是 future source acceptance gate，不是本轮已执行测试。
+11. fixture root 必须放在本任务自有目录下，测试后只删除本轮创建的资源，核对物理 absence。
+12. **receipt key uniqueness**：两个只相差 `verification` 或 `releaseProofs` 的 receipt，若 `OccurrenceTaskBinding` 完全相同，必须生成同一 commitId，并以 `JournalCommitConflictError` 拒绝第二个 receipt；不得创建第二条 receipt。相同 receipt 的 replay 必须返回第一条记录。
+13. **restarted public consumer lookup**：从真实公开 consumer 入口重启新进程时，只给出 binding 与 authoritative terminal checkpoint 即可定位第一条 durable receipt。断言没有构造 verification、没有 dispatch、没有重新验证业务工作。该条与第 12 条是 future source acceptance gate，不是本轮已执行测试。
 
 RED/control 限定：fake/diagnostic counter 只能用于隔离的确定性 RED/control 回归，不能替代
 真实 consumer 证据。

@@ -132,10 +132,20 @@ The operation must:
 6. release the guard in `finally` after the callback settles.
 
 The callback reads the real admission by the immutable `binding` inside the
-Journal transaction. That read supplies immutable owner A. The callback then
-uses the supervisor-owned predicate to decide whether authenticated current
-caller B is a committed replacement for A. A is never an input supplied by the
-caller.
+Journal transaction. On an existing admission, that read supplies immutable
+owner A. The callback then uses the supervisor-owned predicate to decide
+whether authenticated current caller B is a committed replacement for A. A is
+never an input supplied by the caller.
+
+The first invocation has no admission to read. Inside the same outer daemon
+guard and Journal transaction, it validates the complete immutable binding
+against the actual authoritative input. Only after that validation passes does
+it derive the initial admitted owner from the supervisor-authenticated current
+caller, persist that owner with the unique admission, and permit the single
+dispatch authorized by that admission. It must not dereference an absent
+admission, precreate unfenced ownership, accept caller-readable identity as
+authority, or introduce a second store or lease. Existing A applies only to
+later mutations.
 
 This is an extension of the existing supervisor authority. It is not a second
 registry, lease, controller, or token. Until this callable public operation
@@ -194,7 +204,7 @@ The future core validator returns typed outcomes. The table is the contract:
 
 | Case | Observable facts | Result |
 | --- | --- | --- |
-| No admission | no admission record and current owner available | admit once |
+| No admission | no admission record; complete immutable binding validates against the actual authoritative input; current caller is supervisor-authenticated | derive initial admitted owner only from the authenticated caller; append owner plus the unique admission; permit exactly one dispatch |
 | current live owner | the guard's injected `SupervisorLease.assertActive()` passes and its local record matches the durable current lease; immutable A equals the current authenticated caller | allow normal mutation; same bindings only |
 | concurrent B / live unproven | persisted claim equals admitted owner, claim unexpired, B cannot prove A is dead or fenced | typed `owner-live-unproven`/`in-progress`; no dispatch, no recovery, no terminal |
 | expired claim | claim lease expired | typed `lease-expired`; no recovery from expiry alone |
@@ -221,12 +231,17 @@ scope. The app adapter that implements `ServeTaskConsumerPort` uses this order:
 withCurrentDaemonOwner(paths, binding, async (currentCaller, proveReplacement) => {
   // currentCaller is supervisor-authenticated by the injected local lease.
   return journal.transaction(async ({ records }) => {
+    const requested = validateAuthoritativeBinding(records, binding)
     const admission = readAdmission(records, binding)
-    const decision = decideOwner(admission.admittedExecutionOwner, currentCaller, proveReplacement)
-    return { admission, decision }
-  }, async ({ admission, decision }, append) => {
-    if (!decision.allowed) return decision.rejected
-    return append(...)
+    if (admission === undefined) {
+      return createInitialAdmission(requested, currentCaller)
+    }
+    return decideExistingAdmission(admission, currentCaller, proveReplacement)
+  }, async (decision, append) => {
+    if (decision.kind !== 'admitted' && decision.kind !== 'recovery-allowed') {
+      return decision.rejected
+    }
+    return append(decision.record)
   })
 })
 ```
@@ -246,9 +261,13 @@ Why this closes the race:
   identity as proof.
 - The Journal transaction acquires the Journal lock and appends inside the
   same guard scope.
-- The Journal read callback reads immutable A from the real admission. The
-  decision compares A with the authenticated caller or with the supervisor
-  predicate. The apply callback runs only after that read validation.
+- The first admission validates the complete binding against the actual
+  authoritative input. It derives the initial owner only from the already
+  supervisor-authenticated current caller and persists it with the unique
+  admission.
+- Existing-admission reads supply immutable A. The decision compares A with
+  the authenticated caller or with the supervisor predicate. The apply
+  callback runs only after that read validation.
 - Validation-to-append overlap with handoff is impossible if the guard is held
   for the whole mutation.
 - A stale A that holds the guard after handoff cannot authenticate as the
@@ -257,11 +276,20 @@ Why this closes the race:
 
 ### Normal admission and terminal path
 
-For an occurrence that has no completed execution, the Journal read callback
-receives immutable A from the real persisted admission. The guard authenticates
-the local caller. The in-guard decision requires the authenticated current
-caller to equal A. Only then may it append the normal admission or terminal
-checkpoint/receipt. A mismatch returns the typed concurrent/rejected outcome
+The guard authenticates the local caller before the Journal transaction. The
+first-admission branch runs only when no matching record exists. It validates
+the complete immutable binding against the actual authoritative input, then
+uses the authenticated current caller as the only source for the initial
+`admittedExecutionOwner`. The initial owner and unique admission are appended
+together; only that committed admission authorizes one dispatch. An append
+failure produces no dispatch. A concurrent caller, replay, or different caller
+either reads that admission or is typed-rejected; it never creates a second
+admission or dispatch.
+
+For an existing admission, the Journal read callback receives immutable A from
+the real persisted admission. Normal mutation is allowed only when A equals
+the authenticated current caller. Recovery uses the committed-replacement
+predicate instead. A mismatch returns the typed concurrent/rejected outcome
 and performs no dispatch or Journal mutation.
 
 ### Replacement recovery path
@@ -396,31 +424,38 @@ these commands as current evidence.
 Required public assertions:
 
 1. Same-process success: one admission, one dispatch, same receipt replay.
-2. Two-process A/B before terminal: B copies A's exact readable
+2. First admission: with no admission record, the guarded Journal transaction
+   validates the complete immutable binding against the actual authoritative
+   input and persists `admittedExecutionOwner` equal to the authenticated
+   initializer. The assertion reads back the real persisted owner. Only that
+   committed unique admission permits exactly one dispatch. Append failure
+   yields no dispatch. Concurrent and replay callers never create a second
+   admission or dispatch; the record/receipt identity is unchanged.
+3. Two-process A/B before terminal: B copies A's exact readable
    `daemonLeaseId`/`daemonGeneration`/`processStartToken`. B's mutation callback
    never runs. Assert no dispatch, terminal, or recovery record is appended.
-3. Crash after admission: replacement daemon lease B has a new generation and
+4. Crash after admission: replacement daemon lease B has a new generation and
    token. `isDaemonLeaseHandoffCommitted(paths, A)` is true inside the guard. B
    writes exactly one recovery checkpoint/receipt for the original binding and
    does not redispatch or rebind A.
-4. Stale A after replacement: A tries the same recovery operation but cannot
+5. Stale A after replacement: A tries the same recovery operation but cannot
    authenticate as the durable current lease or prove a handoff from itself.
    The mutation callback never runs. A also copies B's readable identity and
    must still fail.
-5. Concurrent B/uncertain/expired: while A is live, or when A's claim is expired
+6. Concurrent B/uncertain/expired: while A is live, or when A's claim is expired
    without a committed replacement, B receives typed rejection/pending and
    writes nothing.
-6. Validation-to-append race: a handoff attempted between Journal read and
+7. Validation-to-append race: a handoff attempted between Journal read and
    append cannot interleave because the guard is held across the transaction.
    The post-guard authoritative replay returns the committed winner.
-7. Persistence/effect uncertainty: append failure is visible; a failed append
+8. Persistence/effect uncertainty: append failure is visible; a failed append
    leaves no receipt; provider/tool/browser/port release remains `possible`
    until real stop/settlement evidence exists.
-8. Same receipt key: second receipt with the same binding and different content
+9. Same receipt key: second receipt with the same binding and different content
    throws `JournalCommitConflictError`; checkpoint-only remains
    `durable-unverified-recovery-pending`; standard stop/settlement and original
    errors/external effects remain unchanged.
-9. Cleanup: only this task's fixture roots are removed.
+10. Cleanup: only this task's fixture roots are removed.
 
 Fake counters are RED/control evidence only. They cannot be GREEN.
 

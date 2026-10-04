@@ -6,7 +6,7 @@
     "admission_check": "执行资源与权限准入",
     "load_verification_policy": "加载创建期校验策略",
     "correlate_task": "关联或创建真实任务",
-    "durable_consume": "认证当前 daemon caller 并持久准入 occurrence 到不可变 admitted owner",
+    "durable_consume": "首次准入时认证 caller、验证权威 binding 并提交初始 owner；已有 admission 时按 A 或 replacement 判定",
     "execute_task_turns": "执行真实轮次与工具",
     "bind_verification_evidence": "绑定真实执行身份与产物摘要",
     "produce_observation_evidence": "从绑定产物生产视觉观测回执",

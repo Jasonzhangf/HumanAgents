@@ -38,7 +38,7 @@
       "plannedOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
       "supervisorGuardOwnerPath": "packages/app/src/supervisor/supervisor.ts",
       "supervisorGuardOwnerRel": "packages/app/src/supervisor/supervisor.ts",
-      "supervisorGuardStatus": "pending; withCurrentDaemonOwner equivalent authenticates local caller and proves committed replacement",
+      "supervisorGuardStatus": "pending; withCurrentDaemonOwner equivalent authenticates local caller, initializes absent-admission owner inside the Journal transaction, and proves committed replacement for existing admissions",
       "journalFenceOwnerPath": "packages/adapters/jsonl/src/index.ts",
       "journalFenceOwnerRel": "packages/adapters/jsonl/src/index.ts"
     },
