@@ -226,21 +226,61 @@ function findCommittedOccurrence(snapshot: SubscriptionSnapshot, scheduleRevisio
   return snapshot.occurrences.find((occurrence) => occurrence.scheduleRevision === scheduleRevision && occurrence.dueAt === dueAt);
 }
 
+interface PolicySlot {
+  readonly ordinal: number;
+  readonly dueAt: string;
+}
+
+function* policySlotEntries(policy: ExecutionPolicyDefinition): Generator<PolicySlot> {
+  const max = policyMaxOccurrences(policy);
+  if (policy.executionMode === 'recurring') {
+    let ordinal = 0;
+    for (const dueAt of recurringDueTimeEntries(policy)) {
+      ordinal += 1;
+      if (max !== undefined && ordinal > max) break;
+      yield { ordinal, dueAt };
+    }
+    return;
+  }
+  if (max !== undefined && max < 1) return;
+  const dueAt = policy.executionMode === 'once' ? policy.dueAt : policy.startAt;
+  if (policy.executionMode !== 'once' && policy.endAt !== undefined && Date.parse(dueAt) >= Date.parse(policy.endAt)) return;
+  yield { ordinal: 1, dueAt };
+}
+
 function policySlotOrdinal(policy: ExecutionPolicyDefinition, dueAt: string): number {
   const target = Date.parse(dueAt);
   if (!Number.isFinite(target)) throw new SubscriptionSchedulerError('invalid-occurrence', 'claim dueAt is invalid');
-  const candidates = policy.executionMode === 'recurring'
-    ? recurringDueTimeEntries(policy)
-    : [policyDueAt(policy, 1)];
-  let ordinal = 0;
-  for (const candidate of candidates) {
-    if (candidate === undefined) break;
-    ordinal += 1;
-    const candidateAt = Date.parse(candidate);
-    if (candidateAt === target) return ordinal;
+  for (const slot of policySlotEntries(policy)) {
+    const candidateAt = Date.parse(slot.dueAt);
+    if (candidateAt === target) return slot.ordinal;
     if (candidateAt > target) break;
   }
   throw new SubscriptionSchedulerError('invalid-occurrence', 'claim dueAt is not part of the committed schedule');
+}
+
+function nextPolicySlotAfter(policy: ExecutionPolicyDefinition, ordinal: number): PolicySlot | undefined {
+  for (const slot of policySlotEntries(policy)) {
+    if (slot.ordinal > ordinal) return slot;
+  }
+  return undefined;
+}
+
+function latestDuePolicySlot(
+  policy: ExecutionPolicyDefinition,
+  nowAt: string,
+  afterOrdinal = 0,
+): PolicySlot | undefined {
+  const now = Date.parse(nowAt);
+  if (!Number.isFinite(now)) throw new SubscriptionSchedulerError('invalid-occurrence', 'nowAt must be a valid timestamp');
+  let latest: PolicySlot | undefined;
+  for (const slot of policySlotEntries(policy)) {
+    if (slot.ordinal <= afterOrdinal) continue;
+    const candidateAt = Date.parse(slot.dueAt);
+    if (candidateAt > now + 1_000) break;
+    latest = slot;
+  }
+  return latest;
 }
 
 function wallTimeToInstant(
@@ -558,9 +598,14 @@ export class SubscriptionControlPort {
           occurrence: cloneState(consumed),
           terminal: cloneState(input.terminal),
         };
-        const max = policyMaxOccurrences(snapshot.policy);
-        const currentOccurrenceOrdinal = Math.max(snapshot.subscription.currentOccurrenceOrdinal, occurrence.occurrenceOrdinal);
-        const nextState = snapshot.subscription.state === 'active'
+        const claimIsCurrent = occurrence.scheduleRevision === snapshot.subscription.scheduleRevision
+          && claim.scheduleRevision === snapshot.subscription.scheduleRevision;
+        const max = policyMaxOccurrences(claim.policy);
+        const currentOccurrenceOrdinal = claimIsCurrent
+          ? Math.max(snapshot.subscription.currentOccurrenceOrdinal, occurrence.occurrenceOrdinal)
+          : snapshot.subscription.currentOccurrenceOrdinal;
+        const nextState = claimIsCurrent
+          && snapshot.subscription.state === 'active'
           && max !== undefined
           && currentOccurrenceOrdinal >= max
           ? 'exhausted'
@@ -640,22 +685,34 @@ export class SubscriptionControlPort {
         nextOccurrence = { ...nextOccurrence, state: 'skipped-busy' };
       } else if (busy && snapshot.policy.busyPolicy === 'idle-reminder') {
         nextOccurrence = { ...nextOccurrence, state: 'reminder-pending' };
-        const reminderId = `reminder:${occurrenceId}`;
-        if (!snapshot.reminders.some((reminder) => reminder.reminderId === reminderId)) {
-          nextReminders = [...snapshot.reminders, {
-            reminderId,
-            subscriptionId: input.occurrence.subscriptionId,
-            scheduleRevision: input.occurrence.scheduleRevision,
-            occurrenceOrdinal: expectedOrdinal,
-            state: 'pending',
-            dueAt: input.occurrence.dueAt,
-          }];
+        const reminderId = `reminder:${input.occurrence.subscriptionId}`;
+        const reminder = {
+          reminderId,
+          subscriptionId: input.occurrence.subscriptionId,
+          scheduleRevision: input.occurrence.scheduleRevision,
+          occurrenceOrdinal: expectedOrdinal,
+          state: 'pending' as const,
+          dueAt: input.occurrence.dueAt,
+        };
+        const pendingIndex = snapshot.reminders.findIndex((candidate) => candidate.subscriptionId === input.occurrence.subscriptionId
+          && candidate.state === 'pending');
+        const stableIndex = snapshot.reminders.findIndex((candidate) => candidate.reminderId === reminderId);
+        if (pendingIndex >= 0) {
+          nextReminders = snapshot.reminders.map((candidate, index) => index === pendingIndex ? reminder : candidate);
+        } else if (stableIndex >= 0) {
+          nextReminders = snapshot.reminders.map((candidate, index) => index === stableIndex ? reminder : candidate);
+        } else {
+          nextReminders = [...snapshot.reminders, reminder];
         }
       }
       const consumedOrdinal = nextOccurrence.state === 'skipped-busy';
+      const recoverySkipped = snapshot.policy.latePolicy === 'run-once'
+        && expectedOrdinal > subscription.currentOccurrenceOrdinal + 1;
       const currentOccurrenceOrdinal = consumedOrdinal
         ? Math.max(subscription.currentOccurrenceOrdinal, expectedOrdinal)
-        : subscription.currentOccurrenceOrdinal;
+        : recoverySkipped
+          ? expectedOrdinal - 1
+          : subscription.currentOccurrenceOrdinal;
       const exhausted = consumedOrdinal && max !== undefined && currentOccurrenceOrdinal >= max;
       const nextSubscription: Subscription = {
         ...subscription,
@@ -708,8 +765,12 @@ export class SubscriptionControlPort {
       return isDue(due) && due < end ? [input.policy.startAt] : [];
     }
 
-    return recurringDueTimes(input.policy, input.count)
-      .filter((dueAt) => isDue(Date.parse(dueAt)));
+    const due: string[] = [];
+    for (const slot of policySlotEntries(input.policy)) {
+      if (!isDue(Date.parse(slot.dueAt))) break;
+      due.push(slot.dueAt);
+    }
+    return due.slice(-input.count);
   }
 
   async consumeExecution(occurrenceId: string, claim?: OccurrenceClaimRecord): Promise<ServeTaskTerminalReceipt> {
@@ -787,13 +848,6 @@ function policyMaxOccurrences(policy: ExecutionPolicyDefinition): number | undef
   return policy.executionMode === 'once' ? 1 : policy.maxOccurrences;
 }
 
-function policyDueAt(policy: ExecutionPolicyDefinition, ordinal: number): string | undefined {
-  assertPositiveOrdinal(ordinal, 'occurrence ordinal');
-  if (policy.executionMode === 'once') return ordinal === 1 ? policy.dueAt : undefined;
-  if (policy.executionMode === 'scheduled') return ordinal === 1 ? policy.startAt : undefined;
-  return recurringDueTimes(policy, ordinal)[ordinal - 1];
-}
-
 function nextCalendarDate(date: string): string {
   const parsed = Date.parse(`${date}T00:00:00.000Z`);
   if (!Number.isFinite(parsed)) throw new SubscriptionSchedulerError('invalid-occurrence', 'calendar date is invalid');
@@ -852,29 +906,18 @@ function* recurringDueTimeEntries(
   }
 }
 
-function recurringDueTimes(
-  policy: Extract<ExecutionPolicyDefinition, { readonly executionMode: 'recurring' }>,
-  count: number,
-): readonly string[] {
-  const limit = policy.maxOccurrences === undefined ? count : Math.min(count, policy.maxOccurrences);
-  if (limit < 1) return [];
-  const results: string[] = [];
-  for (const dueAt of recurringDueTimeEntries(policy)) {
-    if (results.length >= limit) break;
-    results.push(dueAt);
-  }
-  return results;
-}
-
 function computeOccurrence(input: NextOccurrenceInput): ScheduledOccurrenceInput {
   const { subscription, policy, nowAt, busy } = input;
   validateSubscription(subscription);
   validateExecutionPolicyDefinition(policy);
   const now = Date.parse(nowAt);
   if (!Number.isFinite(now)) throw new SubscriptionSchedulerError('invalid-occurrence', 'nowAt must be a valid timestamp');
-  const ordinal = subscription.currentOccurrenceOrdinal + 1;
-  const dueAt = policyDueAt(policy, ordinal);
-  if (dueAt === undefined) throw new SubscriptionSchedulerError('exhausted', 'subscription has no further occurrence');
+  const latest = policy.latePolicy === 'run-once'
+    ? latestDuePolicySlot(policy, nowAt, subscription.currentOccurrenceOrdinal)
+    : undefined;
+  const slot = latest ?? nextPolicySlotAfter(policy, subscription.currentOccurrenceOrdinal);
+  if (slot === undefined) throw new SubscriptionSchedulerError('exhausted', 'subscription has no further occurrence');
+  const { ordinal, dueAt } = slot;
   if (policy.executionMode !== 'once' && policy.endAt !== undefined) {
     if (Date.parse(dueAt) >= Date.parse(policy.endAt)) {
       throw new SubscriptionSchedulerError('exhausted', 'subscription end has passed');

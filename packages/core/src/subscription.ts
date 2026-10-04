@@ -188,6 +188,7 @@ export function decideSubscriptionControl(
     const nextSubscription: Subscription = {
       ...subscription,
       scheduleRevision: subscription.scheduleRevision + 1,
+      currentOccurrenceOrdinal: 0,
     };
     const invalidated = supersedeUnclaimed(occurrences, subscription.scheduleRevision);
     const receipt = appliedReceipt(request, nextSubscription, request.newPolicy.policyRevision, invalidated);

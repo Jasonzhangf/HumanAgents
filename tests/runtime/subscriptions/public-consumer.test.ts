@@ -286,7 +286,7 @@ test('idle-reminder persists a pending reminder without consuming the occurrence
     const snapshot = await port.snapshot('subscription-a');
     assert.equal(snapshot.subscription.currentOccurrenceOrdinal, 0);
     assert.deepEqual(snapshot.reminders, [{
-      reminderId: 'reminder:subscription-a::1::1',
+      reminderId: 'reminder:subscription-a',
       subscriptionId: 'subscription-a',
       scheduleRevision: 1,
       occurrenceOrdinal: 1,
@@ -643,4 +643,258 @@ test('public claimed execution remains valid after future cancel', async () => {
     },
   });
   assert.equal(dispatchCount, 1);
+});
+
+test('public modify resets progress for the replacement policy', async () => {
+  await withStore(async (port, file) => {
+    await port.create(initialSubscription(), executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 3,
+      frequency: 'interval',
+      intervalMinutes: 60,
+    }));
+    await port.schedule(occurrenceInput());
+    const claim = await port.claim(claimRequest());
+    await port.settleOccurrence({ occurrenceId: claim.occurrenceId, terminal: terminalReceipt() });
+    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 1);
+
+    const replacementPolicy = executionPolicy({
+      policyId: 'policy-b',
+      policyRevision: 2,
+      executionMode: 'scheduled',
+      startAt: '2026-10-04T00:00:00.000Z',
+    });
+    const modified = await port.control(control({
+      action: 'modify',
+      idempotencyKey: 'modify-after-progress',
+      newPolicy: replacementPolicy,
+      newPolicyHash: executionPolicyHash(replacementPolicy),
+      confirmationRef: 'confirm:policy-b',
+    }));
+    assert.equal(modified.status, 'applied');
+    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 0);
+
+    const replacement = occurrenceInput({
+      occurrence: {
+        subscriptionId: 'subscription-a',
+        scheduleRevision: 2,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: '2026-10-04T00:00:00.000Z',
+      },
+      nowAt: '2026-10-04T00:00:00.000Z',
+    });
+    const scheduled = await port.schedule(replacement);
+    assert.equal(scheduled.occurrenceOrdinal, 1);
+    assert.equal(scheduled.dueAt, '2026-10-04T00:00:00.000Z');
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    assert.deepEqual(await restarted.schedule(replacement), scheduled);
+    assert.equal((await restarted.snapshot('subscription-a')).subscription.state, 'active');
+  });
+});
+
+test('public old-policy settlement cannot advance replacement progress', async () => {
+  await withStore(async (port, file) => {
+    await port.create(initialSubscription(), executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 2,
+      frequency: 'interval',
+      intervalMinutes: 60,
+    }));
+    const oldClaim = await port.claim(claimRequest());
+    const replacementPolicy = executionPolicy({
+      policyId: 'policy-b',
+      policyRevision: 2,
+      executionMode: 'once',
+      dueAt: '2026-10-04T00:00:00.000Z',
+    });
+    await port.control(control({
+      action: 'modify',
+      idempotencyKey: 'replace-with-once',
+      newPolicy: replacementPolicy,
+      newPolicyHash: executionPolicyHash(replacementPolicy),
+      confirmationRef: 'confirm:policy-b',
+    }));
+
+    const settled = await port.settleOccurrence({ occurrenceId: oldClaim.occurrenceId, terminal: terminalReceipt() });
+    assert.equal(settled.occurrence.state, 'consumed');
+    const snapshot = await port.snapshot('subscription-a');
+    assert.equal(snapshot.subscription.scheduleRevision, 2);
+    assert.equal(snapshot.subscription.currentOccurrenceOrdinal, 0);
+    assert.equal(snapshot.subscription.state, 'active');
+
+    const replacement = occurrenceInput({
+      occurrence: {
+        subscriptionId: 'subscription-a',
+        scheduleRevision: 2,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: '2026-10-04T00:00:00.000Z',
+      },
+      nowAt: '2026-10-04T00:00:00.000Z',
+    });
+    assert.equal((await port.schedule(replacement)).occurrenceOrdinal, 1);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    assert.deepEqual(
+      await restarted.settleOccurrence({ occurrenceId: oldClaim.occurrenceId, terminal: terminalReceipt() }),
+      settled,
+    );
+    const restartedSnapshot = await restarted.snapshot('subscription-a');
+    assert.equal(restartedSnapshot.subscription.currentOccurrenceOrdinal, 0);
+    assert.equal(restartedSnapshot.subscription.state, 'active');
+  });
+});
+
+test('public pause and resume preserve progress for the same policy', async () => {
+  await withStore(async (port) => {
+    const recurringPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 3,
+      frequency: 'interval',
+      intervalMinutes: 60,
+    });
+    await port.create(initialSubscription(), recurringPolicy);
+    await port.schedule(occurrenceInput());
+    const claim = await port.claim(claimRequest());
+    await port.settleOccurrence({ occurrenceId: claim.occurrenceId, terminal: terminalReceipt() });
+
+    const paused = await port.control(control({ action: 'pause', idempotencyKey: 'pause-progress' }));
+    assert.equal(paused.status, 'applied');
+    const resumed = await port.control(control({
+      action: 'resume',
+      idempotencyKey: 'resume-progress',
+      expectedScheduleRevision: 2,
+      requestedAt: '2026-10-03T00:01:00.000Z',
+    }));
+    assert.equal(resumed.status, 'applied');
+    const snapshot = await port.snapshot('subscription-a');
+    assert.equal(snapshot.subscription.currentOccurrenceOrdinal, 1);
+    const next = await port.nextOccurrence({
+      subscription: snapshot.subscription,
+      policy: snapshot.policy,
+      nowAt: '2026-10-03T01:00:00.000Z',
+    });
+    assert.equal(next.occurrenceOrdinal, 2);
+    assert.equal(next.dueAt, '2026-10-03T01:00:00.000Z');
+  });
+});
+
+test('public idle reminders coalesce to one pending reminder per subscription', async () => {
+  await withStore(async (port, file) => {
+    await port.create(initialSubscription({ busyPolicy: 'idle-reminder' }), executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 3,
+      frequency: 'interval',
+      intervalMinutes: 60,
+      busyPolicy: 'idle-reminder',
+    }));
+    const first = await port.schedule(occurrenceInput({ busy: true }));
+    const second = await port.schedule(occurrenceInput({
+      occurrence: {
+        subscriptionId: 'subscription-a',
+        scheduleRevision: 1,
+        occurrenceOrdinal: 2,
+        state: 'due',
+        dueAt: '2026-10-03T01:00:00.000Z',
+      },
+      nowAt: '2026-10-03T01:00:00.000Z',
+      busy: true,
+    }));
+    assert.equal(first.state, 'reminder-pending');
+    assert.equal(second.state, 'reminder-pending');
+
+    const snapshot = await port.snapshot('subscription-a');
+    assert.deepEqual(snapshot.occurrences.map(({ occurrenceOrdinal, state, dueAt }) => ({ occurrenceOrdinal, state, dueAt })), [
+      { occurrenceOrdinal: 1, state: 'reminder-pending', dueAt: '2026-10-03T00:00:00.000Z' },
+      { occurrenceOrdinal: 2, state: 'reminder-pending', dueAt: '2026-10-03T01:00:00.000Z' },
+    ]);
+    assert.deepEqual(snapshot.reminders, [{
+      reminderId: 'reminder:subscription-a',
+      subscriptionId: 'subscription-a',
+      scheduleRevision: 1,
+      occurrenceOrdinal: 2,
+      state: 'pending',
+      dueAt: '2026-10-03T01:00:00.000Z',
+    }]);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    assert.deepEqual((await restarted.snapshot('subscription-a')).reminders, snapshot.reminders);
+  });
+});
+
+test('public run-once recovery catches up only the latest missed slot', async () => {
+  await withStore(async (port, file) => {
+    const recurringPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      frequency: 'interval',
+      intervalMinutes: 60,
+      latePolicy: 'run-once',
+    });
+    await port.create(initialSubscription(), recurringPolicy);
+    const recovered = await port.nextOccurrence({
+      subscription: initialSubscription(),
+      policy: recurringPolicy,
+      nowAt: '2026-10-03T03:30:00.000Z',
+    });
+    assert.equal(recovered.occurrenceOrdinal, 4);
+    assert.equal(recovered.dueAt, '2026-10-03T03:00:00.000Z');
+    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 3);
+
+    const claim = await port.claim(claimRequest({
+      occurrenceOrdinal: 4,
+      dueAt: '2026-10-03T03:00:00.000Z',
+      nowAt: '2026-10-03T03:30:00.000Z',
+      leaseUntil: '2026-10-03T03:35:00.000Z',
+    }));
+    await port.settleOccurrence({ occurrenceId: claim.occurrenceId, terminal: terminalReceipt() });
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    await assert.rejects(
+      () => restarted.schedule(occurrenceInput({
+        occurrence: {
+          subscriptionId: 'subscription-a',
+          scheduleRevision: 1,
+          occurrenceOrdinal: 1,
+          state: 'due',
+          dueAt: '2026-10-03T00:00:00.000Z',
+        },
+        nowAt: '2026-10-03T03:31:00.000Z',
+      })),
+      SubscriptionSchedulerError,
+    );
+    const future = await restarted.nextOccurrence({
+      subscription: (await restarted.snapshot('subscription-a')).subscription,
+      policy: recurringPolicy,
+      nowAt: '2026-10-03T04:00:00.000Z',
+    });
+    assert.equal(future.occurrenceOrdinal, 5);
+    assert.equal(future.dueAt, '2026-10-03T04:00:00.000Z');
+  });
+});
+
+test('public dueTimes returns the latest eligible slots before applying count', async () => {
+  await withStore(async (port) => {
+    const recurringPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      frequency: 'interval',
+      intervalMinutes: 60,
+    });
+    assert.deepEqual(await port.dueTimes({ policy: recurringPolicy, nowAt: '2026-10-03T03:30:00.000Z', count: 1 }), [
+      '2026-10-03T03:00:00.000Z',
+    ]);
+    assert.deepEqual(await port.dueTimes({ policy: recurringPolicy, nowAt: '2026-10-03T03:30:00.000Z', count: 4 }), [
+      '2026-10-03T00:00:00.000Z',
+      '2026-10-03T01:00:00.000Z',
+      '2026-10-03T02:00:00.000Z',
+      '2026-10-03T03:00:00.000Z',
+    ]);
+  });
 });
