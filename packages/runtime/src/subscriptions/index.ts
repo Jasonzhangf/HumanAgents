@@ -5,6 +5,7 @@ import {
   assertVerifiedTerminalReceipt,
   decideSubscriptionControl,
   executionPolicyHash,
+  preserveSamePolicyClaimProgress,
   SubscriptionControlError as CoreSubscriptionControlError,
   type SubscriptionControlDecision,
 } from '../../../core/src/subscription.js';
@@ -220,10 +221,6 @@ function applyOccurrences(existing: readonly Occurrence[], next: readonly Occurr
 
 function findOccurrence(snapshot: SubscriptionSnapshot, occurrenceId: string): Occurrence | undefined {
   return snapshot.occurrences.find((occurrence) => occurrence.occurrenceId === occurrenceId);
-}
-
-function findCommittedOccurrence(snapshot: SubscriptionSnapshot, scheduleRevision: number, dueAt: string): Occurrence | undefined {
-  return snapshot.occurrences.find((occurrence) => occurrence.scheduleRevision === scheduleRevision && occurrence.dueAt === dueAt);
 }
 
 interface PolicySlot {
@@ -598,25 +595,17 @@ export class SubscriptionControlPort {
           occurrence: cloneState(consumed),
           terminal: cloneState(input.terminal),
         };
-        const claimIsCurrent = occurrence.scheduleRevision === snapshot.subscription.scheduleRevision
-          && claim.scheduleRevision === snapshot.subscription.scheduleRevision;
         const max = policyMaxOccurrences(claim.policy);
-        const currentOccurrenceOrdinal = claimIsCurrent
-          ? Math.max(snapshot.subscription.currentOccurrenceOrdinal, occurrence.occurrenceOrdinal)
-          : snapshot.subscription.currentOccurrenceOrdinal;
-        const nextState = claimIsCurrent
-          && snapshot.subscription.state === 'active'
-          && max !== undefined
-          && currentOccurrenceOrdinal >= max
-          ? 'exhausted'
-          : snapshot.subscription.state;
+        const nextSubscription = preserveSamePolicyClaimProgress(
+          snapshot.subscription,
+          claim,
+          snapshot.policyHash,
+          occurrence.occurrenceOrdinal,
+          max,
+        );
         const next = normalizeSnapshot({
           ...snapshot,
-          subscription: {
-            ...snapshot.subscription,
-            currentOccurrenceOrdinal,
-            state: nextState,
-          },
+          subscription: nextSubscription,
           occurrences: applyOccurrence(snapshot.occurrences, consumed),
           settlements: [...snapshot.settlements, settlementRecord],
         });
@@ -647,14 +636,6 @@ export class SubscriptionControlPort {
       if (input.occurrence.scheduleRevision !== subscription.scheduleRevision) {
         throw new SubscriptionSchedulerError('stale-revision', 'occurrence schedule revision is stale');
       }
-      const committed = findCommittedOccurrence(snapshot, input.occurrence.scheduleRevision, input.occurrence.dueAt);
-      if (committed) {
-        if (policySlotOrdinal(snapshot.policy, committed.dueAt) !== committed.occurrenceOrdinal) {
-          throw new SubscriptionSchedulerError('invalid-occurrence', 'committed occurrence does not match the committed policy slot');
-        }
-        return cloneState(committed);
-      }
-      if (subscription.state !== 'active') throw new SubscriptionSchedulerError('invalid-transition', `subscription is ${subscription.state}`);
       const expectedOrdinal = policySlotOrdinal(snapshot.policy, input.occurrence.dueAt);
       const occurrenceId = generatedOccurrenceId(input.occurrence.subscriptionId, input.occurrence.scheduleRevision, expectedOrdinal);
       const existing = findOccurrence(snapshot, occurrenceId);
@@ -665,6 +646,7 @@ export class SubscriptionControlPort {
         }
         return cloneState(existing);
       }
+      if (subscription.state !== 'active') throw new SubscriptionSchedulerError('invalid-transition', `subscription is ${subscription.state}`);
       if (expectedOrdinal <= subscription.currentOccurrenceOrdinal) {
         throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence ordinal has already been consumed');
       }
@@ -796,14 +778,12 @@ export class SubscriptionControlPort {
       }
       throw error;
     }
+    const occurrence = findOccurrence(snapshot, claim.occurrenceId);
+    if (!occurrence) throw new SubscriptionSchedulerError('not-found', 'claimed occurrence was not found');
     return this.serveTask.executeOccurrence({
       occurrence: {
-        occurrenceId,
-        subscriptionId: claim.subscriptionId,
-        scheduleRevision: claim.scheduleRevision,
-        occurrenceOrdinal: claim.occurrenceOrdinal,
+        ...cloneState(occurrence),
         state: 'claimed',
-        dueAt: claim.acquiredAt,
       },
       policy: cloneState(claim.policy),
       claim: cloneState(claim),

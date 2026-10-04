@@ -89,6 +89,41 @@ function supersedeUnclaimed(occurrences: readonly Occurrence[], scheduleRevision
     : []);
 }
 
+export function preserveSamePolicyControlProgress(
+  subscription: Subscription,
+  action: Exclude<SubscriptionControlRequest['action'], 'modify'>,
+  invalidated: readonly Occurrence[] = [],
+): Subscription {
+  if (action !== 'pause' && action !== 'resume') return { ...subscription };
+  const next = subscription.state === 'suspended' ? 'active' : 'suspended';
+  const currentOccurrenceOrdinal = action === 'pause'
+    ? invalidated.reduce((ordinal, occurrence) => Math.max(ordinal, occurrence.occurrenceOrdinal), subscription.currentOccurrenceOrdinal)
+    : subscription.currentOccurrenceOrdinal;
+  return {
+    ...subscription,
+    state: next,
+    scheduleRevision: subscription.scheduleRevision + 1,
+    currentOccurrenceOrdinal,
+  };
+}
+
+export function preserveSamePolicyClaimProgress(
+  subscription: Subscription,
+  claim: { readonly policyHash: string },
+  policyHash: string,
+  occurrenceOrdinal: number,
+  maxOccurrences?: number,
+): Subscription {
+  if (claim.policyHash !== policyHash) return { ...subscription };
+  const next = Math.max(subscription.currentOccurrenceOrdinal, occurrenceOrdinal);
+  const state = subscription.state === 'active'
+    && maxOccurrences !== undefined
+    && next >= maxOccurrences
+    ? 'exhausted' as const
+    : subscription.state;
+  return { ...subscription, currentOccurrenceOrdinal: next, state };
+}
+
 function appliedReceipt(
   request: SubscriptionControlRequest,
   subscription: Subscription,
@@ -204,8 +239,8 @@ export function decideSubscriptionControl(
 
   if (request.action === 'pause') {
     if (subscription.state !== 'active') fail('invalid-state', `only active subscriptions can pause; current is ${subscription.state}`);
-    const nextSubscription: Subscription = { ...subscription, state: 'suspended', scheduleRevision: subscription.scheduleRevision + 1 };
     const invalidated = supersedeUnclaimed(occurrences, subscription.scheduleRevision);
+    const nextSubscription = preserveSamePolicyControlProgress(subscription, 'pause', invalidated);
     return {
       status: 'applied',
       subscription: nextSubscription,
@@ -218,7 +253,7 @@ export function decideSubscriptionControl(
 
   if (request.action === 'resume') {
     if (subscription.state !== 'suspended') fail('invalid-state', `only suspended subscriptions can resume; current is ${subscription.state}`);
-    const nextSubscription: Subscription = { ...subscription, state: 'active', scheduleRevision: subscription.scheduleRevision + 1 };
+    const nextSubscription = preserveSamePolicyControlProgress(subscription, 'resume');
     return {
       status: 'applied',
       subscription: nextSubscription,
