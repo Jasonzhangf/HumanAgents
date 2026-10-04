@@ -1,10 +1,15 @@
 # 持久 occurrence consumer 前置设计（ServeTaskConsumerPort）
 
 状态：**PRE-CODE DESIGN CANDIDATE / BLOCKED capability**。本文是 docs-only 设计产物，
-不是 source PASS、不是独立 review、也不是已实现能力。R2 修正关闭两个 R1 P1：
-durable verification/receipt 的权威读写与恢复责任，以及跨进程 live-owner / interrupted-owner
-判定。真实 `ServeTaskConsumerPort` 仍不存在；本文只给出最小可实现 owner、typed 记录、
-崩溃窗口、公开验证和解除路径。
+不是 source PASS、不是独立 review、也不是已实现能力。已准入的 R3 语义保持不变：
+durable verification/receipt 的权威读写与恢复责任，以及 receipt-key/replay/checkpoint
+生命周期。真实 `ServeTaskConsumerPort` 仍不存在；owner-death/recovery-authority primitive
+仍缺失。本文只给出最小可实现 owner、typed 记录、崩溃窗口、公开验证和解除路径。
+
+Owner-binding / fenced-commit 的唯一契约是
+[`docs/ui/occurrence-owner-fence-design-2026-10-04.md`](occurrence-owner-fence-design-2026-10-04.md)。
+本文保留已准入的 receipt/replay/checkpoint 语义；owner 判定、recovery authority 和
+guard/fence 细节以该文档为准，不在本文复制第二套 owner/fence 契约。
 
 ## 1. 目标与范围
 
@@ -211,26 +216,19 @@ blocked/recovery 必须绑定**真实 core error/checkpoint/stop settlement 语�
 
 ## 6. 跨进程 live-owner 与 interrupted-owner
 
-唯一 claim/lease authority 仍是 scheduler candidate 的持久 `OccurrenceClaimRecord`，经现有
-`claim()` / `claimRecord()` 读写。consumer 不新建 execution registry、不解析日志，也不用
-lease timeout 推断 owner 死亡。
+唯一 owner/fence 契约是
+[`docs/ui/occurrence-owner-fence-design-2026-10-04.md`](occurrence-owner-fence-design-2026-10-04.md)
+第 6-8 节。本文不再复制 owner 判定与 recovery-authority 细节。
 
-判定必须同时满足：
+本文只保留已准入的 receipt/replay 事实：
 
-- **live / current**：当前 claim 的 occurrence、generation、executionEpoch、leaseId、
-  schedulerInstanceId 与 caller claim 完全相等，且 `assertOccurrenceClaimLease()` 通过。
-  该 caller 可以等待当前 promise 或返回 typed `in-progress`；不得写 recovery checkpoint、
-  不得写 terminal、不得再次 dispatch。
-- **unchanged but unowned / uncertain**：当前 claim 仍为同 identity 且 lease 未过期，但当前
-  caller 无法证明自己是 owner。现有 claim 没有跨进程 process-start / liveness proof，因此
-  只能返回 `owner-live-unproven` 或 `in-progress`，不能 recovery。
-- **confirmed interrupted / fenced**：必须由一个最小 typed control extension 提供
-  owner-death proof 与 monotonic recovery fence。候选字段为 `processStartToken` 与
-  `recoveryFence`，owner 与 claim/fence 校验仍归 scheduler/core contract。只有 confirmed
-  dead 或 confirmed fenced 后，新的 recovery generation 才取得写恢复终态的 authority。
-- **stale / new port / concurrent caller**：generation、executionEpoch、leaseId 或 instance 不匹配时拒绝 mutation；不接管、不恢复、不 dispatch。
+- consumer 不新建 execution registry、不解析日志，也不用 lease timeout 推断 owner 死亡。
+- live/current claim 可等待统一 promise 或返回 typed `in-progress`，但不得第二次 dispatch。
+- unchanged-but-unowned caller 只能返回 `owner-live-unproven`/`in-progress`。
+- 只有 confirmed dead 或 confirmed fenced 后，新的 recovery authority 才能写恢复终态。
+- stale claim、new port、concurrent caller 不得写 terminal/recovery。
 
-因此，缺少 terminal 只能说明执行未收口。它不能说明 A 已中断，也不能授权 B 写 terminal。现有 claim/lease 只证明 claim identity 与未过期 lease；进程死亡与 recovery fence 是 **BLOCKED primitive**，必须按第 9 节最小扩展后实现，不能用新 lease、timeout、PID probe、log parse 或本地 in-flight map 替代。
+缺少 terminal 只能说明执行未收口。它不能证明 A 已中断，也不能授权 B 写 terminal。
 
 ## 7. 稳定终态身份与验证权威
 
@@ -270,10 +268,14 @@ lease timeout 推断 owner 死亡。
 
 ```text
 W3 actual verification bytes composition
-  -> minimal claim process-start / recovery-fence contract
-  -> durable consumer owner (ServeTaskConsumerPort adapter + admission/receipt/replay)
-  -> scheduler recovery/call contract (consumeExecution 调用 + 非成功 settle 终点)
-  -> public E2E
+  -> contracts/core occurrence executionOwner identity + typed owner/fence states
+  -> existing app supervisor typed guard equivalent to
+     withCurrentDaemonOwner(paths, executionOwner, operation)
+  -> durable consumer adapter
+     (ServeTaskConsumerPort + admission/receipt/replay under the same guard)
+  -> scheduler recovery/call wiring
+     (consumeExecution 调用 + 非成功 settle 终点)
+  -> public two-process E2E
 ```
 
 允许路径（parent 独立 review 通过后再派发）：
@@ -281,23 +283,30 @@ W3 actual verification bytes composition
 | 顺序 | 文件 | Owner | 内容 |
 | --- | --- | --- | --- |
 | 0 | `packages/contracts/src/tool-execution.ts` | 契约 owner（先于实现） | 新增 admission、`OccurrenceTerminalReceiptRecord`、`RecoveryResponsibilityRecord`、receipt validator |
-| 0a | `packages/contracts/src/framework.ts` | scheduler contract owner | 最小扩展 `OccurrenceClaim` 的 process-start token 与 recovery-fence identity；不得改称第二 lease |
+| 0a | `packages/contracts/src/framework.ts` | claim/fence contract owner | 最小扩展 `OccurrenceClaim`/validator 的 domain `executionOwner`；不得改称第二 lease |
+| 0b | `packages/core/src/subscription.ts` | claim/fence core owner | typed current-live/current-caller/unproven/expired/confirmed-fenced/stale-A 状态与非成功 settle 判定；保持 core 唯一 owner |
 | 1 | W3 `packages/runtime/src/ui-runtime/task-verification.ts` | W3 bytes 组合 owner | 组合实际 W3 验证 bridge；不得以 stub 代替 |
-| 2 | `packages/app/src/ui-runtime/service.ts`（及同 owner sibling module） | 持久 consumer owner | 实现真实 `ServeTaskConsumerPort`：admission、live-owner guard、execute、terminal/receipt 提交 |
-| 3 | `packages/app/src/ui-runtime/journal.ts` | 持久 consumer owner | 补最小 admission/receipt event 读写；不新增 generic registry |
-| 4 | `packages/runtime/src/ui-runtime/coordinator.ts` | 持久 consumer owner | 仅当需要暴露 execute/settle seam 时最小改动 |
-| 5 | `packages/core/src/subscription.ts` | scheduler/core owner | 非成功 settle 终点判定扩展；保持 core 唯一 owner |
-| 6 | `packages/runtime/src/subscriptions/index.ts` | scheduler owner | `consumeExecution` 调用 execute-or-resume consumer 与错误码处理 |
+| 2 | `packages/app/src/supervisor/*` | existing supervisor owner | 在现有 supervisor 上增加 typed public guard `withCurrentDaemonOwner(paths, executionOwner, operation)`；内部复用 `withDaemonLeaseGuard` + `readDaemonLease`，不得新建 lease/registry |
+| 3 | `packages/app/src/ui-runtime/service.ts`（及同 owner sibling module） | 持久 consumer owner | 实现真实 `ServeTaskConsumerPort`：admission、owner guard、execute、terminal/receipt 提交 |
+| 4 | `packages/app/src/ui-runtime/journal.ts` | 持久 consumer owner | 补最小 admission/receipt event 读写；不新增 generic registry |
+| 5 | `packages/runtime/src/ui-runtime/coordinator.ts` | 持久 consumer owner | 仅当需要暴露 execute/settle seam 时最小改动 |
+| 6 | `packages/runtime/src/subscriptions/index.ts` | scheduler owner | `consumeExecution` 调用 execute-or-resume consumer 与错误码处理；不复制 owner/fence 判定 |
 
-三个独立任务、互不重叠的写入范围：
+四个独立任务、互不重叠的写入范围：
 
+- **Task F（claim/fence authority）**：`packages/contracts/src/framework.ts`、
+  `packages/core/src/subscription.ts`。
+- **Task G（existing supervisor guard）**：`packages/app/src/supervisor/*`。
 - **Task A（durable consumer owner）**：`packages/contracts/src/tool-execution.ts`、
   `packages/runtime/src/ui-runtime/task-verification.ts`、`packages/app/src/ui-runtime/*`、
   `packages/runtime/src/ui-runtime/coordinator.ts`。
-- **Task B（scheduler owner authority）**：`packages/contracts/src/framework.ts`、
-  `packages/core/src/subscription.ts`、`packages/runtime/src/subscriptions/index.ts`。
-- Typed handoff（A→B，不重叠）：`ServeTaskConsumerPort` 接口签名 + `OccurrenceTaskBinding`
-  + `ServeTaskTerminalReceipt` + claim/fence identity。B 只按契约调用，不改 A 的文件；A 不改 scheduler 文件。
+- **Task B（scheduler call/replay）**：`packages/runtime/src/subscriptions/index.ts`。
+
+Typed handoff（F→G→A→B，不重叠）：Task F 产出 domain owner/fence contract；Task G 产出
+supervisor-owned current-owner guard；Task A 只按该 guard 执行 admission、terminal 与 recovery
+Journal mutation；Task B 只按公开 consumer/receipt 契约调用 scheduler。每个任务不修改下游
+任务的文件。Task G 不得复制 lease 到另一个 store；Task A 不得重新读取 PID、日志或本地 map
+来补 owner 真相；Task B 不得在 scheduler 重建 owner/fence 决策。
 
 真实 consumer 不实现前，`due -> execute -> settle` 不能验收；fake counter 不能作为 GREEN。
 
@@ -355,17 +364,21 @@ node --test dist/tests-runtime/tests/runtime/checkpoints/public-consumer-recover
 
 本轮只改现有 `humanagent-serve-task` 的 docs/dagpipe 文件：
 
-- 新增 `durable_consume` 节点，位于 `correlate_task` 与 `provider_execution` 之间，语义为
-  "持久准入、判定 owner 并执行或恢复"。
-- 新增 `receipt_commit` 节点，位于 `provider_execution` 与 `task_terminal` 之间，语义为
-  "提交可重放的持久验证 receipt"。
+- `durable_consume` 位于 `correlate_task` 与 `execute_task_turns` 之间，语义为
+  "持久准入并绑定 occurrence 到当前 daemon owner"。
+- `receipt_commit` 位于 `checkpoint_commit` 与 `task_terminal` 之间，语义为
+  "在同一 owner fence 下提交可重放 receipt"。
+- 保留 retained W3 的 policy、verification、observation、settlement、checkpoint
+  节点与真实 owner，不另建第二套 verification 路径。
 - meta 补 `durableConsumerCapability = BLOCKED`、`durableConsumerOwner`、
-  `recoveryContract`、`stableBindingIdentity`、`replayRule`、`capabilityResolution` 与
-  `designBaseline`。
+  `ownerFenceContract`、`ownerFenceStatus`、`ownerFenceMissingPrimitive`、
+  `ownerFenceGuardOrder`、`recoveryContract`、`stableBindingIdentity`、`replayRule`、
+  `capabilityResolution` 与 `designBaseline`。
 
-图仍为 SESE：单 source（`fifo_peek`）、单 sink（`task_terminal`）、每节点单入单出。
+图仍为 SESE：单 source（`recover_or_claim_plan`）、单 sink（`task_terminal`）、每节点单入单出。
 新节点 binding 指向现有 `packages/app/src/ui-runtime/service.ts`，
-`implementationStatus = pending`，不声称实现完成。已有 checkpoint 边保持准确（不新增/删除）。
+`implementationStatus = pending`，并标出 planned consumer 与 existing supervisor guard
+owner。二者都不声称实现完成。已有 checkpoint 边保持准确（不新增/删除）。
 
 ## 12. 本轮验证记录
 
@@ -394,9 +407,15 @@ git diff --stat
 - **BLOCKED**：真实 durable `ServeTaskConsumerPort` 不存在。最小解除方式是按第 9 节顺序派发
   Task A（持久 consumer owner）与 Task B（scheduler recovery/call contract），并先完成
   W3 验证字节组合与必要的 core 契约扩展。
-- **BLOCKED**：现有 claim/lease 没有跨进程 liveness 或 owner-death proof，也没有 recovery
-  fence。最小解除方式是扩展现有 `OccurrenceClaim` / scheduler fence contract，并提供真实
-  两进程证明；不得使用第二 lease、timeout、PID/log parse 或本地 map。
+- **BLOCKED**：现有 claim/lease 没有 occurrence-to-supervisor execution-owner binding，
+  也没有同 guard 的 owner 验证与 Journal mutation。最小解除方式是：
+  1. 扩展现有 `OccurrenceClaim` / core fence contract 的 domain `executionOwner`；
+  2. 在现有 app supervisor 上增加 typed guard
+     `withCurrentDaemonOwner(paths, executionOwner, operation)`；
+  3. 在该 guard scope 内完成 admission、terminal、recovery Journal transaction；
+  4. 用两个真实进程证明 success、live-A/B rejection、crash replacement、stale-A race 与
+     external-effect inventory。
+  不得使用第二 lease、timeout、PID/log parse、本地 map 或假 terminal。
 - 非成功 settle 终点当前被 `assertVerifiedTerminalReceipt`（仅 `success`）阻断，需在
   Task B 扩展，且不得放宽为接受伪造成功。
 - 本设计不是 source review，也不替代 parent 独立 pre-code design review。

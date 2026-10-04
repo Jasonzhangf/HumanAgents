@@ -5,13 +5,24 @@
     "operator_version": "1"
   },
   "nodes": {
-    "fifo_peek": {
+    "recover_or_claim_plan": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "validate_plan_lifecycle": {
+      "ownerPath": "packages/core/src/index.ts",
+      "ownerRel": "packages/core/src/index.ts"
     },
     "admission_check": {
       "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
       "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    },
+    "load_verification_policy": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "plannedOwnerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "plannedOwnerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "status": "pending-w1b-w3v"
     },
     "correlate_task": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
@@ -20,20 +31,68 @@
     "durable_consume": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "implementationStatus": "pending"
+      "implementationStatus": "pending",
+      "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
+      "ownerFenceStatus": "BLOCKED",
+      "plannedOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "plannedOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "supervisorGuardOwnerPath": "packages/app/src/supervisor/supervisor.ts",
+      "supervisorGuardOwnerRel": "packages/app/src/supervisor/supervisor.ts",
+      "supervisorGuardStatus": "pending; withCurrentDaemonOwner equivalent",
+      "journalFenceOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "journalFenceOwnerRel": "packages/adapters/jsonl/src/index.ts"
     },
-    "provider_execution": {
+    "execute_task_turns": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
+    "bind_verification_evidence": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "plannedOwnerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "plannedOwnerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "assetOwnerPath": "packages/adapters/filesystem/src/index.ts",
+      "status": "pending-w3v"
+    },
+    "produce_observation_evidence": {
+      "ownerPath": "packages/adapters/operations/src/index.ts",
+      "ownerRel": "packages/adapters/operations/src/index.ts",
+      "plannedOwnerPath": "packages/adapters/operations/src/aitest-observation-route.ts",
+      "plannedOwnerRel": "packages/adapters/operations/src/aitest-observation-route.ts",
+      "plannedBrowserPortOwnerPath": "packages/adapters/operations/src/browser-observation.ts",
+      "plannedBrowserPortOwnerRel": "packages/adapters/operations/src/browser-observation.ts",
+      "assetOwnerPath": "packages/adapters/filesystem/src/index.ts",
+      "status": "pending-w3v-w3app"
+    },
+    "verify_task_result": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "plannedOwnerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "plannedOwnerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "processCheckOwnerPath": "packages/adapters/operations/src/task-checker-route.ts",
+      "nativeDefaultCheckOwnerPath": "packages/adapters/operations/src/native-task-check-route.ts",
+      "nativeCheckOwnerPath": "packages/adapters/operations/src/aitest-observation-route.ts",
+      "gatewayOwnerPath": "packages/app/src/tool-execution-gateway.ts",
+      "status": "pending-w3v"
+    },
+    "stop_or_settle": {
+      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+    },
     "checkpoint_commit": {
-      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts"
     },
     "receipt_commit": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "implementationStatus": "pending"
+      "implementationStatus": "pending",
+      "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
+      "ownerFenceStatus": "BLOCKED",
+      "plannedOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "plannedOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "supervisorGuardOwnerPath": "packages/app/src/supervisor/supervisor.ts",
+      "supervisorGuardOwnerRel": "packages/app/src/supervisor/supervisor.ts"
     },
     "task_terminal": {
       "ownerPath": "packages/ui/projection/runtime.ts",

@@ -1,13 +1,19 @@
 {
   "graph": "humanagent-serve-task",
   "labels": {
-    "fifo_peek": "读取 FIFO 队首",
-    "admission_check": "执行资源准入",
-    "correlate_task": "关联或创建运行时任务",
-    "durable_consume": "持久准入、判定 owner 并执行或恢复",
-    "provider_execution": "执行 Provider 任务",
-    "checkpoint_commit": "提交终态检查点",
-    "receipt_commit": "提交可重放的持久验证 receipt",
-    "task_terminal": "生成任务完成投影"
+    "recover_or_claim_plan": "恢复或认领已授权计划",
+    "validate_plan_lifecycle": "校验计划与执行栅栏",
+    "admission_check": "执行资源与权限准入",
+    "load_verification_policy": "加载创建期校验策略",
+    "correlate_task": "关联或创建真实任务",
+    "durable_consume": "持久准入并绑定 occurrence 到当前 daemon owner",
+    "execute_task_turns": "执行真实轮次与工具",
+    "bind_verification_evidence": "绑定真实执行身份与产物摘要",
+    "produce_observation_evidence": "从绑定产物生产视觉观测回执",
+    "verify_task_result": "执行必需检查并消费校验回执",
+    "stop_or_settle": "停止并收拢副作用",
+    "checkpoint_commit": "提交任务检查点",
+    "receipt_commit": "在同一 owner fence 下提交可重放 receipt",
+    "task_terminal": "生成任务终态与恢复责任"
   }
 }
