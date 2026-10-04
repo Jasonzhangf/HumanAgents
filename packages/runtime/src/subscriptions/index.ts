@@ -601,6 +601,7 @@ export class SubscriptionControlPort {
           claim,
           snapshot.policyHash,
           occurrence.occurrenceOrdinal,
+          snapshot.receipts,
           max,
         );
         const next = normalizeSnapshot({

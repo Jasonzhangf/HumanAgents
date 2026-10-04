@@ -109,12 +109,17 @@ export function preserveSamePolicyControlProgress(
 
 export function preserveSamePolicyClaimProgress(
   subscription: Subscription,
-  claim: { readonly policyHash: string },
+  claim: { readonly policyHash: string; readonly scheduleRevision: number },
   policyHash: string,
   occurrenceOrdinal: number,
+  receipts: readonly SubscriptionControlReceipt[],
   maxOccurrences?: number,
 ): Subscription {
-  if (claim.policyHash !== policyHash) return { ...subscription };
+  const replacedAfterClaim = receipts.some((receipt) => receipt.action === 'modify'
+    && receipt.status === 'applied'
+    && receipt.scheduleRevision > claim.scheduleRevision
+    && receipt.scheduleRevision <= subscription.scheduleRevision);
+  if (claim.policyHash !== policyHash || replacedAfterClaim) return { ...subscription };
   const next = Math.max(subscription.currentOccurrenceOrdinal, occurrenceOrdinal);
   const state = subscription.state === 'active'
     && maxOccurrences !== undefined

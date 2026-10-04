@@ -783,6 +783,145 @@ test('public old-policy settlement cannot advance replacement progress', async (
   });
 });
 
+test('public old-policy settlement cannot advance replacement progress when policy hash is identical', async () => {
+  await withStore(async (port, file) => {
+    const originalPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 2,
+      frequency: 'interval',
+      intervalMinutes: 60,
+    });
+    await port.create(initialSubscription(), originalPolicy);
+    const oldClaim = await port.claim(claimRequest());
+
+    const identicalPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 2,
+      frequency: 'interval',
+      intervalMinutes: 60,
+    });
+    assert.equal(executionPolicyHash(identicalPolicy), executionPolicyHash(originalPolicy));
+    const modified = await port.control(control({
+      action: 'modify',
+      idempotencyKey: 'replace-identical-policy',
+      newPolicy: identicalPolicy,
+      newPolicyHash: executionPolicyHash(identicalPolicy),
+      confirmationRef: 'confirm:identical-policy',
+    }));
+    assert.equal(modified.status, 'applied');
+    assert.equal((await port.snapshot('subscription-a')).subscription.scheduleRevision, 2);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const persistedModify = await restarted.receipt('replace-identical-policy');
+    assert.equal(persistedModify.action, 'modify');
+    assert.equal(persistedModify.status, 'applied');
+    assert.equal(persistedModify.scheduleRevision, 2);
+
+    await restarted.settleOccurrence({ occurrenceId: oldClaim.occurrenceId, terminal: terminalReceipt() });
+    const afterOldSettlement = await restarted.snapshot('subscription-a');
+    assert.equal(afterOldSettlement.subscription.currentOccurrenceOrdinal, 0);
+    assert.equal(afterOldSettlement.subscription.state, 'active');
+
+    const replacement = occurrenceInput({
+      occurrence: {
+        subscriptionId: 'subscription-a',
+        scheduleRevision: 2,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: '2026-10-03T00:00:00.000Z',
+      },
+      nowAt: '2026-10-03T00:00:00.000Z',
+    });
+    await restarted.schedule(replacement);
+    const replacementClaim = await restarted.claim(claimRequest({
+      scheduleRevision: 2,
+      occurrenceOrdinal: 1,
+      leaseId: 'lease-replacement',
+    }));
+    await restarted.settleOccurrence({ occurrenceId: replacementClaim.occurrenceId, terminal: terminalReceipt() });
+    assert.equal((await restarted.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 1);
+
+    const finalRestart = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const restartedSnapshot = await finalRestart.snapshot('subscription-a');
+    assert.equal(restartedSnapshot.subscription.currentOccurrenceOrdinal, 1);
+    assert.equal(restartedSnapshot.subscription.state, 'active');
+  });
+});
+
+test('public returning to an earlier policy cannot revive an older in-flight claim', async () => {
+  await withStore(async (port, file) => {
+    const originalPolicy = executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 2,
+      frequency: 'interval',
+      intervalMinutes: 60,
+    });
+    await port.create(initialSubscription(), originalPolicy);
+    const oldClaim = await port.claim(claimRequest());
+
+    const replacementPolicy = executionPolicy({
+      policyId: 'policy-b',
+      policyRevision: 2,
+      executionMode: 'once',
+      dueAt: '2026-10-04T00:00:00.000Z',
+    });
+    await port.control(control({
+      action: 'modify',
+      idempotencyKey: 'replace-before-return',
+      newPolicy: replacementPolicy,
+      newPolicyHash: executionPolicyHash(replacementPolicy),
+      confirmationRef: 'confirm:policy-b',
+    }));
+    const restored = await port.control(control({
+      action: 'modify',
+      expectedPolicyRevision: 2,
+      expectedScheduleRevision: 2,
+      idempotencyKey: 'restore-earlier-policy',
+      requestedAt: '2026-10-03T00:02:00.000Z',
+      newPolicy: originalPolicy,
+      newPolicyHash: executionPolicyHash(originalPolicy),
+      confirmationRef: 'confirm:policy-a-again',
+    }));
+    assert.equal(restored.status, 'applied');
+    const restoredSnapshot = await port.snapshot('subscription-a');
+    assert.equal(restoredSnapshot.subscription.scheduleRevision, 3);
+    assert.equal(restoredSnapshot.policyHash, executionPolicyHash(originalPolicy));
+    assert.equal(restoredSnapshot.subscription.currentOccurrenceOrdinal, 0);
+
+    await port.settleOccurrence({ occurrenceId: oldClaim.occurrenceId, terminal: terminalReceipt() });
+    const afterOldSettlement = await port.snapshot('subscription-a');
+    assert.equal(afterOldSettlement.subscription.currentOccurrenceOrdinal, 0);
+    assert.equal(afterOldSettlement.subscription.state, 'active');
+
+    const replacement = occurrenceInput({
+      occurrence: {
+        subscriptionId: 'subscription-a',
+        scheduleRevision: 3,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: '2026-10-03T00:00:00.000Z',
+      },
+      nowAt: '2026-10-03T00:00:00.000Z',
+    });
+    await port.schedule(replacement);
+    const replacementClaim = await port.claim(claimRequest({
+      scheduleRevision: 3,
+      occurrenceOrdinal: 1,
+      leaseId: 'lease-restored',
+    }));
+    await port.settleOccurrence({ occurrenceId: replacementClaim.occurrenceId, terminal: terminalReceipt() });
+    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 1);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const restartedSnapshot = await restarted.snapshot('subscription-a');
+    assert.equal(restartedSnapshot.subscription.currentOccurrenceOrdinal, 1);
+    assert.equal(restartedSnapshot.subscription.state, 'active');
+  });
+});
+
 test('public same-policy pause and resume preserve in-flight settlement progress', async () => {
   await withStore(async (port, file) => {
     const finitePolicy = executionPolicy({
