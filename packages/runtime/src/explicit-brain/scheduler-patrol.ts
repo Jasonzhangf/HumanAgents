@@ -1,15 +1,15 @@
 import {
-  validateOccurrence,
-  validateSubscription,
-  type Occurrence,
-  type Subscription,
-} from '../../../contracts/src/index.js';
-import {
   SubscriptionSchedulerError,
   type SubscriptionControlPort,
   type SubscriptionControlReceipt,
   type SubscriptionControlRequest,
 } from '../subscriptions/index.js';
+import {
+  validateOccurrence,
+  validateSubscription,
+  type Occurrence,
+  type Subscription,
+} from '../../../contracts/src/index.js';
 
 export class SchedulerPatrolError extends Error {
   readonly code: 'subscription-not-found' | 'subscription-state' | 'idempotency-conflict' | 'serve-task-pending';
@@ -97,11 +97,13 @@ export class SchedulerPatrol {
       throw new SchedulerPatrolError('subscription-state', 'scheduler patrol occurrence is not due yet');
     }
     if (this.options.subscriptionPort === undefined) {
-      const occurrence = this.occurrenceFor(this.options.subscription, input.dueAt);
+      const snapshot = this.options.subscription;
+      const occurrence = this.occurrenceFor(snapshot, input.dueAt);
       validateOccurrence(occurrence);
       return this.pendingAttention(occurrence, 'scheduler patrol requires the typed SubscriptionControlPort');
     }
-    const subscription = (await this.options.subscriptionPort.snapshot(this.subscriptionId)).subscription;
+    const snapshot = await this.options.subscriptionPort.snapshot(this.subscriptionId);
+    const subscription = snapshot.subscription;
     if (subscription.state !== 'active') {
       throw new SchedulerPatrolError('subscription-state', `subscription is ${subscription.state}`);
     }

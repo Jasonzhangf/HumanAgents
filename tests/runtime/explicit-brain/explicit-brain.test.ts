@@ -1120,7 +1120,7 @@ test('scheduler patrol uses the durable subscription port for pause and occurren
       subscriptionPort: replayed,
     });
     const afterRestart = await restarted.run({ dueAt: '2026-09-17T02:00:00.000Z', busy: false });
-    assert.equal(afterRestart.occurrence.occurrenceOrdinal, 2);
+    assert.equal(afterRestart.occurrence.occurrenceOrdinal, 3);
     assert.deepEqual(attentions, []);
 
     const pending = new SchedulerPatrol({

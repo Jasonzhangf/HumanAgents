@@ -28,7 +28,8 @@ export type SubscriptionControlFailureCode =
   | 'invalid-transition'
   | 'invalid-occurrence'
   | 'exhausted'
-  | 'superseded';
+  | 'superseded'
+  | 'lease-expired';
 
 export class SubscriptionControlError extends CoreError {
   readonly code: SubscriptionControlFailureCode;
@@ -275,12 +276,19 @@ export function assertOccurrenceClaimFence(
 ): void {
   validateSubscription(subscription);
   validateExecutionPolicyDefinition(policy);
-  validateOccurrenceClaim(claim);
   if (subscription.state !== 'active') fail('invalid-state', `subscription is ${subscription.state}`);
   if (claim.subscriptionId !== subscription.subscriptionId) fail('invalid-occurrence', 'claim belongs to another subscription');
   if (claim.scheduleRevision !== subscription.scheduleRevision) fail('superseded', 'claim schedule revision is stale');
+  assertOccurrenceClaimLease(claim, nowAt);
+}
+
+export function assertOccurrenceClaimLease(claim: OccurrenceClaim, nowAt: string): void {
+  validateOccurrenceClaim(claim);
   if (claim.generation < 1) fail('invalid-occurrence', 'claim generation is invalid');
-  if (Date.parse(claim.expiresAt) <= Date.parse(nowAt)) fail('invalid-occurrence', 'claim lease has expired');
+  const expiry = Date.parse(claim.expiresAt);
+  const now = Date.parse(nowAt);
+  if (!Number.isFinite(expiry) || !Number.isFinite(now)) fail('invalid-occurrence', 'claim lease timestamps are invalid');
+  if (expiry <= now) fail('lease-expired', 'claim lease has expired');
 }
 
 export function assertVerifiedTerminalReceipt(input: {

@@ -1,6 +1,7 @@
 import {
   assertOccurrenceClaimFence,
   assertOccurrenceClaimable,
+  assertOccurrenceClaimLease,
   assertVerifiedTerminalReceipt,
   decideSubscriptionControl,
   executionPolicyHash,
@@ -13,6 +14,7 @@ import {
   validateOccurrence,
   validateOccurrenceClaim,
   validateReminder,
+  validateServeTaskTerminalReceipt,
   validateSubscription,
   validateSubscriptionControlReceipt,
   validateSubscriptionControlRequest,
@@ -40,6 +42,7 @@ export interface SubscriptionSnapshot {
   readonly receipts: readonly SubscriptionControlReceipt[];
   readonly occurrences: readonly Occurrence[];
   readonly claims: readonly OccurrenceClaimRecord[];
+  readonly settlements: readonly OccurrenceSettlementRecord[];
   readonly reminders: readonly Reminder[];
 }
 
@@ -50,6 +53,11 @@ export interface OccurrenceClaimRecord extends OccurrenceClaim {
   readonly taskId: TaskId;
   readonly operationId: OperationId;
   readonly inputArtifactDigest: string;
+}
+
+export interface OccurrenceSettlementRecord {
+  readonly occurrence: Occurrence;
+  readonly terminal: ServeTaskTerminalReceipt;
 }
 
 export interface ScheduledOccurrenceClaimInput {
@@ -155,16 +163,21 @@ function stateFromJournal(records: readonly { readonly payload?: Record<string, 
 }
 
 function normalizeSnapshot(input: SubscriptionSnapshot): SubscriptionSnapshot {
-  validateSubscription(input.subscription);
-  validateExecutionPolicyDefinition(input.policy);
-  if (input.policyHash !== executionPolicyHash(input.policy)) {
+  const normalized = { ...input, settlements: input.settlements ?? [] as readonly OccurrenceSettlementRecord[] };
+  validateSubscription(normalized.subscription);
+  validateExecutionPolicyDefinition(normalized.policy);
+  if (normalized.policyHash !== executionPolicyHash(normalized.policy)) {
     throw new SubscriptionSchedulerError('invalid-transition', 'subscription policy hash does not match the persisted policy');
   }
-  for (const receipt of input.receipts) validateSubscriptionControlReceipt(receipt);
-  for (const occurrence of input.occurrences) validateOccurrence(occurrence);
-  for (const claim of input.claims) validateOccurrenceClaim(claim);
-  for (const reminder of input.reminders) validateReminder(reminder);
-  return cloneState(input);
+  for (const receipt of normalized.receipts) validateSubscriptionControlReceipt(receipt);
+  for (const occurrence of normalized.occurrences) validateOccurrence(occurrence);
+  for (const claim of normalized.claims) validateOccurrenceClaim(claim);
+  for (const settlement of normalized.settlements) {
+    validateOccurrence(settlement.occurrence);
+    validateServeTaskTerminalReceipt(settlement.terminal);
+  }
+  for (const reminder of normalized.reminders) validateReminder(reminder);
+  return cloneState(normalized);
 }
 
 function stateVersion(state: PersistedState): string {
@@ -183,6 +196,17 @@ function assertPositiveOrdinal(value: number, label: string): void {
   }
 }
 
+function assertValidServeTaskTerminalReceipt(terminal: ServeTaskTerminalReceipt): void {
+  try {
+    validateServeTaskTerminalReceipt(terminal);
+  } catch (error) {
+    throw new SubscriptionSchedulerError(
+      'verification-rejected',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 function applyOccurrence(existing: readonly Occurrence[], next: Occurrence): readonly Occurrence[] {
   const id = next.occurrenceId ?? generatedOccurrenceId(next.subscriptionId, next.scheduleRevision, next.occurrenceOrdinal);
   const index = existing.findIndex((occurrence) => occurrence.occurrenceId === id);
@@ -196,6 +220,27 @@ function applyOccurrences(existing: readonly Occurrence[], next: readonly Occurr
 
 function findOccurrence(snapshot: SubscriptionSnapshot, occurrenceId: string): Occurrence | undefined {
   return snapshot.occurrences.find((occurrence) => occurrence.occurrenceId === occurrenceId);
+}
+
+function findCommittedOccurrence(snapshot: SubscriptionSnapshot, scheduleRevision: number, dueAt: string): Occurrence | undefined {
+  return snapshot.occurrences.find((occurrence) => occurrence.scheduleRevision === scheduleRevision && occurrence.dueAt === dueAt);
+}
+
+function policySlotOrdinal(policy: ExecutionPolicyDefinition, dueAt: string): number {
+  const target = Date.parse(dueAt);
+  if (!Number.isFinite(target)) throw new SubscriptionSchedulerError('invalid-occurrence', 'claim dueAt is invalid');
+  const candidates = policy.executionMode === 'recurring'
+    ? recurringDueTimeEntries(policy)
+    : [policyDueAt(policy, 1)];
+  let ordinal = 0;
+  for (const candidate of candidates) {
+    if (candidate === undefined) break;
+    ordinal += 1;
+    const candidateAt = Date.parse(candidate);
+    if (candidateAt === target) return ordinal;
+    if (candidateAt > target) break;
+  }
+  throw new SubscriptionSchedulerError('invalid-occurrence', 'claim dueAt is not part of the committed schedule');
 }
 
 function wallTimeToInstant(
@@ -299,6 +344,7 @@ export class SubscriptionControlPort {
         receipts: [],
         occurrences: [],
         claims: [],
+        settlements: [],
         reminders: [],
       });
       state.subscriptions[subscriptionId] = snapshot;
@@ -377,6 +423,10 @@ export class SubscriptionControlPort {
     return this.transaction(async (state, append) => {
       const snapshot = state.subscriptions[key(input.subscriptionId)];
       if (!snapshot) throw new SubscriptionSchedulerError('not-found', `subscription not found: ${input.subscriptionId}`);
+      const expectedOrdinal = policySlotOrdinal(snapshot.policy, input.dueAt);
+      if (expectedOrdinal !== input.occurrenceOrdinal) {
+        throw new SubscriptionSchedulerError('invalid-occurrence', 'claim ordinal does not match the committed policy slot');
+      }
       const occurrenceId = generatedOccurrenceId(input.subscriptionId, input.scheduleRevision, input.occurrenceOrdinal);
       const occurrence = findOccurrence(snapshot, occurrenceId) ?? {
         occurrenceId,
@@ -405,6 +455,15 @@ export class SubscriptionControlPort {
           || current.operationId.value !== input.operationId.value
           || current.inputArtifactDigest !== input.inputArtifactDigest) {
           throw new SubscriptionSchedulerError('invalid-occurrence', 'claim execution identity is stale');
+        }
+        try {
+          assertOccurrenceClaimFence(snapshot.subscription, snapshot.policy, current, input.nowAt);
+        } catch (error) {
+          if (error instanceof CoreSubscriptionControlError) {
+            const code = error.code === 'lease-expired' ? 'lease-expired' : error.code === 'superseded' ? 'superseded' : 'invalid-occurrence';
+            throw new SubscriptionSchedulerError(code, error.message);
+          }
+          throw error;
         }
         return cloneState(current);
       }
@@ -459,11 +518,25 @@ export class SubscriptionControlPort {
   async settleOccurrence(input: {
     readonly occurrenceId: string;
     readonly terminal: ServeTaskTerminalReceipt;
-  }): Promise<Occurrence> {
+  }): Promise<OccurrenceSettlementRecord> {
+    assertValidServeTaskTerminalReceipt(input.terminal);
     return this.transaction(async (state, append) => {
       for (const [subscriptionId, snapshot] of Object.entries(state.subscriptions)) {
         const occurrence = findOccurrence(snapshot, input.occurrenceId);
         if (!occurrence) continue;
+        const settled = snapshot.settlements.find((candidate) => candidate.occurrence.occurrenceId === input.occurrenceId);
+        if (settled) {
+          if (settled.terminal.taskId.scope !== input.terminal.taskId.scope
+            || settled.terminal.taskId.value !== input.terminal.taskId.value
+            || settled.terminal.operationId.scope !== input.terminal.operationId.scope
+            || settled.terminal.operationId.value !== input.terminal.operationId.value
+            || settled.terminal.executionEpoch !== input.terminal.executionEpoch
+            || settled.terminal.inputArtifactDigest !== input.terminal.inputArtifactDigest
+            || canonicalJsonStringify(settled.terminal) !== canonicalJsonStringify(input.terminal)) {
+            throw new SubscriptionSchedulerError('verification-rejected', 'settlement does not match the committed terminal receipt');
+          }
+          return cloneState(settled);
+        }
         const claim = snapshot.claims.find((candidate) => candidate.occurrenceId === input.occurrenceId);
         if (!claim) throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence has not been claimed');
         if (occurrence.state !== 'claimed') throw new SubscriptionSchedulerError('invalid-occurrence', `occurrence is ${occurrence.state}`);
@@ -481,6 +554,10 @@ export class SubscriptionControlPort {
           throw error;
         }
         const consumed: Occurrence = { ...occurrence, state: 'consumed' };
+        const settlementRecord: OccurrenceSettlementRecord = {
+          occurrence: cloneState(consumed),
+          terminal: cloneState(input.terminal),
+        };
         const max = policyMaxOccurrences(snapshot.policy);
         const currentOccurrenceOrdinal = Math.max(snapshot.subscription.currentOccurrenceOrdinal, occurrence.occurrenceOrdinal);
         const nextState = snapshot.subscription.state === 'active'
@@ -496,10 +573,11 @@ export class SubscriptionControlPort {
             state: nextState,
           },
           occurrences: applyOccurrence(snapshot.occurrences, consumed),
+          settlements: [...snapshot.settlements, settlementRecord],
         });
         state.subscriptions[subscriptionId] = next;
         await append(this.record(state));
-        return cloneState(consumed);
+        return cloneState(settlementRecord);
       }
       throw new SubscriptionSchedulerError('not-found', `occurrence not found: ${input.occurrenceId}`);
     });
@@ -510,29 +588,49 @@ export class SubscriptionControlPort {
     return Object.values(state.subscriptions).flatMap((snapshot) => snapshot.claims.map((claim) => cloneState(claim)));
   }
 
+  async settlements(): Promise<readonly OccurrenceSettlementRecord[]> {
+    const state = await this.read();
+    return Object.values(state.subscriptions).flatMap((snapshot) => snapshot.settlements.map((settlement) => cloneState(settlement)));
+  }
+
   async schedule(input: ScheduledOccurrenceInput): Promise<Occurrence> {
     validateOccurrence(input.occurrence);
     return this.transaction(async (state, append) => {
       const snapshot = state.subscriptions[key(input.occurrence.subscriptionId)];
       if (!snapshot) throw new SubscriptionSchedulerError('not-found', `subscription not found: ${input.occurrence.subscriptionId}`);
       const subscription = snapshot.subscription;
-      if (subscription.state !== 'active') throw new SubscriptionSchedulerError('invalid-transition', `subscription is ${subscription.state}`);
       if (input.occurrence.scheduleRevision !== subscription.scheduleRevision) {
         throw new SubscriptionSchedulerError('stale-revision', 'occurrence schedule revision is stale');
       }
-      const occurrenceId = generatedOccurrenceId(input.occurrence.subscriptionId, input.occurrence.scheduleRevision, input.occurrence.occurrenceOrdinal);
+      const committed = findCommittedOccurrence(snapshot, input.occurrence.scheduleRevision, input.occurrence.dueAt);
+      if (committed) {
+        if (policySlotOrdinal(snapshot.policy, committed.dueAt) !== committed.occurrenceOrdinal) {
+          throw new SubscriptionSchedulerError('invalid-occurrence', 'committed occurrence does not match the committed policy slot');
+        }
+        return cloneState(committed);
+      }
+      if (subscription.state !== 'active') throw new SubscriptionSchedulerError('invalid-transition', `subscription is ${subscription.state}`);
+      const expectedOrdinal = policySlotOrdinal(snapshot.policy, input.occurrence.dueAt);
+      const occurrenceId = generatedOccurrenceId(input.occurrence.subscriptionId, input.occurrence.scheduleRevision, expectedOrdinal);
       const existing = findOccurrence(snapshot, occurrenceId);
-      if (existing) return cloneState(existing);
-      if (input.occurrence.occurrenceOrdinal <= subscription.currentOccurrenceOrdinal) {
+      if (existing) {
+        if (existing.dueAt !== input.occurrence.dueAt
+          || policySlotOrdinal(snapshot.policy, existing.dueAt) !== existing.occurrenceOrdinal) {
+          throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence does not match the committed policy slot');
+        }
+        return cloneState(existing);
+      }
+      if (expectedOrdinal <= subscription.currentOccurrenceOrdinal) {
         throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence ordinal has already been consumed');
       }
       const max = policyMaxOccurrences(snapshot.policy);
-      if (max !== undefined && input.occurrence.occurrenceOrdinal > max) throw new SubscriptionSchedulerError('exhausted', 'subscription occurrence limit is exhausted');
+      if (max !== undefined && expectedOrdinal > max) throw new SubscriptionSchedulerError('exhausted', 'subscription occurrence limit is exhausted');
       const late = Date.parse(input.occurrence.dueAt) < Date.parse(input.nowAt);
       const busy = input.busy === true;
       let nextOccurrence: Occurrence = {
         ...input.occurrence,
         occurrenceId,
+        occurrenceOrdinal: expectedOrdinal,
         state: 'due',
       };
       let nextReminders = snapshot.reminders;
@@ -548,7 +646,7 @@ export class SubscriptionControlPort {
             reminderId,
             subscriptionId: input.occurrence.subscriptionId,
             scheduleRevision: input.occurrence.scheduleRevision,
-            occurrenceOrdinal: input.occurrence.occurrenceOrdinal,
+            occurrenceOrdinal: expectedOrdinal,
             state: 'pending',
             dueAt: input.occurrence.dueAt,
           }];
@@ -556,7 +654,7 @@ export class SubscriptionControlPort {
       }
       const consumedOrdinal = nextOccurrence.state === 'skipped-busy';
       const currentOccurrenceOrdinal = consumedOrdinal
-        ? Math.max(subscription.currentOccurrenceOrdinal, input.occurrence.occurrenceOrdinal)
+        ? Math.max(subscription.currentOccurrenceOrdinal, expectedOrdinal)
         : subscription.currentOccurrenceOrdinal;
       const exhausted = consumedOrdinal && max !== undefined && currentOccurrenceOrdinal >= max;
       const nextSubscription: Subscription = {
@@ -619,6 +717,24 @@ export class SubscriptionControlPort {
       throw new SubscriptionSchedulerError('serve-task-pending', 'execute_occurrence_task requires W3 humanagent-serve-task@2 bridge');
     }
     if (!claim) throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence claim is required before execution');
+    const persisted = await this.claimRecord(occurrenceId);
+    if (canonicalJsonStringify(persisted) !== canonicalJsonStringify(claim)) {
+      throw new SubscriptionSchedulerError('lease-generation', 'execution claim does not match the persisted claim authority');
+    }
+    const state = await this.read();
+    const snapshot = Object.values(state.subscriptions).find((candidate) => candidate.claims.some((item) => item.occurrenceId === occurrenceId));
+    if (!snapshot) throw new SubscriptionSchedulerError('not-found', `claim not found: ${occurrenceId}`);
+    const settlement = snapshot.settlements.find((candidate) => candidate.occurrence.occurrenceId === occurrenceId);
+    if (settlement) return cloneState(settlement.terminal);
+    try {
+      assertOccurrenceClaimLease(persisted, new Date().toISOString());
+    } catch (error) {
+      if (error instanceof CoreSubscriptionControlError) {
+        const code = error.code === 'lease-expired' ? 'lease-expired' : 'invalid-occurrence';
+        throw new SubscriptionSchedulerError(code, error.message);
+      }
+      throw error;
+    }
     return this.serveTask.executeOccurrence({
       occurrence: {
         occurrenceId,
@@ -671,29 +787,31 @@ function policyMaxOccurrences(policy: ExecutionPolicyDefinition): number | undef
   return policy.executionMode === 'once' ? 1 : policy.maxOccurrences;
 }
 
+function policyDueAt(policy: ExecutionPolicyDefinition, ordinal: number): string | undefined {
+  assertPositiveOrdinal(ordinal, 'occurrence ordinal');
+  if (policy.executionMode === 'once') return ordinal === 1 ? policy.dueAt : undefined;
+  if (policy.executionMode === 'scheduled') return ordinal === 1 ? policy.startAt : undefined;
+  return recurringDueTimes(policy, ordinal)[ordinal - 1];
+}
+
 function nextCalendarDate(date: string): string {
   const parsed = Date.parse(`${date}T00:00:00.000Z`);
   if (!Number.isFinite(parsed)) throw new SubscriptionSchedulerError('invalid-occurrence', 'calendar date is invalid');
   return new Date(parsed + 24 * 60 * 60_000).toISOString().slice(0, 10);
 }
 
-function recurringDueTimes(
+function* recurringDueTimeEntries(
   policy: Extract<ExecutionPolicyDefinition, { readonly executionMode: 'recurring' }>,
-  count: number,
-): readonly string[] {
-  const max = policy.maxOccurrences;
-  const limit = max === undefined ? count : Math.min(count, max);
-  if (limit < 1) return [];
+): Generator<string> {
   const end = policy.endAt === undefined ? Number.POSITIVE_INFINITY : Date.parse(policy.endAt);
-  const results: string[] = [];
   if (policy.frequency === 'interval') {
     const start = Date.parse(policy.startAt);
-    for (let ordinal = 1; ordinal <= limit; ordinal += 1) {
+    for (let ordinal = 1; ; ordinal += 1) {
       const due = start + (ordinal - 1) * policy.intervalMinutes! * 60_000;
       if (due >= end) break;
-      results.push(new Date(due).toISOString());
+      yield new Date(due).toISOString();
     }
-    return results;
+    return;
   }
 
   const [hourText, minuteText] = policy.timeOfDay!.split(':');
@@ -719,7 +837,7 @@ function recurringDueTimes(
     return `${value.year}-${value.month}-${value.day}`;
   };
   let localDate = calendarDate(start);
-  for (let day = 0; day < 3660 && results.length < limit; day += 1) {
+  for (let day = 0; day < 3660; day += 1) {
     const weekday = new Date(`${localDate}T00:00:00.000Z`).getUTCDay();
     if (!weekDays || weekDays.has(weekday)) {
       const due = Date.parse(wallTimeToInstant(
@@ -728,9 +846,22 @@ function recurringDueTimes(
         policy.dstMode,
       ));
       if (due >= end) break;
-      if (due >= start) results.push(new Date(due).toISOString());
+      if (due >= start) yield new Date(due).toISOString();
     }
     localDate = nextCalendarDate(localDate);
+  }
+}
+
+function recurringDueTimes(
+  policy: Extract<ExecutionPolicyDefinition, { readonly executionMode: 'recurring' }>,
+  count: number,
+): readonly string[] {
+  const limit = policy.maxOccurrences === undefined ? count : Math.min(count, policy.maxOccurrences);
+  if (limit < 1) return [];
+  const results: string[] = [];
+  for (const dueAt of recurringDueTimeEntries(policy)) {
+    if (results.length >= limit) break;
+    results.push(dueAt);
   }
   return results;
 }
@@ -742,20 +873,8 @@ function computeOccurrence(input: NextOccurrenceInput): ScheduledOccurrenceInput
   const now = Date.parse(nowAt);
   if (!Number.isFinite(now)) throw new SubscriptionSchedulerError('invalid-occurrence', 'nowAt must be a valid timestamp');
   const ordinal = subscription.currentOccurrenceOrdinal + 1;
-  let dueAt: string;
-  if (policy.executionMode === 'once') {
-    if (ordinal > 1) throw new SubscriptionSchedulerError('exhausted', 'once policy has no further occurrence');
-    dueAt = policy.dueAt;
-  } else if (policy.executionMode === 'scheduled') {
-    if (ordinal > 1) {
-      throw new SubscriptionSchedulerError('exhausted', 'scheduled policy has no further occurrence');
-    }
-    dueAt = policy.startAt;
-  } else {
-    const due = recurringDueTimes(policy, ordinal)[ordinal - 1];
-    if (due === undefined) throw new SubscriptionSchedulerError('exhausted', 'subscription recurrence has no further occurrence');
-    dueAt = due;
-  }
+  const dueAt = policyDueAt(policy, ordinal);
+  if (dueAt === undefined) throw new SubscriptionSchedulerError('exhausted', 'subscription has no further occurrence');
   if (policy.executionMode !== 'once' && policy.endAt !== undefined) {
     if (Date.parse(dueAt) >= Date.parse(policy.endAt)) {
       throw new SubscriptionSchedulerError('exhausted', 'subscription end has passed');

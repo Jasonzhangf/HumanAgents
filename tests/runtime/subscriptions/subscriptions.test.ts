@@ -82,6 +82,18 @@ function claim(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function idempotencySlotClaim(overrides: Record<string, unknown> = {}) {
+  return claim({
+    subscriptionId: 'subscription-b',
+    scheduleRevision: 1,
+    occurrenceOrdinal: 1,
+    dueAt: '2026-10-03T00:00:00.000Z',
+    taskId: id('task', 'task-b'),
+    operationId: id('operation', 'operation-b'),
+    ...overrides,
+  });
+}
+
 function subscription(overrides: Record<string, unknown> = {}) {
   return {
     subscriptionId: 'subscription-a',
@@ -405,7 +417,7 @@ test('verified terminal settle rejects identity mismatch and does not consume oc
     );
     assert.equal((await port.snapshot('subscription-a')).occurrences[0]?.state, 'claimed');
     const settled = await port.settleOccurrence({ occurrenceId: claimed.occurrenceId, terminal: terminal() });
-    assert.equal(settled.state, 'consumed');
+    assert.equal(settled.occurrence.state, 'consumed');
   });
 });
 
@@ -416,5 +428,161 @@ test('serve-task pending is an explicit typed blocker rather than terminal succe
       () => port.consumeExecution('subscription-a::1::1'),
       (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'serve-task-pending',
     );
+  });
+});
+
+test('same due slot resolves its committed occurrence across replay, restart and concurrency', async () => {
+  await withStore(async (port, file) => {
+    await port.create(subscription(), policy({
+      executionMode: 'recurring',
+      frequency: 'interval',
+      intervalMinutes: 60,
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 3,
+    }));
+    const dueAt = '2026-10-03T00:00:00.000Z';
+    const skipped = await port.schedule({
+      occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 1, state: 'due', dueAt },
+      nowAt: '2026-10-03T00:20:00.000Z',
+      busy: true,
+    });
+    assert.equal(skipped.state, 'skipped-busy');
+    const replayAfterSkip = await port.schedule({
+      occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 2, state: 'due', dueAt },
+      nowAt: '2026-10-03T00:21:00.000Z',
+      busy: false,
+    });
+    assert.equal(replayAfterSkip.occurrenceOrdinal, 1);
+    assert.equal(replayAfterSkip.state, 'skipped-busy');
+    const concurrent = await Promise.all([
+      port.schedule({
+        occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 2, state: 'due', dueAt },
+        nowAt: '2026-10-03T00:22:00.000Z',
+        busy: false,
+      }),
+      port.schedule({
+        occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 2, state: 'due', dueAt },
+        nowAt: '2026-10-03T00:22:00.000Z',
+        busy: false,
+      }),
+    ]);
+    assert.deepEqual(concurrent, [replayAfterSkip, replayAfterSkip]);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const afterRestart = await restarted.schedule({
+      occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 2, state: 'due', dueAt },
+      nowAt: '2026-10-03T00:23:00.000Z',
+      busy: false,
+    });
+    assert.deepEqual(afterRestart, replayAfterSkip);
+    assert.equal((await restarted.snapshot('subscription-a')).occurrences.filter((occurrence) => occurrence.dueAt === dueAt).length, 1);
+    assert.equal((await restarted.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 1);
+
+    const secondDueAt = '2026-10-03T01:00:00.000Z';
+    await port.schedule({
+      occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 2, state: 'due', dueAt: secondDueAt },
+      nowAt: secondDueAt,
+    });
+    const secondClaim = await port.claim(claim({
+      occurrenceOrdinal: 2,
+      dueAt: secondDueAt,
+      nowAt: secondDueAt,
+      leaseUntil: '2026-10-03T01:05:00.000Z',
+    }));
+    const secondSettlement = await port.settleOccurrence({
+      occurrenceId: secondClaim.occurrenceId,
+      terminal: terminal(),
+    });
+    const replayConsumed = await port.schedule({
+      occurrence: { subscriptionId: 'subscription-a', scheduleRevision: 1, occurrenceOrdinal: 3, state: 'due', dueAt: secondDueAt },
+      nowAt: '2026-10-03T01:06:00.000Z',
+    });
+    assert.deepEqual(replayConsumed, secondSettlement.occurrence);
+    assert.equal((await port.snapshot('subscription-a')).occurrences.filter((occurrence) => occurrence.dueAt === secondDueAt).length, 1);
+  });
+});
+
+test('claim authority binds to the committed policy slot and rejects forged slots', async () => {
+  await withStore(async (port) => {
+    await port.create(subscription({ subscriptionId: 'subscription-b' }), policy({
+      executionMode: 'scheduled',
+      startAt: '2026-10-04T00:00:00.000Z',
+      policyId: 'policy-scheduled',
+    }));
+    await assert.rejects(
+      () => port.claim(idempotencySlotClaim({ dueAt: '2026-10-03T00:00:00.000Z', nowAt: '2026-10-03T00:00:00.000Z' })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'invalid-occurrence',
+    );
+    await assert.rejects(
+      () => port.claim(idempotencySlotClaim({
+        occurrenceOrdinal: 2,
+        dueAt: '2026-10-04T00:00:00.000Z',
+        nowAt: '2026-10-04T00:00:00.000Z',
+        leaseUntil: '2026-10-04T00:05:00.000Z',
+      })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'invalid-occurrence',
+    );
+    await port.schedule({
+      occurrence: { subscriptionId: 'subscription-b', scheduleRevision: 1, occurrenceOrdinal: 1, state: 'due', dueAt: '2026-10-04T00:00:00.000Z' },
+      nowAt: '2026-10-04T00:00:00.000Z',
+    });
+    await assert.rejects(
+      () => port.claim(idempotencySlotClaim({
+        dueAt: '2026-10-03T23:59:00.000Z',
+        nowAt: '2026-10-04T00:00:00.000Z',
+        leaseUntil: '2026-10-04T00:05:00.000Z',
+      })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'invalid-occurrence',
+    );
+  });
+});
+
+test('expired stored claim cannot be replayed or recover execution authority', async () => {
+  await withStore(async (port) => {
+    await port.create(subscription(), policy({ executionMode: 'scheduled', startAt: '2026-10-03T00:00:00.000Z' }));
+    const first = await port.claim(claim());
+    await assert.rejects(
+      () => port.claim(claim({
+        nowAt: '2026-10-03T00:06:00.000Z',
+        leaseUntil: '2026-10-03T00:10:00.000Z',
+      })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'lease-expired',
+    );
+    await assert.rejects(
+      () => port.claim(claim({
+        nowAt: '2026-10-03T00:06:00.000Z',
+        leaseUntil: '2026-10-03T00:10:00.000Z',
+      })),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'lease-expired',
+    );
+    assert.equal((await port.snapshot('subscription-a')).claims[0]?.expiresAt, first.expiresAt);
+  });
+});
+
+test('settlement persists the full terminal receipt atomically and replays unchanged after restart', async () => {
+  await withStore(async (port, file) => {
+    await port.create(subscription(), policy({ executionMode: 'scheduled', startAt: '2026-10-03T00:00:00.000Z' }));
+    const claimed = await port.claim(claim());
+    const committedTerminal = terminal();
+    const committed = await port.settleOccurrence({ occurrenceId: claimed.occurrenceId, terminal: committedTerminal });
+    assert.deepEqual(committed.terminal, committedTerminal);
+    assert.equal(committed.occurrence.state, 'consumed');
+    assert.equal(committed.occurrence.occurrenceId, claimed.occurrenceId);
+
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const replay = await restarted.settleOccurrence({ occurrenceId: claimed.occurrenceId, terminal: committedTerminal });
+    assert.deepEqual(replay, committed);
+    assert.deepEqual((await restarted.settlements())[0], committed);
+    const snapshot = await restarted.snapshot('subscription-a');
+    assert.equal(snapshot.subscription.currentOccurrenceOrdinal, 1);
+    assert.equal(snapshot.occurrences.filter((occurrence) => occurrence.occurrenceId === claimed.occurrenceId).length, 1);
+    assert.equal(snapshot.settlements.length, 1);
+
+    const conflictingTerminal = terminal(undefined, { settlementReceiptRef: 'receipt:other' });
+    await assert.rejects(
+      () => restarted.settleOccurrence({ occurrenceId: claimed.occurrenceId, terminal: conflictingTerminal }),
+      (error: unknown) => error instanceof SubscriptionSchedulerError && error.code === 'verification-rejected',
+    );
+    assert.deepEqual((await restarted.snapshot('subscription-a')).settlements, [committed]);
   });
 });
