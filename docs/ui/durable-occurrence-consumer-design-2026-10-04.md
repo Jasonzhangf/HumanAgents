@@ -1,8 +1,10 @@
 # 持久 occurrence consumer 前置设计（ServeTaskConsumerPort）
 
 状态：**PRE-CODE DESIGN CANDIDATE / BLOCKED capability**。本文是 docs-only 设计产物，
-不是 source PASS、不是独立 review、也不是已实现能力。真实 `ServeTaskConsumerPort`
-当前不存在；本文只给出最小可实现的 owner、typed 记录、崩溃窗口、公开验证和解除路径。
+不是 source PASS、不是独立 review、也不是已实现能力。R2 修正关闭两个 R1 P1：
+durable verification/receipt 的权威读写与恢复责任，以及跨进程 live-owner / interrupted-owner
+判定。真实 `ServeTaskConsumerPort` 仍不存在；本文只给出最小可实现 owner、typed 记录、
+崩溃窗口、公开验证和解除路径。
 
 ## 1. 目标与范围
 
@@ -10,11 +12,13 @@
 
 - 选定**唯一 durable execution owner**，用现有权威 Journal/checkpoint 原语实现真实
   `ServeTaskConsumerPort`，不新增第二 execution registry 或第二 terminal truth。
-- 规定**dispatch 之前的原子持久准入**、terminal/verification receipt 持久化，以及
-  execute-returned / settle-pending 重启后的 replay 规则。
+- 规定**dispatch 之前的原子持久准入**、terminal checkpoint 与 typed verification/receipt
+  的成对持久化，以及 execute-returned / settle-pending 重启后的 replay 规则。
+- 用现有 claim/lease 真源区分跨进程 live owner 与 confirmed interrupted owner；不能仅凭
+  terminal 缺失或 lease timeout 写 recovery。
 - 逐条说明崩溃窗口与 forward recovery 结果；Provider 自动 resume 当前不支持，本文不把它
   承诺成已存在能力。
-- 给出最小 future source allowlist、依赖顺序、两个互不重叠 owner 的 typed handoff，
+- 给出最小 future source allowlist、依赖顺序、三个互不重叠 owner 的 typed handoff，
   以及真实公开入口的候选测试与 consumer harness。
 
 范围外（明确不做）：
@@ -34,6 +38,10 @@
   `packages/contracts/src/tool-execution.ts`。
   `OccurrenceTaskBinding = { occurrenceId, subscriptionId, scheduleRevision,
   occurrenceOrdinal, taskId, operationId, executionEpoch, inputArtifactDigest }`。
+- 现有 `OccurrenceClaim` 已有 `claimedBy`、`leaseId`、`schedulerInstanceId`、`generation`、
+  `executionEpoch`、`acquiredAt`、`expiresAt`，并且 claim 通过同一 Journal 持久化；但当前
+  类型与检查没有 process-start token、owner-death proof 或 recovery fence，读取时也只校验
+  lease。因此现有 claim/lease 不能单独证明“owner 已中断”，也不能授权另一进程写恢复终态。
 - 现有 `consumeExecution` 只在 `settlement` 已存在时重放 terminal，否则直接调用
   `ServeTaskConsumerPort.executeOccurrence`。接口没有声明 durable idempotent/recovery
   guarantee。诊断 counter `dispatchCount=3` 只是 RED 派发证据。
@@ -43,7 +51,9 @@
 - `FileOperationJournal` 只追加 `OperationEvent`；`ToolExecutionGateway` 的 operation state、
   idempotency 与 execution single-flight 都在内存 `Map` 中，当前不重放该文件。
 - `FileCheckpointStore` 包装权威 `JsonlOrganJournal`；`hydrate()` 可恢复已提交的 terminal
-  checkpoint，但仅凭它不能恢复 execute 已返回、settle 尚未提交的 in-flight execution。
+  checkpoint。`FileCheckpointStore.commit()` 只写 `kind: 'checkpoint'`，checkpoint
+  contract 没有 `TaskVerificationResult`，所以 checkpoint 本身不能证明 verification 成功，
+  也不能恢复 execute 已返回、settle 尚未提交的 verified receipt。
 - W3 `packages/runtime/src/ui-runtime/task-verification.ts` 产出 `TaskVerificationResult`，
   只在内存 `Map` 中 single-flight 每个 check；它不产出 `ServeTaskTerminalReceipt`，也不是
   durable execution owner。该文件当前 candidate 缺失。
@@ -52,8 +62,9 @@
 - 文本检索未发现真实 `ServeTaskConsumerPort` 实现。当前没有可演示的 durable consumer
   重放保证；真实实现前该能力标为 `BLOCKED`。
 
-结论：**当前不存在可演示的 durable `ServeTaskConsumerPort`**。contract promise、内存标志或
-诊断 counter 都不能替代真实 consumer 证据。
+结论：**当前不存在可演示的 durable `ServeTaskConsumerPort`，且跨进程 owner-death /
+recovery-fence primitive 当前缺失**。contract promise、内存标志、lease 耗尽或诊断 counter
+都不能替代真实 consumer 与真实 owner 证据。
 
 ## 3. 唯一 durable owner 与真实原语
 
@@ -100,6 +111,7 @@ OccurrenceExecutionAdmissionRecord {
   binding: OccurrenceTaskBinding
   dispatchRef: string        // 由 operationId + executionEpoch 派生的确定性 dispatch 身份
   admittedAt: string         // ISO-8601
+  recoveryResponsibility: RecoveryResponsibilityRecord   // 初始 possible，保证 crash 前责任可重建
 }
 ```
 
@@ -118,40 +130,51 @@ journal.transaction(
 因为 commitId 确定性且 `appendLocked` 在锁内幂等，两个进程/两个 port 竞争同一 binding 时
 只有一个能首次写入；其余读到已存在记录。admission 提交返回之后才允许 dispatch。
 
-### 4.2 Terminal / verification receipt 持久化
+### 4.2 Durable verification / receipt fact
 
-dispatch 返回并完成验证后：
-
-1. 由现有 checkpoint 编排提交 terminal `Checkpoint`（`Checkpoint.outcome` 覆盖
-   `succeeded|failed|blocked|cancelled|stopped`，`Checkpoint.recoveryStateRef` 与
-   `evidenceRefs` 承载证据），commitId = 现有 `checkpointCommitId(checkpoint)`。
-2. 由 W3 验证 bridge 产出 `TaskVerificationResult`。
-3. 组合 `ServeTaskTerminalReceipt`：
+checkpoint 决定 lifecycle outcome；它不包含 `TaskVerificationResult`，且 `FileCheckpointStore.commit()` 只提交 `Checkpoint`。因此 durable consumer 必须额外提交一个**typed receipt fact**，使 restart 能从权威 Journal 读取完整 `ServeTaskTerminalReceipt`，而不能在内存里重算。
 
 ```text
-ServeTaskTerminalReceipt {
-  taskId, operationId, executionEpoch, inputArtifactDigest   // 必须等于 binding
-  verification: TaskVerificationResult                        // 验证权威
-  terminalCheckpointRef                                        // 已提交 checkpoint 身份
-  settlementReceiptRef                                         // 确定性 settlement 身份
-  recoveryResponsibility?                                      // 未释放资源时必须填写
+OccurrenceTerminalReceiptRecord {
+  kind: 'occurrence-terminal-receipt'
+  version: 1
+  binding: OccurrenceTaskBinding                 // 必须等于 admission
+  terminalCheckpointRef: string                  // 必须等于已提交 terminal checkpoint 身份
+  terminalOutcome: Checkpoint['outcome']
+  verification: TaskVerificationResult
+  recoveryResponsibility?: RecoveryResponsibilityRecord
+  settlementReceiptRef: string                   // 确定性 scheduler settlement 身份
+}
+
+RecoveryResponsibilityRecord {
+  providerEffectState: 'confirmed-released' | 'possible' | 'confirmed-present'
+  resourceInventory: readonly EvidenceRef[]      // provider/tool/browser/port 等真实证据
+  releaseProofs: readonly EvidenceRef[]
 }
 ```
 
-receipt 是已提交 checkpoint + 验证结果的投影；scheduler 用现有
-`assertVerifiedTerminalReceipt` 校验身份后 `settleOccurrence` 原子提交。**checkpoint/Organ
-Journal 是 terminal 权威**；verification 不是独立 lifecycle truth，scheduler settlement
-引用一个已提交的 verified terminal。
+执行顺序：
+
+1. execute 返回 executionEvidence；W3 bridge 产出 `TaskVerificationResult`；consumer 构造 canonical receipt。
+2. `checkpointCommitId(checkpoint)` 和 `occurrenceReceiptCommitId(binding, canonical receipt)` 均确定性。
+3. `FileCheckpointStore.commit(checkpoint)` 先提交 terminal checkpoint；`Checkpoint` 是 lifecycle truth。
+4. 再 append receipt event：同 commitId、同 digest -> 已存在记录；同 commitId、不同 digest -> `JournalCommitConflictError`。这是 winner / replay 的唯一区分。
+5. 只有 checkpoint record 与 receipt record **都在已验证 Journal 中**，consumer 才返回 `ServeTaskTerminalReceipt`。不得把 checkpoint outcome 解读为 verification success，也不得在 checkpoint-only 窗口伪造 receipt。
+
+实际 read path：按 scope 重放 Journal；读取 terminal checkpoint，再用 receipt commitId 查找 receipt event。存在 checkpoint 但缺 receipt，结果是 `durable-unverified-recovery-pending`；verification returned before settlement 的重启证明同一持久 receipt，而不是重新执行验证。
+
+admission 先写入初始 `recoveryResponsibility`，所以即使 crash 发生在 dispatch 之前或 verification 之前，恢复责任的权威来源仍然存在。receipt 提交时以实际 `releaseProofs` 更新它。terminal checkpoint 保留 lifecycle evidence，但不提供第二 terminal。scheduler 仍只在 settlement 中保存已返回的 receipt。
 
 ### 4.3 Replay 规则（execute-returned / settle-pending 重启）
 
-consumer 从权威 journal 派生三态，再决定动作：
+consumer 从权威 journal 派生五态，再决定动作：
 
 | 持久状态 | 判定 | 动作 |
 | --- | --- | --- |
 | settlement 已存在 | 已完成 | 返回同一 `ServeTaskTerminalReceipt`，不 dispatch |
-| terminal checkpoint 已提交，settlement 未提交 | 已完成执行 | 重建 receipt 返回；由 scheduler settle |
-| admission 已存在，terminal 未提交 | 中断/不确定 | 标 blocked/recovery，**不重新 dispatch** |
+| terminal checkpoint + receipt 均已提交 | 已完成执行 | 从 Journal 读取同一 receipt 返回；由 scheduler settle |
+| terminal checkpoint 存在，receipt 缺失 | terminal durable 但 verification 未收口 | `durable-unverified-recovery-pending`；不 dispatch、不伪造 receipt |
+| admission 存在，terminal 缺失 | live / interrupted / unrecoverable 未定 | 按第 6 节 claim/fence 判定；不得仅凭 terminal 缺失 recovery |
 | 无 admission | 可准入 | 原子 admission 后唯一 dispatch |
 
 ## 5. 崩溃窗口与 forward recovery
@@ -164,8 +187,9 @@ consumer 从权威 journal 派生三态，再决定动作：
 | admission 提交后、dispatch 调用前 | admission，无 terminal | 不能证明 Provider 未启动 → 判不确定，blocked/recovery，不自动重派 |
 | dispatch 进行中（Provider 已启动） | admission，无 terminal | 外部副作用不确定 → blocked/recovery，不自动重派 |
 | execute 返回后、terminal checkpoint 提交前 | admission，无 terminal | 同上 → blocked/recovery，不自动重派 |
-| terminal checkpoint 已提交、settlement 前 | admission + terminal checkpoint | 重建 receipt 返回；scheduler settle（settle 以 commitId 幂等） |
 | settlement 已提交 | settlement 记录 | 完成重放，返回已提交 terminal |
+| terminal checkpoint 已提交、receipt 未提交 | admission + terminal checkpoint | `durable-unverified-recovery-pending`；不重新 verify/dispatch，不调用 scheduler settle |
+| receipt 已提交、scheduler settle 前 | admission + terminal checkpoint + receipt | 从 receipt commitId 读取同一 receipt；scheduler settle 幂等 |
 
 关键规则：**admission 提交之后不再自动重派**。`ProviderAgentDriver.resume` 与 RCC v3
 transport resume 返回 `resume.unsupported`，所以无法区分"dispatch 未发出"与"dispatch 已发出
@@ -183,32 +207,58 @@ blocked/recovery 必须绑定**真实 core error/checkpoint/stop settlement 语�
   `AgentClosure`）；取消模型请求不等于 stop 完成。
 - 不伪造 success、不伪造 cancellation、不丢弃 recovery 资源、不降低验收标准。
 
-## 6. 稳定终态身份与验证权威
+## 6. 跨进程 live-owner 与 interrupted-owner
+
+唯一 claim/lease authority 仍是 scheduler candidate 的持久 `OccurrenceClaimRecord`，经现有
+`claim()` / `claimRecord()` 读写。consumer 不新建 execution registry、不解析日志，也不用
+lease timeout 推断 owner 死亡。
+
+判定必须同时满足：
+
+- **live / current**：当前 claim 的 occurrence、generation、executionEpoch、leaseId、
+  schedulerInstanceId 与 caller claim 完全相等，且 `assertOccurrenceClaimLease()` 通过。
+  该 caller 可以等待当前 promise 或返回 typed `in-progress`；不得写 recovery checkpoint、
+  不得写 terminal、不得再次 dispatch。
+- **unchanged but unowned / uncertain**：当前 claim 仍为同 identity 且 lease 未过期，但当前
+  caller 无法证明自己是 owner。现有 claim 没有跨进程 process-start / liveness proof，因此
+  只能返回 `owner-live-unproven` 或 `in-progress`，不能 recovery。
+- **confirmed interrupted / fenced**：必须由一个最小 typed control extension 提供
+  owner-death proof 与 monotonic recovery fence。候选字段为 `processStartToken` 与
+  `recoveryFence`，owner 与 claim/fence 校验仍归 scheduler/core contract。只有 confirmed
+  dead 或 confirmed fenced 后，新的 recovery generation 才取得写恢复终态的 authority。
+- **stale / new port / concurrent caller**：generation、executionEpoch、leaseId 或 instance 不匹配时拒绝 mutation；不接管、不恢复、不 dispatch。
+
+因此，缺少 terminal 只能说明执行未收口。它不能说明 A 已中断，也不能授权 B 写 terminal。现有 claim/lease 只证明 claim identity 与未过期 lease；进程死亡与 recovery fence 是 **BLOCKED primitive**，必须按第 9 节最小扩展后实现，不能用新 lease、timeout、PID probe、log parse 或本地 in-flight map 替代。
+
+## 7. 稳定终态身份与验证权威
 
 - terminal 身份必须匹配 `OccurrenceTaskBinding`：`taskId`、`operationId`、`executionEpoch`、
-  `inputArtifactDigest` 全部相等；`terminal.verification` 同样校验上述身份。
-- 一个 `OccurrenceTaskBinding` 只对应一次业务执行。并发进程/端口、stale claim generation
-  和 crash/restart 都由 admission commitId 幂等 + claim/lease 校验保证。
+  `inputArtifactDigest` 全部相等；receipt 与 `receipt.verification` 同样校验上述身份。
+- 一个 `OccurrenceTaskBinding` 只对应一次业务执行。admission commitId 只授权一次 dispatch；
+  winner / replay 由 claim claim-identity check + Journal `commitFactDigest` 区分。
 - `ServeTaskTerminalReceipt.verification.status` 覆盖
   `success | failed | rejected | missing | blocked | cancelled`。
   Core `assertVerifiedTerminalReceipt` 当前只接受 `success`；非成功终点需要**扩展 settle
   终点判定**（按 outcome 分别处理），但不得扩大为接受伪造成功。
-- verification 不成为独立 lifecycle truth；它只作为 terminal receipt 的字段。
+- verification 不成为独立 lifecycle truth；checkpoint 是 lifecycle truth，receipt fact 只提供
+  durable verification/evidence，scheduler settlement 保存 forward result。
 
-## 7. 终点区分
+## 8. 终点区分
 
 | 终点 | 判据 | 结果 |
 | --- | --- | --- |
 | completed replay | settlement 存在 | 返回已提交 terminal，不 dispatch |
-| live concurrent wait | 同 binding 在本进程 in-flight | 等待同一 promise，不第二次 dispatch |
-| interrupted / uncertain | admission 存在、terminal 缺失 | blocked/recovery，用户可见，不重派 |
+| live concurrent wait | 当前 live claim 未过期 | 等待同一 promise 或 typed `in-progress`，不第二次 dispatch、不写 recovery |
+| current owner unproven | 当前 claim 存在且未过期，但 caller 无 owner identity | typed `owner-live-unproven` / `in-progress`；现有 primitive 下不得 recovery |
+| interrupted / fenced | confirmed dead 或 confirmed fence + 新 recovery authority | 才允许 blocked/recovery terminal；不重派，不伪造 success |
 | verification failure | 验证 status ≠ success | 非成功 terminal，保留原始 evidence |
 | reject / missing / blocked / cancelled | 验证对应 status | 对应 typed 非成功 outcome；blocked 不伪装成功；cancelled 只在 stop settle 后收口 |
-| persistence failure | journal append/commit 抛错 | fail closed：admission 失败则不 dispatch；terminal 失败则不宣称成功 |
+| durable receipt pending | checkpoint 存在、receipt 缺失 | `durable-unverified-recovery-pending`；不宣称 verified terminal |
+| persistence failure | journal append/commit 抛错 | fail closed：admission 失败则不 dispatch；terminal/receipt 未成对提交则不宣称成功 |
 | actual side-effect release | 执行/tool/browser/port 资源已释放 | 释放证据入 receipt；未释放必须显式 recovery inventory |
 | cleanup | consumer 释放自有资源，scheduler 保留 receipt | 未 release 显式进入 recovery inventory，不静默丢弃 |
 
-## 8. 最小 future source allowlist 与依赖顺序
+## 9. 最小 future source allowlist 与依赖顺序
 
 前置：当前 candidate 不含 W3 `packages/runtime/src/ui-runtime/task-verification.ts`，也没有真实
 `ServeTaskConsumerPort`。若必须复用 W3 已验收字节，parent 必须先完成最小组合；不得用 stub
@@ -218,7 +268,8 @@ blocked/recovery 必须绑定**真实 core error/checkpoint/stop settlement 语�
 
 ```text
 W3 actual verification bytes composition
-  -> durable consumer owner (ServeTaskConsumerPort adapter + admission/replay)
+  -> minimal claim process-start / recovery-fence contract
+  -> durable consumer owner (ServeTaskConsumerPort adapter + admission/receipt/replay)
   -> scheduler recovery/call contract (consumeExecution 调用 + 非成功 settle 终点)
   -> public E2E
 ```
@@ -227,27 +278,28 @@ W3 actual verification bytes composition
 
 | 顺序 | 文件 | Owner | 内容 |
 | --- | --- | --- | --- |
-| 0 | `packages/contracts/src/tool-execution.ts` | 契约 owner（先于实现） | 仅在需要时新增 `OccurrenceExecutionAdmissionRecord` typed 形状与 validator |
+| 0 | `packages/contracts/src/tool-execution.ts` | 契约 owner（先于实现） | 新增 admission、`OccurrenceTerminalReceiptRecord`、`RecoveryResponsibilityRecord`、receipt validator |
+| 0a | `packages/contracts/src/framework.ts` | scheduler contract owner | 最小扩展 `OccurrenceClaim` 的 process-start token 与 recovery-fence identity；不得改称第二 lease |
 | 1 | W3 `packages/runtime/src/ui-runtime/task-verification.ts` | W3 bytes 组合 owner | 组合实际 W3 验证 bridge；不得以 stub 代替 |
-| 2 | `packages/app/src/ui-runtime/service.ts`（及同 owner sibling module） | 持久 consumer owner | 实现真实 `ServeTaskConsumerPort` adapter：原子 admission、execute-or-resume、terminal receipt 组合 |
-| 3 | `packages/app/src/ui-runtime/journal.ts` | 持久 consumer owner | 仅当现有 record 类型不足时补最小 admission 读写；不新增 generic registry |
+| 2 | `packages/app/src/ui-runtime/service.ts`（及同 owner sibling module） | 持久 consumer owner | 实现真实 `ServeTaskConsumerPort`：admission、live-owner guard、execute、terminal/receipt 提交 |
+| 3 | `packages/app/src/ui-runtime/journal.ts` | 持久 consumer owner | 补最小 admission/receipt event 读写；不新增 generic registry |
 | 4 | `packages/runtime/src/ui-runtime/coordinator.ts` | 持久 consumer owner | 仅当需要暴露 execute/settle seam 时最小改动 |
 | 5 | `packages/core/src/subscription.ts` | scheduler/core owner | 非成功 settle 终点判定扩展；保持 core 唯一 owner |
 | 6 | `packages/runtime/src/subscriptions/index.ts` | scheduler owner | `consumeExecution` 调用 execute-or-resume consumer 与错误码处理 |
 
-两个独立任务、互不重叠的写入范围：
+三个独立任务、互不重叠的写入范围：
 
-- **Task A（持久 consumer owner）**：`packages/contracts/src/tool-execution.ts`、
+- **Task A（durable consumer owner）**：`packages/contracts/src/tool-execution.ts`、
   `packages/runtime/src/ui-runtime/task-verification.ts`、`packages/app/src/ui-runtime/*`、
   `packages/runtime/src/ui-runtime/coordinator.ts`。
-- **Task B（scheduler recovery/call contract）**：`packages/core/src/subscription.ts`、
-  `packages/runtime/src/subscriptions/index.ts`。
+- **Task B（scheduler owner authority）**：`packages/contracts/src/framework.ts`、
+  `packages/core/src/subscription.ts`、`packages/runtime/src/subscriptions/index.ts`。
 - Typed handoff（A→B，不重叠）：`ServeTaskConsumerPort` 接口签名 + `OccurrenceTaskBinding`
-  + `ServeTaskTerminalReceipt`。B 只按契约调用，不改 A 的文件；A 不改 scheduler 文件。
+  + `ServeTaskTerminalReceipt` + claim/fence identity。B 只按契约调用，不改 A 的文件；A 不改 scheduler 文件。
 
 真实 consumer 不实现前，`due -> execute -> settle` 不能验收；fake counter 不能作为 GREEN。
 
-## 9. 公开候选测试与 consumer harness
+## 10. 公开候选测试与 consumer harness
 
 真实入口：真实 `ServeTaskConsumerPort`（由 Task A 提供）+ 公开
 `SubscriptionControlPort.claim/consumeExecution/settleOccurrence` + 真实
@@ -259,14 +311,16 @@ W3 actual verification bytes composition
 
 1. 同一 occurrence/task/operation/executionEpoch/inputArtifactDigest 只启动一次业务执行。
 2. execute 返回后、settle 前**同一 port** 重复调用，不第二次 dispatch。
-3. execute 返回后、settle 前**重启 port**（新进程/新 port/新端口），不第二次 dispatch。
-4. **并发调用**返回/等待同一 terminal receipt。
-5. settle 前返回的 terminal 与 settle 后重放 terminal 身份一致。
+3. execute 返回后、settle 前**重启 port**（新进程/新 port/新端口），读取同一持久 receipt，不第二次 dispatch。
+4. **两个真实 consumer process**：A 有 live current claim 且仍在执行时，B 只能等待或返回 typed `in-progress`；不得 dispatch、不得写 recovery/terminal。A terminal 后 B 得到 byte/equality 相同的 receipt。
+5. stale claim、new port、unchanged live owner、concurrent caller 均不得写 terminal；只有 confirmed owner failure + recovery fence 才能写恢复终态，且无 phantom stop/success。
 6. **admission 后崩溃**（模拟 admission 提交后进程中断）在重启后返回 blocked/recovery，
    不重新 dispatch，且用户可见结果与原始 error/receipt 身份一致。
-7. `success`、`failed`、`rejected`、`missing`、`blocked`、`cancelled` 和 cleanup 终点均有可断言
-   receipt；未释放资源进入 recovery inventory。
-8. fixture root 必须放在本任务自有目录下，测试后只删除本轮创建的资源，核对物理 absence。
+7. **verification returned before settle restart**：A 在 `settleOccurrence` 前退出；重启后 consumer 读取同一 durable receipt，scheduler 首次 settle，第二次 replay 相同 terminal/settlement。
+8. Journal write failure：terminal 成功、receipt append 失败必须暴露 `durable-unverified-recovery-pending`，不得返回 verified terminal。
+9. `success`、`failed`、`rejected`、`missing`、`blocked`、`cancelled` 和 cleanup 终点均有可断言
+   receipt；未释放 provider/tool/browser/port 资源进入 recovery inventory，且有实际 release/closure inventory。
+10. fixture root 必须放在本任务自有目录下，测试后只删除本轮创建的资源，核对物理 absence。
 
 RED/control 限定：fake/diagnostic counter 只能用于隔离的确定性 RED/control 回归，不能替代
 真实 consumer 证据。
@@ -288,27 +342,28 @@ future harness / public 边界命令（source 实现后）：
 pnpm exec tsc -p tests/app/tsconfig.json
 node --test dist/tests/tests/app/file-checkpoint-store.test.js
 node --test dist/tests/tests/app/ui-runtime.test.js
-# 新增 public consumer harness（真实 JsonlOrganJournal + 真实 Provider seam）
+# 新增 public consumer harness（真实 JsonlOrganJournal + 真实 Provider seam + 两进程 claim/fence）
 pnpm exec tsc -p tests/runtime/tsconfig.json
 node --test dist/tests-runtime/tests/runtime/checkpoints/public-consumer-recovery.test.js
 ```
 
-## 10. Graph 变更
+## 11. Graph 变更
 
 本轮只改现有 `humanagent-serve-task` 的 docs/dagpipe 文件：
 
 - 新增 `durable_consume` 节点，位于 `correlate_task` 与 `provider_execution` 之间，语义为
-  "按绑定持久准入并执行或恢复"。
-- `provider_execution` 输入改由 `durable_consume` 输出 `durable_execution_binding` 提供。
+  "持久准入、判定 owner 并执行或恢复"。
+- 新增 `receipt_commit` 节点，位于 `provider_execution` 与 `task_terminal` 之间，语义为
+  "提交可重放的持久验证 receipt"。
 - meta 补 `durableConsumerCapability = BLOCKED`、`durableConsumerOwner`、
   `recoveryContract`、`stableBindingIdentity`、`replayRule`、`capabilityResolution` 与
   `designBaseline`。
 
 图仍为 SESE：单 source（`fifo_peek`）、单 sink（`task_terminal`）、每节点单入单出。
 新节点 binding 指向现有 `packages/app/src/ui-runtime/service.ts`，
-`implementationStatus = pending`，不声称实现完成。已有 5 条实现边保持准确（不新增/删除）。
+`implementationStatus = pending`，不声称实现完成。已有 checkpoint 边保持准确（不新增/删除）。
 
-## 11. 本轮验证记录
+## 12. 本轮验证记录
 
 本轮只允许 docs/graph 变化。执行并记录：
 
@@ -330,11 +385,14 @@ git diff --stat
   directory overreach 判定不覆盖、不回收。
 - 这些是设计 gate，不是已执行的 runtime/product 验收。
 
-## 12. 未完成与 blocker
+## 13. 未完成与 blocker
 
-- **BLOCKED**：真实 durable `ServeTaskConsumerPort` 不存在。最小解除方式是按第 8 节顺序派发
+- **BLOCKED**：真实 durable `ServeTaskConsumerPort` 不存在。最小解除方式是按第 9 节顺序派发
   Task A（持久 consumer owner）与 Task B（scheduler recovery/call contract），并先完成
   W3 验证字节组合与必要的 core 契约扩展。
+- **BLOCKED**：现有 claim/lease 没有跨进程 liveness 或 owner-death proof，也没有 recovery
+  fence。最小解除方式是扩展现有 `OccurrenceClaim` / scheduler fence contract，并提供真实
+  两进程证明；不得使用第二 lease、timeout、PID/log parse 或本地 map。
 - 非成功 settle 终点当前被 `assertVerifiedTerminalReceipt`（仅 `success`）阻断，需在
   Task B 扩展，且不得放宽为接受伪造成功。
 - 本设计不是 source review，也不替代 parent 独立 pre-code design review。

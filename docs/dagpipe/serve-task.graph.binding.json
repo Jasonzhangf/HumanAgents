@@ -30,6 +30,11 @@
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
       "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
     },
+    "receipt_commit": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending"
+    },
     "task_terminal": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts"

@@ -4,9 +4,10 @@
     "fifo_peek": "读取 FIFO 队首",
     "admission_check": "执行资源准入",
     "correlate_task": "关联或创建运行时任务",
-    "durable_consume": "按绑定持久准入并执行或恢复",
+    "durable_consume": "持久准入、判定 owner 并执行或恢复",
     "provider_execution": "执行 Provider 任务",
-    "checkpoint_commit": "提交检查点",
+    "checkpoint_commit": "提交终态检查点",
+    "receipt_commit": "提交可重放的持久验证 receipt",
     "task_terminal": "生成任务完成投影"
   }
 }

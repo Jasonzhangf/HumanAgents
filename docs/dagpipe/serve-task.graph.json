@@ -7,10 +7,10 @@
     "designBaseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "durableConsumerCapability": "BLOCKED",
     "durableConsumerOwner": "packages/app/src/ui-runtime/service.ts",
-    "recoveryContract": "dispatch 之前原子持久准入；按 OccurrenceTaskBinding execute-or-resume；admission 之后不自动重派；terminal receipt 由已提交 checkpoint 组合；execute-returned/settle-pending 重启重放",
+    "recoveryContract": "dispatch 之前原子持久准入；live/current claim 可等待或返回 in-progress；interrupted 需 confirmed dead/fenced owner + recovery fence",
     "stableBindingIdentity": "OccurrenceTaskBinding{occurrenceId,subscriptionId,scheduleRevision,occurrenceOrdinal,taskId,operationId,executionEpoch,inputArtifactDigest}",
-    "replayRule": "settlement 已存在 -> 重放 terminal；admission 已存在且 terminal 缺失 -> blocked/recovery，不重派；无 admission -> 准入并唯一 dispatch",
-    "capabilityResolution": "组合 W3 保留树 task-verification.ts 实际字节 + 在权威 JsonlOrganJournal/FileCheckpointStore 之上实现真实 ServeTaskConsumerPort adapter"
+    "replayRule": "settlement -> same receipt；checkpoint+receipt -> reconstruct/read receipt；checkpoint only -> durable unverified；admission only -> wait/in-progress/interrupted；no admission -> admit once",
+    "capabilityResolution": "组合 W3 verification bytes；持久 ServeTaskTerminalReceipt Fact；最小扩展 claim processStartToken/fence；真实 ServeTaskConsumerPort"
   },
   "inputs": [
     { "id": "confirmed_requirement", "schema": "Object" }
@@ -77,10 +77,20 @@
       "iterator": "Whole"
     },
     {
+      "id": "receipt_commit",
+      "operator": "humanagent-serve-receipt-commit",
+      "operator_version": "1",
+      "inputs": ["terminal_checkpoint"],
+      "output": { "id": "durable_terminal_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "task_terminal",
       "operator": "humanagent-serve-task-terminal",
       "operator_version": "1",
-      "inputs": ["terminal_checkpoint"],
+      "inputs": ["durable_terminal_receipt"],
       "output": { "id": "completed_task_projection", "schema": "Object" },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
@@ -93,7 +103,8 @@
     { "from": "correlate_task", "to": "durable_consume", "arc_id": "runtime_task" },
     { "from": "durable_consume", "to": "provider_execution", "arc_id": "durable_execution_binding" },
     { "from": "provider_execution", "to": "checkpoint_commit", "arc_id": "provider_evidence" },
-    { "from": "checkpoint_commit", "to": "task_terminal", "arc_id": "terminal_checkpoint" }
+    { "from": "checkpoint_commit", "to": "receipt_commit", "arc_id": "terminal_checkpoint" },
+    { "from": "receipt_commit", "to": "task_terminal", "arc_id": "durable_terminal_receipt" }
   ],
   "outputs": ["completed_task_projection"]
 }
