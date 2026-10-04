@@ -2,7 +2,7 @@
   "graph": "humanagent-scheduled-occurrence",
   "labels": {
     "read_committed_subscription_state": "读取已提交订阅状态并复核版本",
-    "recover_pending_reminder": "空闲恢复待提醒槽位并原子收拢提醒",
+    "recover_pending_reminder": "空闲恢复待提醒槽位或按 late-skip 原子收口槽位与提醒",
     "claim_due_occurrence": "原子比较状态版本后认领到期执行",
     "validate_occurrence_domain": "校验 occurrence 领域状态与触发规则",
     "admit_occurrence_execution": "按忙闲与资源准入执行",

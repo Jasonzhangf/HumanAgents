@@ -155,7 +155,8 @@ ReminderState:   pending | consumed | invalidated
 - `snapshot.subscription.state = active`。
 - 现有 `occurrence.state = reminder-pending`。
 - 存在匹配 `reminder`：`reminder.subscriptionId`、`scheduleRevision`、`occurrenceOrdinal`、`dueAt` 一致且 `reminder.state = pending`。
-- 当前恢复不因 `latePolicy`、`maxOccurrences`、`endAt` 或已提交 control 而禁止执行。
+- `occurrenceOrdinal` 仍在 `currentOccurrenceOrdinal` 之后且不超过 `maxOccurrences`；非 once 时 `dueAt < endAt`。
+- 现有 `latePolicy` 允许该槽位继续执行：尚未过期，或 `latePolicy=run-once`。`latePolicy=skip` 且 `nowAt > dueAt` 时不恢复为 `due`，进入 5.4 的原子收口。
 
 恢复在同一事务内原子更新：
 
@@ -178,10 +179,18 @@ reminder.state:   pending           -> consumed
 | --- | --- |
 | `schedule({busy:true})` 遇到已有 `reminder-pending` | 返回现有，不增加第二个 reminder |
 | `schedule({busy:true})` 遇到已有 `due` | 返回现有 `due`，不改成 reminder |
-| 空闲恢复时 `latePolicy=skip` 已禁止本次执行 | 不恢复为 `due`；同一事务把 occurrence 标 `skipped-busy`、reminder 标 `invalidated`，或返回 typed late-skipped 并保留现有状态，不得死锁 pending |
+| 空闲恢复时 `latePolicy=skip` 已禁止本次执行 | 不恢复为 `due`；同一事务把 occurrence 标 `skipped-busy`、匹配 reminder 标 `invalidated`，返回该 closed occurrence；不得保留 pending |
 | control `modify`/`pause`/`cancel-future` 已使旧 revision 失效 | `schedule` 返回 `stale-revision`/`superseded`；已失效 occurrence/reminder 不恢复 |
 | subscription 非 active | 返回 typed `invalid-state`，不恢复 |
-| `maxOccurrences`/`endAt` 禁止执行 | 不恢复为 `due`；按 typed `exhausted` 收口，不留下 pending 死边 |
+| `maxOccurrences`/`endAt` 禁止执行 | 不恢复为 `due`；`maxOccurrences` 已达上限时按下方同一原子收口，`endAt` 仍按 committed slot 的 `dueAt < endAt` 判断，不新增第二条恢复路径 |
+
+永久 late-skip 的原子收口（owner：`packages/runtime/src/subscriptions/index.ts`，事务：`JsonlOrganJournal.transaction`）：
+
+- 同一事务原子更新 `occurrence.state: reminder-pending -> skipped-busy` 与匹配 `reminder.state: pending -> invalidated`。
+- 复用现有 `skipped-busy` accounting：`currentOccurrenceOrdinal = max(currentOccurrenceOrdinal, occurrenceOrdinal)`；若 `maxOccurrences` 已定义且 `currentOccurrenceOrdinal >= maxOccurrences`，`subscription.state = exhausted`；否则保持原 active 状态。
+- 保留原 slot 身份：`occurrenceId`、`subscriptionId`、`scheduleRevision`、`occurrenceOrdinal`、`dueAt` 不变；不创建 `due`、不 claim、不执行、不新增第二套 ordinal counter。
+- `endAt` 不是 `nowAt` 的截止条件。它继续按 committed policy 的 `dueAt < endAt` 判断；若 slot 不属于 committed policy，既有 `policySlotOrdinal`/core `exhausted`/`invalid-occurrence` 路径拥有拒绝，不伪造 pending closure。
+- 后续同 slot `schedule` 返回同一 `skipped-busy` occurrence；restart 从同一 Journal 恢复 closed 状态；不会恢复 pending 或触发 dispatch。
 
 `commit_subscription_control` 必须同步失效匹配 pending reminder。core `supersedeUnclaimed` 已把 `due`/`reminder-pending` occurrence 标记 `invalidated`；source 修复时同一事务也把匹配 `reminder.state` 改为 `invalidated`。
 
@@ -307,6 +316,18 @@ W3 actual verification/consumer bytes composition (if required) -> scheduler rec
 4. `claim` 成功；`consumeExecution` 只调 consumer 一次；`settleOccurrence` 提交后 occurrence 为 `consumed`。
 5. `schedule({busy:true})` 重复调用不增加 reminder。
 6. `latePolicy=skip`、`maxOccurrences`/`endAt` 禁止、superseded/cancelled 场景不恢复为 `due`，不留下 pending 死边。
+
+#### 9.1.1 `latePolicy=skip` busy-pending closure
+
+独立 planned GREEN case：recurring policy 使用 `busyPolicy=idle-reminder`、`latePolicy=skip`、`maxOccurrences=2`、60 分钟 interval。
+
+1. 在 slot 1 `dueAt` 调用 `schedule({busy:true})`；断言返回 `reminder-pending`，matching reminder 为 `pending`，`currentOccurrenceOrdinal=0`。
+2. 在 `dueAt+1m` 对同一 slot 调用 `schedule({busy:false})`；断言返回 `skipped-busy`，`occurrenceId`/`subscriptionId`/`scheduleRevision`/`occurrenceOrdinal`/`dueAt` 与 admission 时一致，matching reminder 为 `invalidated`，`currentOccurrenceOrdinal=1`，且没有 `due` occurrence、claim 或 consumer dispatch。
+3. 重复同一 slot 的 `schedule` 调用；断言返回同一 `skipped-busy` occurrence，不新增 occurrence/reminder，ordinal 仍为 1，dispatch 仍为 0。
+4. 从同一 `JsonlOrganJournal` 构造新的公开 `SubscriptionControlPort` 后重复同一 slot 调用；断言重启后仍为同一 closed occurrence，journal 中无 pending reminder，ordinal 与 exhausted 状态不变。
+5. 断言 closed slot 不能被 claim 或 `consumeExecution`，consumer dispatch 仍为 0；下一个 slot 的 ordinal 为 2，而不是重试 ordinal 1。
+6. 在 `maxOccurrences=2` 下对 slot 2 执行同样的 late-skip closure 后，断言 subscription 为 `exhausted`，后续 slot 被 typed `exhausted` 拒绝且无 pending dead edge；另以 `maxOccurrences=1` 覆盖首个 closure 即 exhausted。
+7. 保留 active/busy/revision/cancel 路径：未过期或 `latePolicy=run-once` 的 idle recovery 仍恢复为 `due`、claim 一次并 settle 为 `consumed`；重复 busy schedule 仍只保留一个 reminder；`modify`/`pause`/`cancel-future` 仍按既有 revision/control precedence 使旧 pending 不可恢复。
 
 命令示例：
 

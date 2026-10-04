@@ -152,7 +152,7 @@ W1 在 `packages/contracts/src/tool-execution.ts` 导出 `TaskVerificationResult
 | `Subscription.state` | 唯一真源用现有 `active \| completed \| exhausted \| cancelled \| suspended`；暂停即 `suspended`，不另存 paused boolean | contracts |
 | `cancelFutureRef` | 取消未来触发，与在途 stop 分开 | scheduler + control |
 
-`maxOccurrences` 按 `occurrenceOrdinal` 计；每个实际到期槽位（含 `skipped-busy`）消耗一次计数，`state=exhausted` 后不再触发。`maxOccurrences=0` 非法。
+`maxOccurrences` 按 `occurrenceOrdinal` 计；每个实际到期槽位（含 `skipped-busy`，包括 `idle-reminder` 后因 `latePolicy=skip` 原子收口为 `skipped-busy`+reminder `invalidated` 的槽位）消耗一次计数，`state=exhausted` 后不再触发。`maxOccurrences=0` 非法。
 
 W1 的最小 typed control 结构如下；字段名是后续 W2/W3 验收的稳定契约。`SubscriptionControlRequest` 是按 `action` 区分的 union，`modify` 必须携带完整新策略，两个不同时间修改请求不能拥有相同 typed payload：
 
