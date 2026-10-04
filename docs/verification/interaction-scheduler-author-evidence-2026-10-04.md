@@ -207,10 +207,17 @@ these gates.
 - `pnpm build:app`: exit 0. Raw `raw/gate-05-build-app.log`.
 - `pnpm build`: exit 0; build manifest stage pass. Raw `raw/gate-06-build.log`.
 - `pnpm test:compiled`: final candidate exit 0; 733 tests, 733 pass, 0 fail, 0 skipped.
-  Raw `raw/gate-07-compiled-final.log`. An earlier compiled run had one unrelated
-  `tests/app/app.test.ts` restart-timeout failure; its rerun passed 733/733 before the
-  final replay-retention assertion, and the final compiled run above passed 733/733 with
-  that assertion included.
+  Raw `raw/gate-07-compiled-final.log`. The first compiled run exited 1 with 733 tests,
+  732 pass, 1 fail, 0 skipped; its sole failure was case 292,
+  `CLI serve takes over the previous owner and keeps rooted memory across restart` in
+  `tests/app/app.test.ts`. The observed memory context remained task-detail/running with
+  `等待 Provider 事件`, while diagnostics included provider-terminal, settling,
+  checkpoint-committed, and final terminal events. The case uses the fake Provider. The
+  first failure's cause is UNCONFIRMED. The immediate rerun passed 733/733 before the
+  final replay-retention assertion, and the final compiled run passed 733/733 with that
+  assertion included; those passing executions prove command success at their respective
+  versions, not causality, defect closure, formal business acceptance, or that the first
+  run should have exited 0.
 - `pnpm dagpipe:validate`: exit 0; 11 graphs validated. Raw `raw/gate-08-dagpipe.log`.
 - `git diff --check`: exit 0 after the receipt update. Raw `raw/gate-09-diff-check-final.log`.
 
