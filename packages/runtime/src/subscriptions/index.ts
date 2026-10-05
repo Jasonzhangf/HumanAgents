@@ -14,6 +14,7 @@ import {
   validateExecutionPolicyDefinition,
   validateOccurrence,
   validateOccurrenceClaim,
+  validateOccurrenceTaskBinding,
   validateReminder,
   validateServeTaskTerminalReceipt,
   validateSubscription,
@@ -23,6 +24,7 @@ import {
   type ExecutionPolicyDefinition,
   type Occurrence,
   type OccurrenceClaim,
+  type OccurrenceTaskBinding,
   type OperationId,
   type Reminder,
   type ScopeRef,
@@ -33,8 +35,10 @@ import {
   type TaskId,
 } from '../../../contracts/src/index.js';
 import type { JsonlOrganJournal, JournalAppendInput, JournalRecord } from '../../../adapters/jsonl/src/index.js';
+import type { OccurrenceClaimRecord, ServeTaskConsumerPort } from './ports.js';
 
 export type { ExecutionPolicyDefinition, Occurrence, OccurrenceClaim, Reminder, ServeTaskTerminalReceipt, Subscription, SubscriptionControlReceipt, SubscriptionControlRequest };
+export type { OccurrenceClaimRecord, ServeTaskConsumerPort } from './ports.js';
 
 export interface SubscriptionSnapshot {
   readonly subscription: Subscription;
@@ -45,15 +49,6 @@ export interface SubscriptionSnapshot {
   readonly claims: readonly OccurrenceClaimRecord[];
   readonly settlements: readonly OccurrenceSettlementRecord[];
   readonly reminders: readonly Reminder[];
-}
-
-export interface OccurrenceClaimRecord extends OccurrenceClaim {
-  readonly policyRevision: number;
-  readonly policyHash: string;
-  readonly policy: ExecutionPolicyDefinition;
-  readonly taskId: TaskId;
-  readonly operationId: OperationId;
-  readonly inputArtifactDigest: string;
 }
 
 export interface OccurrenceSettlementRecord {
@@ -92,14 +87,6 @@ export interface NextOccurrenceInput {
   readonly policy: ExecutionPolicyDefinition;
   readonly nowAt: string;
   readonly busy?: boolean;
-}
-
-export interface ServeTaskConsumerPort {
-  executeOccurrence(input: {
-    readonly occurrence: Occurrence;
-    readonly policy: ExecutionPolicyDefinition;
-    readonly claim: OccurrenceClaimRecord;
-  }): Promise<ServeTaskTerminalReceipt>;
 }
 
 export class SubscriptionSchedulerError extends Error {
@@ -781,14 +768,49 @@ export class SubscriptionControlPort {
     }
     const occurrence = findOccurrence(snapshot, claim.occurrenceId);
     if (!occurrence) throw new SubscriptionSchedulerError('not-found', 'claimed occurrence was not found');
-    return this.serveTask.executeOccurrence({
+    const binding: OccurrenceTaskBinding = {
+      occurrenceId: claim.occurrenceId,
+      subscriptionId: claim.subscriptionId,
+      scheduleRevision: claim.scheduleRevision,
+      occurrenceOrdinal: claim.occurrenceOrdinal,
+      taskId: cloneState(claim.taskId),
+      operationId: cloneState(claim.operationId),
+      executionEpoch: claim.executionEpoch,
+      inputArtifactDigest: claim.inputArtifactDigest,
+    };
+    try {
+      validateOccurrenceTaskBinding(binding);
+    } catch (error) {
+      throw new SubscriptionSchedulerError(
+        'invalid-occurrence',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const terminal = await this.serveTask.executeOccurrence({
       occurrence: {
         ...cloneState(occurrence),
         state: 'claimed',
       },
       policy: cloneState(claim.policy),
       claim: cloneState(claim),
+      binding,
     });
+    try {
+      assertVerifiedTerminalReceipt({
+        occurrence,
+        taskId: binding.taskId,
+        operationId: binding.operationId,
+        executionEpoch: binding.executionEpoch,
+        inputArtifactDigest: binding.inputArtifactDigest,
+        terminal,
+      });
+    } catch (error) {
+      throw new SubscriptionSchedulerError(
+        'verification-rejected',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return terminal;
   }
 
   private async read(): Promise<PersistedState> {

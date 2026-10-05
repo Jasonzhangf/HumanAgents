@@ -115,10 +115,20 @@ function terminalReceipt(overrides: Partial<ServeTaskTerminalReceipt> = {}): Ser
     taskId: id('task', 'task-a'),
     operationId: id('operation', 'operation-a'),
     executionEpoch: 1,
+    attempt: 1,
     inputArtifactDigest: 'sha256:input',
+    policyRef: 'task-verification/v1:policy-a',
+    policyDigest: 'sha256:policy-a',
     status: 'success' as const,
-    checkerStdout: 'ok',
-    checkerExitCode: 0,
+    checks: [{
+      checkId: 'check-terminal',
+      kind: 'native' as const,
+      status: 'succeeded' as const,
+      decisionRef: 'task-verification/v1:terminal',
+      decisionDigest: 'sha256:terminal-check',
+      artifactDigests: ['sha256:input'],
+      evidenceRefs: [evidence('terminal')],
+    }],
     evidenceRefs: [evidence('terminal')],
   };
   return {

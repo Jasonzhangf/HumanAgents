@@ -5,17 +5,16 @@
     "title": "serve 运行时从已授权执行计划到真实任务终态、恢复责任与 owner fence",
     "baseline": "3a3dbcd5a35dbde4f8928305238f874fcf7cf1cf",
     "designBaseline": "3ee0a362dcc5a18fe6efa21d818848cfdabf1d0e",
-    "durableConsumerCapability": "BLOCKED",
+    "durableConsumerCapability": "IMPLEMENTED",
     "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
-    "durableConsumerOwner": "packages/app/src/ui-runtime/service.ts",
+    "durableConsumerOwner": "packages/app/src/ui-runtime/occurrence-consumer.ts",
     "recoveryContract": "dispatch 之前原子持久准入；live/current claim 可等待或返回 in-progress；replacement 必须是 supervisor-authenticated current caller B 且 A 的 committed monotonic handoff 成立；无同 guard 的 owner 验证不得 mutation",
     "stableBindingIdentity": "OccurrenceTaskBinding{occurrenceId,subscriptionId,scheduleRevision,occurrenceOrdinal,taskId,operationId,executionEpoch,inputArtifactDigest}",
     "replayRule": "settlement -> same receipt；checkpoint+receipt -> reconstruct/read receipt；checkpoint only -> durable unverified；admission only -> wait/in-progress/interrupted；no admission -> validate authoritative binding, derive initial owner from authenticated current caller, commit unique admission, then dispatch once",
     "capabilityResolution": "组合 W3 verification bytes；持久 ServeTaskTerminalReceipt Fact；最小扩展 immutable admitted executionOwner；在现有 supervisor 增加 typed withCurrentDaemonOwner guard，认证本地 current caller 并证明 committed replacement；真实 ServeTaskConsumerPort",
-    "ownerFenceStatus": "BLOCKED; no source implementation or runtime proof",
-    "ownerFenceMissingPrimitive": "public typed supervisor operation withCurrentDaemonOwner(paths, binding, operation) with local caller authentication and committed-replacement predicate",
+    "ownerFenceStatus": "IMPLEMENTED; withCurrentDaemonOwner authenticates the local caller, initializes the absent-admission owner inside the Journal transaction, and proves a committed replacement for existing admissions",
     "ownerFenceGuardOrder": "existing withDaemonLeaseGuard -> authenticate injected SupervisorLease.assertActive -> re-read durable lease -> callback passes authenticated caller + replacement predicate -> journal.transaction validates absent-admission first branch or existing-A authority -> append; same scope; release in finally",
-    "graphStatus": "design; not runtime execution evidence"
+    "graphStatus": "author implementation; durable replay and real RCC evidence; independent review pending"
   },
   "inputs": [
     { "id": "persisted_execution_plan", "schema": "Object" }

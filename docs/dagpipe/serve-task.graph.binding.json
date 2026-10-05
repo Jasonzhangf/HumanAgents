@@ -29,16 +29,14 @@
       "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
     },
     "durable_consume": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "implementationStatus": "pending",
+      "ownerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "implementationStatus": "implemented",
       "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
-      "ownerFenceStatus": "BLOCKED",
-      "plannedOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
-      "plannedOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerFenceStatus": "implemented",
       "supervisorGuardOwnerPath": "packages/app/src/supervisor/supervisor.ts",
       "supervisorGuardOwnerRel": "packages/app/src/supervisor/supervisor.ts",
-      "supervisorGuardStatus": "pending; withCurrentDaemonOwner equivalent authenticates local caller, initializes absent-admission owner inside the Journal transaction, and proves committed replacement for existing admissions",
+      "supervisorGuardStatus": "implemented; withCurrentDaemonOwner authenticates the local caller, initializes the absent-admission owner inside the Journal transaction, and proves a committed replacement for existing admissions",
       "journalFenceOwnerPath": "packages/adapters/jsonl/src/index.ts",
       "journalFenceOwnerRel": "packages/adapters/jsonl/src/index.ts"
     },
@@ -84,13 +82,11 @@
       "ownerRel": "packages/adapters/jsonl/src/index.ts"
     },
     "receipt_commit": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "implementationStatus": "pending",
+      "ownerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "implementationStatus": "implemented",
       "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
-      "ownerFenceStatus": "BLOCKED",
-      "plannedOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
-      "plannedOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerFenceStatus": "implemented",
       "supervisorGuardOwnerPath": "packages/app/src/supervisor/supervisor.ts",
       "supervisorGuardOwnerRel": "packages/app/src/supervisor/supervisor.ts"
     },
