@@ -320,7 +320,7 @@ Release manifest 必须绑定：`releaseVersion`、source commit、config schema
 typecheck → compile → regression → ci → package → package-smoke
 ```
 
-其中 `regression` 执行完整 `pnpm test`，`ci` 执行仓库定义的 `pnpm run ci:check`（类型检查加 release-gate 自测），`package` 组装候选 tarball，`package-smoke` 在隔离 prefix 和任意临时 workspace 中安装并验证 doctor/run/session inspect。它们都是独立 checkpoint stage；本轮只要 identity 未变化就复用 PASS，不把“编译命令成功”当作回归或 CI 成功。
+其中 `typecheck` 执行 `pnpm run typecheck`，`compile` 执行 `pnpm run build:raw`，`regression` 执行 `pnpm run test:compiled:services`，`ci` 执行 `pnpm run dagpipe:gate`（DAGpipe 图校验加 release-gate 自测），`package` 组装候选 tarball，`package-smoke` 在隔离 prefix 和任意临时 workspace 中安装并验证 doctor/run/session inspect。它们都是独立 checkpoint stage；本轮只要 identity 未变化就复用 PASS，不把“编译命令成功”当作回归或 CI 成功。
 
 每个 stage 的执行 identity 由 `stage name + owner + argv + explicit env + input digest + dependency PASS identities` 组成；可复用证据还绑定声明的 output path digest。输入、执行语义、依赖身份和输出 evidence 未变且上次为 PASS 时标记 `reused`；输出被篡改、缺失或首次失败的 stage 及其下游不复用，修复后从该 stage 重跑。实际执行的 stage 会产生新的 evidence identity，确保依赖的 smoke/review gate 不会复用旧执行结果。前置 PASS stage 不重跑。每个 stage 记录 owner、argv、状态、时间、退出码、stdout/stderr artifact、首个偏离和下一动作；禁止 shell 拼接和吞错。
 

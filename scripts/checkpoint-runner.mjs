@@ -311,21 +311,3 @@ async function realpathOrFail(path) {
   if (!info.isDirectory()) throw new Error('project root is not a directory: ' + path);
   return (await import('node:fs/promises')).realpath(path);
 }
-
-export function parseStages(value) {
-  return value.map((stage) => {
-    if (!stage.name || !stage.owner || !Array.isArray(stage.command) || stage.command.length === 0) {
-      throw new Error('stage requires name, owner, and argv command');
-    }
-    return { ...stage, command: stage.command.map(String) };
-  });
-}
-
-if (process.argv[1] && process.argv[1].endsWith('checkpoint-runner.mjs')) {
-  const result = await runStages({
-    projectRoot: process.cwd(),
-    stages: [{ name: 'typecheck', owner: 'compile', command: ['pnpm', 'run', 'typecheck'], inputs: [{ kind: 'path', value: 'package.json' }, { kind: 'path', value: 'packages' }, { kind: 'path', value: 'tests' }] }],
-  });
-  console.log(JSON.stringify(result, null, 2));
-  if (result.overall !== 'pass') process.exitCode = 1;
-}

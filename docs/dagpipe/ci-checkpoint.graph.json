@@ -1,0 +1,59 @@
+{
+  "id": "humanagent-ci-checkpoint",
+  "version": "1",
+  "meta": {
+    "title": "CI 检查点：类型检查、编译、服务回归与门禁",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed"
+  },
+  "inputs": [
+    { "id": "candidate_revision", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "typecheck",
+      "operator": "humanagent-ci-typecheck",
+      "operator_version": "1",
+      "inputs": ["candidate_revision"],
+      "output": { "id": "typecheck_record", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "compile",
+      "operator": "humanagent-ci-compile",
+      "operator_version": "1",
+      "inputs": ["typecheck_record"],
+      "output": { "id": "compiled_artifacts", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "regression",
+      "operator": "humanagent-ci-regression",
+      "operator_version": "1",
+      "inputs": ["compiled_artifacts"],
+      "output": { "id": "regression_record", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "ci_gate",
+      "operator": "humanagent-ci-gate",
+      "operator_version": "1",
+      "inputs": ["regression_record"],
+      "output": { "id": "ci_receipt", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "typecheck", "to": "compile", "arc_id": "typecheck_record" },
+    { "from": "compile", "to": "regression", "arc_id": "compiled_artifacts" },
+    { "from": "regression", "to": "ci_gate", "arc_id": "regression_record" }
+  ],
+  "outputs": ["ci_receipt"]
+}

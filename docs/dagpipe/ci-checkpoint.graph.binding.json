@@ -1,0 +1,25 @@
+{
+  "graph": "humanagent-ci-checkpoint",
+  "operator": {
+    "operator": "humanagent-ci-checkpoint",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "typecheck": {
+      "ownerPath": "scripts/checkpoint-stages.mjs",
+      "ownerRel": "scripts/checkpoint-stages.mjs"
+    },
+    "compile": {
+      "ownerPath": "scripts/checkpoint-stages.mjs",
+      "ownerRel": "scripts/checkpoint-stages.mjs"
+    },
+    "regression": {
+      "ownerPath": "scripts/checkpoint-stages.mjs",
+      "ownerRel": "scripts/checkpoint-stages.mjs"
+    },
+    "ci_gate": {
+      "ownerPath": "scripts/checkpoint-stages.mjs",
+      "ownerRel": "scripts/checkpoint-stages.mjs"
+    }
+  }
+}

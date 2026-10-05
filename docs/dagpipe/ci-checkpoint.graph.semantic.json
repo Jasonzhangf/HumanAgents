@@ -1,0 +1,9 @@
+{
+  "graph": "humanagent-ci-checkpoint",
+  "labels": {
+    "typecheck": "执行类型检查并记录候选类型状态",
+    "compile": "执行原始构建并生成编译产物",
+    "regression": "消费编译产物运行服务回归",
+    "ci_gate": "执行 DAGpipe 与发布门禁自测"
+  }
+}
