@@ -13,7 +13,7 @@
     "recover_pending_reminder": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
-      "implementationStatus": "pending"
+      "implementationStatus": "implemented"
     },
     "claim_due_occurrence": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
