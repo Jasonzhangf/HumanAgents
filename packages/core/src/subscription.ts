@@ -4,17 +4,30 @@ import {
   validateExecutionPolicyDefinition,
   validateOccurrence,
   validateOccurrenceClaim,
+  validateOccurrenceExecutionAdmissionRecord,
+  validateOccurrenceExecutionOwner,
+  validateOccurrenceTaskBinding,
   validateServeTaskTerminalReceipt,
+  validateOccurrenceTerminalReceiptRecord,
+  validateRecoveryResponsibilityRecord,
   validateSubscription,
   validateSubscriptionControlRequest,
+  occurrenceExecutionDispatchRef,
   type ExecutionPolicyDefinition,
+  type EvidenceRef,
+  type OccurrenceExecutionAdmissionRecord,
+  type OccurrenceExecutionOwner,
   type Occurrence,
   type OccurrenceClaim,
+  type OccurrenceTaskBinding,
+  type OccurrenceTerminalReceiptRecord,
   type OperationId,
+  type RecoveryResponsibilityRecord,
   type ServeTaskTerminalReceipt,
   type Subscription,
   type SubscriptionControlReceipt,
   type SubscriptionControlRequest,
+  type TaskVerificationResult,
   type TaskId,
 } from '../../contracts/src/index.js';
 import { createHash } from 'node:crypto';
@@ -56,6 +69,80 @@ export interface SubscriptionControlDecision {
   readonly policyHash: string;
   readonly receipt: SubscriptionControlReceipt;
   readonly superseded: readonly Occurrence[];
+}
+
+export type OccurrenceAuthorityDecision =
+  | {
+      readonly kind: 'first-admission';
+      readonly record: OccurrenceExecutionAdmissionRecord;
+      readonly admittedExecutionOwner: OccurrenceExecutionOwner;
+      readonly mutation: 'admitted';
+      readonly dispatchAllowed: true;
+      readonly recoveryAllowed: false;
+    }
+  | {
+      readonly kind: 'current-owner';
+      readonly admission: OccurrenceExecutionAdmissionRecord;
+      readonly mutation: 'mutation-allowed';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    }
+  | {
+      readonly kind: 'owner-live-unproven';
+      readonly admission?: OccurrenceExecutionAdmissionRecord;
+      readonly reason: 'no-authenticated-caller' | 'claim-live' | 'no-claim' | 'replacement-unproven';
+      readonly mutation: 'none';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    }
+  | {
+      readonly kind: 'lease-expired';
+      readonly admission: OccurrenceExecutionAdmissionRecord;
+      readonly expiresAt: string;
+      readonly nowAt: string;
+      readonly mutation: 'none';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    }
+  | {
+      readonly kind: 'stale-owner';
+      readonly admission: OccurrenceExecutionAdmissionRecord;
+      readonly mutation: 'none';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    }
+  | {
+      readonly kind: 'recovery-allowed';
+      readonly admission: OccurrenceExecutionAdmissionRecord;
+      readonly authenticatedOwner: OccurrenceExecutionOwner;
+      readonly mutation: 'blocked-recovery-only';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: true;
+    }
+  | {
+      readonly kind: 'binding-mismatch';
+      readonly requestedBinding: OccurrenceTaskBinding;
+      readonly authoritativeBinding: OccurrenceTaskBinding;
+      readonly mutation: 'none';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    }
+  | {
+      readonly kind: 'invalid-admission';
+      readonly reason: 'missing-owner' | 'invalid-owner' | 'invalid-record';
+      readonly mutation: 'none';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    };
+
+export interface OccurrenceAuthorityInput {
+  readonly binding: OccurrenceTaskBinding;
+  readonly authoritativeBinding: OccurrenceTaskBinding;
+  readonly admission?: OccurrenceExecutionAdmissionRecord;
+  readonly claim?: OccurrenceClaim;
+  readonly authenticatedCaller?: OccurrenceExecutionOwner;
+  readonly committedReplacement: boolean;
+  readonly nowAt: string;
 }
 
 function fail(code: SubscriptionControlFailureCode, message: string): never {
@@ -335,6 +422,178 @@ export function assertOccurrenceClaimLease(claim: OccurrenceClaim, nowAt: string
   if (expiry <= now) fail('lease-expired', 'claim lease has expired');
 }
 
+function sameOccurrenceBinding(left: OccurrenceTaskBinding, right: OccurrenceTaskBinding): boolean {
+  return left.occurrenceId === right.occurrenceId
+    && left.subscriptionId === right.subscriptionId
+    && left.scheduleRevision === right.scheduleRevision
+    && left.occurrenceOrdinal === right.occurrenceOrdinal
+    && left.taskId.scope === right.taskId.scope
+    && left.taskId.value === right.taskId.value
+    && left.operationId.scope === right.operationId.scope
+    && left.operationId.value === right.operationId.value
+    && left.executionEpoch === right.executionEpoch
+    && left.inputArtifactDigest === right.inputArtifactDigest;
+}
+
+function sameExecutionOwner(left: OccurrenceExecutionOwner, right: OccurrenceExecutionOwner): boolean {
+  return left.daemonLeaseId === right.daemonLeaseId
+    && left.daemonGeneration === right.daemonGeneration
+    && left.processStartToken === right.processStartToken;
+}
+
+function validateOccurrenceAuthorityCaller(caller: OccurrenceExecutionOwner): void {
+  try {
+    validateOccurrenceExecutionOwner(caller);
+  } catch (error) {
+    throw new SubscriptionControlError(
+      'invalid-occurrence',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+export function decideOccurrenceAuthority(input: OccurrenceAuthorityInput): OccurrenceAuthorityDecision {
+  try {
+    validateOccurrenceTaskBinding(input.binding);
+    validateOccurrenceTaskBinding(input.authoritativeBinding);
+  } catch (error) {
+    return {
+      kind: 'invalid-admission',
+      reason: 'invalid-record',
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  if (!sameOccurrenceBinding(input.binding, input.authoritativeBinding)) {
+    return {
+      kind: 'binding-mismatch',
+      requestedBinding: input.binding,
+      authoritativeBinding: input.authoritativeBinding,
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  if (input.admission === undefined) {
+    if (input.authenticatedCaller === undefined) {
+      return {
+        kind: 'owner-live-unproven',
+        reason: 'no-authenticated-caller',
+        mutation: 'none',
+        dispatchAllowed: false,
+        recoveryAllowed: false,
+      };
+    }
+    validateOccurrenceAuthorityCaller(input.authenticatedCaller);
+    const recoveryResponsibility: RecoveryResponsibilityRecord = {
+      providerEffectState: 'possible',
+      resourceInventory: [],
+      releaseProofs: [],
+    };
+    const record: OccurrenceExecutionAdmissionRecord = {
+      kind: 'occurrence-execution-admission',
+      version: 1,
+      binding: input.binding,
+      dispatchRef: occurrenceExecutionDispatchRef(input.binding),
+      admittedAt: input.nowAt,
+      admittedExecutionOwner: input.authenticatedCaller,
+      recoveryResponsibility,
+    };
+    return {
+      kind: 'first-admission',
+      record,
+      admittedExecutionOwner: input.authenticatedCaller,
+      mutation: 'admitted',
+      dispatchAllowed: true,
+      recoveryAllowed: false,
+    };
+  }
+  try {
+    validateOccurrenceExecutionAdmissionRecord(input.admission);
+  } catch (error) {
+    const reason = input.admission.admittedExecutionOwner === undefined
+      ? 'missing-owner'
+      : 'invalid-record';
+    return {
+      kind: 'invalid-admission',
+      reason,
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  if (!sameOccurrenceBinding(input.admission.binding, input.binding)) {
+    return {
+      kind: 'binding-mismatch',
+      requestedBinding: input.binding,
+      authoritativeBinding: input.admission.binding,
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  if (input.authenticatedCaller === undefined) {
+    return {
+      kind: 'owner-live-unproven',
+      admission: input.admission,
+      reason: 'no-authenticated-caller',
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  validateOccurrenceAuthorityCaller(input.authenticatedCaller);
+  const admittedOwner = input.admission.admittedExecutionOwner;
+  if (sameExecutionOwner(admittedOwner, input.authenticatedCaller)) {
+    return {
+      kind: 'current-owner',
+      admission: input.admission,
+      mutation: 'mutation-allowed',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  if (input.claim !== undefined) {
+    try {
+      assertOccurrenceClaimLease(input.claim, input.nowAt);
+    } catch (error) {
+      if (error instanceof SubscriptionControlError && error.code === 'lease-expired') {
+        return {
+          kind: 'lease-expired',
+          admission: input.admission,
+          expiresAt: input.claim.expiresAt,
+          nowAt: input.nowAt,
+          mutation: 'none',
+          dispatchAllowed: false,
+          recoveryAllowed: false,
+        };
+      }
+      throw error;
+    }
+  }
+  if (input.committedReplacement && input.claim !== undefined
+    && input.authenticatedCaller.daemonLeaseId !== admittedOwner.daemonLeaseId
+    && input.authenticatedCaller.daemonGeneration > admittedOwner.daemonGeneration
+    && input.authenticatedCaller.processStartToken !== admittedOwner.processStartToken) {
+    return {
+      kind: 'recovery-allowed',
+      admission: input.admission,
+      authenticatedOwner: input.authenticatedCaller,
+      mutation: 'blocked-recovery-only',
+      dispatchAllowed: false,
+      recoveryAllowed: true,
+    };
+  }
+  return {
+    kind: 'stale-owner',
+    admission: input.admission,
+    mutation: 'none',
+    dispatchAllowed: false,
+    recoveryAllowed: false,
+  };
+}
+
 export function assertVerifiedTerminalReceipt(input: {
   readonly occurrence: Occurrence;
   readonly taskId: TaskId;
@@ -345,6 +604,60 @@ export function assertVerifiedTerminalReceipt(input: {
 }): void {
   const { occurrence, taskId, operationId, executionEpoch, inputArtifactDigest, terminal } = input;
   validateOccurrence(occurrence);
+  const binding: OccurrenceTaskBinding = {
+    occurrenceId: `${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}`,
+    subscriptionId: occurrence.subscriptionId,
+    scheduleRevision: occurrence.scheduleRevision,
+    occurrenceOrdinal: occurrence.occurrenceOrdinal,
+    taskId,
+    operationId,
+    executionEpoch,
+    inputArtifactDigest,
+  };
+  sharedTerminalReceiptIdentity(terminal, binding);
+  if (terminal.verification.status !== 'success') fail('invalid-occurrence', `task verification is ${terminal.verification.status}`);
+}
+
+export type OccurrenceTerminalOutcome =
+  | 'succeeded'
+  | 'failed'
+  | 'rejected'
+  | 'missing'
+  | 'blocked'
+  | 'cancelled';
+
+export interface OccurrenceTerminalReceiptDecision {
+  readonly outcome: OccurrenceTerminalOutcome;
+  readonly terminalReceipt: ServeTaskTerminalReceipt;
+  readonly record: OccurrenceTerminalReceiptRecord;
+  readonly checkpointOutcome: 'succeeded' | 'failed' | 'blocked' | 'cancelled';
+  readonly recoveryRequired: boolean;
+  readonly resourceReleaseConfirmed: boolean;
+}
+
+function terminalOutcomeForVerification(status: TaskVerificationResult['status']): OccurrenceTerminalOutcome {
+  switch (status) {
+    case 'success':
+      return 'succeeded';
+    case 'failed':
+      return 'failed';
+    case 'rejected':
+      return 'rejected';
+    case 'missing':
+      return 'missing';
+    case 'blocked':
+      return 'blocked';
+    case 'cancelled':
+      return 'cancelled';
+  }
+  throw new SubscriptionControlError('invalid-occurrence', `unknown task verification status: ${String(status)}`);
+}
+
+function sharedTerminalReceiptIdentity(
+  terminal: ServeTaskTerminalReceipt,
+  binding: OccurrenceTaskBinding,
+): void {
+  validateOccurrenceTaskBinding(binding);
   try {
     validateServeTaskTerminalReceipt(terminal);
   } catch (error) {
@@ -353,16 +666,76 @@ export function assertVerifiedTerminalReceipt(input: {
       error instanceof Error ? error.message : String(error),
     );
   }
-  if (terminal.taskId.scope !== taskId.scope || terminal.taskId.value !== taskId.value) fail('invalid-occurrence', 'terminal task identity mismatch');
-  if (terminal.operationId.scope !== operationId.scope || terminal.operationId.value !== operationId.value) fail('invalid-occurrence', 'terminal operation identity mismatch');
-  if (terminal.executionEpoch !== executionEpoch) fail('invalid-occurrence', 'terminal execution epoch mismatch');
-  if (terminal.inputArtifactDigest !== inputArtifactDigest) fail('invalid-occurrence', 'terminal input artifact digest mismatch');
-  if (terminal.verification.taskId.scope !== taskId.scope || terminal.verification.taskId.value !== taskId.value) fail('invalid-occurrence', 'verification task identity mismatch');
-  if (terminal.verification.operationId.scope !== operationId.scope || terminal.verification.operationId.value !== operationId.value) fail('invalid-occurrence', 'verification operation identity mismatch');
-  if (terminal.verification.executionEpoch !== executionEpoch) fail('invalid-occurrence', 'verification execution epoch mismatch');
-  if (terminal.verification.inputArtifactDigest !== inputArtifactDigest) fail('invalid-occurrence', 'verification input artifact digest mismatch');
-  if (terminal.verification.status !== 'success') fail('invalid-occurrence', `task verification is ${terminal.verification.status}`);
-  if (!terminal.terminalCheckpointRef.trim() || !terminal.settlementReceiptRef.trim()) fail('invalid-occurrence', 'terminal settlement receipt is incomplete');
+  if (terminal.taskId.scope !== binding.taskId.scope || terminal.taskId.value !== binding.taskId.value) {
+    fail('invalid-occurrence', 'terminal task identity does not match occurrence binding');
+  }
+  if (terminal.operationId.scope !== binding.operationId.scope || terminal.operationId.value !== binding.operationId.value) {
+    fail('invalid-occurrence', 'terminal operation identity does not match occurrence binding');
+  }
+  if (terminal.executionEpoch !== binding.executionEpoch) {
+    fail('invalid-occurrence', 'terminal execution epoch does not match occurrence binding');
+  }
+  if (terminal.inputArtifactDigest !== binding.inputArtifactDigest) {
+    fail('invalid-occurrence', 'terminal input artifact digest does not match occurrence binding');
+  }
+  if (!terminal.terminalCheckpointRef.trim() || !terminal.settlementReceiptRef.trim()) {
+    fail('invalid-occurrence', 'terminal settlement receipt is incomplete');
+  }
+}
+
+export function decideOccurrenceTerminalReceipt(input: {
+  readonly binding: OccurrenceTaskBinding;
+  readonly terminalReceipt: ServeTaskTerminalReceipt;
+  readonly recoveryResponsibility?: RecoveryResponsibilityRecord;
+}): OccurrenceTerminalReceiptDecision {
+  sharedTerminalReceiptIdentity(input.terminalReceipt, input.binding);
+  if (input.recoveryResponsibility !== undefined) {
+    try {
+      validateRecoveryResponsibilityRecord(input.recoveryResponsibility);
+    } catch (error) {
+      throw new SubscriptionControlError(
+        'invalid-occurrence',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+  const verificationStatus = input.terminalReceipt.verification.status;
+  const outcome = terminalOutcomeForVerification(verificationStatus);
+  const checkpointOutcome = verificationStatus === 'success'
+    ? 'succeeded'
+    : verificationStatus === 'failed' || verificationStatus === 'rejected'
+      ? 'failed'
+      : verificationStatus === 'missing' || verificationStatus === 'blocked'
+        ? 'blocked'
+        : 'cancelled';
+  const recoveryRequired = verificationStatus !== 'success'
+    && input.recoveryResponsibility?.providerEffectState !== 'confirmed-released';
+  const record: OccurrenceTerminalReceiptRecord = {
+    kind: 'occurrence-terminal-receipt',
+    version: 1,
+    binding: input.binding,
+    terminalCheckpointRef: input.terminalReceipt.terminalCheckpointRef,
+    terminalOutcome: checkpointOutcome,
+    verification: input.terminalReceipt.verification,
+    ...(input.recoveryResponsibility === undefined ? {} : { recoveryResponsibility: input.recoveryResponsibility }),
+    settlementReceiptRef: input.terminalReceipt.settlementReceiptRef,
+  };
+  try {
+    validateOccurrenceTerminalReceiptRecord(record);
+  } catch (error) {
+    throw new SubscriptionControlError(
+      'invalid-occurrence',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  return {
+    outcome,
+    terminalReceipt: input.terminalReceipt,
+    record,
+    checkpointOutcome,
+    recoveryRequired,
+    resourceReleaseConfirmed: input.recoveryResponsibility?.providerEffectState === 'confirmed-released',
+  };
 }
 
 export function subscriptionRequestFingerprint(request: SubscriptionControlRequest): string {

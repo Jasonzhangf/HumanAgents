@@ -3,14 +3,18 @@ import {
   assertExecutionEpoch,
   assertNextAction,
   assertScope,
+  validateOccurrenceExecutionOwner,
   type CycleId,
+  type Checkpoint,
   type EvidenceRef,
   type NextAction,
+  type OccurrenceExecutionOwner,
   type OperationId,
   type OrganId,
   type ScopeRef,
   type TaskId,
 } from './index.js';
+import { canonicalJsonStringify } from './explicit-brain.js';
 import { ContractError } from './errors.js';
 
 export type OperationKind = 'inspect' | 'apply' | 'run' | 'interact' | 'verify';
@@ -492,6 +496,38 @@ export interface OccurrenceTaskBinding {
   readonly operationId: OperationId;
   readonly executionEpoch: number;
   readonly inputArtifactDigest: string;
+}
+
+export const OCCURRENCE_EXECUTION_ADMISSION_RECORD_VERSION = 1 as const;
+export const OCCURRENCE_TERMINAL_RECEIPT_RECORD_VERSION = 1 as const;
+
+export type ProviderEffectState = 'confirmed-released' | 'possible' | 'confirmed-present';
+
+export interface RecoveryResponsibilityRecord {
+  readonly providerEffectState: ProviderEffectState;
+  readonly resourceInventory: readonly EvidenceRef[];
+  readonly releaseProofs: readonly EvidenceRef[];
+}
+
+export interface OccurrenceExecutionAdmissionRecord {
+  readonly kind: 'occurrence-execution-admission';
+  readonly version: typeof OCCURRENCE_EXECUTION_ADMISSION_RECORD_VERSION;
+  readonly binding: OccurrenceTaskBinding;
+  readonly dispatchRef: string;
+  readonly admittedAt: string;
+  readonly admittedExecutionOwner: OccurrenceExecutionOwner;
+  readonly recoveryResponsibility: RecoveryResponsibilityRecord;
+}
+
+export interface OccurrenceTerminalReceiptRecord {
+  readonly kind: 'occurrence-terminal-receipt';
+  readonly version: typeof OCCURRENCE_TERMINAL_RECEIPT_RECORD_VERSION;
+  readonly binding: OccurrenceTaskBinding;
+  readonly terminalCheckpointRef: string;
+  readonly terminalOutcome: Checkpoint['outcome'];
+  readonly verification: TaskVerificationResult;
+  readonly recoveryResponsibility?: RecoveryResponsibilityRecord;
+  readonly settlementReceiptRef: string;
 }
 
 export type OccurrenceSettlementOutcome = 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'skipped-busy';
@@ -1747,6 +1783,92 @@ export function validateServeTaskTerminalReceipt(input: ServeTaskTerminalReceipt
   if (input.recoveryResponsibility !== undefined) {
     assertNonEmpty(input.recoveryResponsibility, 'serve-task recoveryResponsibility');
   }
+}
+
+export function validateRecoveryResponsibilityRecord(input: RecoveryResponsibilityRecord): void {
+  if (!['confirmed-released', 'possible', 'confirmed-present'].includes(input.providerEffectState)) {
+    throw new ContractError('recovery responsibility providerEffectState is invalid');
+  }
+  for (const resource of input.resourceInventory) assertEvidenceRef(resource);
+  for (const proof of input.releaseProofs) assertEvidenceRef(proof);
+  if (input.providerEffectState === 'confirmed-released' && input.releaseProofs.length === 0) {
+    throw new ContractError('confirmed-released recovery responsibility requires release proof');
+  }
+}
+
+function occurrenceBindingIdentity(input: OccurrenceTaskBinding): Record<string, unknown> {
+  return {
+    occurrenceId: input.occurrenceId,
+    subscriptionId: input.subscriptionId,
+    scheduleRevision: input.scheduleRevision,
+    occurrenceOrdinal: input.occurrenceOrdinal,
+    taskId: { scope: input.taskId.scope, value: input.taskId.value },
+    operationId: { scope: input.operationId.scope, value: input.operationId.value },
+    executionEpoch: input.executionEpoch,
+    inputArtifactDigest: input.inputArtifactDigest,
+  };
+}
+
+async function occurrenceBindingKey(domain: string, binding: OccurrenceTaskBinding): Promise<string> {
+  validateOccurrenceTaskBinding(binding);
+  const bytes = new TextEncoder().encode(canonicalJsonStringify({ domain, binding: occurrenceBindingIdentity(binding) }));
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `sha256:${hex}`;
+}
+
+export async function occurrenceExecutionAdmissionCommitId(binding: OccurrenceTaskBinding): Promise<string> {
+  return occurrenceBindingKey('occurrence-execution-admission/v1', binding);
+}
+
+export async function occurrenceTerminalReceiptCommitId(binding: OccurrenceTaskBinding): Promise<string> {
+  return occurrenceBindingKey('occurrence-terminal-receipt/v1', binding);
+}
+
+export function occurrenceExecutionDispatchRef(binding: OccurrenceTaskBinding): string {
+  validateOccurrenceTaskBinding(binding);
+  return `occurrence-execution-dispatch/v1:${binding.operationId.value}:${binding.executionEpoch}`;
+}
+
+export function validateOccurrenceExecutionAdmissionRecord(input: OccurrenceExecutionAdmissionRecord): void {
+  if (input.kind !== 'occurrence-execution-admission') throw new ContractError('occurrence admission kind is invalid');
+  if (input.version !== OCCURRENCE_EXECUTION_ADMISSION_RECORD_VERSION) {
+    throw new ContractError('occurrence admission version is invalid');
+  }
+  validateOccurrenceTaskBinding(input.binding);
+  assertNonEmpty(input.dispatchRef, 'occurrence admission dispatchRef');
+  if (input.dispatchRef !== occurrenceExecutionDispatchRef(input.binding)) {
+    throw new ContractError('occurrence admission dispatchRef does not match binding');
+  }
+  assertValidTime(input.admittedAt, 'occurrence admission admittedAt');
+  validateOccurrenceExecutionOwner(input.admittedExecutionOwner);
+  validateRecoveryResponsibilityRecord(input.recoveryResponsibility);
+}
+
+export function validateOccurrenceTerminalReceiptRecord(input: OccurrenceTerminalReceiptRecord): void {
+  if (input.kind !== 'occurrence-terminal-receipt') throw new ContractError('occurrence terminal receipt kind is invalid');
+  if (input.version !== OCCURRENCE_TERMINAL_RECEIPT_RECORD_VERSION) {
+    throw new ContractError('occurrence terminal receipt version is invalid');
+  }
+  validateOccurrenceTaskBinding(input.binding);
+  assertNonEmpty(input.terminalCheckpointRef, 'occurrence terminal receipt terminalCheckpointRef');
+  if (![
+    'succeeded',
+    'waiting',
+    'blocked',
+    'failed',
+    'cancelled',
+    'stopped',
+    'unknown',
+  ].includes(input.terminalOutcome)) {
+    throw new ContractError('occurrence terminal receipt outcome is invalid');
+  }
+  validateTaskVerificationResult(input.verification);
+  if (!sameExecutionIdentity(input.binding, input.verification)) {
+    throw new ContractError('occurrence terminal receipt verification identity does not match binding');
+  }
+  if (input.recoveryResponsibility !== undefined) validateRecoveryResponsibilityRecord(input.recoveryResponsibility);
+  assertNonEmpty(input.settlementReceiptRef, 'occurrence terminal receipt settlementReceiptRef');
 }
 
 export function validateOccurrenceTaskBinding(input: OccurrenceTaskBinding): void {

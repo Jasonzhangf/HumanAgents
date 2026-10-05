@@ -797,6 +797,12 @@ export interface OccurrenceClaim {
   readonly expiresAt: string;
 }
 
+export interface OccurrenceExecutionOwner {
+  readonly daemonLeaseId: string;
+  readonly daemonGeneration: number;
+  readonly processStartToken: string;
+}
+
 export type ReminderState = 'pending' | 'consumed' | 'invalidated';
 
 export interface Reminder {
@@ -1307,6 +1313,15 @@ export function validateOccurrenceClaim(input: OccurrenceClaim): void {
   if (input.occurrenceId !== `${input.subscriptionId}::${input.scheduleRevision}::${input.occurrenceOrdinal}`) {
     throw new ContractError('occurrence claim id does not match subscription schedule identity');
   }
+}
+
+export function validateOccurrenceExecutionOwner(input: OccurrenceExecutionOwner): void {
+  if (input === undefined || input === null || typeof input !== 'object') {
+    throw new ContractError('occurrence execution owner is required');
+  }
+  nonEmpty(input.daemonLeaseId, 'occurrence execution owner daemonLeaseId');
+  assertPositiveSafeInteger(input.daemonGeneration, 'occurrence execution owner daemonGeneration');
+  nonEmpty(input.processStartToken, 'occurrence execution owner processStartToken');
 }
 
 export function validateReminder(input: Reminder): void {
