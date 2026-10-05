@@ -11,7 +11,11 @@ import {
   validateBugReport,
   validateChannelBinding,
   type BugReportArguments,
+  type DraftConfirmation,
   type EvidenceRef,
+  type ExistingTaskChangeSubmit,
+  type ExecutionPolicyDefinition,
+  type FinalSubmit,
   type MemoryInteractionPort,
   type MemoryOperationRequestedEvent,
   type RequirementEnvelope,
@@ -51,6 +55,7 @@ import {
   resolveBugOwner,
   stableBugSubmissionId,
   submitMemorySaveCandidate,
+  ExecutionPolicyCompiler,
   type ExplicitBrainRuntimeBinding,
   type ExplicitBrainOperationalToolPorts,
   type GitBugPort,
@@ -3319,3 +3324,339 @@ test('Decision Trace stores denied and unknown execution outcomes for later quer
   });
   assert.equal(traces.query({ interactionRef: 'interaction-a', admission: 'permission-denied' }).length, 1);
 });
+
+function typedRevisionFixture(overrides: Partial<Parameters<ConfirmationLedger['registerRevision']>[0]> = {}) {
+  return {
+    interactionId: 'interaction-typed',
+    draftId: 'draft-typed',
+    inputRevision: 1,
+    draftRevisionVersion: 2,
+    draftRevisionHash: 'sha256:typed-revision-2',
+    normalizedInput: 'apply the refined directive',
+    intent: 'create' as const,
+    payloadRef: 'asset://requirements/typed',
+    requestKind: 'new-task-create' as const,
+    ...overrides,
+  };
+}
+
+function typedConfirmation(revision: ReturnType<typeof typedRevisionFixture>): DraftConfirmation {
+  return {
+    confirmationRef: 'confirm-typed',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: revision.payloadRef,
+    draftId: revision.draftId,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    interactionId: revision.interactionId,
+  };
+}
+
+function typedSubmit(revision: ReturnType<typeof typedRevisionFixture>, overrides: Partial<FinalSubmit> = {}): FinalSubmit {
+  return {
+    interactionId: revision.interactionId,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    idempotencyKey: 'submit-typed',
+    requestKind: 'new-task-create',
+    ...overrides,
+  };
+}
+
+test('exact submit authorizes the confirmed revision once and rejects stale hash and reused idempotency', async () => {
+  const revision = typedRevisionFixture();
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision(typedConfirmation(revision));
+
+  // A stale hash is rejected with a typed error, not accepted silently.
+  assert.throws(
+    () => ledger.assertFinalSubmit(typedSubmit(revision, { draftRevisionHash: 'sha256:stale' })),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'confirmation-stale',
+  );
+  // A mismatched confirmation ref is a typed confirmation-required rejection.
+  assert.throws(
+    () => ledger.assertFinalSubmit(typedSubmit(revision, { confirmationRef: 'confirm-other' })),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'confirmation-required',
+  );
+
+  const dispatched: string[] = [];
+  const inbox = {
+    get expectedNextFifoSeq() { return 1; },
+    markConfirmed() {},
+    find() { return undefined; },
+    async append(envelope: RequirementEnvelope) {
+      dispatched.push(envelope.requirementId);
+      return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+    },
+  } as unknown as Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) { return { requirementId: envelope.requirementId }; },
+  });
+
+  const first = await owner.submitFinal(typedSubmit(revision));
+  assert.equal(first.status, 'submitted');
+  assert.equal(first.requirement.draftRevisionHash, revision.draftRevisionHash);
+  const duplicate = await owner.submitFinal(typedSubmit(revision));
+  assert.equal(duplicate.status, 'duplicate');
+  assert.equal(duplicate.requirement.requirementId, first.requirement.requirementId);
+  const distinctKeyReplay = await owner.submitFinal(typedSubmit(revision, {
+    idempotencyKey: 'submit-typed-distinct',
+  }));
+  assert.equal(distinctKeyReplay.status, 'duplicate');
+  assert.equal(distinctKeyReplay.requirement.requirementId, first.requirement.requirementId);
+  assert.equal(dispatched.length, 1);
+});
+
+test('typed revisions cannot use the legacy untyped submit path', async () => {
+  const revision = typedRevisionFixture();
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision(typedConfirmation(revision));
+
+  const dispatched: string[] = [];
+  const inbox = {
+    get expectedNextFifoSeq() { return 1; },
+    markConfirmed() {},
+    find() { return undefined; },
+    async append(envelope: RequirementEnvelope) {
+      dispatched.push(envelope.requirementId);
+      return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+    },
+  } as unknown as Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) { return { requirementId: envelope.requirementId }; },
+  });
+
+  await assert.rejects(
+    () => owner.submit({
+      interactionId: revision.interactionId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      confirmationRef: 'confirm-typed',
+    }),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  assert.equal(dispatched.length, 0);
+});
+
+test('final authorization kind must match the confirmed revision intent', async () => {
+  const targetTask = id('task', 'task-intent-target');
+
+  function ownerFor(revision: ReturnType<typeof typedRevisionFixture>) {
+    const ledger = new ConfirmationLedger();
+    ledger.registerRevision(revision);
+    ledger.confirmRevision(typedConfirmation(revision));
+    const appended: RequirementEnvelope[] = [];
+    let downstreamCalls = 0;
+    const owner = new RequirementSubmissionOwner(
+      ledger,
+      {
+        get expectedNextFifoSeq() { return appended.length + 1; },
+        markConfirmed() {},
+        find(draftId: string) { return appended.find((envelope) => envelope.draftId === draftId); },
+        async append(envelope: RequirementEnvelope) {
+          appended.push(envelope);
+          return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+        },
+      },
+      {
+        async submit(envelope) {
+          downstreamCalls += 1;
+          return { requirementId: envelope.requirementId };
+        },
+      },
+    );
+    return {
+      owner,
+      appended,
+      downstreamCalls: () => downstreamCalls,
+    };
+  }
+
+  const mismatches = [
+    {
+      revision: typedRevisionFixture({
+        intent: 'change',
+        taskRef: targetTask,
+      }),
+      submit: typedSubmit(typedRevisionFixture({
+        intent: 'change',
+        taskRef: targetTask,
+      })),
+    },
+    {
+      revision: typedRevisionFixture({
+        draftId: 'draft-existing-create-mismatch',
+        intent: 'create',
+        requestKind: 'existing-task-change',
+        taskRef: targetTask,
+      }),
+      submit: {
+        interactionId: 'interaction-typed',
+        taskId: targetTask,
+        draftId: 'draft-existing-create-mismatch',
+        inputRevision: 1,
+        draftRevisionVersion: 2,
+        draftRevisionHash: 'sha256:typed-revision-2',
+        confirmationRef: 'confirm-typed',
+        idempotencyKey: 'submit-existing-create-mismatch',
+        requestKind: 'existing-task-change',
+      } satisfies ExistingTaskChangeSubmit,
+    },
+  ];
+
+  for (const mismatch of mismatches) {
+    const fixture = ownerFor(mismatch.revision);
+    await assert.rejects(
+      () => fixture.owner.submitFinal(mismatch.submit),
+      (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+    );
+    assert.equal(fixture.appended.length, 0);
+    assert.equal(fixture.downstreamCalls(), 0);
+  }
+
+  const createRevision = typedRevisionFixture();
+  const createFixture = ownerFor(createRevision);
+  const created = await createFixture.owner.submitFinal(typedSubmit(createRevision));
+  assert.equal(created.status, 'submitted');
+  assert.equal(createFixture.appended.length, 1);
+  assert.equal(createFixture.appended[0]?.intent, 'create');
+  assert.equal(createFixture.downstreamCalls(), 1);
+
+  for (const intent of ['append', 'change'] as const) {
+    const revision = typedRevisionFixture({
+      draftId: `draft-existing-${intent}`,
+      intent,
+      requestKind: 'existing-task-change',
+      taskRef: targetTask,
+    });
+    const fixture = ownerFor(revision);
+    const submit: ExistingTaskChangeSubmit = {
+      interactionId: revision.interactionId,
+      taskId: targetTask,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion: revision.draftRevisionVersion,
+      draftRevisionHash: revision.draftRevisionHash,
+      confirmationRef: 'confirm-typed',
+      idempotencyKey: `submit-existing-${intent}`,
+      requestKind: 'existing-task-change',
+    };
+    const receipt = await fixture.owner.submitFinal(submit);
+    assert.equal(receipt.status, 'submitted');
+    assert.equal(fixture.appended.length, 1);
+    assert.equal(fixture.appended[0]?.intent, intent);
+    assert.equal(fixture.downstreamCalls(), 1);
+  }
+});
+
+test('existing-task-change cannot be authorized as a new task and execution policy compiles to a control ref', () => {
+  const targetTask = id('task', 'task-target');
+  const revision = typedRevisionFixture({ intent: 'change', requestKind: 'existing-task-change', taskRef: targetTask });
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision(typedConfirmation(revision));
+
+  // The same confirmed revision cannot be dispatched as a new-task-create.
+  assert.throws(
+    () => ledger.assertFinalSubmit(typedSubmit(revision)),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  // But it is valid as its own request kind (taskRef is the target task).
+  const existingAcceptance = ledger.assertFinalSubmit({
+    interactionId: revision.interactionId,
+    taskId: targetTask,
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    idempotencyKey: 'submit-existing',
+    requestKind: 'existing-task-change',
+  });
+  assert.equal(existingAcceptance.revision.draftId, revision.draftId);
+
+  const policy: ExecutionPolicyDefinition = {
+    policyId: 'policy-a',
+    policyRevision: 1,
+    executionMode: 'once',
+    timezone: 'America/Los_Angeles',
+    canonicalInstant: '2026-10-03T12:00:00.000Z',
+    dstMode: 'wall',
+    dstMissedPolicy: 'shift-forward',
+    dstAmbiguousPolicy: 'earlier-offset',
+    latePolicy: 'run-once',
+    busyPolicy: 'skip',
+    dueAt: '2026-10-03T12:00:00.000Z',
+  };
+  const compiled = new ExecutionPolicyCompiler().compile(firstRequirement(revision), policy);
+  assert.equal(compiled.executionControlRef, 'execution-policy:policy-a:1');
+  assert.equal(compiled.policyHash.startsWith('sha256:'), true);
+  assert.equal(compiled.definition.executionMode, 'once');
+});
+
+test('existing-task-change target is bound to the confirmed revision before first submit', async () => {
+  const targetA = id('task', 'task-target-a');
+  const revision = typedRevisionFixture({ intent: 'change', requestKind: 'existing-task-change', taskRef: targetA });
+  const ledger = new ConfirmationLedger();
+  ledger.registerRevision(revision);
+  ledger.confirmRevision(typedConfirmation(revision));
+
+  const dispatched: RequirementEnvelope[] = [];
+  const inbox = {
+    get expectedNextFifoSeq() { return 1; },
+    markConfirmed() {},
+    find() { return undefined; },
+    async append(envelope: RequirementEnvelope) {
+      dispatched.push(envelope);
+      return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+    },
+  } as unknown as Pick<RequirementInbox, 'expectedNextFifoSeq' | 'markConfirmed' | 'append' | 'find'>;
+  const owner = new RequirementSubmissionOwner(ledger, inbox, {
+    async submit(envelope) { return { requirementId: envelope.requirementId }; },
+  });
+  const submit = {
+    interactionId: revision.interactionId,
+    taskId: id('task', 'task-target-b'),
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    idempotencyKey: 'submit-existing-a',
+    requestKind: 'existing-task-change' as const,
+  };
+
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  assert.equal(dispatched.length, 0);
+
+  const first = await owner.submitFinal({ ...submit, taskId: targetA, idempotencyKey: 'submit-existing-a' });
+  assert.equal(first.status, 'submitted');
+  assert.equal(dispatched.length, 1);
+  await assert.rejects(
+    () => owner.submitFinal(submit),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  assert.equal(dispatched.length, 1);
+});
+
+function firstRequirement(revision: ReturnType<typeof typedRevisionFixture>) {
+  return {
+    requirementId: 'requirement:typed',
+    draftId: revision.draftId,
+    inputRevision: revision.inputRevision,
+    draftRevisionVersion: revision.draftRevisionVersion,
+    draftRevisionHash: revision.draftRevisionHash,
+    confirmationRef: 'confirm-typed',
+    fifoSeq: 1,
+    payloadRef: revision.payloadRef,
+  };
+}

@@ -37,7 +37,7 @@ import {
   type MemoryReviewReceipt, type MemorySubmission, type ProceduralMemoryCandidate, type ProjectSourceUpdateProposal, type SemanticMemoryCandidate,
   type InteractionClosure,
   type Occurrence, type Reminder, type RuntimeBinding, type SchedulerLease, type ScopeAcl, type Subscription,
-  type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderReadiness,
+  type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderImageContent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
   type OperationIdempotencyRecord, type OperationIntent, type RequirementEnvelope, type ScopeRef, type ToolRegistration,
@@ -174,6 +174,11 @@ const resumeInput = (overrides: Partial<ProviderResumeInput> = {}): ProviderResu
 });
 const submitInput = (overrides: Partial<ProviderSubmitInput> = {}): ProviderSubmitInput => ({
   ...executionIdentity, inputRefs: ['input-b'], evidenceRefs: [providerEvidence('submit')], payload: { question: 'continue' }, ...overrides,
+});
+const providerImage = (overrides: Partial<ProviderImageContent> = {}): ProviderImageContent => ({
+  mediaType: 'image/png',
+  dataBase64: btoa(String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)),
+  ...overrides,
 });
 const startReceipt = (overrides: Partial<ProviderStartReceipt> = {}): ProviderStartReceipt => ({
   ...executionIdentity, startedAt: '2026-09-13T00:00:00Z', evidenceRefs: [providerEvidence('start-receipt')],
@@ -588,6 +593,33 @@ test('provider-neutral execution runtime fixtures validate and expose a typed fa
   assert.equal(submitted.status, 'completed');
   assert.equal(settled.state, 'succeeded');
   assert.equal(closed.state, 'closed');
+});
+
+test('provider image content validates the current typed contract and rejects resume images', () => {
+  for (const mediaType of ['image/png', 'image/jpeg', 'image/webp'] as const) {
+    assert.doesNotThrow(() => validateProviderStartInput(startInput({ imageContents: [providerImage({ mediaType })] })));
+    assert.doesNotThrow(() => validateProviderSubmitInput(submitInput({ imageContents: [providerImage({ mediaType })] })));
+  }
+  assert.throws(
+    () => validateProviderStartInput(startInput({ imageContents: [providerImage(), providerImage()] })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderStartInput(startInput({ imageContents: [providerImage({ mediaType: 'image/gif' as never })] })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderStartInput(startInput({ imageContents: [providerImage({ dataBase64: '' })] })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderStartInput(startInput({ imageContents: [providerImage({ dataBase64: 'not-base64' })] })),
+    ContractError,
+  );
+  assert.throws(
+    () => validateProviderResumeInput(resumeInput({ imageContents: [providerImage()] })),
+    ContractError,
+  );
 });
 
 test('provider execution identity carries and matches HumanAgent organ and cycle scope', () => {
