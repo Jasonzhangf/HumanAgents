@@ -9,6 +9,7 @@ export {
 export type {
   AcquireDaemonLeaseOptions,
   SupervisorCleanupFailure,
+  SupervisorCommittedReplacementPredicate,
   SupervisorDisposeReceipt,
   SupervisorFailureReceipt,
   SupervisorFailureRecord,
