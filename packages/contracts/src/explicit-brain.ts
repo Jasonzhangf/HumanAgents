@@ -404,6 +404,7 @@ export interface DraftRevision {
   readonly proposal: string;
   readonly matchedTasks: readonly string[];
   readonly knownFacts: readonly string[];
+  readonly executionPolicy?: ExecutionPolicyDefinition;
   readonly executionControlRef?: string;
   readonly decisionRefs: readonly string[];
   readonly supersededBy?: string;
@@ -972,6 +973,7 @@ export function validateDraftRevision(input: DraftRevision): void {
   nonEmpty(input.proposal, 'draft proposal');
   stringArray(input.matchedTasks, 'draft matchedTasks');
   stringArray(input.knownFacts, 'draft knownFacts');
+  if (input.executionPolicy !== undefined) validateExecutionPolicyDefinition(input.executionPolicy);
   if (input.executionControlRef !== undefined) nonEmpty(input.executionControlRef, 'draft executionControlRef');
   stringArray(input.decisionRefs, 'draft decisionRefs');
   if (input.supersededBy !== undefined) nonEmpty(input.supersededBy, 'draft supersededBy');
