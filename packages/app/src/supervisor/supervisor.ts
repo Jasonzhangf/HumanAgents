@@ -549,10 +549,6 @@ async function assertLeaseIdentity(paths: RuntimePaths, expected: SupervisorLeas
   return latest;
 }
 
-async function assertLeaseActive(paths: RuntimePaths, expected: SupervisorLeaseRecord): Promise<SupervisorLeaseRecord> {
-  return assertLeaseIdentity(paths, expected);
-}
-
 function executionOwnerFromLease(record: SupervisorLeaseRecord): OccurrenceExecutionOwner {
   return {
     daemonLeaseId: record.leaseId,
@@ -580,7 +576,7 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
 
   async function update(mutate: (current: SupervisorLeaseRecord) => SupervisorLeaseRecord): Promise<SupervisorLeaseRecord> {
     return withLeaseGuard(daemonLeasePath(paths), async () => {
-      const latest = await assertLeaseActive(paths, record);
+      const latest = await assertLeaseIdentity(paths, leaseIdentity);
       const next = mutate(latest);
       validateLeaseRecord(next);
       await writeLeaseRecord(paths, next);
@@ -595,11 +591,11 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       return record;
     },
     async refresh() {
-      record = await assertLeaseActive(paths, record);
+      record = await assertLeaseIdentity(paths, leaseIdentity);
       return record;
     },
     async assertActive() {
-      record = await assertLeaseActive(paths, record);
+      record = await assertLeaseIdentity(paths, leaseIdentity);
     },
     async markReady() {
       return update((current) => ({ ...current, readyAt: new Date().toISOString() }));

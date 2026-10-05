@@ -262,6 +262,8 @@ test('live stale A after supported replacement cannot mutate even after copying 
   const attemptPath = join(fx.root, 'attempt-stale-a');
   const resultPath = join(fx.root, 'stale-a-result.json');
   const outputPath = join(fx.root, 'stale-a-output.json');
+  const replacementOutputPath = join(fx.root, 'replacement-owner-output.json');
+  const copiedEndpoint = { host: '127.0.0.1' as const, port: 10086 };
   const childScript = `
     ${childPathsScript(fx.paths)}
     import { existsSync } from 'node:fs';
@@ -285,16 +287,44 @@ test('live stale A after supported replacement cannot mutate even after copying 
       generation: current.generation,
       processStartToken: current.processStartToken,
     });
-    let code = null;
+    let withCurrentDaemonOwnerCode = null;
     try {
       await lease.withCurrentDaemonOwner(${JSON.stringify(binding)}, async () => {
         await writeFile(${JSON.stringify(outputPath)}, 'unauthorized\\n', 'utf8');
       });
     } catch (error) {
-      code = error?.code ?? error?.message;
+      withCurrentDaemonOwnerCode = error?.code ?? error?.message;
+    }
+    let setControlEndpointCode = null;
+    try {
+      await lease.setControlEndpoint(${JSON.stringify(copiedEndpoint)});
+    } catch (error) {
+      setControlEndpointCode = error?.code ?? error?.message;
+    }
+    let releaseCode = null;
+    try {
+      await lease.release();
+    } catch (error) {
+      releaseCode = error?.code ?? error?.message;
+    }
+    let refreshCode = null;
+    try {
+      await lease.refresh();
+    } catch (error) {
+      refreshCode = error?.code ?? error?.message;
+    }
+    let assertActiveCode = null;
+    try {
+      await lease.assertActive();
+    } catch (error) {
+      assertActiveCode = error?.code ?? error?.message;
     }
     await writeFile(${JSON.stringify(resultPath)}, JSON.stringify({
-      code,
+      withCurrentDaemonOwnerCode,
+      setControlEndpointCode,
+      releaseCode,
+      refreshCode,
+      assertActiveCode,
       copiedRecordLeaseId: lease.record.leaseId,
       copiedLeaseId: current.leaseId,
     }) + '\\n', 'utf8');
@@ -305,20 +335,38 @@ test('live stale A after supported replacement cannot mutate even after copying 
     const line = JSON.parse(await child.line) as { readonly pid: number; readonly owner: OccurrenceExecutionOwner };
     console.log(JSON.stringify({ event: 'stale-a-child', pid: child.child.pid, root: fx.root }));
     assert.ok(line.pid > 0);
-    replacement = await acquireDaemonLease(fx.paths, {
+    const acquiredReplacement = await acquireDaemonLease(fx.paths, {
       ownerId: 'occurrence-owner-B',
       takeover: {
         reason: 'supported takeover while stale A is still alive',
         allowed: () => true,
       },
     });
+    replacement = acquiredReplacement;
     await writeFile(attemptPath, 'attempt\n', 'utf8');
     await waitForExit(child.child);
     const observed = JSON.parse(await readFile(resultPath, 'utf8')) as Record<string, unknown>;
-    assert.equal(observed.code, 'daemon-lease-stale');
-    assert.equal(observed.copiedRecordLeaseId, replacement.record.leaseId);
-    assert.equal(observed.copiedLeaseId, replacement.record.leaseId);
+    assert.equal(observed.withCurrentDaemonOwnerCode, 'daemon-lease-stale');
+    assert.equal(observed.setControlEndpointCode, 'daemon-lease-stale');
+    assert.equal(observed.releaseCode, 'daemon-lease-stale');
+    assert.equal(observed.refreshCode, 'daemon-lease-stale');
+    assert.equal(observed.assertActiveCode, 'daemon-lease-stale');
+    assert.equal(observed.copiedRecordLeaseId, acquiredReplacement.record.leaseId);
+    assert.equal(observed.copiedLeaseId, acquiredReplacement.record.leaseId);
     assert.equal(existsSync(outputPath), false);
+
+    const durableAfterStaleAttempts = await readDaemonLease(fx.paths);
+    assert.equal(durableAfterStaleAttempts?.leaseId, acquiredReplacement.record.leaseId);
+    assert.equal(durableAfterStaleAttempts?.disposedAt, undefined);
+    assert.equal(durableAfterStaleAttempts?.controlEndpoint, undefined);
+
+    const replacementResult = await acquiredReplacement.withCurrentDaemonOwner(binding, async (authenticatedCaller) => {
+      assert.deepEqual(authenticatedCaller, ownerFromRecord(acquiredReplacement.record));
+      await writeFile(replacementOutputPath, JSON.stringify(authenticatedCaller) + '\n', 'utf8');
+      return 'replacement-authorized';
+    });
+    assert.equal(replacementResult, 'replacement-authorized');
+    assert.deepEqual(JSON.parse(await readFile(replacementOutputPath, 'utf8')), ownerFromRecord(acquiredReplacement.record));
   } finally {
     await stopChild(child.child);
     await replacement?.release().catch(() => undefined);
