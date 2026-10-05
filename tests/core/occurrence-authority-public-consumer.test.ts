@@ -394,24 +394,96 @@ test('domain authority rejects a mismatched supplied claim during first admissio
   assert.equal(decision.recoveryAllowed, false);
 });
 
-test('domain terminal decisions preserve all non-success statuses and original evidence', () => {
-  for (const [status, outcome] of [
-    ['success', 'succeeded'],
-    ['failed', 'failed'],
-    ['rejected', 'rejected'],
-    ['missing', 'missing'],
-    ['blocked', 'blocked'],
-    ['cancelled', 'cancelled'],
-  ] as const) {
+test('successful verification keeps resource recovery responsibility until confirmed release', () => {
+  const cases = [
+    ['possible', admission.recoveryResponsibility, true, false],
+    ['confirmed-present', {
+      providerEffectState: 'confirmed-present' as const,
+      resourceInventory: [evidence],
+      releaseProofs: [],
+    }, true, false],
+    ['confirmed-released', {
+      providerEffectState: 'confirmed-released' as const,
+      resourceInventory: [evidence],
+      releaseProofs: [evidence],
+    }, false, true],
+  ] as const;
+
+  for (const [state, recoveryResponsibility, recoveryRequired, resourceReleaseConfirmed] of cases) {
+    const receipt = terminal('success');
     const decision = decideOccurrenceTerminalReceipt({
       binding,
-      terminalReceipt: terminal(status),
-      recoveryResponsibility: admission.recoveryResponsibility,
+      terminalReceipt: receipt,
+      recoveryResponsibility,
     });
-    assert.equal(decision.outcome, outcome);
-    assert.equal(decision.record.verification.status, status);
-    assert.equal(decision.resourceReleaseConfirmed, false);
+    assert.equal(state, recoveryResponsibility.providerEffectState);
+    assert.equal(decision.outcome, 'succeeded');
+    assert.equal(decision.checkpointOutcome, 'succeeded');
+    assert.equal(decision.terminalReceipt, receipt);
+    assert.equal(decision.record.terminalOutcome, 'succeeded');
+    assert.equal(decision.record.terminalCheckpointRef, receipt.terminalCheckpointRef);
+    assert.equal(decision.record.settlementReceiptRef, receipt.settlementReceiptRef);
+    assert.deepEqual(decision.record.verification, receipt.verification);
+    assert.deepEqual(decision.record.recoveryResponsibility, recoveryResponsibility);
+    assert.equal(decision.recoveryRequired, recoveryRequired);
+    assert.equal(decision.resourceReleaseConfirmed, resourceReleaseConfirmed);
   }
+});
+
+test('terminal decisions preserve all verification outcomes and non-success resource states', () => {
+  for (const [status, outcome, checkpointOutcome] of [
+    ['success', 'succeeded', 'succeeded'],
+    ['failed', 'failed', 'failed'],
+    ['rejected', 'rejected', 'failed'],
+    ['missing', 'missing', 'blocked'],
+    ['blocked', 'blocked', 'blocked'],
+    ['cancelled', 'cancelled', 'cancelled'],
+  ] as const) {
+    for (const [providerEffectState, recoveryRequired] of [
+      ['possible', true],
+      ['confirmed-present', true],
+      ['confirmed-released', false],
+    ] as const) {
+      const recoveryResponsibility = {
+        providerEffectState,
+        resourceInventory: [evidence],
+        releaseProofs: providerEffectState === 'confirmed-released' ? [evidence] : [],
+      };
+      const receipt = terminal(status);
+      const decision = decideOccurrenceTerminalReceipt({
+        binding,
+        terminalReceipt: receipt,
+        recoveryResponsibility,
+      });
+      assert.equal(decision.outcome, outcome);
+      assert.equal(decision.checkpointOutcome, checkpointOutcome);
+      assert.equal(decision.record.verification.status, status);
+      assert.deepEqual(decision.record.verification, receipt.verification);
+      assert.deepEqual(decision.record.recoveryResponsibility, recoveryResponsibility);
+      assert.equal(decision.recoveryRequired, recoveryRequired);
+      assert.equal(decision.resourceReleaseConfirmed, providerEffectState === 'confirmed-released');
+    }
+  }
+});
+
+test('optional recovery responsibility preserves existing absence behavior', () => {
+  const successful = decideOccurrenceTerminalReceipt({
+    binding,
+    terminalReceipt: terminal('success'),
+  });
+  assert.equal(successful.outcome, 'succeeded');
+  assert.equal(successful.recoveryRequired, false);
+  assert.equal(successful.resourceReleaseConfirmed, false);
+  assert.equal('recoveryResponsibility' in successful.record, false);
+
+  const failed = decideOccurrenceTerminalReceipt({
+    binding,
+    terminalReceipt: terminal('failed'),
+  });
+  assert.equal(failed.outcome, 'failed');
+  assert.equal(failed.recoveryRequired, true);
+  assert.equal(failed.resourceReleaseConfirmed, false);
+  assert.equal('recoveryResponsibility' in failed.record, false);
 });
 
 test('strict success assertion rejects non-success terminal receipts', () => {

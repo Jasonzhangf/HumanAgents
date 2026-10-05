@@ -808,8 +808,9 @@ export function decideOccurrenceTerminalReceipt(input: {
       : verificationStatus === 'missing' || verificationStatus === 'blocked'
         ? 'blocked'
         : 'cancelled';
-  const recoveryRequired = verificationStatus !== 'success'
-    && input.recoveryResponsibility?.providerEffectState !== 'confirmed-released';
+  const recoveryRequired = input.recoveryResponsibility === undefined
+    ? verificationStatus !== 'success'
+    : input.recoveryResponsibility.providerEffectState !== 'confirmed-released';
   const record: OccurrenceTerminalReceiptRecord = {
     kind: 'occurrence-terminal-receipt',
     version: 1,
