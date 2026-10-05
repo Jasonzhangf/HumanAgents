@@ -26,6 +26,7 @@ import {
   validateProviderSettleInput, validateProviderSettlement, validateProviderStartInput, validateProviderStartReceipt, validateProviderStopReceipt,
   validateProviderStopRequest, validateProviderSubmitInput, validateProviderSubmitResult, validateProviderToolResult, validateRequirementEnvelope,
   validateReminder, validateRuntimeBinding, validateSchedulerLease, validateScopeAcl, validateSubscription,
+  validateDraftRevision,
   validateOperationIntentForRegistration, validateOperationResult,
   validateWorkAssignment, validateWorkResult, type AgentMemoryContext, type AgentDriver, type AgentMemoryContextInjectionPort, type AgentRuntimeId,
   type AgentDriverV1, type AgentRequestEnvelope, type AcpDriverBinding, type AcpServerBinding, type AgentMessageEnvelope, type AgentProviderBinding, type BusinessPayload, type Checkpoint,
@@ -40,6 +41,7 @@ import {
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderImageContent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
+  type DraftRevision, type ExecutionPolicyDefinition,
   type OperationIdempotencyRecord, type OperationIntent, type RequirementEnvelope, type ScopeRef, type ToolRegistration,
   type WorkAssignment, type WorkResult,
 } from '@humanagent/contracts';
@@ -1431,4 +1433,85 @@ test('operation scope patterns treat omitted organId as wildcard without weakeni
     { ...operationIntent, taskId: otherTask, requestedScope: { ...requestedScope, taskId: otherTask } },
     toolRegistration,
   ), ContractError);
+});
+
+test('draft revisions carry only typed execution policies', () => {
+  const once: ExecutionPolicyDefinition = {
+    policyId: 'policy-once',
+    policyRevision: 1,
+    executionMode: 'once',
+    timezone: 'America/Los_Angeles',
+    canonicalInstant: '2026-11-01T17:00:00Z',
+    dstMode: 'wall',
+    dstMissedPolicy: 'shift-forward',
+    dstAmbiguousPolicy: 'earlier-offset',
+    latePolicy: 'skip',
+    busyPolicy: 'skip',
+    dueAt: '2026-11-01T17:00:00Z',
+  };
+  const scheduled: ExecutionPolicyDefinition = {
+    ...once,
+    policyId: 'policy-scheduled',
+    executionMode: 'scheduled',
+    startAt: '2026-11-02T17:00:00Z',
+  };
+  const recurring: ExecutionPolicyDefinition = {
+    ...scheduled,
+    policyId: 'policy-recurring',
+    executionMode: 'recurring',
+    frequency: 'weekly',
+    timeOfDay: '09:30',
+    weekDays: [1, 3, 5],
+  };
+  for (const executionPolicy of [once, scheduled, recurring]) {
+    const revision: DraftRevision = {
+      draftId: `draft-${executionPolicy.executionMode}`,
+      revisionVersion: 1,
+      inputRevision: 1,
+      goal: 'deliver the revision contract',
+      scope: 'contracts',
+      constraints: ['typed only'],
+      deliverables: ['contract tests'],
+      normalizedInput: `deliver ${executionPolicy.executionMode} contract`,
+      proposedIntent: 'create',
+      proposal: 'create a typed task',
+      matchedTasks: [],
+      knownFacts: ['fixture'],
+      executionPolicy,
+      decisionRefs: [],
+      state: 'draft',
+      history: [],
+      revisionHash: `sha256:${executionPolicy.executionMode.padEnd(64, '0')}`,
+      immutableOriginalRef: `asset://${executionPolicy.executionMode}/original`,
+    };
+    assert.doesNotThrow(() => validateDraftRevision(revision));
+  }
+
+  const base: DraftRevision = {
+    draftId: 'draft-invalid-policy',
+    revisionVersion: 1,
+    inputRevision: 1,
+    goal: 'reject invalid policy',
+    scope: 'contracts',
+    constraints: [],
+    deliverables: [],
+    normalizedInput: 'reject invalid policy',
+    proposedIntent: 'create',
+    proposal: 'create a typed task',
+    matchedTasks: [],
+    knownFacts: ['fixture'],
+    decisionRefs: [],
+    state: 'draft',
+    history: [],
+    revisionHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    immutableOriginalRef: 'asset://draft-invalid-policy/original',
+  };
+  assert.throws(
+    () => validateDraftRevision({ ...base, executionPolicy: { ...once, executionMode: 'hourly' as never } }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateDraftRevision({ ...base, executionPolicy: { ...recurring, frequency: 'yearly' as never } }),
+    ContractError,
+  );
 });

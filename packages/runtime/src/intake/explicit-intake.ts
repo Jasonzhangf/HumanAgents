@@ -5,6 +5,7 @@ import type {
   DraftRejectClosure,
   DraftRevision,
   DraftRevisionInput,
+  ExecutionPolicyDefinition,
   InteractionRequestKind,
   RequirementIntent,
   TaskId,
@@ -18,6 +19,7 @@ import {
 import {
   assertDraftRevisionCurrent,
   createDraftRevision,
+  DraftRevisionError,
   refineDraftRevision,
 } from '../../../core/src/index.js';
 import { ExplicitIntakeError } from './errors.js';
@@ -258,6 +260,7 @@ export interface DraftIntent {
   readonly matchedTasks?: readonly MatchedTask[];
   readonly knownFacts?: readonly string[];
   readonly decisionRefs?: readonly string[];
+  readonly executionPolicy?: ExecutionPolicyDefinition;
   readonly executionControlRef?: string;
 }
 
@@ -755,6 +758,7 @@ export class ExplicitIntake {
       matchedTasks: matchedTasks.map((task) => task.taskId.value),
       knownFacts: intent.knownFacts,
       decisionRefs: intent.decisionRefs,
+      executionPolicy: intent.executionPolicy,
       executionControlRef: intent.executionControlRef,
       immutableOriginalRef: `raw-input:${interaction.interactionId}:${interaction.inputRevision}`,
     });
@@ -895,10 +899,24 @@ export class ExplicitIntake {
         },
       );
     }
-    assertDraftRevisionCurrent(revision, {
-      revisionVersion: input.draftRevisionVersion,
-      revisionHash: input.draftRevisionHash,
-    });
+    try {
+      assertDraftRevisionCurrent(revision, {
+        revisionVersion: input.draftRevisionVersion,
+        revisionHash: input.draftRevisionHash,
+      });
+    } catch (error) {
+      if (error instanceof DraftRevisionError && error.code === 'stale-revision') {
+        throw new DraftRevisionError({
+          code: 'confirmation-stale',
+          message: 'confirmation is not bound to the current draft revision',
+          draftId: revision.draftId,
+          expectedRevisionVersion: input.draftRevisionVersion,
+          actualRevisionVersion: revision.revisionVersion,
+          actualRevisionHash: revision.revisionHash,
+        });
+      }
+      throw error;
+    }
     if (interaction.state === 'rejected') {
       throw new ExplicitIntakeError(
         'draft-not-confirmable',

@@ -5,12 +5,14 @@ import {
   validateDraftConfirmation,
   validateDraftRevision,
   validateDraftRevisionInput,
+  validateExecutionPolicyDefinition,
   type DraftConfirmation,
   type DraftRevision,
   type DraftRevisionFailure,
   type DraftRevisionFailureCode,
   type DraftRevisionInput,
   type DraftRevisionRef,
+  type ExecutionPolicyDefinition,
   type FinalSubmit,
   type RequirementIntent,
 } from '../../contracts/src/index.js';
@@ -69,6 +71,7 @@ const REFINABLE_FIELDS = [
   'proposedIntent',
   'proposal',
   'knownFacts',
+  'executionPolicy',
 ] as const;
 
 type RefinableField = (typeof REFINABLE_FIELDS)[number];
@@ -98,6 +101,7 @@ function hashableContent(revision: DraftRevision | Omit<DraftRevision, 'revision
     knownFacts: revision.knownFacts,
     decisionRefs: revision.decisionRefs,
     immutableOriginalRef: revision.immutableOriginalRef,
+    ...(revision.executionPolicy === undefined ? {} : { executionPolicy: revision.executionPolicy }),
     ...(revision.executionControlRef === undefined ? {} : { executionControlRef: revision.executionControlRef }),
   };
 }
@@ -127,6 +131,7 @@ export interface CreateDraftRevisionInput {
   readonly matchedTasks?: readonly string[];
   readonly knownFacts?: readonly string[];
   readonly decisionRefs?: readonly string[];
+  readonly executionPolicy?: ExecutionPolicyDefinition;
   readonly executionControlRef?: string;
   readonly immutableOriginalRef: string;
 }
@@ -154,6 +159,7 @@ export function createDraftRevision(input: CreateDraftRevisionInput): DraftRevis
     state: 'draft',
     history: [],
     immutableOriginalRef: input.immutableOriginalRef,
+    ...(input.executionPolicy === undefined ? {} : { executionPolicy: input.executionPolicy }),
     ...(input.executionControlRef ? { executionControlRef: input.executionControlRef } : {}),
   };
   const created: DraftRevision = { ...revision, revisionHash: draftRevisionHash(revision) };
@@ -186,6 +192,15 @@ function requireIntent(draftId: string, value: unknown): RequirementIntent {
   return value;
 }
 
+function requireExecutionPolicy(draftId: string, value: unknown): ExecutionPolicyDefinition {
+  try {
+    validateExecutionPolicyDefinition(value as ExecutionPolicyDefinition);
+    return structuredClone(value as ExecutionPolicyDefinition);
+  } catch {
+    fail('invalid-refinement', draftId, 'draft refinement executionPolicy is invalid');
+  }
+}
+
 function applyFields(current: DraftRevision, fields: Readonly<Record<string, unknown>>): DraftRevision {
   const draftId = current.draftId;
   return {
@@ -198,6 +213,9 @@ function applyFields(current: DraftRevision, fields: Readonly<Record<string, unk
     proposedIntent: fields.proposedIntent === undefined ? current.proposedIntent : requireIntent(draftId, fields.proposedIntent),
     proposal: fields.proposal === undefined ? current.proposal : requireString(draftId, 'proposal', fields.proposal),
     knownFacts: fields.knownFacts === undefined ? current.knownFacts : requireStringArray(draftId, 'knownFacts', fields.knownFacts),
+    ...(fields.executionPolicy === undefined
+      ? {}
+      : { executionPolicy: requireExecutionPolicy(draftId, fields.executionPolicy) }),
   };
 }
 
@@ -401,7 +419,7 @@ export function draftRevisionDiff(previous: DraftRevision, current: DraftRevisio
     const after = current[field];
     const same = Array.isArray(before) && Array.isArray(after)
       ? before.length === after.length && before.every((entry, index) => entry === after[index])
-      : before === after;
+      : canonicalJsonStringify(before ?? null) === canonicalJsonStringify(after ?? null);
     if (!same) changed.push(field);
   }
   return changed;

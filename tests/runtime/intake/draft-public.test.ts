@@ -285,6 +285,31 @@ test('new-task-preview creates an editable draft without dispatching; status sta
   assert.equal(inbox.size, 0);
 });
 
+test('typed draft revisions carry an execution policy into the immutable revision', async () => {
+  const intake = new ExplicitIntake();
+  const interaction = await receivePreview(intake);
+  const executionPolicy = {
+    policyId: 'policy-recurring',
+    policyRevision: 1,
+    executionMode: 'recurring' as const,
+    timezone: 'America/Los_Angeles',
+    canonicalInstant: '2026-11-01T17:00:00Z',
+    dstMode: 'wall' as const,
+    dstMissedPolicy: 'shift-forward' as const,
+    dstAmbiguousPolicy: 'earlier-offset' as const,
+    latePolicy: 'skip' as const,
+    busyPolicy: 'skip' as const,
+    startAt: '2026-11-02T17:00:00Z',
+    frequency: 'weekly' as const,
+    timeOfDay: '09:30',
+    weekDays: [1, 3, 5],
+  };
+  await intake.createDraft(interaction, draftIntent({ executionPolicy }));
+  const revision = intake.currentDraftRevision(interaction);
+  assert.deepEqual(revision?.executionPolicy, executionPolicy);
+  assert.equal(revision?.revisionHash.startsWith('sha256:'), true);
+});
+
 test('typed refined preview cannot enter the legacy confirmation and submission chain', async () => {
   const root = mkdtempSync(join(tmpdir(), 'humanagent-intake-typed-legacy-fence-'));
   try {
@@ -600,7 +625,7 @@ test('final submit is the only authorization: duplicate is idempotent, reject ne
       payloadRef: 'asset://requirements/req-stale',
     });
   } catch (error) {
-    staleRejected = error instanceof DraftRevisionError && error.code === 'stale-revision';
+    staleRejected = error instanceof DraftRevisionError && error.code === 'confirmation-stale';
   }
   assert.equal(staleRejected, true);
 

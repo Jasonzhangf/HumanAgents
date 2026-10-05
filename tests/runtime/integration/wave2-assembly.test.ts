@@ -219,7 +219,7 @@ test('confirmed intake flows through admission, node execution, checkpoint, and 
   const classified = classifyRequirement({
     envelope: consumed,
     queue: 'execution',
-    registeredQueues: ['interactive', 'execution', 'research', 'maintenance'],
+    registeredQueues: ['interactive', 'execution'],
   });
   const admission = checkAdmission({
     queue: { kind: classified.queue, concurrencyLimit: 1, maxBacklog: 2 },
