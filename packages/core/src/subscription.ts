@@ -112,6 +112,15 @@ export type OccurrenceAuthorityDecision =
       readonly recoveryAllowed: false;
     }
   | {
+      readonly kind: 'claim-mismatch';
+      readonly admission?: OccurrenceExecutionAdmissionRecord;
+      readonly claim: OccurrenceClaim;
+      readonly binding: OccurrenceTaskBinding;
+      readonly mutation: 'none';
+      readonly dispatchAllowed: false;
+      readonly recoveryAllowed: false;
+    }
+  | {
       readonly kind: 'recovery-allowed';
       readonly admission: OccurrenceExecutionAdmissionRecord;
       readonly authenticatedOwner: OccurrenceExecutionOwner;
@@ -452,6 +461,44 @@ function validateOccurrenceAuthorityCaller(caller: OccurrenceExecutionOwner): vo
   }
 }
 
+function claimMatchesOccurrenceBinding(claim: OccurrenceClaim, binding: OccurrenceTaskBinding): boolean {
+  return claim.occurrenceId === binding.occurrenceId
+    && claim.subscriptionId === binding.subscriptionId
+    && claim.scheduleRevision === binding.scheduleRevision
+    && claim.occurrenceOrdinal === binding.occurrenceOrdinal
+    && claim.executionEpoch === binding.executionEpoch;
+}
+
+function validateOccurrenceAuthorityClaim(
+  claim: OccurrenceClaim,
+  binding: OccurrenceTaskBinding,
+  admission?: OccurrenceExecutionAdmissionRecord,
+): OccurrenceAuthorityDecision | undefined {
+  try {
+    validateOccurrenceClaim(claim);
+  } catch (error) {
+    return {
+      kind: 'invalid-admission',
+      reason: 'invalid-record',
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  if (!claimMatchesOccurrenceBinding(claim, binding)) {
+    return {
+      kind: 'claim-mismatch',
+      ...(admission === undefined ? {} : { admission }),
+      claim,
+      binding,
+      mutation: 'none',
+      dispatchAllowed: false,
+      recoveryAllowed: false,
+    };
+  }
+  return undefined;
+}
+
 export function decideOccurrenceAuthority(input: OccurrenceAuthorityInput): OccurrenceAuthorityDecision {
   try {
     validateOccurrenceTaskBinding(input.binding);
@@ -476,6 +523,10 @@ export function decideOccurrenceAuthority(input: OccurrenceAuthorityInput): Occu
     };
   }
   if (input.admission === undefined) {
+    if (input.claim !== undefined) {
+      const claimDecision = validateOccurrenceAuthorityClaim(input.claim, input.binding);
+      if (claimDecision !== undefined) return claimDecision;
+    }
     if (input.authenticatedCaller === undefined) {
       return {
         kind: 'owner-live-unproven',
@@ -545,13 +596,51 @@ export function decideOccurrenceAuthority(input: OccurrenceAuthorityInput): Occu
   }
   validateOccurrenceAuthorityCaller(input.authenticatedCaller);
   const admittedOwner = input.admission.admittedExecutionOwner;
-  if (sameExecutionOwner(admittedOwner, input.authenticatedCaller)) {
+  if (input.claim === undefined) {
+    if (sameExecutionOwner(admittedOwner, input.authenticatedCaller)) {
+      return {
+        kind: 'current-owner',
+        admission: input.admission,
+        mutation: 'mutation-allowed',
+        dispatchAllowed: false,
+        recoveryAllowed: false,
+      };
+    }
+    if (input.committedReplacement
+      && input.authenticatedCaller.daemonLeaseId !== admittedOwner.daemonLeaseId
+      && input.authenticatedCaller.daemonGeneration > admittedOwner.daemonGeneration
+      && input.authenticatedCaller.processStartToken !== admittedOwner.processStartToken) {
+      return {
+        kind: 'recovery-allowed',
+        admission: input.admission,
+        authenticatedOwner: input.authenticatedCaller,
+        mutation: 'blocked-recovery-only',
+        dispatchAllowed: false,
+        recoveryAllowed: true,
+      };
+    }
     return {
-      kind: 'current-owner',
+      kind: 'stale-owner',
       admission: input.admission,
-      mutation: 'mutation-allowed',
+      mutation: 'none',
       dispatchAllowed: false,
       recoveryAllowed: false,
+    };
+  }
+  const claimDecision = validateOccurrenceAuthorityClaim(input.claim, input.binding, input.admission);
+  if (claimDecision !== undefined) return claimDecision;
+  const committedReplacement = input.committedReplacement
+    && input.authenticatedCaller.daemonLeaseId !== admittedOwner.daemonLeaseId
+    && input.authenticatedCaller.daemonGeneration > admittedOwner.daemonGeneration
+    && input.authenticatedCaller.processStartToken !== admittedOwner.processStartToken;
+  if (committedReplacement) {
+    return {
+      kind: 'recovery-allowed',
+      admission: input.admission,
+      authenticatedOwner: input.authenticatedCaller,
+      mutation: 'blocked-recovery-only',
+      dispatchAllowed: false,
+      recoveryAllowed: true,
     };
   }
   if (input.claim !== undefined) {
@@ -572,17 +661,13 @@ export function decideOccurrenceAuthority(input: OccurrenceAuthorityInput): Occu
       throw error;
     }
   }
-  if (input.committedReplacement && input.claim !== undefined
-    && input.authenticatedCaller.daemonLeaseId !== admittedOwner.daemonLeaseId
-    && input.authenticatedCaller.daemonGeneration > admittedOwner.daemonGeneration
-    && input.authenticatedCaller.processStartToken !== admittedOwner.processStartToken) {
+  if (sameExecutionOwner(admittedOwner, input.authenticatedCaller)) {
     return {
-      kind: 'recovery-allowed',
+      kind: 'current-owner',
       admission: input.admission,
-      authenticatedOwner: input.authenticatedCaller,
-      mutation: 'blocked-recovery-only',
+      mutation: 'mutation-allowed',
       dispatchAllowed: false,
-      recoveryAllowed: true,
+      recoveryAllowed: false,
     };
   }
   return {

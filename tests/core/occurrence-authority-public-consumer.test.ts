@@ -171,6 +171,17 @@ test('domain authority rejects binding mismatch and missing persisted owner', ()
 });
 
 test('domain authority compares immutable owner A with authenticated caller B', () => {
+  const currentWithoutClaim = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    admission,
+    authenticatedCaller: ownerA,
+    committedReplacement: false,
+    nowAt: '2026-10-05T00:06:00Z',
+  });
+  assert.equal(currentWithoutClaim.kind, 'current-owner');
+  assert.equal(currentWithoutClaim.mutation, 'mutation-allowed');
+
   const current = decideOccurrenceAuthority({
     binding,
     authoritativeBinding: binding,
@@ -208,6 +219,22 @@ test('domain authority compares immutable owner A with authenticated caller B', 
   assert.equal(expired.recoveryAllowed, false);
 });
 
+test('domain authority rejects an expired provided claim for the current owner', () => {
+  const expiredCurrent = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    admission,
+    claim,
+    authenticatedCaller: ownerA,
+    committedReplacement: false,
+    nowAt: '2026-10-05T00:06:00Z',
+  });
+  assert.equal(expiredCurrent.kind, 'lease-expired');
+  assert.equal(expiredCurrent.mutation, 'none');
+  assert.equal(expiredCurrent.dispatchAllowed, false);
+  assert.equal(expiredCurrent.recoveryAllowed, false);
+});
+
 test('domain authority permits recovery only for a committed owner replacement', () => {
   const recovered = decideOccurrenceAuthority({
     binding,
@@ -224,6 +251,88 @@ test('domain authority permits recovery only for a committed owner replacement',
   if (recovered.kind !== 'recovery-allowed') throw new Error('expected recovery');
   assert.equal(recovered.admission.binding.occurrenceId, binding.occurrenceId);
   assert.equal(recovered.admission.admittedExecutionOwner.daemonLeaseId, ownerA.daemonLeaseId);
+});
+
+test('domain authority permits committed replacement recovery after the original claim expires', () => {
+  const recovered = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    admission,
+    claim,
+    authenticatedCaller: ownerB,
+    committedReplacement: true,
+    nowAt: '2026-10-05T00:06:00Z',
+  });
+  assert.equal(recovered.kind, 'recovery-allowed');
+  assert.equal(recovered.mutation, 'blocked-recovery-only');
+  assert.equal(recovered.dispatchAllowed, false);
+  assert.equal(recovered.recoveryAllowed, true);
+  if (recovered.kind !== 'recovery-allowed') throw new Error('expected recovery');
+  assert.equal(recovered.authenticatedOwner.daemonLeaseId, ownerB.daemonLeaseId);
+  assert.equal(recovered.admission.binding.occurrenceId, binding.occurrenceId);
+  assert.equal(recovered.admission.binding.executionEpoch, binding.executionEpoch);
+  assert.equal(recovered.admission.admittedExecutionOwner.daemonLeaseId, ownerA.daemonLeaseId);
+  assert.equal(recovered.admission.admittedExecutionOwner.daemonGeneration, ownerA.daemonGeneration);
+  assert.equal(recovered.admission.admittedExecutionOwner.processStartToken, ownerA.processStartToken);
+});
+
+test('domain authority rejects a supplied claim that does not bind the occurrence identity', () => {
+  const mismatchedClaims: readonly OccurrenceClaim[] = [
+    { ...claim, occurrenceId: 'subscription-b::1::1', subscriptionId: 'subscription-b' },
+    { ...claim, occurrenceId: 'subscription-a::2::1', scheduleRevision: 2 },
+    { ...claim, occurrenceId: 'subscription-a::1::2', occurrenceOrdinal: 2 },
+    { ...claim, executionEpoch: 2 },
+  ];
+
+  for (const mismatchedClaim of mismatchedClaims) {
+    const current = decideOccurrenceAuthority({
+      binding,
+      authoritativeBinding: binding,
+      admission,
+      claim: mismatchedClaim,
+      authenticatedCaller: ownerA,
+      committedReplacement: false,
+      nowAt: '2026-10-05T00:01:00Z',
+    });
+    assert.equal(current.kind, 'claim-mismatch');
+    assert.equal(current.mutation, 'none');
+    assert.equal(current.dispatchAllowed, false);
+    assert.equal(current.recoveryAllowed, false);
+
+    const recovery = decideOccurrenceAuthority({
+      binding,
+      authoritativeBinding: binding,
+      admission,
+      claim: mismatchedClaim,
+      authenticatedCaller: ownerB,
+      committedReplacement: true,
+      nowAt: '2026-10-05T00:01:00Z',
+    });
+    assert.equal(recovery.kind, 'claim-mismatch');
+    assert.equal(recovery.mutation, 'none');
+    assert.equal(recovery.dispatchAllowed, false);
+    assert.equal(recovery.recoveryAllowed, false);
+  }
+});
+
+test('domain authority rejects a mismatched supplied claim during first admission', () => {
+  const mismatchedClaim: OccurrenceClaim = {
+    ...claim,
+    occurrenceId: 'other::1::1',
+    subscriptionId: 'other',
+  };
+  const decision = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    claim: mismatchedClaim,
+    authenticatedCaller: ownerA,
+    committedReplacement: false,
+    nowAt: '2026-10-05T00:01:00Z',
+  });
+  assert.equal(decision.kind, 'claim-mismatch');
+  assert.equal(decision.mutation, 'none');
+  assert.equal(decision.dispatchAllowed, false);
+  assert.equal(decision.recoveryAllowed, false);
 });
 
 test('domain terminal decisions preserve all non-success statuses and original evidence', () => {
