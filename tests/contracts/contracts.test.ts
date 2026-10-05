@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import './interaction-contracts-public-consumer.test.js';
 import {
   ContractError, assertAgentRuntimeId, assertBusinessPayload, assertCapabilities, assertCheckpointLink, assertContextBudget, assertExecutionEpoch,
   assertAgentLoopCheckpointLink,

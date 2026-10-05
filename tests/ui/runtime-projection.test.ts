@@ -14,6 +14,7 @@ import {
   projectRuntimeTaskList,
   type RuntimeTaskSnapshotInput,
 } from '../../packages/ui/projection/runtime.js';
+import './interaction-projection-public.test.js';
 
 const runtimeApiModuleUrl = new URL('../../../../docs/ui/runtime-api.js', import.meta.url).href;
 
