@@ -27,6 +27,8 @@ Exit codes are recorded in the matching `*.exit` files.
 
 The owner fix uses the captured immutable `leaseIdentity` for `update`,
 `refresh`, and `assertActive`. The unused `assertLeaseActive` alias was removed.
+The genuine acquired-lease public test refreshes the live handle and calls
+`assertActive` successfully before its guarded disk mutation.
 After the fix, stale A receives typed `daemon-lease-stale` from
 `withCurrentDaemonOwner`, `setControlEndpoint`, `release`, `refresh`, and
 `assertActive`. B's durable `disposedAt` and `controlEndpoint` stay unchanged,

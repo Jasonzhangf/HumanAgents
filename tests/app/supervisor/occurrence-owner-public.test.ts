@@ -137,6 +137,10 @@ test('genuine acquired lease authorizes an occurrence mutation visible on disk',
   const binding = occurrenceBinding();
   const outputPath = join(fx.root, 'authorized-owner.json');
   try {
+    const refreshed = await lease.refresh();
+    assert.equal(refreshed.leaseId, lease.record.leaseId);
+    await lease.assertActive();
+
     const result = await lease.withCurrentDaemonOwner(binding, async (authenticatedCaller, isCommittedReplacement) => {
       assert.deepEqual(authenticatedCaller, ownerFromRecord(lease.record));
       assert.equal(await isCommittedReplacement(authenticatedCaller), false);
