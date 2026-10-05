@@ -73,21 +73,72 @@ interface Fixture {
   cleanup(): Promise<void>;
 }
 
+// Test-only hook for proving that cleanup failures fail the public suite.
+const INJECT_LEASE_RELEASE_FAILURE =
+  process.env.HUMANAGENT_PUBLIC_TEST_INJECT_LEASE_RELEASE_FAILURE === '1';
+
 async function fixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-durable-consumer-'));
-  const controlRoot = join(root, 'control');
-  const workspace = join(root, 'workspace');
-  await mkdir(workspace);
-  const paths = await resolveRuntimePaths({ controlRoot, workspace });
-  await ensureControlLayout(paths);
-  return {
-    root,
-    paths,
-    async cleanup() {
-      await rm(root, { recursive: true, force: true });
-      assert.equal(existsSync(root), false);
-    },
+  const cleanup = async (): Promise<void> => {
+    await rm(root, { recursive: true, force: true });
+    assert.equal(existsSync(root), false);
   };
+  try {
+    const controlRoot = join(root, 'control');
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
+    const paths = await resolveRuntimePaths({ controlRoot, workspace });
+    await ensureControlLayout(paths);
+    return { root, paths, cleanup };
+  } catch (error) {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'fixture setup and cleanup failed');
+    }
+    throw error;
+  }
+}
+
+async function releaseLease(lease: SupervisorLease): Promise<void> {
+  if (INJECT_LEASE_RELEASE_FAILURE) {
+    throw new Error('injected public harness lease release failure');
+  }
+  await lease.release();
+}
+
+function releaseOnce(lease: SupervisorLease): () => Promise<void> {
+  let release: Promise<void> | undefined;
+  return () => {
+    release ??= releaseLease(lease);
+    return release;
+  };
+}
+
+async function runCleanups(...cleanups: readonly (() => Promise<void>)[]): Promise<void> {
+  const errors: unknown[] = [];
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'durable occurrence public harness cleanup failed');
+  }
+}
+
+async function cleanupFixture(fx: Fixture | undefined, release?: () => Promise<void>): Promise<void> {
+  await runCleanups(
+    async () => {
+      if (release !== undefined) await release();
+    },
+    async () => {
+      if (fx !== undefined) await fx.cleanup();
+    },
+  );
 }
 
 function bindingFor(suffix: string, overrides: Partial<OccurrenceTaskBinding> = {}): OccurrenceTaskBinding {
@@ -336,7 +387,7 @@ async function waitForExit(child: ChildProcess): Promise<void> {
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGKILL');
-  await waitForExit(child).catch(() => undefined);
+  await waitForExit(child);
 }
 
 function childInputs(input: {
@@ -361,9 +412,12 @@ function childInputs(input: {
 }
 
 test('first admission dispatches exactly once and commits a paired checkpoint + typed receipt', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const binding = bindingFor('success');
     const scope = scopeFor(binding);
     const journalPath = journalPathFor(fx.paths, binding);
@@ -406,15 +460,17 @@ test('first admission dispatches exactly once and commits a paired checkpoint + 
       lease.record.leaseId,
     );
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('a mismatched requested occurrence cannot mutate or dispatch against the authoritative claim', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const binding = bindingFor('authoritative-mismatch');
     const scope = scopeFor(binding);
     const journalPath = journalPathFor(fx.paths, binding);
@@ -438,19 +494,21 @@ test('a mismatched requested occurrence cannot mutate or dispatch against the au
     assert.equal(counter.count(), 0);
     assert.equal(existsSync(journalPath), false);
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('replay on the same port, a new port, and a new OS process never dispatches again', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
-  const binding = bindingFor('replay');
-  const scope = scopeFor(binding);
-  const journalPath = journalPathFor(fx.paths, binding);
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   let committed: ServeTaskTerminalReceipt | undefined;
   try {
+    fx = await fixture();
+    const binding = bindingFor('replay');
+    const scope = scopeFor(binding);
+    const journalPath = journalPathFor(fx.paths, binding);
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const counter = countingDispatch(async ({ binding: dispatched }) => terminalProduction(dispatched, scope, 'success'));
     const consumer = consumerFor({ lease, scope, journalPath, dispatch: counter.port });
     committed = await consumer.executeOccurrence({
@@ -476,11 +534,8 @@ test('replay on the same port, a new port, and a new OS process never dispatches
     });
     assert.equal(counter.count(), 1);
     assert.deepEqual(newPort, committed);
-  } finally {
-    await lease.release().catch(() => undefined);
-  }
 
-  try {
+    await release();
     const inputs = join(fx.root, 'replay-inputs.json');
     await writeFile(inputs, childInputs({
       paths: fx.paths,
@@ -518,14 +573,17 @@ test('replay on the same port, a new port, and a new OS process never dispatches
     assert.equal(observed.dispatches, 0);
     assert.deepEqual(observed.receipt, committed);
   } finally {
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('admission append failure leaves no admission and dispatches zero times', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const binding = bindingFor('admission-failure');
     const scope = scopeFor(binding);
     const journalPath = journalPathFor(fx.paths, binding);
@@ -555,15 +613,17 @@ test('admission append failure leaves no admission and dispatches zero times', a
     assert.equal(counter.count(), 0);
     assert.equal((await replayJournal(journalPath)).length, 0);
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('receipt append failure stays durable-unverified-recovery-pending and never verified success', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const binding = bindingFor('receipt-failure');
     const scope = scopeFor(binding);
     const journalPath = journalPathFor(fx.paths, binding);
@@ -599,15 +659,17 @@ test('receipt append failure stays durable-unverified-recovery-pending and never
     );
     assert.equal(counter.count(), 1);
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('a different receipt fact under the same binding key is rejected by the journal', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const binding = bindingFor('conflict');
     const scope = scopeFor(binding);
     const journalPath = journalPathFor(fx.paths, binding);
@@ -647,18 +709,20 @@ test('a different receipt fact under the same binding key is rejected by the jou
     assert.equal(counter.count(), 1);
     assert.deepEqual(replayed, committed);
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('a second process cannot turn copied readable owner fields into authority and writes nothing', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
-  const binding = bindingFor('copied-identity');
-  const scope = scopeFor(binding);
-  const journalPath = journalPathFor(fx.paths, binding);
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const binding = bindingFor('copied-identity');
+    const scope = scopeFor(binding);
+    const journalPath = journalPathFor(fx.paths, binding);
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const inputs = join(fx.root, 'copied-inputs.json');
     await writeFile(inputs, childInputs({
       paths: fx.paths,
@@ -700,18 +764,18 @@ test('a second process cannot turn copied readable owner fields into authority a
     const durable = await readDaemonLease(fx.paths);
     assert.equal(durable?.leaseId, lease.record.leaseId);
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('a crashed owner is replaced and the committed replacement writes one blocked recovery without redispatch or rebind', async () => {
-  const fx = await fixture();
-  const binding = bindingFor('crash-recovery');
-  const scope = scopeFor(binding);
-  const journalPath = journalPathFor(fx.paths, binding);
-  let replacement: SupervisorLease | undefined;
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const binding = bindingFor('crash-recovery');
+    const scope = scopeFor(binding);
+    const journalPath = journalPathFor(fx.paths, binding);
     const inputs = join(fx.root, 'crash-inputs.json');
     const dispatched = join(fx.root, 'crash-dispatch-started');
     await writeFile(inputs, childInputs({
@@ -759,7 +823,7 @@ test('a crashed owner is replaced and the committed replacement writes one block
       ownerId: 'durable-consumer-B',
       takeover: { reason: 'owner A crashed after admission without committing a terminal receipt' },
     });
-    replacement = acquired;
+    release = releaseOnce(acquired);
     assert.equal(acquired.record.generation, Number(ownerA.daemonGeneration) + 1);
     assert.equal(acquired.record.takeover?.previousLeaseId, ownerA.daemonLeaseId);
 
@@ -789,23 +853,23 @@ test('a crashed owner is replaced and the committed replacement writes one block
     assert.equal(recovery?.providerEffectState, 'possible');
     assert.ok((recovery?.resourceInventory.length ?? 0) >= 1);
   } finally {
-    await replacement?.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });
 
 test('live stale A after a committed replacement cannot write, and B recovers without rebind or dispatch', async () => {
-  const fx = await fixture();
-  const binding = bindingFor('stale-a');
-  const scope = scopeFor(binding);
-  const journalPath = journalPathFor(fx.paths, binding);
-  const inputs = join(fx.root, 'stale-a-inputs.json');
-  const dispatched = join(fx.root, 'stale-a-dispatch-started');
-  const release = join(fx.root, 'stale-a-release');
-  const resultPath = join(fx.root, 'stale-a-result.json');
-  let replacement: SupervisorLease | undefined;
+  let fx: Fixture | undefined;
+  let releaseAcquired: (() => Promise<void>) | undefined;
   let child: ChildProcess | undefined;
   try {
+    fx = await fixture();
+    const binding = bindingFor('stale-a');
+    const scope = scopeFor(binding);
+    const journalPath = journalPathFor(fx.paths, binding);
+    const inputs = join(fx.root, 'stale-a-inputs.json');
+    const dispatched = join(fx.root, 'stale-a-dispatch-started');
+    const release = join(fx.root, 'stale-a-release');
+    const resultPath = join(fx.root, 'stale-a-result.json');
     await writeFile(inputs, childInputs({
       paths: fx.paths,
       journalPath,
@@ -903,7 +967,7 @@ test('live stale A after a committed replacement cannot write, and B recovers wi
       ownerId: 'durable-consumer-B',
       takeover: { reason: 'supported takeover while stale A is still alive', allowed: () => true },
     });
-    replacement = acquired;
+    releaseAcquired = releaseOnce(acquired);
     assert.equal(acquired.record.generation, 2);
     assert.equal(acquired.record.takeover?.previousLeaseId, ready.leaseId);
 
@@ -941,16 +1005,27 @@ test('live stale A after a committed replacement cannot write, and B recovers wi
     );
     assert.equal(after.filter((record) => record.payload?.kind === 'occurrence-terminal-receipt').length, 1);
   } finally {
-    if (child !== undefined) await stopChild(child);
-    await replacement?.release().catch(() => undefined);
-    await fx.cleanup();
+    await runCleanups(
+      async () => {
+        if (child !== undefined) await stopChild(child);
+      },
+      async () => {
+        if (releaseAcquired !== undefined) await releaseAcquired();
+      },
+      async () => {
+        if (fx !== undefined) await fx.cleanup();
+      },
+    );
   }
 });
 
 test('success, failed, rejected, missing, blocked, and cancelled terminals each persist a paired receipt', async () => {
-  const fx = await fixture();
-  const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+  let fx: Fixture | undefined;
+  let release: (() => Promise<void>) | undefined;
   try {
+    fx = await fixture();
+    const lease = await acquireDaemonLease(fx.paths, { ownerId: 'durable-consumer-A' });
+    release = releaseOnce(lease);
     const statuses: readonly TaskVerificationStatus[] = ['success', 'failed', 'rejected', 'missing', 'blocked', 'cancelled'];
     for (const status of statuses) {
       const binding = bindingFor(`terminal-${status}`);
@@ -978,7 +1053,6 @@ test('success, failed, rejected, missing, blocked, and cancelled terminals each 
       }
     }
   } finally {
-    await lease.release().catch(() => undefined);
-    await fx.cleanup();
+    await cleanupFixture(fx, release);
   }
 });

@@ -7,7 +7,10 @@ independent PASS.
 This document was extended by the corrective pass
 `durable-occurrence-consumer-failure-correction-20261005`; see
 [Corrective pass](#corrective-pass-real-execution-failure-and-exception-path-cleanup).
-The RCC section now reflects the corrected three-case harness.
+It was extended again by the public-harness review-fix pass
+`durable-occurrence-consumer-review-fix-20261005-r1`; see
+[Review-fix pass](#review-fix-pass-public-harness-cleanup-failures).
+The RCC section reflects the corrected three-case harness.
 
 ## Identity and inputs
 
@@ -250,3 +253,69 @@ Raw outputs in the corrective record root `raw/`.
 - The success, failure, and stop cases each exercise a live RCC round; the model
   decides whether to call `file.read`, so the failure case is retried a bounded
   number of times and never accepted as a pass if the path was not exercised.
+
+## Review-fix pass: public harness cleanup failures
+
+This pass closes the P1 in the independent public review final.
+
+- task/worker: `durable-occurrence-consumer-review-fix-20261005-r1`
+- cwd: `/Volumes/Intel/playground/humanagent/interaction-durable-consumer-failure-correction-20261005`
+- branch: `codex/interaction-durable-consumer-failure-correction-20261005`
+- base candidate HEAD: `42142627f12ea40de204fbef04bd07683dda8e29`
+- candidate: the commit that adds this section on top of the base candidate
+- record root:
+  `/Users/fanzhang/.codex/visualizations/2026/10/03/01a0ff23-1b80-7f50-8087-0fd5e4819c67/interaction-redesign-run/durable-occurrence-consumer-review-fix-20261005-r1`
+
+### Defect closed
+
+The public suite used `lease.release().catch(() => undefined)` in six direct
+paths and two replacement-owner paths. A failed release could therefore be
+discarded while the fixture was removed and the test still reported success.
+The suite also acquired the fixture and lease before its `try`, so a lease
+acquisition failure could bypass fixture cleanup. `stopChild` also discarded a
+`waitForExit` failure.
+
+### Fix
+
+- `tests/app/durable-occurrence-consumer-public.test.ts` now enters the
+  protected `try` before every lease acquisition. A failed acquisition still
+  reaches fixture cleanup.
+- `releaseOnce` memoizes the real lease release. `runCleanups` catches each
+  cleanup failure only to continue the remaining cleanup, then rethrows the
+  single error or an `AggregateError`. A release failure cannot prevent fixture
+  removal, and a fixture cleanup failure cannot hide the release failure.
+- `stopChild` now propagates `waitForExit` errors. The test-only
+  `HUMANAGENT_PUBLIC_TEST_INJECT_LEASE_RELEASE_FAILURE=1` hook injects a
+  release failure for the negative proof.
+- No assertion, test name, test count, public contract, product source, RCC
+  harness, or cleanup semantics were weakened.
+
+### Review-fix commands (real exits)
+
+Raw outputs are in the review-fix record root `raw/`.
+
+| command | exit | evidence |
+| --- | --- | --- |
+| `pnpm exec tsc -p tests/app/tsconfig.json` | 0 | `raw/compiler.{stdout,stderr,exit}` |
+| `node --test dist/tests/tests/app/durable-occurrence-consumer-public.test.js` | 0 | `raw/public-test.*`; TAP `# tests 10`, `# pass 10`, `# fail 0` |
+| `HUMANAGENT_PUBLIC_TEST_INJECT_LEASE_RELEASE_FAILURE=1 node --test dist/tests/tests/app/durable-occurrence-consumer-public.test.js` | 1 (expected) | `raw/public-test-cleanup-failure.*`; `# fail 10`, each test reports `injected public harness lease release failure` |
+| `pnpm typecheck` | 0 | `raw/typecheck.{stdout,stderr,exit}` |
+| `git diff --check` | 0 | `raw/diff-check.{stdout,stderr,exit}` |
+| `TMPDIR` glob check for `humanagent-durable-consumer-*` | 0 | `raw/fixture-absence.*`; `remaining=0` |
+
+The negative run proves that an injected lifecycle cleanup failure exits
+non-zero and keeps a readable error. The normal run proves the same suite still
+passes all ten public cases without injection. A post-run `TMPDIR` check found
+no remaining `humanagent-durable-consumer-*` fixture directory.
+
+### Reused evidence
+
+The RCC harness and its raw evidence are unchanged and are reused. The public
+suite still exercises the same ten black-box cases; only its cleanup and
+acquisition protection changed. Upstream F/G and contracts evidence are
+unchanged and are reused.
+
+### Review-fix pass not claimed
+
+- No independent review, merge, push, installation, restart, or deployment.
+- This pass does not claim that the candidate is reviewed or integrated.
