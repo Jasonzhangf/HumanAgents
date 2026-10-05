@@ -153,6 +153,7 @@ export interface AgentInput {
   readonly executionEpoch: number;
   readonly assignmentId: string;
   readonly payload: BusinessPayload;
+  readonly imageContents?: readonly ProviderImageContent[];
 }
 export interface AgentOutput {
   readonly taskId: TaskId;
@@ -950,10 +951,16 @@ export interface ProviderExecutionIdentityRef {
   readonly executionEpoch: number;
 }
 
+export interface ProviderImageContent {
+  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
+  readonly dataBase64: string;
+}
+
 export interface ProviderExecutionInput extends ProviderExecutionIdentityRef {
   readonly inputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly payload?: BusinessPayload;
+  readonly imageContents?: readonly ProviderImageContent[];
   readonly tools?: readonly ProviderToolDefinition[];
 }
 
@@ -987,9 +994,32 @@ export interface ProviderSubmitInput extends ProviderExecutionInput {
   readonly payload: BusinessPayload;
   readonly toolContinuations?: readonly ProviderToolContinuation[];
 }
-export interface ProviderObserveInput extends ProviderExecutionIdentityRef {}
+export interface ProviderObserveInput extends ProviderExecutionIdentityRef, Partial<ProviderRequestIdentityRef> {}
 export interface ProviderSettleInput extends ProviderExecutionIdentityRef {
   readonly evidenceRefs?: readonly EvidenceRef[];
+}
+
+export type ProviderRequestPhase =
+  | 'dispatching'
+  | 'dispatched'
+  | 'waiting'
+  | 'settled'
+  | 'failed'
+  | 'cancelled';
+
+export interface ProviderRequestIdentityRef {
+  readonly turnId: string;
+  readonly requestId: string;
+  readonly parentRequestId?: string;
+}
+
+export interface ProviderRequestLifecycleEvent extends ProviderExecutionIdentityRef, ProviderRequestIdentityRef {
+  readonly phase: ProviderRequestPhase;
+  readonly occurredAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  /** Provider wire identity is diagnostic evidence only, never Harness control identity. */
+  readonly externalResponseId?: string;
+  readonly error?: ProviderError;
 }
 
 export interface ProviderStartReceipt extends ProviderExecutionIdentityRef {
@@ -1025,6 +1055,14 @@ export interface ProviderSubmitResult extends ProviderExecutionIdentityRef {
 export interface ProviderEvent extends ProviderExecutionIdentityRef {
   readonly eventId: string;
   readonly kind: ProviderEventKind;
+  readonly turnId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  readonly occurredAt?: string;
+  /** Provider wire identity is diagnostic evidence only, never Harness control identity. */
+  readonly externalResponseId?: string;
+  /** Provider-reported response model; diagnostic evidence for visual producer identity. */
+  readonly responseModel?: string;
   readonly toolPhase?: 'invoke' | 'result';
   readonly terminalState?: ProviderTerminalState;
   readonly outputRefs?: readonly string[];
@@ -1138,6 +1176,7 @@ export type ProviderEventEpochDecision =
 const PROVIDER_PROTOCOLS = new Set<string>(['responses', 'anthropic', 'openai', 'other-explicit']);
 const PROVIDER_READINESS_STATES = new Set<string>(['ready', 'degraded', 'not-ready', 'unknown', 'capability-unavailable', 'dependency-missing']);
 const PROVIDER_EVENT_KINDS = new Set<string>(['model', 'output', 'tool', 'error', 'terminal', 'attention', 'transport']);
+const PROVIDER_REQUEST_PHASES = new Set<string>(['dispatching', 'dispatched', 'waiting', 'settled', 'failed', 'cancelled']);
 const PROVIDER_TERMINAL_STATES = new Set<string>(['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown']);
 const PROVIDER_ERROR_PHASES = new Set<string>(['probe', 'start', 'resume', 'submit', 'observe', 'tool', 'stop', 'settle', 'close', 'unknown']);
 const PROVIDER_ERROR_CATEGORIES = new Set<string>(['provider', 'protocol', 'transport', 'timeout', 'capability', 'configuration', 'permission', 'validation', 'runtime', 'unknown']);
@@ -1172,6 +1211,23 @@ function assertProviderEvidenceRefsPresent(refs: readonly EvidenceRef[], label: 
   if (refs.length === 0) throw new ContractError(`${label} evidence refs are required`);
   assertProviderEvidenceRefs(refs, label);
 }
+const PROVIDER_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const PROVIDER_IMAGE_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+function assertProviderImageContents(images: readonly ProviderImageContent[] | undefined): void {
+  if (images === undefined) return;
+  if (!Array.isArray(images)) throw new ContractError('provider image contents must be an array');
+  if (images.length > 1) throw new ContractError('provider image contents accepts at most one image');
+  for (const image of images) {
+    if (!image || typeof image !== 'object' || Array.isArray(image)) throw new ContractError('provider image content must be an object');
+    if (!PROVIDER_IMAGE_MEDIA_TYPES.has(image.mediaType)) throw new ContractError('provider image media type is invalid');
+    if (typeof image.dataBase64 !== 'string' || image.dataBase64.length === 0) {
+      throw new ContractError('provider image dataBase64 must be non-empty');
+    }
+    if (image.dataBase64.length % 4 !== 0 || !PROVIDER_IMAGE_BASE64_PATTERN.test(image.dataBase64)) {
+      throw new ContractError('provider image dataBase64 must be valid base64');
+    }
+  }
+}
 function assertExternalEvidenceRef(ref: EvidenceRef, runtimeIdValue: AgentRuntimeId, label: string): void {
   assertEvidenceRef(ref);
   if (ref.kind !== 'external') throw new ContractError(`${label} must use external evidence`);
@@ -1197,6 +1253,20 @@ function assertProviderCompletionEvidenceRefs(refs: readonly EvidenceRef[], exec
 function assertOptionalProviderOwner(input: { readonly ownerId?: string; readonly nextAction?: NextAction }): void {
   if (input.ownerId !== undefined) assertNonEmptyReference(input.ownerId, 'provider ownerId');
   if (input.nextAction !== undefined) assertNextAction(input.nextAction);
+}
+function assertProviderRequestIdentity(input: ProviderRequestIdentityRef, label: string): void {
+  assertNonEmptyReference(input.turnId, `${label} turnId`);
+  assertNonEmptyReference(input.requestId, `${label} requestId`);
+  if (input.parentRequestId !== undefined) assertNonEmptyReference(input.parentRequestId, `${label} parentRequestId`);
+  if (input.parentRequestId === input.requestId) throw new ContractError(`${label} parentRequestId cannot equal requestId`);
+}
+function assertOptionalProviderRequestIdentity(input: Partial<ProviderRequestIdentityRef>, label: string): void {
+  const values = [input.turnId, input.requestId, input.parentRequestId];
+  if (values.every((value) => value === undefined)) return;
+  if (input.turnId === undefined || input.requestId === undefined) {
+    throw new ContractError(`${label} request identity requires both turnId and requestId`);
+  }
+  assertProviderRequestIdentity({ turnId: input.turnId, requestId: input.requestId, ...(input.parentRequestId === undefined ? {} : { parentRequestId: input.parentRequestId }) }, label);
 }
 
 export function validateProviderBinding(input: ProviderBinding): void {
@@ -1262,6 +1332,7 @@ function validateProviderExecutionInput(input: ProviderExecutionInput): void {
   assertRefList(input.inputRefs, 'provider inputRefs');
   assertProviderEvidenceRefs(input.evidenceRefs, 'provider execution evidenceRefs');
   if (input.payload !== undefined) assertBusinessPayload(input.payload);
+  assertProviderImageContents(input.imageContents);
   for (const tool of input.tools ?? []) {
     assertNonEmptyReference(tool.toolId, 'provider tool definition toolId');
     assertNonEmptyReference(tool.description, 'provider tool definition description');
@@ -1276,6 +1347,7 @@ export function validateProviderStartInput(input: ProviderStartInput): void {
 }
 export function validateProviderResumeInput(input: ProviderResumeInput): void {
   validateProviderExecutionInput(input);
+  if ((input.imageContents?.length ?? 0) > 0) throw new ContractError('provider resume does not support image content');
   assertScope(input.checkpointId, 'checkpoint');
   assertExecutionEpoch(input.checkpointExecutionEpoch);
   if (input.checkpointExecutionEpoch !== input.executionEpoch) throw new ContractError('provider resume checkpoint epoch is stale');
@@ -1303,6 +1375,7 @@ export function validateProviderSubmitInput(input: ProviderSubmitInput): void {
 }
 export function validateProviderObserveInput(input: ProviderObserveInput): void {
   assertProviderExecutionIdentity(input);
+  assertOptionalProviderRequestIdentity(input, 'provider observe');
 }
 export function validateProviderSettleInput(input: ProviderSettleInput): void {
   assertProviderExecutionIdentity(input);
@@ -1356,6 +1429,9 @@ export function validateProviderSubmitResult(input: ProviderSubmitResult): void 
 export function validateProviderEvent(input: ProviderEvent): void {
   assertProviderExecutionIdentity(input);
   assertNonEmptyReference(input.eventId, 'provider eventId');
+  assertOptionalProviderRequestIdentity(input, 'provider event');
+  if (input.occurredAt !== undefined) assertValidTime(input.occurredAt, 'provider event occurredAt');
+  if (input.responseModel !== undefined) assertNonEmptyReference(input.responseModel, 'provider event responseModel');
   if (!PROVIDER_EVENT_KINDS.has(input.kind)) throw new ContractError('provider event kind is invalid');
   if (input.toolPhase !== undefined && input.kind !== 'tool') throw new ContractError('provider tool phase requires tool event kind');
   if (input.kind === 'tool' && input.toolCall && input.toolPhase === 'result') throw new ContractError('provider tool result cannot carry a tool call');
@@ -1391,6 +1467,19 @@ export function validateProviderEvent(input: ProviderEvent): void {
     validateProviderToolResult(input.toolResult);
   }
   assertOptionalProviderOwner(input);
+}
+export function validateProviderRequestLifecycleEvent(input: ProviderRequestLifecycleEvent): void {
+  assertProviderExecutionIdentity(input);
+  assertProviderRequestIdentity(input, 'provider request lifecycle');
+  if (!PROVIDER_REQUEST_PHASES.has(input.phase)) throw new ContractError('provider request phase is invalid');
+  assertValidTime(input.occurredAt, 'provider request occurredAt');
+  assertProviderEvidenceRefs(input.evidenceRefs, 'provider request lifecycle evidenceRefs');
+  if (input.phase === 'dispatching' && input.externalResponseId !== undefined) {
+    throw new ContractError('provider dispatching request cannot carry a provider response id');
+  }
+  if (input.error) validateProviderError(input.error);
+  if (input.phase === 'failed' && !input.error) throw new ContractError('failed provider request requires error');
+  if (input.phase !== 'failed' && input.error) throw new ContractError('provider request error requires failed phase');
 }
 export function checkProviderEventEpoch(event: ProviderEvent, expectedExecutionEpoch: number): ProviderEventEpochDecision {
   if (event.executionEpoch === expectedExecutionEpoch) return { accepted: true };

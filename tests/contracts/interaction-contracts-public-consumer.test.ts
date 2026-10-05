@@ -24,7 +24,12 @@ import {
   validateServeTaskTerminalReceipt,
   validateSubscriptionControlRequest,
   validateTaskExecutionEvidence,
+  validateTaskCheckPolicy,
+  validateTaskObservationProductionResult,
+  validateTaskVerificationPolicy,
   validateTaskVerificationResult,
+  validateVisualProducerResult,
+  validateProviderEvent,
   subscriptionControlRequestFingerprint,
   type AuthorizedRequirement,
   type DraftConfirmation,
@@ -47,7 +52,14 @@ import {
   type ServeTaskTerminalReceipt,
   type SubscriptionControlRequest,
   type TaskExecutionEvidence,
+  type TaskCheckPolicy,
+  type TaskNativeCheckPolicy,
+  type TaskVerificationPolicy,
   type TaskVerificationResult,
+  type TaskObservationProductionResult,
+  type TaskObservationProducedResult,
+  type TaskVisualObservationReceipt,
+  type VisualProducerResult,
 } from '@humanagent/contracts';
 
 const task = id('task', 'task-a');
@@ -224,11 +236,57 @@ const taskVerification: TaskVerificationResult = {
   taskId: task,
   operationId: operation,
   executionEpoch: 1,
+  attempt: 1,
   inputArtifactDigest: 'sha256:input-artifact-a',
+  policyRef: 'verification-policy:policy-a:1',
+  policyDigest: 'sha256:verification-policy-a',
   status: 'success',
-  checkerStdout: 'checker output',
-  checkerExitCode: 0,
+  checks: [{
+    checkId: 'structural-check',
+    kind: 'process',
+    status: 'succeeded',
+    stdout: '{"empty":false,"has_html_root":true,"inline_svg_count":1,"animation":{"present":true}}',
+    stderr: '',
+    exitCode: 0,
+    artifactDigests: ['sha256:input-artifact-a'],
+    evidenceRefs: [evidence],
+  }],
   evidenceRefs: [evidence],
+};
+
+const taskProcessCheckEvidence = {
+  checkId: 'structural-check',
+  kind: 'process' as const,
+  status: 'succeeded' as const,
+  stdout: '{"empty":false,"has_html_root":true,"inline_svg_count":1,"animation":{"present":true}}',
+  stderr: '',
+  exitCode: 0,
+  artifactDigests: ['sha256:input-artifact-a'],
+  evidenceRefs: [evidence],
+};
+
+const taskVerificationPolicy: TaskVerificationPolicy = {
+  policyId: 'policy-verification-a',
+  policyRevision: 1,
+  requirementId: 'requirement-a',
+  directiveRevision: 1,
+  profileRef: 'verification-profile://default/v1',
+  checks: [{
+    checkId: 'native-default-task-output',
+    kind: 'native',
+    required: true,
+    evaluator: 'default-task-output-v1',
+    evaluatorDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    timeoutMs: 5_000,
+    permissionRefs: ['permission://task-output/read'],
+  }],
+  compiledRef: 'verification-policy:policy-verification-a:1',
+  compiledDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+};
+
+const taskVerificationSuccess: TaskVerificationResult = {
+  ...taskVerification,
+  checks: [taskProcessCheckEvidence],
 };
 
 const terminalReceipt: ServeTaskTerminalReceipt = {
@@ -385,6 +443,8 @@ test('public contract consumer rejects invalid policy and control shapes', () =>
     true,
   );
   assert.equal(canonicalJsonStringify({ b: 1, a: 2 }), '{"a":2,"b":1}');
+  assert.throws(() => validateExecutionPolicyDefinition({ ...oncePolicy, verificationProfileRef: '' }), ContractError);
+  assert.doesNotThrow(() => validateExecutionPolicyDefinition({ ...oncePolicy, verificationProfileRef: 'verification-profile://default/v1' }));
 });
 
 test('public contract consumer rejects incomplete revisions, tool identities, and terminal receipts', () => {
@@ -394,7 +454,24 @@ test('public contract consumer rejects incomplete revisions, tool identities, an
   assert.throws(() => validateFinalSubmit({ ...finalSubmit, draftRevisionVersion: 0 }), ContractError);
   assert.throws(() => validateExistingTaskChangeSubmit({ ...existingChange, confirmationRef: '' }), ContractError);
   assert.throws(() => validateInteractionTraceEntry({ ...traceEntry, tool: { ...traceEntry.tool!, callId: '' } }), ContractError);
-  assert.throws(() => validateTaskVerificationResult({ ...taskVerification, checkerExitCode: 1 }), ContractError);
+  assert.throws(() => validateTaskVerificationResult({
+    ...taskVerification,
+    checks: [{ ...taskProcessCheckEvidence, status: 'failed', exitCode: 1 }],
+  }), ContractError);
+  assert.doesNotThrow(() => validateTaskVerificationPolicy(taskVerificationPolicy));
+  assert.throws(() => validateTaskVerificationPolicy({
+    ...taskVerificationPolicy,
+    checks: [],
+  }), ContractError);
+  assert.throws(() => validateTaskVerificationPolicy({
+    ...taskVerificationPolicy,
+    compiledDigest: 'not-a-digest',
+  }), ContractError);
+  const nativePolicy = taskVerificationPolicy.checks[0] as TaskNativeCheckPolicy;
+  assert.throws(() => validateTaskCheckPolicy({
+    ...nativePolicy,
+    evaluatorDigest: 'not-a-digest',
+  }), ContractError);
   assert.throws(() => validateServeTaskTerminalReceipt({
     ...terminalReceipt,
     taskId: id('task', 'task-b'),
@@ -403,7 +480,12 @@ test('public contract consumer rejects incomplete revisions, tool identities, an
     ...occurrenceSettlement,
     terminalReceipt: {
       ...terminalReceipt,
-      verification: { ...taskVerification, status: 'failed', rejectionCode: 'checker-rejected', checkerExitCode: 1 },
+      verification: {
+        ...taskVerification,
+        status: 'failed',
+        rejectionCode: 'checker-rejected',
+        checks: [{ ...taskProcessCheckEvidence, status: 'failed', exitCode: 1 }],
+      },
     },
   }), ContractError);
   assert.doesNotThrow(() => validateInteractionHistoryResult({
@@ -544,4 +626,184 @@ test('public consumer report is externally inspectable', () => {
   assert.equal(report.terminalStatus, 'success');
   assert.equal(report.occurrenceOutcome, 'succeeded');
   console.log(`PUBLIC_CONSUMER_REPORT ${JSON.stringify(report)}`);
+});
+
+const digestA = `sha256:${'a'.repeat(64)}`;
+const digestB = `sha256:${'b'.repeat(64)}`;
+const digestC = `sha256:${'c'.repeat(64)}`;
+const digestD = `sha256:${'d'.repeat(64)}`;
+const digestE = `sha256:${'e'.repeat(64)}`;
+const digestF = `sha256:${'f'.repeat(64)}`;
+
+function observationReceipt(): TaskVisualObservationReceipt {
+  return {
+    taskId: task,
+    operationId: operation,
+    executionEpoch: 1,
+    attempt: 1,
+    bindingRef: 'binding://visual',
+    bindingDigest: digestA,
+    primaryArtifactRef: 'artifact://visual/primary.html',
+    primaryArtifactDigest: digestB,
+    screenshot: { artifactRef: 'asset://visual/screenshot', artifactDigest: digestC, mediaType: 'image/png' },
+    motion: {
+      artifactRef: 'asset://visual/motion',
+      artifactDigest: digestD,
+      firstSampleRef: 'asset://visual/t1',
+      firstSampleDigest: digestE,
+      secondSampleRef: 'asset://visual/t2',
+      secondSampleDigest: digestF,
+    },
+    browserRelease: { releaseRef: 'browser-release://visual', released: true, evidenceRefs: [evidence] },
+    evidenceRefs: [evidence],
+    producedAt: '2026-10-04T00:00:00.000Z',
+  };
+}
+
+function producedObservation(): TaskObservationProducedResult {
+  const receipt = observationReceipt();
+  return {
+    taskId: task,
+    operationId: operation,
+    executionEpoch: 1,
+    attempt: 1,
+    bindingRef: receipt.bindingRef,
+    bindingDigest: receipt.bindingDigest,
+    primaryArtifactRef: receipt.primaryArtifactRef,
+    primaryArtifactDigest: receipt.primaryArtifactDigest,
+    browserCreated: true,
+    evidenceRefs: [evidence],
+    browserRelease: receipt.browserRelease,
+    status: 'produced',
+    receipt,
+  };
+}
+
+function settledVisual(): VisualProducerResult {
+  return {
+    checkId: 'native-aitest-visual-motion',
+    taskId: task,
+    operationId: operation,
+    executionEpoch: 1,
+    attempt: 1,
+    inputArtifactDigest: digestC,
+    status: 'satisfied',
+    assertions: [
+      { assertion: 'visible-pelican-identity', verdict: 'satisfied', evidenceText: 'the rendered frame shows the pelican' },
+    ],
+    capturedAt: '2026-10-04T00:00:01.000Z',
+    decisionRef: 'decision://visual',
+    decisionDigest: digestD,
+    evidenceRefs: [evidence],
+    phase: 'settled',
+    providerBindingId: 'provider-binding://visual',
+    providerBindingDigest: digestE,
+    routeRef: 'route://visual',
+    requestModel: 'gpt-5.5',
+    responseModel: 'MiniMax-M3',
+    requestId: 'request-1',
+    outputArtifactRef: 'asset://visual/output',
+    outputArtifactDigest: digestF,
+    settlementRef: 'settlement://visual',
+    settlementDigest: digestA,
+  };
+}
+
+test('public consumer accepts a produced observation only after real browser release', () => {
+  assert.doesNotThrow(() => validateTaskObservationProductionResult(producedObservation()));
+});
+
+test('public consumer rejects a produced observation without a released browser', () => {
+  const produced = producedObservation();
+  assert.throws(() => validateTaskObservationProductionResult({
+    ...produced,
+    browserCreated: false,
+    browserRelease: undefined,
+  } as unknown as TaskObservationProductionResult), ContractError);
+  assert.throws(() => validateTaskObservationProductionResult({
+    ...produced,
+    browserRelease: { ...produced.receipt.browserRelease, released: false as unknown as true },
+  }), ContractError);
+});
+
+test('public consumer rejects a non-produced observation that carries a receipt', () => {
+  const produced = producedObservation();
+  assert.throws(() => validateTaskObservationProductionResult({
+    ...produced,
+    status: 'failed',
+  } as unknown as TaskObservationProductionResult), ContractError);
+});
+
+test('public consumer requires browser release evidence for a produced observation', () => {
+  const produced = producedObservation();
+  assert.throws(() => validateTaskObservationProductionResult({
+    ...produced,
+    browserRelease: { ...produced.receipt.browserRelease, evidenceRefs: [] },
+  }), ContractError);
+});
+
+test('public consumer accepts a settled visual result with a real response model', () => {
+  assert.doesNotThrow(() => validateVisualProducerResult(settledVisual()));
+});
+
+test('public consumer rejects a settled visual result without an actual response model', () => {
+  const settled = settledVisual();
+  assert.throws(() => validateVisualProducerResult({ ...settled, responseModel: undefined } as unknown as VisualProducerResult), ContractError);
+  assert.throws(() => validateVisualProducerResult({ ...settled, responseModel: '   ' } as VisualProducerResult), ContractError);
+});
+
+test('public consumer rejects a not-dispatched visual result that carries phantom provider facts', () => {
+  const notDispatched: VisualProducerResult = {
+    checkId: 'native-aitest-visual-motion',
+    taskId: task,
+    operationId: operation,
+    executionEpoch: 1,
+    attempt: 1,
+    inputArtifactDigest: digestC,
+    status: 'unavailable',
+    assertions: [],
+    capturedAt: '2026-10-04T00:00:01.000Z',
+    decisionRef: 'decision://visual-unavailable',
+    decisionDigest: digestD,
+    evidenceRefs: [evidence],
+    phase: 'not-dispatched',
+    providerBindingId: 'provider-binding://visual',
+    providerBindingDigest: digestE,
+    routeRef: 'route://visual',
+    error: {
+      code: 'capability-unavailable',
+      message: 'no provider image consumer is configured',
+      evidenceRefs: [evidence],
+      retryable: false,
+      recoveryOwner: 'humanagent.operations-adapter',
+      nextAction: 'configure the provider image consumer',
+    },
+  };
+  assert.doesNotThrow(() => validateVisualProducerResult(notDispatched));
+  assert.throws(() => validateVisualProducerResult({ ...notDispatched, requestId: 'phantom-request' } as VisualProducerResult), ContractError);
+  assert.throws(() => validateVisualProducerResult({ ...notDispatched, settlementRef: 'phantom-settlement' } as VisualProducerResult), ContractError);
+});
+
+test('public consumer rejects a satisfied visual result with an unresolved assertion', () => {
+  const settled = settledVisual();
+  assert.throws(() => validateVisualProducerResult({
+    ...settled,
+    assertions: [{ assertion: 'visible-pelican-identity', verdict: 'rejected', evidenceText: 'the pelican is missing' }],
+  } as VisualProducerResult), ContractError);
+});
+
+test('public consumer carries an actual provider response model and rejects a blank one', () => {
+  const event = {
+    runtimeId: 'runtime-a',
+    taskId: task,
+    operationId: operation,
+    executionEpoch: 1,
+    eventId: 'event-a',
+    kind: 'model' as const,
+    responseModel: 'MiniMax-M3',
+    evidenceRefs: [evidence],
+  };
+  assert.doesNotThrow(() => validateProviderEvent(event));
+  assert.doesNotThrow(() => validateProviderEvent({ ...event, responseModel: undefined }));
+  assert.throws(() => validateProviderEvent({ ...event, responseModel: '   ' }), ContractError);
 });

@@ -296,6 +296,7 @@ export type BusyPolicy = 'skip' | 'idle-reminder';
 export interface ExecutionPolicyBase {
   readonly policyId: string;
   readonly policyRevision: number;
+  readonly verificationProfileRef?: string;
   readonly timezone: string;
   readonly canonicalInstant: string;
   readonly dstMode: DstMode;
@@ -836,6 +837,12 @@ export function validateExecutionPolicyDefinition(input: ExecutionPolicyDefiniti
   const value = input as unknown as Record<string, unknown>;
   nonEmpty(typeof value.policyId === 'string' ? value.policyId : undefined, 'execution policy policyId');
   positiveInteger(value.policyRevision, 'execution policy policyRevision');
+  if (value.verificationProfileRef !== undefined) {
+    nonEmpty(
+      typeof value.verificationProfileRef === 'string' ? value.verificationProfileRef : undefined,
+      'execution policy verificationProfileRef',
+    );
+  }
   const timezone = typeof value.timezone === 'string' ? value.timezone : '';
   nonEmpty(timezone, 'execution policy timezone');
   if (!isIanaTimeZone(timezone)) throw new ContractError(`execution policy timezone is not a valid IANA zone: ${timezone}`);
