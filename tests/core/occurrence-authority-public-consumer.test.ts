@@ -141,6 +141,65 @@ test('domain authority admits only a validated first binding with an authenticat
   assert.equal(decision.record.binding.occurrenceId, binding.occurrenceId);
 });
 
+test('domain authority admits an unexpired matching claim and preserves no-claim first admission', () => {
+  const active = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    claim,
+    authenticatedCaller: ownerA,
+    committedReplacement: false,
+    nowAt: '2026-10-05T00:04:00Z',
+  });
+  assert.equal(active.kind, 'first-admission');
+  assert.equal(active.mutation, 'admitted');
+  assert.equal(active.dispatchAllowed, true);
+  assert.equal(active.recoveryAllowed, false);
+  if (active.kind !== 'first-admission') throw new Error('expected first admission');
+  assert.equal(active.record.admittedAt, '2026-10-05T00:04:00Z');
+
+  const withoutClaim = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    authenticatedCaller: ownerA,
+    committedReplacement: false,
+    nowAt: '2026-10-05T00:00:00Z',
+  });
+  assert.equal(withoutClaim.kind, 'first-admission');
+  assert.equal(withoutClaim.mutation, 'admitted');
+  assert.equal(withoutClaim.dispatchAllowed, true);
+});
+
+test('domain authority rejects matching claims at and after expiry before first admission mutation', () => {
+  for (const nowAt of ['2026-10-05T00:05:00Z', '2026-10-05T00:06:00Z']) {
+    const expired = decideOccurrenceAuthority({
+      binding,
+      authoritativeBinding: binding,
+      claim,
+      authenticatedCaller: ownerA,
+      committedReplacement: false,
+      nowAt,
+    });
+    assert.equal(expired.kind, 'lease-expired');
+    assert.equal(expired.mutation, 'none');
+    assert.equal(expired.dispatchAllowed, false);
+    assert.equal(expired.recoveryAllowed, false);
+    assert.equal('record' in expired, false);
+  }
+
+  const expired = decideOccurrenceAuthority({
+    binding,
+    authoritativeBinding: binding,
+    claim,
+    authenticatedCaller: ownerA,
+    committedReplacement: false,
+    nowAt: '2026-10-05T00:06:00Z',
+  });
+  assert.equal(expired.kind, 'lease-expired');
+  assert.equal(expired.mutation, 'none');
+  assert.equal(expired.dispatchAllowed, false);
+  assert.equal(expired.recoveryAllowed, false);
+});
+
 test('domain authority rejects binding mismatch and missing persisted owner', () => {
   const mismatch = decideOccurrenceAuthority({
     binding,

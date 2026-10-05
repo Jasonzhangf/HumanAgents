@@ -97,7 +97,7 @@ export type OccurrenceAuthorityDecision =
     }
   | {
       readonly kind: 'lease-expired';
-      readonly admission: OccurrenceExecutionAdmissionRecord;
+      readonly admission?: OccurrenceExecutionAdmissionRecord;
       readonly expiresAt: string;
       readonly nowAt: string;
       readonly mutation: 'none';
@@ -526,6 +526,21 @@ export function decideOccurrenceAuthority(input: OccurrenceAuthorityInput): Occu
     if (input.claim !== undefined) {
       const claimDecision = validateOccurrenceAuthorityClaim(input.claim, input.binding);
       if (claimDecision !== undefined) return claimDecision;
+      try {
+        assertOccurrenceClaimLease(input.claim, input.nowAt);
+      } catch (error) {
+        if (error instanceof SubscriptionControlError && error.code === 'lease-expired') {
+          return {
+            kind: 'lease-expired',
+            expiresAt: input.claim.expiresAt,
+            nowAt: input.nowAt,
+            mutation: 'none',
+            dispatchAllowed: false,
+            recoveryAllowed: false,
+          };
+        }
+        throw error;
+      }
     }
     if (input.authenticatedCaller === undefined) {
       return {
