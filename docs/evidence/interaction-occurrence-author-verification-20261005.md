@@ -69,6 +69,17 @@ The immutable raw evidence directory is:
 /Users/fanzhang/.codex/visualizations/2026/10/03/01a0ff23-1b80-7f50-8087-0fd5e4819c67/interaction-redesign-run/occurrence-terminal-recovery-correction/raw/
 ```
 
+The original author's public command execution event source is:
+
+```text
+/Users/fanzhang/.codex/visualizations/2026/10/03/01a0ff23-1b80-7f50-8087-0fd5e4819c67/interaction-redesign-run/occurrence-terminal-recovery-correction.events.jsonl
+```
+
+The executed commands below come from completed public `command_execution`
+records in that event file. Those records also contain the raw stdout/stderr
+redirect paths and exit status. This receipt does not use reviewer-private
+events or logs.
+
 RED evidence:
 
 ```text
@@ -127,26 +138,32 @@ Static and commit evidence:
 
 ## Chronology and commands
 
-The raw file modification times and the Git commit timestamp are the
-authoritative chronology. The original author-stage note captions are useful
-for command order, but they are not the timestamp source for this receipt.
+The original author's public `command_execution` events are the authoritative
+source for the executed commands, raw redirect paths, and exit status. The
+event records do not contain wall-clock timestamps. The root author admission
+at `2026-10-05 04:09:31 UTC` is an actual stage boundary. The root
+command-mismatch observation at `2026-10-05 04:22:07 UTC` bounds this
+documentation correction. Individual command order below follows the public
+event order, not raw file modification times or original author note guesses.
+Raw file modification times are retained only as filesystem observations. The
+Git commit timestamp remains commit metadata.
 
-The raw streams do not include the shell command line. The command mapping
-below is reconstructed from the raw filenames, their output, the checked
-TypeScript configs, and the author notes/handoff. The tests were not rerun for
-this receipt.
+The commands below are copied from completed public `command_execution` events.
+The three corrected rows use events `item_40`, `item_67`, and `item_68`. Each
+has `exit_code` 0 and redirects to the named raw files. All other listed command
+events also have `exit_code` 0. The tests were not rerun for this receipt.
 
-| Actual UTC from raw file mtime | Node | Command mapping | Observed evidence |
+| Raw mtime (UTC observation only) | Node | Executed command from public event | Observed evidence |
 | --- | --- | --- | --- |
 | 2026-10-05T04:03:56Z | install | `pnpm install --frozen-lockfile` | `install.stdout` shows pnpm `10.31.0`, lockfile up to date, install done |
-| 2026-10-05T04:04:18Z | RED contracts compile | `pnpm exec tsc -p tests/contracts/tsconfig.json` | `red-contracts-tsc.stdout` and `.stderr` are empty; author notes record exit 0 |
-| 2026-10-05T04:04:52Z | RED core compile | `pnpm exec tsc -p tests/core/tsconfig.json` | `red-core-tsc.stdout` and `.stderr` are empty; author notes record exit 0 |
+| 2026-10-05T04:04:18Z | RED contracts compile | `pnpm exec tsc -p packages/contracts/tsconfig.json` | `red-contracts-tsc.stdout` and `.stderr` are empty; public event `item_40` has `exit_code` 0 |
+| 2026-10-05T04:04:52Z | RED core compile | `pnpm exec tsc -p tests/core/tsconfig.json` | `red-core-tsc.stdout` and `.stderr` are empty; public event has `exit_code` 0 |
 | 2026-10-05T04:04:57Z | RED core TAP | `node --test dist/tests/tests/core/core.test.js dist/tests/tests/core/occurrence-authority-public-consumer.test.js` | `red-core-node.stdout` has `1..30`, `# tests 30`, `# pass 28`, `# fail 2`, zero cancelled/skipped/todo; failures 27 and 28 expect `recoveryRequired=true` and observe `false` |
-| 2026-10-05T04:05:21Z | GREEN core compile | `pnpm exec tsc -p tests/core/tsconfig.json` | `green-core-tsc.stdout` and `.stderr` are empty; author notes record exit 0 |
+| 2026-10-05T04:05:21Z | GREEN core compile | `pnpm exec tsc -p tests/core/tsconfig.json` | `green-core-tsc.stdout` and `.stderr` are empty; public event has `exit_code` 0 |
 | 2026-10-05T04:05:27Z | GREEN core TAP | `node --test dist/tests/tests/core/core.test.js dist/tests/tests/core/occurrence-authority-public-consumer.test.js` | `green-core-node.stdout` has `# tests 30`, `# pass 30`, `# fail 0`, zero cancelled/skipped/todo |
-| 2026-10-05T04:05:48Z | GREEN contracts, intake, explicit-brain, policy compile | `pnpm exec tsc -p tests/contracts/tsconfig.json`; `pnpm exec tsc -p tests/runtime/intake/tsconfig.json`; `pnpm exec tsc -p tests/runtime/explicit-brain/tsconfig.json`; `pnpm exec tsc -p tests/runtime/verification-policy-compiler/tsconfig.json` | all eight raw compiler stdout/stderr files are empty; author notes record exit 0 for each |
-| 2026-10-05T04:06:00Z to 04:06:01Z | GREEN contracts, intake, explicit-brain, policy TAP | `node --test dist/tests/tests/contracts/contracts.test.js dist/tests/tests/contracts/occurrence-admission-public-consumer.test.js`; `node --test dist/tests-runtime-intake/tests/runtime/intake/draft-public.test.js dist/tests-runtime-intake/tests/runtime/intake/intake.test.js`; `node --test dist/tests-explicit-brain/tests/runtime/explicit-brain/explicit-brain.test.js`; `node --test dist/tests/runtime/verification-policy-compiler/tests/runtime/verification-policy-compiler/verification-policy-compiler.test.js` | contracts `67/67`; intake `35/35`; explicit-brain `46/46`; policy `8/8`; each has `# fail 0`, zero cancelled/skipped/todo |
-| 2026-10-05T04:06:13Z to 04:06:14Z | typecheck, DAG, diff | `pnpm typecheck`; `pnpm dagpipe:validate`; `git diff --check` | typecheck output shows `tsc --noEmit` and empty stderr; DAG output says `validated 9 DAGpipe graph(s)`; diff stdout/stderr are empty; author notes record exit 0 for each |
+| 2026-10-05T04:05:48Z | GREEN contracts, intake, explicit-brain, policy compile | `pnpm exec tsc -p tests/contracts/tsconfig.json`; `pnpm exec tsc -p tests/runtime/intake/tsconfig.json`; `pnpm exec tsc -p tests/runtime/explicit-brain/tsconfig.json`; `pnpm exec tsc -p tests/runtime/verification-policy-compiler/tsconfig.json` | all eight raw compiler stdout/stderr files are empty; public events have `exit_code` 0 |
+| 2026-10-05T04:06:00Z to 04:06:01Z | GREEN contracts, intake, explicit-brain, policy TAP | `node --test dist/tests/tests/contracts/contracts.test.js dist/tests/tests/contracts/interaction-contracts-public-consumer.test.js dist/tests/tests/contracts/occurrence-admission-public-consumer.test.js`; `node --test dist/tests-runtime-intake/tests/runtime/intake/draft-public.test.js`; `node --test dist/tests-explicit-brain/tests/runtime/explicit-brain/explicit-brain.test.js`; `node --test dist/tests/runtime/verification-policy-compiler/tests/runtime/verification-policy-compiler/verification-policy-compiler.test.js` | contracts `67/67`; intake `35/35`; explicit-brain `46/46`; policy `8/8`; each has `# fail 0`, zero cancelled/skipped/todo |
+| 2026-10-05T04:06:13Z to 04:06:14Z | typecheck, DAG, diff | `pnpm typecheck`; `pnpm dagpipe:validate`; `git diff --check` | typecheck output shows `tsc --noEmit` and empty stderr; DAG output says `validated 9 DAGpipe graph(s)`; diff stdout/stderr are empty; public events have `exit_code` 0 |
 | 2026-10-05T04:07:45Z | commit | ordinary Git CLI commit, normal hooks, no bypass recorded | `commit.stdout` shows `a3f3c93` and `2 files changed, 89 insertions(+), 16 deletions(-)`; `commit.stderr` is empty |
 
 The author notes also record one setup failure before product evidence: the
