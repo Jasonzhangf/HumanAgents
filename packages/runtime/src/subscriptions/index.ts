@@ -2,6 +2,7 @@ import {
   assertOccurrenceClaimFence,
   assertOccurrenceClaimable,
   assertOccurrenceClaimLease,
+  assertPendingReminderRecoverable,
   assertVerifiedTerminalReceipt,
   decideSubscriptionControl,
   executionPolicyHash,
@@ -442,6 +443,12 @@ export class SubscriptionControlPort {
         policyHash: decision.policyHash,
         receipts: [...snapshot.receipts, decision.receipt],
         occurrences: applyOccurrences(snapshot.occurrences, decision.superseded),
+        reminders: snapshot.reminders.map((reminder) => decision.superseded.some((occurrence) => occurrence.subscriptionId === reminder.subscriptionId
+          && occurrence.scheduleRevision === reminder.scheduleRevision
+          && occurrence.occurrenceOrdinal === reminder.occurrenceOrdinal
+          && occurrence.dueAt === reminder.dueAt) && reminder.state === 'pending'
+            ? { ...reminder, state: 'invalidated' as const }
+            : reminder),
       });
       state.subscriptions[key(request.subscriptionId)] = next;
       await append(this.record(state));
@@ -644,6 +651,56 @@ export class SubscriptionControlPort {
         if (existing.dueAt !== input.occurrence.dueAt
           || policySlotOrdinal(snapshot.policy, existing.dueAt) !== existing.occurrenceOrdinal) {
           throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence does not match the committed policy slot');
+        }
+        if (!input.busy && existing.state === 'reminder-pending') {
+          let recovered: Occurrence;
+          let closed: boolean;
+          let nextReminders = snapshot.reminders;
+          try {
+            assertPendingReminderRecoverable(subscription, snapshot.policy, existing, snapshot.reminders, input.nowAt);
+            recovered = { ...existing, state: 'due' };
+            closed = false;
+            nextReminders = snapshot.reminders.map((reminder) => reminder.subscriptionId === existing.subscriptionId
+              && reminder.scheduleRevision === existing.scheduleRevision
+              && reminder.occurrenceOrdinal === existing.occurrenceOrdinal
+              && reminder.dueAt === existing.dueAt
+                ? { ...reminder, state: 'consumed' as const }
+                : reminder);
+          } catch (error) {
+            if (error instanceof CoreSubscriptionControlError) {
+              throw new SubscriptionSchedulerError(error.code === 'superseded' ? 'superseded' : 'invalid-occurrence', error.message);
+            }
+            throw error;
+          }
+          if (snapshot.policy.latePolicy === 'skip' && Date.parse(existing.dueAt) < Date.parse(input.nowAt)) {
+            recovered = { ...existing, state: 'skipped-busy' };
+            closed = true;
+            nextReminders = snapshot.reminders.map((reminder) => reminder.subscriptionId === existing.subscriptionId
+              && reminder.scheduleRevision === existing.scheduleRevision
+              && reminder.occurrenceOrdinal === existing.occurrenceOrdinal
+              && reminder.dueAt === existing.dueAt
+                ? { ...reminder, state: 'invalidated' as const }
+                : reminder);
+          }
+          const nextCurrentOccurrenceOrdinal = closed
+            ? Math.max(subscription.currentOccurrenceOrdinal, existing.occurrenceOrdinal)
+            : subscription.currentOccurrenceOrdinal;
+          const max = policyMaxOccurrences(snapshot.policy);
+          const next: SubscriptionSnapshot = normalizeSnapshot({
+            ...snapshot,
+            subscription: {
+              ...subscription,
+              currentOccurrenceOrdinal: nextCurrentOccurrenceOrdinal,
+              state: closed && max !== undefined && nextCurrentOccurrenceOrdinal >= max
+                ? 'exhausted' as const
+                : subscription.state,
+            },
+            occurrences: applyOccurrence(snapshot.occurrences, recovered),
+            reminders: nextReminders,
+          });
+          state.subscriptions[key(input.occurrence.subscriptionId)] = next;
+          await append(this.record(state));
+          return cloneState(recovered);
         }
         return cloneState(existing);
       }

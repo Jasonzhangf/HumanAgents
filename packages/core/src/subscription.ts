@@ -11,6 +11,7 @@ import {
   type Occurrence,
   type OccurrenceClaim,
   type OperationId,
+  type Reminder,
   type ServeTaskTerminalReceipt,
   type Subscription,
   type SubscriptionControlReceipt,
@@ -309,6 +310,40 @@ export function assertOccurrenceClaimable(
   }
   if (Date.parse(occurrence.dueAt) > Date.parse(nowAt) + 1_000) {
     fail('invalid-occurrence', 'occurrence is not due yet');
+  }
+}
+
+export function assertPendingReminderRecoverable(
+  subscription: Subscription,
+  policy: ExecutionPolicyDefinition,
+  occurrence: Occurrence,
+  reminders: readonly Reminder[],
+  nowAt: string,
+): void {
+  validateSubscription(subscription);
+  validateExecutionPolicyDefinition(policy);
+  validateOccurrence(occurrence);
+  const now = Date.parse(nowAt);
+  if (!Number.isFinite(now)) fail('invalid-occurrence', 'nowAt must be a valid timestamp');
+  if (subscription.state !== 'active') fail('invalid-state', `subscription is ${subscription.state}`);
+  if (occurrence.subscriptionId !== subscription.subscriptionId) fail('invalid-occurrence', 'occurrence belongs to another subscription');
+  if (occurrence.scheduleRevision !== subscription.scheduleRevision) fail('superseded', 'occurrence schedule revision is superseded');
+  if (occurrence.state !== 'reminder-pending') fail('invalid-occurrence', `occurrence state ${occurrence.state} is not reminder-pending`);
+  const reminder = reminders.find((candidate) => candidate.subscriptionId === occurrence.subscriptionId
+    && candidate.scheduleRevision === occurrence.scheduleRevision
+    && candidate.occurrenceOrdinal === occurrence.occurrenceOrdinal
+    && candidate.dueAt === occurrence.dueAt);
+  if (!reminder) fail('invalid-occurrence', 'pending reminder does not match the committed occurrence');
+  if (reminder.state !== 'pending') fail('invalid-occurrence', `reminder state ${reminder.state} is not pending`);
+  if (occurrence.occurrenceOrdinal <= subscription.currentOccurrenceOrdinal) {
+    fail('invalid-occurrence', 'occurrence ordinal has already been consumed');
+  }
+  const maxOccurrences = policy.executionMode === 'once' ? 1 : policy.maxOccurrences;
+  if (maxOccurrences !== undefined && occurrence.occurrenceOrdinal > maxOccurrences) {
+    fail('exhausted', 'occurrence ordinal exceeds maxOccurrences');
+  }
+  if (policy.executionMode !== 'once' && policy.endAt !== undefined && Date.parse(occurrence.dueAt) >= Date.parse(policy.endAt)) {
+    fail('exhausted', 'occurrence is outside the subscription end');
   }
 }
 

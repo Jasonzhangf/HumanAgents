@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -1142,6 +1142,44 @@ test('public idle reminders coalesce to one pending reminder per subscription', 
 
     const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
     assert.deepEqual((await restarted.snapshot('subscription-a')).reminders, snapshot.reminders);
+  });
+});
+
+async function withRestartedStore<T>(work: (port: SubscriptionControlPort, file: string) => Promise<T>): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-subscriptions-'));
+  const file = join(root, 'subscriptions.jsonl');
+  try {
+    const first = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    return await work(first, file);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test('public idle reminder restarts to due and claims with reminder closure', async () => {
+  await withRestartedStore(async (port, file) => {
+    await port.create(initialSubscription({ busyPolicy: 'idle-reminder' }), executionPolicy({
+      executionMode: 'recurring',
+      startAt: '2026-10-03T00:00:00.000Z',
+      maxOccurrences: 3,
+      frequency: 'interval',
+      intervalMinutes: 60,
+      busyPolicy: 'idle-reminder',
+    }));
+    await port.schedule(occurrenceInput({ busy: true }));
+    const restarted = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
+    const recovered = await restarted.schedule(occurrenceInput({ busy: false }));
+    assert.equal(recovered.state, 'due');
+    const claim = await restarted.claim(claimRequest());
+    assert.equal(claim.occurrenceOrdinal, 1);
+    await restarted.settleOccurrence({ occurrenceId: claim.occurrenceId, terminal: terminalReceipt() });
+    const snapshot = await restarted.snapshot('subscription-a');
+    assert.equal(snapshot.occurrences.find((occurrence) => occurrence.occurrenceOrdinal === 1)?.state, 'consumed');
+    assert.equal(snapshot.reminders[0]?.state, 'consumed');
+    const journal = await readFile(file, 'utf8');
+    assert.match(journal, /"occurrenceOrdinal":1,\s*"state":"consumed"/);
+    assert.match(journal, /"reminderId":"reminder:subscription-a"/);
+    assert.match(journal, /"state":"consumed"/);
   });
 });
 
