@@ -9,6 +9,15 @@ import type {
   OperationStatus,
   RouteSelection,
   Scope,
+  TaskCheckEvidence,
+  TaskCheckPolicy,
+  TaskExecutionEvidence,
+  TaskObservationProductionResult,
+  TaskVerificationBinding,
+  TaskVerificationPolicy,
+  TaskVerificationResult,
+  TaskVisualCheckPolicy,
+  TaskVisualObservationReceipt,
   ToolRegistration,
 } from '../../../contracts/src/index.js';
 import type {
@@ -110,6 +119,30 @@ export interface OperationVerifierRequest {
 
 export interface OperationVerifierPort {
   verify(input: OperationVerifierRequest): Promise<OperationVerifierDecision>;
+}
+
+export interface TaskObservationProductionPort {
+  produce(input: {
+    readonly policy: TaskVisualCheckPolicy;
+    readonly binding: TaskVerificationBinding;
+  }): Promise<TaskObservationProductionResult>;
+}
+
+export interface TaskVerificationExecutionPort {
+  execute(input: {
+    readonly policy: TaskVerificationPolicy;
+    readonly binding: TaskVerificationBinding;
+    readonly check: TaskCheckPolicy;
+    readonly observation?: TaskVisualObservationReceipt;
+  }): Promise<TaskCheckEvidence>;
+}
+
+export interface TaskVerificationPort {
+  verify(input: {
+    readonly policy: TaskVerificationPolicy;
+    readonly binding: TaskVerificationBinding;
+    readonly executionEvidence: TaskExecutionEvidence;
+  }): Promise<TaskVerificationResult>;
 }
 
 export interface OperationJournalPort {
