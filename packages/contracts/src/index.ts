@@ -739,7 +739,22 @@ export interface WorkResult {
 import { ContractError } from './errors.js';
 export { ContractError } from './errors.js';
 const ID_SCOPES: readonly ScopeKind[] = ['organ', 'task', 'cycle', 'operation', 'checkpoint', 'evidence'];
-const CONTROL_KEYS = new Set(['retry', 'degrade', 'steer', 'continuation', 'health', 'debug', 'checkpoint', 'executionEpoch', 'operationId']);
+const CONTROL_KEYS = new Set([
+  'retry',
+  'degrade',
+  'steer',
+  'continuation',
+  'health',
+  'debug',
+  'checkpoint',
+  'executionEpoch',
+  'operationId',
+  'executionMode',
+  'policyId',
+  'policyRevision',
+  'newPolicy',
+  'newPolicyHash',
+]);
 
 export function id<K extends ScopeKind>(scope: K, value: string): ScopedId<K> {
   if (!ID_SCOPES.includes(scope) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new ContractError(`invalid ${scope} id`);

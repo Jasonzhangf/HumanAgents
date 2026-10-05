@@ -1,0 +1,183 @@
+{
+  "id": "humanagent-subscription-control",
+  "version": "1",
+  "meta": {
+    "title": "订阅控制请求从公开入口到持久化回执",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "controlContract": {
+      "request": "SubscriptionControlRequest = ModifySubscriptionControlRequest | PauseSubscriptionControlRequest | ResumeSubscriptionControlRequest | CancelFutureSubscriptionControlRequest",
+      "modify": "ModifySubscriptionControlRequest { action:'modify', newPolicy: ExecutionPolicyDefinition, newPolicyHash, confirmationRef, expectedPolicyRevision, expectedScheduleRevision, idempotencyKey, requestedAt }",
+      "receipt": "SubscriptionControlReceipt { subscriptionId, action, status, policyRevision, scheduleRevision, idempotencyKey, requestHash, supersededUnclaimedOccurrences, controlRef }",
+      "transactionResource": "packages/adapters/jsonl/src/index.ts:transaction",
+      "criticalSection": "begin_subscription_control_transaction -> decide_subscription_control -> commit_subscription_control",
+      "reminderRecovery": "commit_subscription_control atomically invalidates each pending reminder whose subscriptionId, scheduleRevision, and occurrenceOrdinal are superseded by modify, pause, or cancel-future; reminders are not a second control truth",
+      "linearization": [
+        "control does not depend on due_occurrence; pause/resume/cancel-future commit a durable receipt even when no due slot exists",
+        "control committed before claim supersedes old unclaimed occurrences; claim rechecks committed state and revision and returns typed stale/conflict",
+        "claim committed before control keeps the authorized immutable policy snapshot for that executionEpoch; future pause/cancel-future does not stop in-flight execution",
+        "two modifies from the same base revision produce exactly one applied receipt and typed stale/conflict for the losers",
+        "duplicate idempotencyKey with the same requestHash returns the existing receipt; different content returns conflict",
+        "resume generates deterministic future slots and never reissues superseded occurrences",
+        "journal restart replay restores committed subscription state and receipts"
+      ]
+    },
+    "terminalContract": {
+      "success": "durable_subscription_control_receipt(status=applied)",
+      "duplicate": "durable_subscription_control_receipt(status=duplicate)",
+      "stale": "durable_subscription_control_receipt(status=stale)",
+      "conflict": "durable_subscription_control_receipt(status=conflict)",
+      "failure": "typed control rejection before transaction commit; subscription unchanged and no success receipt",
+      "reminderInvalidation": "superseded pending reminders and their matching unclaimed occurrences become invalidated in the same transaction"
+    }
+  },
+  "inputs": [
+    {
+      "id": "subscription_control_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "accept_subscription_control_request",
+      "operator": "humanagent-subscription-control-request",
+      "operator_version": "1",
+      "inputs": [
+        "subscription_control_request"
+      ],
+      "output": {
+        "id": "typed_subscription_control_intent",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "orchestrate_subscription_control",
+      "operator": "humanagent-subscription-control-orchestrate",
+      "operator_version": "1",
+      "inputs": [
+        "typed_subscription_control_intent"
+      ],
+      "output": {
+        "id": "control_transaction_request",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "begin_subscription_control_transaction",
+      "operator": "humanagent-subscription-control-begin",
+      "operator_version": "1",
+      "inputs": [
+        "control_transaction_request"
+      ],
+      "output": {
+        "id": "locked_subscription_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "decide_subscription_control",
+      "operator": "humanagent-subscription-control-invariants",
+      "operator_version": "1",
+      "inputs": [
+        "locked_subscription_state"
+      ],
+      "output": {
+        "id": "subscription_control_decision",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_subscription_control",
+      "operator": "humanagent-subscription-control-commit",
+      "operator_version": "1",
+      "inputs": [
+        "subscription_control_decision"
+      ],
+      "output": {
+        "id": "durable_subscription_control_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "accept_subscription_control_request",
+      "to": "orchestrate_subscription_control",
+      "arc_id": "typed_subscription_control_intent"
+    },
+    {
+      "from": "orchestrate_subscription_control",
+      "to": "begin_subscription_control_transaction",
+      "arc_id": "control_transaction_request"
+    },
+    {
+      "from": "begin_subscription_control_transaction",
+      "to": "decide_subscription_control",
+      "arc_id": "locked_subscription_state"
+    },
+    {
+      "from": "decide_subscription_control",
+      "to": "commit_subscription_control",
+      "arc_id": "subscription_control_decision"
+    }
+  ],
+  "outputs": [
+    "durable_subscription_control_receipt"
+  ]
+}

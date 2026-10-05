@@ -1,11 +1,14 @@
 {
   "graph": "humanagent-serve-task",
   "labels": {
-    "fifo_peek": "读取 FIFO 队首",
-    "admission_check": "执行资源准入",
-    "correlate_task": "关联或创建运行时任务",
-    "provider_execution": "执行 Provider 任务",
-    "checkpoint_commit": "提交检查点",
-    "task_terminal": "生成任务完成投影"
+    "recover_or_claim_plan": "恢复或认领已授权计划",
+    "validate_plan_lifecycle": "校验计划与执行栅栏",
+    "admission_check": "执行资源与权限准入",
+    "correlate_task": "关联或创建真实任务",
+    "execute_task_turns": "执行真实轮次与工具",
+    "verify_task_result": "校验任务结果与证据",
+    "stop_or_settle": "停止并收拢副作用",
+    "checkpoint_commit": "提交任务检查点",
+    "task_terminal": "生成任务终态与恢复责任"
   }
 }

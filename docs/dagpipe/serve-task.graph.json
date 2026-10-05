@@ -1,20 +1,67 @@
 {
   "id": "humanagent-serve-task",
-  "version": "1",
+  "version": "2",
   "meta": {
-    "title": "serve 运行时从已确认需求到任务完成投影",
-    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+    "title": "serve 运行时从已授权执行计划到真实任务终态与恢复责任",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "verificationContract": {
+      "producer": "TaskExecutionEvidence { taskId, operationId, executionEpoch, inputArtifactDigest, stdout, exitCode, evidenceRefs }",
+      "consumer": "TaskVerificationResult { taskId, operationId, executionEpoch, inputArtifactDigest, status, checkerStdout, checkerExitCode, evidenceRefs }",
+      "status": "success | failed | rejected | missing | blocked | cancelled",
+      "terminalMapping": {
+        "success": "checkpoint succeeded only after checker success",
+        "failed": "checkpoint failed with original stdout/exit preserved",
+        "rejected": "non-success terminal with checker rejection evidence",
+        "missing": "explicit non-success, then cleanup/recovery before checkpoint",
+        "blocked": "waiting/blocked checkpoint with checker owner and recovery condition",
+        "cancelled": "cancelled checkpoint only after stop settlement"
+      },
+      "authority": "typed control; never inferred from business payload, metadata, or logs",
+      "reuseBoundary": "OperationVerifierDecision remains operation-scoped; task-level results use TaskVerificationResult rather than impersonating that contract"
+    },
+    "terminalContract": {
+      "success": "task_terminal with checkpoint and readable result",
+      "failure": "task_terminal with original error and recovery responsibility",
+      "cancel": "stop operation settled before cancelled state",
+      "blocked": "attention with exact blocked object and user action",
+      "cleanup": "settlement receipt, provider close result, missing/rejected verification cleanup, and no false stopped state"
+    }
   },
   "inputs": [
-    { "id": "confirmed_requirement", "schema": "Object" }
+    {
+      "id": "persisted_execution_plan",
+      "schema": "Object"
+    }
   ],
   "nodes": [
     {
-      "id": "fifo_peek",
-      "operator": "humanagent-fifo-peek",
+      "id": "recover_or_claim_plan",
+      "operator": "humanagent-serve-plan-recover",
       "operator_version": "1",
-      "inputs": ["confirmed_requirement"],
-      "output": { "id": "fifo_envelope", "schema": "Object" },
+      "inputs": [
+        "persisted_execution_plan"
+      ],
+      "output": {
+        "id": "claimed_plan",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_plan_lifecycle",
+      "operator": "humanagent-serve-plan-invariants",
+      "operator_version": "1",
+      "inputs": [
+        "claimed_plan"
+      ],
+      "output": {
+        "id": "validated_plan",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -23,8 +70,13 @@
       "id": "admission_check",
       "operator": "humanagent-serve-admission-check",
       "operator_version": "1",
-      "inputs": ["fifo_envelope"],
-      "output": { "id": "admitted_requirement", "schema": "Object" },
+      "inputs": [
+        "validated_plan"
+      ],
+      "output": {
+        "id": "admitted_requirement",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -33,18 +85,58 @@
       "id": "correlate_task",
       "operator": "humanagent-serve-correlate-task",
       "operator_version": "1",
-      "inputs": ["admitted_requirement"],
-      "output": { "id": "runtime_task", "schema": "Object" },
+      "inputs": [
+        "admitted_requirement"
+      ],
+      "output": {
+        "id": "runtime_task",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "provider_execution",
-      "operator": "humanagent-serve-provider-execution",
+      "id": "execute_task_turns",
+      "operator": "humanagent-serve-execute-turns",
       "operator_version": "1",
-      "inputs": ["runtime_task"],
-      "output": { "id": "provider_evidence", "schema": "Object" },
+      "inputs": [
+        "runtime_task"
+      ],
+      "output": {
+        "id": "execution_evidence",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_task_result",
+      "operator": "humanagent-serve-task-verification",
+      "operator_version": "1",
+      "inputs": [
+        "execution_evidence"
+      ],
+      "output": {
+        "id": "task_verification_receipt",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "stop_or_settle",
+      "operator": "humanagent-serve-stop-settle",
+      "operator_version": "1",
+      "inputs": [
+        "task_verification_receipt"
+      ],
+      "output": {
+        "id": "settlement_receipt",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -53,8 +145,13 @@
       "id": "checkpoint_commit",
       "operator": "humanagent-serve-checkpoint-commit",
       "operator_version": "1",
-      "inputs": ["provider_evidence"],
-      "output": { "id": "terminal_checkpoint", "schema": "Object" },
+      "inputs": [
+        "settlement_receipt"
+      ],
+      "output": {
+        "id": "terminal_checkpoint",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -63,19 +160,61 @@
       "id": "task_terminal",
       "operator": "humanagent-serve-task-terminal",
       "operator_version": "1",
-      "inputs": ["terminal_checkpoint"],
-      "output": { "id": "completed_task_projection", "schema": "Object" },
+      "inputs": [
+        "terminal_checkpoint"
+      ],
+      "output": {
+        "id": "task_terminal_projection",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     }
   ],
   "edges": [
-    { "from": "fifo_peek", "to": "admission_check", "arc_id": "fifo_envelope" },
-    { "from": "admission_check", "to": "correlate_task", "arc_id": "admitted_requirement" },
-    { "from": "correlate_task", "to": "provider_execution", "arc_id": "runtime_task" },
-    { "from": "provider_execution", "to": "checkpoint_commit", "arc_id": "provider_evidence" },
-    { "from": "checkpoint_commit", "to": "task_terminal", "arc_id": "terminal_checkpoint" }
+    {
+      "from": "recover_or_claim_plan",
+      "to": "validate_plan_lifecycle",
+      "arc_id": "claimed_plan"
+    },
+    {
+      "from": "validate_plan_lifecycle",
+      "to": "admission_check",
+      "arc_id": "validated_plan"
+    },
+    {
+      "from": "admission_check",
+      "to": "correlate_task",
+      "arc_id": "admitted_requirement"
+    },
+    {
+      "from": "correlate_task",
+      "to": "execute_task_turns",
+      "arc_id": "runtime_task"
+    },
+    {
+      "from": "execute_task_turns",
+      "to": "verify_task_result",
+      "arc_id": "execution_evidence"
+    },
+    {
+      "from": "verify_task_result",
+      "to": "stop_or_settle",
+      "arc_id": "task_verification_receipt"
+    },
+    {
+      "from": "stop_or_settle",
+      "to": "checkpoint_commit",
+      "arc_id": "settlement_receipt"
+    },
+    {
+      "from": "checkpoint_commit",
+      "to": "task_terminal",
+      "arc_id": "terminal_checkpoint"
+    }
   ],
-  "outputs": ["completed_task_projection"]
+  "outputs": [
+    "task_terminal_projection"
+  ]
 }

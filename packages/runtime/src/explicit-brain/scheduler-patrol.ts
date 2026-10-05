@@ -1,5 +1,10 @@
 import {
-  occurrenceIdempotencyKey,
+  SubscriptionSchedulerError,
+  type SubscriptionControlPort,
+  type SubscriptionControlReceipt,
+  type SubscriptionControlRequest,
+} from '../subscriptions/index.js';
+import {
   validateOccurrence,
   validateSubscription,
   type Occurrence,
@@ -7,7 +12,7 @@ import {
 } from '../../../contracts/src/index.js';
 
 export class SchedulerPatrolError extends Error {
-  readonly code: 'subscription-not-found' | 'subscription-state' | 'idempotency-conflict';
+  readonly code: 'subscription-not-found' | 'subscription-state' | 'idempotency-conflict' | 'serve-task-pending';
 
   constructor(code: SchedulerPatrolError['code'], message: string) {
     super(message);
@@ -30,10 +35,6 @@ export interface SchedulerPatrolTrigger {
 }
 
 export interface SchedulerPatrolPort {
-  submitTrigger(input: SchedulerPatrolTrigger): Promise<{
-    readonly triggerReceiptRef: string;
-    readonly accepted: boolean;
-  }>;
   createAttention(input: {
     readonly sourceRef: string;
     readonly reason: string;
@@ -46,8 +47,14 @@ export interface SchedulerPatrolReceipt {
   readonly subscriptionId: string;
   readonly occurrence: Occurrence;
   readonly nextCheckRef: string;
-  readonly triggerReceiptRef?: string;
   readonly attentionRef?: string;
+}
+
+export interface SchedulerPatrolControlInput {
+  readonly expectedPolicyRevision: number;
+  readonly expectedScheduleRevision?: number;
+  readonly idempotencyKey: string;
+  readonly requestedAt: string;
 }
 
 export interface SchedulerPatrolOptions {
@@ -55,43 +62,27 @@ export interface SchedulerPatrolOptions {
   readonly trigger: Omit<SchedulerPatrolTrigger, 'idempotencyKey'>;
   readonly port: SchedulerPatrolPort;
   readonly now: () => Date;
+  readonly subscriptionPort?: SubscriptionControlPort;
 }
 
 export class SchedulerPatrol {
-  private subscription: Subscription;
-  private readonly completed = new Map<string, SchedulerPatrolReceipt>();
-  private lastOccurrence?: Occurrence;
+  private readonly subscriptionId: string;
 
   constructor(private readonly options: SchedulerPatrolOptions) {
     validateSubscription(options.subscription);
-    this.subscription = { ...options.subscription };
+    this.subscriptionId = options.subscription.subscriptionId;
   }
 
-  snapshot(): Subscription {
-    return { ...this.subscription };
+  async snapshot(): Promise<Subscription> {
+    return (await this.requireSubscriptionPort().snapshot(this.subscriptionId)).subscription;
   }
 
-  pause(): Subscription {
-    this.subscription = {
-      ...this.subscription,
-      state: 'suspended',
-      scheduleRevision: this.subscription.scheduleRevision + 1,
-    };
-    validateSubscription(this.subscription);
-    return this.snapshot();
+  async pause(input: SchedulerPatrolControlInput): Promise<SubscriptionControlReceipt> {
+    return this.control({ ...input, subscriptionId: this.subscriptionId, action: 'pause' });
   }
 
-  resume(): Subscription {
-    if (this.subscription.state !== 'suspended') {
-      throw new SchedulerPatrolError('subscription-state', 'only a suspended subscription can be resumed');
-    }
-    this.subscription = {
-      ...this.subscription,
-      state: 'active',
-      scheduleRevision: this.subscription.scheduleRevision + 1,
-    };
-    validateSubscription(this.subscription);
-    return this.snapshot();
+  async resume(input: SchedulerPatrolControlInput): Promise<SubscriptionControlReceipt> {
+    return this.control({ ...input, subscriptionId: this.subscriptionId, action: 'resume' });
   }
 
   async run(input: {
@@ -105,76 +96,84 @@ export class SchedulerPatrol {
     if (Date.parse(input.dueAt) > now.getTime()) {
       throw new SchedulerPatrolError('subscription-state', 'scheduler patrol occurrence is not due yet');
     }
-    if (this.subscription.state !== 'active') {
-      throw new SchedulerPatrolError('subscription-state', `subscription is ${this.subscription.state}`);
+    if (this.options.subscriptionPort === undefined) {
+      const snapshot = this.options.subscription;
+      const occurrence = this.occurrenceFor(snapshot, input.dueAt);
+      validateOccurrence(occurrence);
+      return this.pendingAttention(occurrence, 'scheduler patrol requires the typed SubscriptionControlPort');
     }
-    const replay = this.lastOccurrence?.dueAt === input.dueAt
-      && this.lastOccurrence.scheduleRevision === this.subscription.scheduleRevision;
-    const occurrenceOrdinal = replay
-      ? this.lastOccurrence!.occurrenceOrdinal
-      : this.subscription.currentOccurrenceOrdinal + 1;
-    const occurrence: Occurrence = {
-      subscriptionId: this.subscription.subscriptionId,
-      scheduleRevision: this.subscription.scheduleRevision,
-      occurrenceOrdinal,
-      state: input.busy && this.subscription.busyPolicy === 'skip' ? 'skipped-busy' : 'claimed',
-      dueAt: input.dueAt,
-    };
+    const snapshot = await this.options.subscriptionPort.snapshot(this.subscriptionId);
+    const subscription = snapshot.subscription;
+    if (subscription.state !== 'active') {
+      throw new SchedulerPatrolError('subscription-state', `subscription is ${subscription.state}`);
+    }
+    const occurrence = this.occurrenceFor(subscription, input.dueAt);
     validateOccurrence(occurrence);
-    const idempotencyKey = occurrenceIdempotencyKey(occurrence);
-    const existing = this.completed.get(idempotencyKey);
-    if (existing) return { ...existing };
-
-    if (!replay) {
-      this.subscription = {
-        ...this.subscription,
-        currentOccurrenceOrdinal: occurrenceOrdinal,
-      };
-      this.lastOccurrence = occurrence;
-    }
-
-    if (occurrence.state === 'skipped-busy') {
-      const receipt = {
-        subscriptionId: this.subscription.subscriptionId,
-        occurrence: { ...occurrence, state: 'consumed' as const },
-        nextCheckRef: `next-check:${idempotencyKey}`,
-      };
-      this.completed.set(idempotencyKey, receipt);
-      return { ...receipt };
-    }
-
     try {
-      const submitted = await this.options.port.submitTrigger({
-        ...this.options.trigger,
-        idempotencyKey,
+      const scheduled = await this.options.subscriptionPort.schedule({
+        occurrence,
+        nowAt: now.toISOString(),
+        busy: input.busy,
       });
-      if (!submitted.accepted) {
-        throw new Error('scheduler patrol trigger was not accepted');
-      }
-      const receipt = {
-        subscriptionId: this.subscription.subscriptionId,
-        occurrence: { ...occurrence, state: 'consumed' as const },
-        triggerReceiptRef: submitted.triggerReceiptRef,
-        nextCheckRef: `next-check:${idempotencyKey}`,
+      return {
+        subscriptionId: this.subscriptionId,
+        occurrence: scheduled,
+        nextCheckRef: `next-check:${scheduled.subscriptionId}::${scheduled.scheduleRevision}::${scheduled.occurrenceOrdinal}`,
       };
-      this.completed.set(idempotencyKey, receipt);
-      return { ...receipt };
     } catch (error) {
+      if (!(error instanceof SubscriptionSchedulerError)) throw error;
       const failedOccurrence: Occurrence = { ...occurrence, state: 'due' };
-      const failureKey = `${idempotencyKey}:attention`;
+      const failureKey = `${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`;
       const attention = await this.options.port.createAttention({
         sourceRef: this.options.trigger.triggerRef,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: error.message,
         nextAction: 'retry-scheduler-patrol',
         conditionRef: failureKey,
       });
       const receipt = {
-        subscriptionId: this.subscription.subscriptionId,
+        subscriptionId: this.subscriptionId,
         occurrence: failedOccurrence,
         attentionRef: attention.attentionRef,
         nextCheckRef: `next-check:${failureKey}`,
       };
       return { ...receipt };
     }
+  }
+
+  private requireSubscriptionPort(): SubscriptionControlPort {
+    if (this.options.subscriptionPort === undefined) {
+      throw new SchedulerPatrolError('serve-task-pending', 'scheduler patrol requires the typed SubscriptionControlPort');
+    }
+    return this.options.subscriptionPort;
+  }
+
+  private async control(request: SubscriptionControlRequest): Promise<SubscriptionControlReceipt> {
+    return this.requireSubscriptionPort().control(request);
+  }
+
+  private occurrenceFor(subscription: Subscription, dueAt: string): Occurrence {
+    return {
+      subscriptionId: subscription.subscriptionId,
+      scheduleRevision: subscription.scheduleRevision,
+      occurrenceOrdinal: subscription.currentOccurrenceOrdinal + 1,
+      state: 'due',
+      dueAt,
+    };
+  }
+
+  private async pendingAttention(occurrence: Occurrence, message: string): Promise<SchedulerPatrolReceipt> {
+    const error = new SchedulerPatrolError('serve-task-pending', message);
+    const attention = await this.options.port.createAttention({
+      sourceRef: this.options.trigger.triggerRef,
+      reason: error.message,
+      nextAction: 'retry-scheduler-patrol',
+      conditionRef: `${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`,
+    });
+    return {
+      subscriptionId: this.subscriptionId,
+      occurrence,
+      attentionRef: attention.attentionRef,
+      nextCheckRef: `next-check:${occurrence.subscriptionId}::${occurrence.scheduleRevision}::${occurrence.occurrenceOrdinal}:${error.code}`,
+    };
   }
 }

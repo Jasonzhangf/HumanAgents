@@ -1,6 +1,9 @@
+/// <reference path="./node-modules.d.ts" />
+
 import { link, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
+import { kill, pid } from 'node:process';
 import {
   assertCheckpointLink,
   assertEvidenceRef,
@@ -23,14 +26,6 @@ import type {
   ReadEventInput,
   ReadEventsInput,
 } from '../../../runtime/src/events/ports.js';
-
-declare module 'node:fs/promises' {
-  interface FileHandle {
-    sync(): Promise<void>;
-  }
-  function link(oldPath: string, newPath: string): Promise<void>;
-  function rename(oldPath: string, newPath: string): Promise<void>;
-}
 
 export type JournalRecordKind = 'checkpoint' | 'event';
 
@@ -93,7 +88,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function randomToken(): string {
-  return String(createHash('sha256').update(`${process.pid}:${Date.now()}:${Math.random()}`).digest('hex'));
+  return String(createHash('sha256').update(`${pid}:${Date.now()}:${Math.random()}`).digest('hex'));
 }
 
 function assertJournalContract<T>(assertion: () => T): T {
@@ -284,7 +279,7 @@ function readLockInfo(content: string): LockInfo | null {
 
 function processAlive(pid: number): boolean {
   try {
-    (process as unknown as { kill(pid: number, signal: 0): void }).kill(pid, 0);
+    kill(pid, 0);
     return true;
   } catch (error) {
     return (error as { code?: string }).code === 'EPERM';
@@ -312,7 +307,7 @@ async function evictDeadLock(lockPath: string, expected: LockInfo): Promise<bool
     if (!current) return false;
     if (current.pid !== expected.pid || current.token !== expected.token) return false;
     if (processAlive(current.pid)) return false;
-    const stalePath = `${lockPath}.stale-${process.pid}-${Date.now().toString(36)}-${randomToken()}`;
+    const stalePath = `${lockPath}.stale-${pid}-${Date.now().toString(36)}-${randomToken()}`;
     try {
       await rename(lockPath, stalePath);
     } catch (error) {
@@ -333,11 +328,11 @@ async function acquireLock(journalPath: string): Promise<{ path: string; token: 
   const deadline = Date.now() + LOCK_WAIT_MS;
   await mkdir(dirname(journalPath), { recursive: true });
   for (;;) {
-    const tempLockPath = `${lockPath}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const tempLockPath = `${lockPath}.tmp-${pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     try {
       const handle = await open(tempLockPath, 'wx');
       try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt, token }));
+        await handle.writeFile(JSON.stringify({ pid, startedAt, token }));
         await handle.sync();
       } finally {
         await handle.close();
@@ -370,7 +365,7 @@ async function acquireLock(journalPath: string): Promise<{ path: string; token: 
 
 async function releaseLock(lock: { readonly path: string; readonly token: string }): Promise<void> {
   const current = await readLock(lock.path);
-  if (current?.pid === process.pid && current.token === lock.token) {
+  if (current !== null && current.pid === pid && current.token === lock.token) {
     await rm(lock.path, { force: true });
   }
 }
@@ -381,7 +376,7 @@ async function readVerifiedJournal(filePath: string): Promise<JournalVerificatio
 }
 
 async function replaceFileDurably(filePath: string, content: string): Promise<void> {
-  const tempPath = `${filePath}.recover-${process.pid}-${Date.now().toString(36)}-${randomToken()}`;
+  const tempPath = `${filePath}.recover-${pid}-${Date.now().toString(36)}-${randomToken()}`;
   try {
     const handle = await open(tempPath, 'wx');
     try {

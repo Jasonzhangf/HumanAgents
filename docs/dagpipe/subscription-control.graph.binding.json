@@ -1,0 +1,35 @@
+{
+  "graph": "humanagent-subscription-control",
+  "operator": {
+    "operator": "humanagent-subscription-control",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "accept_subscription_control_request": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "plannedOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "implementationStatus": "pending"
+    },
+    "orchestrate_subscription_control": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "implemented"
+    },
+    "begin_subscription_control_transaction": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "implemented"
+    },
+    "decide_subscription_control": {
+      "ownerPath": "packages/core/src/subscription.ts",
+      "ownerRel": "packages/core/src/subscription.ts",
+      "implementationStatus": "implemented"
+    },
+    "commit_subscription_control": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "implementationStatus": "implemented"
+    }
+  }
+}
