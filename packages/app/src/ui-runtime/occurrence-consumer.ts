@@ -315,8 +315,15 @@ export class DurableOccurrenceConsumer implements ServeTaskConsumerPort {
     readonly occurrence: Occurrence;
     readonly policy: ExecutionPolicyDefinition;
     readonly claim: OccurrenceClaimRecord;
+    readonly binding: OccurrenceTaskBinding;
   }): Promise<ServeTaskTerminalReceipt> {
     const authoritativeBinding = this.authoritativeBindingFor(input.claim, input.policy);
+    if (!sameBinding(input.binding, authoritativeBinding)) {
+      throw new DurableOccurrenceConsumerError(
+        'invalid-binding',
+        'requested binding does not match the authoritative persisted claim',
+      );
+    }
     const requestedBinding = this.requestedBindingFor(input.occurrence, authoritativeBinding);
     const admissionCommitId = await occurrenceExecutionAdmissionCommitId(authoritativeBinding);
     const receiptCommitId = await occurrenceTerminalReceiptCommitId(authoritativeBinding);

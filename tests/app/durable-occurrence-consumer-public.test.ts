@@ -404,6 +404,7 @@ function childInputs(input: {
     workspace: input.paths.workspaceCwd,
     journalPath: input.journalPath,
     scope: input.scope,
+    binding: input.binding,
     occurrence: input.occurrence,
     policy: POLICY,
     claim: input.claim,
@@ -432,6 +433,7 @@ test('first admission dispatches exactly once and commits a paired checkpoint + 
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
 
     assert.equal(counter.count(), 1);
@@ -488,6 +490,7 @@ test('a mismatched requested occurrence cannot mutate or dispatch against the au
         occurrence: mismatchedOccurrence,
         policy: POLICY,
         claim: claimFor(binding),
+        binding,
       }),
       (error: unknown) => error instanceof DurableOccurrenceConsumerError && error.code === 'invalid-binding',
     );
@@ -515,6 +518,7 @@ test('replay on the same port, a new port, and a new OS process never dispatches
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 1);
 
@@ -522,6 +526,7 @@ test('replay on the same port, a new port, and a new OS process never dispatches
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 1);
     assert.deepEqual(samePort, committed);
@@ -531,6 +536,7 @@ test('replay on the same port, a new port, and a new OS process never dispatches
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 1);
     assert.deepEqual(newPort, committed);
@@ -564,7 +570,7 @@ test('replay on the same port, a new port, and a new OS process never dispatches
         checkpoints: new FileCheckpointStore(input.journalPath),
         dispatch: { async dispatch() { dispatches += 1; throw new Error('replay must not dispatch'); } },
       });
-      const receipt = await consumer.executeOccurrence({ occurrence: input.occurrence, policy: input.policy, claim: input.claim });
+      const receipt = await consumer.executeOccurrence({ occurrence: input.occurrence, policy: input.policy, claim: input.claim, binding: input.binding });
       await lease.release();
       console.log(JSON.stringify({ dispatches, receipt }));
     `);
@@ -607,7 +613,7 @@ test('admission append failure leaves no admission and dispatches zero times', a
     });
 
     await assert.rejects(
-      () => consumer.executeOccurrence({ occurrence: occurrenceFor(binding), policy: POLICY, claim: claimFor(binding) }),
+      () => consumer.executeOccurrence({ occurrence: occurrenceFor(binding), policy: POLICY, claim: claimFor(binding), binding }),
       /simulated admission append failure/,
     );
     assert.equal(counter.count(), 0);
@@ -644,7 +650,7 @@ test('receipt append failure stays durable-unverified-recovery-pending and never
     });
 
     await assert.rejects(
-      () => consumer.executeOccurrence({ occurrence: occurrenceFor(binding), policy: POLICY, claim: claimFor(binding) }),
+      () => consumer.executeOccurrence({ occurrence: occurrenceFor(binding), policy: POLICY, claim: claimFor(binding), binding }),
       /simulated receipt append failure/,
     );
     assert.equal(counter.count(), 1);
@@ -653,7 +659,7 @@ test('receipt append failure stays durable-unverified-recovery-pending and never
     assert.equal(records.filter((record) => record.payload?.kind === 'occurrence-terminal-receipt').length, 0);
 
     await assert.rejects(
-      () => consumer.executeOccurrence({ occurrence: occurrenceFor(binding), policy: POLICY, claim: claimFor(binding) }),
+      () => consumer.executeOccurrence({ occurrence: occurrenceFor(binding), policy: POLICY, claim: claimFor(binding), binding }),
       (error: unknown) => error instanceof DurableOccurrenceConsumerError
         && error.code === 'durable-unverified-recovery-pending',
     );
@@ -679,6 +685,7 @@ test('a different receipt fact under the same binding key is rejected by the jou
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 1);
 
@@ -705,6 +712,7 @@ test('a different receipt fact under the same binding key is rejected by the jou
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 1);
     assert.deepEqual(replayed, committed);
@@ -809,7 +817,7 @@ test('a crashed owner is replaced and the committed replacement writes one block
           },
         },
       });
-      await consumer.executeOccurrence({ occurrence: input.occurrence, policy: input.policy, claim: input.claim });
+      await consumer.executeOccurrence({ occurrence: input.occurrence, policy: input.policy, claim: input.claim, binding: input.binding });
     `);
     assert.equal(child.code, 9, child.stderr);
     assert.equal(existsSync(dispatched), true);
@@ -835,6 +843,7 @@ test('a crashed owner is replaced and the committed replacement writes one block
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 0);
     assert.equal(recovered.verification.status, 'blocked');
@@ -952,7 +961,7 @@ test('live stale A after a committed replacement cannot write, and B recovers wi
       });
       let code = null;
       try {
-        await consumer.executeOccurrence({ occurrence: input.occurrence, policy: input.policy, claim: input.claim });
+        await consumer.executeOccurrence({ occurrence: input.occurrence, policy: input.policy, claim: input.claim, binding: input.binding });
         code = 'committed';
       } catch (error) {
         code = error?.code ?? error?.message;
@@ -991,6 +1000,7 @@ test('live stale A after a committed replacement cannot write, and B recovers wi
       occurrence: occurrenceFor(binding),
       policy: POLICY,
       claim: claimFor(binding),
+      binding,
     });
     assert.equal(counter.count(), 0);
     assert.equal(recovered.verification.status, 'blocked');
@@ -1037,6 +1047,7 @@ test('success, failed, rejected, missing, blocked, and cancelled terminals each 
         occurrence: occurrenceFor(binding),
         policy: POLICY,
         claim: claimFor(binding),
+        binding,
       });
       assert.equal(receipt.verification.status, status, status);
       assert.equal(counter.count(), 1, status);

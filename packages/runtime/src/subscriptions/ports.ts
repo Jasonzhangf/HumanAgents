@@ -8,6 +8,7 @@ import type {
   Occurrence,
   OccurrenceClaim,
   OperationId,
+  OccurrenceTaskBinding,
   ServeTaskTerminalReceipt,
   TaskId,
 } from '../../../contracts/src/index.js';
@@ -21,10 +22,15 @@ export interface OccurrenceClaimRecord extends OccurrenceClaim {
   readonly inputArtifactDigest: string;
 }
 
+// Execute-or-resume contract. The consumer owns one business execution per
+// immutable `OccurrenceTaskBinding`; duplicate, concurrent, and restart calls
+// must return or recover the same `ServeTaskTerminalReceipt` instead of
+// dispatching a second execution.
 export interface ServeTaskConsumerPort {
   executeOccurrence(input: {
     readonly occurrence: Occurrence;
     readonly policy: ExecutionPolicyDefinition;
     readonly claim: OccurrenceClaimRecord;
+    readonly binding: OccurrenceTaskBinding;
   }): Promise<ServeTaskTerminalReceipt>;
 }

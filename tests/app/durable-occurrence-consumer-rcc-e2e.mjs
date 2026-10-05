@@ -535,7 +535,33 @@ async function runCase({ suffix, modelRef, mode }) {
       occurrence: occurrenceFor(taskBinding),
       policy: POLICY,
       claim: claimFor(taskBinding),
+      binding: taskBinding,
     });
+    if (mode === 'success') {
+      const repeated = await consumer.executeOccurrence({
+        occurrence: occurrenceFor(taskBinding),
+        policy: POLICY,
+        claim: claimFor(taskBinding),
+        binding: taskBinding,
+      });
+      assert.deepEqual(repeated, receipt, `${suffix}: real RCC replay must return the same terminal receipt`);
+      const [parallelA, parallelB] = await Promise.all([
+        consumer.executeOccurrence({
+          occurrence: occurrenceFor(taskBinding),
+          policy: POLICY,
+          claim: claimFor(taskBinding),
+          binding: taskBinding,
+        }),
+        consumer.executeOccurrence({
+          occurrence: occurrenceFor(taskBinding),
+          policy: POLICY,
+          claim: claimFor(taskBinding),
+          binding: taskBinding,
+        }),
+      ]);
+      assert.deepEqual(parallelA, receipt, `${suffix}: concurrent real RCC replay must return the same terminal receipt`);
+      assert.deepEqual(parallelB, receipt, `${suffix}: concurrent real RCC replay must return the same terminal receipt`);
+    }
     const records = await new JsonlOrganJournal(journalPath).replay();
     const admission = records.filter((record) => record.payload?.kind === 'occurrence-execution-admission');
     const checkpointRecords = records.filter((record) => record.kind === 'checkpoint');
@@ -605,12 +631,16 @@ async function runCase({ suffix, modelRef, mode }) {
       checkpointCount: checkpointRecords.length,
       receiptCount: receiptRecords.length,
       evidenceFileCount: evidenceFiles.length,
+      capturedRunCount: capturedRuns.length,
       journalPath,
     };
     assert.equal(admission.length, 1, `${suffix}: expected exactly one admission`);
     assert.equal(checkpointRecords.length, 1, `${suffix}: expected exactly one terminal checkpoint`);
     assert.equal(receiptRecords.length, 1, `${suffix}: expected exactly one terminal receipt`);
     assert.ok(evidenceFiles.length > 0, `${suffix}: expected real provider evidence artifacts on disk`);
+    if (mode === 'success') {
+      assert.equal(capturedRuns.length, 1, `${suffix}: real RCC duplicate/concurrent replay must not dispatch a second business execution`);
+    }
     return { result, root, journalPath };
   } finally {
     await lease.release();
