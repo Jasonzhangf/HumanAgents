@@ -63,6 +63,7 @@ export function buildReceipt(binding, evidence = {}) {
     },
     screenshots: evidence.screenshots ?? [],
     cleanup: evidence.cleanup ?? null,
+    cleaned: evidence.cleaned ?? null,
     deviation: evidence.deviation ?? null,
     missingEvidence: evidence.missingEvidence ?? null,
   };
@@ -141,8 +142,16 @@ function renderReceiptMarkdown(receipt) {
   lines.push('## Cleanup');
   lines.push('');
   if (receipt.cleanup) {
+    if (receipt.cleanup.branch !== undefined) {
+      lines.push(`- Branch: \`${String(receipt.cleanup.branch)}\``);
+    }
+    if (receipt.cleaned !== null && receipt.cleaned !== undefined) {
+      lines.push(`- Verified complete: \`${String(receipt.cleaned)}\``);
+    }
     for (const [key, value] of Object.entries(receipt.cleanup)) {
-      lines.push(`- ${key}: \`${String(value)}\``);
+      if (key === 'branch') continue;
+      const rendered = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
+      lines.push(`- ${key}: \`${rendered}\``);
     }
   } else {
     lines.push('- not recorded');
@@ -174,14 +183,4 @@ export function writeReceipt(binding, receipt) {
     mkdir(receiptDir, { recursive: true }).then(() => writeFile(markdownPath, renderReceiptMarkdown(receipt), 'utf8')),
     writeFile(jsonPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8'),
   ]).then(() => ({ markdownPath, jsonPath }));
-}
-
-export function writeIncompleteReceipt(binding, deviation, evidence = {}) {
-  const receipt = buildReceipt(binding, {
-    ...evidence,
-    result: 'INCOMPLETE',
-    deviation,
-    finishedAt: evidence.finishedAt ?? new Date().toISOString(),
-  });
-  return writeReceipt(binding, receipt);
 }
