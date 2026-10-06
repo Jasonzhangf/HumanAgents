@@ -74,6 +74,23 @@ export function createRuntimeApi(options = {}) {
       method: 'POST',
       body: JSON.stringify(confirmation),
     }),
+    // 修改: a typed edit against the exact revision the caller is looking at. The
+    // runtime rejects a stale base revision instead of editing a newer one.
+    refineExplicitDraft: (interactionId, input) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/refine`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    // 重新整理: re-run the explicit brain over the original input, optionally
+    // with a human correction.
+    regenerateExplicitDraft: (interactionId, input = {}) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    // 放弃: the durable closure. The response carries the abandon receipt.
+    rejectExplicitDraft: (interactionId, input) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
     dispatchNextExplicitRequirement: () => request('/api/explicit/dispatch-next', { method: 'POST' }),
     memorySummary: ({ namespace = 'project', query = '', limit = 20 } = {}) => {
       const params = new URLSearchParams({ namespace, limit: String(limit) })
@@ -86,6 +103,15 @@ export function createRuntimeApi(options = {}) {
     }),
     taskDetail: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     taskDashboard: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`),
+    // The runtime owns which plan a task resolves to, so only the frozen control
+    // fields travel: a caller cannot name a subscription.
+    planControl: (taskId, { action, idempotencyKey, requestedAt }) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/plan-control`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action, idempotencyKey, requestedAt }),
+      },
+    ),
     taskHistory: (taskId, { cursor, limit = 20, kinds, search } = {}) => {
       const query = new URLSearchParams({ limit: String(limit) })
       if (cursor) query.set('cursor', cursor)
