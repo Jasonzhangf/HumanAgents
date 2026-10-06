@@ -578,15 +578,40 @@ async function submitThroughEntry(page, { rawInput, mode, startAt }) {
   await page.click('#entry-form button[type="submit"]');
 }
 
-async function waitForPlanReceipt(page, mode) {
+/**
+ * Wait until the entry page shows the plan receipt for a scheduled/recurring
+ * submission, or fail fast with the status/error the page actually shows. A
+ * blind `waitForFunction` timeout turns a `status-only` brain reply or a
+ * backend rejection into an opaque 90 s wait.
+ */
+async function waitForPlanReceipt(page, mode, timeoutMs = 90_000) {
   await page.waitForSelector('#entry-draft', { timeout: 20_000 });
-  await page.waitForFunction((expectedMode) => {
-    const panel = document.querySelector('#entry-error');
-    if (panel && !panel.hidden && (panel.textContent || '').trim()) return false;
-    const status = document.querySelector('[role="status"]');
-    const text = status?.textContent || '';
-    return text.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存');
-  }, mode, { timeout: 90_000 });
+  const deadline = Date.now() + timeoutMs;
+  let last = { panelText: '', statusText: '' };
+  while (Date.now() < deadline) {
+    const state = await page.evaluate((expectedMode) => {
+      const panel = document.querySelector('#entry-error');
+      const panelText = panel && !panel.hidden ? (panel.textContent || '').trim() : '';
+      const statusText = (document.querySelector('[role="status"]')?.textContent || '').trim();
+      return {
+        panelText,
+        statusText,
+        hasReceipt: statusText.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存'),
+      };
+    }, mode).catch(() => ({ panelText: '', statusText: '', hasReceipt: false }));
+    last = state;
+    if (state.hasReceipt) return;
+    if (state.panelText) throw new Error(`plan receipt was not produced: ${state.panelText}`);
+    if (state.statusText && !/等待|保存|正在/.test(state.statusText)) {
+      throw new Error(`plan receipt was not produced; page status: ${state.statusText}`);
+    }
+    await page.waitForTimeout(500);
+  }
+  throw new Error(
+    `plan receipt was not produced within ${timeoutMs} ms; `
+    + `the explicit brain may have answered status-only instead of saving a plan `
+    + `(status: ${last.statusText || 'empty'}; error: ${last.panelText || 'none'})`,
+  );
 }
 
 /**
@@ -704,11 +729,14 @@ async function sectionB(browser, artifactDir, root) {
       run.ok = true;
     }
 
-    // Scheduled and recurring: real plans persisted as subscriptions.
+    // Scheduled and recurring: real plans persisted as subscriptions. The two
+    // plans need distinct requirements: the explicit brain matches an existing
+    // task for identical input and answers `status-only`, which would leave the
+    // recurring plan unexercised.
     const subscriptionsPath = join(launched.checkpointRoot, 'rcc', 'subscriptions.jsonl');
     for (const plan of [
       { mode: 'scheduled', label: 'scheduled', rawInput: 'Do not ask questions. Create exactly one task: report the current date.' },
-      { mode: 'recurring', label: 'recurring', rawInput: 'Do not ask questions. Create exactly one task: report the current date.' },
+      { mode: 'recurring', label: 'recurring', rawInput: 'Do not ask questions. Create exactly one task: report the current weekday name.' },
     ]) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
       await pairContext(context, base, workspace, controlRoot);
