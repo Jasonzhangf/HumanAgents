@@ -935,6 +935,8 @@ test('observation page reads only typed pipeline fields and owns no node-order t
   assert.equal(page.includes('node.toolSteps'), true);
   assert.equal(page.includes('projection.handoffs'), true);
   assert.equal(page.includes('projection.selectedNode'), true);
+  assert.equal(page.includes('mountInteractionWorkCard'), true);
+  assert.equal(page.includes("mode: 'observation'"), true);
   assert.equal(page.includes('fromRoleDisplay'), true);
   assert.equal(page.includes('carrySummary'), true);
   assert.equal(page.includes('notCarried'), true);
@@ -947,6 +949,8 @@ test('observation page reads only typed pipeline fields and owns no node-order t
     'node.handoffs',
     'node.inputRefs',
     'node.outputRefs',
+    'renderToolHistory',
+    'renderSummaryPane',
     'fromAgent ',
     'notReturned',
     'export const PIPELINE_ROWS',
@@ -958,6 +962,63 @@ test('observation page reads only typed pipeline fields and owns no node-order t
   // Attribution comes from the typed field only, and the row comes from the projection.
   assert.equal(page.includes("const role = node.ownerAgentRole"), true);
   assert.equal(page.includes('node.row'), true);
+});
+
+test('observation work-card adapter pairs tool calls with results and marks unprojected turns', async () => {
+  const { projectObservationWorkCard } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
+  ).href);
+  const projection = projectObservationWorkCard({
+    node: {
+      nodeId: 'pipeline.execute',
+      title: '执行流水线',
+      kindDisplay: '执行',
+      stateDisplay: '运行中',
+      owner: '执行',
+      ownerAgentRole: 'execution',
+      roleDisplay: '执行',
+      iteration: 2,
+      updatedAt: '2026-10-05T12:00:03Z',
+      summary: '执行完成，taskId 技术标识已折叠',
+      activity: [{
+        activityRef: 'activity:execute-1',
+        summary: 'provider 工具调用已返回',
+        occurredAt: '2026-10-05T12:00:00Z',
+      }],
+      toolSteps: [
+        {
+          stepId: 'call-returned',
+          name: 'read.file',
+          status: 'succeeded',
+          statusDisplay: '已返回',
+          returned: 'status=succeeded · outputRef=asset://output',
+          occurredAt: '2026-10-05T12:00:01Z',
+        },
+        {
+          stepId: 'call-unreturned',
+          name: 'write.file',
+          status: 'unknown',
+          statusDisplay: '未知',
+          returned: 'status=unknown · call=write.file',
+          occurredAt: '2026-10-05T12:00:02Z',
+        },
+      ],
+    },
+  });
+
+  assert.equal(projection.surface, 'interaction-work-card');
+  assert.equal(projection.mode, 'observation');
+  assert.deepEqual(projection.actions, []);
+  assert.equal(projection.conversation.turns.length, 2);
+  assert.equal(projection.conversation.turns[1].markdown, '该条目包含技术细节，完整内容在折叠详情中。');
+  assert.deepEqual(projection.conversation.turns[1].details, [['节点结论原文', '执行完成，taskId 技术标识已折叠']]);
+  const tools = projection.history.items.filter((item: { tool?: unknown }) => item.tool);
+  assert.equal(tools.length, 2);
+  assert.equal(tools[0].tool.paired, true);
+  assert.equal(tools[1].tool.paired, false);
+  assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'model-request'), true);
+  assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'conclusion'), true);
+  assert.equal(projection.history.items.every((item: { turnKey?: string }) => item.turnKey === 'observation:turn-unprojected'), true);
 });
 
 test('UI index is the task input entry with explicit draft, confirmation gate, and runtime status', async () => {

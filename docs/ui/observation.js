@@ -8,6 +8,7 @@ import {
   stateTone,
   taskIdFromQuery,
 } from './runtime-shell.js'
+import { mountInteractionWorkCard } from './interaction-work-card.js'
 
 // Node order, display row and agent ownership are read from the HTTP projection only. The page keeps
 // no second node-order table and no keyword-based attribution: `projection.nodes[].row` comes from
@@ -19,8 +20,6 @@ const UNASSIGNED_LANE = Object.freeze({
   label: '归属未投影',
   role: 'projection 未给出 agentId / ownerAgentRole',
 })
-
-const UNPROJECTED_ROLE = UNASSIGNED_LANE.label
 
 // Distance from the last node box edge to the routing channel, and the channel width itself.
 // The channel width is CSS-owned (`--flow-corridor` on .flow-canvas) so JS only reads it.
@@ -36,6 +35,7 @@ const { main, status } = makePageShell(
 )
 
 let drawer
+let drawerCard
 let triggerNodeId
 let returnFocusPending = false
 let selectedNodeId
@@ -354,6 +354,8 @@ function buildDrawer() {
   const body = element('div', undefined, 'drawer-body')
   drawer.append(body)
   drawer.addEventListener('close', () => {
+    drawerCard?.dispose()
+    drawerCard = undefined
     returnFocusPending = true
     queueMicrotask(focusCurrentTrigger)
   })
@@ -411,72 +413,6 @@ function trapFocus(event) {
     event.preventDefault()
     first.focus()
   }
-}
-
-function renderToolHistory(node) {
-  const panel = element('section', undefined, 'drawer-pane')
-  panel.append(element('h3', '工具调用历史'))
-  // Typed contract: `toolSteps[]` with stepId / name / status / statusDisplay / returned.
-  const calls = Array.isArray(node.toolSteps) ? node.toolSteps : []
-  if (calls.length === 0) {
-    const empty = element('p', '尚未投影工具调用记录；本栏只呈现工具调用与工具返回，不呈现模型私有思维链。', 'flow-empty')
-    empty.dataset.empty = 'true'
-    panel.append(empty)
-    return panel
-  }
-  const list = element('ol', undefined, 'tool-list')
-  for (const call of calls) {
-    const item = element('li', undefined, 'tool-call')
-    item.dataset.stepId = String(call.stepId || '')
-    const head = element('div', undefined, 'tool-call-head')
-    head.append(element('strong', call.name || '未标注工具'))
-    const chip = element('span', call.statusDisplay || call.status || 'unknown', 'state-chip')
-    chip.dataset.tone = stateTone(call.status)
-    head.append(chip)
-    item.append(head)
-    const refs = element('dl', undefined, 'tool-refs')
-    const returned = unresolvedList([call.returned], '未投影工具返回')
-    for (const [label, group] of [['工具返回', returned]]) {
-      const cell = element('div')
-      const dd = element('dd', group.items.join(', '))
-      if (group.empty) dd.dataset.empty = 'true'
-      cell.append(element('dt', label), dd)
-      refs.append(cell)
-    }
-    if (call.occurredAt) {
-      const cell = element('div')
-      cell.append(element('dt', '时间'), element('dd', call.occurredAt))
-      refs.append(cell)
-    }
-    item.append(refs)
-    list.append(item)
-  }
-  panel.append(list)
-  return panel
-}
-
-function renderSummaryPane(node) {
-  const panel = element('section', undefined, 'drawer-pane drawer-pane--summary')
-  panel.append(element('h3', 'summary'))
-  const summary = element('p', node.summary || '尚未投影 summary。', 'drawer-summary')
-  if (!node.summary) summary.dataset.empty = 'true'
-  panel.append(summary, element('p', 'summary 是 agent 自己写入的结论，不代表模型私有推理。', 'drawer-note'))
-  const facts = element('dl', undefined, 'drawer-facts')
-  const role = agentRoleOf(node)
-  for (const [label, value] of [
-    ['节点类型', node.kindDisplay || node.kind || '未标注'],
-    ['状态', node.stateDisplay || nodeState(node)],
-    ['归属 agent', role || UNPROJECTED_ROLE],
-    ['更新时间', node.updatedAt || '未投影'],
-  ]) {
-    const cell = element('div')
-    const dd = element('dd', value)
-    if (!value || value === '未投影' || value === '未标注' || value === UNPROJECTED_ROLE) dd.dataset.empty = 'true'
-    cell.append(element('dt', label), dd)
-    facts.append(cell)
-  }
-  panel.append(facts)
-  return panel
 }
 
 function renderHandoffPane(node, handoffs) {
@@ -543,12 +479,14 @@ function renderDrawerSection(definition, node, handoffs, detail) {
 function renderNodeDrawer(node, handoffs, detail) {
   triggerNodeId = node.nodeId
   const body = drawer.querySelector('.drawer-body')
+  drawerCard?.dispose()
+  drawerCard = undefined
   clearNode(body)
   const head = element('header', undefined, 'drawer-head')
   const titleWrap = element('div')
   titleWrap.append(
     element('p', '节点详情 · 只读', 'eyebrow'),
-    element('h2', node.title || node.nodeId),
+    element('h2', detail?.title || node.title || node.nodeId),
     element('p', '工具调用、工具返回和 agent 自己写入的 summary 结论；不呈现模型私有思维链。', 'drawer-note'),
   )
   const close = element('button', '关闭', 'button drawer-close')
@@ -558,12 +496,16 @@ function renderNodeDrawer(node, handoffs, detail) {
   head.append(titleWrap, close)
   body.append(head)
 
-  // Two visible panes: tool call history on the left, summary on the right.
-  const panes = element('div', undefined, 'drawer-panes')
-  const toolsPane = renderToolHistory(node)
-  toolsPane.classList.add('drawer-pane--tools')
-  panes.append(toolsPane, renderSummaryPane(node))
-  body.append(panes)
+  // The node drawer uses the same status/conversation/trace shell as every
+  // other work card. The adapter keeps this surface read-only.
+  const cardHost = element('div', undefined, 'drawer-work-card-host')
+  cardHost.dataset.observationWorkCard = 'true'
+  body.append(cardHost)
+  drawerCard = mountInteractionWorkCard(cardHost, { mode: 'observation' })
+  // Typed contract: `node.toolSteps` carries stepId / name / status / statusDisplay / returned.
+  // The typed drawer detail owns those steps; the node card is only the fallback identity.
+  const observationNode = detail || node
+  drawerCard.update({ node: { ...observationNode, toolSteps: observationNode.toolSteps || [] }, handoffs })
 
   // Handoff lives on its own page inside the same sheet.
   const tabs = element('div', undefined, 'drawer-tabs')
