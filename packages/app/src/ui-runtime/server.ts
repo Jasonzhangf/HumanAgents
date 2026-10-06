@@ -613,6 +613,31 @@ async function handleRequest(
       writeJson(response, 200, await schedulerStatus());
       return;
     }
+    // The only production entry to the persisted plan control edge. The plan is
+    // named by its own id; the expected revisions are read from the authoritative
+    // snapshot inside the service, so a client cannot declare a revision.
+    const planControl = /^\/api\/plans\/([^/]+)\/control$/.exec(path);
+    if (planControl && method === 'POST') {
+      const body = await readBody(request);
+      const action = requireString(body, 'action');
+      if (action !== 'pause' && action !== 'resume' && action !== 'cancel-future') {
+        throw new UiRuntimeApiError(
+          'execution-plan.action-unsupported',
+          APP_OWNER,
+          action === 'modify'
+            ? 'the modify action has no production entry: no confirmationRef collection surface exists'
+            : `unsupported execution plan control action: ${action}`,
+          'use pause, resume or cancel-future',
+          400,
+        );
+      }
+      writeJson(response, 200, await service.controlExecutionPlan(decodeURIComponent(planControl[1]!), {
+        action,
+        idempotencyKey: requireString(body, 'idempotencyKey'),
+        requestedAt: requireString(body, 'requestedAt'),
+      }));
+      return;
+    }
     if (path === '/api/runtime/identity' && method === 'GET') {
       if (identity === undefined) {
         throw new UiRuntimeApiError(
@@ -952,7 +977,7 @@ async function handleRequest(
     }
     const taskDashboard = /^\/api\/tasks\/([^/]+)\/dashboard$/.exec(path);
     if (taskDashboard && method === 'GET') {
-      writeJson(response, 200, service.taskDashboard(id('task', decodeURIComponent(taskDashboard[1]!))));
+      writeJson(response, 200, await service.taskDashboardWithPlan(id('task', decodeURIComponent(taskDashboard[1]!))));
       return;
     }
     const taskObservation = /^\/api\/tasks\/([^/]+)\/observation$/.exec(path);
@@ -1033,7 +1058,7 @@ async function handleRequest(
       return;
     }
     if (taskDetail && method === 'DELETE') {
-      writeJson(response, 200, service.deleteTask(id('task', decodeURIComponent(taskDetail[1]!))));
+      writeJson(response, 200, await service.deleteTask(id('task', decodeURIComponent(taskDetail[1]!))));
       return;
     }
     if (taskDetail && method === 'GET') {

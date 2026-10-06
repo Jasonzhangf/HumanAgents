@@ -251,7 +251,22 @@ export function policySlotOrdinal(policy: ExecutionPolicyDefinition, dueAt: stri
   throw new SubscriptionSchedulerError('invalid-occurrence', 'claim dueAt is not part of the committed schedule');
 }
 
-function nextPolicySlotAfter(policy: ExecutionPolicyDefinition, ordinal: number): PolicySlot | undefined {
+/**
+ * The committed policy slot after `ordinal`, or undefined when the committed
+ * schedule has no further slot.
+ *
+ * Exported so a read-only projection can name the next due instant with the same
+ * slot owner `dueTimes`/`schedule`/`claim` use, instead of re-deriving slot
+ * arithmetic or keeping a second schedule outside this module. The durable
+ * `Subscription.currentOccurrenceOrdinal` is the ordinal to pass: it advances on
+ * settlement and on pause, so the returned slot is exactly the next slot this
+ * plan can still act on. It only reads the committed policy and does not
+ * reserve, claim, or advance the slot.
+ */
+export function nextPolicySlotAfter(
+  policy: ExecutionPolicyDefinition,
+  ordinal: number,
+): PolicySlot | undefined {
   for (const slot of policySlotEntries(policy)) {
     if (slot.ordinal > ordinal) return slot;
   }
