@@ -13,7 +13,12 @@
       "subscriptionControlOwnerPath": "packages/runtime/src/subscriptions/index.ts",
       "subscriptionControlOwnerRel": "packages/runtime/src/subscriptions/index.ts",
       "subscriptionControlOwnerSymbol": "SubscriptionControlPort.schedule",
-      "productionWiringStatus": "pending-T14"
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/scheduler.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/scheduler.ts",
+      "productionOwnerSymbol": "UiRuntimeScheduler.tick",
+      "productionEvidence": "startUiRuntime 在有 supervisor lease 时按真实时钟启动 patrol，每个 tick 依次 dueTimes→schedule→claim→consumeExecution→settleOccurrence；tests/app/scheduler-production-wiring.test.ts 生产同入口验证到点执行与 restart 不重复 dispatch",
+      "ablationFollowUp": "ownerPath 的 SchedulerPatrol.run 仍存在但 production 未使用；与 UiRuntimeScheduler 语义重复，需要单独 ablation 收敛，本任务不删除范围外实现"
     },
     "read_committed_subscription_state": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",

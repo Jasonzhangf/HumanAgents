@@ -29,7 +29,10 @@
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
       "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
       "ownerSymbol": "ExplicitIntake.confirmDraftRevision",
-      "productionWiringStatus": "pending-T14"
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerSymbol": "UiRuntimeService.confirmExplicitRequirement"
     },
     "validate_draft_revision": {
       "ownerPath": "packages/core/src/draft-revision.ts",
@@ -56,7 +59,11 @@
       "markSubmittedOwnerSymbol": "ExplicitIntake.markRevisionSubmitted",
       "duplicateTerminal": "duplicate-submit",
       "staleTerminal": "confirmation-stale",
-      "productionWiringStatus": "pending-T14"
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerSymbol": "UiRuntimeService.confirmTypedExplicitRequirement",
+      "productionEvidence": "confirmTypedExplicitRequirement 调用 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）"
     },
     "compile_execution_policy": {
       "ownerPath": "packages/runtime/src/explicit-brain/router.ts",

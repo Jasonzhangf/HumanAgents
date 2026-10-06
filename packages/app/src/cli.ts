@@ -1158,6 +1158,11 @@ export async function main(args: readonly string[]): Promise<void> {
             projectKey: paths.projectKey,
             workspaceRoot: paths.workspaceCwd,
             restart: requestRestart,
+            // The scheduled-occurrence patrol may only dispatch under the live
+            // supervisor lease. The stage starts before `runSupervisorStartup`
+            // returns, so the lease is read lazily at tick time; an unresolved
+            // lease fails the patrol closed with a typed reason.
+            lease: () => supervisor?.lease,
             identity: () => {
               if (supervisor === undefined) {
                 throw new AppLifecycleError(

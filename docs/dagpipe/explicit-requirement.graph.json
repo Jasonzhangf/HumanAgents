@@ -23,10 +23,10 @@
       "rejectClosure": "explicit rejectDraft records a durable DraftRejectClosure and keeps the interaction input available for a later retry of the same request path",
       "restart": "preview, revision history, confirmation, final-submit receipt, and inbox transaction replay from explicit-intake and requirement-inbox durable state"
     },
-    "productionWiringStatus": "PENDING",
-    "productionWiringGap": "packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner 使用桩 RequirementSubmitPort；production app 尚未把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription",
+    "productionWiringStatus": "WIRED",
+    "productionWiringGap": "本图关键边已接线：confirmTypedExplicitRequirement 调用真实的 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）；端到端到点执行由 packages/app/src/ui-runtime/scheduler.ts 驱动。仍在的相邻事实（不阻断本图）：RequirementSubmissionOwner 的 RequirementSubmitPort.submit 仍是只回显 requirementId 的桩（service.ts:1007），执行计划落库不经该桩",
     "productionWiringOwner": "T14",
-    "productionWiringEvidence": "packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create"
+    "productionWiringEvidence": "packages/app/src/ui-runtime/service.ts:2819 submitFinal 与 :2972 SubscriptionControlPort.create；packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；tests/app/scheduler-production-wiring.test.ts 经真实 HTTP 确认路径落成计划并到期执行"
   },
   "inputs": [
     {

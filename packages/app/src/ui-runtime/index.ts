@@ -34,6 +34,10 @@ import {
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
+import type { SupervisorLease } from '../supervisor/index.js';
+import { OccurrenceConsumerRouter } from './occurrence-router.js';
+import type { OccurrenceDispatchPort } from './occurrence-consumer.js';
+import { UiRuntimeScheduler } from './scheduler.js';
 import { AccessControlService } from './access-control.js';
 import {
   createProviderExplicitBrainInterpreter,
@@ -110,6 +114,25 @@ export interface UiRuntimeLaunchOptions {
     readonly pid: number;
     readonly processStartToken: string;
   };
+  /**
+   * The live supervisor lease that authorizes scheduled occurrence execution.
+   * The object form is the direct handoff. The resolver form exists because the
+   * `ui-runtime` supervisor stage starts before `runSupervisorStartup` returns,
+   * so the production entry can only read the lease lazily - exactly like the
+   * existing `identity` option. Nothing resolved means the patrol fails closed
+   * with a typed reason; this runtime never fabricates a lease.
+   */
+  readonly lease?: SupervisorLease | (() => SupervisorLease | undefined);
+  /**
+   * Patrol interval for persisted execution plans. The default matches the
+   * runtime's own due-time grace, so a due slot is claimed before it is late.
+   */
+  readonly schedulerIntervalMs?: number;
+  /**
+   * Injectable clock for the patrol. It is the same clock the service uses, so a
+   * test can drive due times without wall-clock sleeps.
+   */
+  readonly now?: () => Date;
 }
 
 function providerStateFromReadiness(readiness: ProviderReadiness): string {
@@ -187,6 +210,11 @@ class InMemoryAttentionPort implements AttentionPort {
 export interface UiRuntime {
   readonly service: UiRuntimeService;
   readonly server: UiRuntimeServer;
+  /**
+   * The due-time patrol. It is absent when the runtime was started without a
+   * supervisor lease; in that case no execution plan may run.
+   */
+  readonly scheduler?: UiRuntimeScheduler;
   close(): Promise<void>;
 }
 
@@ -222,10 +250,42 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const modeRoot = join(options.checkpointRoot, options.mode);
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
   const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
+  const clock = options.now;
+  const resolveLease: () => SupervisorLease | undefined = typeof options.lease === 'function'
+    ? options.lease
+    : options.lease === undefined
+      ? () => undefined
+      : () => options.lease as SupervisorLease;
+  let service: UiRuntimeService | undefined;
+  // The occurrence consumer is constructed with the port, but its dispatch port
+  // can only be the service, which is constructed with the port. The indirection
+  // is resolved before any dispatch can run: the scheduler starts after the
+  // service exists and the port only dispatches through a claimed occurrence.
+  const occurrenceDispatch: OccurrenceDispatchPort = {
+    async dispatch(input) {
+      if (service === undefined) {
+        throw new AppLifecycleError(
+          'ui-runtime.scheduler.not-ready',
+          'scheduled occurrence dispatch ran before the UI runtime service was constructed',
+          'restart the runtime through the supervisor-owned serve entry',
+          'humanagent.app.ui-runtime',
+        );
+      }
+      return service.executeScheduledOccurrence(input);
+    },
+  };
+  const occurrenceRouter = new OccurrenceConsumerRouter({
+    organId: options.organId,
+    root: join(modeRoot, 'occurrence-consumer'),
+    lease: resolveLease,
+    dispatch: occurrenceDispatch,
+    ...(clock === undefined ? {} : { now: () => clock().toISOString() }),
+  });
   const subscriptionControl = new SubscriptionControlPort(
     new JsonlOrganJournal(subscriptionJournalPath),
     { organId: options.organId },
     subscriptionJournalPath,
+    occurrenceRouter,
   );
   const interactionJournal = options.interactionRoot
     ? new UiRuntimeJournal(join(options.interactionRoot, 'sessions', 'explicit-brain.jsonl'))
@@ -245,7 +305,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
         return { executor: built.executor, toolOutputs: built.toolOutputs };
       })()
     : undefined;
-  const service = new UiRuntimeService({
+  const runtimeService = new UiRuntimeService({
     mode: options.mode,
     organId: options.organId,
     binding: options.binding,
@@ -286,36 +346,64 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     memory: options.memory,
     subscriptionControl,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
+    ...(clock === undefined ? {} : { now: clock }),
   });
-  await service.hydrate();
-  service.startImplicitConsumer();
+  service = runtimeService;
+  await runtimeService.hydrate();
+  runtimeService.startImplicitConsumer();
+  // The patrol is only armed when a supervisor lease is configured. Without the
+  // option the runtime must not run scheduled plans at all, and the status
+  // surface reports that typed reason instead of pretending to be idle.
+  const scheduler = options.lease === undefined
+    ? undefined
+    : new UiRuntimeScheduler({
+        port: subscriptionControl,
+        lease: resolveLease,
+        runningTaskCount: () => runtimeService.listTasks().running.length,
+        ...(clock === undefined ? {} : { now: clock }),
+        ...(options.schedulerIntervalMs === undefined ? {} : { intervalMs: options.schedulerIntervalMs }),
+      });
+  scheduler?.start();
   const server = await startUiRuntimeServer({
-    service,
+    service: runtimeService,
     accessControl: options.accessControl,
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
+    schedulerStatus: async () => scheduler === undefined
+      ? {
+          state: 'blocked',
+          reason: {
+            code: 'scheduler.lease.unavailable',
+            ownerId: 'humanagent.app.scheduled-occurrence-patrol',
+            message: 'the runtime was started without a supervisor lease, so no execution plan may be patrolled',
+            nextAction: 'start the runtime through the supervisor-owned serve entry',
+          },
+        }
+      : scheduler.status(),
   });
   return {
-    service,
+    service: runtimeService,
     server,
+    ...(scheduler === undefined ? {} : { scheduler }),
     async close() {
-      await service.quiesceImplicitConsumption();
+      scheduler?.stop();
+      await runtimeService.quiesceImplicitConsumption();
       let serverCloseFailure: unknown;
       try {
         await server.close();
       } catch (error) {
         serverCloseFailure = error;
       }
-      const active = service.listTasks().running.filter((task) => task.requirementAdmission !== 'queued');
+      const active = runtimeService.listTasks().running.filter((task) => task.requirementAdmission !== 'queued');
       const stopped = await Promise.allSettled(
         active.map(async (task) => {
           try {
-            await service.stop(task.taskId);
+            await runtimeService.stop(task.taskId);
           } catch (error) {
-            const stillActive = service.listTasks().running.some(
+            const stillActive = runtimeService.listTasks().running.some(
               (candidate) => candidate.taskId.value === task.taskId.value && candidate.requirementAdmission !== 'queued',
             );
             // A task can settle between the running snapshot and stop admission.
@@ -345,4 +433,12 @@ export { MemoryBoundExecutionDriver, MemoryContextCapture, UiRuntimeService } fr
 export type { TaskCheckpointStore, UiRuntimeMemoryComposition } from './service.js';
 export { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
 export { FakeReplayExecutionRuntimePort } from './fake-port.js';
+export { UiRuntimeScheduler } from './scheduler.js';
+export type {
+  UiRuntimeSchedulerIssue,
+  UiRuntimeSchedulerOptions,
+  UiRuntimeSchedulerPlanProjection,
+  UiRuntimeSchedulerStatusProjection,
+} from './scheduler.js';
+export { OccurrenceConsumerRouter } from './occurrence-router.js';
 export type { UiRuntimeServer } from './server.js';

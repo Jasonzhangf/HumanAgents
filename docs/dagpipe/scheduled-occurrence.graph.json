@@ -28,11 +28,11 @@
       "settleNode": "settle_occurrence",
       "recoveryIdentity": "OccurrenceTaskBinding { occurrenceId, subscriptionId, scheduleRevision, occurrenceOrdinal, taskId, operationId, executionEpoch, inputArtifactDigest }",
       "requiredReceipt": "ServeTaskTerminalReceipt { taskId, operationId, executionEpoch, inputArtifactDigest, verification: TaskVerificationResult, terminalCheckpointRef, settlementReceiptRef, recoveryResponsibility }",
-      "verificationAuthority": "W3 retained tree public task-verification bridge in packages/runtime/src/ui-runtime/task-verification.ts; the current scheduler candidate does not contain that file and scheduler does not own a second verifier",
+      "verificationAuthority": "W3 retained tree public task-verification bridge in packages/runtime/src/ui-runtime/task-verification.ts exists in this candidate; the occurrence terminal receipt derives its verification from the really committed coordinator checkpoint (packages/app/src/ui-runtime/occurrence-terminal.ts) and the scheduler does not own a second verifier",
       "settlementRule": "settle_occurrence consumes only a verified serve-task terminal/settlement receipt; checker failed/missing/rejected, identity mismatch, stale executionEpoch, or pending verification cannot be projected as occurrence success; cancelled requires a settled stop",
       "identityFencing": "core validates task/operation/executionEpoch/inputArtifactDigest; JSONL atomically commits occurrence settle and receipt",
       "replayRule": "execute_occurrence_task executes or resumes exactly one business execution for OccurrenceTaskBinding; duplicate, concurrent, and restart calls return or await the same terminal receipt and never dispatch a second business execution; settlement and verification receipts remain authoritative",
-      "consumerCapability": "BLOCKED until a real ServeTaskConsumerPort implementation proves durable execute-or-resume over projection/correlation operation identity, authoritative checkpoint settlement, and TaskVerificationResult; an in-memory flag, replayJournal projection, or diagnostic counter is not sufficient",
+      "consumerCapability": "DELIVERED: OccurrenceConsumerRouter implements ServeTaskConsumerPort with ownsFirstAdmissionAuthority=true and delegates to DurableOccurrenceConsumer.forTaskCycle over the persisted OccurrenceTaskBinding; execute-or-resume, authoritative checkpoint settlement and TaskVerificationResult are proven by the production same-entry acceptance test (tests/app/scheduler-production-wiring.test.ts) and the durable consumer suites",
       "crossGraph": "typed invocation of the public serve-task input/output contract; no cross-graph node edge, back-edge, second lifecycle, or second persistence truth"
     },
     "recoveryContract": {
@@ -64,10 +64,10 @@
       "scope": "只读取已存在 Subscription 并按 dueAt 调用 SubscriptionControlPort.snapshot/schedule/control；不创建 Subscription，不执行任务轮次",
       "terminal": "返回 SchedulerPatrolReceipt；订阅不存在或端口缺失时返回 typed pending attention，不伪装 occurrence 成功"
     },
-    "productionWiringStatus": "PENDING",
-    "productionWiringGap": "packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner 使用桩 RequirementSubmitPort；production app 尚未把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription，且 production app 未组装 SchedulerPatrol/DurableOccurrenceConsumer",
+    "productionWiringStatus": "WIRED",
+    "productionWiringGap": "due 时间触发已由 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler 在 startUiRuntime 内按真实时钟组装并驱动 schedule→claim→consumeExecution→settleOccurrence；production app 已把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2830 persistAuthorizedExecutionPlan→:2972 port.create），并已组装 OccurrenceConsumerRouter/DurableOccurrenceConsumer。真实剩余缺口：(1) packages/runtime/src/explicit-brain/scheduler-patrol.ts 仍以单 dueAt 和 serve-task-pending 语义存在，与 production patrol 重复，需要单独 ablation 收敛；(2) 已 claim 且未 settle 的 occurrence 在 owner 仍存活但结果未知时按 in-progress 拒绝重新 dispatch，进程内 unknown-outcome 停摆不会自愈；(3) patrol 间隔大于约 1s 时 latePolicy=skip 的槽位可能错过；(4) dueTimes/policySlotOrdinal 每 tick 为 O(总槽位)，需要游标或闭式解",
     "productionWiringOwner": "T14",
-    "productionWiringEvidence": "packages/runtime/src/explicit-brain/scheduler-patrol.ts:68 SchedulerPatrol；packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create；packages/app/src/ui-runtime/occurrence-consumer.ts:276 DurableOccurrenceConsumer"
+    "productionWiringEvidence": "packages/app/src/ui-runtime/scheduler.ts:117 UiRuntimeScheduler；packages/app/src/ui-runtime/occurrence-router.ts:34 OccurrenceConsumerRouter；packages/app/src/ui-runtime/index.ts:startUiRuntime 组装并 start/stop；packages/app/src/ui-runtime/service.ts:2972 SubscriptionControlPort.create；tests/app/scheduler-production-wiring.test.ts 生产同入口 5 用例全通过"
   },
   "inputs": [
     {

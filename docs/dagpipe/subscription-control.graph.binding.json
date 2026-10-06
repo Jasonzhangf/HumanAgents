@@ -11,7 +11,8 @@
       "plannedOwnerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerSymbol": "UiRuntimeService",
       "implementationStatus": "pending",
-      "productionWiringStatus": "pending-T14"
+      "productionWiringStatus": "pending",
+      "productionWiringGap": "production runtime 尚未接受订阅控制请求（modify/pause/resume/cancel-future）；server.ts 对 control 通道返回 explicit-brain.control.unsupported，service.ts 无 SubscriptionControlPort.control 调用点。create 边已在 service.ts:2972 交付，与本节点无关"
     },
     "orchestrate_subscription_control": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",

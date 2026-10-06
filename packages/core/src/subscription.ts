@@ -753,6 +753,46 @@ export function assertVerifiedTerminalReceipt(input: {
   if (terminal.verification.status !== 'success') fail('invalid-occurrence', `task verification is ${terminal.verification.status}`);
 }
 
+/**
+ * Settlement gate for one claimed occurrence.
+ *
+ * The success path is exactly `assertVerifiedTerminalReceipt`: the same identity
+ * checks and the same `success` requirement, so no success claim that the strict
+ * assertion rejects can pass here.
+ *
+ * A non-success terminal settles the occurrence as a non-success outcome. Every
+ * identity check is identical to the success path; the only difference is that
+ * `validateServeTaskTerminalReceipt` (already run inside the shared identity
+ * check) is allowed to carry a typed non-success verification status instead of
+ * `success`. Nothing is upgraded to success, and the terminal still has to be a
+ * well-formed, identity-bound serve-task receipt.
+ */
+export function assertSettleableTerminalReceipt(input: {
+  readonly occurrence: Occurrence;
+  readonly taskId: TaskId;
+  readonly operationId: OperationId;
+  readonly executionEpoch: number;
+  readonly inputArtifactDigest: string;
+  readonly terminal: ServeTaskTerminalReceipt;
+}): void {
+  if (input.terminal.verification.status === 'success') {
+    assertVerifiedTerminalReceipt(input);
+    return;
+  }
+  validateOccurrence(input.occurrence);
+  const binding: OccurrenceTaskBinding = {
+    occurrenceId: `${input.occurrence.subscriptionId}::${input.occurrence.scheduleRevision}::${input.occurrence.occurrenceOrdinal}`,
+    subscriptionId: input.occurrence.subscriptionId,
+    scheduleRevision: input.occurrence.scheduleRevision,
+    occurrenceOrdinal: input.occurrence.occurrenceOrdinal,
+    taskId: input.taskId,
+    operationId: input.operationId,
+    executionEpoch: input.executionEpoch,
+    inputArtifactDigest: input.inputArtifactDigest,
+  };
+  sharedTerminalReceiptIdentity(input.terminal, binding);
+}
+
 export type OccurrenceTerminalOutcome =
   | 'succeeded'
   | 'failed'

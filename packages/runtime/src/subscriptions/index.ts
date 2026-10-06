@@ -3,7 +3,7 @@ import {
   assertOccurrenceClaimable,
   assertOccurrenceClaimLease,
   assertPendingReminderRecoverable,
-  assertVerifiedTerminalReceipt,
+  assertSettleableTerminalReceipt,
   decideSubscriptionControl,
   executionPolicyHash,
   preserveSamePolicyClaimProgress,
@@ -233,7 +233,14 @@ function* policySlotEntries(policy: ExecutionPolicyDefinition): Generator<Policy
   yield { ordinal: 1, dueAt };
 }
 
-function policySlotOrdinal(policy: ExecutionPolicyDefinition, dueAt: string): number {
+/**
+ * Authoritative ordinal of the committed policy slot a due timestamp belongs to.
+ *
+ * Exported so the production scheduler names a slot with the same owner that
+ * `schedule`/`claim` use, instead of re-deriving slot arithmetic or passing a
+ * placeholder ordinal in a validated field.
+ */
+export function policySlotOrdinal(policy: ExecutionPolicyDefinition, dueAt: string): number {
   const target = Date.parse(dueAt);
   if (!Number.isFinite(target)) throw new SubscriptionSchedulerError('invalid-occurrence', 'claim dueAt is invalid');
   for (const slot of policySlotEntries(policy)) {
@@ -383,6 +390,16 @@ export class SubscriptionControlPort {
     const snapshot = state.subscriptions[key(subscriptionId)];
     if (!snapshot) throw new SubscriptionControlError('not-found', `subscription not found: ${subscriptionId}`);
     return normalizeSnapshot(snapshot);
+  }
+
+  /**
+   * Read-only enumeration of every persisted subscription snapshot. It reads the
+   * same `this.read()` state that `snapshot` reads, so there is one persisted
+   * truth. The scheduler uses it to find the active plans it must patrol.
+   */
+  async list(): Promise<readonly SubscriptionSnapshot[]> {
+    const state = await this.read();
+    return Object.values(state.subscriptions).map((snapshot) => normalizeSnapshot(snapshot));
   }
 
   async receipt(idempotencyKey: string): Promise<SubscriptionControlReceipt> {
@@ -572,7 +589,7 @@ export class SubscriptionControlPort {
         if (!claim) throw new SubscriptionSchedulerError('invalid-occurrence', 'occurrence has not been claimed');
         if (occurrence.state !== 'claimed') throw new SubscriptionSchedulerError('invalid-occurrence', `occurrence is ${occurrence.state}`);
         try {
-          assertVerifiedTerminalReceipt({
+          assertSettleableTerminalReceipt({
             occurrence,
             taskId: claim.taskId,
             operationId: claim.operationId,
@@ -855,7 +872,7 @@ export class SubscriptionControlPort {
       binding,
     });
     try {
-      assertVerifiedTerminalReceipt({
+      assertSettleableTerminalReceipt({
         occurrence,
         taskId: binding.taskId,
         operationId: binding.operationId,

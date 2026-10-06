@@ -37,10 +37,10 @@
       "recurring": "recurring 策略按 intervalMinutes/cadence 生成多个 occurrence；pause 或 cancel-future 只失效未 claim 的 future slots"
     },
     "occurrenceIsolation": "每个 occurrence 使用 subscriptionId、scheduleRevision、occurrenceOrdinal、dueAt 稳定身份；resume 生成新的未来槽位，不回写或复活已失效槽位",
-    "productionWiringStatus": "PENDING",
-    "productionWiringGap": "packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner 使用桩 RequirementSubmitPort；production app 尚未把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription",
+    "productionWiringStatus": "PARTIAL",
+    "productionWiringGap": "create 边已接线：已确认草稿 revision 的 executionPolicy 经 packages/app/src/ui-runtime/service.ts:2830 persistAuthorizedExecutionPlan→:2972 SubscriptionControlPort.create 落成 Subscription，到期执行由 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler 驱动。真实剩余缺口：production runtime 尚未接受订阅控制请求（modify/pause/resume/cancel-future）——server.ts 只返回 explicit-brain.control.unsupported，service.ts 没有 control 调用点，因此 accept_subscription_control_request 仍未实现",
     "productionWiringOwner": "T14",
-    "productionWiringEvidence": "packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create/control"
+    "productionWiringEvidence": "packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create/control；packages/app/src/ui-runtime/service.ts:2972 port.create（create 边已交付）"
   },
   "inputs": [
     {

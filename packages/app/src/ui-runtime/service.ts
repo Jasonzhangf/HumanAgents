@@ -21,6 +21,9 @@ import {
   type CycleId,
   type ExecutionRuntimePort,
   type EvidenceRef,
+  type Checkpoint,
+  type Occurrence,
+  type OccurrenceTaskBinding,
   type MemoryActorContext,
   type CanonicalMemoryScope,
   type MemoryComparisonView,
@@ -88,6 +91,7 @@ import {
   type SubscriptionControlPort,
   type SubscriptionSnapshot,
 } from '../../../runtime/src/subscriptions/index.js';
+import type { OccurrenceClaimRecord } from '../../../runtime/src/subscriptions/ports.js';
 import { ExplicitIntakeError, IntakeError } from '../../../runtime/src/intake/errors.js';
 import {
   ADMISSION_QUEUE_KINDS,
@@ -177,6 +181,12 @@ import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
 } from '../explicit-brain-runtime.js';
+import {
+  occurrenceTerminalProduction,
+  OccurrenceTerminalError,
+  type CommittedExecutionCheckpoint,
+} from './occurrence-terminal.js';
+import type { OccurrenceTerminalProduction } from './occurrence-consumer.js';
 
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
@@ -881,6 +891,37 @@ function interactionClosurePersistenceError(error: unknown): UiRuntimeApiError {
     503,
   );
 }
+
+/**
+ * The single owner of the confirmed-execution-plan subscription id convention.
+ * `persistAuthorizedExecutionPlan` mints the id and the scheduled occurrence
+ * dispatch resolves the requirement back from it.
+ */
+function subscriptionIdForRequirement(requirementId: string): string {
+  return `subscription:${requirementId}`;
+}
+
+function requirementIdForSubscription(subscriptionId: string): string {
+  const prefix = 'subscription:';
+  if (!subscriptionId.startsWith(prefix) || subscriptionId.length === prefix.length) {
+    throw new UiRuntimeApiError(
+      'scheduled-occurrence.plan-identity-invalid',
+      RUNTIME_OWNER,
+      `execution plan id is not a requirement subscription: ${subscriptionId}`,
+      'inspect the persisted execution plan identity before dispatching it',
+      409,
+    );
+  }
+  return subscriptionId.slice(prefix.length);
+}
+
+/**
+ * Upper bound on how long the scheduled-occurrence dispatch waits for the real
+ * execution terminal. A provider that never terminates must not pin the patrol
+ * forever; the wait fails explicitly and the occurrence stays claimed with its
+ * durable recovery responsibility instead of being reported as settled.
+ */
+const SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS = 30 * 60_000;
 
 export class UiRuntimeService {
   private readonly mode: 'fake' | 'rcc';
@@ -1981,6 +2022,154 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * The production seam between the durable occurrence consumer and the real
+   * execution coordinator. It creates or reuses the task for the immutable
+   * occurrence binding, starts exactly the operation the occurrence was claimed
+   * with, waits for the real terminal, and returns the durable terminal
+   * production for the consumer's own lifecycle scope.
+   *
+   * There is no second verification truth: the returned verification and
+   * checkpoint are derived from the checkpoint the coordinator really committed.
+   */
+  async executeScheduledOccurrence(input: {
+    readonly occurrence: Occurrence;
+    readonly policy: ExecutionPolicyDefinition;
+    readonly claim: OccurrenceClaimRecord;
+    readonly binding: OccurrenceTaskBinding;
+    readonly scope: ScopeRef;
+    readonly previousCheckpoint: Checkpoint | null;
+  }): Promise<OccurrenceTerminalProduction> {
+    try {
+      const status = this.status();
+      if (status.state !== 'ready' && status.state !== 'degraded') {
+        const providerError = this.options.providerError;
+        throw new UiRuntimeApiError(
+          providerError?.code ?? `provider.readiness.${status.providerState}`,
+          providerError?.ownerId ?? 'humanagent.provider-adapter',
+          providerError?.message ?? `provider readiness is ${status.providerState}`,
+          providerError?.nextAction ?? 'inspect provider readiness',
+          409,
+        );
+      }
+      const prompt = this.scheduledOccurrencePrompt(input.binding);
+      const title = `计划执行 ${input.binding.occurrenceId}`;
+      const existing = this.coordinator.taskSnapshots().find((task) => task.taskId.value === input.binding.taskId.value);
+      if (existing !== undefined && (existing.title !== title || existing.directive !== prompt)) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.task-identity-conflict',
+          RUNTIME_OWNER,
+          `occurrence task ${input.binding.taskId.value} already belongs to different task content`,
+          'inspect the persisted occurrence task identity before dispatching it',
+          409,
+        );
+      }
+      const task = existing ?? this.coordinator.createTask({ taskId: input.binding.taskId, title, directive: prompt });
+      const started = this.coordinator.startExecution(task.taskId, {
+        prompt,
+        operationId: input.binding.operationId,
+        ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+      });
+      if (started.operationId.value !== input.binding.operationId.value || started.executionEpoch !== input.binding.executionEpoch) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.execution-identity-conflict',
+          RUNTIME_OWNER,
+          `started execution ${started.operationId.value}@${started.executionEpoch} does not match occurrence binding ${input.binding.operationId.value}@${input.binding.executionEpoch}`,
+          'inspect the persisted occurrence claim before dispatching it',
+          409,
+        );
+      }
+      await this.awaitScheduledOccurrenceTerminal(started.operationId);
+      const snapshot = this.coordinator.taskSnapshot(task.taskId);
+      const committed = snapshot.checkpoint;
+      if (committed === undefined) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.checkpoint-missing',
+          RUNTIME_OWNER,
+          `execution ${started.operationId.value} terminated without a committed checkpoint`,
+          'inspect the execution terminal evidence before retrying the occurrence',
+          409,
+        );
+      }
+      return occurrenceTerminalProduction({
+        binding: input.binding,
+        claim: input.claim,
+        policy: input.policy,
+        scope: input.scope,
+        previousCheckpoint: input.previousCheckpoint,
+        committed: committed as CommittedExecutionCheckpoint,
+      });
+    } catch (error) {
+      if (error instanceof OccurrenceTerminalError) {
+        throw new UiRuntimeApiError(error.code, RUNTIME_OWNER, error.message, 'inspect the committed execution checkpoint', 409);
+      }
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * The real business input for one execution plan. The plan carries only the
+   * requirement identity, so the confirmed requirement envelope is the single
+   * source of the prompt; a plan whose requirement is gone fails closed instead
+   * of running a synthetic prompt.
+   */
+  private scheduledOccurrencePrompt(binding: OccurrenceTaskBinding): string {
+    const requirementId = requirementIdForSubscription(binding.subscriptionId);
+    const envelope = this.requirementInbox
+      .exportState()
+      .envelopes
+      .find((candidate) => candidate.requirementId === requirementId);
+    if (envelope === undefined || !envelope.normalizedInput.trim()) {
+      throw new UiRuntimeApiError(
+        'scheduled-occurrence.requirement-missing',
+        RUNTIME_OWNER,
+        `no confirmed requirement is retained for execution plan ${binding.subscriptionId}`,
+        'inspect the persisted execution plan before dispatching it',
+        409,
+      );
+    }
+    return envelope.normalizedInput;
+  }
+
+  private awaitScheduledOccurrenceTerminal(operationId: OperationId): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let unsubscribe: () => void = () => {};
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsubscribe();
+        reject(new UiRuntimeApiError(
+          'scheduled-occurrence.terminal-timeout',
+          RUNTIME_OWNER,
+          `execution ${operationId.value} did not reach a terminal state within ${SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS}ms`,
+          'inspect the running execution and the provider before retrying the occurrence',
+          504,
+        ));
+      }, SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      const isFinalTerminal = (event: RuntimeSseEvent): boolean =>
+        event.kind === 'execution.terminal' && event.terminalPhase === 'final';
+      try {
+        const subscription = this.coordinator.subscribeReplay(operationId, undefined, (event) => {
+          if (isFinalTerminal(event)) finish();
+        });
+        unsubscribe = subscription.unsubscribe;
+        if (subscription.replay.some(isFinalTerminal)) finish();
+      } catch (error) {
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
+  }
+
   async stop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
     try {
       return await this.coordinator.stop(taskId);
@@ -2757,7 +2946,7 @@ export class UiRuntimeService {
       );
     }
     const compiled = new ExecutionPolicyCompiler().compile(requirement, definition);
-    const subscriptionId = `subscription:${requirement.requirementId}`;
+    const subscriptionId = subscriptionIdForRequirement(requirement.requirementId);
     const existing = await this.subscriptionSnapshot(port, subscriptionId);
     if (existing) {
       if (existing.policyHash !== compiled.policyHash) {
@@ -2820,7 +3009,7 @@ export class UiRuntimeService {
   ): Promise<boolean> {
     const port = this.subscriptionControl;
     if (port === undefined) return false;
-    const subscriptionId = `subscription:${envelope.requirementId}`;
+    const subscriptionId = subscriptionIdForRequirement(envelope.requirementId);
     let snapshot: SubscriptionSnapshot | undefined;
     try {
       snapshot = await port.snapshot(subscriptionId);
