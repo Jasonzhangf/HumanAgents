@@ -2521,9 +2521,32 @@ export class UiRuntimeService {
         409,
       );
     }
-    // Read the request-arrival revision before any mutation. A caller that
-    // pinned an explicit version/hash must match that arrival revision, so the
-    // same-submit policy refinement below can never be mistaken for staleness.
+    // Bind the caller to the draft and input revision that existed when this
+    // request arrived. Policy refinement may mint a typed revision with a new
+    // internal draft id, but it must never replace the caller's identity before
+    // this check.
+    const arrivalSnapshot = await this.explicitIntake.inspect(interactionId);
+    const arrivalDraft = arrivalSnapshot.draft;
+    const arrivalMatches = arrivalDraft !== undefined
+      && input.draftId === arrivalDraft.draftId
+      && input.inputRevision === arrivalDraft.inputRevision;
+    const confirmedReplayMatches = arrivalSnapshot.state === 'confirmed'
+      && arrivalSnapshot.confirmation !== undefined
+      && input.inputRevision === arrivalSnapshot.confirmation.inputRevision
+      && input.confirmationRef === arrivalSnapshot.confirmation.confirmationRef
+      && input.confirmedBy === arrivalSnapshot.confirmation.confirmedBy
+      && input.confirmedAt === arrivalSnapshot.confirmation.confirmedAt
+      && input.payloadRef === arrivalSnapshot.confirmation.payloadRef;
+    if (!arrivalMatches && !confirmedReplayMatches) {
+      throw new DraftRevisionError({
+        code: 'confirmation-stale',
+        message: `confirmation addresses draft ${input.draftId} input revision ${input.inputRevision}, but the interaction-arrival draft is ${arrivalDraft?.draftId ?? 'missing'} input revision ${arrivalDraft?.inputRevision ?? 'missing'}`,
+        draftId: arrivalDraft?.draftId ?? input.draftId,
+        expectedRevisionVersion: input.inputRevision,
+        actualRevisionVersion: arrivalDraft?.inputRevision,
+      });
+    }
+    // Read the request-arrival typed revision before any policy refinement.
     let revision = this.explicitIntake.currentDraftRevision(interactionId);
     if (revision === undefined) {
       revision = await this.ensureTypedDraftRevision(interactionId, {
@@ -2791,6 +2814,28 @@ export class UiRuntimeService {
     });
   }
 
+  /** Prevent future execution plans from entering the immediate FIFO path. */
+  private async checkExecutionPolicyGate(
+    envelope: RequirementEnvelope,
+  ): Promise<boolean> {
+    const port = this.subscriptionControl;
+    if (port === undefined) return false;
+    const subscriptionId = `subscription:${envelope.requirementId}`;
+    let snapshot: SubscriptionSnapshot | undefined;
+    try {
+      snapshot = await port.snapshot(subscriptionId);
+    } catch (error) {
+      if (!(error instanceof SubscriptionControlError) || error.code !== 'not-found') throw error;
+    }
+    if (!snapshot || snapshot.policy.executionMode === 'once') return false;
+    await this.requirementInbox.acknowledge({
+      consumerId: RUNTIME_OWNER,
+      requirementId: envelope.requirementId,
+    });
+    this.persistExplicitBrainState();
+    return true;
+  }
+
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
     for (;;) {
       const attempt = await this.dispatchNextExplicitRequirementInternal();
@@ -2886,6 +2931,21 @@ export class UiRuntimeService {
         this.dispatchLedger.set(consumed.draftId, dispatchEntry);
         this.persistExplicitBrainState();
       }
+      if (await this.checkExecutionPolicyGate(consumed)) {
+        return {
+          kind: 'dispatched',
+          receipt: {
+            requirement: {
+              requirementId: consumed.requirementId,
+              draftId: consumed.draftId,
+              fifoSeq: consumed.fifoSeq,
+            },
+            taskId: dispatchEntry.taskId,
+            operationId: dispatchEntry.operationId,
+            executionEpoch: 0,
+          },
+        };
+      }
       return {
         kind: 'dispatched',
         receipt: await this.completePreparedDispatch(consumed, dispatchEntry),
@@ -2932,6 +2992,20 @@ export class UiRuntimeService {
       this.queuedRequirements.delete(envelope.draftId);
       this.dispatchLedger.set(envelope.draftId, dispatchEntry);
       this.persistExplicitBrainState();
+    }
+    if (await this.checkExecutionPolicyGate(envelope)) {
+      return {
+        status: 'succeeded',
+        envelope,
+        admission,
+        ownerId: RUNTIME_OWNER,
+        scope,
+        executionEpoch: 0,
+        inputRevision,
+        taskId: dispatchEntry.taskId,
+        operationId: dispatchEntry.operationId.value,
+        evidenceRefs: [],
+      };
     }
     const receipt = await this.completePreparedDispatch(envelope, dispatchEntry, false);
     return {
