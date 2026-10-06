@@ -981,3 +981,78 @@ test('RCC v3 ignores the duplicate response.done trailer emitted by the transpar
   const settled = await built.transport.settle(execution);
   assert.equal(settled.state, 'succeeded');
 });
+
+test('RCC v3 keeps the observed terminal outcome when the provider closes the SSE stream', async () => {
+  const built = transportHarness();
+  const closingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      yield new TextEncoder().encode('event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-provider-close"}}\n\n');
+      // The provider reported a terminal outcome, then closed the idle SSE
+      // connection; Node fetch rejects the pending read with `terminated`.
+      throw new Error('terminated');
+    },
+  };
+  seedActive(built.transport, closingBody);
+
+  const events: ProviderWireEvent[] = [];
+  for await (const event of built.transport.observe(execution)) events.push(event);
+  assert.deepEqual(events.map((event) => event.type), ['response.completed']);
+
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'succeeded');
+  assert.equal(settled.error, undefined);
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'committed');
+  assert.equal(built.writes.some((write) => write.type === 'settle-error'), false);
+  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
+  assert.equal((await built.transport.close(binding)).state, 'closed');
+});
+
+test('RCC v3 still reports failed when the SSE stream closes without any terminal frame', async () => {
+  const built = transportHarness();
+  const closingBody: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      yield new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"resp-no-terminal"}}\n\n');
+      throw new Error('terminated');
+    },
+  };
+  seedActive(built.transport, closingBody);
+
+  await assert.rejects(async () => {
+    for await (const _event of built.transport.observe(execution)) void _event;
+  }, /terminated/);
+
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'failed');
+  assert.equal(settled.error?.code, 'transport.failure');
+  assert.equal(settled.resourceRelease.state, 'released');
+});
+
+test('RCC v3 fully observed waiting settlement releases the session and allows close', async () => {
+  // The provider finished the round with tool calls pending and the stream is
+  // fully consumed. Continuation is unavailable for RCC v3, so the settlement
+  // must release the record: otherwise close() stays pending forever and the
+  // runtime cannot finish its failure cleanup.
+  const built = transportHarness();
+  seedActive(built.transport, chunks([
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-waiting-tools"}}\n\n',
+    `data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call-waiting', name: 'file_read', arguments: '{"path":"marker.txt"}' },
+    })}\n\n`,
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-waiting-tools"}}\n\n',
+  ]));
+  for await (const _event of built.transport.observe(execution)) void _event;
+
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'blocked');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'pending');
+  assert.equal(settled.error?.code, 'capability.continuation-unavailable');
+  assert.equal(settled.error?.ownerId, 'humanagent.provider-adapter.rcc-v3');
+  assert.equal(settled.error?.nextAction.kind, 'recover');
+  assert.equal(settled.nextAction?.kind, 'recover');
+  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
+  assert.equal((await built.transport.close(binding)).state, 'closed');
+});

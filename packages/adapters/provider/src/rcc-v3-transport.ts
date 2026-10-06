@@ -592,11 +592,17 @@ export class RccV3ProviderTransport implements ProviderTransport {
     });
     let completed = false;
     let failed = false;
+    // True once this stream decoded a terminal outcome reported by the
+    // provider itself. Any later transport close only releases the stream.
+    let observedTerminal = false;
     try {
       for await (const frame of parseSse(active.body, this.maxEventBytes, this.maxBufferBytes)) {
         if (!frame.data) continue;
         if (frame.data === '[DONE]') {
-          if (active.protocol === 'openai' && !active.terminalState) active.terminalState = terminalStateFor(active.protocol, 'done', undefined, active.stopRequested);
+          if (active.protocol === 'openai') {
+            if (!active.terminalState) active.terminalState = terminalStateFor(active.protocol, 'done', undefined, active.stopRequested);
+            observedTerminal = true;
+          }
           continue;
         }
         let record: Record<string, unknown>;
@@ -627,6 +633,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
           if (item.type === 'function_call') active.responsesToolCallsPending = true;
         }
         if (isTerminalEvent(active.protocol, type)) {
+          observedTerminal = true;
           if (type === 'error' || type.endsWith('.failed')) {
             const errorRecord = type.endsWith('.failed')
               ? (readRecord(record.response).error ?? {})
@@ -659,6 +666,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
           if (typeof finishReason === 'string') {
             const mapping = mapOpenAIFinishReason(finishReason);
             active.terminalState = mapping.terminalState;
+            observedTerminal = true;
             if (mapping.errorCode) {
               active.terminalError = providerError(
                 active.evidenceScope,
@@ -691,7 +699,12 @@ export class RccV3ProviderTransport implements ProviderTransport {
       if (isExpectedStopAbort(cause, active)) {
         if (!active.terminalError) active.terminalState = 'stopped';
         return;
-      } else if (!active.terminalError) {
+      }
+      // The provider already reported a terminal outcome. A transport close
+      // after that point only releases the stream: it must not overwrite the
+      // observed outcome or surface a fabricated failure to the consumer.
+      if (observedTerminal && !active.terminalError) return;
+      if (!active.terminalError) {
         const errorMessage = cause instanceof Error ? cause.message : 'RCC v3 stream failed';
         active.terminalError = providerError(active.evidenceScope, 'observe', 'transport.failure', errorMessage, 'transport');
         active.terminalState = 'failed';
@@ -781,11 +794,17 @@ export class RccV3ProviderTransport implements ProviderTransport {
         'capability',
         { kind: 'recover', ref: OWNER },
       ));
+      // The stream is fully observed and RCC v3 cannot continue it, so the
+      // execution record is finished: release it exactly like the other
+      // non-final settlements. Retaining it would keep close() pending forever
+      // and strand the runtime's failure cleanup.
+      active.resourceReleased = true;
+      this.executions.delete(executionKey(input));
       return {
         ...input,
         state: 'blocked',
         evidenceRefs: [evidenceRef],
-        resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
+        resourceRelease: { state: 'released', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
         error,
         ownerId: OWNER,
