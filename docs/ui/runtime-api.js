@@ -86,6 +86,15 @@ export function createRuntimeApi(options = {}) {
     }),
     taskDetail: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     taskDashboard: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`),
+    // The runtime owns which plan a task resolves to, so only the frozen control
+    // fields travel: a caller cannot name a subscription.
+    planControl: (taskId, { action, idempotencyKey, requestedAt }) => request(
+      `/api/tasks/${encodeURIComponent(taskId)}/plan-control`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action, idempotencyKey, requestedAt }),
+      },
+    ),
     taskHistory: (taskId, { cursor, limit = 20, kinds, search } = {}) => {
       const query = new URLSearchParams({ limit: String(limit) })
       if (cursor) query.set('cursor', cursor)

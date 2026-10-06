@@ -176,6 +176,153 @@ function actionCopy() {
     : '当前没有合法操作；请等待收拢或按详情处理。'
 }
 
+// The plan surface is driven only by the dashboard read: the state, mode and due
+// time are reported facts, and a control is rendered only when the read marks it
+// available. A label falls back to the raw value, so an unknown state is never
+// translated into a claim the read did not make.
+const PLAN_STATE_LABELS = { active: '生效中', paused: '已暂停', cancelled: '已取消' }
+const PLAN_MODE_LABELS = { once: '单次', scheduled: '定时', recurring: '周期' }
+const PLAN_STATE_TONES = { active: 'success', paused: 'warning', cancelled: 'gray' }
+const PLAN_CONTROLS = [
+  { action: 'pause', field: 'canPause', label: '暂停计划', className: 'button button--quiet' },
+  { action: 'resume', field: 'canResume', label: '继续计划', className: 'button button--primary' },
+  { action: 'cancel-future', field: 'canCancelFuture', label: '取消后续执行', className: 'button button--danger' },
+]
+
+let planControlNotice = ''
+
+function planStateLabel(state) {
+  if (state === undefined || state === null || state === '') return '未提供'
+  return PLAN_STATE_LABELS[state] || String(state)
+}
+
+function planModeLabel(mode) {
+  if (mode === undefined || mode === null || mode === '') return '未提供'
+  return PLAN_MODE_LABELS[mode] || String(mode)
+}
+
+function planControlKey(subscriptionId, action) {
+  const bytes = crypto.getRandomValues(new Uint8Array(8))
+  const random = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `plan-control:${subscriptionId}:${action}:${random}`
+}
+
+/**
+ * The 200 body reports what the runtime did with the control. Only `applied`
+ * means the plan changed: `duplicate` means an identical control was already
+ * applied, and `stale`/`conflict` mean it did not take effect. An unknown status
+ * is reported as unrecognised instead of being read as success.
+ */
+function planControlResultCopy(action, result) {
+  const label = PLAN_CONTROLS.find((control) => control.action === action)?.label || action
+  const revisions = `policy=${result.policyRevision || '未提供'} · schedule=${result.scheduleRevision || '未提供'}`
+  const superseded = Number.isFinite(result.supersededUnclaimedOccurrences)
+    ? ` · 已取消未领取的到期 ${result.supersededUnclaimedOccurrences} 个`
+    : ''
+  switch (result.status) {
+    case 'applied':
+      return `${label}已生效 · ${revisions}${superseded} · control=${result.controlRef || '未提供'}`
+    case 'duplicate':
+      return `${label}此前已生效，本次未重复应用 · ${revisions} · key=${result.idempotencyKey || '未提供'}`
+    case 'stale':
+      return `${label}未生效：计划已被其他控制改变 · ${revisions} · next=重新读取计划后再选择控制`
+    case 'conflict':
+      return `${label}未生效：与当前计划状态冲突 · ${revisions} · next=按当前计划状态重新选择控制`
+    default:
+      return `${label}结果未识别：status=${result.status === undefined ? '未提供' : String(result.status)}`
+  }
+}
+
+async function runPlanControl(action) {
+  const plan = dashboard?.plan
+  if (!plan) return
+  const label = PLAN_CONTROLS.find((control) => control.action === action)?.label || action
+  planControlNotice = `正在提交${label}…`
+  renderDashboard()
+  try {
+    const result = await api.planControl(taskId, {
+      action,
+      idempotencyKey: planControlKey(plan.subscriptionId, action),
+      requestedAt: new Date().toISOString(),
+    })
+    planControlNotice = planControlResultCopy(action, result)
+    await refresh()
+  } catch (error) {
+    planControlNotice = `计划控制被拒绝 · code=${error.code || 'runtime.request.failed'} · owner=${error.ownerId || 'unknown'} · ${error.message} · next=${error.nextAction || 'inspect the runtime error'}`
+    renderDashboard()
+    await refresh().catch(setRefreshError)
+  }
+}
+
+function renderPlanSection(plan) {
+  const section = element('section', undefined, 'section')
+  section.dataset.planSection = 'true'
+  section.dataset.planSubscription = plan.subscriptionId ?? ''
+  section.append(element('h2', '执行计划'))
+  const panel = element('div', undefined, 'panel')
+
+  const facts = element('dl', undefined, 'detail-grid')
+  const stateCell = element('div', undefined, 'detail-cell')
+  const stateChip = element('span', planStateLabel(plan.state), 'state-chip')
+  stateChip.dataset.planState = plan.state ?? ''
+  stateChip.dataset.tone = PLAN_STATE_TONES[plan.state] || 'gray'
+  stateCell.append(element('dt', '计划状态'), stateChip)
+  const modeCell = element('div', undefined, 'detail-cell')
+  const modeValue = element('span', planModeLabel(plan.executionMode))
+  modeValue.dataset.planMode = plan.executionMode ?? ''
+  modeCell.append(element('dt', '执行模式'), modeValue)
+  const dueCell = element('div', undefined, 'detail-cell')
+  const dueValue = element('span', plan.nextDueAt ? formatPreciseTime(plan.nextDueAt) : '未提供')
+  dueValue.dataset.planNextDue = plan.nextDueAt ?? ''
+  dueCell.append(element('dt', '下次到期'), dueValue)
+  facts.append(stateCell, modeCell, dueCell)
+  panel.append(facts)
+
+  const available = PLAN_CONTROLS.filter((control) => plan[control.field] === true)
+  const actions = element('div', undefined, 'actions')
+  for (const control of available) {
+    const button = element('button', control.label, control.className)
+    button.type = 'button'
+    button.dataset.planAction = control.action
+    button.addEventListener('click', () => void runPlanControl(control.action))
+    actions.append(button)
+  }
+  if (available.length === 0) {
+    actions.append(element('p', '这次读取没有报告可用的计划控制。', 'muted'))
+  }
+  panel.append(actions)
+
+  const notice = element('p', planControlNotice || `计划状态：${planStateLabel(plan.state)}。`, 'muted')
+  notice.dataset.planStatus = 'true'
+  notice.setAttribute('role', 'status')
+  notice.setAttribute('aria-live', 'polite')
+  panel.append(notice)
+
+  const details = element('details')
+  details.dataset.planDetails = 'true'
+  const body = element('dl', undefined, 'event-detail')
+  for (const [label, value] of [
+    ['subscriptionId', plan.subscriptionId],
+    ['executionMode', plan.executionMode],
+    ['nextDueAt', plan.nextDueAt],
+    ['canPause', plan.canPause],
+    ['canResume', plan.canResume],
+    ['canCancelFuture', plan.canCancelFuture],
+  ]) {
+    const cell = element('div')
+    cell.append(
+      element('dt', label),
+      element('dd', value === undefined || value === null || value === '' ? '未提供' : String(value)),
+    )
+    body.append(cell)
+  }
+  details.append(element('summary', '计划技术身份'), body)
+  panel.append(details)
+
+  section.append(panel)
+  return section
+}
+
 function stopObserving() {
   if (observeTimer) {
     clearTimeout(observeTimer)
@@ -260,6 +407,10 @@ function renderDashboard() {
   panel.append(actions, actionStatus)
   execution.append(panel)
   main.append(execution)
+
+  // The plan section exists only when the dashboard read reports a persisted
+  // plan; a task without one must not show a plan surface at all.
+  if (dashboard.plan) main.append(renderPlanSection(dashboard.plan))
 
   const events = element('section', undefined, 'section')
   events.append(element('h2', '执行轨迹'))
