@@ -9,17 +9,29 @@
       "ownerPath": "packages/app/src/ui-runtime/server.ts",
       "ownerRel": "packages/app/src/ui-runtime/server.ts"
     },
-    "task_dashboard": {
+    "load_task_truth": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts"
     },
-    "observation_projection": {
+    "load_event_history": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "correlate_tool_lifecycle": {
+      "ownerPath": "packages/app/src/ui-runtime/service.ts",
+      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    },
+    "project_conversation_and_trace": {
+      "ownerPath": "packages/ui/projection/runtime.ts",
+      "ownerRel": "packages/ui/projection/runtime.ts"
+    },
+    "project_status_and_actions": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts"
     },
     "browser_view": {
-      "ownerPath": "packages/ui/surfaces/dsh-dashboard-replay.html",
-      "ownerRel": "packages/ui/surfaces/dsh-dashboard-replay.html"
+      "ownerPath": "docs/ui/observation.js",
+      "ownerRel": "docs/ui/observation.js"
     }
   }
 }

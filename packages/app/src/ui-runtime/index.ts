@@ -20,8 +20,11 @@ import {
   filesystemProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
+import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
+import { UiRuntimeApiError } from './errors.js';
 import { createFakeExecutionPort } from '../fake-execution.js';
 import {
   UiRuntimeService,
@@ -31,6 +34,7 @@ import {
 } from './service.js';
 import { startUiRuntimeServer, type UiRuntimeServer } from './server.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
+import { AccessControlService } from './access-control.js';
 import {
   createProviderExplicitBrainInterpreter,
   type ExplicitBrainAgentTarget,
@@ -62,6 +66,7 @@ export interface RccModeConfig {
 
 export interface UiRuntimeLaunchOptions {
   readonly mode: 'fake' | 'rcc';
+  readonly accessControl?: AccessControlService;
   readonly organId: OrganId;
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
@@ -182,9 +187,18 @@ class InMemoryAttentionPort implements AttentionPort {
 export interface UiRuntime {
   readonly service: UiRuntimeService;
   readonly server: UiRuntimeServer;
+  close(): Promise<void>;
 }
 
 export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<UiRuntime> {
+  if (!options.accessControl) {
+    throw new AppLifecycleError(
+      'ui-runtime.access-control.missing',
+      'UI runtime startup requires an access-control service',
+      'initialize web access control before starting the UI runtime',
+      'humanagent.app.ui-runtime',
+    );
+  }
   const explicitBrainInterpreter = options.explicitBrainInterpreter ?? (() => {
     const templateRoot = options.explicitBrainTemplateRoot?.trim();
     if (!templateRoot) {
@@ -207,6 +221,12 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
+  const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
+  const subscriptionControl = new SubscriptionControlPort(
+    new JsonlOrganJournal(subscriptionJournalPath),
+    { organId: options.organId },
+    subscriptionJournalPath,
+  );
   const interactionJournal = options.interactionRoot
     ? new UiRuntimeJournal(join(options.interactionRoot, 'sessions', 'explicit-brain.jsonl'))
     : undefined;
@@ -264,19 +284,60 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     explicitBrainInterpreter,
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
+    subscriptionControl,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
   });
   await service.hydrate();
   service.startImplicitConsumer();
   const server = await startUiRuntimeServer({
     service,
+    accessControl: options.accessControl,
     uiRoot: options.uiRoot,
     host: options.host,
     port: options.portNumber,
     ...(options.restart === undefined ? {} : { restart: options.restart }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
   });
-  return { service, server };
+  return {
+    service,
+    server,
+    async close() {
+      await service.quiesceImplicitConsumption();
+      let serverCloseFailure: unknown;
+      try {
+        await server.close();
+      } catch (error) {
+        serverCloseFailure = error;
+      }
+      const active = service.listTasks().running.filter((task) => task.requirementAdmission !== 'queued');
+      const stopped = await Promise.allSettled(
+        active.map(async (task) => {
+          try {
+            await service.stop(task.taskId);
+          } catch (error) {
+            const stillActive = service.listTasks().running.some(
+              (candidate) => candidate.taskId.value === task.taskId.value && candidate.requirementAdmission !== 'queued',
+            );
+            // A task can settle between the running snapshot and stop admission.
+            // That is a completed stop, not a shutdown failure; all other stop
+            // errors remain explicit.
+            if (error instanceof UiRuntimeApiError && error.code === 'task.not.running' && !stillActive) return;
+            throw error;
+          }
+        }),
+      );
+      const failures: unknown[] = [];
+      if (serverCloseFailure !== undefined) failures.push(serverCloseFailure);
+      for (const result of stopped) {
+        if (result.status === 'rejected') failures.push(result.reason);
+      }
+
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, 'UI runtime close failed while settling active executions');
+      }
+    },
+  };
 }
 
 export { UiRuntimeApiError } from './errors.js';

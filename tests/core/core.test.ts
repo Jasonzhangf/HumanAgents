@@ -58,6 +58,15 @@ import {
   transitionLifecycle,
   transitionOperationStatus,
   classifyAgentLoopBudget,
+  DraftRevisionError,
+  assertDraftConfirmation,
+  assertDraftRevisionCurrent,
+  assertDraftRevisionHash,
+  assertFinalSubmit,
+  createDraftRevision,
+  draftRevisionDiff,
+  refineDraftRevision,
+  supersedeDraftRevision,
   type ExecutionEventFence,
 } from '../../packages/core/src/index.js';
 import {
@@ -66,6 +75,7 @@ import {
   type AgentModeTransition, type ContextReplacement, type ModeLease, type ObservationBatch, type ObservationDelta,
   type OperationEvent,
   type AgentProviderBinding, type Checkpoint, type CheckpointClosureRecord, type CheckpointReentryRecord,
+  type DraftConfirmation, type DraftRevisionInput, type FinalSubmit,
   type EventConsumerCursor, type EventConsumerReceipt, type EventRetryObligation, type EvidenceRef, type OrganHealthSnapshot, type RuntimeBinding, type ScopeRef,
 } from '../../packages/contracts/src/index.js';
 
@@ -764,4 +774,179 @@ test('operation lifecycle maps to core state and fences stale epochs', () => {
     nextAction: { kind: 'stop' },
     evidenceRefs: [evidence('failure')],
   }), LifecycleError);
+});
+
+function draftRevisionFixture() {
+  return createDraftRevision({
+    draftId: 'draft-1',
+    inputRevision: 1,
+    goal: 'summarize the current task evidence',
+    scope: 'task-current',
+    constraints: ['read-only'],
+    deliverables: ['summary'],
+    normalizedInput: 'summarize current evidence',
+    proposedIntent: 'create',
+    proposal: 'create a summary task',
+    matchedTasks: ['task-current'],
+    knownFacts: ['fixture'],
+    immutableOriginalRef: 'raw-input:interaction-1:1',
+  });
+}
+
+function draftRefinement(base: ReturnType<typeof draftRevisionFixture>, overrides: Partial<DraftRevisionInput> = {}): DraftRevisionInput {
+  return {
+    draftId: base.draftId,
+    baseRevisionVersion: base.revisionVersion,
+    requestedRevisionHash: base.revisionHash,
+    fields: { normalizedInput: 'summarize current evidence and risks' },
+    instructionRef: 'user-edit-1',
+    idempotencyKey: 'edit-1',
+    ...overrides,
+  };
+}
+
+function draftFailure(fn: () => unknown): DraftRevisionError {
+  try {
+    fn();
+  } catch (error) {
+    if (error instanceof DraftRevisionError) return error;
+    throw error;
+  }
+  throw new Error('expected DraftRevisionError');
+}
+
+test('draft revision create and refine keep immutable history and content hash', () => {
+  const first = draftRevisionFixture();
+  assert.equal(first.revisionVersion, 1);
+  assert.equal(first.state, 'draft');
+  assert.equal(first.history.length, 0);
+  assert.equal(first.revisionHash.startsWith('sha256:'), true);
+  assert.doesNotThrow(() => assertDraftRevisionHash(first));
+
+  const second = refineDraftRevision(first, draftRefinement(first, {
+    fields: {
+      goal: 'summarize the current task evidence and open risks',
+      constraints: ['read-only', 'no network'],
+      normalizedInput: 'summarize current evidence and open risks',
+    },
+  }));
+  assert.equal(second.revisionVersion, 2);
+  assert.equal(second.previousRevisionRef, first.revisionHash);
+  assert.deepEqual(second.history, [{ draftId: first.draftId, revisionVersion: 1, revisionHash: first.revisionHash }]);
+  assert.notEqual(second.revisionHash, first.revisionHash);
+  assert.equal(second.immutableOriginalRef, first.immutableOriginalRef);
+  assert.deepEqual(draftRevisionDiff(first, second), ['goal', 'constraints', 'normalizedInput']);
+  assert.doesNotThrow(() => assertDraftRevisionHash(second));
+});
+
+test('draft refinement permits an execution-policy-only edit without rewriting normalized input', () => {
+  const first = draftRevisionFixture();
+  const policy = {
+    policyId: 'plan-once',
+    policyRevision: 1,
+    executionMode: 'once' as const,
+    dueAt: '2026-10-05T00:00:00.000Z',
+    timezone: 'UTC',
+    canonicalInstant: '2026-10-05T00:00:00.000Z',
+    dstMode: 'wall' as const,
+    dstMissedPolicy: 'shift-forward' as const,
+    dstAmbiguousPolicy: 'earlier-offset' as const,
+    latePolicy: 'run-once' as const,
+    busyPolicy: 'skip' as const,
+  };
+
+  const second = refineDraftRevision(first, draftRefinement(first, {
+    fields: { executionPolicy: policy },
+  }));
+  assert.equal(second.normalizedInput, first.normalizedInput);
+  assert.deepEqual(second.executionPolicy, policy);
+  assert.notEqual(second.revisionHash, first.revisionHash);
+  assert.deepEqual(draftRevisionDiff(first, second), ['executionPolicy']);
+
+  assert.equal(
+    draftFailure(() => refineDraftRevision(first, draftRefinement(first, {
+      fields: { goal: 'rename the task while binding policy', executionPolicy: policy },
+    }))).code,
+    'invalid-refinement',
+  );
+});
+
+test('draft refinement rejects stale base and unchanged normalized input without mutating the draft', () => {
+  const first = draftRevisionFixture();
+  const staleVersion: DraftRevisionInput = { ...draftRefinement(first), baseRevisionVersion: 2 };
+  assert.equal(draftFailure(() => refineDraftRevision(first, staleVersion)).code, 'stale-revision');
+  const staleHash: DraftRevisionInput = { ...draftRefinement(first), requestedRevisionHash: 'sha256:deadbeef' };
+  assert.equal(draftFailure(() => refineDraftRevision(first, staleHash)).code, 'revision-hash-mismatch');
+  assert.equal(
+    draftFailure(() => refineDraftRevision(first, draftRefinement(first, { fields: { goal: 'renamed goal only' } }))).code,
+    'invalid-refinement',
+  );
+  assert.equal(
+    draftFailure(() => refineDraftRevision(first, draftRefinement(first, { fields: { normalizedInput: first.normalizedInput } }))).code,
+    'invalid-refinement',
+  );
+  // The failed edits left the current revision untouched.
+  assert.equal(first.revisionVersion, 1);
+  assert.equal(first.normalizedInput, 'summarize current evidence');
+});
+
+test('draft confirmation and final submit bind the exact revision', () => {
+  const first = draftRevisionFixture();
+  const confirmation: DraftConfirmation = {
+    confirmationRef: 'confirm-1',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-02T00:00:00.000Z',
+    payloadRef: 'asset://requirements/req-1',
+    draftId: first.draftId,
+    draftRevisionVersion: 1,
+    draftRevisionHash: first.revisionHash,
+    interactionId: 'interaction-1',
+  };
+  assert.doesNotThrow(() => assertDraftConfirmation(first, confirmation));
+
+  const submit: FinalSubmit = {
+    interactionId: 'interaction-1',
+    draftId: first.draftId,
+    inputRevision: 1,
+    draftRevisionVersion: 1,
+    draftRevisionHash: first.revisionHash,
+    confirmationRef: 'confirm-1',
+    idempotencyKey: 'submit-1',
+    requestKind: 'new-task-create',
+  };
+  assert.doesNotThrow(() => assertFinalSubmit(first, confirmation, submit));
+
+  const edited = refineDraftRevision(first, draftRefinement(first, {
+    fields: { normalizedInput: 'summarize current evidence and risks' },
+  }));
+  // The old confirmation/submit no longer matches the edited revision.
+  assert.equal(
+    draftFailure(() => assertDraftRevisionCurrent(edited, { revisionVersion: 1, revisionHash: first.revisionHash })).code,
+    'stale-revision',
+  );
+  assert.throws(() => assertFinalSubmit(edited, confirmation, submit), DraftRevisionError);
+  assert.equal(
+    draftFailure(() => assertFinalSubmit(edited, { ...confirmation, draftRevisionVersion: 2, draftRevisionHash: edited.revisionHash }, {
+      ...submit,
+      requestKind: 'new-task-preview' as FinalSubmit['requestKind'],
+      draftRevisionVersion: 2,
+      draftRevisionHash: edited.revisionHash,
+    })).code,
+    'unauthorized-final-submit',
+  );
+
+  const superseded = supersedeDraftRevision(edited, 'replaced by newer draft', 'draft-2');
+  assert.equal(superseded.state, 'stale');
+  assert.equal(
+    draftFailure(() => assertFinalSubmit(superseded, { ...confirmation, draftRevisionVersion: 2, draftRevisionHash: superseded.revisionHash }, {
+      ...submit,
+      draftRevisionVersion: 2,
+      draftRevisionHash: superseded.revisionHash,
+    })).code,
+    'unauthorized-final-submit',
+  );
+  // The hash covers immutable content only, so superseding (a derived state
+  // change) preserves the content hash that a confirmation is bound to.
+  assert.equal(superseded.revisionHash, edited.revisionHash);
+  assert.doesNotThrow(() => assertDraftRevisionHash(superseded));
 });

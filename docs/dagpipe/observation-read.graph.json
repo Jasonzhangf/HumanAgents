@@ -1,40 +1,112 @@
 {
   "id": "humanagent-observation-read",
-  "version": "1",
+  "version": "2",
   "meta": {
-    "title": "浏览器只读观测从 HTTP 请求到所见视图",
-    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+    "title": "浏览器只读观测从请求到真实轨迹、状态与合法动作",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "pending",
+    "terminalContract": {
+      "success": "rendered_view",
+      "failure": "explicit stale/disconnected projection; no fake live state",
+      "cancel": "last durable projection remains readable",
+      "blocked": "scope or data unavailable is explicit",
+      "cleanup": "read-only projection closes with no runtime mutation"
+    }
   },
   "inputs": [
-    { "id": "browser_request", "schema": "Object" }
+    {
+      "id": "browser_request",
+      "schema": "Object"
+    }
   ],
   "nodes": [
     {
       "id": "http_api",
       "operator": "humanagent-observation-http-api",
       "operator_version": "1",
-      "inputs": ["browser_request"],
-      "output": { "id": "runtime_projection", "schema": "Object" },
+      "inputs": [
+        "browser_request"
+      ],
+      "output": {
+        "id": "runtime_projection",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "task_dashboard",
-      "operator": "humanagent-task-dashboard",
+      "id": "load_task_truth",
+      "operator": "humanagent-observation-task-truth",
       "operator_version": "1",
-      "inputs": ["runtime_projection"],
-      "output": { "id": "dashboard_data", "schema": "Object" },
+      "inputs": [
+        "runtime_projection"
+      ],
+      "output": {
+        "id": "task_projection",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "observation_projection",
-      "operator": "humanagent-observation-projection",
+      "id": "load_event_history",
+      "operator": "humanagent-observation-event-history",
       "operator_version": "1",
-      "inputs": ["dashboard_data"],
-      "output": { "id": "read_model", "schema": "Object" },
+      "inputs": [
+        "task_projection"
+      ],
+      "output": {
+        "id": "event_history",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "correlate_tool_lifecycle",
+      "operator": "humanagent-observation-tool-lifecycle",
+      "operator_version": "1",
+      "inputs": [
+        "event_history"
+      ],
+      "output": {
+        "id": "tool_lifecycle",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_conversation_and_trace",
+      "operator": "humanagent-observation-conversation-trace",
+      "operator_version": "1",
+      "inputs": [
+        "tool_lifecycle"
+      ],
+      "output": {
+        "id": "read_model",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_status_and_actions",
+      "operator": "humanagent-observation-status-actions",
+      "operator_version": "1",
+      "inputs": [
+        "read_model"
+      ],
+      "output": {
+        "id": "status_model",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -43,17 +115,51 @@
       "id": "browser_view",
       "operator": "humanagent-browser-view",
       "operator_version": "1",
-      "inputs": ["read_model"],
-      "output": { "id": "rendered_view", "schema": "Object" },
+      "inputs": [
+        "status_model"
+      ],
+      "output": {
+        "id": "rendered_view",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     }
   ],
   "edges": [
-    { "from": "http_api", "to": "task_dashboard", "arc_id": "runtime_projection" },
-    { "from": "task_dashboard", "to": "observation_projection", "arc_id": "dashboard_data" },
-    { "from": "observation_projection", "to": "browser_view", "arc_id": "read_model" }
+    {
+      "from": "http_api",
+      "to": "load_task_truth",
+      "arc_id": "runtime_projection"
+    },
+    {
+      "from": "load_task_truth",
+      "to": "load_event_history",
+      "arc_id": "task_projection"
+    },
+    {
+      "from": "load_event_history",
+      "to": "correlate_tool_lifecycle",
+      "arc_id": "event_history"
+    },
+    {
+      "from": "correlate_tool_lifecycle",
+      "to": "project_conversation_and_trace",
+      "arc_id": "tool_lifecycle"
+    },
+    {
+      "from": "project_conversation_and_trace",
+      "to": "project_status_and_actions",
+      "arc_id": "read_model"
+    },
+    {
+      "from": "project_status_and_actions",
+      "to": "browser_view",
+      "arc_id": "status_model"
+    }
   ],
-  "outputs": ["rendered_view"]
+  "outputs": [
+    "rendered_view"
+  ]
 }

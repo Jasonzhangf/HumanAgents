@@ -105,7 +105,9 @@ function probeExpired(result: ProviderProbeResult): boolean {
 interface ActiveExecution {
   readonly identity: ProviderExecutionIdentityRef;
   readonly scope: ScopeRef;
-  readonly externalExecutionRef?: EvidenceRef;
+  externalExecutionRef?: EvidenceRef;
+  stopRequested: boolean;
+  pendingStart: boolean;
 }
 
 function scopeFromEvidence(input: ProviderStartInput | ProviderResumeInput, phase: ProviderErrorPhase): ScopeRef {
@@ -290,21 +292,20 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       }
       const scope = scopeFromEvidence(input, 'start');
       const request = this.options.codec.encodeStart(input, this.options.binding, this.options.routeRef);
-      const receipt = await this.callTransport('start', input, () => this.options.transport.start(input, request));
-      validateProviderStartReceipt(receipt);
-      assertProviderExecutionIdentityMatch(receipt, input);
-      if (receipt.externalExecutionRef) this.assertExternalEvidenceMatches(receipt.externalExecutionRef, input, scope, 'start');
-      if (this.sessions.has(key)) {
-        throw new ProviderAdapterError({
-          code: 'runtime.already.started',
-          category: 'runtime',
-          phase: 'start',
-          message: 'provider execution instance activated concurrently',
-          scope: input,
-        });
+      const active: ActiveExecution = { identity: { ...input }, scope, stopRequested: false, pendingStart: true };
+      this.sessions.set(key, active);
+      try {
+        const receipt = await this.callTransport('start', input, () => this.options.transport.start(input, request));
+        validateProviderStartReceipt(receipt);
+        assertProviderExecutionIdentityMatch(receipt, input);
+        if (receipt.externalExecutionRef) this.assertExternalEvidenceMatches(receipt.externalExecutionRef, input, scope, 'start');
+        active.pendingStart = false;
+        active.externalExecutionRef = receipt.externalExecutionRef;
+        return receipt;
+      } catch (error) {
+        if (!active.stopRequested) this.sessions.delete(key);
+        throw error;
       }
-      this.sessions.set(key, { identity: { ...input }, scope, externalExecutionRef: receipt.externalExecutionRef });
-      return receipt;
     });
   }
 
@@ -353,7 +354,13 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       }
       if (result.recovered) {
         const previous = this.sessions.get(executionKey(input));
-        this.sessions.set(executionKey(input), { identity: { ...input }, scope, externalExecutionRef: previous?.externalExecutionRef });
+        this.sessions.set(executionKey(input), {
+          identity: { ...input },
+          scope,
+          externalExecutionRef: previous?.externalExecutionRef,
+          stopRequested: false,
+          pendingStart: false,
+        });
       }
       return result;
     });
@@ -398,12 +405,14 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       for await (const raw of this.options.transport.observe(input)) {
         const decoded: ProviderDecodedEvent = await this.guard('observe', active.identity, async () => this.options.codec.decodeEvent(raw, context));
         for (const event of decoded.events) {
-          this.guardSync('observe', active.identity, () => {
-            validateProviderEvent(event);
-            assertProviderEventEpoch(event, input.executionEpoch);
-            assertProviderExecutionIdentityMatch(event, input);
+          const stamped = this.guardSync('observe', active.identity, () => {
+            const scoped = this.stampObservedEvent(event, input);
+            validateProviderEvent(scoped);
+            assertProviderEventEpoch(scoped, input.executionEpoch);
+            assertProviderExecutionIdentityMatch(scoped, input);
+            return scoped;
           });
-          yield event;
+          yield stamped;
         }
       }
     } catch (error) {
@@ -422,7 +431,8 @@ export class ProviderAdapter implements ExecutionRuntimePort {
   async requestStop(input: ProviderStopRequest): Promise<ProviderStopReceipt> {
     return this.guard('stop', input, async () => {
       validateProviderStopRequest(input);
-      this.requireActive(input, 'stop');
+      const active = this.requireActive(input, 'stop');
+      active.stopRequested = true;
       const request = this.options.codec.encodeStop(input, this.options.binding, this.options.routeRef);
       const receipt = await this.callTransport('stop', input, () => this.options.transport.requestStop(input, request));
       validateProviderStopReceipt(receipt);
@@ -550,6 +560,17 @@ export class ProviderAdapter implements ExecutionRuntimePort {
       return result.resourceRelease.state === 'released' && result.persistence.state === 'committed';
     }
     return result.resourceRelease.state === 'released';
+  }
+
+  private stampObservedEvent(event: ProviderEvent, input: ProviderObserveInput): ProviderEvent {
+    const receivedAt = new Date().toISOString();
+    return {
+      ...event,
+      ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+      ...(input.parentRequestId === undefined ? {} : { parentRequestId: input.parentRequestId }),
+      occurredAt: receivedAt,
+    };
   }
 
   private async callTransport<T>(

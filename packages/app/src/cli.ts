@@ -34,6 +34,7 @@ import {
 } from './index.js';
 import { SessionStore } from './session-store.js';
 import { buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
+import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
 import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
   createFakeExecutionPort,
@@ -50,10 +51,11 @@ import {
   serveCompositionManifestMatches,
 } from './entry-composition.js';
 import { createCordisHost } from './cordis-host.js';
-import { runSupervisorStartup, waitForDaemonLeaseHandoff, type SupervisorStartup } from './supervisor/supervisor.js';
+import { readDaemonLease, runSupervisorStartup, waitForDaemonLeaseHandoff, type SupervisorStartup } from './supervisor/supervisor.js';
 import { requestDaemonRestart } from './supervisor/restart-client.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
@@ -170,11 +172,57 @@ function fakeScenario(args: readonly string[]): FakeExecutionScenario | undefine
   return value;
 }
 
-function loopbackHost(value: string): '127.0.0.1' | '::1' {
-  if (value !== '127.0.0.1' && value !== '::1') {
-    throw new Error('serve --host must be a loopback address (127.0.0.1 or ::1) until the control API has authentication');
+type ServeHost = '0.0.0.0' | '::' | '127.0.0.1' | '::1';
+
+function serveHost(value: string): ServeHost {
+  if (value !== '0.0.0.0' && value !== '::' && value !== '127.0.0.1' && value !== '::1') {
+    throw new AppLifecycleError(
+      'serve.host.invalid',
+      `serve --host must be 0.0.0.0, ::, 127.0.0.1, or ::1: ${value}`,
+      'choose a supported listener wildcard or loopback host; interface addresses and hostnames are not accepted',
+      'humanagent.app.serve',
+    );
   }
   return value;
+}
+
+function controlEndpointFor(host: ServeHost, port: number): { readonly host: '127.0.0.1' | '::1'; readonly port: number } {
+  return { host: host === '::1' ? '::1' : '127.0.0.1', port };
+}
+
+function reachableIpv4Address(): string | undefined {
+  const addresses = networkInterfaces();
+  for (const entries of Object.values(addresses)) {
+    for (const entry of entries ?? []) {
+      if (entry.family === 'IPv4' && !entry.internal) return entry.address;
+    }
+  }
+  return undefined;
+}
+
+function reachableIpv6Address(): string | undefined {
+  const addresses = networkInterfaces();
+  for (const entries of Object.values(addresses)) {
+    for (const entry of entries ?? []) {
+      if (entry.family === 'IPv6' && !entry.internal) return entry.address;
+    }
+  }
+  return undefined;
+}
+
+function displayOrigin(bound: { readonly listenAddress: string; readonly port: number }): string {
+  const address = bound.listenAddress === '0.0.0.0'
+    ? reachableIpv4Address() ?? '127.0.0.1'
+    : bound.listenAddress === '::'
+      ? reachableIpv6Address() ?? '::1'
+    : bound.listenAddress;
+  const host = address.includes(':') ? `[${address}]` : address;
+  return `http://${host}:${bound.port}`;
+}
+
+function controlEndpointUrl(endpoint: { readonly host: '127.0.0.1' | '::1'; readonly port: number }, path: string): string {
+  const host = endpoint.host === '::1' ? '[::1]' : endpoint.host;
+  return `http://${host}:${endpoint.port}${path}`;
 }
 
 function memoryTrigger(outcome: Checkpoint['outcome']): 'completion' | 'blocked' | 'rewind' | null {
@@ -761,8 +809,69 @@ export async function main(args: readonly string[]): Promise<void> {
   if (command === 'restart') {
     const paths = await resolveRuntimePaths({ workspace, controlRoot });
     await ensureControlLayout(paths);
-    const receipt = await requestDaemonRestart(paths);
+    const receipt = await requestDaemonRestart(paths, paths.webAccessCredentialPath);
     console.log(JSON.stringify({ command, ...receipt }, null, 2));
+    return;
+  }
+  if (command === 'pair') {
+    const paths = await resolveRuntimePaths({ workspace, controlRoot });
+    await ensureControlLayout(paths);
+    const lease = await readDaemonLease(paths);
+    if (!lease || lease.ownerId !== 'humanagent.app.serve' || lease.disposedAt) {
+      throw new AppLifecycleError(
+        'auth.pair.owner-missing',
+        'no active serve owner was found for this workspace',
+        'start humanagent serve before requesting a pairing code',
+        'humanagent.app.serve',
+      );
+    }
+    const endpoint = lease.controlEndpoint;
+    if (!endpoint) {
+      throw new AppLifecycleError(
+        'auth.pair.endpoint-missing',
+        'the active serve owner has not published its control endpoint',
+        'restart the serve owner once and retry pairing',
+        'humanagent.app.serve',
+      );
+    }
+    const token = await deriveSupervisorToken(paths.webAccessCredentialPath, lease.leaseId, lease.generation);
+    let response: Response;
+    try {
+      response = await fetch(controlEndpointUrl(endpoint, '/api/auth/pair/challenge'), {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        body: JSON.stringify({ leaseId: lease.leaseId, generation: lease.generation }),
+      });
+    } catch (error) {
+      throw new AppLifecycleError(
+        'auth.pair.request-failed',
+        `could not reach the active serve owner: ${error instanceof Error ? error.message : String(error)}`,
+        'confirm the original serve CLI is still running and retry pairing',
+        'humanagent.app.serve',
+      );
+    }
+    const payload = await response.json().catch(() => ({})) as { readonly code?: unknown; readonly expiresAt?: unknown; readonly error?: unknown };
+    if (!response.ok) {
+      throw new AppLifecycleError(
+        'auth.pair.rejected',
+        `serve owner rejected pairing (${response.status})`,
+        'inspect the original serve CLI output and retry pairing',
+        'humanagent.app.serve',
+      );
+    }
+    if (typeof payload.code !== 'string' || typeof payload.expiresAt !== 'string') {
+      throw new AppLifecycleError(
+        'auth.pair.response-invalid',
+        'serve owner returned an invalid pairing challenge',
+        'restart the serve owner and retry pairing',
+        'humanagent.app.serve',
+      );
+    }
+    console.log(JSON.stringify({ command, code: payload.code, expiresAt: payload.expiresAt }));
     return;
   }
   if (command === 'serve') {
@@ -783,7 +892,11 @@ export async function main(args: readonly string[]): Promise<void> {
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
     let boundPortNumber = portNumber;
-    const host = loopbackHost(option(args, '--host') ?? '127.0.0.1');
+    const host = serveHost(option(args, '--host') ?? '127.0.0.1');
+    const accessControl = await AccessControlService.open({
+      credentialPath: paths.webAccessCredentialPath,
+      create: true,
+    });
     const memoryRoot = paths.memoryRoot;
     const port = mode === 'rcc'
       ? buildRccExecutionPort({
@@ -915,8 +1028,8 @@ export async function main(args: readonly string[]): Promise<void> {
             try {
               const restarted = await supervisor!.restart();
               if (!runtime) throw new AppLifecycleError('daemon-restart.runtime-missing', 'serve restart completed without a UI runtime', 'inspect the original serve CLI startup failure', 'humanagent.app.serve');
-              await supervisor!.lease.setControlEndpoint({ host, port: runtime.server.port });
-              console.log(JSON.stringify({ event: 'restart.ready', ...receipt, readyAt: restarted.readyAt, url: runtime.server.url }, null, 2));
+              await supervisor!.lease.setControlEndpoint(controlEndpointFor(host, runtime.server.port));
+              console.log(JSON.stringify({ event: 'restart.ready', ...receipt, readyAt: restarted.readyAt, url: displayOrigin({ listenAddress: runtime.server.listenAddress, port: runtime.server.port }) }, null, 2));
             } catch (error) {
               console.error(JSON.stringify({ event: 'restart.failed', ...receipt, error: cliErrorPayload(error) }, null, 2));
             } finally {
@@ -985,6 +1098,7 @@ export async function main(args: readonly string[]): Promise<void> {
         start: async () => {
           runtime = await startUiRuntime({
             mode,
+            accessControl,
             organId: id('organ', 'humanagent-ui'),
             binding,
             port: cordisHost.getExecutionRuntimePort(),
@@ -1064,7 +1178,14 @@ export async function main(args: readonly string[]): Promise<void> {
           });
         },
         dispose: async () => {
-          if (runtime) await runtime.server.close();
+          try {
+            if (runtime) await runtime.close();
+          } finally {
+            // Pairing challenges are process-lifetime credentials. A restart
+            // or stop must retire them without invalidating persistent
+            // browser-session generations.
+            accessControl.closeChallengeStore();
+          }
         },
       },
     ], {
@@ -1078,7 +1199,7 @@ export async function main(args: readonly string[]): Promise<void> {
     });
     if (!runtime || supervisor === undefined) throw new AppLifecycleError('ui-runtime.startup.missing', 'serve startup completed without a UI runtime', 'repair the serve composition', 'humanagent.app');
     boundPortNumber = runtime.server.port;
-    await supervisor.lease.setControlEndpoint({ host, port: runtime.server.port });
+    await supervisor.lease.setControlEndpoint(controlEndpointFor(host, runtime.server.port));
     let shuttingDown = false;
     const shutdown = (): void => {
       if (shuttingDown) return;
@@ -1105,7 +1226,9 @@ export async function main(args: readonly string[]): Promise<void> {
       // Kept for the current UI runtime projection; it is not a user configuration concept.
       mode,
       driverRef: mode,
-      url: runtime.server.url,
+      url: displayOrigin({ listenAddress: runtime.server.listenAddress, port: runtime.server.port }),
+      listenAddress: runtime.server.listenAddress,
+      listenPort: runtime.server.port,
       bindingId: binding.bindingId,
       providerId: binding.providerId,
       endpointRef: binding.endpointRef,

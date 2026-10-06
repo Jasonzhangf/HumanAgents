@@ -22,7 +22,7 @@ import {
   type RequirementAdmissionReceipt,
 } from './implicit-admission.js';
 import {
-  ADMISSION_QUEUE_KINDS,
+  ACTIVE_ADMISSION_QUEUE_KINDS,
   type AdmissionQueueKind,
   type CheckpointRecoveryFacts,
   type QueueLoadSnapshot,
@@ -432,7 +432,7 @@ function defaultAdmit(input: {
   return admitRequirement({
     envelope: input.envelope,
     queue: defaultAdmissionQueueConfig(queue),
-    registeredQueues: ADMISSION_QUEUE_KINDS,
+    registeredQueues: ACTIVE_ADMISSION_QUEUE_KINDS,
     queueLoad: input.queueLoad,
     requiredCapabilities: input.requiredCapabilities,
     availableCapabilities: input.availableCapabilities,
