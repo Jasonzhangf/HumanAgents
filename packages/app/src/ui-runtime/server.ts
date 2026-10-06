@@ -7,6 +7,7 @@ import {
   validateInteractionDecision,
   type ExecutionPolicyDefinition,
   type InteractionRequestKind,
+  type InteractionTraceKind,
   type TaskId,
 } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
@@ -936,6 +937,31 @@ async function handleRequest(
       const selected = url.searchParams.get('node') ?? undefined;
       const scope = url.searchParams.get('scope') ?? undefined;
       writeJson(response, 200, service.observation(id('task', decodeURIComponent(taskObservation[1]!)), selected, scope));
+      return;
+    }
+    const taskHistory = /^\/api\/tasks\/([^/]+)\/history$/.exec(path);
+    if (taskHistory && method === 'GET') {
+      const limitParam = url.searchParams.get('limit');
+      const cursor = url.searchParams.get('cursor') ?? undefined;
+      const search = url.searchParams.get('search') ?? undefined;
+      const kinds = url.searchParams.getAll('kind');
+      const limit = limitParam === null ? 20 : Number(limitParam);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+        throw new UiRuntimeApiError(
+          'history.limit.invalid',
+          APP_OWNER,
+          'history limit must be an integer from 1 to 500',
+          'send a valid history limit',
+          400,
+        );
+      }
+      const result = service.history(id('task', decodeURIComponent(taskHistory[1]!)), {
+        limit,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(search === undefined ? {} : { search }),
+        ...(kinds.length === 0 ? {} : { filter: { kinds: kinds as InteractionTraceKind[] } }),
+      });
+      writeJson(response, result.ok ? 200 : 409, result);
       return;
     }
     const taskExecutions = /^\/api\/tasks\/([^/]+)\/executions$/.exec(path);

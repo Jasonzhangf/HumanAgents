@@ -28,6 +28,9 @@ const playwright = playwrightModule.default ?? playwrightModule
 
 const TASK_ID = 'task-observation'
 const TIME = '2026-10-05T12:00:00Z'
+// The turn identity the provider binding reported for this node. The proof
+// asserts the drawer displays this literal id, not an ordinal.
+const REAL_TURN_ID = 'turn-3c7d1f8a-52b4-4e19-8a60-1d9f4b2c7e35'
 
 function evidenceRef(locator) {
   return {
@@ -53,12 +56,16 @@ function selectedNode() {
     roleDisplay: '执行',
     iteration: 2,
     updatedAt: '2026-10-05T12:00:05Z',
+    // The provider binding reported this turn id for the node's real events.
+    turnId: REAL_TURN_ID,
     summary: '执行完成，输出已投影。',
     inputs: [{ ref: 'operation://operation-observation/input', label: '执行输入' }],
     outputs: [{ ref: 'artifact://observation-result', label: '结果' }],
     evidenceRefs: [evidenceRef('evidence:ev-observation')],
     activity: [
-      { activityRef: 'activity:receive', summary: '已接收执行请求', occurredAt: '2026-10-05T12:00:00Z' },
+      { activityRef: 'activity:receive', summary: '已接收执行请求', occurredAt: '2026-10-05T12:00:00Z', turnId: REAL_TURN_ID },
+      // The runtime's own settling activity carries no provider turn; it must
+      // show the explicit no-turn state instead of a fabricated number.
       { activityRef: 'activity:return', summary: 'provider 返回结果', occurredAt: '2026-10-05T12:00:04Z' },
     ],
     toolSteps: [
@@ -69,6 +76,7 @@ function selectedNode() {
         statusDisplay: '已返回',
         returned: 'status=succeeded · outputRef=asset://output/call-returned',
         occurredAt: '2026-10-05T12:00:01Z',
+        turnId: REAL_TURN_ID,
       },
       {
         stepId: 'call-unreturned',
@@ -256,6 +264,15 @@ async function readDrawer(page) {
       detailsText: details.map((node) => node.textContent ?? '').join('\n'),
       traceGroupCount: trace?.querySelectorAll('.iwc-trace-group').length ?? 0,
       traceGroupText: trace?.querySelector('.iwc-trace-group-head')?.innerText ?? '',
+      turnGroups: [...(trace?.querySelectorAll('.iwc-trace-group') ?? [])].map((group) => ({
+        turnKey: group.dataset.turnKey,
+        turnId: group.dataset.turnId,
+        chip: group.querySelector('.iwc-turn-id')?.textContent ?? '',
+        chipTurnId: group.querySelector('.iwc-turn-id')?.dataset.turnId,
+        unprojected: Boolean(group.querySelector('.iwc-turn-unprojected')),
+        unprojectedText: group.querySelector('.iwc-turn-unprojected')?.textContent ?? '',
+        rows: group.querySelectorAll('.iwc-trace-row').length,
+      })),
       pairedRowText: traceRows.find((row) => row.dataset.callId === 'call-returned')?.innerText ?? '',
       pairedRowState: traceRows.find((row) => row.dataset.callId === 'call-returned')?.dataset.toolPaired ?? '',
       unpairedRowText: traceRows.find((row) => row.dataset.callId === 'call-unreturned')?.innerText ?? '',
@@ -310,7 +327,37 @@ try {
     observe(`${run.label} page errors`, pageErrors)
     record(`${run.label} shared status/conversation/trace card`, drawer.statusRendered && drawer.conversationRendered && drawer.traceRendered, drawer)
     record(`${run.label} conversation contains real activity and conclusion`, drawer.conversationText.includes('已接收执行请求') && drawer.conversationText.includes('执行完成'), drawer.conversationText)
-    record(`${run.label} trace groups by projected source and marks unprojected turn`, drawer.traceGroupCount > 0 && drawer.traceGroupText.includes('轮次未投影'), drawer.traceGroupText)
+    const realTurnGroups = drawer.turnGroups.filter((group) => group.turnKey === REAL_TURN_ID)
+    const unprojectedGroups = drawer.turnGroups.filter((group) => group.unprojected)
+    record(
+      `${run.label} drawer displays the real provider turn id as the group label`,
+      realTurnGroups.length === 1
+        && realTurnGroups[0].turnId === REAL_TURN_ID
+        && realTurnGroups[0].chipTurnId === REAL_TURN_ID
+        && realTurnGroups[0].chip === `轮次 ${REAL_TURN_ID}`
+        && realTurnGroups[0].unprojected === false
+        && realTurnGroups[0].rows === 3,
+      drawer.turnGroups,
+    )
+    record(
+      `${run.label} real turn group never claims the unprojected state`,
+      realTurnGroups.length === 1 && realTurnGroups[0].unprojectedText === '',
+      drawer.turnGroups,
+    )
+    record(
+      `${run.label} event without a provider turn shows the explicit no-turn state`,
+      unprojectedGroups.length === 1
+        && unprojectedGroups[0].turnKey === '__no-turn-identity__'
+        && unprojectedGroups[0].turnId === undefined
+        && unprojectedGroups[0].unprojectedText.includes('轮次未投影')
+        && unprojectedGroups[0].rows === 3,
+      drawer.turnGroups,
+    )
+    record(
+      `${run.label} no turn group is labelled with a fabricated ordinal turn`,
+      drawer.turnGroups.every((group) => group.chip === '' || !/^轮次 \d+$/.test(group.chip)),
+      drawer.turnGroups.map((group) => group.chip),
+    )
     record(`${run.label} trace has second-level time and categories`, /\d{2}:\d{2}:\d{2}/.test(drawer.traceText) && ['状态', '结论', '工具调用', '模型请求'].every((label) => drawer.traceText.includes(label)), drawer.traceText)
     record(`${run.label} paired call and result render in one item`, drawer.pairedRowState === 'true' && drawer.pairedRowText.includes('调用与返回已配对'), drawer.pairedRowText)
     record(`${run.label} unpaired call is explicitly not returned`, drawer.unpairedRowState === 'false' && drawer.unpairedRowText.includes('调用未返回'), drawer.unpairedRowText)

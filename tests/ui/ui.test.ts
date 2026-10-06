@@ -980,10 +980,12 @@ test('observation work-card adapter pairs tool calls with results and marks unpr
       iteration: 2,
       updatedAt: '2026-10-05T12:00:03Z',
       summary: '执行完成，taskId 技术标识已折叠',
+      turnId: 'turn-provider-reported',
       activity: [{
         activityRef: 'activity:execute-1',
         summary: 'provider 工具调用已返回',
         occurredAt: '2026-10-05T12:00:00Z',
+        turnId: 'turn-provider-reported',
       }],
       toolSteps: [
         {
@@ -993,6 +995,7 @@ test('observation work-card adapter pairs tool calls with results and marks unpr
           statusDisplay: '已返回',
           returned: 'status=succeeded · outputRef=asset://output',
           occurredAt: '2026-10-05T12:00:01Z',
+          turnId: 'turn-provider-reported',
         },
         {
           stepId: 'call-unreturned',
@@ -1018,7 +1021,14 @@ test('observation work-card adapter pairs tool calls with results and marks unpr
   assert.equal(tools[1].tool.paired, false);
   assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'model-request'), true);
   assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'conclusion'), true);
-  assert.equal(projection.history.items.every((item: { turnKey?: string }) => item.turnKey === 'observation:turn-unprojected'), true);
+  // The real provider turn id the node reported reaches every entry whose
+  // source carried it, and nothing is renamed to a synthesized turn key.
+  assert.equal(projection.history.items.every((item: { turnKey?: string }) => item.turnKey === undefined), true);
+  assert.equal(projection.history.items.filter((item: { turnId?: string }) => item.turnId === 'turn-provider-reported').length, 3);
+  // The step whose source reported no turn has the explicit absent state.
+  const unreturned = tools[1] as { turnId?: string };
+  assert.equal(unreturned.turnId, undefined);
+  assert.equal(projection.cardMetadata.source.turnId, 'turn-provider-reported');
 });
 
 test('UI index is the task input entry with explicit draft, confirmation gate, and runtime status', async () => {
@@ -1690,6 +1700,7 @@ type InteractionCardPageAdapter = {
     };
     readonly trace: { readonly items: readonly { readonly requestId: string }[] };
     readonly history: { readonly result: string };
+    readonly cardMetadata: { readonly nextAction?: string };
   };
   readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
     readonly conversation: {
@@ -1719,8 +1730,20 @@ test('interaction card page adapter keeps technical identifiers in trace details
   assert.equal(projection.surface, 'interaction-work-card');
   assert.equal(projection.conversation.turns[0]?.markdown, '显式大脑正在整理输入');
   assert.equal(projection.conversation.turns[0]?.markdown?.includes('requestId'), false);
-  assert.equal(projection.trace.items[0]?.requestId, 'explicit.interpret');
-  assert.equal(projection.history.result, 'ok');
+  // An explicit interaction is owned by explicit intake, not by a provider
+  // request, so it has no turn or request identity to show. The card reports
+  // the absent history explicitly instead of synthesizing a turn id.
+  assert.equal(projection.trace.items.length, 0);
+  assert.equal(projection.history.result, 'missing');
+  // The conversation and trace carry no technical identity; the interaction's
+  // own event key stays in the folded status detail only.
+  assert.equal(JSON.stringify(projection.conversation).includes('explicit.interpret'), false);
+  assert.equal(JSON.stringify(projection.trace).includes('explicit.interpret'), false);
+  assert.equal(JSON.stringify(projection.trace).includes('1.explicit.interpret'), false);
+  assert.equal(
+    JSON.stringify({ ...projection.cardMetadata, nextAction: undefined }).includes('1.explicit.interpret'),
+    false,
+  );
 });
 
 test('interaction card page adapter preserves draft facts without leaking decision refs', () => {
