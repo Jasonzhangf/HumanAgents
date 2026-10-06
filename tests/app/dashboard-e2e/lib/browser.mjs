@@ -11,9 +11,7 @@
  * capture the human-observation screenshots.
  *
  * The attempt's serve PID and port are registered on the binding and are the
- * exact resources the cleanup closure stops and verifies. The page-driving
- * patterns mirror tests/app/real-browser-explicit-implicit-e2e.mjs, which is
- * the proven real-entry driver.
+ * exact resources the cleanup closure stops and verifies.
  */
 
 import { spawn } from 'node:child_process';
@@ -546,6 +544,25 @@ export async function readTaskListDom(binding) {
       text: link.textContent?.trim() ?? '',
     })),
   }));
+}
+
+/**
+ * Collect rendered trajectory rows from the newest dashboard page and, while
+ * `stop` is unsatisfied, from the paged-back pages (bounded). The dashboard
+ * pages its history by turn, so rows of one turn are not all on one page.
+ */
+export async function collectDashboardEventRows(binding, stop, maxPages = 3) {
+  const { page } = binding.browser;
+  const rows = [...((await readTaskDashboardDom(binding)).eventRows ?? [])];
+  for (let index = 0; index < maxPages; index += 1) {
+    if (stop(rows)) break;
+    const older = page.locator('.history-pager button', { hasText: '更早' }).first();
+    if (await older.count() === 0 || await older.isDisabled()) break;
+    await older.click();
+    await page.waitForTimeout(200);
+    rows.push(...((await readTaskDashboardDom(binding, { navigate: false })).eventRows ?? []));
+  }
+  return rows;
 }
 
 /**

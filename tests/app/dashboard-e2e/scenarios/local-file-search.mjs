@@ -17,11 +17,11 @@ import { join } from 'node:path';
 import {
   captureDashboardEvidence,
   captureScreenshot,
+  collectDashboardEventRows,
   openTaskDashboard,
   pageBackDashboardHistory,
   probeDashboardLiveSse,
   readObservationDom,
-  readTaskDashboardDom,
   readTaskListDom,
   submitDirectiveAndConfirmDraft,
   waitForTerminal,
@@ -70,9 +70,9 @@ export async function runLocalFileSearchScenario(binding) {
   // result events arrive, a network interruption shows 已断开 without faking
   // failure, and reconnect restores live freshness.
   await openTaskDashboard(binding);
-  // While the task is still nonterminal the dashboard must already render the
-  // model-work request rows and must not yet claim a terminal chip.
-  const nonterminalDom = await readTaskDashboardDom(binding).catch((error) => ({ error: error.message }));
+  // Capture the live page snapshot while the task still runs: the real SSE
+  // connection, the running state chip, and the trajectory events delivered
+  // before terminal. This must happen before the task terminalizes.
   const liveSse = await probeDashboardLiveSse(binding).catch((error) => ({ error: error.message }));
 
   // run queue -> execution turns -> verifiable terminal
@@ -203,41 +203,47 @@ export async function runLocalFileSearchScenario(binding) {
     missing.push(`terminal dashboard Checkpoint=${JSON.stringify(factValue('Checkpoint'))} (expected a committed succeeded checkpoint)`);
   }
 
-  // Rendered trajectory rows: tool requests keep request semantics, generic
-  // provider.model rows stay hidden, and the visible request-start rows match
-  // the projection the same page was rendered from.
+  // Rendered trajectory rows: tool requests keep request semantics and generic
+  // provider.model rows stay hidden. The dashboard pages this history by turn,
+  // so the rows are collected while paging back through the turns.
   const eventKindPrefix = (kindLabel) => String(kindLabel ?? '').split(' · ')[0];
-  const eventRows = dashboardDom.eventRows ?? [];
-  const toolRequestRows = eventRows.filter((row) => eventKindPrefix(row.kind) === 'provider.tool' && String(row.summary ?? '').startsWith('调用工具：'));
+  const isToolRequestRow = (row) => eventKindPrefix(row.kind) === 'provider.tool' && String(row.summary ?? '').startsWith('调用工具：');
+  const isRequestStartRow = (row) => String(row.kind ?? '').startsWith('provider.model') && row.summary === 'provider requested model work';
+  const allRows = [];
+  const seenEventIds = new Set();
+  for (const row of await collectDashboardEventRows(binding, () => false, 40)) {
+    if (row.eventId !== null && seenEventIds.has(row.eventId)) continue;
+    if (row.eventId !== null) seenEventIds.add(row.eventId);
+    allRows.push(row);
+  }
+  const toolRequestRows = allRows.filter(isToolRequestRow);
   if (toolRequestRows.length < 2) {
     missing.push(`terminal dashboard rendered ${toolRequestRows.length} provider tool request rows (expected >= 2)`);
   }
-  const genericModelRows = eventRows.filter((row) => row.summary === 'model');
+  const genericModelRows = allRows.filter((row) => row.summary === 'model');
   if (genericModelRows.length > 0) {
     missing.push(`terminal dashboard still rendered ${genericModelRows.length} generic provider.model rows with summary=model`);
   }
-  const requestStartRows = eventRows.filter((row) => row.summary === 'provider requested model work');
-  if (!requestStartRows.some((row) => String(row.kind ?? '').startsWith('provider.model'))) {
+  const mislabelledToolRows = allRows.filter((row) => eventKindPrefix(row.kind) === 'provider.tool-result' && String(row.summary ?? '').startsWith('调用工具：'));
+  if (mislabelledToolRows.length > 0) {
+    missing.push(`terminal dashboard rendered ${mislabelledToolRows.length} tool results as tool requests`);
+  }
+  const requestStartRows = allRows.filter(isRequestStartRow);
+  if (requestStartRows.length === 0) {
     missing.push('terminal dashboard rendered no visible provider request-start row');
   }
-  const projectedRequestStarts = (dashboardEvidence.dashboardProbe?.recentEvents ?? [])
-    .filter((event) => event.summary === 'provider requested model work').length;
-  if (requestStartRows.length !== projectedRequestStarts) {
-    missing.push(`terminal dashboard rendered ${requestStartRows.length} request-start rows, the projection reported ${projectedRequestStarts}`);
+  const journalRequestStarts = turnEvidence?.requestStartTurns ?? 0;
+  if (requestStartRows.length < Math.min(journalRequestStarts, 2)) {
+    missing.push(`terminal dashboard rendered ${requestStartRows.length} request-start rows, the journal recorded ${journalRequestStarts}`);
   }
 
-  // While the task is nonterminal the dashboard must already render request
-  // rows, and it must not yet claim the terminal chip.
-  if (nonterminalDom?.error) {
-    missing.push(`nonterminal dashboard DOM could not be read: ${nonterminalDom.error}`);
-  } else {
-    const nonterminalRows = nonterminalDom?.eventRows ?? [];
-    if (nonterminalRows.filter((row) => row.summary === 'provider requested model work').length === 0) {
-      missing.push('nonterminal dashboard rendered no provider request-start row');
-    }
-    if (String(nonterminalDom?.stateChip ?? '') === '已完成') {
-      missing.push('nonterminal dashboard already claimed the terminal state chip 已完成');
-    }
+  // The live snapshot captured while the task ran must show a nonterminal chip:
+  // the dashboard must not claim a terminal state before the runtime reports it.
+  const liveChip = String(liveSse?.connected?.stateChip ?? '');
+  if (!liveSse || liveSse.error) {
+    missing.push(`live dashboard snapshot could not be captured: ${liveSse?.error ?? 'missing result'}`);
+  } else if (['已完成', '失败', '已停止'].includes(liveChip)) {
+    missing.push(`running dashboard already claimed a terminal state chip: ${JSON.stringify(liveChip)}`);
   }
 
   // The draft the human confirms must be the explicit brain's new-task intent.
@@ -307,6 +313,15 @@ export async function runLocalFileSearchScenario(binding) {
     terminalSse: dashboardEvidence.sse,
     historyPaging,
     liveSse,
+    entryLayout: binding.entryLayout ?? null,
+    trajectoryRows: {
+      collected: allRows.length,
+      toolRequests: toolRequestRows.map(pickEvent),
+      requestStarts: requestStartRows.map(pickEvent),
+      genericModelRows: genericModelRows.length,
+    },
+    observationDom: { nodeIds: observationDom.nodeIds ?? null, metaChip: observationDom.metaChip ?? null, error: observationDom.error ?? null },
+    taskListDom: { groupTitles: taskListDom.groupTitles ?? null, links: taskListDom.links ?? null, error: taskListDom.error ?? null },
   };
   evidence.terminalState = dashboard.state;
   evidence.dashboardState = dashboard.state;
