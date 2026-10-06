@@ -573,6 +573,21 @@ class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimeP
   }
 }
 
+// The fake replay port intentionally omits summaries for model events. This
+// wrapper restores the real provider's framework summary so the implicit
+// executor projection can be tested against the same event shape.
+class SemanticModelSummaryReplayPort extends FakeReplayExecutionRuntimePort {
+  override async *observe(
+    input: Parameters<ExecutionRuntimePort['observe']>[0],
+  ): AsyncIterable<ProviderEvent> {
+    for await (const event of super.observe(input)) {
+      yield event.kind === 'model'
+        ? { ...event, summary: 'provider requested model work' }
+        : event;
+    }
+  }
+}
+
 function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId: string) {
   const row = list.draft.find((task) => task.taskId.value === `ui-task-implicit-${draftId}`);
   if (!row) throw new Error(`missing queued draft row for ${draftId}`);
@@ -6258,30 +6273,30 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   const link = rule('.task-row-link');
   const head = rule('.task-row--head');
 
-  // The runtime row is a three-track shell: checkbox, the multi-column link, actions.
+  // The runtime row is a five-track shell: checkbox, title, status, time, actions.
   assert.match(row, /grid-template-columns:\s*var\(--task-columns\)/);
-  assert.match(tasksCss, /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+auto;/);
-
-  // The link spans that middle track and owns the eight data columns itself,
-  // so the time cell never overflows onto an implicit second row.
-  assert.match(link, /display:\s*grid;/);
-  assert.match(link, /grid-column:\s*2;/);
   assert.match(
-    link,
-    /grid-template-columns:\s*minmax\(140px,\s*1\.5fr\)\s+minmax\(74px,\s*0\.5fr\)\s+minmax\(92px,\s*0\.85fr\)\s+minmax\(104px,\s*1fr\)\s+minmax\(132px,\s*1\.25fr\)\s+minmax\(58px,\s*0\.4fr\)\s+minmax\(104px,\s*0\.8fr\)\s+minmax\(96px,\s*0\.7fr\);/s,
+    tasksCss,
+    /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+84px\s+108px\s+116px;/s,
   );
 
-  // The header keeps the same nine tracks instead of inheriting the three-track shell.
-  assert.match(head, /grid-template-columns:\s*44px/);
-  assert.equal((head.match(/minmax\(/g) ?? []).length, 8);
+  // The link spans the title, status and time tracks through subgrid, so every
+  // cell stays in the shared five-track row without an implicit second row.
+  assert.match(link, /display:\s*grid;/);
+  assert.match(link, /grid-column:\s*2\s*\/\s*5;/);
+  assert.match(link, /grid-template-columns:\s*subgrid;/);
 
-  // The dense table is only safe once the viewport can actually fit the link's
-  // minimum track sum plus the checkbox, actions, gaps, panel padding and page
-  // margin. Derive that budget from the stylesheet so the breakpoint cannot be
-  // lowered below it again (the 1081px regression this replaced).
-  const trackMinima = [...(link.match(/minmax\((\d+)px/g) ?? [])].map((value) => Number(value.replace(/\D/g, '')));
-  assert.equal(trackMinima.length, 8);
-  const linkMin = trackMinima.reduce((total, value) => total + value, 0) + 7 * 12;
+  // The header uses the shared five-track shell and positions its first label
+  // after the checkbox, so the labels stay aligned with the data cells.
+  assert.equal(head.includes('grid-template-columns'), false);
+  assert.match(tasksCss, /\.task-row\s*\{\s*display:\s*grid;/s);
+  assert.match(tasksCss, /\.task-row--head:first-child\s+\.task-cell-label:first-child\s*\{\s*grid-column:\s*2;/s);
+
+  // The five-track table is only safe once the viewport can actually fit the
+  // fixed status/time/actions tracks plus the checkbox, gaps, panel padding and
+  // page margin. Derive that budget from the stylesheet so the narrow-screen
+  // branch cannot silently break the dense layout.
+  const linkMin = 84 + 108 + 116 + 2 * 12;
 
   const checkbox = Number(rule('.task-row-check').match(/width:\s*(\d+)px/)?.[1]);
   const actions = Number(rule('.task-row-actions').match(/min-width:\s*(\d+)px/)?.[1]);
@@ -6290,19 +6305,17 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   const rowGaps = 2 * Number(tasksCss.match(/--task-gap:\s*\d+px\s+(\d+)px/)?.[1]);
   const requiredViewport = checkbox + linkMin + actions + rowGaps + panelPadding + pageMargin;
 
-  const dense = tasksCss.match(/@media\s*\(min-width:\s*(\d+)px\)\s*\{\s*\.task-cell--time\s*\{\s*grid-column:\s*8;/s);
-  if (!dense) throw new Error('expected a dense breakpoint pinning .task-cell--time to grid-column 8');
+  const wide = 560;
   assert.ok(
-    Number(dense[1]) >= requiredViewport,
-    `dense breakpoint ${dense[1]}px is below the ${requiredViewport}px the link minimum needs`,
+    wide < requiredViewport,
+    `the narrow-screen branch at ${wide}px cannot fit the ${requiredViewport}px track budget`,
   );
 
-  // The wrap branch must cover everything below the dense breakpoint and lay
-  // the link out as wrapped tracks rather than the eight dense ones.
-  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{\s*grid-template-columns:\s*repeat\((\d+),/);
+  // The narrow branch must cover the small viewport and lay the link out as one
+  // wrapped track rather than the dense subgrid.
+  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/);
   if (!wrap) throw new Error('expected the wrap breakpoint to lay the link out as wrapped tracks');
-  assert.equal(Number(wrap[1]), Number(dense[1]) - 1);
-  assert.ok(Number(wrap[2]) < 8);
+  assert.ok(Number(wrap[1]) <= wide);
 });
 
 test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {
@@ -7688,6 +7701,73 @@ test('multiple appended inputs drain FIFO across successive executions of one ta
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).executionEpoch, 3);
   await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+});
+
+test('implicit executor produced output excludes provider semantic model summaries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-output-summary-'));
+  try {
+    const port = new SemanticModelSummaryReplayPort({
+      binding,
+      stepDelayMs: 1,
+      replay: [
+        { kind: 'model', state: 'model', summary: 'ignored model summary' },
+        { kind: 'output', state: 'output', summary: 'hello ', outputRefs: ['fake://output/1'] },
+        { kind: 'output', state: 'output', summary: 'world', outputRefs: ['fake://output/2'] },
+        { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+      ],
+    });
+    const service = serviceFor(root, port);
+    const executionAgent = (service as unknown as {
+      createImplicitSubtaskExecutionAgent(): ExecutionAgentPort;
+    }).createImplicitSubtaskExecutionAgent();
+    const taskId = id('task', 'task-implicit-output-summary');
+    const scope: ScopeRef = {
+      organId,
+      taskId,
+      cycleId: id('cycle', 'cycle-implicit-output-summary'),
+      operationId: id('operation', 'operation-implicit-output-summary'),
+    };
+    const result = await executionAgent.execute({
+      assignment: {
+        assignmentId: 'assignment-implicit-output-summary',
+        taskId,
+        pipelineNodeId: 'pipeline.execute',
+        attempt: 1,
+        executionEpoch: 1,
+        inputRevision: 1,
+        objective: 'summarize the model reply',
+        targetRefs: ['artifact://implicit-output-summary'],
+        expectedOutputRefs: ['artifact://implicit-output-summary'],
+        acceptanceCriteriaDigest: 'sha256:implicit-output-summary',
+        successCriteria: ['the reply is projected'],
+        failureCriteria: ['the reply is not projected'],
+        incompleteCriteria: ['the reply is incomplete'],
+        requiredCapabilities: ['provider.execution'],
+        mergeGate: 'required',
+      },
+      agentId: 'agent-implicit-output-summary',
+      executionEpoch: 1,
+      attempt: 1,
+      lease: {
+        leaseId: 'lease-implicit-output-summary',
+        runtimeId: 'runtime-implicit-output-summary',
+        generation: 1,
+        executionEpoch: 1,
+        ownerId: 'ui-runtime-test',
+        assignmentId: 'assignment-implicit-output-summary',
+        capabilities: ['provider.execution'],
+      },
+      scope,
+    });
+    assert.ok('status' in result);
+    const workResult = result as Extract<typeof result, { readonly status: string }>;
+    assert.equal(workResult.status, 'succeeded');
+    assert.equal(workResult.summary, 'implicit executor agent-implicit-output-summary succeeded: hello world');
+    assert.deepEqual(workResult.producedArtifactBodies, ['hello world']);
+    assert.equal(workResult.summary.includes('provider requested model work'), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('produced artifact paths count only file-producing calls, in order and without repeats', () => {

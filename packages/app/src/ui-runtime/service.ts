@@ -1481,7 +1481,10 @@ export class UiRuntimeService {
         await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
         const settlement = driver.settlement();
         if (!settlement) throw new Error('implicit executor did not expose settlement');
-        const producedOutput = events.map((event) => event.summary ?? '').join('');
+        const producedOutput = events
+          .filter((event) => event.providerEvent?.kind === 'output' && event.summary !== undefined)
+          .map((event) => event.summary ?? '')
+          .join('');
         const status: WorkResult['status'] = settlement.state === 'succeeded'
           ? 'succeeded'
           : settlement.state === 'waiting'
