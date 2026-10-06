@@ -222,8 +222,9 @@ function applyFields(current: DraftRevision, fields: Readonly<Record<string, unk
 /**
  * Produce the next revision of a draft from an explicit typed edit. The caller
  * must name the base revision version and hash; a stale base is rejected
- * without touching the current revision. Every accepted refinement must change
- * both the revision hash and the normalized execution input.
+ * without touching the current revision. A refinement that omits
+ * `normalizedInput` may only change the execution policy; every other accepted
+ * refinement must change the normalized execution input.
  */
 export function refineDraftRevision(current: DraftRevision, input: DraftRevisionInput): DraftRevision {
   validateDraftRevision(current);
@@ -264,12 +265,18 @@ export function refineDraftRevision(current: DraftRevision, input: DraftRevision
   if (Object.keys(fields).length === 0) {
     fail('invalid-refinement', current.draftId, 'draft refinement must change at least one field');
   }
-  if (fields.normalizedInput === undefined) {
-    fail('invalid-refinement', current.draftId, 'draft refinement must update normalized execution input');
-  }
 
   const applied = applyFields(current, fields);
-  if (applied.normalizedInput === current.normalizedInput) {
+  const changed = draftRevisionDiff(current, applied);
+  if (fields.normalizedInput === undefined) {
+    if (changed.length !== 1 || changed[0] !== 'executionPolicy') {
+      fail(
+        'invalid-refinement',
+        current.draftId,
+        'draft refinement without normalized execution input may only change the execution policy',
+      );
+    }
+  } else if (applied.normalizedInput === current.normalizedInput) {
     fail('invalid-refinement', current.draftId, 'draft refinement did not update normalized execution input');
   }
 

@@ -839,6 +839,38 @@ test('draft revision create and refine keep immutable history and content hash',
   assert.doesNotThrow(() => assertDraftRevisionHash(second));
 });
 
+test('draft refinement permits an execution-policy-only edit without rewriting normalized input', () => {
+  const first = draftRevisionFixture();
+  const policy = {
+    policyId: 'plan-once',
+    policyRevision: 1,
+    executionMode: 'once' as const,
+    dueAt: '2026-10-05T00:00:00.000Z',
+    timezone: 'UTC',
+    canonicalInstant: '2026-10-05T00:00:00.000Z',
+    dstMode: 'wall' as const,
+    dstMissedPolicy: 'shift-forward' as const,
+    dstAmbiguousPolicy: 'earlier-offset' as const,
+    latePolicy: 'run-once' as const,
+    busyPolicy: 'skip' as const,
+  };
+
+  const second = refineDraftRevision(first, draftRefinement(first, {
+    fields: { executionPolicy: policy },
+  }));
+  assert.equal(second.normalizedInput, first.normalizedInput);
+  assert.deepEqual(second.executionPolicy, policy);
+  assert.notEqual(second.revisionHash, first.revisionHash);
+  assert.deepEqual(draftRevisionDiff(first, second), ['executionPolicy']);
+
+  assert.equal(
+    draftFailure(() => refineDraftRevision(first, draftRefinement(first, {
+      fields: { goal: 'rename the task while binding policy', executionPolicy: policy },
+    }))).code,
+    'invalid-refinement',
+  );
+});
+
 test('draft refinement rejects stale base and unchanged normalized input without mutating the draft', () => {
   const first = draftRevisionFixture();
   const staleVersion: DraftRevisionInput = { ...draftRefinement(first), baseRevisionVersion: 2 };

@@ -602,6 +602,11 @@ test('same-submit execution policy binds the typed revision and persists one sub
         scenario.policy,
         `${scenario.suffix}: the submit-time policy is stored on the revision`,
       );
+      assert.equal(
+        afterConfirm.revision!.normalizedInput,
+        arrivalRevision!.normalizedInput,
+        `${scenario.suffix}: policy binding preserves the human-readable task body`,
+      );
 
       const plans = await readPersistedPlans(file);
       const planEntries = Object.entries(plans)

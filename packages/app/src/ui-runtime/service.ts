@@ -734,9 +734,9 @@ function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['s
 
 /**
  * Build the execution input for a revision edit from the user-facing fields.
- * The core requires every accepted refinement to change `normalizedInput`;
- * callers that submit the structured fields (goal/scope/constraints/
- * deliverables) do not repeat the same content in a technical field.
+ * Callers that submit structured text fields (goal/scope/constraints/
+ * deliverables) do not repeat the same content in a technical field. Policy
+ * binding uses the core's policy-only refinement path instead.
  */
 function normalizedInputForDraftFields(
   current: DraftRevision,
@@ -2633,9 +2633,8 @@ export class UiRuntimeService {
   /**
    * Bind the submit-time execution policy to the current typed revision. The
    * revision owner mints the new version; the app only names the base revision
-   * and the fields to change, so the immutable revision structure stays with
-   * its owner. The normalized execution input changes with the refinement
-   * because the core requires every accepted refinement to update it.
+   * and the changed policy, so the immutable revision structure stays with its
+   * owner. The task body remains the human-readable normalized input.
    */
   private async refineDraftWithExecutionPolicy(
     interactionId: string,
@@ -2650,13 +2649,12 @@ export class UiRuntimeService {
       ...(input.deliverables === undefined ? {} : { deliverables: input.deliverables }),
       executionPolicy,
     };
-    const normalizedInput = normalizedInputForDraftFields(current, fields);
     const idempotencyKey = `final-submit-policy:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify(executionPolicy)}`;
     return await this.explicitIntake.refineDraft(interactionId, {
       draftId: current.draftId,
       baseRevisionVersion: current.revisionVersion,
       requestedRevisionHash: current.revisionHash,
-      fields: { ...fields, normalizedInput },
+      fields,
       instructionRef: `final-submit-policy:${interactionId}`,
       idempotencyKey,
     });
