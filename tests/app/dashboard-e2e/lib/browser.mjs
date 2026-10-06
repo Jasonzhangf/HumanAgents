@@ -434,12 +434,16 @@ export async function captureDashboardEvidence(binding) {
   const dashboardProbe = await readDashboardProbe(binding).catch((error) => ({ error: error.message }));
   const observation = await jsonRequest(
     `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/observation`,
+    {},
+    binding.auth,
   ).catch((error) => ({ error: error.message }));
   const rootScopeRef = observation?.scope?.scopeRef ?? `task://${binding.taskId}/observation`;
   // `pipeline.execute` is a registry node on the root scope; the child scope only
   // holds provider sub-event nodes, so select it without the child scope ref.
   const executeNode = await jsonRequest(
     `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/observation?node=pipeline.execute`,
+    {},
+    binding.auth,
   ).catch((error) => ({ error: error.message }));
   const taskDashboardDom = await readTaskDashboardDom(binding).catch((error) => ({ error: error.message }));
   const sse = await readSseEvents(binding).catch((error) => ({ error: error.message }));
@@ -533,7 +537,7 @@ export async function readSseEvents(binding, timeoutMs = 15_000) {
   const operationId = binding.dashboardProbe?.operationId ?? binding.operationId;
   if (!operationId) return { error: 'no operation id observed before the terminal' };
   const url = `${binding.serveBaseUrl}/api/executions/${encodeURIComponent(operationId)}/events`;
-  const response = await fetch(url, { headers: { accept: 'text/event-stream' } }).catch((error) => ({ error: error.message }));
+  const response = await (binding.auth?.fetch ?? fetch)(url, { headers: { accept: 'text/event-stream' } }).catch((error) => ({ error: error.message }));
   if (!response?.body) return { error: response?.error ?? `unexpected response status=${response?.status}` };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
