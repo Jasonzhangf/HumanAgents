@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { UiCommandError, validateUiCommand, assertObservationReadOnly, type PipelineObservationCommand, type UiCommand } from '../../packages/ui/contracts/commands.js';
 import { UiProjectionError } from '../../packages/ui/contracts/models.js';
 import {
@@ -834,6 +835,8 @@ test('dashboard progress copy does not expose internal identifiers or protocol n
   assert.equal(source.includes('interaction='), false);
   assert.equal(source.includes('draftId='), false);
   assert.equal(source.includes('RequirementEnvelope'), false);
+  assert.equal(source.includes('projectInteractionCardFromEntries'), true);
+  assert.equal(source.includes('createInteractionProgressWidget'), true);
 });
 
 test('explicit requirement checkbox stays compact under the shared input style', async () => {
@@ -858,10 +861,10 @@ test('task dashboard event rows do not render internal owner or next action deta
 test('dashboard confirmation waits on user without continuing a provider timer', async () => {
   const source = await readFile('docs/ui/dashboard.js', 'utf8');
   assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), true);
-  assert.equal(source.includes("timer.hidden = true"), true);
-  assert.equal(source.includes("root.dataset.tone = 'waiting'"), true);
   assert.equal(source.includes('await api.confirmExplicitRequirement(interaction.id'), true);
   assert.equal(source.includes("progress.set('等待你确认任务草案'"), false);
+  assert.equal(source.includes("timer.hidden = true"), false);
+  assert.equal(source.includes("root.dataset.tone = 'waiting'"), false);
 });
 
 test('memory review button exposes typed API failure and becomes usable again', async () => {
@@ -1387,7 +1390,24 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
     return { state: 'awaiting-confirmation', draft: { proposedIntent: 'create', draftId: 'draft', inputRevision: 1 } };
   };
   const window = { location: { href: '' } };
-  new Function('element', 'main', 'api', 'advanceExplicitInteraction', 'window', `${createSource}; renderCreate()`)(element, main, api, advance, window);
+  const appendCardEvent = () => {};
+  const appendCardError = () => {};
+  const updateCardFromSnapshot = () => {};
+  const attachInteractionCardHost = () => {};
+  const interactionCard = null;
+  new Function(
+    'element',
+    'main',
+    'api',
+    'advanceExplicitInteraction',
+    'window',
+    'appendCardEvent',
+    'appendCardError',
+    'updateCardFromSnapshot',
+    'attachInteractionCardHost',
+    'interactionCard',
+    `${createSource}; renderCreate()`,
+  )(element, main, api, advance, window, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard);
   const form = nodes.find(node => node.tag === 'form')!;
   const textarea = nodes.find(node => node.tag === 'textarea')!;
   const button = nodes.find(node => node.tag === 'button')!;
@@ -1524,6 +1544,11 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     draft: { draftId: 'draft-7', inputRevision: 1, proposal: 'prepare release evidence' },
   });
   const clearNode = (node: Node) => { node.children = []; };
+  const appendCardEvent = () => {};
+  const appendCardError = () => {};
+  const updateCardFromSnapshot = () => {};
+  const attachInteractionCardHost = () => {};
+  const interactionCard = null;
   await new Function(
     'element',
     'main',
@@ -1532,8 +1557,13 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     'window',
     'document',
     'clearNode',
+    'appendCardEvent',
+    'appendCardError',
+    'updateCardFromSnapshot',
+    'attachInteractionCardHost',
+    'interactionCard',
     `${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
-  )(element, main, api, advance, window, document, clearNode);
+  )(element, main, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard);
   const feedback = nodes.find((node) => node.attrs.role === 'status');
   const confirm = nodes.find((node) => node.textContent === '按此方案继续');
   if (!feedback || !confirm) throw new Error('expected confirmation controls');
@@ -1559,4 +1589,75 @@ test('runtime task dashboard is observational and has no second execution-input 
   assert.equal(/subscribedOperationId = operationId/.test(source), true);
   assert.equal(/if \(subscribedOperationId\) \{[\s\S]*subscribedOperationId = undefined/.test(source), true);
   assert.equal(source.includes('subscribe(dashboard.operationId)'), true);
+});
+
+type InteractionCardPageAdapter = {
+  readonly projectInteractionCardFromEntries: (entries: readonly unknown[], state?: string) => {
+    readonly surface: string;
+    readonly conversation: {
+      readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
+      readonly turns: readonly { readonly markdown?: string }[];
+    };
+    readonly trace: { readonly items: readonly { readonly requestId: string }[] };
+    readonly history: { readonly result: string };
+  };
+  readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
+    readonly conversation: {
+      readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
+      readonly turns: readonly { readonly markdown?: string }[];
+    };
+  };
+  readonly scopedId: (scope: string, value: string) => { readonly scope: string; readonly value: string };
+};
+
+const interactionCardPage = await import(
+  pathToFileURL(resolve('docs/ui/interaction-card-page.js')).href
+) as InteractionCardPageAdapter;
+
+test('interaction card page adapter keeps technical identifiers in trace details only', () => {
+  const projection = interactionCardPage.projectInteractionCardFromEntries([
+    {
+      sequence: 1,
+      interactionId: 'interaction-1',
+      kind: 'status',
+      sourceKind: 'progress',
+      eventKey: 'explicit.interpret',
+      text: '显式大脑正在整理输入',
+    },
+  ], 'matching');
+
+  assert.equal(projection.surface, 'interaction-work-card');
+  assert.equal(projection.conversation.turns[0]?.markdown, '显式大脑正在整理输入');
+  assert.equal(projection.conversation.turns[0]?.markdown?.includes('requestId'), false);
+  assert.equal(projection.trace.items[0]?.requestId, 'explicit.interpret');
+  assert.equal(projection.history.result, 'ok');
+});
+
+test('interaction card page adapter preserves draft facts without leaking decision refs', () => {
+  const projection = interactionCardPage.projectInteractionCardFromSnapshot({
+    interactionId: 'interaction-2',
+    state: 'awaiting-confirmation',
+    rawInput: '整理周报证据',
+    reply: '请确认',
+    clarifications: [],
+    draft: {
+      draftId: 'draft-1',
+      inputRevision: 1,
+      proposedIntent: 'append',
+      normalizedInput: '整理周报证据并保持不发布',
+      proposal: '补齐证据，不发布。',
+      decisionRefs: ['decision:internal'],
+      knownFacts: ['已有草稿'],
+    },
+  });
+
+  const summary = projection.conversation.summary;
+  assert.equal(summary.missing, undefined);
+  assert.equal(summary.goal?.text, '整理周报证据');
+  assert.equal(JSON.stringify(summary).includes('decision:internal'), false);
+  assert.equal(JSON.stringify(projection.conversation.turns).includes('decision:internal'), false);
+});
+
+test('interaction card page adapter scoped ids are explicit and deterministic', () => {
+  assert.deepEqual(interactionCardPage.scopedId('task', 'task-1'), { scope: 'task', value: 'task-1' });
 });

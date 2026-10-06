@@ -9,19 +9,69 @@ import {
   stateTone,
   taskDashboardHref,
 } from './runtime-shell.js'
+import { mountInteractionWorkCard } from './interaction-work-card.js'
+import {
+  projectInteractionCardFromEntries,
+  projectInteractionCardFromSnapshot,
+} from './interaction-card-page.js'
 
-const { main, status } = makePageShell(
+const { main, status, interactionCardHosts } = makePageShell(
   'Index',
   'Explicit Input',
   '任务输入',
   '接受用户任务、展示显式草稿、确认后进入运行时队列。',
 )
+const interactionCardHost = interactionCardHosts[0]
+const interactionCard = interactionCardHost
+  ? mountInteractionWorkCard(interactionCardHost, {
+      onAction: async (action) => {
+        if (action.id === 'confirm-requirement') {
+          const confirmationButton = document.querySelector('#entry-confirm-button')
+          if (confirmationButton) void confirmationButton.click()
+        }
+      },
+    })
+  : null
+interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 
 let interactionId
 let draft
 let confirmation
 let pollTimer
 let submitting = false
+const cardState = { sequence: 0, entries: [] }
+
+function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
+  cardState.sequence += 1
+  const activeInteractionId = detail.interactionId || interactionId || 'pending-input'
+  cardState.entries = [
+    ...cardState.entries,
+    {
+      sequence: cardState.sequence,
+      interactionId: activeInteractionId,
+      kind,
+      sourceKind,
+      eventKey: detail.eventKey || kind,
+      text,
+      ...detail,
+    },
+  ]
+  interactionCard?.update(projectInteractionCardFromEntries(cardState.entries, interactionId ? 'received' : 'awaiting-confirmation'))
+}
+
+function appendCardError(error) {
+  appendCardEvent('failure', error.message || String(error), 'error', {
+    eventKey: 'request-failed',
+    error: { code: error.code, message: error.message || String(error), ownerId: error.ownerId || 'humanagent.app' },
+    evidenceRefs: error.evidenceRefs || [],
+  })
+}
+
+function updateCardFromSnapshot(snapshot) {
+  cardState.sequence = 0
+  cardState.entries = []
+  interactionCard?.update(projectInteractionCardFromSnapshot(snapshot))
+}
 
 function liveArea() {
   const section = element('section', undefined, 'section')
@@ -70,6 +120,7 @@ function renderDraft(snapshot) {
       event.preventDefault()
       void run(async () => {
         await api.answerExplicitClarification(interactionId, input.value.trim())
+        appendCardEvent('user', input.value.trim(), 'user', { eventKey: 'explicit.clarification-answer' })
         const next = await api.inspectExplicitInteraction(interactionId)
         if (next.state === 'received' || next.state === 'matching') {
           const interpreted = await api.interpretExplicitInput(interactionId)
@@ -86,6 +137,7 @@ function renderDraft(snapshot) {
 
   if (snapshot.state !== 'awaiting-confirmation' || !snapshot.draft) {
     section.append(element('p', `状态：${snapshot.state} · ${snapshot.nextAction}`, 'empty'))
+    updateCardFromSnapshot(snapshot)
     return
   }
 
@@ -95,7 +147,6 @@ function renderDraft(snapshot) {
   renderField(grid, '意图', draft.proposedIntent)
   renderField(grid, '规范化输入', draft.normalizedInput)
   renderField(grid, '已知事实', (draft.knownFacts || []).join('\n'))
-  renderField(grid, '决策引用', (draft.decisionRefs || []).join('\n'))
   panel.append(grid)
 
   const proposal = element('section', undefined, 'section')
@@ -105,10 +156,12 @@ function renderDraft(snapshot) {
   const actions = element('div', undefined, 'actions')
   const confirmButton = element('button', '确认并进入队列', 'button button--primary')
   confirmButton.type = 'button'
+  confirmButton.id = 'entry-confirm-button'
   confirmButton.addEventListener('click', () => void confirmDraft(confirmButton))
   actions.append(confirmButton)
   panel.append(actions)
   section.append(panel)
+  updateCardFromSnapshot(snapshot)
 }
 
 function renderStatus(summary, rows) {
@@ -194,11 +247,13 @@ async function confirmDraft(button) {
       payloadRef: `asset://requirements/ui:${interactionId}`,
     })
     confirmation = receipt.requirement
+    appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted' })
     button.textContent = `已确认 · ${confirmation.requirementId}`
     await refreshQueue()
     pollTimer ??= setInterval(() => void refreshQueue(), 2000)
   } catch (error) {
     button.disabled = false
+    appendCardError(error)
     status.dataset.tone = 'danger'
     status.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
   }
@@ -235,6 +290,7 @@ function renderForm() {
         inputRevision: 1,
       })
       interactionId = received.interactionId
+      appendCardEvent('user', textarea.value.trim(), 'user', { eventKey: 'explicit.raw-input' })
       const snapshot = await api.interpretExplicitInput(interactionId)
       renderDraft(snapshot)
       await refreshQueue()
@@ -269,7 +325,9 @@ async function load() {
   renderRuntimeStatus(status, runtimeStatus, error)
   const layout = element('div', undefined, 'layout')
   const left = element('div')
-  left.append(renderForm(), renderDraftContainer(), liveArea())
+  left.append(renderForm())
+  if (interactionCardHost) left.append(interactionCardHost)
+  left.append(renderDraftContainer(), liveArea())
   layout.append(left)
   main.append(layout)
 }

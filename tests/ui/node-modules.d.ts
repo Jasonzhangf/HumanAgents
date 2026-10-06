@@ -16,7 +16,11 @@ declare module 'node:test' {
 declare module 'node:fs/promises' {
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
 }
+declare module 'node:url' {
+  export function pathToFileURL(path: string): { readonly href: string };
+}
 declare module 'node:path' {
   export function join(...paths: string[]): string;
+  export function resolve(...paths: string[]): string;
 }
 declare const process: { readonly cwd: () => string };
