@@ -25,6 +25,7 @@ import {
   type OccurrenceExecutionOwner,
   type OccurrenceTaskBinding,
   type OccurrenceTerminalReceiptRecord,
+  type OrganId,
   type RecoveryResponsibilityRecord,
   type ScopeRef,
   type ServeTaskTerminalReceipt,
@@ -45,6 +46,7 @@ import type {
 } from '../../../runtime/src/subscriptions/ports.js';
 import type { SupervisorLease } from '../supervisor/index.js';
 import { FileCheckpointStore } from './journal.js';
+import { occurrenceIdentityToken } from './occurrence-identity.js';
 
 export type DurableOccurrenceConsumerFailureCode =
   | 'invalid-binding'
@@ -84,6 +86,17 @@ export interface OccurrenceDispatchInput {
   readonly claim: OccurrenceClaimRecord;
   readonly binding: OccurrenceTaskBinding;
   readonly owner: OccurrenceExecutionOwner;
+  /**
+   * The consumer's own lifecycle scope for this binding. A dispatched terminal
+   * checkpoint must be committed in exactly this scope, so the dispatcher cannot
+   * invent a second lifecycle identity.
+   */
+  readonly scope: ScopeRef;
+  /**
+   * The consumer's last committed checkpoint for this scope, or `null` when the
+   * admission is the first one. The dispatched checkpoint must link to it.
+   */
+  readonly previousCheckpoint: Checkpoint | null;
 }
 
 export interface OccurrenceDispatchPort {
@@ -116,13 +129,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function safeId(value: string): string {
-  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, '-');
-  const head = cleaned[0] ?? '';
-  const candidate = /[A-Za-z0-9]/.test(head) ? cleaned : `x${cleaned}`;
-  return candidate.slice(0, 128);
-}
-
 function bindingIdentity(binding: OccurrenceTaskBinding): Record<string, unknown> {
   return {
     occurrenceId: binding.occurrenceId,
@@ -153,7 +159,7 @@ function recoveryEvidence(binding: OccurrenceTaskBinding, scope: ScopeRef): Evid
   return {
     evidenceId: id(
       'evidence',
-      safeId(`occurrence-recovery-${binding.operationId.value}-${binding.executionEpoch}`),
+      occurrenceIdentityToken(`occurrence-recovery-${binding.operationId.value}-${binding.executionEpoch}`),
     ),
     kind: 'operation',
     source: 'humanagent.app.occurrence-consumer',
@@ -313,6 +319,38 @@ export class DurableOccurrenceConsumer implements ServeTaskConsumerPort {
     });
   }
 
+  /**
+   * The single owner of the occurrence lifecycle scope. The cycle identity is
+   * derived from the immutable occurrence id, so a restarted process rebuilds
+   * the same scope and replays the same journal instead of forking a new one.
+   * `occurrenceIdentityToken` is required because an occurrence id contains
+   * `::`, which the contract id grammar rejects, and because the derived id is
+   * composed into the Organ Journal commit id, which the journal grammar caps.
+   */
+  static scopeForBinding(organId: OrganId, binding: OccurrenceTaskBinding): ScopeRef {
+    return {
+      organId,
+      taskId: binding.taskId,
+      cycleId: id('cycle', occurrenceIdentityToken(`occurrence-${binding.occurrenceId}`)),
+      operationId: binding.operationId,
+    };
+  }
+
+  /**
+   * The durable journal file name for one immutable binding. The file name must
+   * not collide with the coordinator's business task-cycle checkpoint file,
+   * because a shared file would make this consumer read a checkpoint without a
+   * receipt and report `durable-unverified-recovery-pending` forever.
+   */
+  static journalFileNameForBinding(binding: OccurrenceTaskBinding): string {
+    return DurableOccurrenceConsumer.journalFileNameForOccurrence(binding.occurrenceId);
+  }
+
+  /** The single owner of the per-occurrence journal file name. */
+  static journalFileNameForOccurrence(occurrenceId: string): string {
+    return `${occurrenceIdentityToken(`occurrence-${occurrenceId}`)}.jsonl`;
+  }
+
   async executeOccurrence(input: {
     readonly occurrence: Occurrence;
     readonly policy: ExecutionPolicyDefinition;
@@ -459,6 +497,8 @@ export class DurableOccurrenceConsumer implements ServeTaskConsumerPort {
       claim: input.claim,
       binding: requestedBinding,
       owner: admission.decision.admittedExecutionOwner,
+      scope: this.scope,
+      previousCheckpoint: (await this.checkpoints.readLatest(this.scope))?.checkpoint ?? null,
     });
 
     return this.commitTerminal(
@@ -575,7 +615,7 @@ export class DurableOccurrenceConsumer implements ServeTaskConsumerPort {
     const checkpoint: Checkpoint = {
       id: id(
         'checkpoint',
-        safeId(`occurrence-recovery-${authoritativeBinding.operationId.value}-${authoritativeBinding.executionEpoch}`),
+        occurrenceIdentityToken(`occurrence-recovery-${authoritativeBinding.operationId.value}-${authoritativeBinding.executionEpoch}`),
       ),
       scope: this.scope,
       cycleId: this.scope.cycleId as NonNullable<ScopeRef['cycleId']>,

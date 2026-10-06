@@ -42,6 +42,11 @@ export interface UiRuntimeServerOptions {
     readonly pid: number;
     readonly processStartToken: string;
   };
+  /**
+   * Read-only projection of the due-time patrol. Absent means this runtime was
+   * started without a patrol, which the route reports as unsupported.
+   */
+  readonly schedulerStatus?: () => Promise<unknown>;
 }
 
 export interface UiRuntimeServer {
@@ -420,7 +425,7 @@ export async function startUiRuntimeServer(options: UiRuntimeServerOptions): Pro
   let closeReceipt: ListenerShutdownReceipt | undefined;
   let closePromise: Promise<ListenerShutdownReceipt> | undefined;
   const server = createServer((request, response) => {
-    void handleRequest(request, response, service, accessControl, sseRegistry, () => closing, options.uiRoot, options.restart, options.identity)
+    void handleRequest(request, response, service, accessControl, sseRegistry, () => closing, options.uiRoot, options.restart, options.identity, options.schedulerStatus)
       .catch((error) => {
         writeError(response, error);
       });
@@ -493,6 +498,7 @@ async function handleRequest(
   uiRoot: string,
   restart?: UiRuntimeServerOptions['restart'],
   identity?: UiRuntimeServerOptions['identity'],
+  schedulerStatus?: UiRuntimeServerOptions['schedulerStatus'],
 ): Promise<void> {
   const method = request.method ?? 'GET';
   try {
@@ -588,6 +594,19 @@ async function handleRequest(
     }
     if (path === '/api/runtime/status' && method === 'GET') {
       writeJson(response, 200, service.status());
+      return;
+    }
+    if (path === '/api/runtime/scheduler' && method === 'GET') {
+      if (schedulerStatus === undefined) {
+        throw new UiRuntimeApiError(
+          'scheduler.unsupported',
+          APP_OWNER,
+          'this runtime was started without a due-time patrol',
+          'start the runtime through the supervisor-owned serve entry',
+          501,
+        );
+      }
+      writeJson(response, 200, await schedulerStatus());
       return;
     }
     if (path === '/api/runtime/identity' && method === 'GET') {
