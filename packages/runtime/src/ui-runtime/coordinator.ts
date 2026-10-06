@@ -512,6 +512,7 @@ function providerEventSummary(event: ProviderEvent): string {
   if (event.kind === 'terminal') return `execution ${event.terminalState ?? 'unknown'}`;
   if (event.kind === 'error') return event.error?.message ?? 'provider error';
   if (event.summary) return event.summary;
+  if (event.kind === 'output') return '未投影';
   if (event.outputRefs && event.outputRefs.length > 0) return `${event.kind}: ${event.outputRefs.join(', ')}`;
   return event.kind;
 }
@@ -2374,9 +2375,10 @@ export class RuntimeTaskCoordinator {
     const error = event.kind === 'error' && event.error ? providerErrorProjection(event.error) : undefined;
     let taskOutput: string | undefined;
     if (event.kind === 'output') {
-      const text = event.summary ?? event.outputRefs?.join(', ') ?? summary;
-      record.output = appendOutput(record.output, text);
-      taskOutput = record.output;
+      if (event.summary !== undefined) {
+        record.output = appendOutput(record.output, event.summary);
+        taskOutput = record.output;
+      }
       record.updatedAt = this.now().toISOString();
     }
     const toolProjection = event.toolCall !== undefined

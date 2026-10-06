@@ -5021,6 +5021,65 @@ test('runtime output concatenates repeated provider deltas without suffix dedupe
   assert.equal(service.taskDashboard(task.taskId).output, 'aa');
 });
 
+test('provider output without readable text never projects artifact refs into task output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-output-artifact-ref-'));
+  const artifactRef = 'humanagent.provider-adapter:response.content_part.added:part-msg-1:sha256:c45b5b';
+  try {
+    class MissingOutputSummaryReplayPort extends FakeReplayExecutionRuntimePort {
+      override async *observe(
+        input: Parameters<ExecutionRuntimePort['observe']>[0],
+      ): AsyncIterable<ProviderEvent> {
+        for await (const event of super.observe(input)) {
+          if (event.kind === 'output' && event.outputRefs?.includes(artifactRef)) {
+            const { summary: _summary, ...withoutSummary } = event;
+            yield withoutSummary;
+          } else {
+            yield event;
+          }
+        }
+      }
+    }
+
+    const service = serviceFor(root, new MissingOutputSummaryReplayPort({
+      binding,
+      stepDelayMs: 1,
+      replay: [
+        { kind: 'output', state: 'output', summary: 'ignored snapshot summary', outputRefs: [artifactRef] },
+        { kind: 'output', state: 'output', summary: 'real model reply', outputRefs: ['humanagent.provider-adapter:response.output_text.done:text-msg-1:sha256:done'] },
+        { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+      ],
+    }));
+    const task = service.createTask({ title: 'provider artifact ref', directive: 'keep the task output readable' });
+    service.startExecution(task.taskId, { prompt: 'read the marker and reply' });
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const dashboard = service.taskDashboard(task.taskId);
+    assert.equal(dashboard.output, 'real model reply');
+    assert.equal(dashboard.output.includes('humanagent.provider-adapter:'), false);
+
+    const observation = service.observation(task.taskId);
+    const executionNode = observation.scope.nodes.find((node) => node.nodeId === 'pipeline.execute');
+    assert.equal(executionNode?.summary, 'real model reply');
+    assert.equal(executionNode?.summary.includes('humanagent.provider-adapter:'), false);
+
+    const providerScope = service.observation(
+      task.taskId,
+      undefined,
+      `task://${task.taskId.value}/observation/pipeline.execute`,
+    );
+    assert.equal(
+      providerScope.scope.nodes.some((node) => node.summary.includes('humanagent.provider-adapter:')),
+      false,
+    );
+    assert.equal(
+      providerScope.scope.nodes.some((node) => node.summary === '未投影'),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('responses delta and completion replay projects output text exactly once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-responses-output-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
