@@ -2862,19 +2862,29 @@ export class UiRuntimeService {
     });
     this.confirmationLedger.confirmRevision(confirmation);
 
-    const submitted = await this.requirementSubmissions.submitFinal({
-      interactionId,
-      draftId: revision.draftId,
-      inputRevision: revision.inputRevision,
-      draftRevisionVersion,
-      draftRevisionHash,
-      confirmationRef: input.confirmationRef,
-      idempotencyKey: input.idempotencyKey ?? `final-submit:${revision.draftId}:${draftRevisionVersion}:${input.confirmationRef}`,
-      requestKind: 'new-task-create',
+    // Making the confirmed requirement visible to the FIFO consumer and
+    // persisting the execution plan it owns must be one step for that consumer.
+    // Otherwise a drain can observe the requirement while its plan is still
+    // missing, read the missing plan as "this requirement owns no future
+    // execution", and dispatch a scheduled requirement immediately. The
+    // dispatch lock is the single owner of FIFO consumption, so holding it
+    // across both writes keeps the requirement out of the immediate path.
+    const submitted = await this.withDispatchLock(async () => {
+      const receipt = await this.requirementSubmissions.submitFinal({
+        interactionId,
+        draftId: revision.draftId,
+        inputRevision: revision.inputRevision,
+        draftRevisionVersion,
+        draftRevisionHash,
+        confirmationRef: input.confirmationRef,
+        idempotencyKey: input.idempotencyKey ?? `final-submit:${revision.draftId}:${draftRevisionVersion}:${input.confirmationRef}`,
+        requestKind: 'new-task-create',
+      });
+      if (revision.executionPolicy !== undefined) {
+        await this.persistAuthorizedExecutionPlan(receipt.requirement, revision.executionPolicy);
+      }
+      return receipt;
     });
-    if (revision.executionPolicy !== undefined) {
-      await this.persistAuthorizedExecutionPlan(submitted.requirement, revision.executionPolicy);
-    }
     this.projectConfirmedRequirement(revision.draftId);
     this.persistExplicitBrainState();
     this.scheduleImplicitConsumption();
