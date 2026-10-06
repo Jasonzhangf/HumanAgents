@@ -8,7 +8,9 @@ import test from 'node:test';
 import {
   PIPELINE_NODE_IDS,
   PIPELINE_ROWS,
+  ContractError,
   id,
+  validateInteractionTraceEntry,
   type Attention,
   type Checkpoint,
   type EvidenceRef,
@@ -54,7 +56,9 @@ import {
   producedArtifactPaths,
   type RuntimeCheckpointBoundary,
   type RuntimeCheckpointBoundaryPort,
+  type RuntimeTaskEvent,
   type RuntimeTaskJournalRecord,
+  type RuntimeTaskSnapshot,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import {
   FileCheckpointStore,
@@ -75,6 +79,7 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
+import { projectRuntimeTaskHistory } from '../../packages/app/src/ui-runtime/turn-history.js';
 import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -8181,4 +8186,62 @@ test('runtime history reports the explicit no-turn state for a task with no prov
   assert.equal(history.page.hasMore, false);
   assert.equal(service.observation(task.taskId, 'pipeline.execute').selectedNode?.turnId, undefined);
   await rm(root, { recursive: true, force: true });
+});
+
+test('runtime history states real tool pairing and keeps a succeeded result verifiable', () => {
+  const taskId = id('task', 'turn-identity-tool-pairing');
+  const scope: ScopeRef = { organId, taskId };
+  const runtimeEvent = (seq: number, over: Partial<RuntimeTaskEvent>): RuntimeTaskEvent => ({
+    eventId: `event-${seq}`,
+    seq,
+    occurredAt: '2026-10-06T08:00:00.000Z',
+    taskId,
+    operationId: 'operation-turn-identity',
+    executionEpoch: 1,
+    kind: 'provider.tool',
+    state: 'running',
+    summary: `runtime event ${seq}`,
+    evidenceRefs: [evidence(`tool-${seq}`, scope)],
+    ...over,
+  });
+  // The projection reads the runtime event stream; that is the real input shape
+  // the runtime coordinator journals, so this exercises the real projection.
+  const snapshot = {
+    events: [
+      runtimeEvent(1, { kind: 'provider.tool', callId: 'call-returned', toolId: 'file.read' }),
+      runtimeEvent(2, { kind: 'provider.tool-result', callId: 'call-returned', toolId: 'file.read', status: 'succeeded' }),
+      runtimeEvent(3, { kind: 'provider.tool', callId: 'call-open', toolId: 'file.list' }),
+    ],
+  } as unknown as RuntimeTaskSnapshot;
+
+  const history = projectRuntimeTaskHistory(snapshot, { limit: 20 });
+  assert.equal(history.ok, true);
+  if (!history.ok) throw new Error('history must project the runtime events');
+  const returned = history.page.items.find((entry) => entry.kind === 'tool-call' && entry.tool?.callId === 'call-returned');
+  const open = history.page.items.find((entry) => entry.kind === 'tool-call' && entry.tool?.callId === 'call-open');
+  const result = history.page.items.find((entry) => entry.kind === 'tool-result');
+  if (!returned || !open || !result) throw new Error('the projection must carry every reported tool event');
+
+  // Pairing is a real reported fact: the call that has a result event is paired,
+  // and the call with no result is explicitly not returned. A real succeeded
+  // result must therefore never render as "未返回".
+  assert.equal(returned.tool?.paired, true);
+  assert.equal(open.tool?.paired, false);
+  assert.equal(result.tool?.paired, true);
+
+  // The succeeded result points at the returned side through its evidence ref,
+  // so the projection never invents an output ref or digest for it.
+  assert.equal(result.tool?.status, 'succeeded');
+  assert.equal(result.tool?.outputRef, undefined);
+  assert.equal(result.tool?.outputDigest, undefined);
+  assert.ok(result.evidenceRefs.length > 0, 'a succeeded tool result must keep a real evidence pointer');
+  // The public contract accepts this real shape: it does not throw.
+  validateInteractionTraceEntry(result);
+
+  // The same success with no pointer at all is rejected by the public contract,
+  // so no surface can present it as a bare success claim.
+  assert.throws(
+    () => validateInteractionTraceEntry({ ...result, evidenceRefs: [] }),
+    (error: unknown) => error instanceof ContractError,
+  );
 });
