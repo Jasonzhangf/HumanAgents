@@ -17,6 +17,7 @@ import {
   type ProviderCloseResult,
   type ProviderError,
   type ProviderEvent,
+  type ProviderRequestLifecycleEvent,
   type ProviderToolCall,
   type ScopeRef,
   type Task,
@@ -105,6 +106,15 @@ export interface RuntimeTaskEvent {
   readonly state: string;
   readonly summary: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+  /**
+   * Real provider-reported turn identity. Only present when the provider
+   * reported one; the runtime never synthesizes a turn id.
+   */
+  readonly turnId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  /** Provider-reported occurrence time, when the provider reported one. */
+  readonly providerOccurredAt?: string;
   readonly ownerId?: string;
   readonly retryable?: boolean;
   readonly nextAction?: string;
@@ -116,6 +126,18 @@ export interface RuntimeTaskEvent {
   readonly error?: RuntimeTaskError;
   readonly outputRef?: string;
   readonly outputDigest?: string;
+}
+
+/**
+ * Provider-reported request identity for one request attempt of a task. Every
+ * field comes from the provider binding's own lifecycle report.
+ */
+export interface RuntimeTaskRequestIdentity {
+  readonly turnId: string;
+  readonly requestId: string;
+  readonly parentRequestId?: string;
+  readonly phase: string;
+  readonly occurredAt: string;
 }
 
 export interface RuntimeTaskSnapshot {
@@ -144,6 +166,12 @@ export interface RuntimeTaskSnapshot {
     readonly committedAt: string;
     readonly evidenceRefs: readonly EvidenceRef[];
   };
+  /**
+   * The most recent request identity the provider binding itself reported for
+   * this task. It is absent until the binding reports one; the runtime never
+   * synthesizes a turn or request id.
+   */
+  readonly requestIdentity?: RuntimeTaskRequestIdentity;
   readonly error?: RuntimeTaskError;
 }
 
@@ -425,6 +453,7 @@ interface TaskRecord {
     readonly admission: RequirementAdmissionReceipt;
   };
   events: RuntimeTaskEvent[];
+  requestIdentity?: RuntimeTaskRequestIdentity;
   checkpoint?: Checkpoint;
   checkpointSeq: number;
   error?: RuntimeTaskError;
@@ -951,6 +980,25 @@ export class RuntimeTaskCoordinator {
 
   taskSnapshot(taskId: TaskId): RuntimeTaskSnapshot {
     return this.snapshot(this.requireTask(taskId));
+  }
+
+  /**
+   * Records the request identity the provider binding reported for one request
+   * attempt. This is the provider's own report, so the runtime can expose the
+   * current turn before the first provider event arrives. A lifecycle report for
+   * a task this coordinator does not track is out of scope and is ignored; no
+   * identity is ever minted here.
+   */
+  recordProviderRequestIdentity(event: ProviderRequestLifecycleEvent): void {
+    const record = this.tasks.get(event.taskId.value);
+    if (!record) return;
+    record.requestIdentity = {
+      turnId: event.turnId,
+      requestId: event.requestId,
+      ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+      phase: event.phase,
+      occurredAt: event.occurredAt,
+    };
   }
 
   startExecution(taskId: TaskId, input: {
@@ -2407,7 +2455,19 @@ export class RuntimeTaskCoordinator {
       event.ownerId,
       event.error ? event.error.retryable === 'retryable' : undefined,
       toNextActionText(event.nextAction),
-      { taskOutput, error, tool: toolProjection },
+      {
+        taskOutput,
+        error,
+        // The provider binding reported this identity on the event itself. Carry
+        // it verbatim; when the provider reported none, no turn id is added.
+        turn: {
+          ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+          ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
+          ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+          ...(event.occurredAt === undefined ? {} : { occurredAt: event.occurredAt }),
+        },
+        tool: toolProjection,
+      },
       event.kind === 'terminal' ? 'provider' : undefined,
     );
     if (event.kind === 'tool') record.currentNode = RUNTIME_NODE_MARKERS.providerTool;
@@ -2629,6 +2689,16 @@ export class RuntimeTaskCoordinator {
     details?: {
       readonly taskOutput?: string;
       readonly error?: RuntimeTaskError;
+      /**
+       * Real provider-reported request identity and occurrence time. Only the
+       * provider binding may produce these; the runtime never invents them.
+       */
+      readonly turn?: {
+        readonly turnId?: string;
+        readonly requestId?: string;
+        readonly parentRequestId?: string;
+        readonly occurredAt?: string;
+      };
       readonly tool?: {
         readonly callId: string;
         readonly toolId: string;
@@ -2657,6 +2727,10 @@ export class RuntimeTaskCoordinator {
       retryable,
       nextAction,
       ...(terminalPhase === undefined ? {} : { terminalPhase }),
+      ...(details?.turn?.turnId === undefined ? {} : { turnId: details.turn.turnId }),
+      ...(details?.turn?.requestId === undefined ? {} : { requestId: details.turn.requestId }),
+      ...(details?.turn?.parentRequestId === undefined ? {} : { parentRequestId: details.turn.parentRequestId }),
+      ...(details?.turn?.occurredAt === undefined ? {} : { providerOccurredAt: details.turn.occurredAt }),
       ...(details?.tool === undefined ? {} : {
         callId: details.tool.callId,
         toolId: details.tool.toolId,
@@ -2890,6 +2964,7 @@ export class RuntimeTaskCoordinator {
       allowedActions: record.allowedActions,
       recentEvents: record.events.slice(-20),
       events: record.events,
+      requestIdentity: record.requestIdentity,
       checkpoint: record.checkpoint
         ? {
             checkpointId: record.checkpoint.id.value,

@@ -124,11 +124,12 @@ export interface InteractionCardMetadataProjection {
   readonly nextStep: string;
   readonly nextAction: string;
   readonly waitingOn?: string;
-  readonly startedAt: string;
-  readonly provider: InteractionTraceProvider;
-  readonly transport: InteractionTraceTransport;
-  readonly settlement: InteractionTraceSettlement;
-  readonly lastBusiness: InteractionTraceLastBusiness;
+  /** Real start time reported by the source; absent only when the source reported none. */
+  readonly startedAt?: string;
+  readonly provider?: InteractionTraceProvider;
+  readonly transport?: InteractionTraceTransport;
+  readonly settlement?: InteractionTraceSettlement;
+  readonly lastBusiness?: InteractionTraceLastBusiness;
 }
 
 export interface InteractionConversationTurnProjection {

@@ -52,6 +52,10 @@ const TASK = { scope: 'task', value: 'task-card-proof' };
 const OPERATION = { scope: 'operation', value: 'operation-card-proof' };
 const SCOPE = { organId: ORGAN, taskId: TASK, operationId: OPERATION };
 const TIME = '2026-10-03T12:00:00Z';
+// The turn identity the provider binding reported for this execution. It is the
+// literal value the card must display; the proof asserts the DOM label equals it.
+const REAL_TURN_ID = 'turn-9f1c7b3e-4a52-4d0f-9d31-6b7c2a5e8f04';
+const REAL_REQUEST_ID = 'request-4c8a1d62-7e35-4b90-a1f2-0d9e6c3b7a58';
 
 function evidenceRef(ref, digest) {
   return {
@@ -64,7 +68,10 @@ function evidenceRef(ref, digest) {
   };
 }
 
-function traceEntry({ seq, kind, callId, toolId, toolStatus, error, outputRef, state }) {
+function traceEntry({ seq, kind, callId, toolId, toolStatus, error, outputRef, state, turnId = REAL_TURN_ID }) {
+  // `turnId: null` models an event whose source reported no turn identity; an
+  // explicit `undefined` would be indistinguishable from an omitted argument.
+  const reportedTurnId = turnId === null ? undefined : turnId;
   const tool = kind === 'tool-call' || kind === 'tool-result' || error
     ? {
         callId,
@@ -81,8 +88,8 @@ function traceEntry({ seq, kind, callId, toolId, toolStatus, error, outputRef, s
     : undefined;
 
   return {
-    turnId: `turn-${seq}`,
-    requestId: `request-${seq}`,
+    ...(reportedTurnId === undefined ? {} : { turnId: reportedTurnId }),
+    requestId: REAL_REQUEST_ID,
     seq,
     occurredAt: new Date(Date.UTC(2026, 9, 3, 12, seq, 0)).toISOString(),
     kind,
@@ -136,6 +143,16 @@ function makeProjection() {
       state: 'succeeded',
       outputRef: 'asset://output/call-asset-read',
     }),
+    // The runtime's own event carries no provider turn identity. The card must
+    // show the explicit no-turn state for it instead of a fabricated number.
+    traceEntry({
+      seq: 4,
+      kind: 'status',
+      state: 'settling',
+      toolId: 'none',
+      toolStatus: 'unknown',
+      turnId: null,
+    }),
   ];
 
   return projectInteractionWorkCard({
@@ -151,8 +168,8 @@ function makeProjection() {
         taskId: TASK,
         operationId: OPERATION,
         executionEpoch: 1,
-        requestId: 'request-card-proof',
-        turnId: 'turn-card-proof',
+        requestId: REAL_REQUEST_ID,
+        turnId: REAL_TURN_ID,
       },
       currentNode: 'provider.tool',
       ownerId: 'runtime.card-proof',
@@ -247,8 +264,8 @@ const HARNESS_HTML = `<!doctype html>
 
 /** Identifiers that must never appear in a human-facing surface. */
 const TECHNICAL_TOKENS = Object.freeze([
-  'request-card-proof',
-  'turn-card-proof',
+  REAL_REQUEST_ID,
+  REAL_TURN_ID,
   'call-memory-curate',
   'call-asset-read',
   'sha256:',
@@ -382,6 +399,15 @@ try {
         paragraph: panel?.querySelector('.iwc-md-paragraph')?.textContent ?? '',
       },
       traces: document.querySelectorAll('[data-trace-key]').length,
+      turnGroups: [...document.querySelectorAll('.iwc-trace-group')].map((group) => ({
+        turnKey: group.dataset.turnKey,
+        turnId: group.dataset.turnId,
+        chip: group.querySelector('.iwc-turn-id')?.textContent ?? '',
+        chipTurnId: group.querySelector('.iwc-turn-id')?.dataset.turnId,
+        unprojected: Boolean(group.querySelector('.iwc-turn-unprojected')),
+        unprojectedText: group.querySelector('.iwc-turn-unprojected')?.textContent ?? '',
+        rows: group.querySelectorAll('[data-trace-key]').length,
+      })),
       detailBlocks: details.length,
       detailText: details.join('\n'),
       pageText: document.body.innerText,
@@ -421,6 +447,49 @@ try {
   record('no technical identifier leaks into the human surfaces', leaks.length === 0, leaks);
   record('technical identifiers are retained in the trace detail blocks', card.detailText.includes('requestId') && card.detailText.includes('tool.callId') && card.detailText.includes('tool.outputDigest'), card.detailText.slice(0, 300));
   record('raw error semantics and evidence stay in the details', card.detailText.includes('memory-agent-source-invalid') && card.detailText.includes('sha256:evidence-memory-source') && card.detailText.includes('adapters.memory'), card.detailText.slice(0, 400));
+
+  // --- real provider turn identity ----------------------------------------
+  // The label the card displays must be exactly the turn id the provider
+  // binding reported, not an ordinal and not a synthesized number.
+  const realTurnGroups = card.turnGroups.filter((group) => group.turnKey === REAL_TURN_ID);
+  record(
+    'trace groups real provider turn under its reported turn id',
+    card.turnGroups.length === 2 && realTurnGroups.length === 1 && realTurnGroups[0].rows === 3,
+    card.turnGroups,
+  );
+  record(
+    'displayed turn label is the real provider turn id',
+    realTurnGroups.length === 1
+      && realTurnGroups[0].turnId === REAL_TURN_ID
+      && realTurnGroups[0].chipTurnId === REAL_TURN_ID
+      && realTurnGroups[0].chip === `轮次 ${REAL_TURN_ID}`,
+    realTurnGroups,
+  );
+  record(
+    'real turn group does not claim the unprojected state',
+    realTurnGroups.length === 1 && realTurnGroups[0].unprojected === false && realTurnGroups[0].unprojectedText === '',
+    realTurnGroups,
+  );
+  // The runtime event that carried no provider turn must be shown as an
+  // explicit no-turn state, not merged into the real turn and not numbered.
+  const unprojectedGroups = card.turnGroups.filter((group) => group.unprojected);
+  record(
+    'event without a provider turn shows the explicit no-turn state',
+    unprojectedGroups.length === 1
+      && unprojectedGroups[0].turnKey === '__no-turn-identity__'
+      && unprojectedGroups[0].turnId === undefined
+      && unprojectedGroups[0].unprojectedText.includes('轮次未投影')
+      && unprojectedGroups[0].rows === 1,
+    card.turnGroups,
+  );
+  record(
+    'no trace row is labelled with a fabricated ordinal turn',
+    !card.detailText.includes('轮次 1')
+      && !card.detailText.includes('轮次 2')
+      && !card.detailText.includes('轮次 3')
+      && !card.detailText.includes('轮次 4'),
+    card.detailText.slice(0, 300),
+  );
 
   // --- real page static contract -------------------------------------------
   pageErrors.length = 0;

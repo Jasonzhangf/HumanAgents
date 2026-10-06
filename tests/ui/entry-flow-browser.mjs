@@ -717,11 +717,56 @@ async function sectionB(browser, artifactDir, root) {
         const trace = document.querySelector('.iwc-panel--trace');
         return trace?.innerText ?? document.querySelector('.node-drawer')?.innerText ?? '';
       });
+      const turnLabels = await page.evaluate(() => {
+        const trace = document.querySelector('.iwc-panel--trace');
+        return [...(trace?.querySelectorAll('.iwc-trace-group') ?? [])].map((group) => ({
+          turnKey: group.dataset.turnKey,
+          turnId: group.dataset.turnId,
+          chip: group.querySelector('.iwc-turn-id')?.textContent ?? '',
+          chipTurnId: group.querySelector('.iwc-turn-id')?.dataset.turnId,
+          unprojected: Boolean(group.querySelector('.iwc-turn-unprojected')),
+        }));
+      });
+      // The independent oracle: the runtime's own public history for this real
+      // task. The drawer may only show turn ids that this surface reported.
+      const historyResponse = await context.request.get(
+        `${base}/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`,
+      );
+      const historyBody = historyResponse.ok() ? await historyResponse.json() : null;
+      const reportedTurnIds = [...new Set(
+        (historyBody?.page?.items ?? [])
+          .map((entry) => entry.turnId)
+          .filter((value) => typeof value === 'string' && value.length > 0),
+      )];
+      const realLabels = turnLabels.filter((label) => label.unprojected === false && typeof label.turnId === 'string');
+      const unprojectedLabels = turnLabels.filter((label) => label.unprojected);
       observe('once task id', taskId);
       observe('once trace text', traceText);
+      observe('once runtime history status', historyResponse.status());
+      observe('once reported turn ids', reportedTurnIds);
+      observe('once drawer turn labels', turnLabels);
       record('once submit lands on the real observation page', Boolean(taskId), page.url());
       record('once observation renders the real pipeline', nodeCount >= 8, nodeCount);
       record('once observation drawer shows the real tool trace', /file\.read|create_goal|update_goal/.test(traceText), traceText.slice(0, 400));
+      record(
+        'once drawer turn label equals the real provider turn id the runtime reported',
+        reportedTurnIds.length > 0
+          && realLabels.length > 0
+          && realLabels.every((label) => reportedTurnIds.includes(label.turnId)
+            && label.chipTurnId === label.turnId
+            && label.chip === `轮次 ${label.turnId}`),
+        { reportedTurnIds, realLabels },
+      );
+      record(
+        'once drawer never labels a real turn with the unprojected fallback',
+        realLabels.length > 0 && realLabels.every((label) => label.unprojected === false),
+        turnLabels,
+      );
+      record(
+        'once drawer uses the explicit no-turn state for events the provider did not stamp',
+        unprojectedLabels.length === 0 || unprojectedLabels.every((label) => label.turnKey === '__no-turn-identity__'),
+        unprojectedLabels,
+      );
       record('once submit sends a once execution policy', confirmationBody?.executionPolicy?.executionMode === 'once' && Boolean(confirmationBody?.executionPolicy?.dueAt), confirmationBody);
       record('once observation has no page errors', pageErrors.length === 0, pageErrors);
       await page.screenshot({ path: join(artifactDir, 'rcc-once-observation.png') });

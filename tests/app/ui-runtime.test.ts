@@ -588,6 +588,34 @@ class SemanticModelSummaryReplayPort extends FakeReplayExecutionRuntimePort {
   }
 }
 
+// The execution port is the only boundary that sees the provider binding's own
+// request identity, so it is the independent oracle for the trace projection.
+// This port records the identity the driver handed it and stamps a fixed
+// provider-reported occurrence time on every event, which lets a test assert the
+// trace carries the values the provider reported rather than a render time.
+class TurnIdentityCapturingReplayPort extends FakeReplayExecutionRuntimePort {
+  readonly startIdentities: Array<{ readonly turnId?: string; readonly requestId?: string }> = [];
+  readonly observeIdentities: Array<{ readonly turnId?: string; readonly requestId?: string }> = [];
+  readonly providerOccurredAt = '2026-10-06T08:00:00.000Z';
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    // The driver spreads its request identity into the port input; the declared
+    // start input type does not name those fields, so read them structurally.
+    const identity = input as ProviderStartInput & { readonly turnId?: string; readonly requestId?: string };
+    this.startIdentities.push({ turnId: identity.turnId, requestId: identity.requestId });
+    return super.start(input);
+  }
+
+  override async *observe(
+    input: Parameters<ExecutionRuntimePort['observe']>[0],
+  ): AsyncIterable<ProviderEvent> {
+    this.observeIdentities.push({ turnId: input.turnId, requestId: input.requestId });
+    for await (const event of super.observe(input)) {
+      yield { ...event, occurredAt: this.providerOccurredAt };
+    }
+  }
+}
+
 function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId: string) {
   const row = list.draft.find((task) => task.taskId.value === `ui-task-implicit-${draftId}`);
   if (!row) throw new Error(`missing queued draft row for ${draftId}`);
@@ -8060,4 +8088,97 @@ test('produced artifact truncation honours its byte bound for multibyte content'
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('runtime history reports the provider-reported turn identity and event time across restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-turn-identity-'));
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const journal = new UiRuntimeJournal(journalPath);
+  const port = new TurnIdentityCapturingReplayPort({ binding, stepDelayMs: 1 });
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+  const task = service.createTask({ title: 'turn identity projection' });
+  service.startExecution(task.taskId, { prompt: 'project the real turn identity' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  // The execution port is the only boundary that sees the provider binding's own
+  // request identity, so it is the independent oracle for everything below.
+  assert.ok(port.observeIdentities.length > 0, 'the provider binding must have observed the execution');
+  const reported = port.observeIdentities[0]!;
+  const reportedTurnId = reported.turnId;
+  const reportedRequestId = reported.requestId;
+  if (reportedTurnId === undefined) throw new Error('the provider binding must report a turn id');
+  if (reportedRequestId === undefined) throw new Error('the provider binding must report a request id');
+  assert.match(reportedTurnId, /^turn-/);
+  for (const identity of port.observeIdentities) {
+    assert.equal(identity.turnId, reportedTurnId, 'one execution stays inside one provider turn');
+    assert.equal(identity.requestId, reportedRequestId);
+  }
+
+  const history = service.history(task.taskId, { limit: 50 });
+  assert.equal(history.ok, true);
+  if (!history.ok) throw new Error('history must project the runtime trace');
+  assert.ok(history.page.items.length > 0, 'a succeeded execution must have a trace');
+  // The provider-reported occurrence time is the real event time; a render or
+  // receipt time would not be this exact value.
+  const providerEntries = history.page.items.filter((entry) => entry.kind !== 'status');
+  assert.ok(providerEntries.length > 0);
+  for (const entry of providerEntries) {
+    assert.equal(entry.turnId, reportedTurnId);
+    assert.equal(entry.requestId, reportedRequestId);
+    assert.equal(entry.occurredAt, port.providerOccurredAt);
+  }
+  // The runtime's own pre-provider event has no provider turn, and the trace
+  // reports that absence explicitly instead of synthesizing an identifier.
+  const started = history.page.items.find((entry) => entry.seq === 1);
+  assert.equal(started?.state, 'running');
+  assert.equal(started?.turnId, undefined);
+  assert.equal(started?.requestId, undefined);
+  // No entry may carry a synthesized identifier of the retired `<seq>.<ref>` shape.
+  for (const entry of history.page.items) {
+    if (entry.turnId === undefined) continue;
+    assert.equal(/^\d+\./.test(entry.turnId), false, entry.turnId);
+  }
+
+  const pipeline = service.observation(task.taskId, 'pipeline.execute').selectedNode;
+  assert.equal(pipeline?.turnId, reportedTurnId);
+
+  // The real identity and event time are persisted in the runtime journal, which
+  // is what makes them restart-readable rather than process-local.
+  const persisted = journal.replay().filter((record) => record.kind === 'operation.event');
+  assert.ok(persisted.length > 0);
+  const persistedTurnIds = new Set(
+    persisted.flatMap((record) => (record.kind === 'operation.event' && record.event.turnId !== undefined ? [record.event.turnId] : [])),
+  );
+  assert.deepEqual([...persistedTurnIds], [reportedTurnId]);
+  assert.ok(
+    persisted.some((record) => record.kind === 'operation.event' && record.event.providerOccurredAt === port.providerOccurredAt),
+    'the provider-reported event time must be journaled',
+  );
+
+  // Restart from the same control root: the trace must read back the same real
+  // turn identity and the same provider-reported event time.
+  const restarted = serviceFor(root, new TurnIdentityCapturingReplayPort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  await restarted.hydrate();
+  const replayed = restarted.history(task.taskId, { limit: 50 });
+  assert.equal(replayed.ok, true);
+  if (!replayed.ok) throw new Error('history must project the replayed runtime trace');
+  assert.deepEqual(
+    replayed.page.items.map((entry) => [entry.seq, entry.turnId, entry.occurredAt]),
+    history.page.items.map((entry) => [entry.seq, entry.turnId, entry.occurredAt]),
+  );
+  assert.equal(restarted.observation(task.taskId, 'pipeline.execute').selectedNode?.turnId, reportedTurnId);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('runtime history reports the explicit no-turn state for a task with no provider event', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-turn-identity-absent-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const task = service.createTask({ title: 'no provider turn yet' });
+  const history = service.history(task.taskId, { limit: 20 });
+  assert.equal(history.ok, true);
+  if (!history.ok) throw new Error('history must project an empty real trace');
+  assert.deepEqual(history.page.items, []);
+  assert.equal(history.page.hasMore, false);
+  assert.equal(service.observation(task.taskId, 'pipeline.execute').selectedNode?.turnId, undefined);
+  await rm(root, { recursive: true, force: true });
 });

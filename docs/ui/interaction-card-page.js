@@ -1,13 +1,8 @@
 const TASK_SCOPE = 'task'
 const OPERATION_SCOPE = 'operation'
-const EVIDENCE_SCOPE = 'evidence'
 
 export function scopedId(scope, value) {
   return { scope, value }
-}
-
-function nowIso() {
-  return new Date().toISOString()
 }
 
 function fallbackText(value, fallback) {
@@ -22,72 +17,18 @@ function fallbackText(value, fallback) {
   return fallback
 }
 
-function evidenceFor(kind, value, occurredAt) {
-  return [{
-    evidenceId: scopedId(EVIDENCE_SCOPE, `${kind}:${value}:${occurredAt}`),
-    kind,
-    source: 'humanagent.explicit-interaction',
-    locator: `explicit/${kind}/${value}`,
-    digest: `ui:${kind}:${value}`,
-    scope: { taskId: scopedId(TASK_SCOPE, 'explicit-interaction'), operationId: scopedId(OPERATION_SCOPE, 'explicit-interaction') },
-  }]
-}
-
-function sourceFor(entry) {
-  const interactionId = entry.interactionId || 'pending-input'
-  const reference = entry.eventKey || `event:${entry.sequence}`
+// A real interaction event carries only what the explicit-intake owner reported:
+// its key, kind, text and the interaction's own occurrence time. Anything the
+// owner did not report stays absent; the page never mints a turn id, a request
+// id, a tool call, an authorization record or an event time.
+function interactiveEntry(entry) {
   return {
-    taskId: scopedId(TASK_SCOPE, interactionId),
-    operationId: scopedId(OPERATION_SCOPE, interactionId),
-    executionEpoch: 1,
-    requestId: reference,
-    turnId: `${entry.sequence}.${reference}`,
-  }
-}
-
-function traceEntry(entry) {
-  const occurredAt = nowIso()
-  const source = sourceFor(entry)
-  const status = entry.sourceKind === 'error' ? 'failed' : 'succeeded'
-  const state = entry.sourceKind === 'error' ? 'failed' : 'observed'
-  return {
-    turnId: source.turnId,
-    requestId: source.requestId,
-    seq: entry.sequence,
-    occurredAt,
     kind: entry.kind,
-    modelRef: 'explicit-brain',
-    taskId: source.taskId,
-    operationId: source.operationId,
-    executionEpoch: 1,
-    tool: {
-      callId: `explicit-${entry.sequence}`,
-      toolId: 'explicit.interaction',
-      argumentsRef: `interaction://${source.taskId.value}/${entry.sequence}`,
-      argumentsDigest: `ui:${source.taskId.value}:${entry.sequence}`,
-      status,
-      outputRef: status === 'failed' ? undefined : `interaction://${source.taskId.value}/${entry.sequence}`,
-      outputDigest: status === 'failed' ? undefined : `ui:${source.taskId.value}:${entry.sequence}`,
-      error: entry.error ? { code: entry.error.code, message: entry.error.message, ownerId: entry.error.ownerId || 'humanagent.app', evidenceRefs: entry.evidenceRefs || [] } : undefined,
-      startedAt: occurredAt,
-      durationMs: 0,
-    },
-    authorization: {
-      scope: { taskId: source.taskId, operationId: source.operationId },
-      taskId: source.taskId,
-      operationId: source.operationId,
-      executionEpoch: 1,
-      requestedCapabilities: ['explicit.interaction'],
-      permissionRefs: [`explicit:${source.taskId.value}`],
-      toolOutputRef: `interaction://${source.taskId.value}/${entry.sequence}`,
-    },
-    evidenceRefs: evidenceFor(entry.kind, entry.sequence, occurredAt),
-    state,
-    allowedActions: [],
-    provider: { state: entry.sourceKind === 'error' ? 'unavailable' : 'ready', lastEventAt: occurredAt },
-    transport: { connected: entry.sourceKind !== 'error', lastSyncedAt: occurredAt, cursor: `explicit:${source.taskId.value}:${entry.sequence}` },
-    settlement: { providerStopped: false, checkpointCommitted: false },
-    lastBusiness: { kind: entry.kind, at: occurredAt, ref: `${source.taskId.value}:${entry.sequence}` },
+    text: entry.text || '',
+    eventKey: entry.eventKey,
+    sequence: entry.sequence,
+    ...(entry.occurredAt === undefined ? {} : { occurredAt: entry.occurredAt }),
+    ...(entry.error === undefined ? {} : { error: entry.error }),
   }
 }
 
@@ -122,16 +63,24 @@ function taskStateFor(state) {
   }
 }
 
-function cardFromEntries(entries, state = 'received') {
-  const now = nowIso()
-  const latest = entries.at(-1)
-  const source = latest ? sourceFor(latest) : {
-    taskId: scopedId(TASK_SCOPE, 'pending-input'),
-    operationId: scopedId(OPERATION_SCOPE, 'pending-input'),
-    executionEpoch: 1,
-    requestId: 'pending-input',
-    turnId: 'pending-input',
+// The interaction id is the only real scope an explicit interaction has. The
+// operation id is the interaction's runtime operation; it is derived from the
+// interaction id so both scoped ids identify the same real owner.
+function sourceFor(entry) {
+  const interactionId = entry?.interactionId || 'pending-input'
+  return {
+    taskId: scopedId(TASK_SCOPE, interactionId),
+    operationId: scopedId(OPERATION_SCOPE, interactionId),
   }
+}
+
+// The card status is built from the interaction facts the runtime reported. The
+// only timestamp used is the occurrence time the interaction owner stamped, and
+// it stays absent when the owner reported none.
+function cardFromEntries(entries, state = 'received', latestOccurredAt) {
+  const latest = entries.at(-1)
+  const source = sourceFor(latest)
+  const reportedAt = latestOccurredAt ?? latest?.occurredAt
   return {
     source,
     currentNode: 'explicit.brain',
@@ -139,13 +88,7 @@ function cardFromEntries(entries, state = 'received') {
     nextStep: fallbackText(latest?.text, '等待交互事件'),
     nextAction: latest?.eventKey || 'inspect-explicit-interaction',
     waitingOn: state.includes('awaiting') ? 'human' : 'runtime',
-    startedAt: now,
-    provider: { state: 'ready', lastEventAt: now },
-    transport: { connected: true, lastSyncedAt: now, cursor: `explicit:${source.taskId.value}` },
-    settlement: { providerStopped: false, checkpointCommitted: false },
-    lastBusiness: latest
-      ? { kind: latest.kind, at: now, ref: `${source.taskId.value}:${latest.sequence}` }
-      : { kind: 'status', at: now, ref: source.taskId.value },
+    ...(reportedAt === undefined ? {} : { startedAt: reportedAt }),
   }
 }
 
@@ -162,17 +105,13 @@ function projectInteractionCard(input) {
       nextAction: input.card.nextAction,
       waitingOn: input.card.waitingOn,
       startedAt: input.card.startedAt,
-      provider: input.card.provider,
-      transport: input.card.transport,
-      settlement: input.card.settlement,
-      lastBusiness: input.card.lastBusiness,
     },
     conversation: {
       summary: input.conversation?.summary || { missing: true },
       turns: input.conversation?.turns || [],
     },
     actions: input.actions || [],
-    trace: { count: input.history?.result?.page?.items?.length ?? 0, items: input.history?.result?.page?.items ?? [] },
+    trace: { count: input.history?.items?.length ?? 0, items: input.history?.items ?? [] },
     history: input.history
       ? {
           result: 'ok',
@@ -189,43 +128,82 @@ function projectInteractionCard(input) {
   }
 }
 
+/**
+ * Projects one explicit-interaction snapshot onto the shared work card.
+ *
+ * The interaction snapshot has no provider turn identity: an explicit
+ * interaction is owned by explicit intake, not by a provider request. The card
+ * therefore reports the absent turn/trace state explicitly instead of
+ * inventing a turn id, and the conversation carries only the occurrence times
+ * the snapshot itself reported.
+ */
 export function projectInteractionCardFromSnapshot(snapshot, state) {
-  const now = nowIso()
   const interactionId = snapshot?.interactionId || 'pending-input'
   const draft = snapshot?.draft || null
+  const enteredAt = snapshot?.occurredAt
   const userTurn = {
     sourceKind: 'user',
-    occurredAt: now,
+    ...(enteredAt === undefined ? {} : { occurredAt: enteredAt }),
     markdown: snapshot?.rawInput || fallbackText(snapshot?.reply, '尚未收到输入'),
   }
-  const entries = [{ sequence: 1, kind: 'user', sourceKind: 'user', eventKey: 'explicit.raw-input', interactionId, text: userTurn.markdown }]
+  const entries = [interactiveEntry({
+    sequence: 1,
+    kind: 'user',
+    sourceKind: 'user',
+    eventKey: 'explicit.raw-input',
+    interactionId,
+    text: userTurn.markdown,
+    occurredAt: enteredAt,
+  })]
   let sequence = 1
   for (const clarification of snapshot?.clarifications || []) {
     sequence += 1
-    entries.push({ sequence, kind: 'user', sourceKind: 'user', eventKey: 'explicit.clarification-answer', interactionId, text: clarification.answer || '' })
+    entries.push(interactiveEntry({
+      sequence,
+      kind: 'user',
+      sourceKind: 'user',
+      eventKey: 'explicit.clarification-answer',
+      interactionId,
+      text: clarification.answer || '',
+    }))
   }
   if (draft) {
     sequence += 1
-    entries.push({ sequence, kind: 'decision', sourceKind: 'draft', eventKey: 'explicit.draft-confirmation', interactionId, text: draft.proposal || draft.normalizedInput || '草稿等待确认' })
+    entries.push(interactiveEntry({
+      sequence,
+      kind: 'decision',
+      sourceKind: 'draft',
+      eventKey: 'explicit.draft-confirmation',
+      interactionId,
+      text: draft.proposal || draft.normalizedInput || '草稿等待确认',
+    }))
   } else if (snapshot?.reply) {
     sequence += 1
-    entries.push({ sequence, kind: 'assistant', sourceKind: 'assistant', eventKey: 'explicit.reply', interactionId, text: snapshot.reply })
+    entries.push(interactiveEntry({
+      sequence,
+      kind: 'assistant',
+      sourceKind: 'assistant',
+      eventKey: 'explicit.reply',
+      interactionId,
+      text: snapshot.reply,
+    }))
   }
 
   const turnKind = draft ? 'draft' : 'assistant'
   const turnText = draft
     ? draft.proposal || draft.normalizedInput || '草稿已生成'
     : snapshot?.reply || snapshot?.nextAction || '交互处理中'
+  const stateLabel = snapshot?.state || state
 
   return projectInteractionCard({
-    taskState: taskStateFor(snapshot?.state || state),
+    taskState: taskStateFor(stateLabel),
     source: {
       state: 'ready',
       label: '显式大脑',
-      detail: snapshot?.state || state,
-      updatedAt: now,
+      detail: stateLabel,
+      ...(enteredAt === undefined ? {} : { updatedAt: enteredAt }),
     },
-    card: cardFromEntries(entries, snapshot?.state || state),
+    card: cardFromEntries(entries, stateLabel, enteredAt),
     conversation: {
       summary: {
         goal: { text: snapshot?.rawInput || '尚未收到输入' },
@@ -237,27 +215,22 @@ export function projectInteractionCardFromSnapshot(snapshot, state) {
         userTurn,
         ...entries.slice(1).map((entry) => ({
           sourceKind: turnKind === 'draft' && entry.kind === 'decision' ? 'draft' : 'progress',
-          occurredAt: now,
+          ...(entry.occurredAt === undefined ? {} : { occurredAt: entry.occurredAt }),
           markdown: entry.text,
         })),
-        { sourceKind: turnKind, occurredAt: now, markdown: turnText },
+        {
+          sourceKind: turnKind,
+          ...(enteredAt === undefined ? {} : { occurredAt: enteredAt }),
+          markdown: turnText,
+        },
       ],
     },
     actions: draft
       ? [{ id: 'confirm-requirement', label: '确认并进入队列', executable: true }]
       : [],
-    history: {
-      query: { filter: { taskId: scopedId(TASK_SCOPE, interactionId) }, limit: 20, replay: true },
-      result: {
-        ok: true,
-        page: {
-          hasMore: false,
-          filter: { taskId: scopedId(TASK_SCOPE, interactionId) },
-          replay: true,
-          items: entries.map(traceEntry),
-        },
-      },
-    },
+    // An explicit interaction is owned by explicit intake, not by a provider
+    // request. It has no runtime event to project, so the page reports the
+    // absent history source explicitly instead of a synthesized trace.
     nodeCards: [],
   })
 }
@@ -273,37 +246,91 @@ export function projectInteractionCardFromEntries(entries, state = 'received') {
         eventKey: 'explicit.ready',
         text: '等待新的交互事件',
       }]
+  const latestOccurredAt = effectiveEntries.reduce(
+    (found, entry) => entry.occurredAt ?? found,
+    undefined,
+  )
   return projectInteractionCard({
     taskState: toLifecycleState(state),
     source: {
       state: 'ready',
       label: '显式大脑',
       detail: state,
-      updatedAt: nowIso(),
+      ...(latestOccurredAt === undefined ? {} : { updatedAt: latestOccurredAt }),
     },
-    card: cardFromEntries(effectiveEntries, state),
+    card: cardFromEntries(effectiveEntries, state, latestOccurredAt),
     conversation: {
       summary: { missing: true },
       turns: effectiveEntries.map((entry) => ({
         sourceKind: entry.sourceKind || 'progress',
-        occurredAt: nowIso(),
+        ...(entry.occurredAt === undefined ? {} : { occurredAt: entry.occurredAt }),
         markdown: entry.text || '',
         error: entry.error,
       })),
     },
     actions: [],
-    history: {
-      query: { filter: { taskId: scopedId(TASK_SCOPE, effectiveEntries.at(-1)?.interactionId || 'pending-input') }, limit: 50, replay: true },
-      result: {
-        ok: true,
-        page: {
-          hasMore: false,
-          filter: { taskId: scopedId(TASK_SCOPE, effectiveEntries.at(-1)?.interactionId || 'pending-input') },
-          replay: true,
-          items: effectiveEntries.map(traceEntry),
-        },
-      },
-    },
+    // Same as the snapshot projection: the interaction page itself is not a
+    // provider trace source, so the card reports the absent history explicitly.
     nodeCards: [],
   })
+}
+
+/**
+ * Replaces a card's history with the runtime's own history result.
+ *
+ * `result` is the contract-shaped `InteractionHistoryResult` the runtime
+ * history surface returned. The trace items are used verbatim: their turn ids,
+ * request ids and occurrence times are the values the provider binding and the
+ * runtime reported. A failed read keeps the typed failure visible and shows no
+ * invented entries.
+ */
+export function withTaskHistory(projection, query, result) {
+  if (!result || result.ok !== true) {
+    return {
+      ...projection,
+      trace: { count: 0, items: [] },
+      history: {
+        result: 'failed',
+        query,
+        code: result?.failure?.code ?? 'unavailable',
+        message: result?.failure?.message ?? '运行时未返回历史记录',
+        retryable: result?.failure?.retryable ?? false,
+        evidenceRefs: result?.failure?.evidenceRefs,
+        count: 0,
+        items: [],
+      },
+    }
+  }
+  const page = result.page || {}
+  const items = Array.isArray(page.items) ? page.items : []
+  const latest = items.at(-1)
+  return {
+    ...projection,
+    cardMetadata: latest
+      ? {
+          ...projection.cardMetadata,
+          source: {
+            taskId: latest.taskId,
+            operationId: latest.operationId,
+            executionEpoch: latest.executionEpoch,
+            ...(latest.requestId === undefined ? {} : { requestId: latest.requestId }),
+            ...(latest.turnId === undefined ? {} : { turnId: latest.turnId }),
+          },
+          ...(projection.cardMetadata?.startedAt === undefined && items[0]?.occurredAt !== undefined
+            ? { startedAt: items[0].occurredAt }
+            : {}),
+        }
+      : projection.cardMetadata,
+    trace: { count: items.length, items },
+    history: {
+      result: 'ok',
+      query,
+      cursor: page.cursor,
+      hasMore: page.hasMore ?? false,
+      filter: page.filter,
+      replay: page.replay,
+      count: items.length,
+      items,
+    },
+  }
 }

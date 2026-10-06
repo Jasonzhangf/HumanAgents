@@ -43,6 +43,7 @@ import {
   type FinalSubmit,
   type InteractionHistoryQuery,
   type InteractionHistoryResult,
+  type InteractionTraceAuthorization,
   type InteractionTraceEntry,
   type InteractionWorkCard,
   type OccurrenceClaim,
@@ -316,6 +317,16 @@ const occurrenceSettlement: OccurrenceSettlementInput = {
   outcome: 'succeeded',
 };
 
+const traceAuthorization: InteractionTraceAuthorization = {
+  scope,
+  taskId: task,
+  operationId: operation,
+  executionEpoch: 1,
+  requestedCapabilities: ['file.read'],
+  permissionRefs: ['permission://task-a'],
+  toolOutputRef: 'asset://call-a/output',
+};
+
 const traceEntry: InteractionTraceEntry = {
   turnId: 'turn-a',
   requestId: 'request-a',
@@ -337,15 +348,7 @@ const traceEntry: InteractionTraceEntry = {
     startedAt: '2026-11-01T15:59:59Z',
     durationMs: 1000,
   },
-  authorization: {
-    scope,
-    taskId: task,
-    operationId: operation,
-    executionEpoch: 1,
-    requestedCapabilities: ['file.read'],
-    permissionRefs: ['permission://task-a'],
-    toolOutputRef: 'asset://call-a/output',
-  },
+  authorization: traceAuthorization,
   dependencyEdge: { source: 'turn-a', target: 'turn-b', ref: 'call-a', reason: 'tool-result' },
   evidenceRefs: [evidence],
   state: 'running',
@@ -555,7 +558,7 @@ test('public consumer rejects authorization scope task conflicts', () => {
   assert.throws(() => validateInteractionTraceEntry({
     ...traceEntry,
     authorization: {
-      ...traceEntry.authorization,
+      ...traceAuthorization,
       scope: { ...scope, taskId: id('task', 'task-b') },
     },
   }), ContractError);
@@ -565,7 +568,7 @@ test('public consumer rejects authorization scope operation conflicts', () => {
   assert.throws(() => validateInteractionTraceEntry({
     ...traceEntry,
     authorization: {
-      ...traceEntry.authorization,
+      ...traceAuthorization,
       scope: { ...scope, operationId: id('operation', 'operation-b') },
     },
   }), ContractError);
@@ -575,7 +578,7 @@ test('public consumer rejects authorization output reference conflicts', () => {
   assert.throws(() => validateInteractionTraceEntry({
     ...traceEntry,
     authorization: {
-      ...traceEntry.authorization,
+      ...traceAuthorization,
       toolOutputRef: 'asset://call-a/other-output',
     },
   }), ContractError);
@@ -585,7 +588,7 @@ test('public consumer rejects missing required authorization output reference', 
   assert.throws(() => validateInteractionTraceEntry({
     ...traceEntry,
     authorization: {
-      ...traceEntry.authorization,
+      ...traceAuthorization,
       toolOutputRef: undefined as unknown as string,
     },
   }), ContractError);
@@ -595,14 +598,14 @@ test('public consumer accepts broader and matching authorization scopes', () => 
   assert.doesNotThrow(() => validateInteractionTraceEntry({
     ...traceEntry,
     authorization: {
-      ...traceEntry.authorization,
+      ...traceAuthorization,
       scope: { organId: scope.organId },
     },
   }));
   assert.doesNotThrow(() => validateInteractionTraceEntry({
     ...traceEntry,
     authorization: {
-      ...traceEntry.authorization,
+      ...traceAuthorization,
       scope,
     },
   }));

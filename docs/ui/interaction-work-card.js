@@ -57,6 +57,10 @@ const TAB_DEFINITIONS = Object.freeze([
   { id: 'trace', label: '轨迹' },
 ])
 
+// Grouping key for trace entries whose source reported no turn identity. It is
+// an explicit no-turn state, never a fabricated turn number.
+const NO_TURN_KEY = '__no-turn-identity__'
+
 function create(tag, className, text) {
   const node = document.createElement(tag)
   if (className) node.className = className
@@ -384,7 +388,6 @@ function renderConversation(projection, options, descriptorControls) {
     const list = create('div', 'iwc-conversation-turns')
     turns.forEach((turn, index) => {
       const article = create('article', 'iwc-conversation-turn')
-      article.dataset.turnIndex = String(index)
       const head = create('header', 'iwc-turn-head')
       const kind = CONVERSATION_KIND_LABELS[turn.sourceKind] || turn.sourceKind || '未知'
       head.append(create('span', 'iwc-kind-chip', kind))
@@ -610,8 +613,13 @@ function renderTrace(projection, options, state, descriptorControls) {
   } else if (state.mode === 'observation') {
     const categories = [...new Set(items.map((entry) => TRACE_KIND_LABELS[entry.kind] || entry.kind))].join('、')
     historyMeta.append(create('span', undefined, `只读轨迹 · ${items.length} 项${categories ? ` · 类别：${categories}` : ''}`))
-    if (items.some((entry) => !entry.turnId && !entry.unprojected)) {
-      historyMeta.append(create('span', 'iwc-missing', '真实轮次未投影'))
+    const realTurns = new Set(items.filter((entry) => entry.turnId).map((entry) => entry.turnId))
+    const withoutTurn = items.filter((entry) => !entry.turnId).length
+    if (realTurns.size > 0) {
+      historyMeta.append(create('span', undefined, `真实轮次 ${realTurns.size} 个`))
+    }
+    if (withoutTurn > 0) {
+      historyMeta.append(create('span', 'iwc-missing', `${withoutTurn} 项无真实轮次`))
     }
   } else {
     const cursor = historyState.cursor ? ` · cursor=${historyState.cursor}` : ''
@@ -626,18 +634,25 @@ function renderTrace(projection, options, state, descriptorControls) {
     const list = create('div', 'iwc-trace-list')
     const groups = new Map()
     for (const entry of items) {
-      const key = entry.turnId || entry.turnKey || '__unprojected__'
+      const key = entry.turnId || NO_TURN_KEY
       if (!groups.has(key)) groups.set(key, [])
       groups.get(key).push(entry)
     }
-    let turnIndex = 0
     for (const [key, groupItems] of groups) {
       const group = create('section', 'iwc-trace-group')
       group.dataset.turnKey = key
       const groupHead = create('header', 'iwc-trace-group-head')
       const hasTurnId = groupItems.some((entry) => entry.turnId)
-      if (hasTurnId) turnIndex += 1
-      groupHead.append(create('span', 'iwc-kind-chip', hasTurnId ? `轮次 ${turnIndex}` : '轮次未投影'))
+      if (hasTurnId) {
+        // The real turn id the provider binding reported. It is the literal
+        // identity, never an ordinal and never a synthesized number.
+        group.dataset.turnId = key
+        const turnChip = create('span', 'iwc-kind-chip iwc-turn-id', `轮次 ${key}`)
+        turnChip.dataset.turnId = key
+        groupHead.append(turnChip)
+      } else {
+        groupHead.append(create('span', 'iwc-kind-chip iwc-turn-unprojected', '轮次未投影'))
+      }
       const groupTime = groupItems.find((entry) => entry.occurredAt)?.occurredAt
       if (groupTime) groupHead.append(create('time', 'iwc-time', state.mode === 'observation' ? formatObservationTime(groupTime) : formatTime(groupTime)))
       if (!hasTurnId && state.mode === 'observation') groupHead.append(create('span', 'iwc-missing', '真实轮次未投影；以下按投影顺序显示'))
@@ -693,7 +708,7 @@ function observationTurn(summary, sourceKind, occurredAt, detailLabel) {
   }
 }
 
-function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, tool, details, unprojected }) {
+function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, tool, details, unprojected, turnId }) {
   return {
     kind,
     occurredAt,
@@ -703,15 +718,16 @@ function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, to
     tool,
     details,
     unprojected,
-    turnKey: 'observation:turn-unprojected',
+    ...(turnId === undefined || turnId === null ? {} : { turnId }),
   }
 }
 
 /**
  * Read-only adapter for one observation node. It preserves the shared work-card
  * projection shape while keeping every displayed fact tied to the typed node
- * detail. The current observation contract has no `turnId` or result timestamp,
- * so the adapter marks those gaps explicitly instead of inventing a turn.
+ * detail. A node or step the provider binding stamped with a real turn id shows
+ * that real id; a fact with no turn id is grouped as the explicit
+ * "no turn projected" state instead of being given an invented number.
  */
 export function projectObservationWorkCard(input = {}) {
   const node = input.node
@@ -727,6 +743,7 @@ export function projectObservationWorkCard(input = {}) {
     state: '已投影',
     summary: observationHumanText(item.summary, '活动摘要未投影'),
     sourceRef: item.activityRef,
+    turnId: item.turnId,
     details: [['activityRef', item.activityRef], ['summary', item.summary]],
   }))
 
@@ -739,6 +756,7 @@ export function projectObservationWorkCard(input = {}) {
       state: paired ? statusDisplay : '未返回',
       summary: `${valueOrUnknown(step.name, '未标注工具')} · ${paired ? '调用与返回已配对' : '未返回'}`,
       sourceRef: step.callId ?? step.stepId,
+      turnId: step.turnId,
       tool: {
         callId: step.callId ?? step.stepId,
         toolId: step.name,
@@ -767,6 +785,7 @@ export function projectObservationWorkCard(input = {}) {
       state: node.stateDisplay || '已投影',
       summary: observationHumanText(node.summary, '结论摘要未投影'),
       sourceRef: 'summary',
+      turnId: node.turnId,
       details: [['summary', node.summary]],
     }))
   }
@@ -776,7 +795,7 @@ export function projectObservationWorkCard(input = {}) {
     state: '未投影',
     summary: '模型请求轨迹未投影',
     unprojected: true,
-    details: [['reason', 'observation projection has no typed model-request or turnId field']],
+    details: [['reason', 'this node reported no model-request event with a turn id']],
   }))
   if (toolSteps.length === 0) {
     traceItems.push(observationTraceEntry({
@@ -823,7 +842,7 @@ export function projectObservationWorkCard(input = {}) {
         operationId: undefined,
         executionEpoch: node.iteration,
         requestId: undefined,
-        turnId: undefined,
+        ...(node.turnId === undefined || node.turnId === null ? {} : { turnId: node.turnId }),
       },
     },
     conversation: {

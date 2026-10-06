@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assertNotExpired,
+  ContractError,
   id,
   type Attention,
   type AgentMemoryContext,
@@ -47,6 +48,8 @@ import {
   type ExecutionPolicyDefinition,
   type Subscription,
   type InteractionDecision,
+  type InteractionHistoryQuery,
+  type InteractionHistoryResult,
   type WorkResult,
 } from '../../../contracts/src/index.js';
 import { DraftRevisionError } from '../../../core/src/draft-revision.js';
@@ -114,6 +117,7 @@ import {
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+import { projectRuntimeTaskHistory } from './turn-history.js';
 import {
   MemoryCoordinator,
   MemoryCoordinatorError,
@@ -508,6 +512,10 @@ function observationNodeFacts(
             ...base,
             state: task.state,
             summary: task.output || task.currentState,
+            // The provider binding's own turn identity. `requestIdentity` is the
+            // request the binding reported before the first event arrived; the
+            // newest event turn id is the durable record of the same identity.
+            ...(latestTurnId(task) === undefined ? {} : { turnId: latestTurnId(task)! }),
             inputRefs: [`operation://${task.operationId}/input`],
             outputRefs: task.output ? [`operation://${task.operationId}/output`] : [],
             evidenceRefs: task.events.flatMap((event) => event.evidenceRefs).slice(-5),
@@ -627,6 +635,16 @@ function observationHandoffs(
 }
 
 /**
+ * The real provider turn identity of a task, taken from the runtime events the
+ * provider binding stamped, or from the identity the binding reported for the
+ * in-flight request. It is undefined when the provider never reported one.
+ */
+function latestTurnId(task: RuntimeTaskSnapshot): string | undefined {
+  const fromEvents = task.events.reduce<string | undefined>((found, event) => event.turnId ?? found, undefined);
+  return fromEvents ?? task.requestIdentity?.turnId;
+}
+
+/**
  * Tool-call history from `provider.tool` events only: the step id, the owner that reported the call,
  * its status and the returned content. Model-private reasoning is never part of an event, so it can
  * never reach this projection.
@@ -672,6 +690,7 @@ function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolSte
       status,
       returned,
       occurredAt: call.occurredAt,
+      ...(call.turnId === undefined ? {} : { turnId: call.turnId }),
     });
   }
   return steps;
@@ -1411,6 +1430,7 @@ export class UiRuntimeService {
       scope: input.scope,
       inputRefs: input.inputRefs,
       ownerId: input.ownerId,
+      onRequestLifecycle: (event) => this.coordinator.recordProviderRequestIdentity(event),
       ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
       ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
       ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
@@ -1437,6 +1457,7 @@ export class UiRuntimeService {
           scope: { ...input.scope, operationId },
           inputRefs: [...input.assignment.targetRefs, input.assignment.objective],
           ownerId: RUNTIME_OWNER,
+          onRequestLifecycle: (event) => this.coordinator.recordProviderRequestIdentity(event),
           ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
           ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
           ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
@@ -1905,6 +1926,7 @@ export class UiRuntimeService {
         outputRefs: event.kind === 'provider.output' ? event.evidenceRefs.map((ref) => ref.locator) : [],
         evidenceRefs: event.evidenceRefs,
         updatedAt: event.occurredAt,
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
       }));
       const scopes: Record<string, ObservationScopeSource> = {
         [rootScopeRef]: {
@@ -1954,6 +1976,30 @@ export class UiRuntimeService {
           error.message,
           unknownScope ? 'select an existing observation scope' : 'select an existing observation node',
           404,
+        );
+      }
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * The public trace of one task. It projects the runtime's own events, so every
+   * entry carries the turn identity and occurrence time the provider binding
+   * reported; a task with no provider event yet returns an empty real page
+   * instead of a synthesized trace.
+   */
+  history(taskId: TaskId, query: InteractionHistoryQuery): InteractionHistoryResult {
+    try {
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      return projectRuntimeTaskHistory(task, query);
+    } catch (error) {
+      if (error instanceof ContractError) {
+        throw new UiRuntimeApiError(
+          'history.query.invalid',
+          APP_OWNER,
+          error.message,
+          'send a valid history query',
+          400,
         );
       }
       throw apiError(error);

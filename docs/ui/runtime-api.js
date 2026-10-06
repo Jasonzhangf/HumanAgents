@@ -86,6 +86,13 @@ export function createRuntimeApi(options = {}) {
     }),
     taskDetail: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     taskDashboard: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`),
+    taskHistory: (taskId, { cursor, limit = 20, kinds, search } = {}) => {
+      const query = new URLSearchParams({ limit: String(limit) })
+      if (cursor) query.set('cursor', cursor)
+      if (search) query.set('search', search)
+      for (const kind of kinds || []) query.append('kind', kind)
+      return request(`/api/tasks/${encodeURIComponent(taskId)}/history?${query}`)
+    },
     observation: (taskId, scopeRef, selectedNodeId) => {
       const query = new URLSearchParams()
       if (scopeRef) query.set('scope', scopeRef)

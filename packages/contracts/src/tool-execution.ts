@@ -623,26 +623,38 @@ export type InteractionTraceKind =
   | 'cancel';
 
 export interface InteractionTraceEntry {
-  readonly turnId: string;
-  readonly requestId: string;
+  /**
+   * Real provider/runtime turn identity. Absent only when the source genuinely
+   * reported none; absence is the explicit no-turn state and must never be
+   * replaced by a synthesized identifier.
+   */
+  readonly turnId?: string;
+  /** Real provider request identity. Absent only when the source reported none. */
+  readonly requestId?: string;
   readonly parentRequestId?: string;
   readonly seq: number;
   readonly occurredAt: string;
   readonly kind: InteractionTraceKind;
   readonly modelRef?: string;
+  /** Human-readable event summary reported by the source, when it reported one. */
+  readonly summary?: string;
   readonly taskId: TaskId;
   readonly operationId: OperationId;
   readonly executionEpoch: number;
   readonly tool?: ToolTraceDescriptor;
-  readonly authorization: InteractionTraceAuthorization;
+  /**
+   * Explicit-interaction authorization facts. A runtime/provider trace has no
+   * authorization record, so it stays absent instead of being invented.
+   */
+  readonly authorization?: InteractionTraceAuthorization;
   readonly dependencyEdge?: TraceDependencyEdge;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly state: string;
-  readonly allowedActions: readonly string[];
-  readonly provider: InteractionTraceProvider;
-  readonly transport: InteractionTraceTransport;
-  readonly settlement: InteractionTraceSettlement;
-  readonly lastBusiness: InteractionTraceLastBusiness;
+  readonly allowedActions?: readonly string[];
+  readonly provider?: InteractionTraceProvider;
+  readonly transport?: InteractionTraceTransport;
+  readonly settlement?: InteractionTraceSettlement;
+  readonly lastBusiness?: InteractionTraceLastBusiness;
 }
 
 export interface InteractionHistoryFilter {
@@ -686,20 +698,24 @@ export interface InteractionWorkCard {
   readonly source: {
     readonly taskId: TaskId;
     readonly operationId: OperationId;
-    readonly executionEpoch: number;
-    readonly requestId: string;
-    readonly turnId: string;
+    /** Runtime execution epoch; absent only when the source reported none. */
+    readonly executionEpoch?: number;
+    /** Real request identity; absent only when the source reported none. */
+    readonly requestId?: string;
+    /** Real turn identity; absent only when the source reported none. */
+    readonly turnId?: string;
   };
   readonly currentNode: string;
   readonly ownerId: string;
   readonly nextStep: string;
   readonly nextAction: string;
   readonly waitingOn?: string;
-  readonly startedAt: string;
-  readonly provider: InteractionTraceProvider;
-  readonly transport: InteractionTraceTransport;
-  readonly settlement: InteractionTraceSettlement;
-  readonly lastBusiness: InteractionTraceLastBusiness;
+  /** Real start time reported by the source; absent only when the source reported none. */
+  readonly startedAt?: string;
+  readonly provider?: InteractionTraceProvider;
+  readonly transport?: InteractionTraceTransport;
+  readonly settlement?: InteractionTraceSettlement;
+  readonly lastBusiness?: InteractionTraceLastBusiness;
 }
 
 export interface RouteSelection {
@@ -1930,9 +1946,9 @@ function validateToolTraceDescriptor(input: ToolTraceDescriptor): void {
   if ((input.outputRef === undefined) !== (input.outputDigest === undefined)) {
     throw new ContractError('tool trace outputRef and outputDigest must be provided together');
   }
-  if (input.status === 'succeeded' && input.outputRef === undefined) {
-    throw new ContractError('succeeded tool trace requires outputRef and outputDigest');
-  }
+  // A succeeded provider tool call may report its output in-band instead of as a
+  // descriptor ref. The descriptor reports what the source reported, so it must
+  // not be forced to invent an output ref in order to state a real success.
   if (input.outputRef !== undefined) assertNonEmpty(input.outputRef, 'tool trace outputRef');
   if (input.outputDigest !== undefined) assertNonEmpty(input.outputDigest, 'tool trace outputDigest');
   if (input.error !== undefined) {
@@ -1947,8 +1963,8 @@ function validateToolTraceDescriptor(input: ToolTraceDescriptor): void {
 }
 
 export function validateInteractionTraceEntry(input: InteractionTraceEntry): void {
-  assertNonEmpty(input.turnId, 'trace turnId');
-  assertNonEmpty(input.requestId, 'trace requestId');
+  if (input.turnId !== undefined) assertNonEmpty(input.turnId, 'trace turnId');
+  if (input.requestId !== undefined) assertNonEmpty(input.requestId, 'trace requestId');
   if (input.parentRequestId !== undefined) assertNonEmpty(input.parentRequestId, 'trace parentRequestId');
   assertExecutionEpoch(input.seq);
   assertValidTime(input.occurredAt, 'trace occurredAt');
@@ -1974,29 +1990,31 @@ export function validateInteractionTraceEntry(input: InteractionTraceEntry): voi
     throw new ContractError('tool trace kind requires a tool descriptor');
   }
   if (input.tool !== undefined) validateToolTraceDescriptor(input.tool);
-  if (input.authorization.executionEpoch !== input.executionEpoch
-    || !sameScopedId(input.authorization.taskId, input.taskId)
-    || !sameScopedId(input.authorization.operationId, input.operationId)) {
-    throw new ContractError('trace authorization identity does not match trace');
-  }
-  validateScope(input.authorization.scope, 'trace authorization scope');
-  if (input.authorization.scope.taskId !== undefined
-    && !sameScopedId(input.authorization.scope.taskId, input.taskId)) {
-    throw new ContractError('trace authorization scope taskId does not match trace');
-  }
-  if (input.authorization.scope.operationId !== undefined
-    && !sameScopedId(input.authorization.scope.operationId, input.operationId)) {
-    throw new ContractError('trace authorization scope operationId does not match trace');
-  }
-  for (const capability of input.authorization.requestedCapabilities) {
-    assertNonEmpty(capability, 'trace requested capability');
-  }
-  for (const permission of input.authorization.permissionRefs) {
-    assertNonEmpty(permission, 'trace permissionRef');
-  }
-  assertNonEmpty(input.authorization.toolOutputRef, 'trace toolOutputRef');
-  if (input.tool?.outputRef !== undefined && input.authorization.toolOutputRef !== input.tool.outputRef) {
-    throw new ContractError('trace authorization toolOutputRef does not match tool outputRef');
+  if (input.authorization !== undefined) {
+    if (input.authorization.executionEpoch !== input.executionEpoch
+      || !sameScopedId(input.authorization.taskId, input.taskId)
+      || !sameScopedId(input.authorization.operationId, input.operationId)) {
+      throw new ContractError('trace authorization identity does not match trace');
+    }
+    validateScope(input.authorization.scope, 'trace authorization scope');
+    if (input.authorization.scope.taskId !== undefined
+      && !sameScopedId(input.authorization.scope.taskId, input.taskId)) {
+      throw new ContractError('trace authorization scope taskId does not match trace');
+    }
+    if (input.authorization.scope.operationId !== undefined
+      && !sameScopedId(input.authorization.scope.operationId, input.operationId)) {
+      throw new ContractError('trace authorization scope operationId does not match trace');
+    }
+    for (const capability of input.authorization.requestedCapabilities) {
+      assertNonEmpty(capability, 'trace requested capability');
+    }
+    for (const permission of input.authorization.permissionRefs) {
+      assertNonEmpty(permission, 'trace permissionRef');
+    }
+    assertNonEmpty(input.authorization.toolOutputRef, 'trace toolOutputRef');
+    if (input.tool?.outputRef !== undefined && input.authorization.toolOutputRef !== input.tool.outputRef) {
+      throw new ContractError('trace authorization toolOutputRef does not match tool outputRef');
+    }
   }
   if (input.dependencyEdge !== undefined) {
     assertNonEmpty(input.dependencyEdge.source, 'trace dependency source');
@@ -2006,17 +2024,28 @@ export function validateInteractionTraceEntry(input: InteractionTraceEntry): voi
   }
   for (const evidence of input.evidenceRefs) assertEvidenceRef(evidence);
   assertNonEmpty(input.state, 'trace state');
-  for (const action of input.allowedActions) assertNonEmpty(action, 'trace allowed action');
-  assertNonEmpty(input.provider.state, 'trace provider state');
-  assertValidTime(input.provider.lastEventAt, 'trace provider lastEventAt');
-  if (typeof input.transport.connected !== 'boolean') throw new ContractError('trace transport connected must be boolean');
-  assertValidTime(input.transport.lastSyncedAt, 'trace transport lastSyncedAt');
-  if (input.transport.cursor !== undefined) assertNonEmpty(input.transport.cursor, 'trace transport cursor');
-  if (input.settlement.stoppedAt !== undefined) assertValidTime(input.settlement.stoppedAt, 'trace settlement stoppedAt');
-  if (input.settlement.resultRef !== undefined) assertNonEmpty(input.settlement.resultRef, 'trace settlement resultRef');
-  assertNonEmpty(input.lastBusiness.kind, 'trace lastBusiness kind');
-  assertValidTime(input.lastBusiness.at, 'trace lastBusiness at');
-  assertNonEmpty(input.lastBusiness.ref, 'trace lastBusiness ref');
+  if (input.summary !== undefined) assertNonEmpty(input.summary, 'trace summary');
+  if (input.allowedActions !== undefined) {
+    for (const action of input.allowedActions) assertNonEmpty(action, 'trace allowed action');
+  }
+  if (input.provider !== undefined) {
+    assertNonEmpty(input.provider.state, 'trace provider state');
+    assertValidTime(input.provider.lastEventAt, 'trace provider lastEventAt');
+  }
+  if (input.transport !== undefined) {
+    if (typeof input.transport.connected !== 'boolean') throw new ContractError('trace transport connected must be boolean');
+    assertValidTime(input.transport.lastSyncedAt, 'trace transport lastSyncedAt');
+    if (input.transport.cursor !== undefined) assertNonEmpty(input.transport.cursor, 'trace transport cursor');
+  }
+  if (input.settlement !== undefined) {
+    if (input.settlement.stoppedAt !== undefined) assertValidTime(input.settlement.stoppedAt, 'trace settlement stoppedAt');
+    if (input.settlement.resultRef !== undefined) assertNonEmpty(input.settlement.resultRef, 'trace settlement resultRef');
+  }
+  if (input.lastBusiness !== undefined) {
+    assertNonEmpty(input.lastBusiness.kind, 'trace lastBusiness kind');
+    assertValidTime(input.lastBusiness.at, 'trace lastBusiness at');
+    assertNonEmpty(input.lastBusiness.ref, 'trace lastBusiness ref');
+  }
 }
 
 export function validateInteractionHistoryQuery(input: InteractionHistoryQuery): void {
@@ -2079,23 +2108,31 @@ export function validateInteractionWorkCard(input: InteractionWorkCard): void {
   assertNonEmpty(input.source.taskId.value, 'work card taskId');
   assertScope(input.source.operationId, 'operation');
   assertNonEmpty(input.source.operationId.value, 'work card operationId');
-  assertExecutionEpoch(input.source.executionEpoch);
-  assertNonEmpty(input.source.requestId, 'work card requestId');
-  assertNonEmpty(input.source.turnId, 'work card turnId');
+  if (input.source.executionEpoch !== undefined) assertExecutionEpoch(input.source.executionEpoch);
+  if (input.source.requestId !== undefined) assertNonEmpty(input.source.requestId, 'work card requestId');
+  if (input.source.turnId !== undefined) assertNonEmpty(input.source.turnId, 'work card turnId');
   assertNonEmpty(input.currentNode, 'work card currentNode');
   assertNonEmpty(input.ownerId, 'work card ownerId');
   assertNonEmpty(input.nextStep, 'work card nextStep');
   assertNonEmpty(input.nextAction, 'work card nextAction');
   if (input.waitingOn !== undefined) assertNonEmpty(input.waitingOn, 'work card waitingOn');
-  assertValidTime(input.startedAt, 'work card startedAt');
-  assertNonEmpty(input.provider.state, 'work card provider state');
-  assertValidTime(input.provider.lastEventAt, 'work card provider lastEventAt');
-  if (typeof input.transport.connected !== 'boolean') throw new ContractError('work card transport connected must be boolean');
-  assertValidTime(input.transport.lastSyncedAt, 'work card transport lastSyncedAt');
-  if (input.transport.cursor !== undefined) assertNonEmpty(input.transport.cursor, 'work card transport cursor');
-  if (input.settlement.stoppedAt !== undefined) assertValidTime(input.settlement.stoppedAt, 'work card settlement stoppedAt');
-  if (input.settlement.resultRef !== undefined) assertNonEmpty(input.settlement.resultRef, 'work card settlement resultRef');
-  assertNonEmpty(input.lastBusiness.kind, 'work card lastBusiness kind');
-  assertValidTime(input.lastBusiness.at, 'work card lastBusiness at');
-  assertNonEmpty(input.lastBusiness.ref, 'work card lastBusiness ref');
+  if (input.startedAt !== undefined) assertValidTime(input.startedAt, 'work card startedAt');
+  if (input.provider !== undefined) {
+    assertNonEmpty(input.provider.state, 'work card provider state');
+    assertValidTime(input.provider.lastEventAt, 'work card provider lastEventAt');
+  }
+  if (input.transport !== undefined) {
+    if (typeof input.transport.connected !== 'boolean') throw new ContractError('work card transport connected must be boolean');
+    assertValidTime(input.transport.lastSyncedAt, 'work card transport lastSyncedAt');
+    if (input.transport.cursor !== undefined) assertNonEmpty(input.transport.cursor, 'work card transport cursor');
+  }
+  if (input.settlement !== undefined) {
+    if (input.settlement.stoppedAt !== undefined) assertValidTime(input.settlement.stoppedAt, 'work card settlement stoppedAt');
+    if (input.settlement.resultRef !== undefined) assertNonEmpty(input.settlement.resultRef, 'work card settlement resultRef');
+  }
+  if (input.lastBusiness !== undefined) {
+    assertNonEmpty(input.lastBusiness.kind, 'work card lastBusiness kind');
+    assertValidTime(input.lastBusiness.at, 'work card lastBusiness at');
+    assertNonEmpty(input.lastBusiness.ref, 'work card lastBusiness ref');
+  }
 }

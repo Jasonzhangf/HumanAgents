@@ -17,6 +17,7 @@ import { mountInteractionWorkCard } from './interaction-work-card.js'
 import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
+  withTaskHistory,
 } from './interaction-card-page.js'
 
 const requestedTask = taskIdFromQuery(false)
@@ -37,14 +38,49 @@ const interactionCard = interactionCardHost
           if (confirmationButton) void confirmationButton.click()
         }
       },
+      onHistoryQuery: (query) => loadTaskHistory(query),
     })
   : null
 interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 
+// The card's trace is the runtime's own history for this task. It is loaded
+// from the public history surface, so the displayed turn ids and occurrence
+// times are the values the provider binding reported; when the task has no
+// event yet the card keeps the explicit empty state.
+async function loadTaskHistory(query) {
+  if (!interactionCard || !taskId || taskId === 'new') return
+  const effectiveQuery = query ?? { limit: 20, replay: true }
+  let result
+  try {
+    result = await api.taskHistory(taskId, {
+      limit: effectiveQuery.limit,
+      ...(effectiveQuery.cursor === undefined ? {} : { cursor: effectiveQuery.cursor }),
+      ...(effectiveQuery.search === undefined ? {} : { search: effectiveQuery.search }),
+      ...(effectiveQuery.filter?.kinds === undefined ? {} : { kinds: effectiveQuery.filter.kinds }),
+    })
+  } catch (error) {
+    result = {
+      ok: false,
+      failure: {
+        code: error.code || 'unavailable',
+        message: error.message || String(error),
+        retryable: false,
+        evidenceRefs: error.evidenceRefs || [],
+      },
+    }
+  }
+  interactionCard.update(withTaskHistory(cardState.projection, effectiveQuery, result))
+}
+
 let taskId = requestedTask
 let detail
 let activeInteractionId
-const cardState = { sequence: 0, entries: [] }
+const cardState = { sequence: 0, entries: [], projection: projectInteractionCardFromEntries([], 'received') }
+
+function updateCard(projection) {
+  cardState.projection = projection
+  interactionCard?.update(projection)
+}
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
   cardState.sequence += 1
@@ -61,7 +97,7 @@ function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
       ...detail,
     },
   ]
-  interactionCard?.update(projectInteractionCardFromEntries(cardState.entries, activeInteractionId ? 'received' : 'awaiting-confirmation'))
+  updateCard(projectInteractionCardFromEntries(cardState.entries, activeInteractionId ? 'received' : 'awaiting-confirmation'))
 }
 
 function appendCardError(error) {
@@ -75,7 +111,7 @@ function appendCardError(error) {
 function updateCardFromSnapshot(snapshot) {
   cardState.sequence = 0
   cardState.entries = []
-  interactionCard?.update(projectInteractionCardFromSnapshot(snapshot))
+  updateCard(projectInteractionCardFromSnapshot(snapshot))
 }
 
 // `renderCreate` / `renderInteraction` / `renderTask` rebuild `main`, so the
@@ -338,6 +374,7 @@ function renderTask() {
   actions.append(dashboardLink, observationLink)
   main.append(actions)
   attachInteractionCardHost()
+  void loadTaskHistory()
 }
 
 async function load() {
