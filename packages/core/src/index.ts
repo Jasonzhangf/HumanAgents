@@ -11,3 +11,5 @@ export * from './checkpoint-control.js';
 export * from './attention.js';
 export * from './agent-loop.js';
 export * from './tool-execution-lifecycle.js';
+export * from './draft-revision.js';
+export * from './subscription.js';

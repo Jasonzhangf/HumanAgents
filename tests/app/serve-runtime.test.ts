@@ -26,6 +26,7 @@ import { fakeExecutionBinding } from '../../packages/app/src/fake-execution.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from '../../packages/app/src/serve-orchestration.js';
 import { createServeRuntimeComposition } from '../../packages/app/src/serve-runtime.js';
 import { FakeReplayExecutionRuntimePort, startUiRuntime } from '../../packages/app/src/ui-runtime/index.js';
+import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/memory/index.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import type { CheckpointJournalPort } from '../../packages/runtime/src/checkpoints/ports.js';
@@ -47,6 +48,13 @@ const unusedExplicitBrainInterpreter = {
     throw new Error('explicit brain interpretation is not used in serve orchestration tests');
   },
 };
+
+async function accessControlFor(root: string): Promise<AccessControlService> {
+  return AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+}
 
 async function eventBusPorts(): Promise<{ readonly ports: EventBusPorts; readonly close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-serve-runtime-'));
@@ -409,6 +417,7 @@ test('confirmed requirement enters task orchestration with RCC review before pro
   });
   const runtime = await startUiRuntime({
     mode: 'rcc',
+    accessControl: await accessControlFor(root),
     organId: id('organ', 'humanagent-ui'),
     binding,
     port: providerPort({ state: 'succeeded', reviewMarker: 'HUMANAGENT_REVIEW: passed' }),
@@ -491,6 +500,7 @@ test('confirmed requirement preserves non-success provider closures through orch
     });
     const runtime = await startUiRuntime({
       mode: 'fake',
+      accessControl: await accessControlFor(root),
       organId: id('organ', 'humanagent-ui'),
       binding,
       port: new FakeReplayExecutionRuntimePort({
@@ -566,6 +576,7 @@ test('same-task execution epochs commit epoch-scoped checkpoint ids', async () =
   });
   const runtime = await startUiRuntime({
     mode: 'fake',
+    accessControl: await accessControlFor(root),
     organId: id('organ', 'humanagent-ui'),
     binding,
     port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),

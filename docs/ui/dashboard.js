@@ -7,39 +7,92 @@ import {
   renderRuntimeStatus,
   taskDashboardHref,
 } from './runtime-shell.js'
+import { mountInteractionWorkCard } from './interaction-work-card.js'
+import {
+  projectInteractionCardFromEntries,
+  projectInteractionCardFromSnapshot,
+} from './interaction-card-page.js'
 
 const REFRESH_MS = 4000
-const { main, status } = makePageShell(
+const { main, status, interactionCardHosts } = makePageShell(
   'Dashboard',
   'Runtime',
   '工作总览',
   '在这里新建、跟踪、管理任务；所有数据来自 HumanAgent Runtime API。',
 )
+const interactionCardHost = interactionCardHosts[0]
+const interactionCard = interactionCardHost
+  ? mountInteractionWorkCard(interactionCardHost, {
+      onAction: async (action) => {
+        if (action.id === 'confirm-requirement') {
+          const confirmationButton = document.querySelector('#dashboard-confirm-button')
+          if (confirmationButton) void confirmationButton.click()
+        }
+      },
+    })
+  : null
+interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 
 // ── DOM regions: input panel (stable, never rebuilt) + list panel (refreshed) ──
 const inputRegion = element('section', undefined, 'quick-create')
 const statsRegion = element('section', undefined, 'stats')
 const listRegion = element('div', undefined, 'task-lists')
-main.append(inputRegion, statsRegion, listRegion)
+main.append(inputRegion)
+if (interactionCardHost) main.append(interactionCardHost)
+main.append(statsRegion, listRegion)
 
 // ── Interaction state (surVives refresh) ──
 const interaction = {
   id: null,
   draft: null,
   inFlight: false,
+  sequence: 0,
+  entries: [],
+  state: 'received',
 }
 
-function createProgressWidget() {
+function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
+  interaction.sequence += 1
+  const interactionId = interaction.id || 'pending-input'
+  interaction.entries = [
+    ...interaction.entries,
+    {
+      sequence: interaction.sequence,
+      interactionId,
+      kind,
+      sourceKind,
+      eventKey: detail.eventKey || kind,
+      text,
+      ...detail,
+    },
+  ]
+  interactionCard?.update(projectInteractionCardFromEntries(interaction.entries, interaction.state))
+}
+
+function appendCardError(error) {
+  appendCardEvent('failure', error.message || String(error), 'error', {
+    eventKey: 'request-failed',
+    error: { code: error.code, message: error.message || String(error), ownerId: error.ownerId || 'humanagent.app' },
+    evidenceRefs: error.evidenceRefs || [],
+  })
+}
+
+function updateCardFromSnapshot(snapshot) {
+  interaction.id = interaction.id || 'pending-input'
+  if (snapshot?.state) interaction.state = snapshot.state
+  interactionCard?.update(projectInteractionCardFromSnapshot(snapshot))
+}
+
+function createInteractionProgressWidget() {
   const root = element('div', undefined, 'progress')
   root.setAttribute('role', 'status')
   root.setAttribute('aria-live', 'polite')
-  root.dataset.tone = 'idle'
   const spinner = element('span', undefined, 'progress-spinner')
   spinner.setAttribute('aria-hidden', 'true')
-  const phase = element('span', 'idle', 'progress-phase')
-  phase.setAttribute('data-default', 'idle')
+  const phase = element('span', '', 'progress-phase')
   const detail = element('span', '', 'progress-detail')
   const timer = element('time', '0.0s', 'progress-timer')
+  timer.setAttribute('aria-hidden', 'true')
   root.append(spinner, phase, detail, timer)
 
   let startTime = 0
@@ -61,17 +114,16 @@ function createProgressWidget() {
       timer.hidden = false
       if (handle) clearInterval(handle)
       handle = setInterval(tick, 100)
-      root.dataset.tone = 'active'
       root.classList.add('progress--live')
+      appendCardEvent('status', phaseText, 'progress')
     },
     waiting(phaseText, detailText) {
       if (handle) clearInterval(handle)
       phase.textContent = phaseText || 'waiting'
       detail.textContent = detailText || ''
       timer.textContent = '0.0s'
-      timer.hidden = true
-      root.dataset.tone = 'waiting'
       root.classList.remove('progress--live')
+      appendCardEvent('status', phaseText || 'waiting', 'progress')
     },
     done(phaseText, detailText) {
       if (handle) clearInterval(handle)
@@ -79,8 +131,8 @@ function createProgressWidget() {
       phase.textContent = phaseText || 'done'
       detail.textContent = detailText || ''
       timer.hidden = false
-      root.dataset.tone = 'success'
       root.classList.remove('progress--live')
+      appendCardEvent('status', phaseText || 'done', 'result')
     },
     error(phaseText, detailText) {
       if (handle) clearInterval(handle)
@@ -88,8 +140,8 @@ function createProgressWidget() {
       phase.textContent = phaseText || 'failed'
       detail.textContent = detailText || ''
       timer.hidden = false
-      root.dataset.tone = 'danger'
       root.classList.remove('progress--live')
+      appendCardEvent('failure', phaseText || 'failed', 'error')
     },
     idle(phaseText, detailText) {
       if (handle) clearInterval(handle)
@@ -97,8 +149,8 @@ function createProgressWidget() {
       detail.textContent = detailText || ''
       timer.textContent = '0.0s'
       timer.hidden = false
-      root.dataset.tone = 'idle'
       root.classList.remove('progress--live')
+      appendCardEvent('status', phaseText || 'idle', 'progress')
     },
   }
 }
@@ -118,7 +170,7 @@ function renderInputPanel() {
   const submit = element('button', '提交给显式大脑', 'button button--primary')
   submit.type = 'submit'
 
-  const progress = createProgressWidget()
+  const progress = createInteractionProgressWidget()
   progress.root.classList.add('quick-create-progress')
   progress.idle('空闲', '输入任务后点击提交，显式大脑按 理解 → 匹配 → 确认 → 派发 处理')
 
@@ -160,20 +212,25 @@ function renderInputPanel() {
           inputRevision: 1,
         })
         interaction.id = received.interactionId
+        appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.raw-input' })
       }
       // Check current interaction state
       let snap = await api.inspectExplicitInteraction(interaction.id)
+      updateCardFromSnapshot(snap)
       if (snap.state === 'awaiting-clarification') {
         // Second turn: user answered the clarification question
         progress.set('显式大脑正在理解你的回答', '正在将补充信息交给显式大脑')
         snap = await api.answerExplicitClarification(interaction.id, rawInput)
+        appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.clarification-answer' })
         // After answering, re-interpret to produce a draft
         progress.set('显式大脑正在重新整理意图', '显式大脑正在生成任务草案')
         snap = await api.interpretExplicitInput(interaction.id)
+        updateCardFromSnapshot(snap)
       } else if (snap.state === 'received' || snap.state === 'matching') {
         // First turn: drive interpretation + matching
         progress.set('显式大脑正在匹配任务', '显式大脑正在整理意图')
         snap = await api.interpretExplicitInput(interaction.id)
+        updateCardFromSnapshot(snap)
       }
       if (snap.state === 'awaiting-clarification') {
         progress.done('需要补充信息', snap.reply || '请回答显式大脑的问题')
@@ -206,6 +263,7 @@ function renderInputPanel() {
       textarea.focus()
     } catch (error) {
       progress.error('请求失败', error.message || String(error))
+      appendCardError(error)
       submit.textContent = '重试'
       submit.disabled = false
       textarea.readOnly = false
@@ -232,6 +290,7 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
 
   const confirmBtn = element('button', '确认并执行', 'button button--primary')
   confirmBtn.type = 'button'
+  confirmBtn.id = 'dashboard-confirm-button'
   const rejectBtn = element('button', '取消', 'button button--quiet')
   rejectBtn.type = 'button'
   const confirmStatus = element('p', undefined, 'muted')
@@ -258,6 +317,7 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
         confirmedAt: new Date().toISOString(),
         payloadRef: `asset://requirements/dashboard-${Date.now()}`,
       })
+      appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted' })
       progress.done('已入队 · 隐式大脑将消费', '任务需求已进入隐式大脑队列')
       // Implicit dispatch is async — wait for the task to appear in the list
       // and jump straight to its dashboard so the user sees live turns instead
@@ -281,7 +341,8 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
       textarea.focus()
       void refreshLists()
     } catch (error) {
-      progress.error('确认失败', `${error.message || error} · owner=${error.ownerId || 'unknown'}`)
+      progress.error('确认失败', error.message || error)
+      appendCardError(error)
       confirmBtn.disabled = false
       rejectBtn.disabled = false
       interaction.inFlight = false

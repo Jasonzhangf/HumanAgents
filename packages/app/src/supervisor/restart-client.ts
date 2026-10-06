@@ -1,5 +1,6 @@
 import type { RuntimePaths } from '../../../config/src/index.js';
 import { AppLifecycleError } from '../errors.js';
+import { deriveSupervisorToken } from '../ui-runtime/access-control.js';
 import { readDaemonLease, type SupervisorControlEndpoint } from './supervisor.js';
 
 const SERVE_OWNER = 'humanagent.app.serve';
@@ -40,7 +41,7 @@ function asRemoteError(body: unknown, fallback: { readonly code: string; readonl
   return new AppLifecycleError(fallback.code, fallback.message, fallback.nextAction, SERVE_OWNER);
 }
 
-export async function requestDaemonRestart(paths: RuntimePaths): Promise<DaemonRestartReceipt> {
+export async function requestDaemonRestart(paths: RuntimePaths, credentialPath = paths.webAccessCredentialPath): Promise<DaemonRestartReceipt> {
   const lease = await readDaemonLease(paths);
   if (lease === undefined) {
     throw new AppLifecycleError(
@@ -86,9 +87,14 @@ export async function requestDaemonRestart(paths: RuntimePaths): Promise<DaemonR
 
   let response: Response;
   try {
+    const token = await deriveSupervisorToken(credentialPath, lease.leaseId, lease.generation);
     response = await fetch(endpointUrl(endpoint), {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
       body: JSON.stringify({ leaseId: lease.leaseId, generation: lease.generation }),
     });
   } catch (error) {

@@ -1,9 +1,12 @@
 {
   "graph": "humanagent-observation-read",
   "labels": {
-    "http_api": "处理浏览器 HTTP 请求",
-    "task_dashboard": "生成任务仪表盘投影",
-    "observation_projection": "生成流水线观测投影",
+    "http_api": "处理浏览器只读请求",
+    "load_task_truth": "读取任务真实状态",
+    "load_event_history": "读取完整事件历史",
+    "correlate_tool_lifecycle": "按调用身份关联工具结果",
+    "project_conversation_and_trace": "投影人类对话与完整轨迹",
+    "project_status_and_actions": "投影状态新鲜度与合法动作",
     "browser_view": "渲染浏览器只读视图"
   }
 }

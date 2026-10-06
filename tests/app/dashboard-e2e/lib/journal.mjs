@@ -283,7 +283,7 @@ export async function readToolOutputReports(binding, dashboard, events) {
     const path = `/api/tasks/${encodeURIComponent(binding.taskId)}/operations/${encodeURIComponent(operationId)}`
       + `/executions/${executionEpoch}/events/${event.seq}/tool-output`;
     try {
-      const response = await fetch(`${binding.serveBaseUrl}${path}`);
+      const response = await (binding.auth?.fetch ?? fetch)(`${binding.serveBaseUrl}${path}`);
       const body = await response.json().catch(() => null);
       reports.push({
         seq: event.seq,

@@ -13,19 +13,76 @@ import {
   taskIdFromQuery,
 } from './runtime-shell.js'
 import { advanceExplicitInteraction } from './explicit-interaction-flow.js'
+import { mountInteractionWorkCard } from './interaction-work-card.js'
+import {
+  projectInteractionCardFromEntries,
+  projectInteractionCardFromSnapshot,
+} from './interaction-card-page.js'
 
 const requestedTask = taskIdFromQuery(false)
 const requestedInteraction = queryParam('interaction')
 const isNew = (requestedTask === 'new' || !requestedTask) && !requestedInteraction
-const { main, status } = makePageShell(
+const { main, status, interactionCardHosts } = makePageShell(
   'Task List',
   'Task',
   isNew ? '新建任务' : requestedInteraction ? '确认任务' : '任务详情',
   isNew ? '用一句话告诉显式大脑你要完成什么。' : requestedInteraction ? '显式大脑会先整理，再由你确认是否提交后台。' : '查看任务状态和处理结果。',
 )
+const interactionCardHost = interactionCardHosts[0]
+const interactionCard = interactionCardHost
+  ? mountInteractionWorkCard(interactionCardHost, {
+      onAction: async (action) => {
+        if (action.id === 'confirm-requirement') {
+          const confirmationButton = document.querySelector('#task-confirm-button')
+          if (confirmationButton) void confirmationButton.click()
+        }
+      },
+    })
+  : null
+interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 
 let taskId = requestedTask
 let detail
+let activeInteractionId
+const cardState = { sequence: 0, entries: [] }
+
+function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
+  cardState.sequence += 1
+  const interactionId = detail.interactionId || activeInteractionId || 'pending-input'
+  cardState.entries = [
+    ...cardState.entries,
+    {
+      sequence: cardState.sequence,
+      interactionId,
+      kind,
+      sourceKind,
+      eventKey: detail.eventKey || kind,
+      text,
+      ...detail,
+    },
+  ]
+  interactionCard?.update(projectInteractionCardFromEntries(cardState.entries, activeInteractionId ? 'received' : 'awaiting-confirmation'))
+}
+
+function appendCardError(error) {
+  appendCardEvent('failure', error.message || String(error), 'error', {
+    eventKey: 'request-failed',
+    error: { code: error.code, message: error.message || String(error), ownerId: error.ownerId || 'humanagent.app' },
+    evidenceRefs: error.evidenceRefs || [],
+  })
+}
+
+function updateCardFromSnapshot(snapshot) {
+  cardState.sequence = 0
+  cardState.entries = []
+  interactionCard?.update(projectInteractionCardFromSnapshot(snapshot))
+}
+
+// `renderCreate` / `renderInteraction` / `renderTask` rebuild `main`, so the
+// card host must be re-attached after every rebuild instead of being dropped.
+function attachInteractionCardHost() {
+  if (interactionCardHost) main.append(interactionCardHost)
+}
 
 function readable(value, placeholder = '暂无信息') {
   if (value === undefined || value === null || value === '') return placeholder
@@ -80,6 +137,7 @@ function renderCreate() {
     button.textContent = '正在处理…'
     try {
       feedback.textContent = '正在交给显式大脑整理…'
+      appendCardEvent('status', '正在交给显式大脑整理', 'progress')
       if (!interactionId) {
         const received = await api.receiveExplicitInput({
           sourceRef: 'ui:new-task',
@@ -87,11 +145,15 @@ function renderCreate() {
           inputRevision: 1,
         })
         interactionId = received.interactionId
+        activeInteractionId = interactionId
+        appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.raw-input', interactionId })
       }
       const snapshot = await advanceExplicitInteraction(api, {
         interactionId,
         clarificationAnswer: rawInput,
       })
+      appendCardEvent('status', `状态：${snapshot.state}`, 'progress', { eventKey: 'explicit.advance', interactionId })
+      updateCardFromSnapshot(snapshot)
       if (snapshot.state === 'status-only') {
         feedback.textContent = snapshot.reply || snapshot.nextAction
         interactionId = undefined
@@ -124,6 +186,7 @@ function renderCreate() {
         ? '本次处理未完成。输入已保留并锁定，点击“重试本次提交”继续同一次请求。'
         : '未能确认输入已接收。内容已保留，请重试提交。'
       diagnosticText.textContent = [error.message, error.code, error.ownerId, error.nextAction, interactionId].filter(Boolean).join('\n')
+      appendCardError(error)
       diagnostics.hidden = false
       directive.readOnly = Boolean(interactionId)
       button.textContent = '重试本次提交'
@@ -136,6 +199,7 @@ function renderCreate() {
   })
   panel.append(form)
   main.append(panel)
+  attachInteractionCardHost()
 }
 
 async function renderInteraction(interactionId, currentTaskId) {
@@ -153,6 +217,7 @@ async function renderInteraction(interactionId, currentTaskId) {
   const actions = element('div', undefined, 'actions')
   panel.append(feedback, diagnostics, body, actions)
   main.append(panel)
+  attachInteractionCardHost()
 
   const showError = (error) => {
     feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
@@ -166,6 +231,8 @@ async function renderInteraction(interactionId, currentTaskId) {
 
   try {
     const snapshot = await advanceExplicitInteraction(api, { interactionId })
+    activeInteractionId = interactionId
+    updateCardFromSnapshot(snapshot)
     body.append(
       element('p', '你的输入', 'eyebrow'),
       element('p', snapshot.rawInput),
@@ -212,14 +279,17 @@ async function renderInteraction(interactionId, currentTaskId) {
           const taskList = element('a', '打开任务列表', 'button button--primary')
           taskList.href = './tasks.html'
           actions.replaceChildren(taskList)
+          appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted', interactionId })
         } catch (error) {
           if (button) button.disabled = false
           showError(error)
+          appendCardError(error)
         }
       }
       feedback.textContent = '已整理完成。只有改变已有任务目标时才需要再次确认。'
       const confirm = element('button', '按此方案继续', 'button button--primary')
       confirm.type = 'button'
+      confirm.id = 'task-confirm-button'
       confirm.addEventListener('click', () => void submit(confirm))
       actions.append(confirm)
     } else {
@@ -227,6 +297,7 @@ async function renderInteraction(interactionId, currentTaskId) {
     }
   } catch (error) {
     showError(error)
+    appendCardError(error)
   }
 }
 
@@ -266,6 +337,7 @@ function renderTask() {
   observationLink.href = observationHref(taskId)
   actions.append(dashboardLink, observationLink)
   main.append(actions)
+  attachInteractionCardHost()
 }
 
 async function load() {
@@ -287,6 +359,7 @@ async function load() {
       rawInput: detail.priorInput || detail.title,
       inputRevision: 1,
     })
+    activeInteractionId = received.interactionId
     window.history.replaceState(null, '', `./task.html?task=${encodeURIComponent(taskId)}&interaction=${encodeURIComponent(received.interactionId)}#task-interaction`)
     await renderInteraction(received.interactionId, taskId)
     return
