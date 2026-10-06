@@ -1030,12 +1030,18 @@ test('UI index is the task input entry with explicit draft, confirmation gate, a
   assert.equal(entry.includes('api.interpretExplicitInput'), true);
   assert.equal(entry.includes('api.confirmExplicitRequirement'), true);
   assert.equal(entry.includes('api.listTasks'), true);
+  assert.equal(entry.includes('observationHref(taskIdValue)'), true);
+  assert.equal(entry.includes('executionPolicy: buildExecutionPolicy'), true);
+  assert.equal(entry.includes('id = \'entry-confirm-button\''), false);
+  assert.equal(entry.includes('确认并进入队列'), false);
   assert.equal(entry.includes('implicitScheduling'), true);
   assert.equal(entry.includes('taskDashboardHref'), true);
   assert.equal(html.includes('data-mode="running"'), false);
   assert.equal(html.includes('本地状态已同步'), false);
   assert.equal(html.includes('正在运行'), false);
   assert.equal(html.includes('checkpoint committed'), false);
+  assert.equal(html.includes('id="entry-confirm-button"'), false);
+  assert.equal(html.includes('data-region="confirmation"'), false);
 });
 
 test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {
@@ -1067,10 +1073,14 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
   assert.equal(interaction.includes('channel: \'control\''), false);
   assert.equal(interaction.includes('dataset.runtimeState'), false);
   assert.equal(interaction.includes('data-task-status'), false);
+  assert.equal(interaction.includes("field(matchingForm, 'normalizedInput').value"), false);
+  assert.equal(interaction.includes("field(inputForm, 'rawInput').value"), false);
   assert.equal(html.includes('type="module" src="./interaction.js"'), true);
   assert.equal(html.includes('data-explicit-input'), true);
   assert.equal(html.includes('data-explicit-confirmation'), true);
   assert.equal(html.includes('data-action="dispatch"'), true);
+  assert.equal(html.includes('name="normalizedInput"'), false);
+  assert.equal(html.includes('data-draft-feedback'), true);
 });
 
 test('explicit interaction UI executes route order and confirmation gate', async () => {
@@ -1132,6 +1142,7 @@ test('explicit interaction UI executes route order and confirmation gate', async
   const visibleState = new FakeElement();
   const interactionIdLabel = new FakeElement();
   const inspection = new FakeElement();
+  const draftFeedback = new FakeElement();
   const inputForm = new FakeForm();
   inputForm.addField('sourceRef', 'ui:test');
   inputForm.addField('rawInput', 'create an evidence task');
@@ -1172,6 +1183,7 @@ test('explicit interaction UI executes route order and confirmation gate', async
     ['[data-visible-state]', visibleState],
     ['[data-interaction-id]', interactionIdLabel],
     ['[data-inspection]', inspection],
+    ['[data-draft-feedback]', draftFeedback],
     ['[data-explicit-input]', inputForm],
     ['[data-explicit-match]', matchingForm],
     ['[data-explicit-proposal]', proposalForm],
