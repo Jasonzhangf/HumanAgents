@@ -10,6 +10,8 @@
     "**/*.ts",
     "../../packages/app/src/**/*.ts",
     "../../packages/config/src/**/*.ts",
+    "../../packages/core/src/**/*.ts",
+    "../../packages/runtime/src/subscriptions/**/*.ts",
     "../../packages/contracts/src/**/*.ts"
   ]
 }

@@ -18,3 +18,19 @@ declare module 'node:test' {
   const test: (name: string, fn: () => void | Promise<void>) => void;
   export default test;
 }
+
+declare module 'node:fs' {
+  export function appendFileSync(path: string, data: string, encoding: 'utf8'): void;
+  export function readFileSync(path: string, encoding: 'utf8'): string;
+  export function mkdtempSync(prefix: string): string;
+  export function rmSync(path: string, options: { recursive: true; force: true }): void;
+  export function existsSync(path: string): boolean;
+}
+
+declare module 'node:os' {
+  export function tmpdir(): string;
+}
+
+declare module 'node:path' {
+  export function join(...paths: string[]): string;
+}

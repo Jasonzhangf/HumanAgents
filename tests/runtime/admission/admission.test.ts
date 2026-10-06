@@ -51,7 +51,7 @@ function requirementAdmission(overrides: Partial<RequirementAdmissionInput> = {}
   return {
     envelope: envelope(),
     queue: { kind: 'execution', concurrencyLimit: 2, maxBacklog: 5 },
-    registeredQueues: ['interactive', 'execution', 'research', 'maintenance'],
+    registeredQueues: ['interactive', 'execution'],
     queueLoad: { running: 0, queued: 0 },
     requiredCapabilities: ['provider.execution'],
     availableCapabilities: ['provider.execution'],
@@ -77,17 +77,17 @@ function captureAdmissionError(run: () => unknown): RequirementAdmissionError {
 test('classifies confirmed envelopes into explicitly registered queues only', () => {
   const decision = classifyRequirement({
     envelope: envelope(),
-    queue: 'research',
-    registeredQueues: ['interactive', 'execution', 'research', 'maintenance'],
+    queue: 'execution',
+    registeredQueues: ['interactive', 'execution'],
   });
-  assert.equal(decision.queue, 'research');
+  assert.equal(decision.queue, 'execution');
 
   assert.throws(
-    () => classifyRequirement({ envelope: envelope(), queue: 'execution', registeredQueues: ['research'] }),
+    () => classifyRequirement({ envelope: envelope(), queue: 'execution', registeredQueues: ['interactive'] }),
     AdmissionError,
   );
   assert.throws(
-    () => classifyRequirement({ envelope: envelope(), queue: 'control' as never, registeredQueues: ['interactive', 'execution', 'research', 'maintenance'] }),
+    () => classifyRequirement({ envelope: envelope(), queue: 'research' as never, registeredQueues: ['interactive', 'execution'] }),
     AdmissionError,
   );
 });
@@ -200,8 +200,8 @@ test('confirmed requirements yield no admission receipt until classification and
 
   assert.throws(
     () => admitRequirement(requirementAdmission({
-      queue: { kind: 'execution', concurrencyLimit: 2, maxBacklog: 5 },
-      registeredQueues: ['research'],
+      queue: { kind: 'research' as never, concurrencyLimit: 2, maxBacklog: 5 },
+      registeredQueues: ['execution'],
     })),
     AdmissionError,
   );

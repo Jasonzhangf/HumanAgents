@@ -1,15 +1,37 @@
 declare module 'node:crypto' {
   interface Hash {
     update(data: string | Uint8Array, encoding?: string): Hash;
-    digest(encoding?: string): string | Uint8Array;
+    digest(encoding: 'hex'): string;
+    digest(encoding: 'base64url'): string;
+    digest(encoding: string): string;
+    digest(): Buffer;
   }
+  export function createHmac(algorithm: string, key: string | Uint8Array): Hash;
+  export function randomBytes(size: number): Buffer;
   export function createHash(algorithm: string): Hash;
   export function randomUUID(): string;
+  export function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean;
 }
 
 declare module 'node:fs' {
   export function existsSync(path: string): boolean;
-  export const constants: { readonly O_RDONLY: number; readonly O_NOFOLLOW: number; readonly O_DIRECTORY: number };
+  export const constants: {
+    readonly O_RDONLY: number;
+    readonly O_RDWR: number;
+    readonly O_CREAT: number;
+    readonly O_NONBLOCK: number;
+    readonly O_NOFOLLOW: number;
+    readonly O_DIRECTORY: number;
+  };
+  export interface FSWatcher {
+    close(): void;
+    on(event: 'error', listener: (error: Error) => void): void;
+    unref?(): void;
+  }
+  export function watch(
+    path: string,
+    listener: (eventType: string, filename: string | null | undefined) => void,
+  ): FSWatcher;
 }
 
 declare module 'node:path' {
@@ -26,6 +48,7 @@ declare module 'node:path' {
 
 declare module 'node:os' {
   export function homedir(): string;
+  export function networkInterfaces(): Record<string, readonly { readonly address: string; readonly family: string; readonly internal: boolean }[] | undefined>;
 }
 
 declare module 'node:url' {
@@ -86,15 +109,17 @@ declare module 'node:fs/promises' {
     isDirectory(): boolean;
     isFile(): boolean;
   }
-  export interface Stats { readonly dev: number; readonly ino: number; }
+  export interface Stats { readonly dev: number; readonly ino: number; readonly mode: number; isDirectory(): boolean; isFile(): boolean; }
   export function appendFile(path: string, data: string, encoding?: string): Promise<void>;
-  export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
-  export function open(path: string | URL, flags: string | number): Promise<FileHandle>;
+  export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
+  export function link(oldPath: string, newPath: string): Promise<void>;
+  export function open(path: string | URL, flags: string | number, mode?: number): Promise<FileHandle>;
   export function readFile(path: string | URL | FileHandle, encoding: 'utf8'): Promise<string>;
   export function readFile(path: string): Promise<Uint8Array>;
   export function readdir(path: string, options: { withFileTypes: true }): Promise<Dirent[]>;
-  export function lstat(path: string): Promise<{ isFile(): boolean; isSymbolicLink(): boolean }>;
+  export function lstat(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean; mode: number }>;
   export function stat(path: string): Promise<Stats>;
+  export function chmod(path: string, mode: number): Promise<void>;
   export function rename(oldPath: string, newPath: string): Promise<void>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   export function truncate(path: string, length: number): Promise<void>;
@@ -120,5 +145,7 @@ declare const process: {
   readonly env: { [key: string]: string | undefined };
   readonly execPath: string;
   readonly pid: number;
+  readonly platform: string;
+  readonly kill: (pid: number, signal?: string | number) => boolean;
   exitCode?: number;
 };

@@ -77,7 +77,9 @@ pnpm run smoke
 humanagent --workspace /absolute/project
 ```
 
-命令输出的 loopback URL 就是 WebUI 入口；`/` 是状态入口，
+命令输出的 URL 就是 WebUI 入口；默认只监听 `127.0.0.1`，正式局域网或 Tailscale
+监听需要显式传 `--host 0.0.0.0`（IPv4）或 `--host ::`（IPv6）。
+`/` 是状态入口，
 `/interaction.html` 是显式对话入口。页面提交首条业务输入后会创建显式 Agent
 session，写入 `~/.humanagent/main/sessions/explicit-brain.jsonl`。对项目执行的
 session 仍写入 `~/.humanagent/sessions/<project-key>/<session-id>.jsonl`；启动目录
@@ -98,9 +100,11 @@ route selector；RCC 最终选择的 model 与请求 model 不同不构成 bindi
 mismatch。
 默认端口是 `10086`；可用 `--port` 覆盖。`hm` 是 `humanagent` 的同一全局入口。
 内部测试可使用 `serve --provider fake --port 0`，但不应写入普通用户启动脚本。
-`serve --host` 只接受 loopback（`127.0.0.1` 或 `::1`）：控制 API 目前没有鉴权，
-绑定非 loopback 地址会让任意可达客户端创建任务、发起执行和执行 stop，因此
-server 会拒绝启动而不是静默暴露控制面。
+`serve --host` 只接受 `0.0.0.0`、`::`、`127.0.0.1` 或 `::1`；接口地址和域名
+不可作为监听参数。监听放开后，Web 访问仍要求本地 `humanagent pair` 建立浏览器
+session，未配对客户端不能调用任务、执行、stop、runtime identity 或 SSE 接口。
+Supervisor 控制端点始终只接受 loopback socket 加派生 token，不跟随 wildcard 监听。
+局域网明文 HTTP 的风险仍存在；本实现不提供 TLS 或公网部署。
 `pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。
 
 标准 release 使用 `pnpm build:release`：它要求 clean worktree，自动递增 patch

@@ -3,7 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import type { RuntimePaths } from '../../../config/src/index.js';
+import {
+  validateOccurrenceExecutionOwner,
+  validateOccurrenceTaskBinding,
+  type OccurrenceExecutionOwner,
+  type OccurrenceTaskBinding,
+} from '../../../contracts/src/index.js';
 import { AppLifecycleError } from '../errors.js';
+import { deriveSupervisorToken } from '../ui-runtime/access-control.js';
 
 const LEASE_SCHEMA_VERSION = 1 as const;
 const PROCESS_START_TOKEN = `node:${randomUUID()}`;
@@ -65,6 +72,10 @@ export interface SupervisorDisposeReceipt {
   readonly cleanupFailure?: SupervisorCleanupFailure;
 }
 
+export type SupervisorCommittedReplacementPredicate = (
+  previous: OccurrenceExecutionOwner,
+) => Promise<boolean>;
+
 export interface SupervisorLease {
   readonly paths: RuntimePaths;
   readonly record: SupervisorLeaseRecord;
@@ -72,6 +83,13 @@ export interface SupervisorLease {
   assertActive(): Promise<void>;
   markReady(): Promise<SupervisorLeaseRecord>;
   setControlEndpoint(endpoint: SupervisorControlEndpoint): Promise<SupervisorLeaseRecord>;
+  withCurrentDaemonOwner<T>(
+    binding: OccurrenceTaskBinding,
+    operation: (
+      authenticatedCaller: OccurrenceExecutionOwner,
+      isCommittedReplacement: SupervisorCommittedReplacementPredicate,
+    ) => Promise<T>,
+  ): Promise<T>;
   release(input?: { readonly failure?: SupervisorFailureRecord }): Promise<SupervisorLeaseRecord>;
 }
 
@@ -83,7 +101,6 @@ export interface SupervisorTakeoverOptions {
 
 export interface SupervisorTakeoverStopOptions {
   readonly gracefulTimeoutMs?: number;
-  readonly forceTimeoutMs?: number;
   readonly pollIntervalMs?: number;
 }
 
@@ -329,7 +346,6 @@ function processIsAlive(pid: number): boolean {
 }
 
 const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 2_000;
-const DEFAULT_FORCE_STOP_TIMEOUT_MS = 1_000;
 const DEFAULT_STOP_POLL_INTERVAL_MS = 25;
 
 function assertStopTimeout(value: number | undefined, label: string, fallback: number): number {
@@ -340,7 +356,7 @@ function assertStopTimeout(value: number | undefined, label: string, fallback: n
   return resolved;
 }
 
-function signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
+function signalProcess(pid: number, signal: 'SIGTERM'): void {
   if (pid < 1 || pid === process.pid) {
     throw supervisorError(
       'daemon-takeover.self-protection',
@@ -366,17 +382,17 @@ interface TakeoverTerminationReceipt {
 }
 
 async function stopActiveDaemon(
+  paths: RuntimePaths,
   existing: SupervisorLeaseRecord,
   options: SupervisorTakeoverStopOptions,
   onGracefulSignal?: () => Promise<void>,
 ): Promise<TakeoverTerminationReceipt> {
   const pid = existing.pid;
   const gracefulTimeoutMs = assertStopTimeout(options.gracefulTimeoutMs, 'gracefulTimeoutMs', DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
-  const forceTimeoutMs = assertStopTimeout(options.forceTimeoutMs, 'forceTimeoutMs', DEFAULT_FORCE_STOP_TIMEOUT_MS);
   const pollIntervalMs = assertStopTimeout(options.pollIntervalMs, 'pollIntervalMs', DEFAULT_STOP_POLL_INTERVAL_MS);
   let gracefulStopError: string | undefined;
 
-  await assertTakeoverProcessIdentity(existing);
+  await assertTakeoverProcessIdentity(paths, existing);
   try {
     signalProcess(pid, 'SIGTERM');
   } catch (error) {
@@ -398,30 +414,10 @@ async function stopActiveDaemon(
       ...(gracefulStopError === undefined ? {} : { gracefulStopError }),
     };
   }
-
-  await assertTakeoverProcessIdentity(existing);
-  try {
-    signalProcess(pid, 'SIGKILL');
-  } catch (error) {
-    if ((error as { code?: string }).code !== 'ESRCH') {
-      const forceError = error instanceof Error ? error.message : String(error);
-      throw supervisorError(
-        'daemon-takeover.failed',
-        `graceful daemon stop timed out${gracefulStopError ? ` (${gracefulStopError})` : ''}; force stop failed: ${forceError}`,
-        'inspect the exact daemon PID and terminate it before retrying HumanAgent startup',
-      );
-    }
-  }
-  if (await waitForProcessExit(pid, forceTimeoutMs, pollIntervalMs)) {
-    return {
-      termination: 'forced',
-      ...(gracefulStopError === undefined ? {} : { gracefulStopError }),
-    };
-  }
   throw supervisorError(
     'daemon-takeover.failed',
-    `daemon PID ${pid} did not exit after graceful stop and SIGKILL`,
-    'inspect the exact daemon PID and terminate it before retrying HumanAgent startup',
+    `daemon PID ${pid} did not exit after SIGTERM`,
+    'inspect the exact daemon PID and retry after it exits; forced termination is not available in this runtime',
   );
 }
 
@@ -452,7 +448,7 @@ function controlEndpointUrl(endpoint: SupervisorControlEndpoint): string {
   return `http://${host}:${endpoint.port}/api/runtime/identity`;
 }
 
-async function assertTakeoverProcessIdentity(existing: SupervisorLeaseRecord): Promise<void> {
+async function assertTakeoverProcessIdentity(paths: RuntimePaths, existing: SupervisorLeaseRecord): Promise<void> {
   if (!processIsAlive(existing.pid)) return;
   if (existing.controlEndpoint === undefined) {
     throw supervisorError(
@@ -464,9 +460,10 @@ async function assertTakeoverProcessIdentity(existing: SupervisorLeaseRecord): P
   }
   let response: Response;
   try {
+    const token = await deriveSupervisorToken(paths.webAccessCredentialPath, existing.leaseId, existing.generation);
     response = await fetch(controlEndpointUrl(existing.controlEndpoint), {
       method: 'GET',
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(500),
     });
   } catch (error) {
@@ -505,7 +502,13 @@ async function assertTakeoverProcessIdentity(existing: SupervisorLeaseRecord): P
   }
 }
 
-async function assertLeaseActive(paths: RuntimePaths, expected: SupervisorLeaseRecord): Promise<SupervisorLeaseRecord> {
+interface SupervisorLeaseIdentity {
+  readonly leaseId: string;
+  readonly generation: number;
+  readonly processStartToken: string;
+}
+
+async function assertLeaseIdentity(paths: RuntimePaths, expected: SupervisorLeaseIdentity): Promise<SupervisorLeaseRecord> {
   const latest = await readLeaseRecord(paths);
   if (!latest || latest.leaseId !== expected.leaseId || latest.generation !== expected.generation || latest.processStartToken !== expected.processStartToken) {
     throw supervisorError(
@@ -526,13 +529,34 @@ async function assertLeaseActive(paths: RuntimePaths, expected: SupervisorLeaseR
   return latest;
 }
 
+function executionOwnerFromLease(record: SupervisorLeaseRecord): OccurrenceExecutionOwner {
+  return {
+    daemonLeaseId: record.leaseId,
+    daemonGeneration: record.generation,
+    processStartToken: record.processStartToken,
+  };
+}
+
+function isCommittedLeaseReplacement(current: SupervisorLeaseRecord, previous: SupervisorLeaseIdentity): boolean {
+  return current.leaseId !== previous.leaseId
+    && current.generation > previous.generation
+    && current.processStartToken !== previous.processStartToken
+    && current.disposedAt === undefined
+    && processIsAlive(current.pid);
+}
+
 function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): SupervisorLease {
   let record = initial;
   let released = false;
+  const leaseIdentity: SupervisorLeaseIdentity = Object.freeze({
+    leaseId: initial.leaseId,
+    generation: initial.generation,
+    processStartToken: initial.processStartToken,
+  });
 
   async function update(mutate: (current: SupervisorLeaseRecord) => SupervisorLeaseRecord): Promise<SupervisorLeaseRecord> {
     return withLeaseGuard(daemonLeasePath(paths), async () => {
-      const latest = await assertLeaseActive(paths, record);
+      const latest = await assertLeaseIdentity(paths, leaseIdentity);
       const next = mutate(latest);
       validateLeaseRecord(next);
       await writeLeaseRecord(paths, next);
@@ -547,11 +571,11 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
       return record;
     },
     async refresh() {
-      record = await assertLeaseActive(paths, record);
+      record = await assertLeaseIdentity(paths, leaseIdentity);
       return record;
     },
     async assertActive() {
-      record = await assertLeaseActive(paths, record);
+      record = await assertLeaseIdentity(paths, leaseIdentity);
     },
     async markReady() {
       return update((current) => ({ ...current, readyAt: new Date().toISOString() }));
@@ -561,6 +585,46 @@ function createLease(paths: RuntimePaths, initial: SupervisorLeaseRecord): Super
         throw supervisorError('daemon-control.endpoint-invalid', 'daemon control endpoint port is invalid', 'bind the owner control endpoint to a valid loopback port');
       }
       return update((current) => ({ ...current, controlEndpoint: endpoint }));
+    },
+    async withCurrentDaemonOwner(binding, operation) {
+      return withLeaseGuard(daemonLeasePath(paths), async () => {
+        if (released) {
+          throw supervisorError(
+            'daemon-lease-disposed',
+            'daemon lease has been disposed',
+            'acquire a new daemon lease before continuing',
+          );
+        }
+        const latest = await assertLeaseIdentity(paths, leaseIdentity);
+        if (latest.pid !== process.pid) {
+          throw supervisorError(
+            'daemon-lease-authority-not-local',
+            'daemon lease authority does not belong to the current process',
+            'use the SupervisorLease acquired by this process',
+          );
+        }
+        try {
+          validateOccurrenceTaskBinding(binding);
+        } catch (error) {
+          throw new AppLifecycleError(
+            'daemon-lease-owner-binding-invalid',
+            error instanceof Error ? error.message : String(error),
+            'repair the immutable occurrence binding before retrying the guarded mutation',
+            'supervisor',
+            error,
+          );
+        }
+        const authenticatedCaller = executionOwnerFromLease(latest);
+        const isCommittedReplacement: SupervisorCommittedReplacementPredicate = async (previous) => {
+          validateOccurrenceExecutionOwner(previous);
+          return isCommittedLeaseReplacement(latest, {
+            leaseId: previous.daemonLeaseId,
+            generation: previous.daemonGeneration,
+            processStartToken: previous.processStartToken,
+          });
+        };
+        return operation(authenticatedCaller, isCommittedReplacement);
+      });
     },
     async release(input) {
       if (released) return record;
@@ -604,7 +668,7 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
       try {
         termination = options.takeover.stop === undefined
           ? undefined
-          : await stopActiveDaemon(existing, options.takeover.stop, writeReplacement);
+          : await stopActiveDaemon(paths, existing, options.takeover.stop, writeReplacement);
       } catch (error) {
         if (replacement !== undefined) {
           const failure = {
@@ -653,12 +717,11 @@ export async function readDaemonLease(paths: RuntimePaths): Promise<SupervisorLe
  */
 export async function isDaemonLeaseHandoffCommitted(paths: RuntimePaths, previous: SupervisorLeaseRecord): Promise<boolean> {
   const current = await readLeaseRecord(paths);
-  return current !== undefined
-    && current.leaseId !== previous.leaseId
-    && current.generation > previous.generation
-    && current.processStartToken !== previous.processStartToken
-    && current.disposedAt === undefined
-    && processIsAlive(current.pid);
+  return current !== undefined && isCommittedLeaseReplacement(current, {
+    leaseId: previous.leaseId,
+    generation: previous.generation,
+    processStartToken: previous.processStartToken,
+  });
 }
 
 export async function waitForDaemonLeaseHandoff(

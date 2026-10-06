@@ -65,6 +65,7 @@ export function makeTopbar(active) {
 }
 
 export function makePageShell(active, eyebrow, title, lede) {
+  const interactionCardHosts = [...document.querySelectorAll('[data-interaction-work-card-host]')]
   document.body.replaceChildren()
   const header = makeTopbar(active)
   const main = element('main', undefined, 'page')
@@ -79,7 +80,7 @@ export function makePageShell(active, eyebrow, title, lede) {
   heading.append(copy, status)
   main.append(heading)
   document.body.append(header, main)
-  return { main, status }
+  return { main, status, interactionCardHosts }
 }
 
 export function showError(target, error) {

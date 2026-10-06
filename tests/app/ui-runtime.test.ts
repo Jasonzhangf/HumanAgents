@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -75,7 +75,8 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
-import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
+import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createProviderExplicitBrainInterpreter,
@@ -83,6 +84,29 @@ import {
 } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
+const rawFetch = globalThis.fetch.bind(globalThis);
+const testSessionByOrigin = new Map<string, string>();
+
+async function testAccessControl(root: string) {
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
+}
+
+globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const origin = new URL(url).origin;
+  const cookie = testSessionByOrigin.get(origin);
+  const headers = new Headers(init.headers ?? {});
+  if (cookie) headers.set('cookie', cookie);
+  const method = (init.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') headers.set('origin', origin);
+  return rawFetch(input, { ...init, headers });
+}) as typeof fetch;
 const builtinTemplateRoot = join(process.cwd(), 'packages', 'agent-templates', 'templates');
 const binding: ProviderBinding = {
   bindingId: 'binding-ui-test',
@@ -100,13 +124,18 @@ const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
   },
 };
 
-function startUiRuntime(
+async function startUiRuntime(
   options: Parameters<typeof startUiRuntimeOwner>[0],
 ): ReturnType<typeof startUiRuntimeOwner> {
-  return startUiRuntimeOwner({
+  const securityRoot = options.checkpointRoot;
+  const auth = options.accessControl ? undefined : await testAccessControl(securityRoot);
+  const runtime = await startUiRuntimeOwner({
     ...options,
+    ...(auth === undefined ? {} : { accessControl: auth.accessControl }),
     explicitBrainInterpreter: options.explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
+  if (auth) testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
+  return runtime;
 }
 
 function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
@@ -544,10 +573,57 @@ class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimeP
   }
 }
 
+// The fake replay port intentionally omits summaries for model events. This
+// wrapper restores the real provider's framework summary so the implicit
+// executor projection can be tested against the same event shape.
+class SemanticModelSummaryReplayPort extends FakeReplayExecutionRuntimePort {
+  override async *observe(
+    input: Parameters<ExecutionRuntimePort['observe']>[0],
+  ): AsyncIterable<ProviderEvent> {
+    for await (const event of super.observe(input)) {
+      yield event.kind === 'model'
+        ? { ...event, summary: 'provider requested model work' }
+        : event;
+    }
+  }
+}
+
 function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId: string) {
   const row = list.draft.find((task) => task.taskId.value === `ui-task-implicit-${draftId}`);
   if (!row) throw new Error(`missing queued draft row for ${draftId}`);
   return row;
+}
+
+// Confirms one explicit requirement through the real service owner so FIFO
+// lifecycle tests share one deterministic producer instead of duplicating the
+// interaction state machine.
+async function confirmExplicitRequirementFor(service: UiRuntimeService, suffix: string): Promise<string> {
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: `ui:${suffix}`,
+    rawInput: `confirmed requirement ${suffix}`,
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: `confirmed requirement ${suffix}`,
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: `create ${suffix} work`,
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: `confirmation:${suffix}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: `asset://requirements/${suffix}`,
+  });
+  return interactionId;
 }
 
 class FailingInteractionClosurePort implements CheckpointClosurePort {
@@ -1407,12 +1483,20 @@ test('organ health probe and snapshot expose bounded dimensions, evidence, and i
     assert.match(snapshotError.error.nextAction, /health probe/u);
     assert.equal(probeCount, 0);
 
-    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`);
+    const legacyProbe = await fetch(`${runtime.server.url}/api/health/probe`);
+    assert.equal(legacyProbe.status, 405);
+    assert.equal(legacyProbe.headers.get('allow'), 'POST');
+    assert.equal(probeCount, 0);
+
+    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(probeResponse.status, 200);
     assert.equal(probeCount, 1);
 
-    for (const path of ['/api/health/probe', '/api/health/snapshot']) {
-      const response = await fetch(`${runtime.server.url}${path}`);
+    const requests = [
+      fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' }),
+      fetch(`${runtime.server.url}/api/health/snapshot`),
+    ];
+    for (const response of await Promise.all(requests)) {
       assert.equal(response.status, 200);
       const body = await response.json() as {
         readonly surface: string;
@@ -1491,7 +1575,7 @@ test('expired organ health evidence is reported as stale unknown without changin
     memory: testMemory('project-ui-organ-health-stale'),
   });
   try {
-    const response = await fetch(`${runtime.server.url}/api/health/probe`);
+    const response = await fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(response.status, 200);
     const body = await response.json() as {
       readonly lifecycleState: string;
@@ -1603,13 +1687,21 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
     closurePort: runtimeJournal,
     memory: testMemory('project-ui-organ-health-error'),
   });
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
   const server = await startUiRuntimeServer({
     service,
+    accessControl,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
+  testSessionByOrigin.set(new URL(server.url).origin, accessControl.sessionCookie(session).split(';')[0]!);
   try {
-    const response = await fetch(`${server.url}/api/health/probe`);
+    const response = await fetch(`${server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(response.status, 409);
     const body = await response.json() as {
       readonly error: {
@@ -1844,8 +1936,8 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   // The drawer panes read the detail projection's own typed fields, so the live service path must
   // carry the real tool steps and owning agent role, not just those of the flow node.
   assert.equal(selected.toolSteps.length, 1);
-  assert.equal(selected.toolSteps[0]?.returned, 'tool: fake://tool/1');
-  assert.equal(selected.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.match(selected.toolSteps[0]?.returned ?? '', /status=unknown · call=tool: fake:\/\/tool\/1/);
+  assert.equal(selected.toolSteps[0]?.name, '未标注工具');
   assert.equal(selected.ownerAgentRole, 'execution');
   assert.equal(selected.roleDisplay, '执行');
   assert.equal(selected.owner.length > 0, true);
@@ -1900,6 +1992,93 @@ test('provider tool-result output stays out of task output while remaining visib
   assert.equal(events.some((event) => event.kind === 'provider.output' && event.summary === 'REAL_FILE_CONTENT'), true);
 });
 
+test('observation pairs provider tool calls with results by callId and uses toolId as the display name', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-tool-callid-pair-'));
+  const port = new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      {
+        kind: 'tool',
+        state: 'tool',
+        summary: 'file.search call',
+        outputRefs: ['fake://tool-call/1'],
+        toolCall: { callId: 'call-1', toolId: 'file.search', arguments: { path: '.', query: 'marker', queryKind: 'literal' }, continuationRef: 'responses-tool-call' },
+      },
+      { kind: 'terminal', state: 'tool-waiting', summary: 'provider awaits the tool result', terminalState: 'waiting', nextAction: { kind: 'continue', ref: 'responses-tool-call' } },
+      { kind: 'output', state: 'output', summary: 'final answer', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  });
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-tool-result'),
+    providerTools: [RESPONSES_FILE_SEARCH_TOOL],
+    providerToolExecutor: {
+      async execute() {
+        return {
+          output: JSON.stringify([]),
+          outputRefs: ['fake://tool-result/1'],
+          evidenceRefs: [evidence('result', { organId })],
+          outputRef: 'fake://tool-result/1',
+          outputDigest: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+        };
+      },
+    },
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+  });
+  const task = service.createTask({ title: 'tool call pairing', directive: 'pair call and result' });
+  service.startExecution(task.taskId, { prompt: 'pair the tool round' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const executeNode = service.observation(task.taskId).nodes.find((node) => node.nodeId === 'pipeline.execute');
+  if (!executeNode) throw new Error('expected pipeline.execute node');
+  assert.equal(executeNode.toolSteps.length, 1);
+  assert.equal(executeNode.toolSteps[0]?.name, 'file.search');
+  assert.equal(executeNode.toolSteps[0]?.status, 'succeeded');
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /outputRef=fake:\/\/tool-result\/1/);
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /arguments=.*marker/);
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /durationMs=/);
+  assert.equal(executeNode.toolSteps[0]?.stepId, 'call-1');
+});
+
+test('task dashboard exposes full history with hasMore and no status-layer contradiction after success', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-dashboard-history-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      ...Array.from({ length: 24 }, (_, index) => ({ kind: 'model' as const, state: 'model', summary: `model ${index + 1}` })),
+      { kind: 'output', state: 'output', summary: 'history final output', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  }));
+  const task = service.createTask({ title: 'dashboard history', directive: 'show all history windows' });
+  service.startExecution(task.taskId, { prompt: 'show history' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  // Full typed trajectory is carried for paging; the recent-events summary stays bounded.
+  assert.equal(dashboard.history.events.length, dashboard.history.total);
+  assert.equal(dashboard.history.events.length > 20, true);
+  assert.equal(dashboard.recentEvents.length, 20);
+  assert.equal(dashboard.history.hasMore, true);
+  assert.equal(dashboard.history.omitted, dashboard.history.total - 20);
+  assert.equal(dashboard.history.events[0]!.seq < dashboard.recentEvents[0]!.seq, true);
+  assert.match(dashboard.statusSections.business, /已完成/);
+  assert.match(dashboard.statusSections.waiting, /收拢/);
+  assert.equal(dashboard.statusSections.business.includes('尚未提交'), false);
+});
+
 test('observation projects all thirteen registry nodes in registry order with agent-frame ownership and real tool steps', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-observation-thirteen-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
@@ -1947,8 +2126,8 @@ test('observation projects all thirteen registry nodes in registry order with ag
   const executeNode = observation.nodes.find((node) => node.nodeId === 'pipeline.execute');
   if (!executeNode) throw new Error('expected pipeline.execute node');
   assert.equal(executeNode.toolSteps.length, 1);
-  assert.equal(executeNode.toolSteps[0]?.returned, 'tool: fake://tool/1');
-  assert.equal(executeNode.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /status=unknown · call=tool: fake:\/\/tool\/1/);
+  assert.equal(executeNode.toolSteps[0]?.name, '未标注工具');
   // The provider reports `tool` without a terminal status; the step stays explicitly unknown.
   assert.equal(executeNode.toolSteps[0]?.status, 'unknown');
   assert.equal(executeNode.toolSteps[0]?.stepId.length > 0, true);
@@ -3644,6 +3823,310 @@ test('runtime restart hydrates dispatched state without starting the requirement
   assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
+test('runtime close quiesces pending implicit consumption before settling active executions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-quiescence-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  const interactionRoot = join(root, 'interactions');
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 5 });
+  const options = {
+    mode: 'fake' as const,
+    organId,
+    binding,
+    port,
+    checkpointRoot,
+    interactionRoot,
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    projectKey: 'project-ui-close-quiescence',
+    workspaceRoot: root,
+    memory: testMemory('project-ui-close-quiescence'),
+  };
+  const first = await startUiRuntime(options);
+  try {
+    await confirmExplicitRequirementFor(first.service, 'close-quiescence');
+    assert.equal(first.service.listTasks().counts.total, 1, 'confirmed requirement must be durably queued before close');
+    await first.close();
+    // Wait past the 100ms FIFO visibility window; the retired runtime must not
+    // dispatch the requirement after close has settled it.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(port.startPayloads.length, 0, 'retired runtime must not dispatch after close');
+    assert.equal(first.service.listTasks().counts.running, 0);
+  } finally {
+    await first.close().catch(() => undefined);
+  }
+
+  const replacement = await startUiRuntime(options);
+  try {
+    await waitFor(() => assert.equal(port.startPayloads.length, 1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(port.startPayloads.length, 1, 'replacement runtime must dispatch the durable requirement exactly once');
+    await waitFor(() => assert.equal(replacement.service.listTasks().counts.completed, 1));
+    assert.equal(replacement.service.listTasks().counts.total, 1);
+  } finally {
+    await replacement.close();
+  }
+});
+
+test('server close releases the single tracked auth expiry timer after active SSE streams close', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-auth-timer-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+    sessionTtlMs: 1_500,
+    pairingTtlMs: 1_500,
+  });
+  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('lease-timer', 1).code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 5_000 }));
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  const streams: Array<{ controller: AbortController; closed: Promise<void> }> = [];
+  try {
+    const task = service.createTask({ title: 'auth timer lifecycle' });
+    const started = service.startExecution(task.taskId, { prompt: 'hold three SSE streams open' });
+    for (let index = 0; index < 3; index += 1) {
+      const controller = new AbortController();
+      const stream = await fetch(`${server.url}/api/executions/${encodeURIComponent(started.operationId.value)}/events`, {
+        headers: { cookie },
+        signal: controller.signal,
+      });
+      assert.equal(stream.status, 200);
+      assert.match(stream.headers.get('content-type') ?? '', /text\/event-stream/);
+      const reader = stream.body!.getReader();
+      await reader.read();
+      streams.push({ controller, closed: (async () => {
+        try {
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) return;
+          }
+        } catch {
+          // Abort closes the reader; lifecycle assertions use server.close().
+        }
+      })() });
+    }
+    const receipt = await server.close();
+    assert.equal(receipt.activeSseEnded, 3, 'all active SSE streams must close with the server');
+    assert.equal(receipt.authTimersCleared, 1, 'server close must release the single tracked auth expiry timer');
+    for (const entry of streams) entry.controller.abort();
+    await Promise.all(streams.map((entry) => entry.closed));
+  } finally {
+    for (const entry of streams) entry.controller.abort();
+    await Promise.all(streams.map((entry) => entry.closed.catch(() => undefined)));
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shared control-root credential invalidation is observed by every live access-control instance', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-shared-credential-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    const first = await AccessControlService.open({ credentialPath, create: true });
+    const second = await AccessControlService.open({ credentialPath });
+    const session = await first.consumePairingCode(first.createPairingChallenge('lease-shared', 1).code);
+
+    assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'valid');
+    const staleGeneration = session.sessionGeneration;
+    const generations = await Promise.all([
+      first.logout(),
+      second.logout(),
+    ]);
+    assert.deepEqual([...generations].sort((left, right) => left - right), [staleGeneration + 1, staleGeneration + 2]);
+    assert.equal(await first.readPersistedGeneration(), staleGeneration + 2);
+    assert.equal((await first.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
+    assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('credential mutation lock survives crash recovery without stealing a live owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-lock-'));
+  const credentialPath = join(root, 'security', 'web-access.json');
+  const lockPath = `${credentialPath}.lock`;
+  const accessControl = await AccessControlService.open({ credentialPath, create: true });
+  try {
+    const holder = spawn(process.execPath, [
+      '-e',
+      [
+        "const fs = require('node:fs');",
+        `const handle = fs.openSync(${JSON.stringify(lockPath)}, fs.constants.O_RDWR | fs.constants.O_CREAT | 0x20 | fs.constants.O_NONBLOCK, 0o600);`,
+        "process.stdout.write('locked\\n');",
+        "process.on('SIGTERM', () => { fs.closeSync(handle); process.exit(0); });",
+        'setInterval(() => {}, 1000);',
+      ].join(''),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.stdout!.once('data', () => resolve());
+    });
+    await assert.rejects(
+      () => accessControl.logout(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.busy',
+    );
+    holder.kill('SIGTERM');
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.once('exit', () => resolve());
+    });
+    assert.equal(await accessControl.logout(), 2, 'released lock must allow the next generation mutation');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('credential read and write failures refuse pairing and logout explicitly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-failure-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    const accessControl = await AccessControlService.open({ credentialPath, create: true });
+    await writeFile(credentialPath, '{not-json}\n', 'utf8');
+    const challenge = accessControl.createPairingChallenge('lease-failure', 1);
+
+    await assert.rejects(
+      () => accessControl.consumePairingCode(challenge.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
+    await assert.rejects(
+      () => accessControl.logout(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('runtime close settles active executions before propagating a credential watch failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-watch-failure-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  let releaseExecution!: () => void;
+  const executionGate = new Promise<void>((resolve) => {
+    releaseExecution = resolve;
+  });
+  const port = new FirstOperationGatedReplayPort(
+    { binding, stepDelayMs: 100 },
+    executionGate,
+  );
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const watchFailure = new AccessControlError(
+    'auth.credentials.unavailable',
+    'web access credential is unavailable',
+    'repair the control-root credential path',
+    503,
+  );
+  let runtimeReceiverWatcherClosed: boolean | undefined;
+  const failingAccessControl = Object.create(accessControl) as AccessControlService;
+  failingAccessControl.closeCredentialWatch = async () => {
+    runtimeReceiverWatcherClosed = await accessControl.closeCredentialWatch.call(failingAccessControl);
+    assert.equal(runtimeReceiverWatcherClosed, true, 'shutdown must close the credential watcher owned by the runtime receiver');
+    throw watchFailure;
+  };
+  const runtime = await startUiRuntimeOwner({
+    mode: 'fake',
+    accessControl: failingAccessControl,
+    organId,
+    binding,
+    port,
+    checkpointRoot,
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    memory: testMemory('project-ui-close-watch-failure'),
+  });
+  let closeStarted = false;
+  try {
+    const task = runtime.service.createTask({ title: 'watch failure close' });
+    runtime.service.startExecution(task.taskId, { prompt: 'hold open until watch failure' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'running'));
+
+    closeStarted = true;
+    const closed = runtime.close();
+    const rejection = closed.then(
+      (value: unknown) => {
+        throw new Error(`runtime.close() must reject with the original credential error; resolved with ${JSON.stringify(value)}`);
+      },
+      (error: unknown) => error,
+    );
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'settling'));
+    releaseExecution();
+    assert.equal((await rejection as { readonly code?: string }).code, 'auth.credentials.unavailable');
+    assert.equal(
+      runtimeReceiverWatcherClosed,
+      true,
+      'injected failure must follow the actual runtime receiver closing its credential watcher',
+    );
+    assert.equal(
+      runtime.service.taskDashboard(task.taskId).state,
+      'stopped',
+      'listener close failure must not bypass standard task stop and checkpoint settlement',
+    );
+
+    const checkpoint = runtime.service.taskDashboard(task.taskId).checkpoint;
+    assert.equal(checkpoint?.outcome, 'stopped');
+    const checkpointFile = await readFile(
+      join(checkpointRoot, 'fake', `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
+      'utf8',
+    );
+    const records = checkpointFile
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { readonly kind?: string; readonly checkpoint?: { readonly outcome?: string } });
+    const stoppedCheckpoint = records.find(
+      (record) => record.kind === 'checkpoint' && record.checkpoint?.outcome === 'stopped',
+    );
+    assert.ok(stoppedCheckpoint, 'close must commit the stopped checkpoint before the original error is observable');
+
+    let retryError: unknown;
+    try {
+      await runtime.close();
+      throw new Error('repeated runtime.close() must expose the cached credential error');
+    } catch (error) {
+      retryError = error;
+    }
+    assert.equal((retryError as { readonly code?: string }).code, 'auth.credentials.unavailable');
+    assert.equal(runtime.service.listTasks().counts.running, 0);
+  } finally {
+    releaseExecution();
+    if (!closeStarted) await runtime.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('server close awaits credential watch drain and reports closure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-watch-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  try {
+    const receipt = await server.close();
+    assert.equal(receipt.credentialWatchClosed, true, 'server close must release the credential watcher');
+    assert.equal(receipt.authTimersCleared, 0, 'an empty stream registry must not invent an auth timer release');
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('explicit brain status query never creates a task or FIFO entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
@@ -4156,11 +4639,13 @@ test('explicit brain accepts a clarification answer over HTTP and re-enters inte
 
 test('UI runtime assembly rejects an unconfigured production explicit brain before startup', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-unconfigured-'));
+  const auth = await testAccessControl(root);
   await assert.rejects(
     () => startUiRuntimeOwner({
       mode: 'fake',
       organId,
       binding,
+      accessControl: auth.accessControl,
       port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
       checkpointRoot: join(root, 'checkpoints'),
       evidenceRoot: join(root, 'evidence'),
@@ -4534,6 +5019,65 @@ test('runtime output concatenates repeated provider deltas without suffix dedupe
   service.startExecution(task.taskId, { prompt: 'run repeated deltas' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).output, 'aa');
+});
+
+test('provider output without readable text never projects artifact refs into task output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-output-artifact-ref-'));
+  const artifactRef = 'humanagent.provider-adapter:response.content_part.added:part-msg-1:sha256:c45b5b';
+  try {
+    class MissingOutputSummaryReplayPort extends FakeReplayExecutionRuntimePort {
+      override async *observe(
+        input: Parameters<ExecutionRuntimePort['observe']>[0],
+      ): AsyncIterable<ProviderEvent> {
+        for await (const event of super.observe(input)) {
+          if (event.kind === 'output' && event.outputRefs?.includes(artifactRef)) {
+            const { summary: _summary, ...withoutSummary } = event;
+            yield withoutSummary;
+          } else {
+            yield event;
+          }
+        }
+      }
+    }
+
+    const service = serviceFor(root, new MissingOutputSummaryReplayPort({
+      binding,
+      stepDelayMs: 1,
+      replay: [
+        { kind: 'output', state: 'output', summary: 'ignored snapshot summary', outputRefs: [artifactRef] },
+        { kind: 'output', state: 'output', summary: 'real model reply', outputRefs: ['humanagent.provider-adapter:response.output_text.done:text-msg-1:sha256:done'] },
+        { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+      ],
+    }));
+    const task = service.createTask({ title: 'provider artifact ref', directive: 'keep the task output readable' });
+    service.startExecution(task.taskId, { prompt: 'read the marker and reply' });
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const dashboard = service.taskDashboard(task.taskId);
+    assert.equal(dashboard.output, 'real model reply');
+    assert.equal(dashboard.output.includes('humanagent.provider-adapter:'), false);
+
+    const observation = service.observation(task.taskId);
+    const executionNode = observation.scope.nodes.find((node) => node.nodeId === 'pipeline.execute');
+    assert.equal(executionNode?.summary, 'real model reply');
+    assert.equal(executionNode?.summary.includes('humanagent.provider-adapter:'), false);
+
+    const providerScope = service.observation(
+      task.taskId,
+      undefined,
+      `task://${task.taskId.value}/observation/pipeline.execute`,
+    );
+    assert.equal(
+      providerScope.scope.nodes.some((node) => node.summary.includes('humanagent.provider-adapter:')),
+      false,
+    );
+    assert.equal(
+      providerScope.scope.nodes.some((node) => node.summary === '未投影'),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('responses delta and completion replay projects output text exactly once', async () => {
@@ -5728,23 +6272,28 @@ test('SSE replay honors Last-Event-ID without returning already delivered events
   assert.deepEqual(service.eventsSince(started.operationId, 'unknown-event'), all);
 });
 
-test('ui runtime server refuses to bind the unauthenticated control API outside loopback', async () => {
+test('ui runtime wildcard listener keeps sensitive APIs behind access control', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-host-guard-'));
-  await assert.rejects(async () => {
-    await startUiRuntime({
-      mode: 'fake',
-      organId,
-      binding,
-      port: buildFakeExecutionPort(binding),
-      checkpointRoot: join(root, 'checkpoints'),
-      evidenceRoot: join(root, 'evidence'),
-      uiRoot: join(process.cwd(), 'docs', 'ui'),
-      providerState: 'ready',
-      host: '0.0.0.0',
-      portNumber: 0,
-      memory: testMemory('project-ui-host-guard'),
-    });
-  }, /loopback/);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: buildFakeExecutionPort(binding),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    host: '0.0.0.0',
+    portNumber: 0,
+    memory: testMemory('project-ui-host-guard'),
+  });
+  try {
+    assert.equal(runtime.server.listenAddress, '0.0.0.0');
+    const tasks = await fetch(`${runtime.server.url.replace('0.0.0.0', '127.0.0.1')}/api/tasks`);
+    assert.equal(tasks.status, 401);
+  } finally {
+    await runtime.server.close();
+  }
 });
 
 test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
@@ -5783,30 +6332,30 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   const link = rule('.task-row-link');
   const head = rule('.task-row--head');
 
-  // The runtime row is a three-track shell: checkbox, the multi-column link, actions.
+  // The runtime row is a five-track shell: checkbox, title, status, time, actions.
   assert.match(row, /grid-template-columns:\s*var\(--task-columns\)/);
-  assert.match(tasksCss, /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+auto;/);
-
-  // The link spans that middle track and owns the eight data columns itself,
-  // so the time cell never overflows onto an implicit second row.
-  assert.match(link, /display:\s*grid;/);
-  assert.match(link, /grid-column:\s*2;/);
   assert.match(
-    link,
-    /grid-template-columns:\s*minmax\(140px,\s*1\.5fr\)\s+minmax\(74px,\s*0\.5fr\)\s+minmax\(92px,\s*0\.85fr\)\s+minmax\(104px,\s*1fr\)\s+minmax\(132px,\s*1\.25fr\)\s+minmax\(58px,\s*0\.4fr\)\s+minmax\(104px,\s*0\.8fr\)\s+minmax\(96px,\s*0\.7fr\);/s,
+    tasksCss,
+    /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+84px\s+108px\s+116px;/s,
   );
 
-  // The header keeps the same nine tracks instead of inheriting the three-track shell.
-  assert.match(head, /grid-template-columns:\s*44px/);
-  assert.equal((head.match(/minmax\(/g) ?? []).length, 8);
+  // The link spans the title, status and time tracks through subgrid, so every
+  // cell stays in the shared five-track row without an implicit second row.
+  assert.match(link, /display:\s*grid;/);
+  assert.match(link, /grid-column:\s*2\s*\/\s*5;/);
+  assert.match(link, /grid-template-columns:\s*subgrid;/);
 
-  // The dense table is only safe once the viewport can actually fit the link's
-  // minimum track sum plus the checkbox, actions, gaps, panel padding and page
-  // margin. Derive that budget from the stylesheet so the breakpoint cannot be
-  // lowered below it again (the 1081px regression this replaced).
-  const trackMinima = [...(link.match(/minmax\((\d+)px/g) ?? [])].map((value) => Number(value.replace(/\D/g, '')));
-  assert.equal(trackMinima.length, 8);
-  const linkMin = trackMinima.reduce((total, value) => total + value, 0) + 7 * 12;
+  // The header uses the shared five-track shell and positions its first label
+  // after the checkbox, so the labels stay aligned with the data cells.
+  assert.equal(head.includes('grid-template-columns'), false);
+  assert.match(tasksCss, /\.task-row\s*\{\s*display:\s*grid;/s);
+  assert.match(tasksCss, /\.task-row--head:first-child\s+\.task-cell-label:first-child\s*\{\s*grid-column:\s*2;/s);
+
+  // The five-track table is only safe once the viewport can actually fit the
+  // fixed status/time/actions tracks plus the checkbox, gaps, panel padding and
+  // page margin. Derive that budget from the stylesheet so the narrow-screen
+  // branch cannot silently break the dense layout.
+  const linkMin = 84 + 108 + 116 + 2 * 12;
 
   const checkbox = Number(rule('.task-row-check').match(/width:\s*(\d+)px/)?.[1]);
   const actions = Number(rule('.task-row-actions').match(/min-width:\s*(\d+)px/)?.[1]);
@@ -5815,28 +6364,29 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   const rowGaps = 2 * Number(tasksCss.match(/--task-gap:\s*\d+px\s+(\d+)px/)?.[1]);
   const requiredViewport = checkbox + linkMin + actions + rowGaps + panelPadding + pageMargin;
 
-  const dense = tasksCss.match(/@media\s*\(min-width:\s*(\d+)px\)\s*\{\s*\.task-cell--time\s*\{\s*grid-column:\s*8;/s);
-  if (!dense) throw new Error('expected a dense breakpoint pinning .task-cell--time to grid-column 8');
+  const wide = 560;
   assert.ok(
-    Number(dense[1]) >= requiredViewport,
-    `dense breakpoint ${dense[1]}px is below the ${requiredViewport}px the link minimum needs`,
+    wide < requiredViewport,
+    `the narrow-screen branch at ${wide}px cannot fit the ${requiredViewport}px track budget`,
   );
 
-  // The wrap branch must cover everything below the dense breakpoint and lay
-  // the link out as wrapped tracks rather than the eight dense ones.
-  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{\s*grid-template-columns:\s*repeat\((\d+),/);
+  // The narrow branch must cover the small viewport and lay the link out as one
+  // wrapped track rather than the dense subgrid.
+  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/);
   if (!wrap) throw new Error('expected the wrap breakpoint to lay the link out as wrapped tracks');
-  assert.equal(Number(wrap[1]), Number(dense[1]) - 1);
-  assert.ok(Number(wrap[2]) < 8);
+  assert.ok(Number(wrap[1]) <= wide);
 });
 
 test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-control-'));
+  const auth = await testAccessControl(root);
+  const supervisorToken = auth.accessControl.supervisorToken('lease-1', 7);
   const received: Array<{ readonly leaseId: string; readonly generation: number }> = [];
   const runtime = await startUiRuntime({
     mode: 'fake',
     organId,
     binding,
+    accessControl: auth.accessControl,
     port: buildFakeExecutionPort(binding),
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
@@ -5844,6 +6394,12 @@ test('restart control endpoint accepts an owner-scoped request without becoming 
     providerState: 'ready',
     portNumber: 0,
     memory: testMemory('project-ui-restart-control'),
+    identity: () => ({
+      leaseId: 'lease-1',
+      generation: 7,
+      pid: process.pid,
+      processStartToken: 'test-process-start-token',
+    }),
     restart: (input) => {
       received.push(input);
       return {
@@ -5859,7 +6415,10 @@ test('restart control endpoint accepts an owner-scoped request without becoming 
   try {
     const response = await fetch(`${runtime.server.url}/api/runtime/restart`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${supervisorToken}`,
+        'content-type': 'application/json',
+      },
       body: JSON.stringify({ leaseId: 'lease-1', generation: 7 }),
     });
     assert.equal(response.status, 202);
@@ -7151,6 +7710,10 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   const failedTask = failingService.createTask({ title: 'composition failure' });
   const failedStart = failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
   await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
+  const failedDashboard = failingService.taskDashboard(failedTask.taskId);
+  assert.match(failedDashboard.statusSections.business, /失败/);
+  assert.match(failedDashboard.statusSections.waiting, /已收拢：failed/);
+  assert.equal(failedDashboard.statusSections.business.includes('尚未提交'), false);
   const failedEvents = failingService.eventsSince(failedStart.operationId);
   assert.equal(failedEvents.some((event) => event.kind === 'provider.error' && event.ownerId === 'ui-runtime-blocking-hook'), true);
   assert.equal(failedEvents.some((event) => event.kind === 'checkpoint.committed' && event.state === 'failed'), true);
@@ -7197,6 +7760,73 @@ test('multiple appended inputs drain FIFO across successive executions of one ta
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).executionEpoch, 3);
   await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+});
+
+test('implicit executor produced output excludes provider semantic model summaries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-output-summary-'));
+  try {
+    const port = new SemanticModelSummaryReplayPort({
+      binding,
+      stepDelayMs: 1,
+      replay: [
+        { kind: 'model', state: 'model', summary: 'ignored model summary' },
+        { kind: 'output', state: 'output', summary: 'hello ', outputRefs: ['fake://output/1'] },
+        { kind: 'output', state: 'output', summary: 'world', outputRefs: ['fake://output/2'] },
+        { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+      ],
+    });
+    const service = serviceFor(root, port);
+    const executionAgent = (service as unknown as {
+      createImplicitSubtaskExecutionAgent(): ExecutionAgentPort;
+    }).createImplicitSubtaskExecutionAgent();
+    const taskId = id('task', 'task-implicit-output-summary');
+    const scope: ScopeRef = {
+      organId,
+      taskId,
+      cycleId: id('cycle', 'cycle-implicit-output-summary'),
+      operationId: id('operation', 'operation-implicit-output-summary'),
+    };
+    const result = await executionAgent.execute({
+      assignment: {
+        assignmentId: 'assignment-implicit-output-summary',
+        taskId,
+        pipelineNodeId: 'pipeline.execute',
+        attempt: 1,
+        executionEpoch: 1,
+        inputRevision: 1,
+        objective: 'summarize the model reply',
+        targetRefs: ['artifact://implicit-output-summary'],
+        expectedOutputRefs: ['artifact://implicit-output-summary'],
+        acceptanceCriteriaDigest: 'sha256:implicit-output-summary',
+        successCriteria: ['the reply is projected'],
+        failureCriteria: ['the reply is not projected'],
+        incompleteCriteria: ['the reply is incomplete'],
+        requiredCapabilities: ['provider.execution'],
+        mergeGate: 'required',
+      },
+      agentId: 'agent-implicit-output-summary',
+      executionEpoch: 1,
+      attempt: 1,
+      lease: {
+        leaseId: 'lease-implicit-output-summary',
+        runtimeId: 'runtime-implicit-output-summary',
+        generation: 1,
+        executionEpoch: 1,
+        ownerId: 'ui-runtime-test',
+        assignmentId: 'assignment-implicit-output-summary',
+        capabilities: ['provider.execution'],
+      },
+      scope,
+    });
+    assert.ok('status' in result);
+    const workResult = result as Extract<typeof result, { readonly status: string }>;
+    assert.equal(workResult.status, 'succeeded');
+    assert.equal(workResult.summary, 'implicit executor agent-implicit-output-summary succeeded: hello world');
+    assert.deepEqual(workResult.producedArtifactBodies, ['hello world']);
+    assert.equal(workResult.summary.includes('provider requested model work'), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('produced artifact paths count only file-producing calls, in order and without repeats', () => {
