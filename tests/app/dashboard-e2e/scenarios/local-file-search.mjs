@@ -20,6 +20,9 @@ import {
   openTaskDashboard,
   pageBackDashboardHistory,
   probeDashboardLiveSse,
+  readObservationDom,
+  readTaskDashboardDom,
+  readTaskListDom,
   submitDirectiveAndConfirmDraft,
   waitForTerminal,
 } from '../lib/browser.mjs';
@@ -57,6 +60,7 @@ export async function runLocalFileSearchScenario(binding) {
   await captureScreenshot(binding, '01-input-before-submit');
   evidence.screenshots.push(`${binding.screenshotsDir}/01-input-before-submit.png`);
   await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  const draftIntent = binding.draft?.intent ?? '';
   await captureScreenshot(binding, '02-draft-confirmed');
   evidence.screenshots.push(`${binding.screenshotsDir}/02-draft-confirmed.png`);
   await captureScreenshot(binding, '03-run-queue');
@@ -66,6 +70,9 @@ export async function runLocalFileSearchScenario(binding) {
   // result events arrive, a network interruption shows 已断开 without faking
   // failure, and reconnect restores live freshness.
   await openTaskDashboard(binding);
+  // While the task is still nonterminal the dashboard must already render the
+  // model-work request rows and must not yet claim a terminal chip.
+  const nonterminalDom = await readTaskDashboardDom(binding).catch((error) => ({ error: error.message }));
   const liveSse = await probeDashboardLiveSse(binding).catch((error) => ({ error: error.message }));
 
   // run queue -> execution turns -> verifiable terminal
@@ -180,6 +187,88 @@ export async function runLocalFileSearchScenario(binding) {
   const terminalEventKinds = new Set((dashboardEvidence.sse ?? []).map((event) => event.kind));
   if (!terminalEventKinds.has('provider.tool-result')) {
     missing.push('terminal trajectory did not include provider.tool-result');
+  }
+
+  // Rendered terminal facts: the chip, the current-state fact and the
+  // checkpoint fact must all state the real succeeded outcome.
+  if (String(dashboardDom.stateChip ?? '') !== '已完成') {
+    missing.push(`terminal dashboard state chip=${JSON.stringify(dashboardDom.stateChip ?? null)} (expected 已完成)`);
+  }
+  const dashboardFacts = dashboardDom.facts ?? [];
+  const factValue = (label) => dashboardFacts.find((fact) => fact.label === label)?.value ?? '';
+  if (factValue('当前状态') !== '已完成') {
+    missing.push(`terminal dashboard 当前状态=${JSON.stringify(factValue('当前状态'))} (expected 已完成)`);
+  }
+  if (!factValue('Checkpoint').includes('succeeded')) {
+    missing.push(`terminal dashboard Checkpoint=${JSON.stringify(factValue('Checkpoint'))} (expected a committed succeeded checkpoint)`);
+  }
+
+  // Rendered trajectory rows: tool requests keep request semantics, generic
+  // provider.model rows stay hidden, and the visible request-start rows match
+  // the projection the same page was rendered from.
+  const eventKindPrefix = (kindLabel) => String(kindLabel ?? '').split(' · ')[0];
+  const eventRows = dashboardDom.eventRows ?? [];
+  const toolRequestRows = eventRows.filter((row) => eventKindPrefix(row.kind) === 'provider.tool' && String(row.summary ?? '').startsWith('调用工具：'));
+  if (toolRequestRows.length < 2) {
+    missing.push(`terminal dashboard rendered ${toolRequestRows.length} provider tool request rows (expected >= 2)`);
+  }
+  const genericModelRows = eventRows.filter((row) => row.summary === 'model');
+  if (genericModelRows.length > 0) {
+    missing.push(`terminal dashboard still rendered ${genericModelRows.length} generic provider.model rows with summary=model`);
+  }
+  const requestStartRows = eventRows.filter((row) => row.summary === 'provider requested model work');
+  if (!requestStartRows.some((row) => String(row.kind ?? '').startsWith('provider.model'))) {
+    missing.push('terminal dashboard rendered no visible provider request-start row');
+  }
+  const projectedRequestStarts = (dashboardEvidence.dashboardProbe?.recentEvents ?? [])
+    .filter((event) => event.summary === 'provider requested model work').length;
+  if (requestStartRows.length !== projectedRequestStarts) {
+    missing.push(`terminal dashboard rendered ${requestStartRows.length} request-start rows, the projection reported ${projectedRequestStarts}`);
+  }
+
+  // While the task is nonterminal the dashboard must already render request
+  // rows, and it must not yet claim the terminal chip.
+  if (nonterminalDom?.error) {
+    missing.push(`nonterminal dashboard DOM could not be read: ${nonterminalDom.error}`);
+  } else {
+    const nonterminalRows = nonterminalDom?.eventRows ?? [];
+    if (nonterminalRows.filter((row) => row.summary === 'provider requested model work').length === 0) {
+      missing.push('nonterminal dashboard rendered no provider request-start row');
+    }
+    if (String(nonterminalDom?.stateChip ?? '') === '已完成') {
+      missing.push('nonterminal dashboard already claimed the terminal state chip 已完成');
+    }
+  }
+
+  // The draft the human confirms must be the explicit brain's new-task intent.
+  if (draftIntent !== 'create') {
+    missing.push(`draft intent=${JSON.stringify(draftIntent)} (expected create)`);
+  }
+
+  // Pipeline observation page: the real registry nodes and the projected page state.
+  const observationDom = await readObservationDom(binding).catch((error) => ({ error: error.message }));
+  if (observationDom.error) {
+    missing.push(`observation page DOM could not be read: ${observationDom.error}`);
+  } else {
+    for (const expected of ['sensory.inbox', 'explicit.normalize', 'implicit.classify', 'interactive.queue', 'execution.queue', 'pipeline.execute', 'settle', 'task.output']) {
+      if (!(observationDom.nodeIds ?? []).includes(expected)) {
+        missing.push(`observation page did not render node ${expected}`);
+      }
+    }
+    if (observationDom.metaChip !== '已完成') {
+      missing.push(`observation page meta chip=${JSON.stringify(observationDom.metaChip)} (expected 已完成)`);
+    }
+  }
+
+  // Task list page: the same task must be visible as a completed row.
+  const taskListDom = await readTaskListDom(binding).catch((error) => ({ error: error.message }));
+  if (taskListDom.error) {
+    missing.push(`task list page DOM could not be read: ${taskListDom.error}`);
+  } else {
+    const completedRow = (taskListDom.links ?? []).find((link) => link.href.includes(binding.taskId) && link.text.includes('已完成'));
+    if (!completedRow) {
+      missing.push(`task list page did not show task ${binding.taskId} as a completed row`);
+    }
   }
 
   evidence.scenarioEvidence = {
