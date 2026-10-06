@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createAttemptAuth } from './auth.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_PATH = resolve(__dirname, '..', '..', '..', '..');
@@ -58,8 +59,9 @@ export function loadPlaywright() {
   });
 }
 
-export function jsonRequest(url, init) {
-  return fetch(url, init).then(async (response) => {
+export async function jsonRequest(url, init, auth) {
+  const requester = auth?.fetch ?? fetch;
+  return requester(url, init).then(async (response) => {
     const text = await response.text();
     let body;
     try {
@@ -72,6 +74,19 @@ export function jsonRequest(url, init) {
     }
     return body;
   });
+}
+
+async function requestJsonWithStatus(url, init, auth) {
+  const requester = auth?.fetch ?? fetch;
+  const response = await requester(url, init);
+  const text = await response.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = { _raw: text.slice(0, 800) };
+  }
+  return { status: response.status, headers: Object.fromEntries(response.headers), body };
 }
 
 export function sleep(ms) {
@@ -106,7 +121,7 @@ export async function describeDraftStage(binding) {
   if (!binding.serveBaseUrl) return null;
   const probe = async (path) => {
     try {
-      const response = await fetch(`${binding.serveBaseUrl}${path}`, { headers: { accept: 'application/json' } });
+      const response = await (binding.auth?.fetch ?? fetch)(`${binding.serveBaseUrl}${path}`, { headers: { accept: 'application/json' } });
       const text = await response.text();
       return { status: response.status, body: text.slice(0, 2000) };
     } catch (error) {
@@ -165,6 +180,8 @@ export async function startServeForAttempt(binding, options = {}) {
     '--control-root', controlRoot,
     '--port', '0',
   ], { cwd: repoPath, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  binding.servePid = child.pid;
+  binding.serveChild = child;
 
   let stdout = '';
   let stderr = '';
@@ -192,10 +209,8 @@ export async function startServeForAttempt(binding, options = {}) {
     const base = launched.url ?? launched.baseUrl ?? null;
     if (!base) throw new Error(`serve banner did not include a url: ${JSON.stringify(launched).slice(0, 600)}`);
     const port = Number(new URL(base).port ?? 0) || null;
-    binding.servePid = child.pid;
     binding.servePort = port;
     binding.serveBaseUrl = base;
-    binding.serveChild = child;
     binding.serveControlRoot = launched.controlRoot ?? null;
     binding.serveCheckpointRoot = launched.checkpointRoot ?? null;
     binding.serveStderr = '';
@@ -216,6 +231,13 @@ export async function startServeForAttempt(binding, options = {}) {
         await exited;
       },
     };
+    const auth = createAttemptAuth(binding);
+    await auth.pair();
+    const liveness = await requestJsonWithStatus(`${base}/api/liveness`, {}, auth);
+    if (liveness.status !== 200 || liveness.body?.status !== 'alive' || liveness.body?.providerReady !== undefined) {
+      throw new Error(`serve liveness readiness failed: ${JSON.stringify(liveness).slice(0, 600)}`);
+    }
+    binding.readiness = { status: liveness.status, body: liveness.body };
     return binding;
   } catch (error) {
     child.kill('SIGTERM');
@@ -238,6 +260,7 @@ export async function launchBrowserSession(binding) {
   const browser = await playwright.chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
+  if (binding.auth?.paired) await binding.auth.installBrowserContext(context);
   const consoleErrors = [];
   page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => {
@@ -288,6 +311,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
 
   await openEntryPage(binding);
   await page.fill('.quick-create-form textarea[name="directive"]', directive);
+  binding.formalEntryStarted = true;
   await page.click('form button[type="submit"]');
 
   let draft;
@@ -334,7 +358,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     throw new Error(`no confirmable explicit draft after ${maxClarifications} attempts: ${JSON.stringify(clarificationLog).slice(0, 500)}`);
   }
 
-  const tasksBeforeConfirm = await jsonRequest(`${base}/api/tasks`);
+  const tasksBeforeConfirm = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
   const confirmResponsePromise = page.waitForResponse((response) =>
     response.url().includes('/api/explicit/interactions/')
     && response.url().endsWith('/confirmation')
@@ -346,7 +370,7 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
   }
 
   const taskId = await waitForDom(page, 'dispatched task id', async () => {
-    const tasks = await jsonRequest(`${base}/api/tasks`);
+    const tasks = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
     const candidates = []
       .concat(tasks.running ?? [])
       .concat(tasks.waiting ?? [])
@@ -377,7 +401,7 @@ export async function openTaskDashboard(binding, options = {}) {
   }
   if (options.waitNonterminal !== false) {
     await waitForDom(page, 'nonterminal task dashboard', async () => {
-      const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`);
+      const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
       if (probe.state && !['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
       if (probe.state === 'failed') return 'failed';
       return null;
@@ -390,12 +414,12 @@ export async function openTaskDashboard(binding, options = {}) {
 export async function waitForTerminal(binding, options = {}) {
   const { page } = binding.browser;
   const state = await waitForDom(page, 'task runtime terminal', async () => {
-    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`);
+    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
     if (['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
     return null;
   }, TERMINAL_TIMEOUT_MS);
   await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`);
+  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
   binding.terminalState = state;
   binding.dashboardProbe = probe;
   return probe;
@@ -403,5 +427,5 @@ export async function waitForTerminal(binding, options = {}) {
 
 /** Read the newest execution terminal record from the authoritative journal. */
 export async function readDashboardProbe(binding) {
-  return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`);
+  return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
 }

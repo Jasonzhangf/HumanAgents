@@ -709,6 +709,8 @@ export class UiRuntimeService {
   private dispatchTail: Promise<void> = Promise.resolve();
   private implicitConsumerEnabled = false;
   private implicitConsumerScheduled = false;
+  private implicitConsumerTimer: ReturnType<typeof setTimeout> | undefined;
+  private implicitConsumptionRun: Promise<void> | undefined;
   private implicitConsumerIssue: UiRuntimeApiError | undefined;
   private implicitTerminalIssue: UiRuntimeApiError | undefined;
   private implicitTerminalRequirement: Pick<RequirementEnvelope, 'requirementId' | 'draftId' | 'fifoSeq'> | undefined;
@@ -1896,6 +1898,24 @@ export class UiRuntimeService {
     this.scheduleImplicitConsumption();
   }
 
+  /**
+   * Retires the runtime's background FIFO ownership: new implicit consumption is
+   * disabled, the visibility timer is cancelled, and any already-running drain
+   * cycle is awaited before the caller settles active executions.
+   */
+  async quiesceImplicitConsumption(): Promise<void> {
+    this.implicitConsumerEnabled = false;
+    if (this.implicitConsumerTimer !== undefined) {
+      clearTimeout(this.implicitConsumerTimer);
+      this.implicitConsumerTimer = undefined;
+    }
+    this.implicitConsumerScheduled = false;
+    // A timer that already fired before the flag flipped can still be draining;
+    // its loop observes the disabled flag and stops after the current dispatch.
+    await this.implicitConsumptionRun;
+    await this.dispatchTail;
+  }
+
   implicitSchedulingIssue(): UiRuntimeApiError | undefined {
     return this.implicitConsumerIssue ?? this.implicitTerminalIssue;
   }
@@ -2449,11 +2469,20 @@ export class UiRuntimeService {
     // Drain after a short visibility window, not on the next macrotask, so the
     // confirming HTTP response is written and a following status/task read can
     // still observe the requirement as a genuine queued FIFO entry.
-    setTimeout(() => {
+    this.implicitConsumerTimer = setTimeout(() => {
+      this.implicitConsumerTimer = undefined;
       this.implicitConsumerScheduled = false;
-      void this.consumePendingRequirements().catch((error) => {
-        this.implicitConsumerIssue = apiError(error);
-      });
+      const run = this.consumePendingRequirements();
+      this.implicitConsumptionRun = run;
+      void run.then(
+        () => {
+          if (this.implicitConsumptionRun === run) this.implicitConsumptionRun = undefined;
+        },
+        (error: unknown) => {
+          this.implicitConsumerIssue = apiError(error);
+          if (this.implicitConsumptionRun === run) this.implicitConsumptionRun = undefined;
+        },
+      );
     }, QUEUED_VISIBILITY_WINDOW_MS);
   }
 

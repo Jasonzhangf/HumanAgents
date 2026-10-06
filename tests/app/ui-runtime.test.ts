@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -75,6 +75,7 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
+import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
@@ -83,6 +84,29 @@ import {
 } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
+const rawFetch = globalThis.fetch.bind(globalThis);
+const testSessionByOrigin = new Map<string, string>();
+
+async function testAccessControl(root: string) {
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
+}
+
+globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const origin = new URL(url).origin;
+  const cookie = testSessionByOrigin.get(origin);
+  const headers = new Headers(init.headers ?? {});
+  if (cookie) headers.set('cookie', cookie);
+  const method = (init.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') headers.set('origin', origin);
+  return rawFetch(input, { ...init, headers });
+}) as typeof fetch;
 const builtinTemplateRoot = join(process.cwd(), 'packages', 'agent-templates', 'templates');
 const binding: ProviderBinding = {
   bindingId: 'binding-ui-test',
@@ -100,13 +124,18 @@ const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
   },
 };
 
-function startUiRuntime(
+async function startUiRuntime(
   options: Parameters<typeof startUiRuntimeOwner>[0],
 ): ReturnType<typeof startUiRuntimeOwner> {
-  return startUiRuntimeOwner({
+  const securityRoot = options.checkpointRoot;
+  const auth = options.accessControl ? undefined : await testAccessControl(securityRoot);
+  const runtime = await startUiRuntimeOwner({
     ...options,
+    ...(auth === undefined ? {} : { accessControl: auth.accessControl }),
     explicitBrainInterpreter: options.explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
+  if (auth) testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
+  return runtime;
 }
 
 function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
@@ -548,6 +577,38 @@ function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId
   const row = list.draft.find((task) => task.taskId.value === `ui-task-implicit-${draftId}`);
   if (!row) throw new Error(`missing queued draft row for ${draftId}`);
   return row;
+}
+
+// Confirms one explicit requirement through the real service owner so FIFO
+// lifecycle tests share one deterministic producer instead of duplicating the
+// interaction state machine.
+async function confirmExplicitRequirementFor(service: UiRuntimeService, suffix: string): Promise<string> {
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: `ui:${suffix}`,
+    rawInput: `confirmed requirement ${suffix}`,
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: `confirmed requirement ${suffix}`,
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: `create ${suffix} work`,
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: `confirmation:${suffix}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: `asset://requirements/${suffix}`,
+  });
+  return interactionId;
 }
 
 class FailingInteractionClosurePort implements CheckpointClosurePort {
@@ -1407,12 +1468,20 @@ test('organ health probe and snapshot expose bounded dimensions, evidence, and i
     assert.match(snapshotError.error.nextAction, /health probe/u);
     assert.equal(probeCount, 0);
 
-    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`);
+    const legacyProbe = await fetch(`${runtime.server.url}/api/health/probe`);
+    assert.equal(legacyProbe.status, 405);
+    assert.equal(legacyProbe.headers.get('allow'), 'POST');
+    assert.equal(probeCount, 0);
+
+    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(probeResponse.status, 200);
     assert.equal(probeCount, 1);
 
-    for (const path of ['/api/health/probe', '/api/health/snapshot']) {
-      const response = await fetch(`${runtime.server.url}${path}`);
+    const requests = [
+      fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' }),
+      fetch(`${runtime.server.url}/api/health/snapshot`),
+    ];
+    for (const response of await Promise.all(requests)) {
       assert.equal(response.status, 200);
       const body = await response.json() as {
         readonly surface: string;
@@ -1491,7 +1560,7 @@ test('expired organ health evidence is reported as stale unknown without changin
     memory: testMemory('project-ui-organ-health-stale'),
   });
   try {
-    const response = await fetch(`${runtime.server.url}/api/health/probe`);
+    const response = await fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(response.status, 200);
     const body = await response.json() as {
       readonly lifecycleState: string;
@@ -1603,13 +1672,21 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
     closurePort: runtimeJournal,
     memory: testMemory('project-ui-organ-health-error'),
   });
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
   const server = await startUiRuntimeServer({
     service,
+    accessControl,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
+  testSessionByOrigin.set(new URL(server.url).origin, accessControl.sessionCookie(session).split(';')[0]!);
   try {
-    const response = await fetch(`${server.url}/api/health/probe`);
+    const response = await fetch(`${server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(response.status, 409);
     const body = await response.json() as {
       readonly error: {
@@ -3644,6 +3721,310 @@ test('runtime restart hydrates dispatched state without starting the requirement
   assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
+test('runtime close quiesces pending implicit consumption before settling active executions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-quiescence-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  const interactionRoot = join(root, 'interactions');
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 5 });
+  const options = {
+    mode: 'fake' as const,
+    organId,
+    binding,
+    port,
+    checkpointRoot,
+    interactionRoot,
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    projectKey: 'project-ui-close-quiescence',
+    workspaceRoot: root,
+    memory: testMemory('project-ui-close-quiescence'),
+  };
+  const first = await startUiRuntime(options);
+  try {
+    await confirmExplicitRequirementFor(first.service, 'close-quiescence');
+    assert.equal(first.service.listTasks().counts.total, 1, 'confirmed requirement must be durably queued before close');
+    await first.close();
+    // Wait past the 100ms FIFO visibility window; the retired runtime must not
+    // dispatch the requirement after close has settled it.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(port.startPayloads.length, 0, 'retired runtime must not dispatch after close');
+    assert.equal(first.service.listTasks().counts.running, 0);
+  } finally {
+    await first.close().catch(() => undefined);
+  }
+
+  const replacement = await startUiRuntime(options);
+  try {
+    await waitFor(() => assert.equal(port.startPayloads.length, 1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(port.startPayloads.length, 1, 'replacement runtime must dispatch the durable requirement exactly once');
+    await waitFor(() => assert.equal(replacement.service.listTasks().counts.completed, 1));
+    assert.equal(replacement.service.listTasks().counts.total, 1);
+  } finally {
+    await replacement.close();
+  }
+});
+
+test('server close releases the single tracked auth expiry timer after active SSE streams close', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-auth-timer-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+    sessionTtlMs: 1_500,
+    pairingTtlMs: 1_500,
+  });
+  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('lease-timer', 1).code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 5_000 }));
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  const streams: Array<{ controller: AbortController; closed: Promise<void> }> = [];
+  try {
+    const task = service.createTask({ title: 'auth timer lifecycle' });
+    const started = service.startExecution(task.taskId, { prompt: 'hold three SSE streams open' });
+    for (let index = 0; index < 3; index += 1) {
+      const controller = new AbortController();
+      const stream = await fetch(`${server.url}/api/executions/${encodeURIComponent(started.operationId.value)}/events`, {
+        headers: { cookie },
+        signal: controller.signal,
+      });
+      assert.equal(stream.status, 200);
+      assert.match(stream.headers.get('content-type') ?? '', /text\/event-stream/);
+      const reader = stream.body!.getReader();
+      await reader.read();
+      streams.push({ controller, closed: (async () => {
+        try {
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) return;
+          }
+        } catch {
+          // Abort closes the reader; lifecycle assertions use server.close().
+        }
+      })() });
+    }
+    const receipt = await server.close();
+    assert.equal(receipt.activeSseEnded, 3, 'all active SSE streams must close with the server');
+    assert.equal(receipt.authTimersCleared, 1, 'server close must release the single tracked auth expiry timer');
+    for (const entry of streams) entry.controller.abort();
+    await Promise.all(streams.map((entry) => entry.closed));
+  } finally {
+    for (const entry of streams) entry.controller.abort();
+    await Promise.all(streams.map((entry) => entry.closed.catch(() => undefined)));
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shared control-root credential invalidation is observed by every live access-control instance', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-shared-credential-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    const first = await AccessControlService.open({ credentialPath, create: true });
+    const second = await AccessControlService.open({ credentialPath });
+    const session = await first.consumePairingCode(first.createPairingChallenge('lease-shared', 1).code);
+
+    assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'valid');
+    const staleGeneration = session.sessionGeneration;
+    const generations = await Promise.all([
+      first.logout(),
+      second.logout(),
+    ]);
+    assert.deepEqual([...generations].sort((left, right) => left - right), [staleGeneration + 1, staleGeneration + 2]);
+    assert.equal(await first.readPersistedGeneration(), staleGeneration + 2);
+    assert.equal((await first.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
+    assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('credential mutation lock survives crash recovery without stealing a live owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-lock-'));
+  const credentialPath = join(root, 'security', 'web-access.json');
+  const lockPath = `${credentialPath}.lock`;
+  const accessControl = await AccessControlService.open({ credentialPath, create: true });
+  try {
+    const holder = spawn(process.execPath, [
+      '-e',
+      [
+        "const fs = require('node:fs');",
+        `const handle = fs.openSync(${JSON.stringify(lockPath)}, fs.constants.O_RDWR | fs.constants.O_CREAT | 0x20 | fs.constants.O_NONBLOCK, 0o600);`,
+        "process.stdout.write('locked\\n');",
+        "process.on('SIGTERM', () => { fs.closeSync(handle); process.exit(0); });",
+        'setInterval(() => {}, 1000);',
+      ].join(''),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.stdout!.once('data', () => resolve());
+    });
+    await assert.rejects(
+      () => accessControl.logout(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.busy',
+    );
+    holder.kill('SIGTERM');
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.once('exit', () => resolve());
+    });
+    assert.equal(await accessControl.logout(), 2, 'released lock must allow the next generation mutation');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('credential read and write failures refuse pairing and logout explicitly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-failure-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    const accessControl = await AccessControlService.open({ credentialPath, create: true });
+    await writeFile(credentialPath, '{not-json}\n', 'utf8');
+    const challenge = accessControl.createPairingChallenge('lease-failure', 1);
+
+    await assert.rejects(
+      () => accessControl.consumePairingCode(challenge.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
+    await assert.rejects(
+      () => accessControl.logout(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('runtime close settles active executions before propagating a credential watch failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-watch-failure-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  let releaseExecution!: () => void;
+  const executionGate = new Promise<void>((resolve) => {
+    releaseExecution = resolve;
+  });
+  const port = new FirstOperationGatedReplayPort(
+    { binding, stepDelayMs: 100 },
+    executionGate,
+  );
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const watchFailure = new AccessControlError(
+    'auth.credentials.unavailable',
+    'web access credential is unavailable',
+    'repair the control-root credential path',
+    503,
+  );
+  let runtimeReceiverWatcherClosed: boolean | undefined;
+  const failingAccessControl = Object.create(accessControl) as AccessControlService;
+  failingAccessControl.closeCredentialWatch = async () => {
+    runtimeReceiverWatcherClosed = await accessControl.closeCredentialWatch.call(failingAccessControl);
+    assert.equal(runtimeReceiverWatcherClosed, true, 'shutdown must close the credential watcher owned by the runtime receiver');
+    throw watchFailure;
+  };
+  const runtime = await startUiRuntimeOwner({
+    mode: 'fake',
+    accessControl: failingAccessControl,
+    organId,
+    binding,
+    port,
+    checkpointRoot,
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    memory: testMemory('project-ui-close-watch-failure'),
+  });
+  let closeStarted = false;
+  try {
+    const task = runtime.service.createTask({ title: 'watch failure close' });
+    runtime.service.startExecution(task.taskId, { prompt: 'hold open until watch failure' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'running'));
+
+    closeStarted = true;
+    const closed = runtime.close();
+    const rejection = closed.then(
+      (value: unknown) => {
+        throw new Error(`runtime.close() must reject with the original credential error; resolved with ${JSON.stringify(value)}`);
+      },
+      (error: unknown) => error,
+    );
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'settling'));
+    releaseExecution();
+    assert.equal((await rejection as { readonly code?: string }).code, 'auth.credentials.unavailable');
+    assert.equal(
+      runtimeReceiverWatcherClosed,
+      true,
+      'injected failure must follow the actual runtime receiver closing its credential watcher',
+    );
+    assert.equal(
+      runtime.service.taskDashboard(task.taskId).state,
+      'stopped',
+      'listener close failure must not bypass standard task stop and checkpoint settlement',
+    );
+
+    const checkpoint = runtime.service.taskDashboard(task.taskId).checkpoint;
+    assert.equal(checkpoint?.outcome, 'stopped');
+    const checkpointFile = await readFile(
+      join(checkpointRoot, 'fake', `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
+      'utf8',
+    );
+    const records = checkpointFile
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { readonly kind?: string; readonly checkpoint?: { readonly outcome?: string } });
+    const stoppedCheckpoint = records.find(
+      (record) => record.kind === 'checkpoint' && record.checkpoint?.outcome === 'stopped',
+    );
+    assert.ok(stoppedCheckpoint, 'close must commit the stopped checkpoint before the original error is observable');
+
+    let retryError: unknown;
+    try {
+      await runtime.close();
+      throw new Error('repeated runtime.close() must expose the cached credential error');
+    } catch (error) {
+      retryError = error;
+    }
+    assert.equal((retryError as { readonly code?: string }).code, 'auth.credentials.unavailable');
+    assert.equal(runtime.service.listTasks().counts.running, 0);
+  } finally {
+    releaseExecution();
+    if (!closeStarted) await runtime.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('server close awaits credential watch drain and reports closure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-watch-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  try {
+    const receipt = await server.close();
+    assert.equal(receipt.credentialWatchClosed, true, 'server close must release the credential watcher');
+    assert.equal(receipt.authTimersCleared, 0, 'an empty stream registry must not invent an auth timer release');
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('explicit brain status query never creates a task or FIFO entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
@@ -4156,11 +4537,13 @@ test('explicit brain accepts a clarification answer over HTTP and re-enters inte
 
 test('UI runtime assembly rejects an unconfigured production explicit brain before startup', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-unconfigured-'));
+  const auth = await testAccessControl(root);
   await assert.rejects(
     () => startUiRuntimeOwner({
       mode: 'fake',
       organId,
       binding,
+      accessControl: auth.accessControl,
       port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
       checkpointRoot: join(root, 'checkpoints'),
       evidenceRoot: join(root, 'evidence'),
@@ -5728,23 +6111,28 @@ test('SSE replay honors Last-Event-ID without returning already delivered events
   assert.deepEqual(service.eventsSince(started.operationId, 'unknown-event'), all);
 });
 
-test('ui runtime server refuses to bind the unauthenticated control API outside loopback', async () => {
+test('ui runtime wildcard listener keeps sensitive APIs behind access control', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-host-guard-'));
-  await assert.rejects(async () => {
-    await startUiRuntime({
-      mode: 'fake',
-      organId,
-      binding,
-      port: buildFakeExecutionPort(binding),
-      checkpointRoot: join(root, 'checkpoints'),
-      evidenceRoot: join(root, 'evidence'),
-      uiRoot: join(process.cwd(), 'docs', 'ui'),
-      providerState: 'ready',
-      host: '0.0.0.0',
-      portNumber: 0,
-      memory: testMemory('project-ui-host-guard'),
-    });
-  }, /loopback/);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: buildFakeExecutionPort(binding),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    host: '0.0.0.0',
+    portNumber: 0,
+    memory: testMemory('project-ui-host-guard'),
+  });
+  try {
+    assert.equal(runtime.server.listenAddress, '0.0.0.0');
+    const tasks = await fetch(`${runtime.server.url.replace('0.0.0.0', '127.0.0.1')}/api/tasks`);
+    assert.equal(tasks.status, 401);
+  } finally {
+    await runtime.server.close();
+  }
 });
 
 test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
@@ -5832,11 +6220,14 @@ test('task list styles keep the link contents inside the desktop task grid', asy
 
 test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-control-'));
+  const auth = await testAccessControl(root);
+  const supervisorToken = auth.accessControl.supervisorToken('lease-1', 7);
   const received: Array<{ readonly leaseId: string; readonly generation: number }> = [];
   const runtime = await startUiRuntime({
     mode: 'fake',
     organId,
     binding,
+    accessControl: auth.accessControl,
     port: buildFakeExecutionPort(binding),
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
@@ -5844,6 +6235,12 @@ test('restart control endpoint accepts an owner-scoped request without becoming 
     providerState: 'ready',
     portNumber: 0,
     memory: testMemory('project-ui-restart-control'),
+    identity: () => ({
+      leaseId: 'lease-1',
+      generation: 7,
+      pid: process.pid,
+      processStartToken: 'test-process-start-token',
+    }),
     restart: (input) => {
       received.push(input);
       return {
@@ -5859,7 +6256,10 @@ test('restart control endpoint accepts an owner-scoped request without becoming 
   try {
     const response = await fetch(`${runtime.server.url}/api/runtime/restart`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${supervisorToken}`,
+        'content-type': 'application/json',
+      },
       body: JSON.stringify({ leaseId: 'lease-1', generation: 7 }),
     });
     assert.equal(response.status, 202);
