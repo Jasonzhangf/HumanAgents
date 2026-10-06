@@ -400,6 +400,71 @@ dd[data-empty="true"] {
   flex: 0 0 auto;
 }
 
+.drawer-work-card-host {
+  min-width: 0;
+}
+
+.node-drawer .iwc-card {
+  width: 100%;
+  min-height: 0;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.node-drawer .iwc-status {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.node-drawer .iwc-scroll {
+  max-height: min(38vh, 380px);
+}
+
+.node-drawer .iwc-trace-toolbar--readonly {
+  justify-content: flex-start;
+}
+
+.node-drawer .iwc-trace-group {
+  display: grid;
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.node-drawer .iwc-trace-group:last-child {
+  border-bottom: 0;
+}
+
+.node-drawer .iwc-trace-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 2px 4px;
+}
+
+.node-drawer .iwc-trace-group .iwc-trace-row:last-child {
+  border-bottom: 0;
+}
+
+.node-drawer .iwc-turn-details {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.node-drawer .iwc-turn-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.node-drawer .iwc-turn-details .iwc-facts {
+  margin-top: 8px;
+}
+
 .node-drawer .button {
   display: inline-flex;
   align-items: center;

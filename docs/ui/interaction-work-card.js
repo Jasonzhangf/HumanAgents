@@ -18,9 +18,11 @@ const TASK_STATE_LABELS = Object.freeze({
 const TRACE_KIND_LABELS = Object.freeze({
   user: '用户',
   assistant: '助手',
+  'model-request': '模型请求',
   'tool-call': '工具调用',
   'tool-result': '工具返回',
   status: '状态',
+  conclusion: '结论',
   decision: '决策',
   failure: '失败',
   cancel: '取消',
@@ -72,9 +74,52 @@ function append(target, ...children) {
   return target
 }
 
+const TECHNICAL_HUMAN_TOKENS = Object.freeze([
+  'requestId',
+  'turnId',
+  'callId',
+  'digest',
+  'evidence',
+  'operationId',
+  'taskId',
+  'executionEpoch',
+  'outputRef',
+  'outputDigest',
+  'argumentsRef',
+  'argumentsDigest',
+  'toolOutputRef',
+  'activityRef',
+  'stepId',
+])
+
+function containsTechnicalIdentity(value) {
+  const text = String(value ?? '')
+  return TECHNICAL_HUMAN_TOKENS.some((token) => text.includes(token))
+    || /(?:^|\s)(?:task|operation|request|turn|epoch)=/.test(text)
+}
+
+function observationHumanText(value, fallback = '未投影') {
+  const text = String(value ?? '').trim()
+  if (!text) return fallback
+  return containsTechnicalIdentity(text) ? '该条目包含技术细节，完整内容在折叠详情中。' : text
+}
+
 function valueOrUnknown(value, fallback = '未提供') {
   if (value === undefined || value === null || value === '') return fallback
   return String(value)
+}
+
+function formatObservationTime(value) {
+  if (!value) return '时间未投影'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date)
 }
 
 function boolLabel(value, trueLabel, falseLabel) {
@@ -310,15 +355,16 @@ function renderTextFacts(label, facts, options) {
 
 function renderSummary(summary, options) {
   const section = create('section', 'iwc-summary')
-  section.append(create('h3', undefined, '公开任务信息'))
+  section.append(create('h3', undefined, options?.mode === 'observation' ? '节点公开信息' : '公开任务信息'))
   if (!summary || summary.missing) {
-    section.append(create('p', 'iwc-missing', '来源未提供公开任务信息'))
+    section.append(create('p', 'iwc-missing', options?.mode === 'observation' ? '来源未提供节点公开信息' : '来源未提供公开任务信息'))
     return section
   }
   if (summary.goal) section.append(renderTextFact('目标', summary.goal, options))
   if (summary.scope) section.append(renderTextFact('范围', summary.scope, options))
   if (summary.constraints?.length) section.append(renderTextFacts('约束', summary.constraints, options))
   if (summary.deliverables?.length) section.append(renderTextFacts('交付物', summary.deliverables, options))
+  if (summary.facts?.length) renderFactList(section, summary.facts)
   return section
 }
 
@@ -347,6 +393,14 @@ function renderConversation(projection, options, descriptorControls) {
       const body = create('div', 'iwc-turn-body')
       if (turn.markdown) renderMarkdown(body, turn.markdown)
       if (turn.error) body.append(renderError(turn.error))
+      if (turn.details?.length) {
+        const details = create('details', 'iwc-turn-details')
+        details.append(create('summary', undefined, '技术详情'))
+        const detailBody = create('div')
+        renderFactList(detailBody, turn.details)
+        details.append(detailBody)
+        body.append(details)
+      }
       if (turn.artifacts?.length) {
         const artifacts = create('div', 'iwc-artifacts')
         artifacts.append(create('span', 'iwc-fact-label', '授权描述符'))
@@ -383,33 +437,46 @@ function renderTraceRow(entry, options, state, descriptorControls) {
     entry.tool?.callId ?? '',
   ].join('|')
   row.dataset.callId = entry.tool?.callId || ''
+  row.dataset.toolPaired = entry.tool ? String(Boolean(entry.tool.paired)) : ''
+  row.dataset.unprojected = String(Boolean(entry.unprojected))
   const head = create('header', 'iwc-trace-head')
   head.append(create('span', 'iwc-kind-chip', TRACE_KIND_LABELS[entry.kind] || entry.kind))
   if (entry.tool?.toolId) head.append(create('strong', 'iwc-tool-name', entry.tool.toolId))
-  head.append(create('span', 'iwc-state-chip', valueOrUnknown(entry.state)))
-  head.append(create('time', 'iwc-time', formatTime(entry.occurredAt)))
-  head.append(create('span', 'iwc-seq', `seq ${entry.seq}`))
+  const stateLabel = entry.tool && !entry.tool.paired ? '未返回' : valueOrUnknown(entry.state)
+  head.append(create('span', 'iwc-state-chip', stateLabel))
+  if (entry.occurredAt) {
+    head.append(create('time', 'iwc-time', state.mode === 'observation' ? formatObservationTime(entry.occurredAt) : formatTime(entry.occurredAt)))
+  } else if (state.mode === 'observation') {
+    head.append(create('span', 'iwc-time', '时间未投影'))
+  }
+  if (entry.seq !== undefined && entry.seq !== null) head.append(create('span', 'iwc-seq', `seq ${entry.seq}`))
   row.append(head)
   const summary = entry.tool
-    ? `${entry.tool.toolId} · ${entry.tool.status}`
-    : valueOrUnknown(entry.modelRef, '公开轨迹事件')
+    ? state.mode === 'observation'
+      ? `${entry.tool.toolId} · ${entry.tool.paired ? `调用与返回已配对（${valueOrUnknown(entry.tool.statusDisplay, entry.tool.status)}）` : '调用未返回'}`
+      : `${entry.tool.toolId} · ${entry.tool.paired ? valueOrUnknown(entry.tool.statusDisplay, entry.tool.status) : '未返回'}`
+    : state.mode === 'observation'
+      ? entry.summary || valueOrUnknown(entry.modelRef, '公开轨迹事件')
+      : valueOrUnknown(entry.modelRef, '公开轨迹事件')
   row.append(create('p', 'iwc-trace-summary', summary))
   const details = create('details', 'iwc-trace-details')
   details.append(create('summary', undefined, '技术详情'))
   const body = create('div', 'iwc-trace-detail-body')
-  const facts = [
-    ['turnId', entry.turnId],
-    ['requestId', entry.requestId],
-    ['parentRequestId', entry.parentRequestId],
-    ['taskId', scopedValue(entry.taskId)],
-    ['operationId', scopedValue(entry.operationId)],
-    ['executionEpoch', entry.executionEpoch],
-    ['authorization.scope', scopedValue(entry.authorization?.scope?.organId)],
-    ['authorization.capabilities', entry.authorization?.requestedCapabilities?.join(', ')],
-    ['authorization.toolOutputRef', entry.authorization?.toolOutputRef],
-    ['lastBusiness', `${valueOrUnknown(entry.lastBusiness?.kind)} · ${valueOrUnknown(entry.lastBusiness?.at)} · ${valueOrUnknown(entry.lastBusiness?.ref)}`],
-  ]
-  if (entry.tool) {
+  const facts = state.mode === 'observation'
+    ? observationTraceFacts(entry)
+    : [
+        ['turnId', entry.turnId],
+        ['requestId', entry.requestId],
+        ['parentRequestId', entry.parentRequestId],
+        ['taskId', scopedValue(entry.taskId)],
+        ['operationId', scopedValue(entry.operationId)],
+        ['executionEpoch', entry.executionEpoch],
+        ['authorization.scope', scopedValue(entry.authorization?.scope?.organId)],
+        ['authorization.capabilities', entry.authorization?.requestedCapabilities?.join(', ')],
+        ['authorization.toolOutputRef', entry.authorization?.toolOutputRef],
+        ['lastBusiness', `${valueOrUnknown(entry.lastBusiness?.kind)} · ${valueOrUnknown(entry.lastBusiness?.at)} · ${valueOrUnknown(entry.lastBusiness?.ref)}`],
+      ]
+  if (state.mode !== 'observation' && entry.tool) {
     facts.splice(3, 0,
       ['tool.callId', entry.tool.callId],
       ['tool.toolId', entry.tool.toolId],
@@ -422,7 +489,7 @@ function renderTraceRow(entry, options, state, descriptorControls) {
     )
   }
   renderFactList(body, facts)
-  if (entry.tool?.error?.evidenceRefs?.length) {
+  if (state.mode !== 'observation' && entry.tool?.error?.evidenceRefs?.length) {
     const errorEvidence = create('div', 'iwc-error-evidence')
     errorEvidence.append(create('h4', undefined, '错误证据引用'))
     for (const ref of entry.tool.error.evidenceRefs) {
@@ -435,7 +502,7 @@ function renderTraceRow(entry, options, state, descriptorControls) {
     }
     body.append(errorEvidence)
   }
-  if (entry.evidenceRefs?.length) {
+  if (state.mode !== 'observation' && entry.evidenceRefs?.length) {
     const evidence = create('div', 'iwc-evidence')
     evidence.append(create('h4', undefined, '证据引用'))
     for (const ref of entry.evidenceRefs) {
@@ -448,12 +515,34 @@ function renderTraceRow(entry, options, state, descriptorControls) {
     }
     body.append(evidence)
   }
-  if (entry.tool?.outputRef) {
+  if (state.mode !== 'observation' && entry.tool?.outputRef) {
     body.append(renderDescriptor({ kind: 'output', ref: entry.tool.outputRef, label: `${entry.tool.toolId} 输出`, digest: entry.tool.outputDigest }, options, `trace:${entry.tool.callId}`, descriptorControls))
   }
   details.append(body)
   row.append(details)
   return row
+}
+
+function observationTraceFacts(entry) {
+  const facts = [
+    ['分类', TRACE_KIND_LABELS[entry.kind] || entry.kind],
+    ['状态', entry.state],
+    ['时间', entry.occurredAt],
+  ]
+  if (entry.tool) {
+    facts.push(
+      ['tool.callId', entry.tool.callId],
+      ['tool.toolId', entry.tool.toolId],
+      ['tool.status', entry.tool.status],
+      ['tool.paired', entry.tool.paired ? '是' : '否'],
+      ['tool.returned', entry.tool.returned],
+      ['tool.callOccurredAt', entry.tool.callOccurredAt],
+      ['tool.returnedAt', entry.tool.returnedAt],
+    )
+  }
+  if (entry.sourceRef) facts.push(['sourceRef', entry.sourceRef])
+  for (const [label, value] of entry.details || []) facts.push([label, value])
+  return facts
 }
 
 function renderTrace(projection, options, state, descriptorControls) {
@@ -463,55 +552,67 @@ function renderTrace(projection, options, state, descriptorControls) {
   panel.setAttribute('aria-labelledby', 'iwc-tab-trace')
   panel.tabIndex = 0
   panel.hidden = true
+  const historyState = projection.history
+  const items = historyState?.result === 'ok' ? historyState.items : []
   const toolbar = create('div', 'iwc-trace-toolbar')
-  const query = projection.history?.query || { limit: 20 }
-  const form = create('form', 'iwc-history-form')
-  form.dataset.iwcHistoryForm = 'true'
-  const searchLabel = create('label', 'iwc-field')
-  searchLabel.append(create('span', undefined, '搜索轨迹'))
-  const search = create('input')
-  search.type = 'search'
-  search.name = 'search'
-  search.placeholder = '输入文本'
-  search.value = state.traceSearch ?? query.search ?? ''
-  search.dataset.focusKey = 'history-search'
-  searchLabel.append(search)
-  const kindLabel = create('label', 'iwc-field')
-  kindLabel.append(create('span', undefined, '类型'))
-  const kindSelect = create('select')
-  kindSelect.name = 'kind'
-  kindSelect.dataset.focusKey = 'history-kind'
-  const allOption = create('option', undefined, '全部')
-  allOption.value = ''
-  kindSelect.append(allOption)
-  for (const kind of Object.keys(TRACE_KIND_LABELS)) {
-    const option = create('option', undefined, TRACE_KIND_LABELS[kind])
-    option.value = kind
-    kindSelect.append(option)
+  if (state.mode === 'observation') {
+    toolbar.classList.add('iwc-trace-toolbar--readonly')
+    toolbar.append(create('span', 'iwc-missing', '只读轨迹；不提供查询、重试或控制操作。'))
+  } else {
+    const query = projection.history?.query || { limit: 20 }
+    const form = create('form', 'iwc-history-form')
+    form.dataset.iwcHistoryForm = 'true'
+    const searchLabel = create('label', 'iwc-field')
+    searchLabel.append(create('span', undefined, '搜索轨迹'))
+    const search = create('input')
+    search.type = 'search'
+    search.name = 'search'
+    search.placeholder = '输入文本'
+    search.value = state.traceSearch ?? query.search ?? ''
+    search.dataset.focusKey = 'history-search'
+    searchLabel.append(search)
+    const kindLabel = create('label', 'iwc-field')
+    kindLabel.append(create('span', undefined, '类型'))
+    const kindSelect = create('select')
+    kindSelect.name = 'kind'
+    kindSelect.dataset.focusKey = 'history-kind'
+    const allOption = create('option', undefined, '全部')
+    allOption.value = ''
+    kindSelect.append(allOption)
+    for (const kind of Object.keys(TRACE_KIND_LABELS)) {
+      const option = create('option', undefined, TRACE_KIND_LABELS[kind])
+      option.value = kind
+      kindSelect.append(option)
+    }
+    kindSelect.value = state.traceKind ?? query.filter?.kinds?.[0] ?? ''
+    kindLabel.append(kindSelect)
+    const submit = create('button', 'iwc-button', '查询')
+    submit.type = 'submit'
+    submit.dataset.focusKey = 'history-submit'
+    const canQuery = typeof options.onHistoryQuery === 'function'
+    submit.disabled = !canQuery || state.busy === 'history'
+    if (!canQuery) {
+      search.disabled = true
+      kindSelect.disabled = true
+      submit.title = '未提供 history query 回调'
+    }
+    form.append(searchLabel, kindLabel, submit)
+    toolbar.append(form)
+    if (!canQuery) toolbar.append(create('span', 'iwc-unavailable', '历史查询端口未提供'))
   }
-  kindSelect.value = state.traceKind ?? query.filter?.kinds?.[0] ?? ''
-  kindLabel.append(kindSelect)
-  const submit = create('button', 'iwc-button', '查询')
-  submit.type = 'submit'
-  submit.dataset.focusKey = 'history-submit'
-  const canQuery = typeof options.onHistoryQuery === 'function'
-  submit.disabled = !canQuery || state.busy === 'history'
-  if (!canQuery) {
-    search.disabled = true
-    kindSelect.disabled = true
-    submit.title = '未提供 history query 回调'
-  }
-  form.append(searchLabel, kindLabel, submit)
-  toolbar.append(form)
-  if (!canQuery) toolbar.append(create('span', 'iwc-unavailable', '历史查询端口未提供'))
   panel.append(toolbar)
 
-  const historyState = projection.history
   const historyMeta = create('div', 'iwc-history-meta')
   if (historyState?.result === 'failed') {
     historyMeta.append(renderHistoryFailure(historyState))
   } else if (historyState?.result === 'missing' || !historyState) {
     historyMeta.append(create('span', 'iwc-missing', '来源未提供历史记录'))
+  } else if (state.mode === 'observation') {
+    const categories = [...new Set(items.map((entry) => TRACE_KIND_LABELS[entry.kind] || entry.kind))].join('、')
+    historyMeta.append(create('span', undefined, `只读轨迹 · ${items.length} 项${categories ? ` · 类别：${categories}` : ''}`))
+    if (items.some((entry) => !entry.turnId && !entry.unprojected)) {
+      historyMeta.append(create('span', 'iwc-missing', '真实轮次未投影'))
+    }
   } else {
     const cursor = historyState.cursor ? ` · cursor=${historyState.cursor}` : ''
     historyMeta.append(create('span', undefined, `${historyState.items.length} 条${cursor}${historyState.hasMore ? ' · 可加载更早记录' : ' · 已到最早记录'}`))
@@ -519,12 +620,31 @@ function renderTrace(projection, options, state, descriptorControls) {
   panel.append(historyMeta)
 
   const scroller = create('div', 'iwc-scroll iwc-trace-scroll')
-  const items = historyState?.result === 'ok' ? historyState.items : []
   if (items.length === 0) {
     scroller.append(create('p', 'iwc-missing', historyState?.result === 'failed' ? '历史读取失败，当前没有可显示轨迹' : '来源未提供轨迹记录'))
   } else {
     const list = create('div', 'iwc-trace-list')
-    for (const entry of items) list.append(renderTraceRow(entry, options, state, descriptorControls))
+    const groups = new Map()
+    for (const entry of items) {
+      const key = entry.turnId || entry.turnKey || '__unprojected__'
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(entry)
+    }
+    let turnIndex = 0
+    for (const [key, groupItems] of groups) {
+      const group = create('section', 'iwc-trace-group')
+      group.dataset.turnKey = key
+      const groupHead = create('header', 'iwc-trace-group-head')
+      const hasTurnId = groupItems.some((entry) => entry.turnId)
+      if (hasTurnId) turnIndex += 1
+      groupHead.append(create('span', 'iwc-kind-chip', hasTurnId ? `轮次 ${turnIndex}` : '轮次未投影'))
+      const groupTime = groupItems.find((entry) => entry.occurredAt)?.occurredAt
+      if (groupTime) groupHead.append(create('time', 'iwc-time', state.mode === 'observation' ? formatObservationTime(groupTime) : formatTime(groupTime)))
+      if (!hasTurnId && state.mode === 'observation') groupHead.append(create('span', 'iwc-missing', '真实轮次未投影；以下按投影顺序显示'))
+      group.append(groupHead)
+      for (const entry of groupItems) group.append(renderTraceRow(entry, options, state, descriptorControls))
+      list.append(group)
+    }
     scroller.append(list)
   }
   panel.append(scroller)
@@ -532,6 +652,7 @@ function renderTrace(projection, options, state, descriptorControls) {
 }
 
 function renderActions(projection, options, state) {
+  if (projection.mode === 'observation') return null
   const footer = create('footer', 'iwc-actions')
   footer.append(create('div', 'iwc-actions-head'))
   footer.querySelector('.iwc-actions-head').append(create('h3', undefined, '授权操作'))
@@ -561,49 +682,233 @@ function renderActions(projection, options, state) {
   return footer
 }
 
+function observationTurn(summary, sourceKind, occurredAt, detailLabel) {
+  const text = valueOrUnknown(summary, '摘要未投影')
+  const technical = containsTechnicalIdentity(text)
+  return {
+    sourceKind,
+    occurredAt,
+    markdown: technical ? '该条目包含技术细节，完整内容在折叠详情中。' : text,
+    details: technical ? [[detailLabel, text]] : undefined,
+  }
+}
+
+function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, tool, details, unprojected }) {
+  return {
+    kind,
+    occurredAt,
+    state,
+    summary,
+    sourceRef,
+    tool,
+    details,
+    unprojected,
+    turnKey: 'observation:turn-unprojected',
+  }
+}
+
+/**
+ * Read-only adapter for one observation node. It preserves the shared work-card
+ * projection shape while keeping every displayed fact tied to the typed node
+ * detail. The current observation contract has no `turnId` or result timestamp,
+ * so the adapter marks those gaps explicitly instead of inventing a turn.
+ */
+export function projectObservationWorkCard(input = {}) {
+  const node = input.node
+  if (!node || typeof node !== 'object') throw new TypeError('observation node projection is required')
+  const activity = Array.isArray(node.activity) ? node.activity : []
+  const toolSteps = Array.isArray(node.toolSteps) ? node.toolSteps : []
+  const turns = activity.map((item) => observationTurn(item.summary, 'progress', item.occurredAt, '活动原文'))
+  if (node.summary) turns.push(observationTurn(node.summary, 'result', node.updatedAt, '节点结论原文'))
+
+  const traceItems = activity.map((item) => observationTraceEntry({
+    kind: 'status',
+    occurredAt: item.occurredAt,
+    state: '已投影',
+    summary: observationHumanText(item.summary, '活动摘要未投影'),
+    sourceRef: item.activityRef,
+    details: [['activityRef', item.activityRef], ['summary', item.summary]],
+  }))
+
+  for (const step of toolSteps) {
+    const paired = step.status !== 'unknown'
+    const statusDisplay = step.statusDisplay || step.status || '未知'
+    traceItems.push(observationTraceEntry({
+      kind: 'tool-call',
+      occurredAt: step.occurredAt,
+      state: paired ? statusDisplay : '未返回',
+      summary: `${valueOrUnknown(step.name, '未标注工具')} · ${paired ? '调用与返回已配对' : '未返回'}`,
+      sourceRef: step.callId ?? step.stepId,
+      tool: {
+        callId: step.callId ?? step.stepId,
+        toolId: step.name,
+        status: step.status,
+        statusDisplay,
+        returned: step.returned,
+        paired,
+        callOccurredAt: step.occurredAt,
+        returnedAt: step.returnedAt,
+      },
+      details: [
+        ['callId', step.callId ?? step.stepId],
+        ['toolId', step.name],
+        ['status', step.status],
+        ['returned', step.returned],
+        ['callOccurredAt', step.occurredAt],
+        ['returnedAt', step.returnedAt],
+      ],
+    }))
+  }
+
+  if (node.summary) {
+    traceItems.push(observationTraceEntry({
+      kind: 'conclusion',
+      occurredAt: node.updatedAt,
+      state: node.stateDisplay || '已投影',
+      summary: observationHumanText(node.summary, '结论摘要未投影'),
+      sourceRef: 'summary',
+      details: [['summary', node.summary]],
+    }))
+  }
+
+  traceItems.push(observationTraceEntry({
+    kind: 'model-request',
+    state: '未投影',
+    summary: '模型请求轨迹未投影',
+    unprojected: true,
+    details: [['reason', 'observation projection has no typed model-request or turnId field']],
+  }))
+  if (toolSteps.length === 0) {
+    traceItems.push(observationTraceEntry({
+      kind: 'tool-result',
+      state: '未投影',
+      summary: '工具调用与返回轨迹未投影',
+      unprojected: true,
+      details: [['reason', 'observation projection has no typed toolSteps for this node']],
+    }))
+  }
+
+  const humanFacts = [
+    ['节点', observationHumanText(node.title, '未标注节点')],
+    ['类型', observationHumanText(node.kindDisplay, '未标注类型')],
+    ['状态', observationHumanText(node.stateDisplay, '未知')],
+    ['归属', observationHumanText(node.roleDisplay || node.ownerAgentRole, '未投影')],
+    ['更新时间', node.updatedAt ? formatObservationTime(node.updatedAt) : '未投影'],
+  ]
+
+  return {
+    surface: 'interaction-work-card',
+    mode: 'observation',
+    taskState: 'unknown',
+    stateLabel: valueOrUnknown(node.stateDisplay, '未知'),
+    statusbar: {
+      label: '只读节点观测',
+      state: 'ready',
+      detail: `${observationHumanText(node.title, '未标注节点')} · ${observationHumanText(node.kindDisplay, '未标注类型')} · ${observationHumanText(node.stateDisplay, '未知')}`,
+    },
+    cardMetadata: {
+      currentNode: observationHumanText(node.title, '未标注节点'),
+      nodeKind: observationHumanText(node.kindDisplay, '未标注类型'),
+      ownerId: observationHumanText(node.roleDisplay || node.ownerAgentRole, '未投影'),
+      nextStep: node.stateDisplay,
+      nextAction: '只读观测',
+      waitingOn: undefined,
+      startedAt: node.updatedAt,
+      provider: { state: '只读', lastEventAt: undefined },
+      transport: { connected: false, lastSyncedAt: undefined, stale: false },
+      settlement: { providerStopped: false, checkpointCommitted: false },
+      lastBusiness: { kind: 'observation', at: node.updatedAt, ref: undefined },
+      source: {
+        taskId: undefined,
+        operationId: undefined,
+        executionEpoch: node.iteration,
+        requestId: undefined,
+        turnId: undefined,
+      },
+    },
+    conversation: {
+      summary: {
+        goal: { text: observationHumanText(node.summary, '节点摘要未投影') },
+        facts: humanFacts,
+      },
+      turns,
+    },
+    history: {
+      query: { limit: traceItems.length },
+      result: 'ok',
+      items: traceItems,
+      cursor: undefined,
+      hasMore: false,
+    },
+    actions: [],
+    observation: {
+      nodeId: node.nodeId,
+      handoffs: Array.isArray(input.handoffs) ? input.handoffs : [],
+    },
+  }
+}
+
 function renderStatus(projection) {
   const metadata = projection.cardMetadata
   const status = create('header', 'iwc-status')
-  status.setAttribute('aria-label', '任务状态')
+  const observation = projection.mode === 'observation'
+  status.setAttribute('aria-label', observation ? '节点状态' : '任务状态')
   const top = create('div', 'iwc-status-top')
   const lifecycle = create('div', 'iwc-lifecycle')
-  if (projection.taskState === 'running' || projection.taskState === 'settling') {
+  if (!observation && (projection.taskState === 'running' || projection.taskState === 'settling')) {
     const dot = create('span', 'iwc-activity-dot')
     dot.setAttribute('aria-hidden', 'true')
     lifecycle.append(dot)
   }
-  lifecycle.append(create('strong', 'iwc-lifecycle-label', TASK_STATE_LABELS[projection.taskState] || '未知'))
-  lifecycle.append(create('span', 'iwc-state-chip', `任务 ${valueOrUnknown(projection.taskState)}`))
+  const stateLabel = projection.stateLabel || TASK_STATE_LABELS[projection.taskState] || '未知'
+  lifecycle.append(create('strong', 'iwc-lifecycle-label', stateLabel))
+  lifecycle.append(create('span', 'iwc-state-chip', observation ? `节点 ${stateLabel}` : `任务 ${valueOrUnknown(projection.taskState)}`))
   top.append(lifecycle)
   const source = projection.statusbar
-  const sourceChip = create('span', 'iwc-state-chip', `来源 ${source?.label || '未提供'}`)
+  const sourceChip = create('span', 'iwc-state-chip', observation ? `来源 ${source?.label || '只读投影'}` : `来源 ${source?.label || '未提供'}`)
   sourceChip.dataset.state = source?.state || 'unknown'
   top.append(sourceChip)
-  const providerChip = create('span', 'iwc-state-chip', `Provider ${valueOrUnknown(metadata.provider?.state)}`)
-  providerChip.dataset.state = metadata.provider?.state || 'unknown'
-  top.append(providerChip)
-  const transportChip = create('span', 'iwc-state-chip', `传输 ${metadata.transport?.connected ? '已连接' : '未连接'}`)
-  transportChip.dataset.state = metadata.transport?.connected ? 'connected' : 'disconnected'
-  top.append(transportChip)
+  if (observation) {
+    top.append(create('span', 'iwc-state-chip', `归属 ${valueOrUnknown(metadata.ownerId)}`))
+  } else {
+    const providerChip = create('span', 'iwc-state-chip', `Provider ${valueOrUnknown(metadata.provider?.state)}`)
+    providerChip.dataset.state = metadata.provider?.state || 'unknown'
+    top.append(providerChip)
+    const transportChip = create('span', 'iwc-state-chip', `传输 ${metadata.transport?.connected ? '已连接' : '未连接'}`)
+    transportChip.dataset.state = metadata.transport?.connected ? 'connected' : 'disconnected'
+    top.append(transportChip)
+  }
   status.append(top)
   if (source?.detail) status.append(create('p', 'iwc-status-detail', source.detail))
   const details = create('details', 'iwc-status-details')
   details.append(create('summary', undefined, '状态与技术身份'))
   const body = create('div')
-  renderFactList(body, [
-    ['当前节点', metadata.currentNode],
-    ['责任方', metadata.ownerId],
-    ['下一步', metadata.nextStep],
-    ['下一步操作', metadata.nextAction],
-    ['等待对象', metadata.waitingOn],
-    ['开始时间', metadata.startedAt],
-    ['Provider 最后事件', metadata.provider?.lastEventAt],
-    ['传输最后同步', metadata.transport?.lastSyncedAt],
-    ['传输状态', `${boolLabel(metadata.transport?.connected, '已连接', '未连接')} · stale=${boolLabel(metadata.transport?.stale, '是', '否')}`],
-    ['停止状态', `providerStopped=${boolLabel(metadata.settlement?.providerStopped, '是', '否')} · checkpointCommitted=${boolLabel(metadata.settlement?.checkpointCommitted, '是', '否')}`],
-    ['最后业务更新', `${valueOrUnknown(metadata.lastBusiness?.kind)} · ${valueOrUnknown(metadata.lastBusiness?.at)} · ${valueOrUnknown(metadata.lastBusiness?.ref)}`],
-  ])
-  body.append(create('p', 'iwc-source-ref', `task=${scopedValue(metadata.source?.taskId)} · operation=${scopedValue(metadata.source?.operationId)} · epoch=${valueOrUnknown(metadata.source?.executionEpoch)} · request=${valueOrUnknown(metadata.source?.requestId)} · turn=${valueOrUnknown(metadata.source?.turnId)}`))
+  renderFactList(body, observation
+    ? [
+        ['节点', metadata.currentNode],
+        ['归属', metadata.ownerId],
+        ['节点状态', stateLabel],
+        ['节点类型', metadata.nodeKind],
+        ['迭代', metadata.source?.executionEpoch],
+        ['更新时间', metadata.startedAt],
+        ['nodeId', projection.observation?.nodeId],
+      ]
+    : [
+        ['当前节点', metadata.currentNode],
+        ['责任方', metadata.ownerId],
+        ['下一步', metadata.nextStep],
+        ['下一步操作', metadata.nextAction],
+        ['等待对象', metadata.waitingOn],
+        ['开始时间', metadata.startedAt],
+        ['Provider 最后事件', metadata.provider?.lastEventAt],
+        ['传输最后同步', metadata.transport?.lastSyncedAt],
+        ['传输状态', `${boolLabel(metadata.transport?.connected, '已连接', '未连接')} · stale=${boolLabel(metadata.transport?.stale, '是', '否')}`],
+        ['停止状态', `providerStopped=${boolLabel(metadata.settlement?.providerStopped, '是', '否')} · checkpointCommitted=${boolLabel(metadata.settlement?.checkpointCommitted, '是', '否')}`],
+        ['最后业务更新', `${valueOrUnknown(metadata.lastBusiness?.kind)} · ${valueOrUnknown(metadata.lastBusiness?.at)} · ${valueOrUnknown(metadata.lastBusiness?.ref)}`],
+      ])
+  body.append(create('p', 'iwc-source-ref', observation
+    ? `node=${valueOrUnknown(projection.observation?.nodeId)} · epoch=${valueOrUnknown(metadata.source?.executionEpoch)}`
+    : `task=${scopedValue(metadata.source?.taskId)} · operation=${scopedValue(metadata.source?.operationId)} · epoch=${valueOrUnknown(metadata.source?.executionEpoch)} · request=${valueOrUnknown(metadata.source?.requestId)} · turn=${valueOrUnknown(metadata.source?.turnId)}`))
   details.append(body)
   status.append(details)
   return status
@@ -666,8 +971,10 @@ function restoreFocus(root, focusKey) {
 
 export function mountInteractionWorkCard(target, options = {}) {
   if (!target || target.nodeType !== 1) throw new TypeError('mountInteractionWorkCard requires an Element target')
+  const observationMode = options.mode === 'observation'
   const root = create('section', 'iwc-card')
-  root.setAttribute('aria-label', '交互工作卡')
+  root.setAttribute('aria-label', observationMode ? '只读节点工作卡' : '交互工作卡')
+  if (observationMode) root.classList.add('iwc-card--observation')
   target.replaceChildren(root)
   const content = create('div', 'iwc-content')
   root.append(content)
@@ -680,15 +987,18 @@ export function mountInteractionWorkCard(target, options = {}) {
 
   function render() {
     if (disposed || !projection) return
-    const state = { activeTab, traceSearch, traceKind, busy: null }
+    const state = { activeTab, traceSearch, traceKind, busy: null, mode: projection.mode }
     root.dataset.taskState = projection.taskState
+    root.dataset.mode = projection.mode || 'interaction'
     const focusKey = activeFocusKey(root)
-    content.replaceChildren(
+    const children = [
       renderStatus(projection),
       renderTabs(activeTab),
       renderPanels(projection, options, state, descriptorControls),
-      renderActions(projection, options, state),
-    )
+    ]
+    const actions = renderActions(projection, options, state)
+    if (actions) children.push(actions)
+    content.replaceChildren(...children)
     restoreFocus(root, focusKey)
   }
 
@@ -748,10 +1058,11 @@ export function mountInteractionWorkCard(target, options = {}) {
 
   function update(nextProjection) {
     if (disposed) return
-    assertProjection(nextProjection)
-    projection = nextProjection
-    traceSearch = nextProjection.history?.query?.search || ''
-    traceKind = nextProjection.history?.query?.filter?.kinds?.[0] || ''
+    const normalized = observationMode ? projectObservationWorkCard(nextProjection) : nextProjection
+    assertProjection(normalized)
+    projection = normalized
+    traceSearch = normalized.history?.query?.search || ''
+    traceKind = normalized.history?.query?.filter?.kinds?.[0] || ''
     render()
   }
 
