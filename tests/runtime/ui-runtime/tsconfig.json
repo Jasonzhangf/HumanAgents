@@ -1,0 +1,15 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/ui-runtime",
+    "noEmitOnError": true
+  },
+  "include": [
+    "node-modules.d.ts",
+    "**/*.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/runtime/src/**/*.ts"
+  ]
+}

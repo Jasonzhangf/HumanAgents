@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  canonicalJsonStringify,
   validateTaskCheckPolicy,
   validateTaskExecutionEvidence,
   validateTaskVerificationBinding,
@@ -30,9 +31,19 @@ export class TaskVerificationError extends Error {
   }
 }
 
-type SingleFlightPort = TaskVerificationExecutionPort & {
-  readonly executions?: Map<string, Promise<TaskCheckEvidence>>;
-};
+export class TaskVerificationIdentityConflictError extends TaskVerificationError {
+  readonly code = 'identity-conflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskVerificationIdentityConflictError';
+  }
+}
+
+interface SingleFlightEntry {
+  readonly identity: string;
+  readonly execution: Promise<TaskCheckEvidence>;
+}
 
 function sameTask(left: TaskVerificationBinding['taskId'], right: TaskExecutionEvidence['taskId']): boolean {
   return left.scope === right.scope && left.value === right.value;
@@ -102,7 +113,7 @@ function receiptMismatch(binding: TaskVerificationBinding, receipt: TaskVisualOb
 }
 
 export class TaskVerificationBridge implements TaskVerificationPort {
-  private readonly executions = new Map<string, Promise<TaskCheckEvidence>>();
+  private readonly executions = new Map<string, SingleFlightEntry>();
 
   constructor(private readonly options: TaskVerificationBridgeOptions) {
     if (this.options.evidenceScope.organId.scope !== 'organ'
@@ -165,6 +176,7 @@ export class TaskVerificationBridge implements TaskVerificationPort {
         }
         checks.push(evidence);
       } catch (error) {
+        if (error instanceof TaskVerificationIdentityConflictError) throw error;
         checks.push(this.failureEvidence(policyCheck, binding, error));
       }
     }
@@ -197,10 +209,27 @@ export class TaskVerificationBridge implements TaskVerificationPort {
     readonly check: TaskCheckPolicy;
   }): Promise<TaskCheckEvidence> {
     const key = `${input.binding.operationId.value}:${input.binding.executionEpoch}:${input.binding.attempt}:${input.check.checkId}`;
+    const identity = canonicalJsonStringify({
+      taskId: input.binding.taskId,
+      operationId: input.binding.operationId,
+      executionEpoch: input.binding.executionEpoch,
+      attempt: input.binding.attempt,
+      policyRef: input.policy.compiledRef,
+      policyDigest: input.policy.compiledDigest,
+      binding: input.binding,
+      check: input.check,
+    });
     const existing = this.executions.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.identity !== identity) {
+        throw new TaskVerificationIdentityConflictError(
+          `task verification single-flight identity conflict for ${key}: requested immutable verification identity does not match the existing execution`,
+        );
+      }
+      return existing.execution;
+    }
     const execution = this.runCheck(input);
-    this.executions.set(key, execution);
+    this.executions.set(key, { identity, execution });
     return execution;
   }
 
