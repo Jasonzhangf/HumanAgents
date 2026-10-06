@@ -645,6 +645,25 @@ function assertProjection(projection) {
   }
 }
 
+// F09: every re-render replaces the card subtree. Capture the focused node's
+// stable `data-focus-key` before the swap so the same control regains focus.
+function activeFocusKey(root) {
+  const active = document.activeElement
+  if (!active || !root.contains(active) || !active.dataset) return null
+  return active.dataset.focusKey || null
+}
+
+function escapeAttributeValue(value) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
+  return String(value).replace(/["\\]/g, '\\$&')
+}
+
+function restoreFocus(root, focusKey) {
+  if (!focusKey) return
+  const target = root.querySelector(`[data-focus-key="${escapeAttributeValue(focusKey)}"]`)
+  if (target && typeof target.focus === 'function') target.focus()
+}
+
 export function mountInteractionWorkCard(target, options = {}) {
   if (!target || target.nodeType !== 1) throw new TypeError('mountInteractionWorkCard requires an Element target')
   const root = create('section', 'iwc-card')
@@ -663,12 +682,14 @@ export function mountInteractionWorkCard(target, options = {}) {
     if (disposed || !projection) return
     const state = { activeTab, traceSearch, traceKind, busy: null }
     root.dataset.taskState = projection.taskState
+    const focusKey = activeFocusKey(root)
     content.replaceChildren(
       renderStatus(projection),
       renderTabs(activeTab),
       renderPanels(projection, options, state, descriptorControls),
       renderActions(projection, options, state),
     )
+    restoreFocus(root, focusKey)
   }
 
   function switchTab(nextTab) {
