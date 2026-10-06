@@ -466,6 +466,13 @@ test('production final submit persists one real subscription per execution mode 
       const receipt = await service.confirmExplicitRequirement(
         planConfirmation(interactionId, proposed.draft!.draftId, scenario.suffix, scenario.policy),
       );
+      if (scenario.policy.executionMode !== 'once') {
+        assert.equal(
+          service.listTasks().running.length,
+          0,
+          `${scenario.suffix}: a future execution plan does not start an immediate task`,
+        );
+      }
 
       const plans = await readPersistedPlans(file);
       const planEntries = Object.entries(plans)
