@@ -50,6 +50,9 @@ import {
   type DraftRejectClosure,
   type ExecutionPolicyDefinition,
   type Subscription,
+  type SubscriptionControlReceipt,
+  type SubscriptionControlRequest,
+  type SubscriptionState,
   type InteractionDecision,
   type InteractionHistoryQuery,
   type InteractionHistoryResult,
@@ -90,6 +93,7 @@ import {
   type RequirementSubmitReceipt,
 } from '../../../runtime/src/explicit-brain/router.js';
 import {
+  nextPolicySlotAfter,
   SubscriptionControlError,
   type SubscriptionControlPort,
   type SubscriptionSnapshot,
@@ -204,6 +208,35 @@ const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
 // delay is too short for a second localhost request to sample the queued state.
 const QUEUED_VISIBILITY_WINDOW_MS = 100;
 
+export type RuntimeExecutionMode = 'once' | 'scheduled' | 'recurring';
+
+/**
+ * Read-only display projection of one persisted execution plan.
+ *
+ * `state` is the durable `SubscriptionState` verbatim; the projection never
+ * invents a second vocabulary, so a terminal plan keeps its real cause.
+ *
+ * `canPause`/`canResume`/`canCancelFuture` restate the guards the control owner
+ * enforces in `decideSubscriptionControl`: pause requires `active`, resume
+ * requires `suspended`, and cancel-future is refused only when the plan is
+ * already `cancelled`. They are advisory display facts; the port re-checks them
+ * inside its own transaction, so a stale client action still gets the durable
+ * typed rejection and this projection never becomes a control truth.
+ *
+ * `nextDueAt` is the next committed policy slot after the durable
+ * `currentOccurrenceOrdinal`, named by the same slot owner `dueTimes`/`schedule`
+ * use. It is omitted when the committed schedule has no further slot.
+ */
+export interface RuntimeTaskPlanProjection {
+  readonly subscriptionId: string;
+  readonly state: SubscriptionState;
+  readonly executionMode: RuntimeExecutionMode;
+  readonly nextDueAt?: string;
+  readonly canPause: boolean;
+  readonly canResume: boolean;
+  readonly canCancelFuture: boolean;
+}
+
 type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
   readonly history: {
     readonly events: readonly RuntimeTaskEventProjection[];
@@ -217,6 +250,8 @@ type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
     readonly waiting: string;
     readonly connection: string;
   };
+  /** The persisted plan this task belongs to; absent when the task has no plan. */
+  readonly plan?: RuntimeTaskPlanProjection;
 };
 
 const LIFECYCLE_STATES = new Set([
@@ -970,6 +1005,37 @@ function subscriptionIdForRequirement(requirementId: string): string {
   return `subscription:${requirementId}`;
 }
 
+/**
+ * Read-only display projection of one persisted execution plan.
+ *
+ * `state` is the durable `SubscriptionState` verbatim: the projection never
+ * invents a second vocabulary, so a terminal plan keeps its real cause.
+ *
+ * `canPause`/`canResume`/`canCancelFuture` restate the guards the control owner
+ * enforces in `decideSubscriptionControl`: pause requires `active`, resume
+ * requires `suspended`, and cancel-future is refused only when the plan is
+ * already `cancelled`. They are advisory display facts; the port re-checks them
+ * inside its own transaction, so a stale client action still gets the durable
+ * typed rejection and this projection never becomes a control truth.
+ *
+ * `nextDueAt` is the next committed policy slot after the durable
+ * `currentOccurrenceOrdinal`, named by the same slot owner `dueTimes`/`schedule`
+ * use. It is omitted when the committed schedule has no further slot.
+ */
+function projectExecutionPlan(snapshot: SubscriptionSnapshot): RuntimeTaskPlanProjection {
+  const subscription = snapshot.subscription;
+  const next = nextPolicySlotAfter(snapshot.policy, subscription.currentOccurrenceOrdinal);
+  return {
+    subscriptionId: subscription.subscriptionId,
+    state: subscription.state,
+    executionMode: snapshot.policy.executionMode,
+    ...(next === undefined ? {} : { nextDueAt: next.dueAt }),
+    canPause: subscription.state === 'active',
+    canResume: subscription.state === 'suspended',
+    canCancelFuture: subscription.state !== 'cancelled',
+  };
+}
+
 function requirementIdForSubscription(subscriptionId: string): string {
   const prefix = 'subscription:';
   if (!subscriptionId.startsWith(prefix) || subscriptionId.length === prefix.length) {
@@ -1698,12 +1764,17 @@ export class UiRuntimeService {
     }
   }
 
-  deleteTask(taskId: TaskId): { readonly taskId: string; readonly deleted: true } {
+  async deleteTask(taskId: TaskId): Promise<{ readonly taskId: string; readonly deleted: true }> {
+    // Resolve the durable plan link before the delete removes the task record.
+    const snapshot = await this.executionPlanSnapshotForTask(taskId);
+    let deleted: { readonly taskId: string; readonly deleted: true };
     try {
-      return { taskId: this.coordinator.deleteTask(taskId).taskId.value, deleted: true };
+      deleted = { taskId: this.coordinator.deleteTask(taskId).taskId.value, deleted: true };
     } catch (error) {
       throw apiError(error);
     }
+    if (snapshot !== undefined) await this.cancelOrphanedExecutionPlan(taskId, snapshot);
+    return deleted;
   }
 
   async bulkTaskAction(taskIds: readonly TaskId[], action: 'delete' | 'stop'): Promise<{
@@ -1721,7 +1792,7 @@ export class UiRuntimeService {
     }[] = [];
     for (const taskId of taskIds) {
       try {
-        if (action === 'delete') this.deleteTask(taskId);
+        if (action === 'delete') await this.deleteTask(taskId);
         else await this.stop(taskId);
         results.push({ taskId: taskId.value, state: 'succeeded' });
       } catch (error) {
@@ -1922,6 +1993,150 @@ export class UiRuntimeService {
       return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()));
     } catch (error) {
       throw apiError(error);
+    }
+  }
+
+  /**
+   * The task dashboard plus the persisted plan this task belongs to, when it has
+   * one. The plan is a durable read, so the HTTP read model is composed here and
+   * the synchronous `taskDashboard` stays free of journal I/O for the internal
+   * callers that only need task state.
+   */
+  async taskDashboardWithPlan(taskId: TaskId): Promise<RuntimeTaskDashboardView> {
+    const dashboard = this.taskDashboard(taskId);
+    const plan = await this.executionPlanForTask(taskId);
+    return plan === undefined ? dashboard : { ...dashboard, plan };
+  }
+
+  /**
+   * The persisted plan a task belongs to, as a read-only display projection.
+   * Absent when the task has no persisted plan.
+   */
+  async executionPlanForTask(taskId: TaskId): Promise<RuntimeTaskPlanProjection | undefined> {
+    const snapshot = await this.executionPlanSnapshotForTask(taskId);
+    return snapshot === undefined ? undefined : projectExecutionPlan(snapshot);
+  }
+
+  /**
+   * The single production caller of the persisted plan control edge.
+   *
+   * The caller names the plan and the intent; `expectedPolicyRevision` and
+   * `expectedScheduleRevision` are read from the authoritative snapshot here and
+   * are never declared by the caller. The port re-checks both inside its own
+   * transaction, so a concurrent change is reported as the durable `stale`
+   * receipt instead of silently applying to a moved base.
+   */
+  async controlExecutionPlan(
+    subscriptionId: string,
+    input: {
+      readonly action: 'pause' | 'resume' | 'cancel-future';
+      readonly idempotencyKey: string;
+      readonly requestedAt: string;
+    },
+  ): Promise<SubscriptionControlReceipt> {
+    const port = this.subscriptionControl;
+    if (!port) {
+      throw new UiRuntimeApiError(
+        'execution-plan.control-unavailable',
+        RUNTIME_OWNER,
+        'execution plan control is not wired to the UI runtime',
+        'start the UI runtime with the durable subscription control port',
+        503,
+      );
+    }
+    const snapshot = await this.subscriptionSnapshot(port, subscriptionId);
+    if (snapshot === undefined) {
+      throw new UiRuntimeApiError(
+        'execution-plan.not-found',
+        RUNTIME_OWNER,
+        `no persisted execution plan: ${subscriptionId}`,
+        'read the persisted execution plans before controlling one',
+        404,
+      );
+    }
+    try {
+      return await port.control({
+        subscriptionId,
+        action: input.action,
+        expectedPolicyRevision: snapshot.policy.policyRevision,
+        expectedScheduleRevision: snapshot.subscription.scheduleRevision,
+        idempotencyKey: input.idempotencyKey,
+        requestedAt: input.requestedAt,
+      });
+    } catch (error) {
+      if (error instanceof ContractError) {
+        throw new UiRuntimeApiError(
+          'execution-plan.invalid-request',
+          RUNTIME_OWNER,
+          error.message,
+          'send a supported action, a non-empty idempotencyKey and a canonical requestedAt instant',
+          400,
+        );
+      }
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Resolve the persisted plan a task belongs to from durable links only. Two
+   * links exist and no third registry is added:
+   *   - a scheduled occurrence task is bound by the `OccurrenceClaimRecord.taskId`
+   *     the scheduler claimed it with;
+   *   - a confirmed requirement's own task is bound by the dispatch ledger entry,
+   *     whose requirement id names the plan.
+   */
+  private async executionPlanSnapshotForTask(taskId: TaskId): Promise<SubscriptionSnapshot | undefined> {
+    const port = this.subscriptionControl;
+    if (!port) return undefined;
+    for (const entry of this.dispatchLedger.values()) {
+      if (entry.taskId.value !== taskId.value) continue;
+      const envelope = this.requirementInbox.find(entry.draftId);
+      if (!envelope) continue;
+      const snapshot = await this.subscriptionSnapshot(port, subscriptionIdForRequirement(envelope.requirementId));
+      if (snapshot !== undefined) return snapshot;
+    }
+    for (const snapshot of await port.list()) {
+      if (snapshot.claims.some((claim) => claim.taskId.value === taskId.value)) return snapshot;
+    }
+    return undefined;
+  }
+
+  /**
+   * A deleted task must not leave a plan behind that keeps dispatching. The
+   * mechanism is the plan's own control edge (`cancel-future`), not a second
+   * lifecycle: a plan that is not `active` or `suspended` cannot dispatch, since
+   * `assertOccurrenceClaimable` requires `active`, so those states are left as
+   * they are and their durable cause is not overwritten.
+   *
+   * The task is deleted first, so a rejected delete (`task.busy`,
+   * `task.not.found`) never destroys a schedule. The two journals have no shared
+   * transaction, so a control failure after a successful delete is reported
+   * explicitly instead of being swallowed.
+   */
+  private async cancelOrphanedExecutionPlan(taskId: TaskId, snapshot: SubscriptionSnapshot): Promise<void> {
+    const port = this.subscriptionControl;
+    if (!port) return;
+    if (snapshot.subscription.state !== 'active' && snapshot.subscription.state !== 'suspended') return;
+    const idempotencyKey = `plan-orphan-cancel:${taskId.value}`;
+    try {
+      await port.control({
+        subscriptionId: snapshot.subscription.subscriptionId,
+        action: 'cancel-future',
+        expectedPolicyRevision: snapshot.policy.policyRevision,
+        expectedScheduleRevision: snapshot.subscription.scheduleRevision,
+        idempotencyKey,
+        requestedAt: this.now().toISOString(),
+      });
+    } catch (error) {
+      throw new UiRuntimeApiError(
+        'execution-plan.orphan-cancel-failed',
+        RUNTIME_OWNER,
+        `task ${taskId.value} was deleted but its execution plan ${snapshot.subscription.subscriptionId} is still live: ${error instanceof Error ? error.message : String(error)}`,
+        `cancel the orphaned plan through POST /api/plans/${encodeURIComponent(snapshot.subscription.subscriptionId)}/control`,
+        409,
+        undefined,
+        error,
+      );
     }
   }
 

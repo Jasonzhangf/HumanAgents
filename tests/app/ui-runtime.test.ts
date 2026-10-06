@@ -7017,7 +7017,7 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
   assert.deepEqual(service.taskDashboard(task.taskId).allowedActions, ['retry-stop']);
   const retryResult = await service.retryStop(task.taskId);
   assert.equal(retryResult.state, 'settling');
-  assert.throws(
+  await assert.rejects(
     () => service.deleteTask(task.taskId),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
   );
@@ -7270,7 +7270,7 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
       && event.terminalPhase === 'final'),
     true,
   );
-  assert.deepEqual(service.deleteTask(task.taskId), { taskId: task.taskId.value, deleted: true });
+  assert.deepEqual(await service.deleteTask(task.taskId), { taskId: task.taskId.value, deleted: true });
   const checkpointJournal = await readFile(
     join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
     'utf8',
