@@ -9,10 +9,14 @@
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
       "plannedOwnerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerSymbol": "UiRuntimeService",
-      "implementationStatus": "pending",
-      "productionWiringStatus": "pending",
-      "productionWiringGap": "production runtime 尚未接受订阅控制请求（modify/pause/resume/cancel-future）；server.ts 对 control 通道返回 explicit-brain.control.unsupported，service.ts 无 SubscriptionControlPort.control 调用点。create 边已在 service.ts:2972 交付，与本节点无关"
+      "ownerSymbol": "UiRuntimeService.controlExecutionPlan",
+      "implementationStatus": "implemented",
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/server.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/server.ts",
+      "productionOwnerSymbol": "POST /api/plans/{subscriptionId}/control",
+      "productionEvidence": "route 只从 URL 取 subscriptionId、从 body 取 action/idempotencyKey/requestedAt，再调用 UiRuntimeService.controlExecutionPlan；后者用 SubscriptionControlPort.snapshot 读取当前 policyRevision 补齐 expectedPolicyRevision（契约中 expectedScheduleRevision 对这三个动作非必填，故不发送：scheduleRevision 每次 applied control 都会前进，发送刚读到的值会让同一请求的诚实重放变成 conflict 而非 durable duplicate）后交给唯一 owner SubscriptionControlPort.control，并把持久化 SubscriptionControlReceipt 原样作为 200 返回；tests/app/plan-control.test.ts 通过真实 HTTP 入口验证 pause/resume/cancel-future 的 applied、duplicate、conflict、invalid-state 与未知 subscriptionId 的 typed 错误",
+      "controlActionCoverage": "production 入口接受 pause/resume/cancel-future；契约中的 modify 仍无 production 入口（缺少 newPolicy/newPolicyHash/confirmationRef 的确认收集面），入口以 typed 错误拒绝，因此本节点只覆盖三个动作"
     },
     "orchestrate_subscription_control": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
