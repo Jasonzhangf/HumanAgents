@@ -33,7 +33,16 @@ import {
   type ScopeRef,
   type TaskId,
 } from '../../packages/contracts/src/index.js';
-import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
+import {
+  ProviderAdapter,
+  ProviderAdapterError,
+  ResponsesProviderCodec,
+  filesystemProviderEvidenceSink,
+  type ProviderTransport,
+} from '../../packages/adapters/provider/src/index.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import { DEFAULT_AGENT_IO_POLICY } from '../../packages/runtime/src/agent-io/types.js';
+import type { RuntimeLivenessProjection } from '../../packages/ui/contracts/runtime.js';
 import {
   digestAgentTemplate,
   type AgentTemplateManifest,
@@ -8244,4 +8253,243 @@ test('runtime history states real tool pairing and keeps a succeeded result veri
     () => validateInteractionTraceEntry({ ...result, evidenceRefs: [] }),
     (error: unknown) => error instanceof ContractError,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Gap B: the original failure must survive to the client.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real provider transport whose probe fails. The adapter itself is the real
+ * producer of the reported error and of its `cause` chain: `callTransport`
+ * wraps the transport failure and keeps it as the cause.
+ */
+function failingProbeTransport(failure: Error): ProviderTransport {
+  return {
+    probe: async () => {
+      throw failure;
+    },
+    start: async () => {
+      throw new Error('start must not be called by the health probe');
+    },
+    resume: async () => {
+      throw new Error('resume must not be called by the health probe');
+    },
+    submit: async () => {
+      throw new Error('submit must not be called by the health probe');
+    },
+    observe: () => {
+      throw new Error('observe must not be called by the health probe');
+    },
+    requestStop: async () => {
+      throw new Error('requestStop must not be called by the health probe');
+    },
+    settle: async () => {
+      throw new Error('settle must not be called by the health probe');
+    },
+    close: async () => {
+      throw new Error('close must not be called by the health probe');
+    },
+  };
+}
+
+test('organ health HTTP keeps the original transport failure behind the provider adapter error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-cause-'));
+  // Four real links. The adapter reports the first; the rest are the original
+  // failure the human needs. Only the deepest link must stay unexposed.
+  const deepest = new Error('level-4 deepest transport detail');
+  const level3 = new Error('level-3 connect detail', { cause: deepest });
+  const level2 = new Error('level-2 socket detail', { cause: level3 });
+  const transportFailure = new Error('level-1 transport failure', { cause: level2 });
+  const adapter = new ProviderAdapter({
+    binding,
+    routeRef: 'organ-health-cause-route',
+    codec: new ResponsesProviderCodec(),
+    transport: failingProbeTransport(transportFailure),
+    evidence: filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets'))),
+  });
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port: adapter,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-organ-health-cause'),
+  });
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  testSessionByOrigin.set(new URL(server.url).origin, accessControl.sessionCookie(session).split(';')[0]!);
+  try {
+    const response = await fetch(`${server.url}/api/health/probe`, { method: 'POST' });
+    assert.equal(response.status, 409);
+    const body = await response.json() as {
+      readonly error: {
+        readonly code: string;
+        readonly ownerId: string;
+        readonly message: string;
+        readonly nextAction: string;
+        readonly evidenceRefs: readonly { readonly evidenceId: { readonly value: string } }[];
+        readonly cause?: {
+          readonly name: string;
+          readonly message: string;
+          readonly cause?: {
+            readonly name: string;
+            readonly message: string;
+            readonly cause?: {
+              readonly name: string;
+              readonly message: string;
+              readonly cause?: unknown;
+            };
+          };
+        };
+      };
+    };
+    // The typed contract is unchanged: the real adapter produced this failure.
+    assert.equal(body.error.code, 'transport.failure');
+    assert.equal(body.error.ownerId, 'humanagent.provider-adapter');
+    assert.equal(body.error.message, 'level-1 transport failure');
+    assert.match(body.error.nextAction, /recover:humanagent\.provider-adapter/);
+    assert.equal(body.error.evidenceRefs.length, 1);
+
+    // The original failure is retained instead of being dropped.
+    const cause = body.error.cause;
+    if (cause === undefined) throw new Error('the error body must keep the original failure the adapter reported');
+    assert.equal(cause.name, 'Error');
+    assert.equal(cause.message, 'level-1 transport failure');
+    assert.equal(cause.cause?.message, 'level-2 socket detail');
+    assert.equal(cause.cause?.cause?.message, 'level-3 connect detail');
+    // Bounded: the fourth link is not exposed, and no stack or extra property
+    // travels with the chain.
+    assert.equal(cause.cause?.cause?.cause, undefined);
+    assert.deepEqual(Object.keys(cause).sort(), ['cause', 'message', 'name']);
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Gap A: the dashboard must state what the runtime really observed.
+// ---------------------------------------------------------------------------
+
+type DashboardView = ReturnType<UiRuntimeService['taskDashboard']>;
+
+/** The dashboard's real liveness projection, or a failure when it is absent. */
+function livenessOf(dashboard: DashboardView): RuntimeLivenessProjection {
+  const liveness = (dashboard as { readonly liveness?: RuntimeLivenessProjection }).liveness;
+  if (liveness === undefined) {
+    throw new Error('the task dashboard must carry the liveness projection derived from real facts');
+  }
+  return liveness;
+}
+
+test('task dashboard states no-activity only past the declared silence budget and returns to working on real activity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-liveness-dashboard-'));
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const port = new FirstOperationGatedReplayPort({ binding, stepDelayMs: 50 }, firstGate);
+  let now = new Date('2026-10-06T12:00:00.000Z');
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, () => now);
+
+  const task = service.createTask({ title: 'liveness target', directive: 'observe real activity' });
+  service.startExecution(task.taskId, { prompt: 'observe real activity' });
+  await port.firstStarted;
+  // The execution started and reported a real event, then the provider stream
+  // stays silent: this is the stalled case, produced by a real gate.
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
+  const started = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(started.state, 'working');
+  assert.equal(started.silenceBudgetMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  // The activity instant is the newest real report, and its source names the
+  // real signal that produced it. Nothing here is invented by the dashboard.
+  assert.match(started.lastActivitySource ?? '', /^(provider\.request-identity|runtime\.event\.)/);
+  const activityMs = Date.parse(started.lastActivityAt ?? '');
+  assert.ok(Number.isFinite(activityMs), `the dashboard must report a real activity instant, got ${String(started.lastActivityAt)}`);
+  assert.ok(
+    (started.silentForMs ?? Number.NaN) < DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs,
+    `a running execution with fresh activity must not be reported as stalled, got silentForMs=${String(started.silentForMs)}`,
+  );
+
+  // One millisecond below the declared budget the execution is still working.
+  // The comparison matches the real watchdog, which fires at `>=` the budget.
+  now = new Date(activityMs + DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs - 1);
+  const belowBudget = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(belowBudget.state, 'working');
+  assert.equal(belowBudget.silentForMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs - 1);
+
+  // At the declared budget the silence is real, is measured, and is named.
+  now = new Date(activityMs + DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  const stalled = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(stalled.state, 'no-activity');
+  assert.equal(stalled.silentForMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  assert.equal(stalled.lastActivityAt, started.lastActivityAt);
+  assert.equal(
+    stalled.reason,
+    `no real activity for ${DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs} ms; the declared silence budget is ${DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs} ms`,
+  );
+
+  // Real activity resumes, so the card returns to working instead of staying
+  // stalled on a timer.
+  releaseFirst();
+  await waitFor(() => assert.equal(livenessOf(service.taskDashboard(task.taskId)).state, 'working'));
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  const settled = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(settled.state, 'idle');
+  assert.equal(settled.silentForMs, undefined);
+});
+
+test('task dashboard never claims working or no-activity for a task that has no real execution activity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-liveness-no-activity-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:liveness-no-activity',
+    rawInput: 'a requirement that is admitted but not dispatched',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'a requirement that is admitted but not dispatched',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create a queued requirement',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:liveness-no-activity',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-06T12:00:00.000Z',
+    payloadRef: 'asset://requirements/liveness-no-activity',
+  });
+
+  const queued = queuedDraftRow(service.listTasks(), 'draft-1');
+  const liveness = livenessOf(service.taskDashboard(queued.taskId));
+  // Nothing is executing, so no activity claim is made at all.
+  assert.equal(liveness.state, 'idle');
+  assert.equal(liveness.lastActivityAt, undefined);
+  assert.equal(liveness.silentForMs, undefined);
+  assert.equal(liveness.silenceBudgetMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  assert.equal(liveness.state === 'working' || liveness.state === 'no-activity', false);
 });

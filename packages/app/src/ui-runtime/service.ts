@@ -121,6 +121,9 @@ import {
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+// The declared silence budget is owned by the agent-io policy. The dashboard
+// reports it as the budget it was measured against; it is never restated here.
+import { DEFAULT_AGENT_IO_POLICY } from '../../../runtime/src/agent-io/types.js';
 import { projectRuntimeTaskHistory } from './turn-history.js';
 import {
   MemoryCoordinator,
@@ -146,6 +149,7 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import {
   type RuntimeDashboardProjection,
+  type RuntimeLivenessInput,
   type RuntimeSseEvent,
   type RuntimeStatusProjection,
   type RuntimeTaskDashboardProjection,
@@ -706,11 +710,51 @@ function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolSte
   return steps;
 }
 
+/**
+ * Build the liveness facts from real runtime signals only.
+ *
+ * The newest real activity instant is the latest of
+ *   - the request identity the provider binding itself reported for this task,
+ *     and
+ *   - the newest runtime event's own occurrence time.
+ * `record.updatedAt` is deliberately not a source: the UI-driven paths also
+ * write it, so it would let a browser refresh reset a real silence measurement.
+ *
+ * `active` comes from the lifecycle state, not from any internal running flag.
+ * A task whose lifecycle still says `running` is exactly the stalled case this
+ * projection must surface.
+ */
+function runtimeLivenessInput(
+  task: RuntimeTaskSnapshot,
+  observedAt: string,
+): RuntimeLivenessInput {
+  const requestIdentityAt = task.requestIdentity?.occurredAt;
+  const newestEvent = task.events.length === 0 ? undefined : task.events[task.events.length - 1];
+  let lastActivityAt = requestIdentityAt;
+  let lastActivitySource = requestIdentityAt === undefined ? undefined : 'provider.request-identity';
+  // The runtime's own record of the newest event wins a tie, because that is the
+  // instant the runtime observed the activity it recorded.
+  if (newestEvent !== undefined && (lastActivityAt === undefined || Date.parse(newestEvent.occurredAt) >= Date.parse(lastActivityAt))) {
+    lastActivityAt = newestEvent.occurredAt;
+    lastActivitySource = `runtime.event.${newestEvent.kind}`;
+  }
+  return {
+    active: task.state === 'running' || task.state === 'settling',
+    ...(lastActivityAt === undefined ? {} : { lastActivityAt, lastActivitySource }),
+    silenceBudgetMs: DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs,
+    observedAt,
+  };
+}
+
 function runtimeTaskDashboard(
   task: RuntimeTaskSnapshot,
   mode: 'fake' | 'rcc',
+  liveness?: RuntimeLivenessInput,
 ): RuntimeTaskDashboardView {
-  const projected = projectRuntimeTaskDashboard(task, mode);
+  const projected = projectRuntimeTaskDashboard({
+    ...task,
+    ...(liveness === undefined ? {} : { liveness }),
+  }, mode);
   const history = task.events;
   const omitted = Math.max(0, history.length - task.recentEvents.length);
   const stateLabel = projected.stateLabel;
@@ -890,6 +934,10 @@ function apiError(error: unknown): UiRuntimeApiError {
       providerError.nextAction ? `${providerError.nextAction.kind}${providerError.nextAction.ref ? `:${providerError.nextAction.ref}` : ''}` : 'inspect provider evidence',
       409,
       providerError.evidenceRefs,
+      // The adapter's own message states the phase that failed; the failure it
+      // wrapped is the original error the human needs. It is passed through
+      // unchanged and stays absent when the adapter reported no original error.
+      error.cause,
     );
   }
   return new UiRuntimeApiError(
@@ -898,6 +946,8 @@ function apiError(error: unknown): UiRuntimeApiError {
     error instanceof Error ? error.message : String(error),
     'inspect the runtime error and retry from a new operation',
     500,
+    undefined,
+    error instanceof Error ? error.cause : undefined,
   );
 }
 
@@ -1868,7 +1918,8 @@ export class UiRuntimeService {
 
   taskDashboard(taskId: TaskId): RuntimeTaskDashboardView {
     try {
-      return runtimeTaskDashboard(this.coordinatorOrQueuedTaskSnapshot(taskId), this.mode);
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()));
     } catch (error) {
       throw apiError(error);
     }
