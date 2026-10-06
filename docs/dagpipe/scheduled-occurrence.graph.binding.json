@@ -5,45 +5,71 @@
     "operator_version": "1"
   },
   "nodes": {
+    "scheduler_patrol": {
+      "ownerPath": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
+      "ownerSymbol": "SchedulerPatrol.run",
+      "implementationStatus": "implemented",
+      "subscriptionControlOwnerPath": "packages/runtime/src/subscriptions/index.ts",
+      "subscriptionControlOwnerRel": "packages/runtime/src/subscriptions/index.ts",
+      "subscriptionControlOwnerSymbol": "SubscriptionControlPort.schedule",
+      "productionWiringStatus": "pending-T14"
+    },
     "read_committed_subscription_state": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.snapshot",
       "implementationStatus": "implemented"
     },
     "recover_pending_reminder": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.schedule",
       "implementationStatus": "implemented"
     },
     "claim_due_occurrence": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.claim",
       "implementationStatus": "implemented"
     },
     "validate_occurrence_domain": {
       "ownerPath": "packages/core/src/subscription.ts",
       "ownerRel": "packages/core/src/subscription.ts",
+      "ownerSymbol": "assertOccurrenceClaimLease",
       "implementationStatus": "implemented"
     },
     "admit_occurrence_execution": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.consumeExecution",
       "implementationStatus": "implemented"
     },
     "execute_occurrence_task": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts",
-      "implementationStatus": "pending"
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.consumeExecution",
+      "implementationStatus": "implemented",
+      "consumerOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "consumerOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "consumerOwnerSymbol": "DurableOccurrenceConsumer.executeOccurrence",
+      "publicConsumer": "humanagent-serve-task@3"
     },
     "settle_occurrence": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.settleOccurrence",
       "implementationStatus": "implemented"
     },
     "publish_occurrence_result": {
-      "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts",
-      "implementationStatus": "pending"
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.settleOccurrence",
+      "implementationStatus": "partial",
+      "projectionOwnerPath": "packages/ui/projection/runtime.ts",
+      "projectionOwnerRel": "packages/ui/projection/runtime.ts",
+      "projectionOwnerSymbol": "projectRuntimeTaskDashboard",
+      "terminalCoverage": "success/failed/rejected/missing/blocked/cancelled/cleanup 由 terminal receipt 保留；当前尚未在 product UI 显示全部终态"
     }
   }
 }

@@ -5,7 +5,7 @@
     "title": "订阅控制请求从公开入口到持久化回执",
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "designStatus": "candidate",
-    "capabilityStatus": "pending",
+    "capabilityStatus": "partial",
     "controlContract": {
       "request": "SubscriptionControlRequest = ModifySubscriptionControlRequest | PauseSubscriptionControlRequest | ResumeSubscriptionControlRequest | CancelFutureSubscriptionControlRequest",
       "modify": "ModifySubscriptionControlRequest { action:'modify', newPolicy: ExecutionPolicyDefinition, newPolicyHash, confirmationRef, expectedPolicyRevision, expectedScheduleRevision, idempotencyKey, requestedAt }",
@@ -30,7 +30,17 @@
       "conflict": "durable_subscription_control_receipt(status=conflict)",
       "failure": "typed control rejection before transaction commit; subscription unchanged and no success receipt",
       "reminderInvalidation": "superseded pending reminders and their matching unclaimed occurrences become invalidated in the same transaction"
-    }
+    },
+    "executionModeContract": {
+      "once": "once 策略只允许单个 dueAt 触发；create 后 schedule 或 claim 只能消费一个 occurrence",
+      "scheduled": "scheduled 策略只允许 startAt 触发；到点后由同一条控制事务驱动一个 occurrence",
+      "recurring": "recurring 策略按 intervalMinutes/cadence 生成多个 occurrence；pause 或 cancel-future 只失效未 claim 的 future slots"
+    },
+    "occurrenceIsolation": "每个 occurrence 使用 subscriptionId、scheduleRevision、occurrenceOrdinal、dueAt 稳定身份；resume 生成新的未来槽位，不回写或复活已失效槽位",
+    "productionWiringStatus": "PENDING",
+    "productionWiringGap": "packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner 使用桩 RequirementSubmitPort；production app 尚未把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription",
+    "productionWiringOwner": "T14",
+    "productionWiringEvidence": "packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create/control"
   },
   "inputs": [
     {

@@ -7,35 +7,66 @@
   "nodes": {
     "sensory_inbox": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService"
     },
     "explicit_normalize": {
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake"
     },
     "create_reviewable_draft": {
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake.createDraft"
     },
     "revise_draft_to_approval": {
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake.refineDraft"
+    },
+    "confirm_exact_revision": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake.confirmDraftRevision",
+      "productionWiringStatus": "pending-T14"
     },
     "validate_draft_revision": {
-      "ownerPath": "packages/core/src/index.ts",
-      "ownerRel": "packages/core/src/index.ts"
+      "ownerPath": "packages/core/src/draft-revision.ts",
+      "ownerRel": "packages/core/src/draft-revision.ts",
+      "ownerSymbol": "assertDraftRevisionCurrent",
+      "publicExportOwnerPath": "packages/core/src/index.ts",
+      "publicExportOwnerRel": "packages/core/src/index.ts"
     },
     "submit_single_authorization": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerSymbol": "RequirementSubmissionOwner.submitFinal",
+      "confirmationOwnerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "confirmationOwnerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "confirmationOwnerSymbol": "ExplicitIntake.confirmDraftRevision",
+      "queueOwnerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "queueOwnerRel": "packages/runtime/src/intake/requirement-inbox.ts",
+      "queueOwnerSymbol": "RequirementInbox.append",
+      "rejectionOwnerPath": "packages/runtime/src/explicit-brain/router.ts",
+      "rejectionOwnerRel": "packages/runtime/src/explicit-brain/router.ts",
+      "rejectionOwnerSymbol": "rejectDraftRevision",
+      "markSubmittedOwnerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "markSubmittedOwnerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "markSubmittedOwnerSymbol": "ExplicitIntake.markRevisionSubmitted",
+      "duplicateTerminal": "duplicate-submit",
+      "staleTerminal": "confirmation-stale",
+      "productionWiringStatus": "pending-T14"
     },
     "compile_execution_policy": {
       "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
-      "ownerRel": "packages/runtime/src/explicit-brain/router.ts"
+      "ownerRel": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerSymbol": "ExecutionPolicyCompiler"
     },
     "persist_authorized_plan": {
       "ownerPath": "packages/adapters/jsonl/src/index.ts",
-      "ownerRel": "packages/adapters/jsonl/src/index.ts"
+      "ownerRel": "packages/adapters/jsonl/src/index.ts",
+      "ownerSymbol": "JsonlOrganJournal.transaction"
     }
   }
 }

@@ -7,30 +7,36 @@
   "nodes": {
     "recover_or_claim_plan": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.dispatchNextExplicitRequirement"
     },
     "validate_plan_lifecycle": {
-      "ownerPath": "packages/core/src/index.ts",
-      "ownerRel": "packages/core/src/index.ts"
+      "ownerPath": "packages/core/src/lifecycle.ts",
+      "ownerRel": "packages/core/src/lifecycle.ts",
+      "ownerSymbol": "assertTransitionLifecycle",
+      "publicExportOwnerPath": "packages/core/src/index.ts",
+      "publicExportOwnerRel": "packages/core/src/index.ts"
     },
     "admission_check": {
       "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
-      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts",
+      "ownerSymbol": "checkAdmission"
     },
     "load_verification_policy": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "plannedOwnerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
-      "plannedOwnerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
-      "status": "pending-w1b-w3v"
+      "ownerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerSymbol": "TaskVerificationBridge",
+      "implementationStatus": "implemented"
     },
     "correlate_task": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerSymbol": "RuntimeTaskCoordinator"
     },
     "durable_consume": {
       "ownerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
       "ownerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerSymbol": "DurableOccurrenceConsumer.executeOccurrence",
       "implementationStatus": "implemented",
       "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
       "ownerFenceStatus": "implemented",
@@ -42,48 +48,46 @@
     },
     "execute_task_turns": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService.dispatchNextExplicitRequirement"
     },
     "bind_verification_evidence": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "plannedOwnerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
-      "plannedOwnerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerSymbol": "TaskVerificationBridge.verify",
       "assetOwnerPath": "packages/adapters/filesystem/src/index.ts",
-      "status": "pending-w3v"
+      "implementationStatus": "implemented"
     },
     "produce_observation_evidence": {
       "ownerPath": "packages/adapters/operations/src/index.ts",
       "ownerRel": "packages/adapters/operations/src/index.ts",
-      "plannedOwnerPath": "packages/adapters/operations/src/aitest-observation-route.ts",
-      "plannedOwnerRel": "packages/adapters/operations/src/aitest-observation-route.ts",
-      "plannedBrowserPortOwnerPath": "packages/adapters/operations/src/browser-observation.ts",
-      "plannedBrowserPortOwnerRel": "packages/adapters/operations/src/browser-observation.ts",
+      "ownerSymbol": "DeterministicInspectRoute.execute",
       "assetOwnerPath": "packages/adapters/filesystem/src/index.ts",
-      "status": "pending-w3v-w3app"
+      "implementationStatus": "implemented"
     },
     "verify_task_result": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "plannedOwnerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
-      "plannedOwnerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
-      "processCheckOwnerPath": "packages/adapters/operations/src/task-checker-route.ts",
-      "nativeDefaultCheckOwnerPath": "packages/adapters/operations/src/native-task-check-route.ts",
-      "nativeCheckOwnerPath": "packages/adapters/operations/src/aitest-observation-route.ts",
-      "gatewayOwnerPath": "packages/app/src/tool-execution-gateway.ts",
-      "status": "pending-w3v"
+      "ownerPath": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerRel": "packages/runtime/src/ui-runtime/task-verification.ts",
+      "ownerSymbol": "TaskVerificationBridge.verify",
+      "implementationStatus": "implemented",
+      "observationOwnerPath": "packages/adapters/operations/src/deterministic-inspect.ts",
+      "observationOwnerRel": "packages/adapters/operations/src/deterministic-inspect.ts",
+      "gatewayOwnerPath": "packages/app/src/tool-execution-gateway.ts"
     },
     "stop_or_settle": {
       "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
+      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts",
+      "ownerSymbol": "RuntimeTaskCoordinator.stop"
     },
     "checkpoint_commit": {
-      "ownerPath": "packages/adapters/jsonl/src/index.ts",
-      "ownerRel": "packages/adapters/jsonl/src/index.ts"
+      "ownerPath": "packages/app/src/ui-runtime/journal.ts",
+      "ownerRel": "packages/app/src/ui-runtime/journal.ts",
+      "ownerSymbol": "FileCheckpointStore.commit"
     },
     "receipt_commit": {
       "ownerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
       "ownerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "ownerSymbol": "DurableOccurrenceConsumer.commitTerminal",
       "implementationStatus": "implemented",
       "ownerFenceContract": "docs/ui/occurrence-owner-fence-design-2026-10-04.md",
       "ownerFenceStatus": "implemented",
@@ -92,7 +96,8 @@
     },
     "task_terminal": {
       "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
+      "ownerRel": "packages/ui/projection/runtime.ts",
+      "ownerSymbol": "projectRuntimeTaskDashboard"
     }
   }
 }
