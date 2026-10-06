@@ -39,6 +39,11 @@ import {
   type ProviderEvent,
   type StopRequestReceipt,
   type TaskId,
+  canonicalJsonStringify,
+  type AuthorizedRequirement,
+  type DraftRevision,
+  type ExecutionPolicyDefinition,
+  type Subscription,
   type InteractionDecision,
   type WorkResult,
 } from '../../../contracts/src/index.js';
@@ -68,12 +73,19 @@ import {
 import {
   type ConfirmationLedgerState,
   ConfirmationLedger,
+  ExecutionPolicyCompiler,
   ExplicitBrainRouterError,
   type PersistedSubmittedReceipt,
+  type PersistedFinalSubmitReceipt,
   RequirementSubmissionOwner,
   type RequirementSubmitReceipt,
 } from '../../../runtime/src/explicit-brain/router.js';
-import { IntakeError } from '../../../runtime/src/intake/errors.js';
+import {
+  SubscriptionControlError,
+  type SubscriptionControlPort,
+  type SubscriptionSnapshot,
+} from '../../../runtime/src/subscriptions/index.js';
+import { ExplicitIntakeError, IntakeError } from '../../../runtime/src/intake/errors.js';
 import {
   ADMISSION_QUEUE_KINDS,
   ImplicitBrainFifo,
@@ -249,6 +261,12 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
   readonly memory: UiRuntimeMemoryComposition;
+  /**
+   * The single owner of persisted execution plans (subscriptions). The app
+   * assembly injects the durable port; the service only wires the confirmed
+   * revision's execution policy into it.
+   */
+  readonly subscriptionControl?: SubscriptionControlPort;
   readonly providerRetryConfig?: {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
@@ -266,6 +284,23 @@ export interface UiRuntimeServiceOptions {
 
 export interface ExplicitBrainReceipt {
   readonly requirement: RequirementSubmitReceipt;
+}
+
+/**
+ * The new-task form's single authorization submit. When it carries an
+ * execution policy the runtime takes the typed draft-revision path: it creates
+ * or refines the exact revision, confirms it, and submits it once. Without an
+ * execution policy the legacy confirmation path is unchanged.
+ */
+export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft {
+  readonly executionPolicy?: ExecutionPolicyDefinition;
+  readonly goal?: string;
+  readonly scope?: string;
+  readonly constraints?: readonly string[];
+  readonly deliverables?: readonly string[];
+  readonly idempotencyKey?: string;
+  readonly draftRevisionVersion?: number;
+  readonly draftRevisionHash?: string;
 }
 
 export interface ExplicitBrainDispatchReceipt {
@@ -690,6 +725,15 @@ function apiError(error: unknown): UiRuntimeApiError {
   if (error instanceof IntakeError) {
     return new UiRuntimeApiError(error.name, error.owner, error.message, error.nextAction, 409);
   }
+  if (error instanceof SubscriptionControlError) {
+    return new UiRuntimeApiError(
+      `execution-plan.${error.code}`,
+      RUNTIME_OWNER,
+      error.message,
+      'inspect the persisted execution plan before resubmitting',
+      error.code === 'not-found' ? 404 : 409,
+    );
+  }
   if (error instanceof RequirementAdmissionError) {
     const { decision } = error;
     return new UiRuntimeApiError(
@@ -792,6 +836,7 @@ export class UiRuntimeService {
   private readonly explicitIntake = new ExplicitIntake();
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
+  private readonly subscriptionControl?: SubscriptionControlPort;
   private readonly dispatchLedger = new Map<string, DispatchLedgerEntry>();
   private readonly requirementAdmissions = new Map<string, RequirementAdmissionObservation>();
   private readonly queuedRequirements = new Map<string, QueuedRequirementObservation>();
@@ -819,6 +864,7 @@ export class UiRuntimeService {
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
+    this.subscriptionControl = options.subscriptionControl;
     this.explicitBrainInterpreter = options.explicitBrainInterpreter;
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
       load: () => this.explicitBrainTraceRecords,
@@ -1956,6 +2002,11 @@ export class UiRuntimeService {
     this.requirementInbox.restoreState(restored.inbox);
     this.confirmationLedger.restoreState(restored.confirmationLedger);
     this.requirementSubmissions.restoreSubmittedReceipts(restored.submittedSubmissions ?? []);
+    this.requirementSubmissions.restoreFinalReceipts(
+      (restored as RuntimeExplicitBrainJournalState & {
+        readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
+      }).finalSubmissions ?? [],
+    );
     this.explicitBrainTraceRecords.length = 0;
     this.explicitBrainTraceRecords.push(...(restored.decisionTraces ?? []).map((record) => structuredClone(record)));
     this.dispatchLedger.clear();
@@ -2210,8 +2261,14 @@ export class UiRuntimeService {
     }
   }
 
-  async confirmExplicitRequirement(input: ConfirmRequirementDraft): Promise<ExplicitBrainReceipt> {
+  async confirmExplicitRequirement(input: ConfirmExplicitRequirementInput): Promise<ExplicitBrainReceipt> {
     try {
+      // A typed draft revision (or an execution policy that requests one) must
+      // final-submit through the exact revision path. The legacy path stays for
+      // interactions that never created a typed revision.
+      if (this.requiresTypedFinalSubmit(input)) {
+        return await this.confirmTypedExplicitRequirement(input);
+      }
       const confirmed: ConfirmedRequirementDraft = await this.explicitIntake.prepareConfirmation(input);
       this.confirmationLedger.registerDraft({
         interactionId: confirmed.interactionId,
@@ -2236,22 +2293,235 @@ export class UiRuntimeService {
         confirmationRef: confirmed.confirmationRef,
         inputRevision: confirmed.inputRevision,
       });
-      const envelope = this.requirementInbox.find(confirmed.draftId);
-      if (envelope) {
-        this.queuedRequirements.set(envelope.draftId, {
-          requirementId: envelope.requirementId,
-          draftId: envelope.draftId,
-          fifoSeq: envelope.fifoSeq,
-          normalizedInput: envelope.normalizedInput,
-          queue: classifyConfirmedRequirement(envelope),
-        });
-      }
+      this.projectConfirmedRequirement(confirmed.draftId);
       this.persistExplicitBrainState();
       this.scheduleImplicitConsumption();
       return { requirement };
     } catch (error) {
       throw apiError(error);
     }
+  }
+
+  private requiresTypedFinalSubmit(input: ConfirmExplicitRequirementInput): boolean {
+    if (input.executionPolicy !== undefined) return true;
+    if (input.interactionId === undefined) return false;
+    return this.explicitIntake.currentDraftRevision(input.interactionId) !== undefined;
+  }
+
+  /**
+   * The typed final-submit path: exact revision confirmation plus one
+   * `submitFinal` authorization. The execution policy, when present, is
+   * compiled and persisted as exactly one subscription.
+   */
+  private async confirmTypedExplicitRequirement(
+    input: ConfirmExplicitRequirementInput,
+  ): Promise<ExplicitBrainReceipt> {
+    const interactionId = input.interactionId;
+    if (interactionId === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.interaction-required',
+        'humanagent.runtime.explicit-brain',
+        'typed final submit requires the owning interaction identity',
+        'confirm the exact interaction that owns the draft revision',
+        409,
+      );
+    }
+    let revision = this.explicitIntake.currentDraftRevision(interactionId);
+    if (revision === undefined) {
+      revision = await this.createTypedRevisionForFinalSubmit(interactionId, input);
+    } else if (input.executionPolicy !== undefined
+      && canonicalJsonStringify(revision.executionPolicy) !== canonicalJsonStringify(input.executionPolicy)) {
+      // The execution type is part of the immutable revision. A revision that
+      // already fixed a different policy cannot be silently rebound at submit
+      // time; the caller must submit against a revision created with the policy.
+      throw new UiRuntimeApiError(
+        'execution-plan.policy-immutable',
+        RUNTIME_OWNER,
+        `draft revision already carries a different execution policy: ${revision.draftId}`,
+        'create the reviewable draft with the intended execution policy before final submission',
+        409,
+      );
+    }
+
+    const draftRevisionVersion = input.draftRevisionVersion ?? revision.revisionVersion;
+    const draftRevisionHash = input.draftRevisionHash ?? revision.revisionHash;
+    this.confirmationLedger.registerRevision({
+      interactionId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion,
+      draftRevisionHash,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      payloadRef: input.payloadRef,
+      requestKind: 'new-task-create',
+    });
+    const confirmation = await this.explicitIntake.confirmDraftRevision({
+      interactionId,
+      draftId: revision.draftId,
+      draftRevisionVersion,
+      draftRevisionHash,
+      confirmationRef: input.confirmationRef,
+      confirmedBy: input.confirmedBy,
+      confirmedAt: input.confirmedAt,
+      payloadRef: input.payloadRef,
+    });
+    this.confirmationLedger.confirmRevision(confirmation);
+
+    const submitted = await this.requirementSubmissions.submitFinal({
+      interactionId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion,
+      draftRevisionHash,
+      confirmationRef: input.confirmationRef,
+      idempotencyKey: input.idempotencyKey ?? `final-submit:${revision.draftId}:${draftRevisionVersion}:${input.confirmationRef}`,
+      requestKind: 'new-task-create',
+    });
+    if (revision.executionPolicy !== undefined) {
+      await this.persistAuthorizedExecutionPlan(submitted.requirement, revision.executionPolicy);
+    }
+    this.projectConfirmedRequirement(revision.draftId);
+    this.persistExplicitBrainState();
+    this.scheduleImplicitConsumption();
+    return {
+      requirement: {
+        status: submitted.status,
+        requirementId: submitted.requirement.requirementId,
+        draftId: submitted.requirement.draftId,
+        inputRevision: submitted.requirement.inputRevision,
+      },
+    };
+  }
+
+  private async createTypedRevisionForFinalSubmit(
+    interactionId: string,
+    input: ConfirmExplicitRequirementInput,
+  ): Promise<DraftRevision> {
+    const alreadyCreated = this.explicitIntake.currentDraftRevision(interactionId);
+    if (alreadyCreated !== undefined) return alreadyCreated;
+    const snapshot = await this.explicitIntake.inspect(interactionId);
+    const draft = snapshot.draft;
+    if (!draft) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.draft-missing',
+        'humanagent.runtime.explicit-intake',
+        `interaction has no reviewable draft to confirm: ${interactionId}`,
+        'generate the reviewable draft before final submission',
+        409,
+      );
+    }
+    try {
+      await this.explicitIntake.createDraft(interactionId, {
+        goal: input.goal ?? draft.proposal,
+        scope: input.scope ?? draft.normalizedInput,
+        constraints: input.constraints,
+        deliverables: input.deliverables,
+        normalizedInput: draft.normalizedInput,
+        proposedIntent: draft.proposedIntent,
+        proposal: draft.proposal,
+        matchedTasks: draft.matchedTasks,
+        knownFacts: draft.knownFacts,
+        decisionRefs: draft.decisionRefs,
+        ...(input.executionPolicy === undefined ? {} : { executionPolicy: input.executionPolicy }),
+      });
+    } catch (error) {
+      // A concurrent final submit may have created the revision first. Reuse
+      // that exact revision instead of failing the racing submit.
+      if (error instanceof ExplicitIntakeError && error.code === 'draft-already-created') {
+        const raced = this.explicitIntake.currentDraftRevision(interactionId);
+        if (raced !== undefined) return raced;
+      }
+      throw error;
+    }
+    const revision = this.explicitIntake.currentDraftRevision(interactionId);
+    if (revision === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.draft-missing',
+        'humanagent.runtime.explicit-intake',
+        `typed draft revision was not created: ${interactionId}`,
+        'inspect the interaction state before retrying final submission',
+        409,
+      );
+    }
+    return revision;
+  }
+
+  /**
+   * Compile the confirmed revision's execution policy and persist exactly one
+   * subscription. Repeating or racing the same revision reuses the durable
+   * subscription identity instead of creating a second plan.
+   */
+  private async persistAuthorizedExecutionPlan(
+    requirement: AuthorizedRequirement,
+    definition: ExecutionPolicyDefinition,
+  ): Promise<void> {
+    const port = this.subscriptionControl;
+    if (!port) {
+      throw new UiRuntimeApiError(
+        'execution-plan.persist-unavailable',
+        RUNTIME_OWNER,
+        'execution plan persistence is not wired to the UI runtime',
+        'start the UI runtime with the durable subscription control port',
+        503,
+      );
+    }
+    const compiled = new ExecutionPolicyCompiler().compile(requirement, definition);
+    const subscriptionId = `subscription:${requirement.requirementId}`;
+    const existing = await this.subscriptionSnapshot(port, subscriptionId);
+    if (existing) {
+      if (existing.policyHash !== compiled.policyHash) {
+        throw new UiRuntimeApiError(
+          'execution-plan.policy-conflict',
+          RUNTIME_OWNER,
+          `subscription already exists with a different policy: ${subscriptionId}`,
+          'inspect the persisted execution plan before resubmitting',
+          409,
+        );
+      }
+      return;
+    }
+    const subscription: Subscription = {
+      subscriptionId,
+      goalId: requirement.requirementId,
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: definition.busyPolicy,
+      currentOccurrenceOrdinal: 0,
+    };
+    try {
+      await port.create(subscription, compiled.definition, subscriptionId);
+    } catch (error) {
+      if (error instanceof SubscriptionControlError && error.code === 'conflict') {
+        const raced = await this.subscriptionSnapshot(port, subscriptionId);
+        if (raced && raced.policyHash === compiled.policyHash) return;
+      }
+      throw error;
+    }
+  }
+
+  private async subscriptionSnapshot(
+    port: SubscriptionControlPort,
+    subscriptionId: string,
+  ): Promise<SubscriptionSnapshot | undefined> {
+    try {
+      return await port.snapshot(subscriptionId);
+    } catch (error) {
+      if (error instanceof SubscriptionControlError && error.code === 'not-found') return undefined;
+      throw error;
+    }
+  }
+
+  private projectConfirmedRequirement(draftId: string): void {
+    const envelope = this.requirementInbox.find(draftId);
+    if (!envelope) return;
+    this.queuedRequirements.set(envelope.draftId, {
+      requirementId: envelope.requirementId,
+      draftId: envelope.draftId,
+      fifoSeq: envelope.fifoSeq,
+      normalizedInput: envelope.normalizedInput,
+      queue: classifyConfirmedRequirement(envelope),
+    });
   }
 
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
@@ -2749,18 +3019,22 @@ export class UiRuntimeService {
   }
 
   private persistExplicitBrainState(): void {
+    const state: RuntimeExplicitBrainJournalState & {
+      readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
+    } = {
+      intake: this.explicitIntake.exportState(),
+      inbox: this.requirementInbox.exportState(),
+      confirmationLedger: this.confirmationLedger.exportState(),
+      dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
+      requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
+      submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
+      finalSubmissions: this.requirementSubmissions.finalReceipts(),
+      decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
+      taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
+    };
     (this.options.interactionJournal ?? this.options.journal)?.append({
       kind: 'explicit-brain.state',
-      state: {
-        intake: this.explicitIntake.exportState(),
-        inbox: this.requirementInbox.exportState(),
-        confirmationLedger: this.confirmationLedger.exportState(),
-        dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
-        requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
-        submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
-        decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
-        taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
-      },
+      state,
     });
   }
 }

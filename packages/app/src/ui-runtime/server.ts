@@ -1,7 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
-import { id, validateInteractionDecision, type TaskId } from '../../../contracts/src/index.js';
+import {
+  id,
+  validateExecutionPolicyDefinition,
+  validateInteractionDecision,
+  type ExecutionPolicyDefinition,
+  type InteractionRequestKind,
+  type TaskId,
+} from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
@@ -204,6 +211,15 @@ function requirePrompt(body: Record<string, unknown>): string {
   return value;
 }
 
+function optionalString(body: Record<string, unknown>, key: string): string | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be a non-empty string`, `provide a valid ${key}`);
+  }
+  return value;
+}
+
 function requirePositiveInteger(body: Record<string, unknown>, key: string): number {
   const value = body[key];
   if (!Number.isSafeInteger(value) || Number(value) < 1) {
@@ -226,6 +242,43 @@ function requireRequirementIntent(body: Record<string, unknown>, key: string): R
     throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be append, change, or create`, `provide a valid ${key}`);
   }
   return value;
+}
+
+const INTERACTION_REQUEST_KINDS: ReadonlySet<InteractionRequestKind> = new Set([
+  'new-task-create',
+  'new-task-preview',
+  'existing-task-change',
+  'status-query',
+  'clarification',
+  'refinement',
+]);
+
+function optionalInteractionRequestKind(body: Record<string, unknown>): InteractionRequestKind | undefined {
+  const value = body.requestKind;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !INTERACTION_REQUEST_KINDS.has(value as InteractionRequestKind)) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field requestKind is not a typed interaction request kind', 'provide a valid requestKind');
+  }
+  return value as InteractionRequestKind;
+}
+
+function optionalExecutionPolicy(body: Record<string, unknown>): ExecutionPolicyDefinition | undefined {
+  const value = body.executionPolicy;
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field executionPolicy must be an object', 'provide a typed execution policy');
+  }
+  try {
+    validateExecutionPolicyDefinition(value as ExecutionPolicyDefinition);
+  } catch (error) {
+    throw new UiRuntimeApiError(
+      'request.invalid-field',
+      APP_OWNER,
+      `request field executionPolicy is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      'provide a valid execution policy',
+    );
+  }
+  return value as ExecutionPolicyDefinition;
 }
 
 function writeSse(response: ServerResponse, event: RuntimeSseEvent): void {
@@ -682,10 +735,12 @@ async function handleRequest(
         throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field channel must be business', 'provide business');
       }
       const inputRevision = body.inputRevision === undefined ? 1 : requirePositiveInteger(body, 'inputRevision');
+      const requestKind = optionalInteractionRequestKind(body);
       const interactionId = await service.receiveExplicitInput({
         sourceRef: requireString(body, 'sourceRef'),
         rawInput: requireString(body, 'rawInput'),
         channel,
+        ...(requestKind === undefined ? {} : { requestKind }),
       }, inputRevision);
       writeJson(response, 201, { interactionId });
       return;
@@ -790,6 +845,10 @@ async function handleRequest(
     const explicitConfirmation = /^\/api\/explicit\/interactions\/([^/]+)\/confirmation$/.exec(path);
     if (explicitConfirmation && method === 'POST') {
       const body = await readBody(request);
+      const executionPolicy = optionalExecutionPolicy(body);
+      const goal = optionalString(body, 'goal');
+      const scope = optionalString(body, 'scope');
+      const idempotencyKey = optionalString(body, 'idempotencyKey');
       const receipt = await service.confirmExplicitRequirement({
         interactionId: decodeURIComponent(explicitConfirmation[1]!),
         draftId: requireString(body, 'draftId'),
@@ -798,6 +857,12 @@ async function handleRequest(
         confirmedBy: requireString(body, 'confirmedBy'),
         confirmedAt: requireString(body, 'confirmedAt'),
         payloadRef: requireString(body, 'payloadRef'),
+        ...(executionPolicy === undefined ? {} : { executionPolicy }),
+        ...(goal === undefined ? {} : { goal }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        ...(body.deliverables === undefined ? {} : { deliverables: requireStringArray(body, 'deliverables') }),
+        ...(body.constraints === undefined ? {} : { constraints: requireStringArray(body, 'constraints') }),
       });
       writeJson(response, 200, receipt);
       return;

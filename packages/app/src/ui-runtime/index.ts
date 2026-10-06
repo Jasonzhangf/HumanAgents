@@ -20,6 +20,8 @@ import {
   filesystemProviderEvidenceSink,
 } from '../../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../../adapters/filesystem/src/index.js';
+import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
+import { SubscriptionControlPort } from '../../../runtime/src/subscriptions/index.js';
 import type { WebSearchBackendConfig } from '../../../config/src/index.js';
 import { FileCheckpointStore, UiRuntimeJournal } from './journal.js';
 import { UiRuntimeApiError } from './errors.js';
@@ -219,6 +221,12 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
   const attentionPort = new InMemoryAttentionPort();
   const modeRoot = join(options.checkpointRoot, options.mode);
   const journal = new UiRuntimeJournal(join(modeRoot, 'ui-runtime-journal.jsonl'));
+  const subscriptionJournalPath = join(modeRoot, 'subscriptions.jsonl');
+  const subscriptionControl = new SubscriptionControlPort(
+    new JsonlOrganJournal(subscriptionJournalPath),
+    { organId: options.organId },
+    subscriptionJournalPath,
+  );
   const interactionJournal = options.interactionRoot
     ? new UiRuntimeJournal(join(options.interactionRoot, 'sessions', 'explicit-brain.jsonl'))
     : undefined;
@@ -276,6 +284,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     explicitBrainInterpreter,
     ...(interactionJournal === undefined ? {} : { interactionJournal }),
     memory: options.memory,
+    subscriptionControl,
     ...(options.runtimeComposition === undefined ? {} : { runtimeComposition: options.runtimeComposition }),
   });
   await service.hydrate();
