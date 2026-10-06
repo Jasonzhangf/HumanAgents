@@ -20,7 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { cpSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
+import { captureDashboardEvidence, captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
 import { countTurnEvidenceFor, journalPathFor } from '../lib/journal.mjs';
 
 export const SCENARIO = 'aitest';
@@ -99,7 +99,8 @@ export async function runAitestScenario(binding) {
   await captureScreenshot(binding, '03-aitest-run-queue');
   evidence.screenshots.push(`${binding.screenshotsDir}/03-aitest-run-queue.png`);
 
-  const dashboard = await waitForTerminal(binding);
+  const dashboard = await waitForTerminal(binding, { timeoutMs: 1_200_000 });
+  const dashboardEvidence = await captureDashboardEvidence(binding);
   await captureScreenshot(binding, '04-aitest-task-result');
   evidence.screenshots.push(`${binding.screenshotsDir}/04-aitest-task-result.png`);
 
@@ -188,6 +189,12 @@ export async function runAitestScenario(binding) {
       animation: checker.animation,
     },
     outputPreview: String(dashboard.output ?? '').slice(0, 1800),
+    dashboardProbe: dashboardEvidence.dashboardProbe,
+    toolStepEvidence: dashboardEvidence.toolStepEvidence,
+    executeNode: dashboardEvidence.executeNode,
+    observation: dashboardEvidence.observation,
+    taskDashboardDom: dashboardEvidence.taskDashboardDom,
+    terminalSse: dashboardEvidence.sse,
     humanObservation:
       `result.html is a standalone document embedding one inline SVG; checker animation=${JSON.stringify(checker.animation)}.`,
   };
