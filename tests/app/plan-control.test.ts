@@ -8,6 +8,14 @@
 // real supervisor lease, the real subscription control port, the real occurrence
 // consumer and the real execution coordinator. Only the provider port is the
 // fake replay runtime the rest of the app suite uses.
+//
+// `stale` is structurally unreachable through this entry, so it is deliberately
+// not manufactured here: the client cannot declare a revision, the service reads
+// `expectedPolicyRevision` from the authoritative snapshot inside the same
+// request, and the port re-checks it inside its own transaction. A `stale`
+// receipt would need `policyRevision` to move between those two points, and the
+// only action that moves it is `modify`, which has no production entry. `stale`
+// stays reachable and covered at the port level in tests/runtime/subscriptions.
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -288,6 +296,127 @@ test('stopping one running occurrence leaves the recurring schedule intact', asy
     const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
     assert.equal(planFor(status, requirementId).state, 'active');
     assert.equal(planFor(status, requirementId).scheduleRevision, 1);
+  } finally {
+    await harness.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a suspended plan dispatches nothing at its due time and resume re-arms the slot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-plan-control-suspended-'));
+  // Comfortably outside the patrol's one second due-time grace window, so the
+  // suspension is committed before the slot can even be scheduled.
+  const startAt = new Date(Date.now() + 5_000).toISOString();
+  const harness = await startHarness({ root, intervalMs: 250 });
+  try {
+    const requirementId = await persistPlan(harness, 'pause the plan before its due time', scheduledPolicy(startAt));
+    const subscriptionId = `subscription:${requirementId}`;
+    const paused = await receiptOf(await controlPlan(harness, subscriptionId, 'pause', 'plan-control-before-due-pause'));
+    assert.equal(paused.status, 'applied');
+
+    // Let the due instant pass while the plan is suspended.
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, Date.parse(startAt) - Date.now()) + 1_500));
+    const during = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    const suspended = planFor(during, requirementId);
+    assert.equal(suspended.state, 'suspended');
+    assert.equal(suspended.occurrences.length, 0, 'a suspended plan never schedules its slot');
+    assert.equal(during.claimed, 0);
+    assert.equal(during.executed, 0);
+    assert.equal(during.settled, 0);
+    assert.equal(harness.port.starts.length, 0, 'a suspended plan dispatched nothing at its due time');
+
+    // Resume re-arms the slot: the assertion is that it really dispatches and
+    // settles, not merely that the state moved back to active.
+    const resumed = await receiptOf(await controlPlan(harness, subscriptionId, 'resume', 'plan-control-before-due-resume'));
+    assert.equal(resumed.status, 'applied');
+    await waitFor(async () => {
+      const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+      assert.equal(planFor(status, requirementId).settlements.length, 1, issueText(status));
+    });
+    const after = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    assert.equal(planFor(after, requirementId).settlements[0]!.verificationStatus, 'success');
+    assert.equal(harness.port.starts.length, 1, 'resume re-armed the slot and it dispatched exactly once');
+  } finally {
+    await harness.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancel-future does not stop an already-claimed in-flight execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-plan-control-in-flight-'));
+  const startAt = new Date(Date.now() + 2_500).toISOString();
+  // Slow provider steps keep the claimed occurrence genuinely in flight while the
+  // plan is cancelled: that is the window the graph's `linearization` rule covers
+  // ("claim committed before control keeps the authorized immutable policy
+  // snapshot for that executionEpoch").
+  const harness = await startHarness({ root, intervalMs: 250, stepDelayMs: 600 });
+  try {
+    const requirementId = await persistPlan(harness, 'cancel the future while one run is in flight', scheduledPolicy(startAt));
+    const subscriptionId = `subscription:${requirementId}`;
+    await waitFor(async () => {
+      assert.equal(harness.port.starts.length, 1, 'the claimed occurrence reached its real execution');
+    });
+    const inFlight = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    assert.equal(planFor(inFlight, requirementId).occurrences[0]?.state, 'claimed');
+
+    const cancelled = await receiptOf(await controlPlan(harness, subscriptionId, 'cancel-future', 'plan-control-in-flight-cancel'));
+    assert.equal(cancelled.status, 'applied');
+    assert.deepEqual(
+      cancelled.supersededUnclaimedOccurrences,
+      [],
+      'a claimed occurrence is not an unclaimed future slot and must not be superseded',
+    );
+    assert.equal(
+      planFor(await harness.json<SchedulerStatusView>('/api/runtime/scheduler'), requirementId).state,
+      'cancelled',
+    );
+
+    // The execution already authorized for this epoch still reaches its verified
+    // terminal and settles through the durable port.
+    await waitFor(async () => {
+      const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+      assert.equal(planFor(status, requirementId).settlements.length, 1, issueText(status));
+    });
+    const settled = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    assert.equal(planFor(settled, requirementId).settlements[0]!.verificationStatus, 'success');
+    assert.equal(harness.port.starts.length, 1, 'the control dispatched no replacement execution');
+  } finally {
+    await harness.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancel-future on a claimed slot that has not started yet dispatches nothing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-plan-control-claimed-cancel-'));
+  const startAt = new Date(Date.now() + 4_000).toISOString();
+  const harness = await startHarness({ root, intervalMs: 250 });
+  try {
+    const requirementId = await persistPlan(harness, 'cancel the future inside the due-time grace window', scheduledPolicy(startAt));
+    const subscriptionId = `subscription:${requirementId}`;
+    // The patrol claims the slot inside its grace window, before the due instant.
+    await waitFor(async () => {
+      const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+      assert.equal(planFor(status, requirementId).occurrences[0]?.state, 'claimed');
+    });
+    assert.equal(harness.port.starts.length, 0, 'the claim happened before the real execution');
+
+    const cancelled = await receiptOf(await controlPlan(harness, subscriptionId, 'cancel-future', 'plan-control-claimed-cancel'));
+    assert.equal(cancelled.status, 'applied');
+    assert.deepEqual(cancelled.supersededUnclaimedOccurrences, []);
+
+    // Past the due instant the claimed slot must still not run: a cancelled plan
+    // never dispatches.
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, Date.parse(startAt) - Date.now()) + 1_500));
+    const after = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    assert.equal(planFor(after, requirementId).state, 'cancelled');
+    assert.equal(after.executed, 0);
+    assert.equal(harness.port.starts.length, 0, 'a cancelled plan dispatched nothing after the due instant');
+    // Observed residual, NOT a desired end state: the patrol skips non-active
+    // plans, so the claim taken in the grace window is never driven to a
+    // settlement and stays `claimed` in the durable snapshot. This fence records
+    // the current behaviour; if the residual is ever fixed, update this assertion.
+    assert.equal(planFor(after, requirementId).occurrences[0]?.state, 'claimed');
+    assert.equal(planFor(after, requirementId).settlements.length, 0);
   } finally {
     await harness.close();
     await rm(root, { recursive: true, force: true });
