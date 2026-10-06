@@ -17,6 +17,7 @@ const runtimeStatus = (function(){try {return document.querySelector('[data-runt
 const visibleState = document.querySelector('[data-visible-state]')
 const interactionIdLabel = document.querySelector('[data-interaction-id]')
 const inspection = document.querySelector('[data-inspection]')
+const draftFeedback = document.querySelector('[data-draft-feedback]')
 const inputForm = document.querySelector('[data-explicit-input]')
 const matchingForm = document.querySelector('[data-explicit-match]')
 const proposalForm = document.querySelector('[data-explicit-proposal]')
@@ -93,9 +94,26 @@ function setFlow({ state, task, action, note, meta }) {
   if (meta !== undefined) flowMeta.textContent = meta
 }
 
+function renderDraftFeedback(draft) {
+  clearNode(draftFeedback)
+  const fields = draft
+    ? [
+        ['意图', draft.proposedIntent],
+        ['规范化输入', draft.normalizedInput],
+        ['已知事实', draft.knownFacts],
+        ['建议', draft.proposal],
+      ]
+    : [['状态', '尚未生成整理反馈。']]
+  for (const [label, content] of fields) {
+    const row = element('div')
+    row.append(element('dt', label), element('dd', readable(content)))
+    draftFeedback.append(row)
+  }
+}
+
 function renderInspection(snapshot) {
   currentInspection = snapshot
-  visibleState.textContent = readable(snapshot.state)
+  if (visibleState) visibleState.textContent = readable(snapshot.state)
   interactionIdLabel.textContent = `interaction=${readable(snapshot.interactionId)}`
   clearNode(inspection)
   for (const [label, content] of [
@@ -112,11 +130,11 @@ function renderInspection(snapshot) {
     row.append(element('dt', label), element('dd', readable(content)))
     inspection.append(row)
   }
+  renderDraftFeedback(snapshot.draft)
   showServerResult(snapshot)
   if (snapshot.draft) {
     field(confirmationForm, 'draftId').value = snapshot.draft.draftId
     field(confirmationForm, 'inputRevision').value = String(snapshot.draft.inputRevision)
-    field(matchingForm, 'normalizedInput').value = snapshot.draft.normalizedInput
   }
   const state = snapshot.state
   matchButton.disabled = !(interactionId && state === 'received')
@@ -173,7 +191,6 @@ inputForm.addEventListener('submit', (event) => {
     })
     interactionId = result.interactionId
     await refreshInspection()
-    field(matchingForm, 'normalizedInput').value = value(inputForm, 'rawInput')
     return result
   }, '输入已接收；正在调用 interpret。', { timeoutMs: INTERPRET_TIMEOUT_MS, label: 'interpretExplicitInput' })
 })
@@ -186,7 +203,7 @@ matchingForm.addEventListener('submit', (event) => {
     if (!Array.isArray(matchedTasks)) throw new Error('matchedTasks must be a JSON array')
     if (currentInspection?.state === 'received') await api.beginExplicitMatching(interactionId)
     await api.recordExplicitMatch(interactionId, {
-      normalizedInput: value(matchingForm, 'normalizedInput'),
+      normalizedInput: currentInspection?.draft?.normalizedInput || currentInspection?.rawInput || '',
       matchedTasks,
       knownFacts: value(matchingForm, 'knownFacts').split('\n').map((item) => item.trim()).filter(Boolean),
     })
