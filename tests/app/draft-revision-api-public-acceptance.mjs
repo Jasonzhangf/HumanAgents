@@ -216,16 +216,55 @@ async function main() {
     }
     record('regenerate', { revision: regenerated.body.revision });
 
+    const policyRefined = await post(`/api/explicit/interactions/${encodeURIComponent(main.interactionId)}/refine`, {
+      draftId: regenerated.body.revision.draftId,
+      baseRevisionVersion: regenerated.body.revision.revisionVersion,
+      requestedRevisionHash: regenerated.body.revision.revisionHash,
+      fields: {
+        goal: 'Summarize the workspace marker file precisely and include its name',
+        scope: 'Read only the workspace marker file and report its contents',
+        normalizedInput: 'Summarize the workspace marker file precisely and include its file name.',
+        executionPolicy: oncePolicy,
+      },
+      instructionRef: `policy:${main.interactionId}`,
+      idempotencyKey: `policy:${main.interactionId}:1`,
+    });
+    const policyRevision = policyRefined.body?.revision;
+    if (policyRefined.status !== 200
+      || !policyRevision
+      || policyRevision.revisionVersion <= regenerated.body.revision.revisionVersion
+      || policyRevision.executionPolicy?.policyId !== oncePolicy.policyId) {
+      fail('refine.policy-missing', 'public refine did not bind the execution policy to a newer typed revision', policyRefined);
+    }
+    for (const field of ['policyId', 'policyRevision', 'canonicalInstant', 'timezone', 'dstMode', 'dstMissedPolicy', 'dstAmbiguousPolicy', 'latePolicy', 'busyPolicy']) {
+      if (policyRevision.executionPolicy[field] !== oncePolicy[field]) {
+        fail('refine.policy-field-mismatch', `refined execution policy lost ${field}`, { field, policyRevision, oncePolicy });
+      }
+    }
+    const policyInspection = await request(`/api/explicit/interactions/${encodeURIComponent(main.interactionId)}`);
+    const inspectedPolicyRevision = policyInspection.body?.revision;
+    if (policyInspection.status !== 200
+      || inspectedPolicyRevision?.revisionVersion !== policyRevision.revisionVersion
+      || inspectedPolicyRevision?.revisionHash !== policyRevision.revisionHash
+      || inspectedPolicyRevision?.executionPolicy?.policyId !== oncePolicy.policyId) {
+      fail('typed-revision.policy-not-readable', 'public GET did not project the refined execution policy before confirmation', {
+        policyInspection,
+        policyRevision,
+      });
+    }
+    record('refine-policy', { revision: policyRevision, inspectedRevision: inspectedPolicyRevision });
+
     // 2. Stale revision must be rejected with a readable error and no side effect.
     const staleConfirm = await post(`/api/explicit/interactions/${encodeURIComponent(main.interactionId)}/confirmation`, {
-      draftId: baseRevision.draftId,
-      inputRevision: baseRevision.inputRevision,
+      draftId: policyRevision.draftId,
+      inputRevision: policyRevision.inputRevision,
       confirmationRef: `confirmation:stale:${main.interactionId}`,
       confirmedBy: 'human:operator',
       confirmedAt: '2026-10-05T00:00:00.000Z',
       payloadRef: `asset://requirements/stale:${main.interactionId}`,
-      draftRevisionVersion: baseRevision.revisionVersion,
-      draftRevisionHash: baseRevision.revisionHash,
+      draftRevisionVersion: regenerated.body.revision.revisionVersion,
+      draftRevisionHash: regenerated.body.revision.revisionHash,
+      executionPolicy: oncePolicy,
     });
     if (staleConfirm.status === 200) {
       fail('stale-revision.accepted', 'a stale revision confirmation was silently accepted', staleConfirm);
@@ -240,6 +279,9 @@ async function main() {
     // 3. Confirm the current revision with the once policy; repeated and
     //    concurrent submits must reuse exactly one subscription.
     const current = (await request(`/api/explicit/interactions/${encodeURIComponent(main.interactionId)}`)).body.revision;
+    if (current.revisionVersion !== policyRevision.revisionVersion || current.revisionHash !== policyRevision.revisionHash) {
+      fail('stale-revision.side-effect', 'the rejected stale confirmation changed the current revision', { current, policyRevision });
+    }
     const confirmBody = {
       draftId: current.draftId,
       inputRevision: current.inputRevision,
@@ -269,7 +311,24 @@ async function main() {
     // 4. Scheduled and recurring interactions each persist one subscription.
     for (const [label, policy] of [['scheduled', scheduledPolicy], ['recurring', recurringPolicy]]) {
       const scoped = await newTypedInteraction(label, `Create exactly one concrete task: ${label} acceptance work.`);
-      const revision = (await request(`/api/explicit/interactions/${encodeURIComponent(scoped.interactionId)}`)).body.revision;
+      const scopedBase = (await request(`/api/explicit/interactions/${encodeURIComponent(scoped.interactionId)}`)).body.revision;
+      const scopedRefined = await post(`/api/explicit/interactions/${encodeURIComponent(scoped.interactionId)}/refine`, {
+        draftId: scopedBase.draftId,
+        baseRevisionVersion: scopedBase.revisionVersion,
+        requestedRevisionHash: scopedBase.revisionHash,
+        fields: {
+          goal: `${label} acceptance work with a durable execution policy`,
+          scope: scopedBase.scope,
+          normalizedInput: `${scopedBase.normalizedInput} Bind the ${label} execution policy.`,
+          executionPolicy: policy,
+        },
+        instructionRef: `policy:${label}:${scoped.interactionId}`,
+        idempotencyKey: `policy:${label}:${scoped.interactionId}`,
+      });
+      const revision = scopedRefined.body?.revision;
+      if (scopedRefined.status !== 200 || revision?.executionPolicy?.policyId !== policy.policyId) {
+        fail(`refine.${label}-policy-missing`, `${label} refine did not bind its execution policy`, scopedRefined);
+      }
       const confirmed = await post(`/api/explicit/interactions/${encodeURIComponent(scoped.interactionId)}/confirmation`, {
         draftId: revision.draftId,
         inputRevision: revision.inputRevision,

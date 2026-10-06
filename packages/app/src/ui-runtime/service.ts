@@ -2550,6 +2550,18 @@ export class UiRuntimeService {
 
     const draftRevisionVersion = input.draftRevisionVersion ?? revision.revisionVersion;
     const draftRevisionHash = input.draftRevisionHash ?? revision.revisionHash;
+    if ((input.draftRevisionVersion !== undefined && input.draftRevisionVersion !== revision.revisionVersion)
+      || (input.draftRevisionHash !== undefined && input.draftRevisionHash !== revision.revisionHash)) {
+      throw new DraftRevisionError({
+        code: 'confirmation-stale',
+        message: 'confirmation is not bound to the current draft revision',
+        draftId: revision.draftId,
+        ...(input.draftRevisionVersion === undefined ? {} : { expectedRevisionVersion: input.draftRevisionVersion }),
+        ...(input.draftRevisionHash === undefined ? {} : { expectedRevisionHash: input.draftRevisionHash }),
+        actualRevisionVersion: revision.revisionVersion,
+        actualRevisionHash: revision.revisionHash,
+      });
+    }
     this.confirmationLedger.registerRevision({
       interactionId,
       draftId: revision.draftId,
