@@ -582,8 +582,10 @@ async function waitForPlanReceipt(page, mode) {
   await page.waitForSelector('#entry-draft', { timeout: 20_000 });
   await page.waitForFunction((expectedMode) => {
     const status = document.querySelector('[role="status"]');
-    return Boolean(status?.textContent?.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存'));
-  }, mode, { timeout: 20_000 });
+    const text = status?.textContent || '';
+    if (text.includes('错误') || text.includes('失败') || text.includes('拒绝')) return false;
+    return text.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存');
+  }, mode, { timeout: 90_000 });
 }
 
 async function sectionB(browser, artifactDir, root) {
@@ -622,7 +624,12 @@ async function sectionB(browser, artifactDir, root) {
         if (!response.ok) return false;
         const projection = await response.json();
         const node = projection.scope?.nodes?.find((item) => item.nodeId === 'pipeline.execute');
-        return Boolean(node && ['succeeded', 'failed', 'stopped'].includes(node.state));
+        if (!node || !['succeeded', 'failed', 'stopped'].includes(node.state)) return false;
+        const detail = await fetch(`/api/tasks/${encodeURIComponent(id)}/observation?node=pipeline.execute`);
+        if (!detail.ok) return false;
+        const selected = await detail.json();
+        return Array.isArray(selected.selectedNode?.toolSteps)
+          && selected.selectedNode.toolSteps.length > 0;
       }, taskId, { timeout: 180_000 });
       await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 20_000 });
