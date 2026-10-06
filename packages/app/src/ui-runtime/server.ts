@@ -236,6 +236,14 @@ function requireStringArray(body: Record<string, unknown>, key: string): readonl
   return value;
 }
 
+function requireRecord(body: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = body[key];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, `request field ${key} must be an object`, `provide ${key} as an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 function requireRequirementIntent(body: Record<string, unknown>, key: string): RequirementIntent {
   const value = requireString(body, key);
   if (value !== 'append' && value !== 'change' && value !== 'create') {
@@ -768,6 +776,29 @@ async function handleRequest(
       }));
       return;
     }
+    const explicitRefinement = /^\/api\/explicit\/interactions\/([^/]+)\/refine$/.exec(path);
+    if (explicitRefinement && method === 'POST') {
+      const body = await readBody(request);
+      writeJson(response, 200, await service.refineExplicitDraft(decodeURIComponent(explicitRefinement[1]!), {
+        draftId: requireString(body, 'draftId'),
+        baseRevisionVersion: requirePositiveInteger(body, 'baseRevisionVersion'),
+        requestedRevisionHash: requireString(body, 'requestedRevisionHash'),
+        fields: requireRecord(body, 'fields'),
+        instructionRef: requireString(body, 'instructionRef'),
+        idempotencyKey: requireString(body, 'idempotencyKey'),
+      }));
+      return;
+    }
+    const explicitRegeneration = /^\/api\/explicit\/interactions\/([^/]+)\/regenerate$/.exec(path);
+    if (explicitRegeneration && method === 'POST') {
+      const body = await readBody(request);
+      const instruction = optionalString(body, 'instruction');
+      writeJson(response, 200, await service.regenerateExplicitDraft(
+        decodeURIComponent(explicitRegeneration[1]!),
+        instruction,
+      ));
+      return;
+    }
     const explicitClarification = /^\/api\/explicit\/interactions\/([^/]+)\/clarification$/.exec(path);
     if (explicitClarification && method === 'POST') {
       const body = await readBody(request);
@@ -785,10 +816,23 @@ async function handleRequest(
     const explicitRejection = /^\/api\/explicit\/interactions\/([^/]+)\/reject$/.exec(path);
     if (explicitRejection && method === 'POST') {
       const body = await readBody(request);
-      writeJson(response, 200, await service.rejectExplicitInteraction(
-        decodeURIComponent(explicitRejection[1]!),
-        requireString(body, 'reason'),
-      ));
+      const interactionId = decodeURIComponent(explicitRejection[1]!);
+      const reason = requireString(body, 'reason');
+      const rejectionId = optionalString(body, 'rejectionId');
+      const closedAt = optionalString(body, 'closedAt');
+      const current = await service.inspectExplicitInteraction(interactionId);
+      if (current.revision !== undefined) {
+        // A typed draft closes through the revision owner so the closure is
+        // durable and the exact revision can never be submitted afterwards.
+        const closure = await service.rejectExplicitDraftRevision(interactionId, {
+          reason,
+          ...(rejectionId === undefined ? {} : { rejectionId }),
+          ...(closedAt === undefined ? {} : { closedAt }),
+        });
+        writeJson(response, 200, { interactionId, state: 'rejected', closure });
+        return;
+      }
+      writeJson(response, 200, await service.rejectExplicitInteraction(interactionId, reason));
       return;
     }
     const explicitMatching = /^\/api\/explicit\/interactions\/([^/]+)\/matching$/.exec(path);
@@ -849,6 +893,8 @@ async function handleRequest(
       const goal = optionalString(body, 'goal');
       const scope = optionalString(body, 'scope');
       const idempotencyKey = optionalString(body, 'idempotencyKey');
+      const draftRevisionVersion = body.draftRevisionVersion === undefined ? undefined : requirePositiveInteger(body, 'draftRevisionVersion');
+      const draftRevisionHash = optionalString(body, 'draftRevisionHash');
       const receipt = await service.confirmExplicitRequirement({
         interactionId: decodeURIComponent(explicitConfirmation[1]!),
         draftId: requireString(body, 'draftId'),
@@ -861,6 +907,8 @@ async function handleRequest(
         ...(goal === undefined ? {} : { goal }),
         ...(scope === undefined ? {} : { scope }),
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        ...(draftRevisionVersion === undefined ? {} : { draftRevisionVersion }),
+        ...(draftRevisionHash === undefined ? {} : { draftRevisionHash }),
         ...(body.deliverables === undefined ? {} : { deliverables: requireStringArray(body, 'deliverables') }),
         ...(body.constraints === undefined ? {} : { constraints: requireStringArray(body, 'constraints') }),
       });
