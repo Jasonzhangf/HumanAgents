@@ -7,6 +7,7 @@
     <meta name="description" content="HumanAgent Runtime Dashboard" />
     <title>HumanAgent · Dashboard</title>
     <link rel="stylesheet" href="./runtime.css" />
+    <link rel="stylesheet" href="./interaction-work-card.css" />
   </head>
   <body>
     <div class="dashboard-wireframe" hidden>
@@ -104,6 +105,17 @@
               </a>
             </li>
           </ul>
+        </section>
+
+        <section class="region" aria-labelledby="interaction-work-card-title" data-region="interaction-work-card">
+          <header class="region-heading">
+            <div>
+              <span class="region-kicker">当前交互</span>
+              <h2 id="interaction-work-card-title">新建任务进度</h2>
+            </div>
+            <span class="section-meta">统一交互工作卡</span>
+          </header>
+          <div class="interaction-work-card-host" data-interaction-work-card data-entry="dashboard"></div>
         </section>
       </main>
     </div>
