@@ -249,6 +249,7 @@ function renderInputPanel() {
         // Reset inFlight so the confirm/cancel buttons inside the draft panel
         // are not blocked by the submit guard.
         interaction.inFlight = false
+        draftNotice = ''
         renderDraftConfirmation(draftArea, snap, textarea, submit, progress, autoConfirm.checked)
         return
       }
@@ -275,48 +276,245 @@ function renderInputPanel() {
   inputRegion.append(form)
 }
 
+// The draft panel reports only what the runtime returned. The confirm edge binds
+// the displayed revision identity so the runtime can refuse an outdated
+// confirmation, the refine edge names the displayed base revision version and
+// hash, and the abandon edge renders the closure receipt the reject route
+// returned instead of claiming a local "已取消".
+let draftNotice = ''
+
+function draftRevisionIdentity(revision) {
+  return {
+    version: revision?.revisionVersion === undefined ? '' : String(revision.revisionVersion),
+    hash: revision?.revisionHash ?? '',
+  }
+}
+
+function typedErrorText(error) {
+  return `${error.code || 'runtime.request.failed'} · owner=${error.ownerId || 'unknown'} · ${error.message || String(error)} · next=${error.nextAction || 'inspect the runtime error'}`
+}
+
+function draftField(labelText, control) {
+  const row = element('label', undefined, 'draft-field')
+  row.append(element('span', labelText, 'draft-field-label'), control)
+  return row
+}
+
+function draftLines(value) {
+  return String(value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function showDraftEditor(area, kind) {
+  for (const node of area.querySelectorAll('[data-draft-editor]')) {
+    node.hidden = node.dataset.draftEditor !== kind
+  }
+}
+
+/**
+ * Replace the confirmable panel with the abandon closure the reject route
+ * returned. Every row is a field of that receipt; nothing is inferred.
+ */
+function renderDraftClosure(area, closure, state) {
+  area.hidden = false
+  clearNode(area)
+  area.append(
+    element('p', '显式大脑整理结果', 'eyebrow'),
+    element('p', '草案已放弃，交互已关闭。', 'draft-proposal'),
+  )
+  const receipt = element('dl', undefined, 'draft-receipt')
+  receipt.dataset.draftReceipt = 'true'
+  for (const [label, value] of [
+    ['交互状态', state],
+    ['rejectionId', closure.rejectionId],
+    ['closedAt', closure.closedAt],
+    ['reason', closure.reason],
+    ['durable', closure.durable === true ? 'true' : '未提供'],
+    ['draftRevisionVersion', closure.draftRevisionVersion],
+    ['draftRevisionHash', closure.draftRevisionHash],
+  ]) {
+    const row = element('div')
+    row.append(
+      element('dt', label),
+      element('dd', value === undefined || value === null || value === '' ? '未提供' : String(value)),
+    )
+    receipt.append(row)
+  }
+  area.append(receipt)
+  const status = element('p', `放弃回执：${closure.rejectionId ?? '未提供'} · ${closure.closedAt ?? '未提供'}`, 'muted')
+  status.dataset.draftStatus = 'true'
+  status.setAttribute('role', 'status')
+  status.setAttribute('aria-live', 'polite')
+  area.append(status)
+}
+
+/** Re-read the interaction and re-render the panel from the runtime's answer. */
+async function reloadDraftConfirmation(area, textarea, submit, progress) {
+  const current = await api.inspectExplicitInteraction(interaction.id)
+  interaction.draft = current.draft ?? null
+  if (current.state === 'awaiting-confirmation' && current.draft) {
+    renderDraftConfirmation(area, current, textarea, submit, progress, false)
+    return current
+  }
+  area.hidden = true
+  clearNode(area)
+  interaction.id = null
+  interaction.draft = null
+  interaction.inFlight = false
+  textarea.readOnly = false
+  textarea.placeholder = '一句话告诉显式大脑要做什么。'
+  submit.textContent = '提交给显式大脑'
+  submit.disabled = false
+  progress.idle(`交互状态：${current.state}`, current.nextAction || '')
+  textarea.focus()
+  return current
+}
+
 function renderDraftConfirmation(area, snap, textarea, submit, progress, autoConfirm) {
   area.hidden = false
   clearNode(area)
   const proposal = snap.draft?.proposal || snap.rawInput || ''
   const normalized = snap.draft?.normalizedInput || ''
   const intent = snap.draft?.proposedIntent || ''
+  const revision = snap.revision
+  const identity = draftRevisionIdentity(revision)
   area.append(
     element('p', '显式大脑整理结果', 'eyebrow'),
     element('p', proposal, 'draft-proposal'),
   )
   if (normalized) area.append(element('p', `标准化输入：${normalized}`, 'draft-meta'))
   if (intent) area.append(element('p', `意图：${intent}`, 'draft-meta'))
+  const revisionNode = element(
+    'p',
+    `修订 ${identity.version ? `v${identity.version}` : '未提供'} · ${identity.hash || '未提供'}`,
+    'draft-meta draft-revision',
+  )
+  revisionNode.dataset.draftRevision = 'true'
+  revisionNode.dataset.draftRevisionVersion = identity.version
+  revisionNode.dataset.draftRevisionHash = identity.hash
+  area.append(revisionNode)
 
   const confirmBtn = element('button', '确认并执行', 'button button--primary')
   confirmBtn.type = 'button'
   confirmBtn.id = 'dashboard-confirm-button'
-  const rejectBtn = element('button', '取消', 'button button--quiet')
+  confirmBtn.dataset.draftAction = 'confirm'
+  const regenerateBtn = element('button', '重新整理', 'button button--quiet')
+  regenerateBtn.type = 'button'
+  regenerateBtn.dataset.draftAction = 'regenerate'
+  const rejectBtn = element('button', '放弃', 'button button--danger')
   rejectBtn.type = 'button'
-  const confirmStatus = element('p', undefined, 'muted')
-  confirmStatus.setAttribute('role', 'status')
-
+  rejectBtn.dataset.draftAction = 'reject'
+  // 修改 names the exact revision the human is looking at, so it exists only
+  // when the runtime reported a typed revision to refine against.
+  const refineBtn = revision === undefined ? null : element('button', '修改', 'button button--quiet')
+  if (refineBtn) {
+    refineBtn.type = 'button'
+    refineBtn.dataset.draftAction = 'refine'
+  }
   const draftActions = element('div', undefined, 'draft-actions')
-  draftActions.append(confirmBtn, rejectBtn)
-  area.append(draftActions, confirmStatus)
+  draftActions.append(confirmBtn)
+  if (refineBtn) draftActions.append(refineBtn)
+  draftActions.append(regenerateBtn, rejectBtn)
+
+  const editors = element('div', undefined, 'draft-editors')
+  const refineEditor = element('div', undefined, 'draft-editor')
+  refineEditor.dataset.draftEditor = 'refine'
+  refineEditor.hidden = true
+  const refineGoal = element('input')
+  refineGoal.name = 'goal'
+  refineGoal.value = revision?.goal ?? ''
+  const refineScope = element('input')
+  refineScope.name = 'scope'
+  refineScope.value = revision?.scope ?? ''
+  const refineConstraints = element('textarea')
+  refineConstraints.name = 'constraints'
+  refineConstraints.value = (revision?.constraints ?? []).join('\n')
+  const refineDeliverables = element('textarea')
+  refineDeliverables.name = 'deliverables'
+  refineDeliverables.value = (revision?.deliverables ?? []).join('\n')
+  const refineSubmit = element('button', '保存修改', 'button button--primary')
+  refineSubmit.type = 'button'
+  refineSubmit.dataset.draftSubmit = 'refine'
+  refineEditor.append(
+    draftField('目标', refineGoal),
+    draftField('范围', refineScope),
+    draftField('约束（每行一条）', refineConstraints),
+    draftField('交付物（每行一条）', refineDeliverables),
+    refineSubmit,
+  )
+
+  const regenerateEditor = element('div', undefined, 'draft-editor')
+  regenerateEditor.dataset.draftEditor = 'regenerate'
+  regenerateEditor.hidden = true
+  const regenerateInstruction = element('textarea')
+  regenerateInstruction.name = 'instruction'
+  regenerateInstruction.placeholder = '可选的修正说明；留空则按原始输入重新整理。'
+  const regenerateSubmit = element('button', '重新整理草案', 'button button--quiet')
+  regenerateSubmit.type = 'button'
+  regenerateSubmit.dataset.draftSubmit = 'regenerate'
+  regenerateEditor.append(draftField('修正说明（可选）', regenerateInstruction), regenerateSubmit)
+
+  const rejectEditor = element('div', undefined, 'draft-editor')
+  rejectEditor.dataset.draftEditor = 'reject'
+  rejectEditor.hidden = true
+  const rejectReason = element('textarea')
+  rejectReason.name = 'reason'
+  rejectReason.placeholder = '放弃原因（必填，会写入放弃回执）'
+  const rejectSubmit = element('button', '确认放弃', 'button button--danger')
+  rejectSubmit.type = 'button'
+  rejectSubmit.dataset.draftSubmit = 'reject'
+  rejectEditor.append(draftField('放弃原因', rejectReason), rejectSubmit)
+
+  editors.append(refineEditor, regenerateEditor, rejectEditor)
+
+  const confirmStatus = element(
+    'p',
+    draftNotice || `当前修订 ${identity.version ? `v${identity.version}` : '未提供'}；确认后进入隐式队列。`,
+    'muted',
+  )
+  confirmStatus.dataset.draftStatus = 'true'
+  confirmStatus.setAttribute('role', 'status')
+  confirmStatus.setAttribute('aria-live', 'polite')
+
+  area.append(draftActions, editors, confirmStatus)
+
+  const disableControls = () => {
+    confirmBtn.disabled = true
+    regenerateBtn.disabled = true
+    rejectBtn.disabled = true
+    if (refineBtn) refineBtn.disabled = true
+  }
+  const failDraftEdge = async (label, error) => {
+    interaction.inFlight = false
+    draftNotice = typedErrorText(error)
+    progress.error(label, error.message || error)
+    appendCardError(error)
+    await reloadDraftConfirmation(area, textarea, submit, progress).catch(() => disableControls())
+  }
 
   confirmBtn.addEventListener('click', async (event) => {
     event.preventDefault()
     event.stopPropagation()
     if (interaction.inFlight) return
     interaction.inFlight = true
-    confirmBtn.disabled = true
-    rejectBtn.disabled = true
+    disableControls()
     progress.set('显式大脑正在提交任务', '正在写入任务需求并进入执行队列')
     try {
       const confirmed = await api.confirmExplicitRequirement(interaction.id, {
         draftId: snap.draft.draftId,
         inputRevision: snap.draft.inputRevision || 1,
+        // Bind the revision the human is looking at. Without this the runtime
+        // cannot tell an outdated confirmation from a current one.
+        ...(identity.version ? { draftRevisionVersion: Number(identity.version) } : {}),
+        ...(identity.hash ? { draftRevisionHash: identity.hash } : {}),
         confirmationRef: `confirmation:dashboard-${Date.now()}`,
         confirmedBy: 'human:operator',
         confirmedAt: new Date().toISOString(),
         payloadRef: `asset://requirements/dashboard-${Date.now()}`,
       })
+      draftNotice = ''
       appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted' })
       progress.done('已入队 · 隐式大脑将消费', '任务需求已进入隐式大脑队列')
       // Implicit dispatch is async — wait for the task to appear in the list
@@ -341,11 +539,9 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
       textarea.focus()
       void refreshLists()
     } catch (error) {
-      progress.error('确认失败', error.message || error)
-      appendCardError(error)
-      confirmBtn.disabled = false
-      rejectBtn.disabled = false
-      interaction.inFlight = false
+      // A refused confirmation is never retried automatically: the panel is
+      // re-read so the human sees the revision the runtime actually holds.
+      await failDraftEdge('确认失败', error)
     }
   })
 
@@ -355,19 +551,116 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
     setTimeout(() => confirmBtn.click(), 0)
   }
 
-  rejectBtn.addEventListener('click', () => {
-    area.hidden = true
-    clearNode(area)
-    interaction.id = null
-    interaction.draft = null
-    interaction.inFlight = false
-    textarea.readOnly = false
-    textarea.value = ''
-    textarea.placeholder = '一句话告诉显式大脑要做什么。'
-    submit.textContent = '提交给显式大脑'
-    submit.disabled = false
-    progress.idle('已取消', '你可以重新输入任务')
-    textarea.focus()
+  if (refineBtn) {
+    refineBtn.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      showDraftEditor(area, 'refine')
+    })
+    refineSubmit.addEventListener('click', async (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (interaction.inFlight) return
+      const fields = {
+        goal: refineGoal.value.trim(),
+        scope: refineScope.value.trim(),
+        constraints: draftLines(refineConstraints.value),
+        deliverables: draftLines(refineDeliverables.value),
+      }
+      if (!fields.goal || !fields.scope) {
+        draftNotice = 'request.invalid-field · owner=humanagent.app.ui · 修改需要目标与范围 · next=补齐修改内容后再提交'
+        renderDraftConfirmation(area, snap, textarea, submit, progress, false)
+        return
+      }
+      interaction.inFlight = true
+      disableControls()
+      progress.set('显式大脑正在修改草案', '正在按当前修订提交 typed 修改')
+      try {
+        const next = await api.refineExplicitDraft(interaction.id, {
+          draftId: revision.draftId,
+          baseRevisionVersion: revision.revisionVersion,
+          requestedRevisionHash: revision.revisionHash,
+          fields,
+          instructionRef: 'user-edit',
+        })
+        interaction.inFlight = false
+        interaction.draft = next.draft ?? null
+        const nextIdentity = draftRevisionIdentity(next.revision)
+        draftNotice = `修改已应用 · 修订 ${nextIdentity.version ? `v${nextIdentity.version}` : '未提供'} · ${nextIdentity.hash || '未提供'}`
+        progress.done('草案已修改', `当前修订 ${nextIdentity.version ? `v${nextIdentity.version}` : '未提供'}`)
+        appendCardEvent('decision', '草案已按 typed 修改更新', 'decision', { eventKey: 'explicit.draft-refined' })
+        renderDraftConfirmation(area, next, textarea, submit, progress, false)
+      } catch (error) {
+        await failDraftEdge('修改失败', error)
+      }
+    })
+  }
+
+  regenerateBtn.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    showDraftEditor(area, 'regenerate')
+  })
+  regenerateSubmit.addEventListener('click', async (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (interaction.inFlight) return
+    const instruction = regenerateInstruction.value.trim()
+    interaction.inFlight = true
+    disableControls()
+    progress.set('显式大脑正在重新整理草案', '正在按原始输入重新整理')
+    try {
+      const next = await api.regenerateExplicitDraft(interaction.id, instruction ? { instruction } : {})
+      interaction.inFlight = false
+      interaction.draft = next.draft ?? null
+      const nextIdentity = draftRevisionIdentity(next.revision)
+      const minted = nextIdentity.version !== '' && nextIdentity.version !== identity.version
+      draftNotice = minted
+        ? `重新整理已产生新修订 v${nextIdentity.version} · ${nextIdentity.hash || '未提供'}`
+        : `重新整理后仍是修订 ${nextIdentity.version ? `v${nextIdentity.version}` : '未提供'}：解释器返回了相同的执行输入，当前修订保持有效。`
+      progress.done('草案已重新整理', minted ? `新修订 v${nextIdentity.version}` : '修订未变化')
+      appendCardEvent('decision', '草案已重新整理', 'decision', { eventKey: 'explicit.draft-regenerated' })
+      renderDraftConfirmation(area, next, textarea, submit, progress, false)
+    } catch (error) {
+      await failDraftEdge('重新整理失败', error)
+    }
+  })
+
+  rejectBtn.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    showDraftEditor(area, 'reject')
+  })
+  rejectSubmit.addEventListener('click', async (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (interaction.inFlight) return
+    const reason = rejectReason.value.trim()
+    if (!reason) {
+      draftNotice = 'request.invalid-field · owner=humanagent.app.ui · 放弃原因必填 · next=填写放弃原因后再提交'
+      renderDraftConfirmation(area, snap, textarea, submit, progress, false)
+      return
+    }
+    interaction.inFlight = true
+    disableControls()
+    progress.set('显式大脑正在放弃草案', '正在写入放弃回执')
+    try {
+      const result = await api.rejectExplicitDraft(interaction.id, { reason })
+      interaction.inFlight = false
+      interaction.draft = null
+      interaction.id = null
+      const closure = result.closure ?? {}
+      progress.done('草案已放弃', `放弃回执 ${closure.rejectionId ?? '未提供'}`)
+      appendCardEvent('decision', '草案已放弃并写入回执', 'decision', { eventKey: 'explicit.draft-abandoned' })
+      renderDraftClosure(area, closure, result.state)
+      textarea.readOnly = false
+      textarea.placeholder = '一句话告诉显式大脑要做什么。'
+      submit.textContent = '提交给显式大脑'
+      submit.disabled = false
+      void refreshLists()
+    } catch (error) {
+      await failDraftEdge('放弃失败', error)
+    }
   })
 
 }

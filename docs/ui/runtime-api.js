@@ -74,6 +74,23 @@ export function createRuntimeApi(options = {}) {
       method: 'POST',
       body: JSON.stringify(confirmation),
     }),
+    // 修改: a typed edit against the exact revision the caller is looking at. The
+    // runtime rejects a stale base revision instead of editing a newer one.
+    refineExplicitDraft: (interactionId, input) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/refine`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    // 重新整理: re-run the explicit brain over the original input, optionally
+    // with a human correction.
+    regenerateExplicitDraft: (interactionId, input = {}) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    // 放弃: the durable closure. The response carries the abandon receipt.
+    rejectExplicitDraft: (interactionId, input) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
     dispatchNextExplicitRequirement: () => request('/api/explicit/dispatch-next', { method: 'POST' }),
     memorySummary: ({ namespace = 'project', query = '', limit = 20 } = {}) => {
       const params = new URLSearchParams({ namespace, limit: String(limit) })

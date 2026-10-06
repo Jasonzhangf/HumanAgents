@@ -819,6 +819,43 @@ pre {
   gap: 8px;
   margin-top: 10px;
 }
+.draft-revision {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.draft-editors { margin-top: 10px; }
+.draft-editor {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--surface) 80%, var(--background));
+}
+.draft-editor[hidden] { display: none; }
+.draft-field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+.draft-field-label { color: var(--muted); }
+.draft-field input,
+.draft-field textarea {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--background);
+  color: inherit;
+}
+.draft-receipt {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+.draft-receipt > div { display: flex; gap: 8px; }
+.draft-receipt dt { min-width: 150px; color: var(--muted); }
+.draft-receipt dd { margin: 0; }
 
 /* Dashboard progress widget: drives the submit-flow state machine. */
 .progress {
