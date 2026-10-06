@@ -581,6 +581,18 @@ async function sectionReal(browser, artifactDir, attemptRoot) {
     await harness.launchBrowserSession(binding);
     const { page } = binding.browser;
     const base = binding.serveBaseUrl;
+    // Every non-2xx response the served page receives, so the proof can assert
+    // that the only refusal is the one it deliberately provoked.
+    const failedResponses = [];
+    page.on('response', (response) => {
+      if (response.status() >= 400) {
+        failedResponses.push({
+          status: response.status(),
+          method: response.request().method(),
+          path: new URL(response.url()).pathname,
+        });
+      }
+    });
     const apiFetch = async (path, init) => {
       const response = await binding.auth.fetch(`${base}${path}`, init);
       const text = await response.text();
@@ -774,9 +786,62 @@ async function sectionReal(browser, artifactDir, attemptRoot) {
         && regeneratedSnapshot?.revision?.revisionVersion === Number(regenerated.revisionVersion),
       { before: secondVersion, displayed: regenerated.revisionVersion, durable: regeneratedSnapshot?.revision?.revisionVersion });
 
+    // --- the successful confirm edge must still work end to end -------------
+    // Declaring the typed request kind moves the confirm onto the typed
+    // final-submit path, so the real success path must be proven, not assumed.
+    // `dispatched` is the state the durable interaction reaches only after the
+    // FIFO consumer has taken the requirement, so it is the real end of the edge.
+    const confirmOk = await clickDraftControl('confirm');
+    let reached = null;
+    if (confirmOk) {
+      try {
+        reached = await harness.waitForDom(page, 'dispatched interaction after the real confirm', async () => {
+          const snapshot = await snapshotOf(second.interactionId);
+          return snapshot.state === 'dispatched' ? snapshot.state : null;
+        }, 180_000);
+      } catch (error) {
+        reached = `wait-failed: ${error.message}`;
+      }
+    }
+    const secondAfterConfirm = await snapshotOf(second.interactionId);
+    const finalUrl = page.url();
+    observe('real successful confirm', {
+      clicked: confirmOk,
+      reached,
+      state: secondAfterConfirm.state,
+      confirmation: secondAfterConfirm.confirmation,
+      finalUrl,
+    });
+    record('the real 确认并执行 confirms the bound revision and reaches the FIFO consumer',
+      confirmOk && secondAfterConfirm.state === 'dispatched',
+      { state: secondAfterConfirm.state, reached, confirmation: secondAfterConfirm.confirmation });
+    record('the real confirmed task is dispatched to a real task the served page navigates to',
+      /task-dashboard\.html\?task=/.test(finalUrl) || /task=/.test(finalUrl),
+      finalUrl);
+
     await harness.captureScreenshot(binding, 'draft-lifecycle-real').catch(() => {});
-    observe('real console errors', [...binding.browser.consoleErrors]);
-    record('the real draft lifecycle page raises no page errors', binding.browser.consoleErrors.length === 0, binding.browser.consoleErrors);
+    // This run deliberately provokes one typed 409 (the outdated confirmation),
+    // and the browser logs every non-2xx fetch as a console error. So the
+    // prohibition is on uncaught script errors and on any non-2xx response that
+    // this proof did not intentionally cause.
+    const consoleErrors = [...binding.browser.consoleErrors];
+    const scriptErrors = consoleErrors.filter((entry) => entry.startsWith('pageerror:'));
+    const unexpectedConsoleErrors = consoleErrors.filter((entry) =>
+      !entry.startsWith('pageerror:') && !/Failed to load resource/.test(entry));
+    observe('real console errors', consoleErrors);
+    observe('real non-2xx responses', [...failedResponses]);
+    record('the real draft lifecycle page raises no uncaught script error',
+      scriptErrors.length === 0,
+      scriptErrors);
+    record('the real draft lifecycle page logs no unexpected console error',
+      unexpectedConsoleErrors.length === 0,
+      unexpectedConsoleErrors);
+    record('the only non-2xx response in the real run is the deliberately outdated confirmation',
+      failedResponses.length === 1
+        && failedResponses[0].status === 409
+        && failedResponses[0].method === 'POST'
+        && failedResponses[0].path.endsWith('/confirmation'),
+      failedResponses);
   } finally {
     await binding.browser?.close().catch(() => {});
     if (serve) await serve.stop();

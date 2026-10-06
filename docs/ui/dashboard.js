@@ -205,11 +205,15 @@ function renderInputPanel() {
     progress.set('显式大脑正在理解输入', '正在接收并解析你的输入')
     try {
       if (!interaction.id) {
-        // First turn: send raw input to explicit brain intake
+        // First turn: send raw input to explicit brain intake. The interaction
+        // must declare its typed request kind, otherwise the intake refuses to
+        // mint the reviewable draft revision and the 修改 / 重新整理 / 放弃
+        // closure has no revision identity to act on.
         const received = await api.receiveExplicitInput({
           sourceRef: 'ui:dashboard',
           rawInput,
           inputRevision: 1,
+          requestKind: 'new-task-preview',
         })
         interaction.id = received.interactionId
         appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.raw-input' })
