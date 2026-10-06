@@ -74,6 +74,96 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   return { root, controlRoot, workspace };
 }
 
+interface ServeAuth {
+  cookie: string;
+  readonly origin: string;
+  request(input: string | URL, init?: RequestInit): Promise<Response>;
+  requestJson(input: string | URL, init?: RequestInit): Promise<unknown>;
+}
+
+function mutationHeaders(auth: ServeAuth, existing?: HeadersInit): Headers {
+  const headers = new Headers(existing ?? {});
+  if (auth.cookie) headers.set('cookie', auth.cookie);
+  for (const [name, value] of Object.entries({ origin: auth.origin })) {
+    if (value) headers.set(name, value);
+  }
+  return headers;
+}
+
+async function requestJson(input: string | URL, init: RequestInit = {}, auth: ServeAuth): Promise<unknown> {
+  const response = await auth.request(input, init);
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text.slice(0, 1_000);
+  }
+}
+
+async function authenticateServe(controlRoot: string, workspace: string, baseUrl: string): Promise<ServeAuth> {
+  const cli = join(process.cwd(), 'dist', 'app', 'app', 'src', 'cli.js');
+  let stdout = '';
+  let stderr = '';
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const pair = spawn(process.execPath, [
+      cli,
+      'pair',
+      '--workspace',
+      workspace,
+      '--control-root',
+      controlRoot,
+    ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    pair.stdout.on('data', (chunk: Uint8Array) => { stdout += String(chunk); });
+    pair.stderr.on('data', (chunk: Uint8Array) => { stderr += String(chunk); });
+    pair.once('error', reject);
+    pair.once('exit', (exitCode) => resolve(exitCode));
+  });
+  if (code !== 0) throw new Error(`humanagent pair exited ${String(code)}; stderr=${stderr.slice(-800)}`);
+  let receipt: { readonly code?: unknown; readonly expiresAt?: unknown } | undefined;
+  try {
+    receipt = JSON.parse(stdout.trim()) as { readonly code?: unknown; readonly expiresAt?: unknown };
+  } catch {
+    throw new Error(`humanagent pair did not return JSON: ${stdout.slice(-400)}`);
+  }
+  if (typeof receipt?.code !== 'string' || receipt.code.length === 0) {
+    throw new Error('humanagent pair returned no pairing code');
+  }
+
+  const url = new URL(baseUrl);
+  const auth: ServeAuth = {
+    cookie: '',
+    origin: url.origin,
+    request(input, init = {}) {
+      const target = new URL(typeof input === 'string' ? input : input.href, baseUrl);
+      const headers = mutationHeaders(auth, init.headers);
+      if (String(init.method ?? 'GET').toUpperCase() !== 'GET') {
+        headers.set('origin', auth.origin);
+      }
+      return fetch(target, { ...init, headers });
+    },
+    async requestJson(input, init = {}) {
+      return requestJson(input, init, auth);
+    },
+  };
+
+  const response = await fetch(`${auth.origin}/api/auth/pair`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      origin: auth.origin,
+    },
+    body: JSON.stringify({ code: receipt.code }),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`serve pairing failed ${response.status}: ${text.slice(0, 600)}`);
+  }
+  const setCookie = response.headers.get('set-cookie');
+  if (!setCookie) throw new Error('serve pairing did not set a session cookie');
+  auth.cookie = setCookie.split(';')[0];
+  return auth;
+}
+
 async function createMemoryStatusFixture(
   prefix: string,
   evidence: ReadonlyMap<string, string>,
@@ -1298,6 +1388,7 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
     readonly stderrText: () => string;
     readonly url: string;
     readonly memoryRoot: string;
+    auth: ServeAuth;
   }> => {
     const child = spawn(process.execPath, [
       cli,
@@ -1336,7 +1427,7 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
         reject(new Error(`serve exited before startup (${String(code)}): stdout=${output}; stderr=${stderr}`));
       });
     });
-    return { process: child, stderrText: () => stderr, ...launched };
+    return { process: child, stderrText: () => stderr, auth: undefined as unknown as ServeAuth, ...launched };
   };
 
   const stop = async (runtime: Awaited<ReturnType<typeof serve>>): Promise<void> => {
@@ -1365,10 +1456,10 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
       readonly entries?: readonly { readonly sourceRef: string }[];
     } | undefined;
     await waitFor(async () => {
-      const receipt = await fetch(`${runtime.url}/api/executions/${encodeURIComponent(operationId)}/memory-context`);
+      const receipt = await runtime.auth.request(`${runtime.url}/api/executions/${encodeURIComponent(operationId)}/memory-context`);
       if (receipt.status !== 200) {
-        const task = await fetch(`${runtime.url}/api/tasks/${encodeURIComponent(taskId)}`);
-        const events = await fetch(`${runtime.url}/api/executions/${encodeURIComponent(operationId)}/events`);
+        const task = await runtime.auth.request(`${runtime.url}/api/tasks/${encodeURIComponent(taskId)}`);
+        const events = await runtime.auth.request(`${runtime.url}/api/executions/${encodeURIComponent(operationId)}/events`);
         throw new Error(`memory context ${receipt.status}: ${await task.text()}; events=${await events.text()}; stderr=${runtime.stderrText()}`);
       }
       context = await receipt.json() as typeof context;
@@ -1377,7 +1468,12 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
     return context as NonNullable<typeof context>;
   };
 
+  const authReady = async (runtime: Awaited<ReturnType<typeof serve>>): Promise<void> => {
+    runtime.auth = await authenticateServe(controlRoot, workspace, runtime.url);
+  };
+
   const first = await serve();
+  await authReady(first);
   let taskId: string;
   try {
     const duplicate = spawn(process.execPath, [
@@ -1412,7 +1508,8 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
       duplicate.once('error', reject);
       duplicate.once('exit', (code) => reject(new Error(`takeover serve exited before startup (${String(code)}): ${output}; stderr=${duplicateStderr}`)));
     });
-    assert.match(duplicateLaunch.url, /^http:\/\/127\.0\.0\.1:/);
+    assert.match(duplicateLaunch.url, /^http:\/\/(?:127\.0\.0\.1:\d+|\[::1\]:\d+)$/);
+    const duplicateAuth = await authenticateServe(controlRoot, workspace, duplicateLaunch.url);
     const originalExitCode = await new Promise<number | null>((resolve) => {
       if (first.process.exitCode !== null) {
         resolve(first.process.exitCode);
@@ -1422,7 +1519,7 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
     });
     assert.equal(originalExitCode, 0);
 
-    const created = await fetch(`${duplicateLaunch.url}/api/tasks`, {
+    const created = await duplicateAuth.request(`${duplicateLaunch.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'rooted memory before restart' }),
@@ -1450,9 +1547,10 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
   });
 
   const second = await serve();
+  await authReady(second);
   try {
     assert.equal(second.memoryRoot, first.memoryRoot);
-    const started = await fetch(`${second.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
+    const started = await second.auth.request(`${second.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after restart' }),
@@ -1468,8 +1566,9 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
   }
 
   const third = await serve();
+  await authReady(third);
   try {
-    const started = await fetch(`${third.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
+    const started = await third.auth.request(`${third.url}/api/tasks/${encodeURIComponent(taskId)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'fake', prompt: 'read rooted memory after another restart' }),
@@ -1552,7 +1651,8 @@ test('CLI serve launch reports the live Cordis plugin composition', async () => 
       assert.equal(launch.composition.components.find((candidate) => candidate.component === component)?.state, 'composed');
     }
     const args = { scopeRef: `scope:workspace:${paths.projectKey}`, pathRef: '.' };
-    const explicitDecisionResponse = await fetch(`${launch.url}/api/explicit/decision`, {
+    const auth = await authenticateServe(controlRoot, workspace, launch.url);
+    const explicitDecisionResponse = await auth.request(`${launch.url}/api/explicit/decision`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -1630,14 +1730,15 @@ test('CLI serve prepares the configured builtin memory audit prompt before check
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
   };
   try {
-    const created = await fetch(`${launched.url}/api/tasks`, {
+    const auth = await authenticateServe(controlRoot, workspace, launched.url);
+    const created = await auth.request(`${launched.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'Gate 25 memory closure', directive: 'prove builtin audit prompt preparation' }),
     });
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
-    const started = await fetch(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+    const started = await auth.request(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'fake', prompt: 'close the memory boundary' }),
@@ -1645,7 +1746,7 @@ test('CLI serve prepares the configured builtin memory audit prompt before check
     assert.equal(started.status, 202);
     const operation = await started.json() as { readonly operationId: string };
     await waitFor(async () => {
-      const detail = await fetch(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
+      const detail = await auth.request(`${launched.url}/api/tasks/${encodeURIComponent(task.taskId.value)}`);
       const body = await detail.json() as { readonly state?: string };
       assert.equal(body.state, 'ready');
     }, 5_000);
@@ -3630,15 +3731,16 @@ async function runServeEntry(input: {
         reject(new Error(`serve exited before startup (${String(code)}): ${stdout}; ${serveStderr}`));
       });
     });
+    const auth = await authenticateServe(input.controlRoot, input.workspace, launch.url);
 
-    const created = await fetch(`${launch.url}/api/tasks`, {
+    const created = await auth.request(`${launch.url}/api/tasks`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: `gate18 ${input.scenario}`, directive: prompt }),
     });
     assert.equal(created.status, 201);
     const task = await created.json() as { readonly taskId: { readonly value: string } };
-    const started = await fetch(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
+    const started = await auth.request(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/executions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'fake', prompt }),
@@ -3646,8 +3748,8 @@ async function runServeEntry(input: {
     assert.equal(started.status, 202);
     const operation = await started.json() as { readonly operationId: string };
 
-    const events = await readEntryEvents(`${launch.url}/api/executions/${encodeURIComponent(operation.operationId)}/events`);
-    const dashboard = await (await fetch(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/dashboard`)).json() as {
+    const events = await readEntryEvents(`${launch.url}/api/executions/${encodeURIComponent(operation.operationId)}/events`, auth);
+    const dashboard = await (await auth.request(`${launch.url}/api/tasks/${encodeURIComponent(task.taskId.value)}/dashboard`)).json() as {
       readonly state: string;
       readonly output: string;
       readonly error?: { readonly code: string; readonly ownerId: string; readonly nextAction: string; readonly message: string };
@@ -3668,8 +3770,10 @@ async function runServeEntry(input: {
   }
 }
 
-async function readEntryEvents(url: string): Promise<readonly EntrySemanticEvent[]> {
-  const response = await fetch(url, { headers: { accept: 'text/event-stream' } });
+async function readEntryEvents(url: string, auth?: ServeAuth): Promise<readonly EntrySemanticEvent[]> {
+  const response = auth
+    ? await auth.request(url, { headers: { accept: 'text/event-stream' } })
+    : await fetch(url, { headers: { accept: 'text/event-stream' } });
   assert.equal(response.status, 200);
   const reader = response.body?.getReader();
   if (!reader) throw new Error('serve event stream has no body');

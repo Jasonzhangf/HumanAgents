@@ -10,6 +10,7 @@ import {
   type OccurrenceTaskBinding,
 } from '../../../contracts/src/index.js';
 import { AppLifecycleError } from '../errors.js';
+import { deriveSupervisorToken } from '../ui-runtime/access-control.js';
 
 const LEASE_SCHEMA_VERSION = 1 as const;
 const PROCESS_START_TOKEN = `node:${randomUUID()}`;
@@ -100,7 +101,6 @@ export interface SupervisorTakeoverOptions {
 
 export interface SupervisorTakeoverStopOptions {
   readonly gracefulTimeoutMs?: number;
-  readonly forceTimeoutMs?: number;
   readonly pollIntervalMs?: number;
 }
 
@@ -346,7 +346,6 @@ function processIsAlive(pid: number): boolean {
 }
 
 const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 2_000;
-const DEFAULT_FORCE_STOP_TIMEOUT_MS = 1_000;
 const DEFAULT_STOP_POLL_INTERVAL_MS = 25;
 
 function assertStopTimeout(value: number | undefined, label: string, fallback: number): number {
@@ -357,7 +356,7 @@ function assertStopTimeout(value: number | undefined, label: string, fallback: n
   return resolved;
 }
 
-function signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
+function signalProcess(pid: number, signal: 'SIGTERM'): void {
   if (pid < 1 || pid === process.pid) {
     throw supervisorError(
       'daemon-takeover.self-protection',
@@ -383,17 +382,17 @@ interface TakeoverTerminationReceipt {
 }
 
 async function stopActiveDaemon(
+  paths: RuntimePaths,
   existing: SupervisorLeaseRecord,
   options: SupervisorTakeoverStopOptions,
   onGracefulSignal?: () => Promise<void>,
 ): Promise<TakeoverTerminationReceipt> {
   const pid = existing.pid;
   const gracefulTimeoutMs = assertStopTimeout(options.gracefulTimeoutMs, 'gracefulTimeoutMs', DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
-  const forceTimeoutMs = assertStopTimeout(options.forceTimeoutMs, 'forceTimeoutMs', DEFAULT_FORCE_STOP_TIMEOUT_MS);
   const pollIntervalMs = assertStopTimeout(options.pollIntervalMs, 'pollIntervalMs', DEFAULT_STOP_POLL_INTERVAL_MS);
   let gracefulStopError: string | undefined;
 
-  await assertTakeoverProcessIdentity(existing);
+  await assertTakeoverProcessIdentity(paths, existing);
   try {
     signalProcess(pid, 'SIGTERM');
   } catch (error) {
@@ -415,30 +414,10 @@ async function stopActiveDaemon(
       ...(gracefulStopError === undefined ? {} : { gracefulStopError }),
     };
   }
-
-  await assertTakeoverProcessIdentity(existing);
-  try {
-    signalProcess(pid, 'SIGKILL');
-  } catch (error) {
-    if ((error as { code?: string }).code !== 'ESRCH') {
-      const forceError = error instanceof Error ? error.message : String(error);
-      throw supervisorError(
-        'daemon-takeover.failed',
-        `graceful daemon stop timed out${gracefulStopError ? ` (${gracefulStopError})` : ''}; force stop failed: ${forceError}`,
-        'inspect the exact daemon PID and terminate it before retrying HumanAgent startup',
-      );
-    }
-  }
-  if (await waitForProcessExit(pid, forceTimeoutMs, pollIntervalMs)) {
-    return {
-      termination: 'forced',
-      ...(gracefulStopError === undefined ? {} : { gracefulStopError }),
-    };
-  }
   throw supervisorError(
     'daemon-takeover.failed',
-    `daemon PID ${pid} did not exit after graceful stop and SIGKILL`,
-    'inspect the exact daemon PID and terminate it before retrying HumanAgent startup',
+    `daemon PID ${pid} did not exit after SIGTERM`,
+    'inspect the exact daemon PID and retry after it exits; forced termination is not available in this runtime',
   );
 }
 
@@ -469,7 +448,7 @@ function controlEndpointUrl(endpoint: SupervisorControlEndpoint): string {
   return `http://${host}:${endpoint.port}/api/runtime/identity`;
 }
 
-async function assertTakeoverProcessIdentity(existing: SupervisorLeaseRecord): Promise<void> {
+async function assertTakeoverProcessIdentity(paths: RuntimePaths, existing: SupervisorLeaseRecord): Promise<void> {
   if (!processIsAlive(existing.pid)) return;
   if (existing.controlEndpoint === undefined) {
     throw supervisorError(
@@ -481,9 +460,10 @@ async function assertTakeoverProcessIdentity(existing: SupervisorLeaseRecord): P
   }
   let response: Response;
   try {
+    const token = await deriveSupervisorToken(paths.webAccessCredentialPath, existing.leaseId, existing.generation);
     response = await fetch(controlEndpointUrl(existing.controlEndpoint), {
       method: 'GET',
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(500),
     });
   } catch (error) {
@@ -688,7 +668,7 @@ export async function acquireDaemonLease(paths: RuntimePaths, options: AcquireDa
       try {
         termination = options.takeover.stop === undefined
           ? undefined
-          : await stopActiveDaemon(existing, options.takeover.stop, writeReplacement);
+          : await stopActiveDaemon(paths, existing, options.takeover.stop, writeReplacement);
       } catch (error) {
         if (replacement !== undefined) {
           const failure = {
