@@ -219,6 +219,7 @@ export interface Harness {
   readonly origin: string;
   readonly modeRoot: string;
   call(path: string, body?: unknown): Promise<Response>;
+  send(method: 'POST' | 'DELETE', path: string, body?: unknown): Promise<Response>;
   json<T>(path: string): Promise<T>;
   close(): Promise<void>;
 }
@@ -235,6 +236,8 @@ export async function startHarness(input: {
   readonly leaseMode?: 'leased' | 'unleased';
   /** Distinct credential roots keep sequential runtimes in one test root isolated. */
   readonly credentialKey?: string;
+  /** Per-step provider delay, so an execution stays genuinely running for a window. */
+  readonly stepDelayMs?: number;
 }): Promise<Harness> {
   const checkpointRoot = join(input.root, 'checkpoints');
   const workspace = join(input.root, 'workspace');
@@ -245,7 +248,7 @@ export async function startHarness(input: {
   const lease = await acquireDaemonLease(paths, { ownerId: 'scheduler-production-wiring' });
   const port = input.port ?? new CountingExecutionPort(new FakeReplayExecutionRuntimePort({
     binding,
-    stepDelayMs: 1,
+    stepDelayMs: input.stepDelayMs ?? 1,
     ...(input.replayTerminal === undefined || input.replayTerminal === 'succeeded'
       ? {}
       : {
@@ -284,8 +287,8 @@ export async function startHarness(input: {
     ...(input.leaseMode === 'unleased' ? {} : { lease: () => lease }),
   });
   const origin = new URL(runtime.server.url).origin;
-  const call = (path: string, body?: unknown): Promise<Response> => fetch(`${origin}${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
+  const send = (method: string, path: string, body?: unknown): Promise<Response> => fetch(`${origin}${path}`, {
+    method,
     headers: {
       origin,
       cookie,
@@ -293,6 +296,7 @@ export async function startHarness(input: {
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+  const call = (path: string, body?: unknown): Promise<Response> => send(body === undefined ? 'GET' : 'POST', path, body);
   return {
     runtime,
     root: input.root,
@@ -300,6 +304,7 @@ export async function startHarness(input: {
     origin,
     modeRoot: join(checkpointRoot, 'fake'),
     call,
+    send,
     async json<T>(path: string): Promise<T> {
       const response = await call(path);
       const text = await response.text();

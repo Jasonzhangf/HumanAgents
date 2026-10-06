@@ -2020,11 +2020,15 @@ export class UiRuntimeService {
   /**
    * The single production caller of the persisted plan control edge.
    *
-   * The caller names the plan and the intent; `expectedPolicyRevision` and
-   * `expectedScheduleRevision` are read from the authoritative snapshot here and
-   * are never declared by the caller. The port re-checks both inside its own
-   * transaction, so a concurrent change is reported as the durable `stale`
-   * receipt instead of silently applying to a moved base.
+   * The caller names the plan and the intent; `expectedPolicyRevision` is read
+   * from the authoritative snapshot here and is never declared by the caller, and
+   * the port re-checks it inside its own transaction. `expectedScheduleRevision`
+   * is deliberately NOT sent: it is optional for these actions, and the schedule
+   * revision moves on every applied control, so sending the freshly read value
+   * would make an honest retry of the same request look like a `conflict`
+   * instead of the durable `duplicate` the port already knows how to report. The
+   * state guards inside the transaction (`invalid-state`) still decide whether the
+   * transition is legal.
    */
   async controlExecutionPlan(
     subscriptionId: string,
@@ -2059,7 +2063,6 @@ export class UiRuntimeService {
         subscriptionId,
         action: input.action,
         expectedPolicyRevision: snapshot.policy.policyRevision,
-        expectedScheduleRevision: snapshot.subscription.scheduleRevision,
         idempotencyKey: input.idempotencyKey,
         requestedAt: input.requestedAt,
       });
@@ -2123,7 +2126,6 @@ export class UiRuntimeService {
         subscriptionId: snapshot.subscription.subscriptionId,
         action: 'cancel-future',
         expectedPolicyRevision: snapshot.policy.policyRevision,
-        expectedScheduleRevision: snapshot.subscription.scheduleRevision,
         idempotencyKey,
         requestedAt: this.now().toISOString(),
       });
