@@ -59,13 +59,13 @@
     "occurrenceIsolation": "每次 occurrence 从 read_committed_subscription_state 重新建立独立执行身份；不在跨功能 DAG 中画回边或复用上一执行的状态",
     "controlIsolation": "pause 或 cancel-future 只使尚未 claim 的 occurrence/reminder 失效；已 claim 的在途执行由 serve-task stop/settle 独立收口，不能在调度图内自动停止",
     "schedulerPatrolContract": {
-      "owner": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
-      "entry": "SchedulerPatrol.snapshot/pause/resume/run",
-      "scope": "只读取已存在 Subscription 并按 dueAt 调用 SubscriptionControlPort.snapshot/schedule/control；不创建 Subscription，不执行任务轮次",
-      "terminal": "返回 SchedulerPatrolReceipt；订阅不存在或端口缺失时返回 typed pending attention，不伪装 occurrence 成功"
+      "owner": "packages/app/src/ui-runtime/scheduler.ts",
+      "entry": "UiRuntimeScheduler.tick/patrolPlan",
+      "scope": "只读取已存在 Subscription 并按 dueAt 调用 SubscriptionControlPort.list/dueTimes/schedule/claim/consumeExecution/settleOccurrence；不创建 Subscription，不执行任务轮次",
+      "terminal": "每个 tick 用 consumeExecution→settleOccurrence 收拢已 claim 的 occurrence；端口不可读时以 typed issue scheduler.plans-unreadable/scheduler.plan-failed 暴露，无 supervisor lease 时以 scheduler.lease.unavailable 显式失败且不 dispatch，不伪装 occurrence 成功"
     },
     "productionWiringStatus": "WIRED",
-    "productionWiringGap": "due 时间触发已由 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler 在 startUiRuntime 内按真实时钟组装并驱动 schedule→claim→consumeExecution→settleOccurrence；production app 已把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2830 persistAuthorizedExecutionPlan→:2972 port.create），并已组装 OccurrenceConsumerRouter/DurableOccurrenceConsumer。真实剩余缺口：(1) packages/runtime/src/explicit-brain/scheduler-patrol.ts 仍以单 dueAt 和 serve-task-pending 语义存在，与 production patrol 重复，需要单独 ablation 收敛；(2) 已 claim 且未 settle 的 occurrence 在 owner 仍存活但结果未知时按 in-progress 拒绝重新 dispatch，进程内 unknown-outcome 停摆不会自愈；(3) patrol 间隔大于约 1s 时 latePolicy=skip 的槽位可能错过；(4) dueTimes/policySlotOrdinal 每 tick 为 O(总槽位)，需要游标或闭式解",
+    "productionWiringGap": "due 时间触发已由 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler 在 startUiRuntime 内按真实时钟组装并驱动 schedule→claim→consumeExecution→settleOccurrence；production app 已把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2830 persistAuthorizedExecutionPlan→:2972 port.create），并已组装 OccurrenceConsumerRouter/DurableOccurrenceConsumer。真实剩余缺口：(1) 已 claim 且未 settle 的 occurrence 在 owner 仍存活但结果未知时按 in-progress 拒绝重新 dispatch，进程内 unknown-outcome 停摆不会自愈；(2) patrol 间隔大于约 1s 时 latePolicy=skip 的槽位可能错过；(3) dueTimes/policySlotOrdinal 每 tick 为 O(总槽位)，需要游标或闭式解；(4) 订阅 pause/resume 语义的唯一 owner 是 packages/runtime/src/subscriptions/index.ts 的 SubscriptionControlPort.control，但 production app 尚无调用入口（packages/app/src 内无 .control 调用）；原重复实现 SchedulerPatrol.pause/resume 只是该 owner 的纯转发，已随 packages/runtime/src/explicit-brain/scheduler-patrol.ts 在本轮 validation-ablation 物理删除，删除未移除任何已接线能力",
     "productionWiringOwner": "T14",
     "productionWiringEvidence": "packages/app/src/ui-runtime/scheduler.ts:117 UiRuntimeScheduler；packages/app/src/ui-runtime/occurrence-router.ts:34 OccurrenceConsumerRouter；packages/app/src/ui-runtime/index.ts:startUiRuntime 组装并 start/stop；packages/app/src/ui-runtime/service.ts:2972 SubscriptionControlPort.create；tests/app/scheduler-production-wiring.test.ts 生产同入口 5 用例全通过"
   },

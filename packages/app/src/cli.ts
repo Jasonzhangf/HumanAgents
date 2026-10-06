@@ -526,8 +526,14 @@ function providerBindingFromOptions(
     protocol,
     endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : `rcc-v3:${baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`),
     modelRef: option(args, '--model') ?? (fake ? 'fake.model' : defaults.model),
-    configDigest: option(args, '--config-digest') ?? (fake ? 'sha256:fake-ui-config' : 'sha256:ui-runtime-config'),
-    capabilityDigest: option(args, '--capability-digest') ?? (fake ? 'sha256:fake-ui-capability' : 'sha256:ui-runtime-capability'),
+    // Identity labels for this locally composed in-process serve binding. Nothing hashes
+    // real config or capability content, and no consumer verifies these against content,
+    // so the RCC defaults are plain labels instead of digest-shaped values. An operator
+    // that holds a real content digest passes --config-digest / --capability-digest. The
+    // fake defaults stay sha256-prefixed because they are the shared fake-binding labels
+    // of fakeExecutionBinding() in fake-execution.ts, which is owned elsewhere.
+    configDigest: option(args, '--config-digest') ?? (fake ? 'sha256:fake-ui-config' : 'ui-runtime-config'),
+    capabilityDigest: option(args, '--capability-digest') ?? (fake ? 'sha256:fake-ui-capability' : 'ui-runtime-capability'),
   };
 }
 

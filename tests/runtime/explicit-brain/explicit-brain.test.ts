@@ -1,12 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { cwd } from 'node:process';
 import { readFile } from 'node:fs/promises';
-import { JsonlOrganJournal } from '../../../packages/adapters/jsonl/src/index.js';
 import {
   EXPLICIT_BRAIN_TEMPLATE_REF,
   id,
@@ -49,8 +46,6 @@ import {
   MemoryOperationProjection,
   MemoryOperationProjectionError,
   RequirementSubmissionOwner,
-  SchedulerPatrol,
-  SchedulerPatrolError,
   admitToolIntent,
   computePriority,
   createExplicitBrainToolRegistry,
@@ -66,11 +61,6 @@ import {
   type RequirementSubmitReceipt,
 } from '../../../packages/runtime/src/explicit-brain/index.js';
 import { reportBug, type BugIntakeLedgerPort } from '../../../packages/runtime/src/explicit-brain/index.js';
-import {
-  SubscriptionControlPort,
-  SubscriptionSchedulerError,
-  type ScheduledOccurrenceInput,
-} from '../../../packages/runtime/src/index.js';
 import {
   consumeEvents,
   publishEvent,
@@ -1000,212 +990,6 @@ test('channel routing supports manual and automatic events without fabricating c
   }), /skill revision is not registered/);
 });
 
-class FlakySubscriptionControlPort extends SubscriptionControlPort {
-  private failNextSchedule = true;
-
-  override async schedule(input: ScheduledOccurrenceInput) {
-    if (this.failNextSchedule) {
-      this.failNextSchedule = false;
-      throw new SubscriptionSchedulerError('invalid-occurrence', 'scheduler transport failed once');
-    }
-    return super.schedule(input);
-  }
-}
-
-test('scheduler patrol uses the durable subscription port for pause and occurrence control', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'humanagent-patrol-'));
-  const file = join(root, 'subscriptions.jsonl');
-  const scope = { organId: id('organ', 'organ-a'), taskId: id('task', 'task-a') };
-  const attentions: string[] = [];
-  try {
-    const port = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
-    await port.create({
-      subscriptionId: 'subscription-a',
-      goalId: 'goal-a',
-      scheduleRevision: 1,
-      state: 'active',
-      busyPolicy: 'skip',
-      currentOccurrenceOrdinal: 0,
-    }, {
-      policyId: 'policy:patrol',
-      policyRevision: 1,
-      executionMode: 'recurring',
-      frequency: 'interval',
-      intervalMinutes: 60,
-      startAt: '2026-09-17T00:00:00.000Z',
-      timezone: 'America/Los_Angeles',
-      canonicalInstant: '2026-09-17T00:00:00.000Z',
-      dstMode: 'wall',
-      dstMissedPolicy: 'shift-forward',
-      dstAmbiguousPolicy: 'earlier-offset',
-      latePolicy: 'run-once',
-      busyPolicy: 'skip',
-    });
-    const patrol = new SchedulerPatrol({
-      subscription: (await port.snapshot('subscription-a')).subscription,
-      trigger: {
-        triggerRef: 'trigger:patrol-a',
-        source: 'schedule',
-        policyRef: 'policy:patrol',
-        policyRevision: 1,
-        skillRef: 'channel-routing',
-        skillDigest: 'sha256:skill',
-        scopeRef: 'scope:organ-a',
-        priorityProposalRef: 'priority:background',
-        payloadRef: 'asset://patrol-a',
-      },
-      now: () => new Date('2026-09-17T02:00:00.000Z'),
-      port: {
-        async createAttention(input) {
-          attentions.push(input.reason);
-          return { attentionRef: 'attention:patrol-failure' };
-        },
-      },
-      subscriptionPort: port,
-    });
-
-    const paused = await patrol.pause({
-      expectedPolicyRevision: 1,
-      idempotencyKey: 'patrol-pause',
-      requestedAt: '2026-09-17T02:00:00.000Z',
-    });
-    assert.equal(paused.status, 'applied');
-    assert.equal((await patrol.snapshot()).state, 'suspended');
-    await assert.rejects(
-      () => patrol.run({ dueAt: '2026-09-17T02:00:00.000Z', busy: false }),
-      (error: unknown) => error instanceof SchedulerPatrolError && error.code === 'subscription-state',
-    );
-
-    const resumed = await patrol.resume({
-      expectedPolicyRevision: 1,
-      expectedScheduleRevision: 2,
-      idempotencyKey: 'patrol-resume',
-      requestedAt: '2026-09-17T02:01:00.000Z',
-    });
-    assert.equal(resumed.status, 'applied');
-
-    const skipped = await patrol.run({ dueAt: '2026-09-17T00:00:00.000Z', busy: true });
-    assert.equal(skipped.occurrence.state, 'skipped-busy');
-    assert.equal(skipped.nextCheckRef, 'next-check:subscription-a::3::1');
-    assert.equal((await port.snapshot('subscription-a')).occurrences[0]?.state, 'skipped-busy');
-
-    const first = await patrol.run({ dueAt: '2026-09-17T01:00:00.000Z', busy: false });
-    const duplicate = await patrol.run({ dueAt: '2026-09-17T01:00:00.000Z', busy: false });
-    assert.deepEqual(duplicate, first);
-    assert.equal(first.occurrence.state, 'due');
-    assert.equal((await port.snapshot('subscription-a')).subscription.currentOccurrenceOrdinal, 1);
-
-    const replayed = new SubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
-    assert.equal((await replayed.snapshot('subscription-a')).subscription.state, 'active');
-    const restarted = new SchedulerPatrol({
-      subscription: (await replayed.snapshot('subscription-a')).subscription,
-      trigger: {
-        triggerRef: 'trigger:patrol-restart',
-        source: 'schedule',
-        policyRef: 'policy:patrol',
-        policyRevision: 1,
-        skillRef: 'channel-routing',
-        skillDigest: 'sha256:skill',
-        scopeRef: 'scope:organ-a',
-        priorityProposalRef: 'priority:background',
-        payloadRef: 'asset://patrol-restart',
-      },
-      now: () => new Date('2026-09-17T03:00:00.000Z'),
-      port: {
-        async createAttention(input) {
-          attentions.push(input.reason);
-          return { attentionRef: 'attention:patrol-restart' };
-        },
-      },
-      subscriptionPort: replayed,
-    });
-    const afterRestart = await restarted.run({ dueAt: '2026-09-17T02:00:00.000Z', busy: false });
-    assert.equal(afterRestart.occurrence.occurrenceOrdinal, 3);
-    assert.deepEqual(attentions, []);
-
-    const pending = new SchedulerPatrol({
-      subscription: (await replayed.snapshot('subscription-a')).subscription,
-      trigger: {
-        triggerRef: 'trigger:patrol-pending',
-        source: 'schedule',
-        policyRef: 'policy:patrol',
-        policyRevision: 1,
-        skillRef: 'channel-routing',
-        skillDigest: 'sha256:skill',
-        scopeRef: 'scope:organ-a',
-        priorityProposalRef: 'priority:background',
-        payloadRef: 'asset://patrol-pending',
-      },
-      now: () => new Date('2026-09-17T04:00:00.000Z'),
-      port: {
-        async createAttention(input) {
-          attentions.push(input.reason);
-          return { attentionRef: 'attention:patrol-pending' };
-        },
-      },
-    });
-    const pendingReceipt = await pending.run({ dueAt: '2026-09-17T03:00:00.000Z', busy: false });
-    assert.equal(pendingReceipt.occurrence.state, 'due');
-    assert.equal(pendingReceipt.attentionRef, 'attention:patrol-pending');
-    assert.deepEqual(attentions, ['scheduler patrol requires the typed SubscriptionControlPort']);
-
-    await port.create({
-      subscriptionId: 'subscription-b',
-      goalId: 'goal-b',
-      scheduleRevision: 1,
-      state: 'active',
-      busyPolicy: 'skip',
-      currentOccurrenceOrdinal: 0,
-    }, {
-      policyId: 'policy:patrol-retry',
-      policyRevision: 1,
-      executionMode: 'once',
-      dueAt: '2026-09-17T03:00:00.000Z',
-      timezone: 'America/Los_Angeles',
-      canonicalInstant: '2026-09-17T03:00:00.000Z',
-      dstMode: 'wall',
-      dstMissedPolicy: 'shift-forward',
-      dstAmbiguousPolicy: 'earlier-offset',
-      latePolicy: 'run-once',
-      busyPolicy: 'skip',
-    });
-    const flakyPort = new FlakySubscriptionControlPort(new JsonlOrganJournal(file), scope, file);
-    const retrying = new SchedulerPatrol({
-      subscription: (await flakyPort.snapshot('subscription-b')).subscription,
-      trigger: {
-        triggerRef: 'trigger:patrol-retry',
-        source: 'schedule',
-        policyRef: 'policy:patrol-retry',
-        policyRevision: 1,
-        skillRef: 'channel-routing',
-        skillDigest: 'sha256:skill',
-        scopeRef: 'scope:organ-a',
-        priorityProposalRef: 'priority:background',
-        payloadRef: 'asset://patrol-retry',
-      },
-      now: () => new Date('2026-09-17T03:00:00.000Z'),
-      port: {
-        async createAttention(input) {
-          attentions.push(input.reason);
-          return { attentionRef: 'attention:patrol-retry' };
-        },
-      },
-      subscriptionPort: flakyPort,
-    });
-    const retryFailure = await retrying.run({ dueAt: '2026-09-17T03:00:00.000Z', busy: false });
-    assert.equal(retryFailure.occurrence.state, 'due');
-    assert.equal(retryFailure.attentionRef, 'attention:patrol-retry');
-    assert.deepEqual(attentions, [
-      'scheduler patrol requires the typed SubscriptionControlPort',
-      'scheduler transport failed once',
-    ]);
-    const retrySuccess = await retrying.run({ dueAt: '2026-09-17T03:00:00.000Z', busy: false });
-    assert.equal(retrySuccess.occurrence.state, 'due');
-    assert.equal((await flakyPort.snapshot('subscription-b')).occurrences[0]?.state, 'due');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test('explicit brain boundary validators reject invalid discriminants', () => {
   assert.throws(() => validateChannelBinding({
