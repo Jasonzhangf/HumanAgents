@@ -9,26 +9,32 @@
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts",
       "plannedOwnerPath": "packages/app/src/ui-runtime/service.ts",
-      "implementationStatus": "pending"
+      "ownerSymbol": "UiRuntimeService",
+      "implementationStatus": "pending",
+      "productionWiringStatus": "pending-T14"
     },
     "orchestrate_subscription_control": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.control",
       "implementationStatus": "implemented"
     },
     "begin_subscription_control_transaction": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.control",
       "implementationStatus": "implemented"
     },
     "decide_subscription_control": {
       "ownerPath": "packages/core/src/subscription.ts",
       "ownerRel": "packages/core/src/subscription.ts",
+      "ownerSymbol": "decideSubscriptionControl",
       "implementationStatus": "implemented"
     },
     "commit_subscription_control": {
       "ownerPath": "packages/runtime/src/subscriptions/index.ts",
       "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.control",
       "implementationStatus": "implemented"
     }
   }

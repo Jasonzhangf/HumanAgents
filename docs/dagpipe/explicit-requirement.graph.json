@@ -2,10 +2,10 @@
   "id": "humanagent-explicit-requirement",
   "version": "2",
   "meta": {
-    "title": "用户新任务从可读草稿到单次最终提交并编译持久化执行计划",
+    "title": "用户新任务从可读草稿、修订、精确确认到单次最终提交并进入需求队列与执行计划",
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "designStatus": "candidate",
-    "capabilityStatus": "pending",
+    "capabilityStatus": "partial",
     "ownershipContract": {
       "W1": "contracts-only shared exports; no runtime implementation",
       "W1b": "core draft invariant and runtime intake/router; consumes W1 and existing journal port",
@@ -17,8 +17,16 @@
       "failure": "draft revision or authorization failure returns explicit error and preserves input",
       "cancel": "rejected closure before dispatch; in-flight stop is separate",
       "blocked": "clarification required; draft remains editable",
-      "cleanup": "interaction closure receipt retained; stale confirmation explicitly rejected"
-    }
+      "cleanup": "interaction closure receipt retained; stale confirmation explicitly rejected",
+      "duplicate": "same draft revision and idempotency key returns existing finalSubmit receipt without a second requirement append or dispatch",
+      "staleRevision": "old confirmation or old revision is rejected with explicit confirmation-stale or stale-revision failure and the current draft remains editable",
+      "rejectClosure": "explicit rejectDraft records a durable DraftRejectClosure and keeps the interaction input available for a later retry of the same request path",
+      "restart": "preview, revision history, confirmation, final-submit receipt, and inbox transaction replay from explicit-intake and requirement-inbox durable state"
+    },
+    "productionWiringStatus": "PENDING",
+    "productionWiringGap": "packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner 使用桩 RequirementSubmitPort；production app 尚未把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription",
+    "productionWiringOwner": "T14",
+    "productionWiringEvidence": "packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create"
   },
   "inputs": [
     {
@@ -88,11 +96,26 @@
       "iterator": "Whole"
     },
     {
+      "id": "confirm_exact_revision",
+      "operator": "humanagent-draft-confirmation",
+      "operator_version": "1",
+      "inputs": [
+        "approved_draft_revision"
+      ],
+      "output": {
+        "id": "confirmed_draft_revision",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
       "id": "validate_draft_revision",
       "operator": "humanagent-draft-revision-invariants",
       "operator_version": "1",
       "inputs": [
-        "approved_draft_revision"
+        "confirmed_draft_revision"
       ],
       "output": {
         "id": "validated_draft_revision",
@@ -166,8 +189,13 @@
     },
     {
       "from": "revise_draft_to_approval",
-      "to": "validate_draft_revision",
+      "to": "confirm_exact_revision",
       "arc_id": "approved_draft_revision"
+    },
+    {
+      "from": "confirm_exact_revision",
+      "to": "validate_draft_revision",
+      "arc_id": "confirmed_draft_revision"
     },
     {
       "from": "validate_draft_revision",

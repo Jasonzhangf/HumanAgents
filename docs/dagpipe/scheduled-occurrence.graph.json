@@ -2,10 +2,10 @@
   "id": "humanagent-scheduled-occurrence",
   "version": "1",
   "meta": {
-    "title": "周期任务单个到期 occurrence 从已提交订阅状态到结果投影",
+    "title": "单个到期 occurrence 从 scheduler patrol、已提交订阅状态、认领、执行、收拢到结果投影",
     "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
     "designStatus": "candidate",
-    "capabilityStatus": "pending",
+    "capabilityStatus": "partial",
     "controlContract": {
       "request": "SubscriptionControlRequest = ModifySubscriptionControlRequest | PauseSubscriptionControlRequest | ResumeSubscriptionControlRequest | CancelFutureSubscriptionControlRequest",
       "receipt": "SubscriptionControlReceipt { subscriptionId, action, status, policyRevision, scheduleRevision, idempotencyKey, requestHash, supersededUnclaimedOccurrences, controlRef }",
@@ -50,7 +50,24 @@
       "cancelFuture": "subscription cancelled before occurrence claim; in-flight stop is separate",
       "cleanup": "occurrence consumed, skipped-busy, or invalidated; matching reminder consumed or invalidated; lease released; journal receipt retained",
       "executionRecovery": "duplicate, concurrent, or restarted execute-or-resume returns the same execution terminal identity without a second business dispatch"
-    }
+    },
+    "executionModeContract": {
+      "once": "单个 dueAt 到期的合法触发；执行成功后 occurrence 进入 consumed 终态",
+      "scheduled": "startAt 到期的单个计划触发；执行成功后 occurrence 进入 consumed 终态",
+      "recurring": "按 intervalMinutes/cadence 生成的每个 occurrence 都是独立 SESE 子图；每次触发使用新的 occurrenceId 与 ordinal，不回写上一 occurrence 的任务真源"
+    },
+    "occurrenceIsolation": "每次 occurrence 从 read_committed_subscription_state 重新建立独立执行身份；不在跨功能 DAG 中画回边或复用上一执行的状态",
+    "controlIsolation": "pause 或 cancel-future 只使尚未 claim 的 occurrence/reminder 失效；已 claim 的在途执行由 serve-task stop/settle 独立收口，不能在调度图内自动停止",
+    "schedulerPatrolContract": {
+      "owner": "packages/runtime/src/explicit-brain/scheduler-patrol.ts",
+      "entry": "SchedulerPatrol.snapshot/pause/resume/run",
+      "scope": "只读取已存在 Subscription 并按 dueAt 调用 SubscriptionControlPort.snapshot/schedule/control；不创建 Subscription，不执行任务轮次",
+      "terminal": "返回 SchedulerPatrolReceipt；订阅不存在或端口缺失时返回 typed pending attention，不伪装 occurrence 成功"
+    },
+    "productionWiringStatus": "PENDING",
+    "productionWiringGap": "packages/app/src/ui-runtime/service.ts:765 RequirementSubmissionOwner 使用桩 RequirementSubmitPort；production app 尚未把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription，且 production app 未组装 SchedulerPatrol/DurableOccurrenceConsumer",
+    "productionWiringOwner": "T14",
+    "productionWiringEvidence": "packages/runtime/src/explicit-brain/scheduler-patrol.ts:68 SchedulerPatrol；packages/runtime/src/subscriptions/index.ts:345 SubscriptionControlPort.create；packages/app/src/ui-runtime/occurrence-consumer.ts:276 DurableOccurrenceConsumer"
   },
   "inputs": [
     {
@@ -60,11 +77,34 @@
   ],
   "nodes": [
     {
+      "id": "scheduler_patrol",
+      "operator": "humanagent-schedule-patrol",
+      "operator_version": "1",
+      "inputs": [
+        "due_occurrence"
+      ],
+      "output": {
+        "id": "scheduler_patrol_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
       "id": "read_committed_subscription_state",
       "operator": "humanagent-schedule-subscription-read",
       "operator_version": "1",
       "inputs": [
-        "due_occurrence"
+        "scheduler_patrol_receipt"
       ],
       "output": {
         "id": "committed_subscription_state",
@@ -245,6 +285,11 @@
     }
   ],
   "edges": [
+    {
+      "from": "scheduler_patrol",
+      "to": "read_committed_subscription_state",
+      "arc_id": "scheduler_patrol_receipt"
+    },
     {
       "from": "read_committed_subscription_state",
       "to": "recover_pending_reminder",
