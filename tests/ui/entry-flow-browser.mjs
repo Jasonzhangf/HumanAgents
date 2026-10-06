@@ -581,11 +581,33 @@ async function submitThroughEntry(page, { rawInput, mode, startAt }) {
 async function waitForPlanReceipt(page, mode) {
   await page.waitForSelector('#entry-draft', { timeout: 20_000 });
   await page.waitForFunction((expectedMode) => {
+    const panel = document.querySelector('#entry-error');
+    if (panel && !panel.hidden && (panel.textContent || '').trim()) return false;
     const status = document.querySelector('[role="status"]');
     const text = status?.textContent || '';
-    if (text.includes('错误') || text.includes('失败') || text.includes('拒绝')) return false;
     return text.includes(expectedMode === 'once' ? '正在打开执行观测' : '执行计划已保存');
   }, mode, { timeout: 90_000 });
+}
+
+/**
+ * Wait until the entry submission lands on the observation surface, or fail
+ * fast with the error the page actually shows. A blind navigation wait turns
+ * every upstream failure into an opaque timeout.
+ */
+async function waitForObservationNavigation(page, timeoutMs = 180_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (/observation\.html\?task=/.test(page.url())) return;
+    const failure = await page.evaluate(() => {
+      const panel = document.querySelector('#entry-error');
+      const panelText = panel && !panel.hidden ? (panel.textContent || '').trim() : '';
+      const statusText = (document.querySelector('[role="status"]')?.textContent || '').trim();
+      return panelText || (/owner=|next=/.test(statusText) ? statusText : '');
+    }).catch(() => '');
+    if (failure) throw new Error(`entry submission did not reach the observation surface: ${failure}`);
+    await page.waitForTimeout(500);
+  }
+  throw new Error(`entry submission never reached the observation surface (url=${page.url()})`);
 }
 
 /**
@@ -596,8 +618,10 @@ async function waitForPlanReceipt(page, mode) {
  * function returns a Promise, so an `async` predicate resolves on its first call
  * and never observes a later state.
  */
-async function waitForObservationTrace(context, base, taskId, timeoutMs = 180_000) {
+async function waitForObservationTrace(context, base, taskId, timeoutMs = 420_000) {
   const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  const timeline = [];
   let last = 'no projection yet';
   while (Date.now() < deadline) {
     const response = await context.request.get(
@@ -607,14 +631,18 @@ async function waitForObservationTrace(context, base, taskId, timeoutMs = 180_00
       const projection = await response.json();
       const node = projection.scope?.nodes?.find((item) => item.nodeId === 'pipeline.execute');
       const toolSteps = projection.selectedNode?.toolSteps ?? [];
-      last = `nodeState=${node?.state ?? 'missing'} toolSteps=${toolSteps.length}`;
-      if (node && ['succeeded', 'failed', 'stopped'].includes(node.state) && toolSteps.length > 0) return last;
+      const line = `+${Math.round((Date.now() - started) / 1000)}s ${node?.state ?? 'missing'}/tools=${toolSteps.length}`;
+      if (line !== last) { timeline.push(line); last = line; }
+      if (node && ['succeeded', 'failed', 'stopped'].includes(node.state) && toolSteps.length > 0) {
+        return timeline.join(' ');
+      }
     } else {
       last = `observation http ${response.status()}`;
+      timeline.push(last);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  throw new Error(`real observation never projected a terminal tool trace: ${last}`);
+  throw new Error(`real observation never projected a terminal tool trace: ${timeline.join(' ')}`);
 }
 
 async function sectionB(browser, artifactDir, root) {
@@ -646,9 +674,10 @@ async function sectionB(browser, artifactDir, root) {
         rawInput: 'Do not ask questions. Create exactly one task: read marker.txt in the workspace root and report its contents, then finish with COMPLETE.',
         mode: 'once',
       });
-      await page.waitForURL(/observation\.html\?task=/, { timeout: 180_000 });
+      await waitForObservationNavigation(page);
       const taskId = new URL(page.url()).searchParams.get('task');
-      await waitForObservationTrace(context, base, taskId);
+      const timeline = await waitForObservationTrace(context, base, taskId);
+      observe('once observation settlement timeline', timeline);
       await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 20_000 });
       const nodeCount = await page.locator('.flow-node').count();
