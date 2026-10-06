@@ -389,7 +389,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     server,
     ...(scheduler === undefined ? {} : { scheduler }),
     async close() {
-      scheduler?.stop();
+      await scheduler?.stop();
       await runtimeService.quiesceImplicitConsumption();
       let serverCloseFailure: unknown;
       try {
@@ -397,19 +397,26 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
       } catch (error) {
         serverCloseFailure = error;
       }
-      const active = runtimeService.listTasks().running.filter((task) => task.requirementAdmission !== 'queued');
+      // The task list reports a settling execution as active until its terminal
+      // checkpoint is committed, but `stop` may only be requested while the
+      // execution still offers it. Selecting the stop targets from that
+      // eligibility keeps shutdown from asking an already settled execution to
+      // stop and reporting it as running.
+      const stopEligible = (taskId: TaskId): boolean =>
+        runtimeService.taskDashboard(taskId).allowedActions.includes('stop');
+      const active = runtimeService.listTasks().running.filter(
+        (task) => task.requirementAdmission !== 'queued' && stopEligible(task.taskId),
+      );
       const stopped = await Promise.allSettled(
         active.map(async (task) => {
           try {
             await runtimeService.stop(task.taskId);
           } catch (error) {
-            const stillActive = runtimeService.listTasks().running.some(
-              (candidate) => candidate.taskId.value === task.taskId.value && candidate.requirementAdmission !== 'queued',
-            );
             // A task can settle between the running snapshot and stop admission.
-            // That is a completed stop, not a shutdown failure; all other stop
-            // errors remain explicit.
-            if (error instanceof UiRuntimeApiError && error.code === 'task.not.running' && !stillActive) return;
+            // Its execution then owns the terminal checkpoint and no longer
+            // offers a stop, so this is a completed stop, not a shutdown
+            // failure; all other stop errors remain explicit.
+            if (error instanceof UiRuntimeApiError && error.code === 'task.not.running' && !stopEligible(task.taskId)) return;
             throw error;
           }
         }),

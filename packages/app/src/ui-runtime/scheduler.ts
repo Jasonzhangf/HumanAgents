@@ -32,6 +32,19 @@ const SCHEDULER_OWNER = 'humanagent.app.scheduled-occurrence-patrol';
  */
 const SCHEDULER_INSTANCE_ID = 'humanagent.app.scheduled-occurrence-patrol';
 
+/**
+ * Durable occurrence decisions that record a patrol skip. `due` and `claimed`
+ * are still pending and `consumed` executed, so only these three states count.
+ * The status projection derives the skip count from the same plan snapshot it
+ * already reads, so the reported number can never lag the durable decision the
+ * way a tick-local counter does.
+ */
+const SKIPPED_OCCURRENCE_STATES: ReadonlySet<string> = new Set([
+  'skipped-busy',
+  'reminder-pending',
+  'invalidated',
+]);
+
 export interface UiRuntimeSchedulerIssue {
   readonly code: string;
   readonly ownerId: string;
@@ -119,7 +132,6 @@ export class UiRuntimeScheduler {
   private claimed = 0;
   private executed = 0;
   private settled = 0;
-  private skipped = 0;
   private lastTickAt: string | undefined;
   private issue: UiRuntimeSchedulerIssue | undefined;
 
@@ -142,12 +154,15 @@ export class UiRuntimeScheduler {
     this.timer.unref?.();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
     this.state = 'stopped';
+    // A patrol that is already dispatching owns a real execution. Shutdown must
+    // wait for it instead of returning while the patrol is still in flight.
+    await this.inFlight;
   }
 
   /**
@@ -172,6 +187,10 @@ export class UiRuntimeScheduler {
       listIssue = this.issueFor('scheduler.plans-unreadable', messageOf(error), 'inspect the subscription journal', undefined);
     }
     const issue = this.issue ?? listIssue;
+    const skipped = plans.reduce(
+      (total, plan) => total + plan.occurrences.filter((occurrence) => SKIPPED_OCCURRENCE_STATES.has(occurrence.state)).length,
+      0,
+    );
     return {
       state: this.state,
       schedulerInstanceId: SCHEDULER_INSTANCE_ID,
@@ -180,7 +199,7 @@ export class UiRuntimeScheduler {
       claimed: this.claimed,
       executed: this.executed,
       settled: this.settled,
-      skipped: this.skipped,
+      skipped,
       ...(this.lastTickAt === undefined ? {} : { lastTickAt: this.lastTickAt }),
       ...(issue === undefined ? {} : { issue }),
       plans,
@@ -210,6 +229,9 @@ export class UiRuntimeScheduler {
   }
 
   private async runTick(): Promise<void> {
+    // `stop()` retires the patrol. A tick that was already queued when the
+    // runtime stopped must not claim or dispatch a new occurrence.
+    if (this.state !== 'running') return;
     const lease = this.options.lease();
     if (lease === undefined) {
       this.issue = this.issueFor(
@@ -288,7 +310,6 @@ export class UiRuntimeScheduler {
     const occurrenceOrdinal = policySlotOrdinal(snapshot.policy, dueAt);
     const occurrenceId = `${subscription.subscriptionId}::${subscription.scheduleRevision}::${occurrenceOrdinal}`;
     if (this.isSettled(snapshot, occurrenceId) || consumed.has(occurrenceId)) {
-      this.skipped += 1;
       return;
     }
     const existing = snapshot.occurrences.find((candidate) => candidate.occurrenceId === occurrenceId);
@@ -314,8 +335,8 @@ export class UiRuntimeScheduler {
     });
     if (scheduled.state !== 'due') {
       // skipped-busy / reminder-pending / consumed / invalidated are all closed
-      // or waiting decisions owned by the port; the patrol does not re-open them.
-      this.skipped += 1;
+      // or waiting decisions owned by the port; the patrol does not re-open them
+      // and the status projection reads the skip from that durable state.
       return;
     }
 
