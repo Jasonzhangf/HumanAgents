@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,11 +42,14 @@ import {
   canonicalJsonStringify,
   type AuthorizedRequirement,
   type DraftRevision,
+  type DraftRevisionInput,
+  type DraftRejectClosure,
   type ExecutionPolicyDefinition,
   type Subscription,
   type InteractionDecision,
   type WorkResult,
 } from '../../../contracts/src/index.js';
+import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
@@ -301,6 +304,15 @@ export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft
   readonly idempotencyKey?: string;
   readonly draftRevisionVersion?: number;
   readonly draftRevisionHash?: string;
+}
+
+export interface RefineExplicitDraftInput {
+  readonly draftId: string;
+  readonly baseRevisionVersion: number;
+  readonly requestedRevisionHash: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly instructionRef?: string;
+  readonly idempotencyKey?: string;
 }
 
 export interface ExplicitBrainDispatchReceipt {
@@ -720,10 +732,51 @@ function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['s
   return 'unknown';
 }
 
+/**
+ * Build the execution input for a revision edit from the user-facing fields.
+ * The core requires every accepted refinement to change `normalizedInput`;
+ * callers that submit the structured fields (goal/scope/constraints/
+ * deliverables) do not repeat the same content in a technical field.
+ */
+function normalizedInputForDraftFields(
+  current: DraftRevision,
+  fields: Readonly<Record<string, unknown>>,
+): string {
+  if (typeof fields.normalizedInput === 'string') return fields.normalizedInput;
+  const goal = typeof fields.goal === 'string' ? fields.goal : current.goal;
+  const scope = typeof fields.scope === 'string' ? fields.scope : current.scope;
+  const constraints = Array.isArray(fields.constraints)
+    ? fields.constraints.filter((entry): entry is string => typeof entry === 'string')
+    : current.constraints;
+  const deliverables = Array.isArray(fields.deliverables)
+    ? fields.deliverables.filter((entry): entry is string => typeof entry === 'string')
+    : current.deliverables;
+  return canonicalJsonStringify({
+    goal,
+    scope,
+    constraints,
+    deliverables,
+  });
+}
+
 function apiError(error: unknown): UiRuntimeApiError {
   if (error instanceof UiRuntimeApiError) return error;
   if (error instanceof IntakeError) {
     return new UiRuntimeApiError(error.name, error.owner, error.message, error.nextAction, 409);
+  }
+  if (error instanceof DraftRevisionError) {
+    // The draft-revision owner keeps the original failure code and message so a
+    // stale revision is rejected with a readable, structured error instead of a
+    // generic 500.
+    return new UiRuntimeApiError(
+      `explicit-draft.${error.code}`,
+      'humanagent.core.draft-revision',
+      error.message,
+      error.code === 'stale-revision' || error.code === 'confirmation-stale' || error.code === 'revision-hash-mismatch'
+        ? 'reload the current draft revision and confirm the exact version'
+        : 'inspect the draft revision before retrying',
+      409,
+    );
   }
   if (error instanceof SubscriptionControlError) {
     return new UiRuntimeApiError(
@@ -2169,6 +2222,9 @@ export class UiRuntimeService {
           proposal: interpreted.proposal,
           decisionRefs: interpreted.decisionRefs,
         });
+        // The reviewable draft exists now, so mint the typed revision before
+        // confirmation. The public GET can then project it for editing.
+        await this.ensureTypedDraftRevision(snapshot.interactionId);
       }
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
@@ -2250,6 +2306,142 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * Apply a typed field edit to the current draft revision. The intake owns the
+   * revision invariant: a stale base version/hash is rejected and the current
+   * revision is left untouched. The app only validates and forwards.
+   */
+  async refineExplicitDraft(interactionId: string, input: RefineExplicitDraftInput): Promise<ExplicitInteractionSnapshot> {
+    try {
+      const instructionRef = input.instructionRef ?? 'user-edit';
+      const current = this.explicitIntake.currentDraftRevision(interactionId);
+      if (current === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.typed-revision-required',
+          'humanagent.runtime.explicit-intake',
+          `interaction has no typed draft revision to refine: ${interactionId}`,
+          'generate the reviewable draft before editing it',
+          409,
+        );
+      }
+      const fields = {
+        ...input.fields,
+        normalizedInput: normalizedInputForDraftFields(current, input.fields),
+      };
+      const idempotencyKey = input.idempotencyKey ?? `refine:${input.draftId}:${input.baseRevisionVersion}:${input.requestedRevisionHash}:${createHash('sha256').update(canonicalJsonStringify(fields)).digest('hex')}`;
+      await this.explicitIntake.refineDraft(interactionId, {
+        draftId: input.draftId,
+        baseRevisionVersion: input.baseRevisionVersion,
+        requestedRevisionHash: input.requestedRevisionHash,
+        fields,
+        instructionRef,
+        idempotencyKey,
+      });
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Regenerate the reviewable draft ("重新整理"). Re-runs the explicit-brain
+   * interpreter and applies the regenerated content to the current typed
+   * revision as a refinement, so the caller observes a new revision identity.
+   * When the interpreter returns the same execution input, the current revision
+   * stays authoritative and no new revision is minted.
+   */
+  async regenerateExplicitDraft(interactionId: string, instruction?: string): Promise<ExplicitInteractionSnapshot> {
+    try {
+      const snapshot = await this.explicitIntake.inspect(interactionId);
+      if (snapshot.state !== 'awaiting-confirmation' && snapshot.state !== 'awaiting-intent') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.regeneration-state-invalid',
+          'humanagent.runtime.explicit-brain',
+          `explicit draft cannot be regenerated from ${snapshot.state}`,
+          'inspect the current interaction state before regenerating the draft',
+          409,
+        );
+      }
+      const correction = instruction?.trim();
+      const revision = this.explicitIntake.currentDraftRevision(interactionId);
+      const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
+        taskId: task.taskId.value,
+        title: task.title,
+        status: task.state,
+        currentInput: task.input || task.directive,
+      }));
+      const interpreted = await this.explicitBrainInterpreter.interpret({
+        interactionId: snapshot.interactionId,
+        inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
+        sourceRef: snapshot.sourceRef,
+        rawInput: correction === undefined || correction === ''
+          ? snapshot.rawInput
+          : `${snapshot.rawInput}\n\nUser correction: ${correction}`,
+        clarifications: snapshot.clarifications ?? [],
+        taskCandidates,
+      });
+      if (interpreted.kind !== 'requirement') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.regeneration-not-a-requirement',
+          'humanagent.runtime.explicit-brain',
+          'regeneration only applies to requirement drafts',
+          'answer the clarification or submit a new input instead',
+          409,
+        );
+      }
+      await this.explicitIntake.propose(interactionId, {
+        proposedIntent: interpreted.intent,
+        proposal: interpreted.proposal,
+        decisionRefs: interpreted.decisionRefs,
+      });
+      if (revision !== undefined && interpreted.normalizedInput !== revision.normalizedInput) {
+        await this.explicitIntake.refineDraft(interactionId, {
+          draftId: revision.draftId,
+          baseRevisionVersion: revision.revisionVersion,
+          requestedRevisionHash: revision.revisionHash,
+          fields: {
+            goal: interpreted.proposal,
+            scope: interpreted.normalizedInput,
+            normalizedInput: interpreted.normalizedInput,
+            proposal: interpreted.proposal,
+            proposedIntent: interpreted.intent,
+            knownFacts: interpreted.knownFacts,
+          },
+          instructionRef: `regenerate:${snapshot.sourceRef}`,
+          idempotencyKey: `regenerate:${interactionId}:${revision.revisionVersion}:${canonicalJsonStringify(interpreted.normalizedInput)}`,
+        });
+      }
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Formal draft rejection ("放弃"). Drives the typed reject through the router
+   * owner so the closure is durable and the interaction can never be submitted,
+   * and returns the closure receipt (reason + terminal revision identity).
+   */
+  async rejectExplicitDraftRevision(
+    interactionId: string,
+    input: { readonly reason: string; readonly rejectionId?: string; readonly closedAt?: string },
+  ): Promise<DraftRejectClosure> {
+    try {
+      const closure = await this.requirementSubmissions.rejectDraftRevision(this.explicitIntake, {
+        interactionId,
+        reason: input.reason,
+        ...(input.rejectionId === undefined ? {} : { rejectionId: input.rejectionId }),
+        ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }),
+      });
+      this.persistExplicitBrainState();
+      return closure;
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
   async completeExplicitStatusQuery(interactionId: string): Promise<StatusQueryReceipt> {
     try {
       await this.explicitIntake.beginStatusCheck(interactionId);
@@ -2326,11 +2518,24 @@ export class UiRuntimeService {
         409,
       );
     }
-    let revision = this.explicitIntake.currentDraftRevision(interactionId);
+    const revision = await this.ensureTypedDraftRevision(interactionId, {
+      executionPolicy: input.executionPolicy,
+      goal: input.goal,
+      scope: input.scope,
+      constraints: input.constraints,
+      deliverables: input.deliverables,
+    });
     if (revision === undefined) {
-      revision = await this.createTypedRevisionForFinalSubmit(interactionId, input);
-    } else if (input.executionPolicy !== undefined
-      && canonicalJsonStringify(revision.executionPolicy) !== canonicalJsonStringify(input.executionPolicy)) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.typed-revision-required',
+        'humanagent.runtime.explicit-intake',
+        `interaction has no reviewable typed draft revision to confirm: ${interactionId}`,
+        'generate the reviewable draft before final submission',
+        409,
+      );
+    }
+    if (input.executionPolicy !== undefined
+      && canonicalJsonStringify(revision.executionPolicy ?? null) !== canonicalJsonStringify(input.executionPolicy)) {
       // The execution type is part of the immutable revision. A revision that
       // already fixed a different policy cannot be silently rebound at submit
       // time; the caller must submit against a revision created with the policy.
@@ -2345,6 +2550,18 @@ export class UiRuntimeService {
 
     const draftRevisionVersion = input.draftRevisionVersion ?? revision.revisionVersion;
     const draftRevisionHash = input.draftRevisionHash ?? revision.revisionHash;
+    if ((input.draftRevisionVersion !== undefined && input.draftRevisionVersion !== revision.revisionVersion)
+      || (input.draftRevisionHash !== undefined && input.draftRevisionHash !== revision.revisionHash)) {
+      throw new DraftRevisionError({
+        code: 'confirmation-stale',
+        message: 'confirmation is not bound to the current draft revision',
+        draftId: revision.draftId,
+        ...(input.draftRevisionVersion === undefined ? {} : { expectedRevisionVersion: input.draftRevisionVersion }),
+        ...(input.draftRevisionHash === undefined ? {} : { expectedRevisionHash: input.draftRevisionHash }),
+        actualRevisionVersion: revision.revisionVersion,
+        actualRevisionHash: revision.revisionHash,
+      });
+    }
     this.confirmationLedger.registerRevision({
       interactionId,
       draftId: revision.draftId,
@@ -2394,57 +2611,58 @@ export class UiRuntimeService {
     };
   }
 
-  private async createTypedRevisionForFinalSubmit(
+  /**
+   * The single writer of a typed draft revision. The draft-generation path
+   * calls this as soon as the reviewable draft exists, so the public surface
+   * can project and edit the revision before confirmation. The final-submit
+   * path reuses the same implementation only when no revision exists yet, so a
+   * submit that carries the execution policy still bakes that policy into the
+   * one immutable revision. `undefined` means the interaction is not a typed
+   * draft (no draft requestKind), so the legacy draft path stays in force.
+   */
+  private async ensureTypedDraftRevision(
     interactionId: string,
-    input: ConfirmExplicitRequirementInput,
-  ): Promise<DraftRevision> {
+    options: {
+      readonly executionPolicy?: ExecutionPolicyDefinition;
+      readonly goal?: string;
+      readonly scope?: string;
+      readonly constraints?: readonly string[];
+      readonly deliverables?: readonly string[];
+    } = {},
+  ): Promise<DraftRevision | undefined> {
     const alreadyCreated = this.explicitIntake.currentDraftRevision(interactionId);
     if (alreadyCreated !== undefined) return alreadyCreated;
     const snapshot = await this.explicitIntake.inspect(interactionId);
     const draft = snapshot.draft;
-    if (!draft) {
-      throw new UiRuntimeApiError(
-        'explicit-brain.draft-missing',
-        'humanagent.runtime.explicit-intake',
-        `interaction has no reviewable draft to confirm: ${interactionId}`,
-        'generate the reviewable draft before final submission',
-        409,
-      );
-    }
+    if (!draft) return undefined;
     try {
       await this.explicitIntake.createDraft(interactionId, {
-        goal: input.goal ?? draft.proposal,
-        scope: input.scope ?? draft.normalizedInput,
-        constraints: input.constraints,
-        deliverables: input.deliverables,
+        goal: options.goal ?? draft.proposal,
+        scope: options.scope ?? draft.normalizedInput,
+        constraints: options.constraints,
+        deliverables: options.deliverables,
         normalizedInput: draft.normalizedInput,
         proposedIntent: draft.proposedIntent,
         proposal: draft.proposal,
         matchedTasks: draft.matchedTasks,
         knownFacts: draft.knownFacts,
         decisionRefs: draft.decisionRefs,
-        ...(input.executionPolicy === undefined ? {} : { executionPolicy: input.executionPolicy }),
+        ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }),
       });
     } catch (error) {
-      // A concurrent final submit may have created the revision first. Reuse
-      // that exact revision instead of failing the racing submit.
+      // A concurrent caller may have created the revision first. Reuse that
+      // exact revision instead of failing the racing caller.
       if (error instanceof ExplicitIntakeError && error.code === 'draft-already-created') {
-        const raced = this.explicitIntake.currentDraftRevision(interactionId);
-        if (raced !== undefined) return raced;
+        return this.explicitIntake.currentDraftRevision(interactionId);
+      }
+      // An untyped interaction keeps its legacy draft: the runtime refuses to
+      // mint a typed revision without a typed draft requestKind.
+      if (error instanceof ExplicitIntakeError && error.code === 'typed-request-kind-required') {
+        return undefined;
       }
       throw error;
     }
-    const revision = this.explicitIntake.currentDraftRevision(interactionId);
-    if (revision === undefined) {
-      throw new UiRuntimeApiError(
-        'explicit-brain.draft-missing',
-        'humanagent.runtime.explicit-intake',
-        `typed draft revision was not created: ${interactionId}`,
-        'inspect the interaction state before retrying final submission',
-        409,
-      );
-    }
-    return revision;
+    return this.explicitIntake.currentDraftRevision(interactionId);
   }
 
   /**
