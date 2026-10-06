@@ -25,14 +25,13 @@ receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源�
 
 范围内：统一 runner 与 lib、三个场景断言、为本地搜索补齐 typed 结果契约与读取入口、receipt/截图、
 失败/超时/取消两条收口分支。
-范围外：Retry-10 独立验收（本轮不验证，标 `INCOMPLETE`）；改造既有
-`tests/app/real-browser-explicit-implicit-e2e.mjs` 的兼容语义；扩大 Dashboard 的 20 条事件窗口。
+范围外：Retry-10 独立验收（本轮不验证，标 `INCOMPLETE`）；扩大 Dashboard 的事件窗口。
 
 ## 2. 能力确认（编码前门禁，已完成）
 
 | 能力 | 证据 | 结论 |
 | --- | --- | --- |
-| 真实 headless 浏览器 | 既有兼容 runner 已跑通 入口→草稿→确认→队列→运行中看板，产出 4 张真实截图 | 可用 |
+| 真实 headless 浏览器 | 既有兼容 runner 已跑通 入口→草稿→确认→队列→运行中看板，产出 4 张真实截图（`docs/evidence/explicit-implicit-e2e/browser-acceptance-584f048.md`） | 可用 |
 | 真实 Provider | RCC `127.0.0.1:4444`；journal 记录 11 次 `provider.tool` 执行 | 可用 |
 | `file.search` Provider 工具 | `packages/app/src/provider-tool-execution.ts:192` 已注册并接线 | 可用 |
 | 网络搜索后端 | `monid run -p tinyfish -e /search` → HTTP 200，返回真实 title/url/snippet，价格 0 | 可用 |
@@ -43,11 +42,12 @@ receipt 与独立收口。因此每条命令有**自己的 SESE 图**（单源�
 
 ## 3. 已定位的既有偏差
 
-1. **计数口径错误**：兼容 runner 从 `dashboard.recentEvents` 统计 turn/tool 数，而该窗口只有最近 20 条
+1. **计数口径错误**：旧兼容 runner 从 `dashboard.recentEvents` 统计 turn/tool 数，而该窗口只有最近 20 条
    （`packages/runtime/src/ui-runtime/coordinator.ts:2764`、`packages/ui/projection/runtime.ts:210`）。
    实测任务成功并执行 11 次 `provider.tool`，runner 仍报 `0 provider.tool rounds` / `1 request-start turn`。
-   本设计的**计数与终态断言取自权威 journal**，UI 渲染只作为独立的可见性断言（§6.1）。
-2. **`pnpm e2e:dashboard:*` 不存在**：`package.json` 无任何 e2e script。
+   本设计的**计数与终态断言取自权威 journal**，UI 渲染只作为独立的可见性断言（§6.1）。该兼容 runner
+   已退役：其未被覆盖的可见性断言已迁入 `lib/browser.mjs` 与 `scenarios/local-file-search.mjs`。
+2. **`pnpm e2e:dashboard:*` 当时不存在**：本设计在 `package.json` 增加三条 script（见 §4）。
 3. **web-search 断链**：`docs/architecture/hand-search-websearch-plan.md` 仍是 `design candidate` 且排除外部 provider。
 
 ## 4. 模块与 owner

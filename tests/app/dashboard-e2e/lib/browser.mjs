@@ -11,9 +11,7 @@
  * capture the human-observation screenshots.
  *
  * The attempt's serve PID and port are registered on the binding and are the
- * exact resources the cleanup closure stops and verifies. The page-driving
- * patterns mirror tests/app/real-browser-explicit-implicit-e2e.mjs, which is
- * the proven real-entry driver.
+ * exact resources the cleanup closure stops and verifies.
  */
 
 import { spawn } from 'node:child_process';
@@ -295,6 +293,21 @@ async function openEntryPage(binding) {
     throw new Error(`served UI entry did not load: ${entryUrl} status=${response?.status()}`);
   }
   await page.waitForSelector('.quick-create-form textarea[name="directive"]', { timeout: 15_000 });
+  // The rendered entry controls are only proven by their real layout: the
+  // directive textarea must occupy space, and the explicit-confirmation
+  // checkbox must stay compact under the shared input style.
+  const directiveBox = await page.locator('.quick-create-form textarea[name="directive"]').boundingBox();
+  if (!directiveBox || directiveBox.width <= 0 || directiveBox.height <= 0) {
+    throw new Error(`real browser input was not laid out with a positive bbox: ${JSON.stringify(directiveBox)}`);
+  }
+  const autoConfirmBox = await page.locator('.quick-create-policy input[name="autoConfirm"]').boundingBox();
+  if (!autoConfirmBox || autoConfirmBox.width <= 0 || autoConfirmBox.height <= 0) {
+    throw new Error(`dashboard autoConfirm checkbox was not laid out with a positive bbox: ${JSON.stringify(autoConfirmBox)}`);
+  }
+  if (autoConfirmBox.width > 20 || autoConfirmBox.height > 20) {
+    throw new Error(`dashboard autoConfirm checkbox was not compact: ${JSON.stringify(autoConfirmBox)}`);
+  }
+  binding.entryLayout = { directive: directiveBox, autoConfirm: autoConfirmBox };
   return entryUrl;
 }
 
@@ -478,7 +491,9 @@ export async function readTaskDashboardDom(binding, options = {}) {
     const rows = [...document.querySelectorAll('.event-list li.event')];
     const eventIds = rows.map((row) => row.dataset.eventId ?? null);
     return {
+      stateChip: text(document.querySelector('.page-heading .state-chip')),
       statusLayers: cells(document.querySelector('.status-layers')),
+      facts: cells([...document.querySelectorAll('.detail-grid')].find((grid) => !grid.classList.contains('status-layers'))),
       eventRows: rows.map((row) => ({
         eventId: row.dataset.eventId ?? null,
         kind: text(row.querySelector('.event-kind')),
@@ -498,6 +513,56 @@ export async function readTaskDashboardDom(binding, options = {}) {
       })),
     };
   });
+}
+
+/**
+ * Read the rendered pipeline observation page: the real node cards and the
+ * page-level projected state chip.
+ */
+export async function readObservationDom(binding) {
+  const { page } = binding.browser;
+  await page.goto(`${binding.serveBaseUrl}/observation.html?task=${encodeURIComponent(binding.taskId)}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.flow-node', { timeout: 30_000 });
+  return page.evaluate(() => ({
+    nodeIds: [...document.querySelectorAll('.flow-node')].map((card) => card.dataset.nodeId ?? ''),
+    metaChip: document.querySelector('.observation-meta .state-chip')?.textContent?.trim() ?? null,
+  }));
+}
+
+/**
+ * Read the rendered runtime task list. The dispatched task must appear there as
+ * a completed row that links to its own dashboard.
+ */
+export async function readTaskListDom(binding) {
+  const { page } = binding.browser;
+  await page.goto(`${binding.serveBaseUrl}/tasks.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-task-groups]', { timeout: 30_000 });
+  return page.evaluate(() => ({
+    groupTitles: [...document.querySelectorAll('[data-task-groups] h2')].map((node) => node.textContent?.trim() ?? ''),
+    links: [...document.querySelectorAll('[data-task-groups] a')].map((link) => ({
+      href: link.getAttribute('href') ?? '',
+      text: link.textContent?.trim() ?? '',
+    })),
+  }));
+}
+
+/**
+ * Collect rendered trajectory rows from the newest dashboard page and, while
+ * `stop` is unsatisfied, from the paged-back pages (bounded). The dashboard
+ * pages its history by turn, so rows of one turn are not all on one page.
+ */
+export async function collectDashboardEventRows(binding, stop, maxPages = 3) {
+  const { page } = binding.browser;
+  const rows = [...((await readTaskDashboardDom(binding)).eventRows ?? [])];
+  for (let index = 0; index < maxPages; index += 1) {
+    if (stop(rows)) break;
+    const older = page.locator('.history-pager button', { hasText: '更早' }).first();
+    if (await older.count() === 0 || await older.isDisabled()) break;
+    await older.click();
+    await page.waitForTimeout(200);
+    rows.push(...((await readTaskDashboardDom(binding, { navigate: false })).eventRows ?? []));
+  }
+  return rows;
 }
 
 /**
