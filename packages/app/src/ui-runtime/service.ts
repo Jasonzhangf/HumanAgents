@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -304,6 +304,15 @@ export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft
   readonly idempotencyKey?: string;
   readonly draftRevisionVersion?: number;
   readonly draftRevisionHash?: string;
+}
+
+export interface RefineExplicitDraftInput {
+  readonly draftId: string;
+  readonly baseRevisionVersion: number;
+  readonly requestedRevisionHash: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly instructionRef?: string;
+  readonly idempotencyKey?: string;
 }
 
 export interface ExplicitBrainDispatchReceipt {
@@ -721,6 +730,33 @@ function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['s
   if (event.error) return 'failed';
   if (event.kind === 'provider.tool-result') return 'succeeded';
   return 'unknown';
+}
+
+/**
+ * Build the execution input for a revision edit from the user-facing fields.
+ * The core requires every accepted refinement to change `normalizedInput`;
+ * callers that submit the structured fields (goal/scope/constraints/
+ * deliverables) do not repeat the same content in a technical field.
+ */
+function normalizedInputForDraftFields(
+  current: DraftRevision,
+  fields: Readonly<Record<string, unknown>>,
+): string {
+  if (typeof fields.normalizedInput === 'string') return fields.normalizedInput;
+  const goal = typeof fields.goal === 'string' ? fields.goal : current.goal;
+  const scope = typeof fields.scope === 'string' ? fields.scope : current.scope;
+  const constraints = Array.isArray(fields.constraints)
+    ? fields.constraints.filter((entry): entry is string => typeof entry === 'string')
+    : current.constraints;
+  const deliverables = Array.isArray(fields.deliverables)
+    ? fields.deliverables.filter((entry): entry is string => typeof entry === 'string')
+    : current.deliverables;
+  return canonicalJsonStringify({
+    goal,
+    scope,
+    constraints,
+    deliverables,
+  });
 }
 
 function apiError(error: unknown): UiRuntimeApiError {
@@ -2275,9 +2311,32 @@ export class UiRuntimeService {
    * revision invariant: a stale base version/hash is rejected and the current
    * revision is left untouched. The app only validates and forwards.
    */
-  async refineExplicitDraft(interactionId: string, input: DraftRevisionInput): Promise<ExplicitInteractionSnapshot> {
+  async refineExplicitDraft(interactionId: string, input: RefineExplicitDraftInput): Promise<ExplicitInteractionSnapshot> {
     try {
-      await this.explicitIntake.refineDraft(interactionId, input);
+      const instructionRef = input.instructionRef ?? 'user-edit';
+      const current = this.explicitIntake.currentDraftRevision(interactionId);
+      if (current === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.typed-revision-required',
+          'humanagent.runtime.explicit-intake',
+          `interaction has no typed draft revision to refine: ${interactionId}`,
+          'generate the reviewable draft before editing it',
+          409,
+        );
+      }
+      const fields = {
+        ...input.fields,
+        normalizedInput: normalizedInputForDraftFields(current, input.fields),
+      };
+      const idempotencyKey = input.idempotencyKey ?? `refine:${input.draftId}:${input.baseRevisionVersion}:${input.requestedRevisionHash}:${createHash('sha256').update(canonicalJsonStringify(fields)).digest('hex')}`;
+      await this.explicitIntake.refineDraft(interactionId, {
+        draftId: input.draftId,
+        baseRevisionVersion: input.baseRevisionVersion,
+        requestedRevisionHash: input.requestedRevisionHash,
+        fields,
+        instructionRef,
+        idempotencyKey,
+      });
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(interactionId);
     } catch (error) {
@@ -2304,16 +2363,8 @@ export class UiRuntimeService {
           409,
         );
       }
-      if (!snapshot.draft) {
-        throw new UiRuntimeApiError(
-          'explicit-brain.draft-missing',
-          'humanagent.runtime.explicit-intake',
-          `interaction has no reviewable draft to regenerate: ${interactionId}`,
-          'generate the reviewable draft before regenerating it',
-          409,
-        );
-      }
       const correction = instruction?.trim();
+      const revision = this.explicitIntake.currentDraftRevision(interactionId);
       const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
         taskId: task.taskId.value,
         title: task.title,
@@ -2344,10 +2395,7 @@ export class UiRuntimeService {
         proposal: interpreted.proposal,
         decisionRefs: interpreted.decisionRefs,
       });
-      const revision = this.explicitIntake.currentDraftRevision(interactionId);
-      if (revision === undefined) {
-        await this.ensureTypedDraftRevision(interactionId);
-      } else if (interpreted.normalizedInput !== revision.normalizedInput) {
+      if (revision !== undefined && interpreted.normalizedInput !== revision.normalizedInput) {
         await this.explicitIntake.refineDraft(interactionId, {
           draftId: revision.draftId,
           baseRevisionVersion: revision.revisionVersion,
@@ -2487,7 +2535,7 @@ export class UiRuntimeService {
       );
     }
     if (input.executionPolicy !== undefined
-      && canonicalJsonStringify(revision.executionPolicy) !== canonicalJsonStringify(input.executionPolicy)) {
+      && canonicalJsonStringify(revision.executionPolicy ?? null) !== canonicalJsonStringify(input.executionPolicy)) {
       // The execution type is part of the immutable revision. A revision that
       // already fixed a different policy cannot be silently rebound at submit
       // time; the caller must submit against a revision created with the policy.

@@ -779,13 +779,15 @@ async function handleRequest(
     const explicitRefinement = /^\/api\/explicit\/interactions\/([^/]+)\/refine$/.exec(path);
     if (explicitRefinement && method === 'POST') {
       const body = await readBody(request);
+      const instructionRef = optionalString(body, 'instructionRef') ?? 'user-edit';
+      const idempotencyKey = optionalString(body, 'idempotencyKey');
       writeJson(response, 200, await service.refineExplicitDraft(decodeURIComponent(explicitRefinement[1]!), {
         draftId: requireString(body, 'draftId'),
         baseRevisionVersion: requirePositiveInteger(body, 'baseRevisionVersion'),
         requestedRevisionHash: requireString(body, 'requestedRevisionHash'),
         fields: requireRecord(body, 'fields'),
-        instructionRef: requireString(body, 'instructionRef'),
-        idempotencyKey: requireString(body, 'idempotencyKey'),
+        instructionRef,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       }));
       return;
     }
