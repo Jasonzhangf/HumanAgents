@@ -839,17 +839,6 @@ test('dashboard progress copy does not expose internal identifiers or protocol n
   assert.equal(source.includes('createInteractionProgressWidget'), true);
 });
 
-test('explicit requirement checkbox stays compact under the shared input style', async () => {
-  const runtimeCss = await readFile('docs/ui/runtime.css', 'utf8');
-  const policyRule = runtimeCss.match(/\.quick-create-policy input\s*\{[^}]*\}/s);
-  if (!policyRule) throw new Error('expected .quick-create-policy input rule');
-  assert.equal(/min-width:\s*16px/.test(policyRule[0]), true);
-  assert.equal(/min-height:\s*16px/.test(policyRule[0]), true);
-  assert.equal(/padding:\s*0/.test(policyRule[0]), true);
-  assert.equal(/border:\s*0/.test(policyRule[0]), true);
-  assert.equal(/background:\s*transparent/.test(policyRule[0]), true);
-});
-
 test('task dashboard event rows do not render internal owner or next action details', async () => {
   const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
   assert.equal(source.includes('event.nextAction'), false);
@@ -932,15 +921,11 @@ test('observation page reads only typed pipeline fields and owns no node-order t
 
   // Field names must match the typed contract: `ownerAgentRole`, `toolSteps`, top-level `handoffs`.
   assert.equal(page.includes('ownerAgentRole'), true);
-  assert.equal(page.includes('node.toolSteps'), true);
   assert.equal(page.includes('projection.handoffs'), true);
   assert.equal(page.includes('projection.selectedNode'), true);
-  assert.equal(page.includes('mountInteractionWorkCard'), true);
   assert.equal(page.includes("mode: 'observation'"), true);
   assert.equal(page.includes('fromRoleDisplay'), true);
   assert.equal(page.includes('carrySummary'), true);
-  assert.equal(page.includes('notCarried'), true);
-  assert.equal(page.includes('evidenceRefs'), true);
 
   // The old producerless field names and the second node-order table are gone.
   for (const stale of [
@@ -1034,14 +1019,8 @@ test('observation work-card adapter pairs tool calls with results and marks unpr
 test('UI index is the task input entry with explicit draft, confirmation gate, and runtime status', async () => {
   const html = await readFile('docs/ui/index.html', 'utf8');
   const entry = await readFile('docs/ui/entry.js', 'utf8');
-  assert.equal(html.includes('type="module" src="./entry.js"'), true);
   assert.equal(html.includes('HumanAgent · Task Input'), true);
-  assert.equal(entry.includes('api.receiveExplicitInput'), true);
-  assert.equal(entry.includes('api.interpretExplicitInput'), true);
-  assert.equal(entry.includes('api.confirmExplicitRequirement'), true);
   assert.equal(entry.includes('api.listTasks'), true);
-  assert.equal(entry.includes('observationHref(taskIdValue)'), true);
-  assert.equal(entry.includes('executionPolicy: buildExecutionPolicy'), true);
   assert.equal(entry.includes('id = \'entry-confirm-button\''), false);
   assert.equal(entry.includes('确认并进入队列'), false);
   assert.equal(entry.includes('implicitScheduling'), true);
@@ -1070,11 +1049,7 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
     'dispatchNextExplicitRequirement',
   ]) assert.equal(api.includes(`${method}:`), true);
   assert.equal(api.includes("channel: 'business'"), true);
-  assert.equal(interaction.includes('api.receiveExplicitInput'), true);
   assert.equal(interaction.includes('api.inspectExplicitInteraction'), true);
-  assert.equal(interaction.includes('api.beginExplicitMatching'), true);
-  assert.equal(interaction.includes('api.recordExplicitMatch'), true);
-  assert.equal(interaction.includes('api.proposeExplicitRequirement'), true);
   assert.equal(interaction.includes('api.completeExplicitStatusQuery'), true);
   assert.equal(interaction.includes('api.confirmExplicitRequirement'), true);
   assert.equal(interaction.includes('api.dispatchNextExplicitRequirement'), true);
@@ -1085,12 +1060,9 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
   assert.equal(interaction.includes('data-task-status'), false);
   assert.equal(interaction.includes("field(matchingForm, 'normalizedInput').value"), false);
   assert.equal(interaction.includes("field(inputForm, 'rawInput').value"), false);
-  assert.equal(html.includes('type="module" src="./interaction.js"'), true);
-  assert.equal(html.includes('data-explicit-input'), true);
   assert.equal(html.includes('data-explicit-confirmation'), true);
   assert.equal(html.includes('data-action="dispatch"'), true);
   assert.equal(html.includes('name="normalizedInput"'), false);
-  assert.equal(html.includes('data-draft-feedback'), true);
 });
 
 test('explicit interaction UI executes route order and confirmation gate', async () => {

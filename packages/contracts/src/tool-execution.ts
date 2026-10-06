@@ -564,6 +564,13 @@ export interface ToolTraceDescriptor {
   readonly status: ToolTraceStatus;
   readonly outputRef?: string;
   readonly outputDigest?: string;
+  /**
+   * Whether the source reported the returned side of this call. It is a real
+   * fact of the trace: `true` when the source reported a result for the call,
+   * `false` when the call has no result yet. Absent only when the source
+   * reported no pairing fact at all, which is not the same as "not returned".
+   */
+  readonly paired?: boolean;
   readonly error?: ToolTraceError;
   readonly startedAt?: string;
   readonly durationMs?: number;
@@ -1947,10 +1954,16 @@ function validateToolTraceDescriptor(input: ToolTraceDescriptor): void {
     throw new ContractError('tool trace outputRef and outputDigest must be provided together');
   }
   // A succeeded provider tool call may report its output in-band instead of as a
-  // descriptor ref. The descriptor reports what the source reported, so it must
-  // not be forced to invent an output ref in order to state a real success.
+  // descriptor ref, so the descriptor must not invent an output ref to state a
+  // real success. The trace entry still has to carry a verifiable pointer to the
+  // returned side: either the descriptor ref pair or at least one evidence ref.
+  // That rule is enforced by `validateInteractionTraceEntry`, which is the only
+  // place that sees both the descriptor and the entry's evidence refs.
   if (input.outputRef !== undefined) assertNonEmpty(input.outputRef, 'tool trace outputRef');
   if (input.outputDigest !== undefined) assertNonEmpty(input.outputDigest, 'tool trace outputDigest');
+  if (input.paired !== undefined && typeof input.paired !== 'boolean') {
+    throw new ContractError('tool trace paired must be boolean');
+  }
   if (input.error !== undefined) {
     assertNonEmpty(input.error.code, 'tool trace error code');
     assertNonEmpty(input.error.message, 'tool trace error message');
@@ -1990,6 +2003,14 @@ export function validateInteractionTraceEntry(input: InteractionTraceEntry): voi
     throw new ContractError('tool trace kind requires a tool descriptor');
   }
   if (input.tool !== undefined) validateToolTraceDescriptor(input.tool);
+  // A succeeded tool trace must point at the returned side verifiably: either the
+  // descriptor's `outputRef`+`outputDigest` pair or at least one evidence ref.
+  // Without this, "succeeded" would be a bare claim with nothing to check.
+  if (input.tool?.status === 'succeeded'
+    && input.tool.outputRef === undefined
+    && input.evidenceRefs.length === 0) {
+    throw new ContractError('succeeded tool trace requires outputRef/outputDigest or evidenceRefs');
+  }
   if (input.authorization !== undefined) {
     if (input.authorization.executionEpoch !== input.executionEpoch
       || !sameScopedId(input.authorization.taskId, input.taskId)

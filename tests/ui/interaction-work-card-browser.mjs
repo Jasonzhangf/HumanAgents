@@ -491,6 +491,143 @@ try {
     card.detailText.slice(0, 300),
   );
 
+  // --- absence-aware status and unverifiable success -----------------------
+  // This projection is built by hand on purpose. It models exactly what the page
+  // itself can receive on the history surface: a source may report a succeeded
+  // tool result with no pointer to the returned side, and it may report no
+  // transport fact at all. The card must state the absence instead of turning it
+  // into a definite claim.
+  await page.evaluate(() => {
+    const host = document.createElement('div');
+    host.id = 'absence-host';
+    host.style.height = '640px';
+    document.body.append(host);
+    const base = {
+      seq: 1,
+      occurredAt: '2026-10-06T08:00:00.000Z',
+      state: 'succeeded',
+      taskId: 'task-card-proof-absence',
+      operationId: 'operation-card-proof-absence',
+      executionEpoch: 1,
+      turnId: 'turn-card-proof-absence',
+      requestId: 'request-card-proof-absence',
+      evidenceRefs: [],
+      summary: 'tool result',
+    };
+    window.__mountInteractionWorkCard(host, {}).update({
+      surface: 'interaction-work-card',
+      mode: 'interaction',
+      taskState: 'running',
+      statusbar: { label: '交互卡片', state: 'ready', detail: '来源：实时投影' },
+      cardMetadata: {
+        currentNode: 'provider.tool',
+        ownerId: 'runtime.card-proof',
+        nextStep: '读取授权描述符',
+        nextAction: 'review-trace',
+        waitingOn: 'provider',
+        startedAt: '2026-10-06T08:00:00.000Z',
+        source: {
+          taskId: 'task-card-proof-absence',
+          operationId: 'operation-card-proof-absence',
+          executionEpoch: 1,
+          turnId: 'turn-card-proof-absence',
+        },
+      },
+      conversation: { turns: [] },
+      actions: [],
+      history: {
+        result: 'ok',
+        query: { limit: 20 },
+        hasMore: false,
+        count: 3,
+        items: [
+          {
+            ...base,
+            kind: 'tool-result',
+            tool: { callId: 'call-no-pointer', toolId: 'file.read', status: 'succeeded', paired: true },
+          },
+          {
+            ...base,
+            seq: 2,
+            kind: 'tool-result',
+            evidenceRefs: [{
+              evidenceId: 'evidence-absence-1',
+              kind: 'execution',
+              source: 'card-proof',
+              locator: 'card-proof://absence/1',
+              scope: { organId: 'organ-card-proof' },
+            }],
+            tool: { callId: 'call-evidence-only', toolId: 'file.list', status: 'succeeded', paired: true },
+          },
+          {
+            ...base,
+            seq: 3,
+            kind: 'tool-call',
+            state: 'running',
+            tool: { callId: 'call-unreturned', toolId: 'file.search', status: 'running', paired: false },
+          },
+        ],
+      },
+    });
+  });
+
+  const absence = await page.evaluate(() => {
+    const host = document.querySelector('#absence-host');
+    const chips = [...host.querySelectorAll('.iwc-state-chip')];
+    const transportChip = chips.find((node) => (node.textContent ?? '').startsWith('传输'));
+    return {
+      transportText: transportChip?.textContent ?? '',
+      transportState: transportChip?.dataset.state ?? '',
+      statusText: host.querySelector('.iwc-status')?.innerText ?? '',
+      statusDetails: host.querySelector('.iwc-status-details')?.textContent ?? '',
+      transportDetail: (() => {
+        const row = [...host.querySelectorAll('.iwc-fact')]
+          .find((node) => node.querySelector('dt')?.textContent === '传输状态');
+        return row ? `${row.querySelector('dt')?.textContent}=${row.querySelector('dd')?.textContent}` : '';
+      })(),
+      rows: [...host.querySelectorAll('[data-trace-key]')].map((row) => ({
+        callId: row.dataset.callId,
+        evidence: row.dataset.toolEvidence,
+        paired: row.dataset.toolPaired,
+        text: row.innerText,
+      })),
+    };
+  });
+
+  const noPointerRow = absence.rows.find((row) => row.callId === 'call-no-pointer');
+  const evidenceOnlyRow = absence.rows.find((row) => row.callId === 'call-evidence-only');
+  const unreturnedRow = absence.rows.find((row) => row.callId === 'call-unreturned');
+  record(
+    'absent transport is stated as not provided instead of a definite disconnected claim',
+    absence.transportText === '传输 未提供'
+      && absence.transportState === 'unknown'
+      && absence.transportDetail.startsWith('传输状态=未提供'),
+    { transportText: absence.transportText, transportState: absence.transportState, transportDetail: absence.transportDetail },
+  );
+  record(
+    'a succeeded result with no verifiable pointer is not shown as a bare success claim',
+    noPointerRow?.evidence === 'unprojected'
+      && noPointerRow.text.includes('输出证据未投影')
+      && noPointerRow.text.includes('返回证据未投影')
+      && !noPointerRow.text.includes('调用与返回已配对'),
+    noPointerRow,
+  );
+  record(
+    'a succeeded result with an evidence ref keeps its real status',
+    evidenceOnlyRow?.evidence === 'projected'
+      && evidenceOnlyRow.text.includes('succeeded')
+      && !evidenceOnlyRow.text.includes('未返回')
+      && !evidenceOnlyRow.text.includes('返回证据未投影'),
+    evidenceOnlyRow,
+  );
+  record(
+    'a call with no reported result is explicitly not returned',
+    unreturnedRow?.paired === 'false'
+      && unreturnedRow.text.includes('调用未返回')
+      && unreturnedRow.evidence === 'projected',
+    unreturnedRow,
+  );
+
   // --- real page static contract -------------------------------------------
   pageErrors.length = 0;
   for (const target of [

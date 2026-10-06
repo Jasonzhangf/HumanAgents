@@ -427,6 +427,20 @@ function renderHistoryFailure(failure) {
   return node
 }
 
+/**
+ * A succeeded tool result must point at the returned side verifiably: either the
+ * descriptor's `outputRef`+`outputDigest` pair or at least one evidence ref. This
+ * is the same rule the public contract enforces. When a source reported neither,
+ * the card states that the pointer is missing instead of repeating a bare
+ * success claim it cannot verify.
+ */
+function toolEvidenceUnprojected(entry) {
+  const tool = entry.tool
+  if (!tool || tool.status !== 'succeeded') return false
+  if (typeof tool.outputRef === 'string' && tool.outputRef.length > 0) return false
+  return !Array.isArray(entry.evidenceRefs) || entry.evidenceRefs.length === 0
+}
+
 function renderTraceRow(entry, options, state, descriptorControls) {
   const row = create('article', `iwc-trace-row iwc-trace-row--${entry.kind}`)
   row.dataset.traceKey = [
@@ -440,12 +454,18 @@ function renderTraceRow(entry, options, state, descriptorControls) {
     entry.tool?.callId ?? '',
   ].join('|')
   row.dataset.callId = entry.tool?.callId || ''
-  row.dataset.toolPaired = entry.tool ? String(Boolean(entry.tool.paired)) : ''
+  row.dataset.toolPaired = entry.tool === undefined || entry.tool.paired === undefined
+    ? ''
+    : String(entry.tool.paired)
   row.dataset.unprojected = String(Boolean(entry.unprojected))
+  const evidenceUnprojected = toolEvidenceUnprojected(entry)
+  row.dataset.toolEvidence = entry.tool === undefined ? '' : evidenceUnprojected ? 'unprojected' : 'projected'
   const head = create('header', 'iwc-trace-head')
   head.append(create('span', 'iwc-kind-chip', TRACE_KIND_LABELS[entry.kind] || entry.kind))
   if (entry.tool?.toolId) head.append(create('strong', 'iwc-tool-name', entry.tool.toolId))
-  const stateLabel = entry.tool && !entry.tool.paired ? '未返回' : valueOrUnknown(entry.state)
+  const stateLabel = entry.tool?.paired === false
+    ? '未返回'
+    : evidenceUnprojected ? '输出证据未投影' : valueOrUnknown(entry.state)
   head.append(create('span', 'iwc-state-chip', stateLabel))
   if (entry.occurredAt) {
     head.append(create('time', 'iwc-time', state.mode === 'observation' ? formatObservationTime(entry.occurredAt) : formatTime(entry.occurredAt)))
@@ -455,9 +475,13 @@ function renderTraceRow(entry, options, state, descriptorControls) {
   if (entry.seq !== undefined && entry.seq !== null) head.append(create('span', 'iwc-seq', `seq ${entry.seq}`))
   row.append(head)
   const summary = entry.tool
-    ? state.mode === 'observation'
-      ? `${entry.tool.toolId} · ${entry.tool.paired ? `调用与返回已配对（${valueOrUnknown(entry.tool.statusDisplay, entry.tool.status)}）` : '调用未返回'}`
-      : `${entry.tool.toolId} · ${entry.tool.paired ? valueOrUnknown(entry.tool.statusDisplay, entry.tool.status) : '未返回'}`
+    ? entry.tool.paired === false
+      ? `${entry.tool.toolId} · 调用未返回`
+      : evidenceUnprojected
+        ? `${entry.tool.toolId} · 返回证据未投影`
+        : state.mode === 'observation'
+          ? `${entry.tool.toolId} · 调用与返回已配对（${valueOrUnknown(entry.tool.statusDisplay, entry.tool.status)}）`
+          : `${entry.tool.toolId} · ${valueOrUnknown(entry.tool.statusDisplay, entry.tool.status)}`
     : state.mode === 'observation'
       ? entry.summary || valueOrUnknown(entry.modelRef, '公开轨迹事件')
       : valueOrUnknown(entry.modelRef, '公开轨迹事件')
@@ -708,7 +732,7 @@ function observationTurn(summary, sourceKind, occurredAt, detailLabel) {
   }
 }
 
-function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, tool, details, unprojected, turnId }) {
+function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, tool, details, unprojected, turnId, evidenceRefs }) {
   return {
     kind,
     occurredAt,
@@ -718,6 +742,9 @@ function observationTraceEntry({ kind, occurredAt, state, summary, sourceRef, to
     tool,
     details,
     unprojected,
+    // The node's own evidence pointers. They are real node-scoped facts and are
+    // what makes a succeeded tool step verifiable on this read-only surface.
+    evidenceRefs: Array.isArray(evidenceRefs) ? evidenceRefs : [],
     ...(turnId === undefined || turnId === null ? {} : { turnId }),
   }
 }
@@ -736,8 +763,12 @@ export function projectObservationWorkCard(input = {}) {
   const toolSteps = Array.isArray(node.toolSteps) ? node.toolSteps : []
   const turns = activity.map((item) => observationTurn(item.summary, 'progress', item.occurredAt, '活动原文'))
   if (node.summary) turns.push(observationTurn(node.summary, 'result', node.updatedAt, '节点结论原文'))
+  // Every trace row on this read-only surface belongs to this node, so the node's
+  // own evidence pointers are the real evidence for each row.
+  const nodeEvidenceRefs = Array.isArray(node.evidenceRefs) ? node.evidenceRefs : []
+  const traceEntry = (fields) => observationTraceEntry({ ...fields, evidenceRefs: nodeEvidenceRefs })
 
-  const traceItems = activity.map((item) => observationTraceEntry({
+  const traceItems = activity.map((item) => traceEntry({
     kind: 'status',
     occurredAt: item.occurredAt,
     state: '已投影',
@@ -750,7 +781,7 @@ export function projectObservationWorkCard(input = {}) {
   for (const step of toolSteps) {
     const paired = step.status !== 'unknown'
     const statusDisplay = step.statusDisplay || step.status || '未知'
-    traceItems.push(observationTraceEntry({
+    traceItems.push(traceEntry({
       kind: 'tool-call',
       occurredAt: step.occurredAt,
       state: paired ? statusDisplay : '未返回',
@@ -779,7 +810,7 @@ export function projectObservationWorkCard(input = {}) {
   }
 
   if (node.summary) {
-    traceItems.push(observationTraceEntry({
+    traceItems.push(traceEntry({
       kind: 'conclusion',
       occurredAt: node.updatedAt,
       state: node.stateDisplay || '已投影',
@@ -790,7 +821,7 @@ export function projectObservationWorkCard(input = {}) {
     }))
   }
 
-  traceItems.push(observationTraceEntry({
+  traceItems.push(traceEntry({
     kind: 'model-request',
     state: '未投影',
     summary: '模型请求轨迹未投影',
@@ -798,7 +829,7 @@ export function projectObservationWorkCard(input = {}) {
     details: [['reason', 'this node reported no model-request event with a turn id']],
   }))
   if (toolSteps.length === 0) {
-    traceItems.push(observationTraceEntry({
+    traceItems.push(traceEntry({
       kind: 'tool-result',
       state: '未投影',
       summary: '工具调用与返回轨迹未投影',
@@ -833,10 +864,9 @@ export function projectObservationWorkCard(input = {}) {
       nextAction: '只读观测',
       waitingOn: undefined,
       startedAt: node.updatedAt,
-      provider: { state: '只读', lastEventAt: undefined },
-      transport: { connected: false, lastSyncedAt: undefined, stale: false },
-      settlement: { providerStopped: false, checkpointCommitted: false },
-      lastBusiness: { kind: 'observation', at: node.updatedAt, ref: undefined },
+      // A read-only node observation reports node facts only. It has no provider
+      // connection, transport or settlement fact to state, so those stay absent
+      // instead of being asserted as a definite value.
       source: {
         taskId: undefined,
         operationId: undefined,
@@ -893,8 +923,10 @@ function renderStatus(projection) {
     const providerChip = create('span', 'iwc-state-chip', `Provider ${valueOrUnknown(metadata.provider?.state)}`)
     providerChip.dataset.state = metadata.provider?.state || 'unknown'
     top.append(providerChip)
-    const transportChip = create('span', 'iwc-state-chip', `传输 ${metadata.transport?.connected ? '已连接' : '未连接'}`)
-    transportChip.dataset.state = metadata.transport?.connected ? 'connected' : 'disconnected'
+    const transportChip = create('span', 'iwc-state-chip', `传输 ${boolLabel(metadata.transport?.connected, '已连接', '未连接')}`)
+    transportChip.dataset.state = metadata.transport === undefined || metadata.transport === null
+      ? 'unknown'
+      : metadata.transport.connected ? 'connected' : 'disconnected'
     top.append(transportChip)
   }
   status.append(top)

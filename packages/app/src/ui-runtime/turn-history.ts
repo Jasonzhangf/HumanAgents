@@ -39,7 +39,10 @@ function traceKind(event: RuntimeTaskEvent): InteractionTraceKind {
   return RUNTIME_TRACE_KIND[event.kind];
 }
 
-function toolDescriptor(event: RuntimeTaskEvent): InteractionTraceEntry['tool'] {
+function toolDescriptor(
+  event: RuntimeTaskEvent,
+  returnedCallIds: ReadonlySet<string>,
+): InteractionTraceEntry['tool'] {
   if (event.kind !== 'provider.tool' && event.kind !== 'provider.tool-result') return undefined;
   const callId = event.callId;
   const toolId = event.toolId;
@@ -52,6 +55,10 @@ function toolDescriptor(event: RuntimeTaskEvent): InteractionTraceEntry['tool'] 
     callId,
     toolId,
     status,
+    // Pairing is a real fact of the trace: the runtime reported a result event
+    // for this call, or this event is that result. A call with no result event
+    // is explicitly not returned.
+    paired: event.kind === 'provider.tool-result' || returnedCallIds.has(callId),
     ...(hasPairedRefs && outputRef !== undefined ? { outputRef, outputDigest } : {}),
     ...(event.error === undefined ? {} : {
       error: {
@@ -64,8 +71,8 @@ function toolDescriptor(event: RuntimeTaskEvent): InteractionTraceEntry['tool'] 
   };
 }
 
-function toTraceEntry(event: RuntimeTaskEvent): InteractionTraceEntry {
-  const tool = toolDescriptor(event);
+function toTraceEntry(event: RuntimeTaskEvent, returnedCallIds: ReadonlySet<string>): InteractionTraceEntry {
+  const tool = toolDescriptor(event, returnedCallIds);
   return {
     ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
     ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
@@ -113,8 +120,16 @@ export function projectRuntimeTaskHistory(
   query: InteractionHistoryQuery,
 ): InteractionHistoryResult {
   validateInteractionHistoryQuery(query);
+  // The returned side of a tool call is reported by the runtime as its own
+  // result event. Collect those call ids first so every entry states the real
+  // pairing fact instead of leaving it unset.
+  const returnedCallIds = new Set(
+    task.events
+      .filter((event) => event.kind === 'provider.tool-result')
+      .flatMap((event) => (event.callId === undefined ? [] : [event.callId])),
+  );
   const all = task.events
-    .map(toTraceEntry)
+    .map((event) => toTraceEntry(event, returnedCallIds))
     .filter((entry) => matchesQuery(entry, query))
     .filter((entry) => (query.search === undefined ? true : matchesSearch(entry, query.search)))
     .sort((left, right) => left.seq - right.seq);

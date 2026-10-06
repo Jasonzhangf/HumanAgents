@@ -513,14 +513,40 @@ test('public consumer rejects a tool-result without a typed descriptor', () => {
   }), ContractError);
 });
 
-test('public consumer rejects a succeeded tool descriptor without verifiable output evidence', () => {
-  assert.throws(() => validateInteractionTraceEntry({
+test('public consumer accepts a succeeded tool descriptor whose evidence is carried by the trace entry', () => {
+  // A succeeded provider tool call may report its output in-band, so the
+  // descriptor refs may be absent; the entry's own evidence refs are then the
+  // verifiable pointer to the returned side.
+  assert.doesNotThrow(() => validateInteractionTraceEntry({
     ...traceEntry,
     tool: {
       ...traceEntry.tool!,
       outputRef: undefined,
       outputDigest: undefined,
     },
+  }));
+});
+
+test('public consumer rejects a succeeded tool descriptor with no output refs and no evidence', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    evidenceRefs: [],
+    tool: {
+      ...traceEntry.tool!,
+      outputRef: undefined,
+      outputDigest: undefined,
+    },
+  }), ContractError);
+});
+
+test('public consumer rejects a tool descriptor whose output ref and digest are not provided together', () => {
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    tool: { ...traceEntry.tool!, outputDigest: undefined },
+  }), ContractError);
+  assert.throws(() => validateInteractionTraceEntry({
+    ...traceEntry,
+    tool: { ...traceEntry.tool!, outputRef: undefined },
   }), ContractError);
 });
 

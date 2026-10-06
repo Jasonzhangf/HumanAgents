@@ -69,17 +69,28 @@ async function loadTaskHistory(query) {
       },
     }
   }
+  cardState.history = { query: effectiveQuery, result }
   interactionCard.update(withTaskHistory(cardState.projection, effectiveQuery, result))
 }
 
 let taskId = requestedTask
 let detail
 let activeInteractionId
-const cardState = { sequence: 0, entries: [], projection: projectInteractionCardFromEntries([], 'received') }
+const cardState = {
+  sequence: 0,
+  entries: [],
+  projection: projectInteractionCardFromEntries([], 'received'),
+  history: null,
+}
 
 function updateCard(projection) {
+  // A loaded history page is a real runtime fact, so rebuilding the card from
+  // local interaction events must not drop it. `cardState.projection` stays the
+  // base projection; the last loaded history page is re-applied on top.
   cardState.projection = projection
-  interactionCard?.update(projection)
+  interactionCard?.update(cardState.history
+    ? withTaskHistory(projection, cardState.history.query, cardState.history.result)
+    : projection)
 }
 
 function appendCardEvent(kind, text, sourceKind = kind, detail = {}) {
