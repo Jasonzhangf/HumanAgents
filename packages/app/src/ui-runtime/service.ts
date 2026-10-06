@@ -88,6 +88,7 @@ import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  RuntimeTaskEvent,
   producedArtifactBody,
   producedArtifactPaths,
   type RuntimeCheckpointBoundaryPort,
@@ -126,6 +127,7 @@ import {
   type RuntimeStatusProjection,
   type RuntimeTaskDashboardProjection,
   type RuntimeTaskErrorProjection,
+  type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type TaskDetailProjection,
   type OrganHealthProjection,
@@ -168,6 +170,21 @@ const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
 // task list) before the background drain starts consuming it. A macrotask-only
 // delay is too short for a second localhost request to sample the queued state.
 const QUEUED_VISIBILITY_WINDOW_MS = 100;
+
+type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
+  readonly history: {
+    readonly events: readonly RuntimeTaskEventProjection[];
+    readonly hasMore: boolean;
+    readonly total: number;
+    readonly omitted: number;
+    readonly gap: boolean;
+  };
+  readonly statusSections: {
+    readonly business: string;
+    readonly waiting: string;
+    readonly connection: string;
+  };
+};
 
 const LIFECYCLE_STATES = new Set([
   'created',
@@ -568,23 +585,104 @@ function observationHandoffs(
  * never reach this projection.
  */
 function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolStepSource[] {
-  return task.events
-    .filter((event) => event.kind === 'provider.tool')
-    .flatMap((event) => {
-      const stepId = event.evidenceRefs[0]?.locator ?? event.eventId;
-      const name = event.ownerId ?? event.evidenceRefs[0]?.source ?? '未标注工具';
-      const returned = event.summary.trim() || event.evidenceRefs.map((ref) => ref.locator).join(', ');
-      if (!stepId.trim() || !name.trim() || !returned.trim()) return [];
-      return [{
-        stepId,
-        name,
-        status: event.state === 'succeeded' || event.state === 'failed' || event.state === 'blocked' || event.state === 'cancelled'
-          ? event.state
-          : 'unknown',
-        returned,
-        occurredAt: event.occurredAt,
-      }];
+  const calls = new Map<string, RuntimeTaskEvent>();
+  for (const event of task.events.filter((item) => item.kind === 'provider.tool')) {
+    const key = event.callId ?? `${event.eventId}`;
+    if (!calls.has(key)) calls.set(key, event);
+  }
+  const resultsByCall = new Map<string, RuntimeTaskEvent>();
+  for (const event of task.events.filter((item) => item.kind === 'provider.tool-result')) {
+    const key = event.callId ?? event.eventId;
+    if (!resultsByCall.has(key)) resultsByCall.set(key, event);
+  }
+  const steps: ObservationNodeToolStepSource[] = [];
+  for (const [key, call] of calls) {
+    const result = resultsByCall.get(key);
+    const status = result ? resultStatus(result) : 'unknown';
+    const name = result?.toolId ?? call.toolId ?? '未标注工具';
+    const stepId = call.callId ?? result?.callId ?? call.eventId;
+    const durationMs = result
+      ? Math.max(0, Date.parse(result.occurredAt) - Date.parse(call.occurredAt))
+      : undefined;
+    const returned = result
+      ? [
+          `status=${status}`,
+          result.outputRef ? `outputRef=${result.outputRef}` : result.outputDigest ? `outputDigest=${result.outputDigest}` : 'output=missing',
+          call.arguments === undefined ? '' : `arguments=${JSON.stringify(call.arguments)}`,
+          result.error ? `error=${result.error.code}: ${result.error.message}` : '',
+          Number.isFinite(durationMs) ? `durationMs=${durationMs}` : '',
+          result.evidenceRefs.length > 0 ? `evidenceRefs=${result.evidenceRefs.length}` : '',
+        ].filter(Boolean).join(' · ')
+      : [
+          'status=unknown',
+          `call=${call.summary.trim() || call.eventId}`,
+          call.arguments === undefined ? '' : `arguments=${JSON.stringify(call.arguments)}`,
+        ].filter(Boolean).join(' · ');
+    if (!stepId.trim() || !name.trim()) continue;
+    steps.push({
+      stepId,
+      name,
+      status,
+      returned,
+      occurredAt: call.occurredAt,
     });
+  }
+  return steps;
+}
+
+function runtimeTaskDashboard(
+  task: RuntimeTaskSnapshot,
+  mode: 'fake' | 'rcc',
+): RuntimeTaskDashboardView {
+  const projected = projectRuntimeTaskDashboard(task, mode);
+  const history = task.events;
+  const omitted = Math.max(0, history.length - task.recentEvents.length);
+  const stateLabel = projected.stateLabel;
+  const hasCheckpoint = task.checkpoint !== undefined;
+  const resultAvailable = task.output.trim().length > 0;
+  const requestedStopWithoutReceipt = (task.state === 'stopped' || task.state === 'cancelled') && !hasCheckpoint;
+  return {
+    ...projected,
+    history: {
+      events: history.slice(),
+      hasMore: omitted > 0,
+      total: history.length,
+      omitted,
+      gap: omitted > 0,
+    },
+    statusSections: {
+      business: resultAvailable
+        ? `${stateLabel} · 结果可用`
+        : requestedStopWithoutReceipt
+          ? '停止 / 取消请求已受理 · 尚未收拢'
+        : task.state === 'succeeded'
+          ? '已完成 · 结果不可用'
+          : hasCheckpoint
+            ? `${stateLabel} · checkpoint 已提交`
+            : stateLabel,
+      waiting: hasCheckpoint
+        ? `已收拢：${task.checkpoint!.outcome} · checkpoint seq=${task.checkpoint!.seq}`
+        : task.state === 'running'
+          ? `等待执行结果：${task.currentNode}`
+          : task.state === 'settling'
+            ? `等待 checkpoint 收拢：${task.currentNode}`
+            : task.state === 'blocked'
+              ? '等待资源或人工处理后才能继续'
+              : task.state === 'failed'
+                ? '执行失败；等待错误证据和资源收拢'
+                : task.state === 'stopped' || task.state === 'cancelled'
+                  ? `停止/取消请求已受理；等待收拢 receipt（当前节点：${task.currentNode}）`
+                  : `当前节点：${task.currentNode}`,
+      connection: '由浏览器 SSE 连接状态呈现',
+    },
+  };
+}
+
+function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['status'] {
+  if (event.status === 'succeeded' || event.status === 'failed' || event.status === 'blocked' || event.status === 'cancelled') return event.status;
+  if (event.error) return 'failed';
+  if (event.kind === 'provider.tool-result') return 'succeeded';
+  return 'unknown';
 }
 
 function apiError(error: unknown): UiRuntimeApiError {
@@ -1602,9 +1700,9 @@ export class UiRuntimeService {
     });
   }
 
-  taskDashboard(taskId: TaskId): RuntimeTaskDashboardProjection {
+  taskDashboard(taskId: TaskId): RuntimeTaskDashboardView {
     try {
-      return projectRuntimeTaskDashboard(this.coordinatorOrQueuedTaskSnapshot(taskId), this.mode);
+      return runtimeTaskDashboard(this.coordinatorOrQueuedTaskSnapshot(taskId), this.mode);
     } catch (error) {
       throw apiError(error);
     }

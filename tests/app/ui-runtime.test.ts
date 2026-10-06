@@ -75,7 +75,7 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
-import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
+import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createProviderExplicitBrainInterpreter,
@@ -1844,8 +1844,8 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   // The drawer panes read the detail projection's own typed fields, so the live service path must
   // carry the real tool steps and owning agent role, not just those of the flow node.
   assert.equal(selected.toolSteps.length, 1);
-  assert.equal(selected.toolSteps[0]?.returned, 'tool: fake://tool/1');
-  assert.equal(selected.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.match(selected.toolSteps[0]?.returned ?? '', /status=unknown · call=tool: fake:\/\/tool\/1/);
+  assert.equal(selected.toolSteps[0]?.name, '未标注工具');
   assert.equal(selected.ownerAgentRole, 'execution');
   assert.equal(selected.roleDisplay, '执行');
   assert.equal(selected.owner.length > 0, true);
@@ -1900,6 +1900,93 @@ test('provider tool-result output stays out of task output while remaining visib
   assert.equal(events.some((event) => event.kind === 'provider.output' && event.summary === 'REAL_FILE_CONTENT'), true);
 });
 
+test('observation pairs provider tool calls with results by callId and uses toolId as the display name', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-tool-callid-pair-'));
+  const port = new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      {
+        kind: 'tool',
+        state: 'tool',
+        summary: 'file.search call',
+        outputRefs: ['fake://tool-call/1'],
+        toolCall: { callId: 'call-1', toolId: 'file.search', arguments: { path: '.', query: 'marker', queryKind: 'literal' }, continuationRef: 'responses-tool-call' },
+      },
+      { kind: 'terminal', state: 'tool-waiting', summary: 'provider awaits the tool result', terminalState: 'waiting', nextAction: { kind: 'continue', ref: 'responses-tool-call' } },
+      { kind: 'output', state: 'output', summary: 'final answer', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  });
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-tool-result'),
+    providerTools: [RESPONSES_FILE_SEARCH_TOOL],
+    providerToolExecutor: {
+      async execute() {
+        return {
+          output: JSON.stringify([]),
+          outputRefs: ['fake://tool-result/1'],
+          evidenceRefs: [evidence('result', { organId })],
+          outputRef: 'fake://tool-result/1',
+          outputDigest: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+        };
+      },
+    },
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+  });
+  const task = service.createTask({ title: 'tool call pairing', directive: 'pair call and result' });
+  service.startExecution(task.taskId, { prompt: 'pair the tool round' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const executeNode = service.observation(task.taskId).nodes.find((node) => node.nodeId === 'pipeline.execute');
+  if (!executeNode) throw new Error('expected pipeline.execute node');
+  assert.equal(executeNode.toolSteps.length, 1);
+  assert.equal(executeNode.toolSteps[0]?.name, 'file.search');
+  assert.equal(executeNode.toolSteps[0]?.status, 'succeeded');
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /outputRef=fake:\/\/tool-result\/1/);
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /arguments=.*marker/);
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /durationMs=/);
+  assert.equal(executeNode.toolSteps[0]?.stepId, 'call-1');
+});
+
+test('task dashboard exposes full history with hasMore and no status-layer contradiction after success', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-dashboard-history-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      ...Array.from({ length: 24 }, (_, index) => ({ kind: 'model' as const, state: 'model', summary: `model ${index + 1}` })),
+      { kind: 'output', state: 'output', summary: 'history final output', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  }));
+  const task = service.createTask({ title: 'dashboard history', directive: 'show all history windows' });
+  service.startExecution(task.taskId, { prompt: 'show history' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  // Full typed trajectory is carried for paging; the recent-events summary stays bounded.
+  assert.equal(dashboard.history.events.length, dashboard.history.total);
+  assert.equal(dashboard.history.events.length > 20, true);
+  assert.equal(dashboard.recentEvents.length, 20);
+  assert.equal(dashboard.history.hasMore, true);
+  assert.equal(dashboard.history.omitted, dashboard.history.total - 20);
+  assert.equal(dashboard.history.events[0]!.seq < dashboard.recentEvents[0]!.seq, true);
+  assert.match(dashboard.statusSections.business, /已完成/);
+  assert.match(dashboard.statusSections.waiting, /收拢/);
+  assert.equal(dashboard.statusSections.business.includes('尚未提交'), false);
+});
+
 test('observation projects all thirteen registry nodes in registry order with agent-frame ownership and real tool steps', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-observation-thirteen-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
@@ -1947,8 +2034,8 @@ test('observation projects all thirteen registry nodes in registry order with ag
   const executeNode = observation.nodes.find((node) => node.nodeId === 'pipeline.execute');
   if (!executeNode) throw new Error('expected pipeline.execute node');
   assert.equal(executeNode.toolSteps.length, 1);
-  assert.equal(executeNode.toolSteps[0]?.returned, 'tool: fake://tool/1');
-  assert.equal(executeNode.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /status=unknown · call=tool: fake:\/\/tool\/1/);
+  assert.equal(executeNode.toolSteps[0]?.name, '未标注工具');
   // The provider reports `tool` without a terminal status; the step stays explicitly unknown.
   assert.equal(executeNode.toolSteps[0]?.status, 'unknown');
   assert.equal(executeNode.toolSteps[0]?.stepId.length > 0, true);
@@ -7151,6 +7238,10 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   const failedTask = failingService.createTask({ title: 'composition failure' });
   const failedStart = failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
   await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
+  const failedDashboard = failingService.taskDashboard(failedTask.taskId);
+  assert.match(failedDashboard.statusSections.business, /失败/);
+  assert.match(failedDashboard.statusSections.waiting, /已收拢：failed/);
+  assert.equal(failedDashboard.statusSections.business.includes('尚未提交'), false);
   const failedEvents = failingService.eventsSince(failedStart.operationId);
   assert.equal(failedEvents.some((event) => event.kind === 'provider.error' && event.ownerId === 'ui-runtime-blocking-hook'), true);
   assert.equal(failedEvents.some((event) => event.kind === 'checkpoint.committed' && event.state === 'failed'), true);

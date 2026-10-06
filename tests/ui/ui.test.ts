@@ -849,10 +849,27 @@ test('explicit requirement checkbox stays compact under the shared input style',
 
 test('task dashboard event rows do not render internal owner or next action details', async () => {
   const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
-  assert.equal(source.includes('event.ownerId'), false);
   assert.equal(source.includes('event.nextAction'), false);
   assert.equal(source.includes("event.kind !== 'provider.model' || (event.summary && event.summary !== 'model')"), true);
-  assert.equal(source.includes('element(\'span\', event.summary)'), true);
+  assert.equal(source.includes("'provider.tool-result'"), true);
+  assert.equal(source.includes('historyChunks'), true);
+  assert.equal(source.includes('olderEventCount'), true);
+  assert.equal(source.includes('connectionState'), true);
+});
+
+test('task dashboard status copy keeps stopped conditional on a collected checkpoint', async () => {
+  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
+  assert.equal(source.includes("dashboard.state === 'stopped'"), true);
+  assert.equal(source.includes('不能宣称已停止'), true);
+  assert.equal(source.includes('statusSections.business'), true);
+  assert.equal(source.includes('statusSections.waiting'), true);
+  assert.equal(source.includes('连接新鲜度'), true);
+  assert.equal(source.includes('historyPage'), true);
+  assert.equal(source.includes('HISTORY_PAGE_SIZE'), true);
+  assert.equal(source.includes("'更早'"), true);
+  assert.equal(source.includes('本页之前还有'), false);
+  assert.equal(source.includes('停止请求已受理'), true);
+  assert.equal(source.includes("['succeeded', 'failed'].includes(dashboard.state)"), true);
 });
 
 test('dashboard confirmation waits on user without continuing a provider timer', async () => {

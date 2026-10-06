@@ -12,7 +12,7 @@
  * deviation and this attempt stays INCOMPLETE.
  */
 
-import { captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
+import { captureDashboardEvidence, captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
 import { countTurnEvidenceFor, journalPathFor, readToolOutputReports } from '../lib/journal.mjs';
 
 export const SCENARIO = 'web-search';
@@ -46,6 +46,7 @@ export async function runWebSearchScenario(binding) {
   evidence.screenshots.push(`${binding.screenshotsDir}/03-run-queue.png`);
 
   const dashboard = await waitForTerminal(binding);
+  const dashboardEvidence = await captureDashboardEvidence(binding);
   await captureScreenshot(binding, '04-task-result');
   evidence.screenshots.push(`${binding.screenshotsDir}/04-task-result.png`);
 
@@ -73,6 +74,17 @@ export async function runWebSearchScenario(binding) {
   if (calls.length === 0) missing.push('no provider.tool round used the web.search tool');
   if (results.length === 0) missing.push('no tool result was recorded for the web.search call');
   if (urls.length === 0) missing.push('no http(s) URL appeared in the tool round evidence or tool output reports');
+  const dashboardDom = dashboardEvidence.taskDashboardDom ?? {};
+  if (!Array.isArray(dashboardDom.statusLayers) || dashboardDom.statusLayers.length !== 3) {
+    missing.push('dashboard did not render the business/waiting/freshness status layers');
+  }
+  if ((dashboardDom.duplicateEventIds ?? []).length > 0) {
+    missing.push('dashboard rendered duplicate event identities');
+  }
+  const terminalEventKinds = new Set((dashboardEvidence.sse ?? []).map((event) => event.kind));
+  if (!terminalEventKinds.has('provider.tool-result')) {
+    missing.push('terminal trajectory did not include provider.tool-result');
+  }
 
   evidence.scenarioEvidence = {
     directive,
@@ -100,6 +112,12 @@ export async function runWebSearchScenario(binding) {
     resultUrls: urls.slice(0, 24),
     outputContainsMarker: output.includes(QUERY_MARKER),
     outputPreview: output.slice(0, 1800),
+    dashboardProbe: dashboardEvidence.dashboardProbe,
+    toolStepEvidence: dashboardEvidence.toolStepEvidence,
+    executeNode: dashboardEvidence.executeNode,
+    observation: dashboardEvidence.observation,
+    taskDashboardDom: dashboardEvidence.taskDashboardDom,
+    terminalSse: dashboardEvidence.sse,
   };
   evidence.terminalState = dashboard.state;
   evidence.dashboardState = dashboard.state;

@@ -14,7 +14,15 @@
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { captureScreenshot, submitDirectiveAndConfirmDraft, waitForTerminal } from '../lib/browser.mjs';
+import {
+  captureDashboardEvidence,
+  captureScreenshot,
+  openTaskDashboard,
+  pageBackDashboardHistory,
+  probeDashboardLiveSse,
+  submitDirectiveAndConfirmDraft,
+  waitForTerminal,
+} from '../lib/browser.mjs';
 import {
   countTurnEvidenceFor,
   journalPathFor,
@@ -54,8 +62,16 @@ export async function runLocalFileSearchScenario(binding) {
   await captureScreenshot(binding, '03-run-queue');
   evidence.screenshots.push(`${binding.screenshotsDir}/03-run-queue.png`);
 
+  // Observe the live dashboard's real SSE connection while the task still runs:
+  // result events arrive, a network interruption shows 已断开 without faking
+  // failure, and reconnect restores live freshness.
+  await openTaskDashboard(binding);
+  const liveSse = await probeDashboardLiveSse(binding).catch((error) => ({ error: error.message }));
+
   // run queue -> execution turns -> verifiable terminal
   const dashboard = await waitForTerminal(binding);
+  const dashboardEvidence = await captureDashboardEvidence(binding);
+  const historyPaging = await pageBackDashboardHistory(binding).catch((error) => ({ error: error.message }));
   await captureScreenshot(binding, '04-task-result');
   evidence.screenshots.push(`${binding.screenshotsDir}/04-task-result.png`);
 
@@ -110,6 +126,61 @@ export async function runLocalFileSearchScenario(binding) {
   if (!fixtureHit) missing.push(`workspace path ${fixtureRel} did not appear in the tool evidence`);
   if (!markerHit) missing.push(`fixture marker ${marker} did not appear in the tool evidence`);
   if (!unchanged) missing.push('workspace manifest changed during the read-only run');
+  const toolStepEvidence = dashboardEvidence.toolStepEvidence ?? [];
+  const pairedCallResult = toolStepEvidence.find((step) =>
+    typeof step.stepId === 'string'
+    && step.stepId.startsWith('call_')
+    && step.status === 'succeeded'
+    && typeof step.returned === 'string'
+    && step.returned.includes('outputRef=')
+    && step.returned.includes('arguments=')
+    && step.returned.includes('durationMs=')
+  );
+  if (!pairedCallResult) {
+    missing.push('no callId-paired succeeded tool step exposed toolId, outputRef, arguments, and duration');
+  }
+  if (!(historyPaging?.flipped && historyPaging?.reachedOlderEvents)) {
+    missing.push('dashboard history did not page back to older typed events');
+  }
+  const dashboardDom = dashboardEvidence.taskDashboardDom ?? {};
+  if (!Array.isArray(dashboardDom.statusLayers) || dashboardDom.statusLayers.length !== 3) {
+    missing.push('dashboard did not render the business/waiting/freshness status layers');
+  }
+  if ((dashboardDom.duplicateEventIds ?? []).length > 0) {
+    missing.push('dashboard rendered duplicate event identities');
+  }
+  if (!String(dashboardDom.historyGap ?? '').includes('更早还有')) {
+    missing.push('dashboard did not expose the older-event gap after paging');
+  }
+  if (!String(dashboardDom.pageStatus ?? '').includes('任务投影已同步')) {
+    missing.push('dashboard did not expose a successful projection read in the status banner');
+  }
+  if (!liveSse || liveSse.error) {
+    missing.push(`live SSE probe failed: ${liveSse?.error ?? 'missing result'}`);
+  } else {
+    if (!liveSse.providerToolResultSeen) missing.push('live SSE did not deliver provider.tool-result');
+    if (!String(liveSse.broken?.freshness ?? '').includes('实时连接已断开')) {
+      missing.push('SSE interruption did not mark the connection freshness as disconnected');
+    }
+    if (liveSse.broken?.stateChip === '失败') missing.push('SSE interruption was rendered as task failure');
+    if (!String(liveSse.broken?.pageStatus ?? '').includes('读取任务失败')) {
+      missing.push('SSE interruption did not perform a visible projection readback');
+    }
+    if (!(liveSse.broken?.dashboardReads > (liveSse.connected?.dashboardReads ?? 0))) {
+      missing.push('SSE interruption did not trigger a dashboard projection read');
+    }
+    const recoveredFreshness = String(liveSse.recovered?.freshness ?? '');
+    if (!recoveredFreshness.includes('实时连接已建立') && !recoveredFreshness.includes('执行已收拢')) {
+      missing.push('SSE reconnection did not restore live or settled freshness');
+    }
+    if (!String(liveSse.recovered?.pageStatus ?? '').includes('任务投影已同步')) {
+      missing.push('SSE reconnection did not perform a visible successful projection readback');
+    }
+  }
+  const terminalEventKinds = new Set((dashboardEvidence.sse ?? []).map((event) => event.kind));
+  if (!terminalEventKinds.has('provider.tool-result')) {
+    missing.push('terminal trajectory did not include provider.tool-result');
+  }
 
   evidence.scenarioEvidence = {
     directive,
@@ -139,6 +210,14 @@ export async function runLocalFileSearchScenario(binding) {
     workspaceManifestAfter: after,
     workspaceUnchanged: unchanged,
     outputPreview: String(dashboard.output ?? '').slice(0, 1600),
+    dashboardProbe: dashboardEvidence.dashboardProbe,
+    toolStepEvidence: dashboardEvidence.toolStepEvidence,
+    executeNode: dashboardEvidence.executeNode,
+    observation: dashboardEvidence.observation,
+    taskDashboardDom: dashboardEvidence.taskDashboardDom,
+    terminalSse: dashboardEvidence.sse,
+    historyPaging,
+    liveSse,
   };
   evidence.terminalState = dashboard.state;
   evidence.dashboardState = dashboard.state;
