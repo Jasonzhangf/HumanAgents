@@ -15,6 +15,7 @@ import {
   type InteractionCardHistorySource,
   type InteractionCardNodeInput,
   type InteractionCardSource,
+  type RuntimeLivenessProjection,
 } from '../../packages/ui/index.js';
 import { UiProjectionError } from '../../packages/ui/contracts/models.js';
 
@@ -188,4 +189,28 @@ test('interaction projection rejects entries that violate typed history scope', 
       result: { ok: true, page: { hasMore: false, items: [traceEntry(4, 'status')] } },
     },
   }), UiProjectionError);
+});
+
+test('interaction projection carries the runtime liveness projection without re-deriving it', () => {
+  const liveness: RuntimeLivenessProjection = {
+    state: 'no-activity',
+    reason: 'no real activity for 42000 ms; the declared silence budget is 30000 ms',
+    lastActivityAt: '2026-11-01T15:59:18Z',
+    observedAt: '2026-11-01T16:00:00Z',
+    silentForMs: 42_000,
+    silenceBudgetMs: 30_000,
+  };
+
+  const projection = projectInteractionWorkCard({ ...cardSource, liveness });
+
+  assert.deepEqual(projection.cardMetadata.liveness, liveness);
+  // The event-transport fact has exactly one carrier: the card's own transport
+  // field, fed by the page that holds the stream. Liveness must not mirror it.
+  assert.equal(projection.cardMetadata.transport, card.transport);
+  assert.equal(Object.prototype.hasOwnProperty.call(projection.cardMetadata.liveness, 'transport'), false);
+});
+
+test('interaction projection reports no liveness when the runtime reported no liveness facts', () => {
+  const projection = projectInteractionWorkCard(cardSource);
+  assert.equal(projection.cardMetadata.liveness, undefined);
 });

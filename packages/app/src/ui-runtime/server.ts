@@ -11,7 +11,7 @@ import {
   type TaskId,
 } from '../../../contracts/src/index.js';
 import type { RequirementIntent } from '../../../contracts/src/index.js';
-import { UiRuntimeApiError } from './errors.js';
+import { boundedErrorCause, UiRuntimeApiError } from './errors.js';
 import type { UiRuntimeService } from './service.js';
 import type { RuntimeSseEvent } from '../../../ui/contracts/runtime.js';
 import type { DaemonRestartReceipt } from '../supervisor/restart-client.js';
@@ -98,22 +98,26 @@ function writeError(response: ServerResponse, error: unknown): void {
     return;
   }
   if (error instanceof AppLifecycleError) {
+    const cause = boundedErrorCause(error);
     writeJson(response, 409, {
       error: {
         code: error.code,
         ownerId: error.ownerId,
         message: error.message,
         nextAction: error.nextAction,
+        ...(cause === undefined ? {} : { cause }),
       },
     });
     return;
   }
+  const cause = boundedErrorCause(error);
   writeJson(response, 500, {
     error: {
       code: 'ui-runtime.unexpected',
       ownerId: APP_OWNER,
       message: error instanceof Error ? error.message : String(error),
       nextAction: 'inspect the runtime error and retry from a new operation',
+      ...(cause === undefined ? {} : { cause }),
     },
   });
 }

@@ -19,6 +19,7 @@ import {
   type TaskId,
 } from '@humanagent/contracts';
 import { UiProjectionError, type UiDataSource } from '../contracts/models.js';
+import type { RuntimeLivenessProjection } from './runtime.js';
 
 const INTERACTION_CARD_SURFACE = 'interaction-work-card' as const;
 
@@ -111,6 +112,11 @@ export interface InteractionCardInput {
   readonly actions?: readonly InteractionCardActionInput[];
   readonly history?: InteractionHistorySource;
   readonly nodeCards?: readonly InteractionCardNodeInput[];
+  /**
+   * Liveness as the runtime observed it. The card carries this projection
+   * unchanged; it does not re-derive liveness, so one owner decides it.
+   */
+  readonly liveness?: RuntimeLivenessProjection;
 }
 
 export type InteractionCardConversationSource = InteractionCardConversationInput;
@@ -130,6 +136,8 @@ export interface InteractionCardMetadataProjection {
   readonly transport?: InteractionTraceTransport;
   readonly settlement?: InteractionTraceSettlement;
   readonly lastBusiness?: InteractionTraceLastBusiness;
+  /** Liveness as the runtime observed it; absent when the runtime reported no facts. */
+  readonly liveness?: RuntimeLivenessProjection;
 }
 
 export interface InteractionConversationTurnProjection {
@@ -237,6 +245,7 @@ export function projectInteractionWorkCard(input: InteractionCardInput): Interac
       transport: input.card.transport,
       settlement: input.card.settlement,
       lastBusiness: input.card.lastBusiness,
+      ...(input.liveness === undefined ? {} : { liveness: input.liveness }),
     },
     conversation: {
       summary: toConversationSummary(input.conversation),
