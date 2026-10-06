@@ -588,6 +588,35 @@ async function waitForPlanReceipt(page, mode) {
   }, mode, { timeout: 90_000 });
 }
 
+/**
+ * Wait until the real observation projection reports a terminal
+ * `pipeline.execute` node that also carries at least one typed tool step.
+ *
+ * This must poll from Node. `page.waitForFunction` resolves as soon as the page
+ * function returns a Promise, so an `async` predicate resolves on its first call
+ * and never observes a later state.
+ */
+async function waitForObservationTrace(context, base, taskId, timeoutMs = 180_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = 'no projection yet';
+  while (Date.now() < deadline) {
+    const response = await context.request.get(
+      `${base}/api/tasks/${encodeURIComponent(taskId)}/observation?node=pipeline.execute`,
+    );
+    if (response.ok()) {
+      const projection = await response.json();
+      const node = projection.scope?.nodes?.find((item) => item.nodeId === 'pipeline.execute');
+      const toolSteps = projection.selectedNode?.toolSteps ?? [];
+      last = `nodeState=${node?.state ?? 'missing'} toolSteps=${toolSteps.length}`;
+      if (node && ['succeeded', 'failed', 'stopped'].includes(node.state) && toolSteps.length > 0) return last;
+    } else {
+      last = `observation http ${response.status()}`;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`real observation never projected a terminal tool trace: ${last}`);
+}
+
 async function sectionB(browser, artifactDir, root) {
   let serve;
   const run = { ok: false };
@@ -619,18 +648,7 @@ async function sectionB(browser, artifactDir, root) {
       });
       await page.waitForURL(/observation\.html\?task=/, { timeout: 180_000 });
       const taskId = new URL(page.url()).searchParams.get('task');
-      await page.waitForFunction(async (id) => {
-        const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/observation`);
-        if (!response.ok) return false;
-        const projection = await response.json();
-        const node = projection.scope?.nodes?.find((item) => item.nodeId === 'pipeline.execute');
-        if (!node || !['succeeded', 'failed', 'stopped'].includes(node.state)) return false;
-        const detail = await fetch(`/api/tasks/${encodeURIComponent(id)}/observation?node=pipeline.execute`);
-        if (!detail.ok) return false;
-        const selected = await detail.json();
-        return Array.isArray(selected.selectedNode?.toolSteps)
-          && selected.selectedNode.toolSteps.length > 0;
-      }, taskId, { timeout: 180_000 });
+      await waitForObservationTrace(context, base, taskId);
       await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 20_000 });
       const nodeCount = await page.locator('.flow-node').count();
