@@ -274,6 +274,8 @@ function assertSameCheckpointScope(actual: ScopeRef, expected: ScopeRef): void {
 }
 
 export class DurableOccurrenceConsumer implements ServeTaskConsumerPort {
+  readonly ownsFirstAdmissionAuthority = true;
+
   private readonly lease: SupervisorLease;
   private readonly scope: ScopeRef;
   private readonly journal: JsonlOrganJournal;

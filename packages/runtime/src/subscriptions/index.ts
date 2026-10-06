@@ -814,14 +814,16 @@ export class SubscriptionControlPort {
     if (!snapshot) throw new SubscriptionSchedulerError('not-found', `claim not found: ${occurrenceId}`);
     const settlement = snapshot.settlements.find((candidate) => candidate.occurrence.occurrenceId === occurrenceId);
     if (settlement) return cloneState(settlement.terminal);
-    try {
-      assertOccurrenceClaimLease(persisted, new Date().toISOString());
-    } catch (error) {
-      if (error instanceof CoreSubscriptionControlError) {
-        const code = error.code === 'lease-expired' ? 'lease-expired' : 'invalid-occurrence';
-        throw new SubscriptionSchedulerError(code, error.message);
+    if (!this.serveTask.ownsFirstAdmissionAuthority) {
+      try {
+        assertOccurrenceClaimLease(persisted, new Date().toISOString());
+      } catch (error) {
+        if (error instanceof CoreSubscriptionControlError) {
+          const code = error.code === 'lease-expired' ? 'lease-expired' : 'invalid-occurrence';
+          throw new SubscriptionSchedulerError(code, error.message);
+        }
+        throw error;
       }
-      throw error;
     }
     const occurrence = findOccurrence(snapshot, claim.occurrenceId);
     if (!occurrence) throw new SubscriptionSchedulerError('not-found', 'claimed occurrence was not found');

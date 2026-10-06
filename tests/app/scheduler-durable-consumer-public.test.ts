@@ -18,7 +18,10 @@ import {
   type ServeTaskTerminalReceipt,
 } from '../../packages/contracts/src/index.js';
 import { acquireDaemonLease } from '../../packages/app/src/supervisor/index.js';
-import { DurableOccurrenceConsumer } from '../../packages/app/src/ui-runtime/occurrence-consumer.js';
+import {
+  DurableOccurrenceConsumer,
+  DurableOccurrenceConsumerError,
+} from '../../packages/app/src/ui-runtime/occurrence-consumer.js';
 import { FileCheckpointStore } from '../../packages/app/src/ui-runtime/index.js';
 import { SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 import type { OccurrenceClaimRecord } from '../../packages/runtime/src/subscriptions/ports.js';
@@ -112,8 +115,10 @@ function policy(): ExecutionPolicyDefinition {
     dstAmbiguousPolicy: 'earlier-offset',
     latePolicy: 'run-once',
     busyPolicy: 'skip',
-    executionMode: 'scheduled',
+    executionMode: 'recurring',
     startAt: '2026-10-05T00:00:00.000Z',
+    frequency: 'interval',
+    intervalMinutes: 60,
   } as ExecutionPolicyDefinition;
 }
 
@@ -238,6 +243,156 @@ test('scheduler and real durable consumer dispatch once across duplicate, concur
     assert.equal(records.filter((record) => record.commitId === admissionCommitId).length, 1);
     assert.equal(records.filter((record) => record.commitId === receiptCommitId).length, 1);
     assert.equal(records.filter((record) => record.kind === 'checkpoint').length, 1);
+  } finally {
+    await lease.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scheduler replays a committed receipt after the original claim expires', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-scheduler-expiry-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const subscriptionFile = join(root, 'subscriptions.jsonl');
+  const occurrenceJournal = join(root, 'occurrence.jsonl');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const lease = await acquireDaemonLease(paths, { ownerId: 'scheduler-expiry-public' });
+  let dispatches = 0;
+  const consumer = new DurableOccurrenceConsumer({
+    lease,
+    scope: assetScope,
+    journal: new JsonlOrganJournal(occurrenceJournal),
+    checkpoints: new FileCheckpointStore(occurrenceJournal),
+    dispatch: {
+      async dispatch() {
+        dispatches += 1;
+        return production(terminalReceipt(dispatches));
+      },
+    },
+  });
+
+  try {
+    const firstPort = new SubscriptionControlPort(
+      new JsonlOrganJournal(subscriptionFile),
+      schedulerScope,
+      subscriptionFile,
+      consumer,
+    );
+    await firstPort.create({
+      subscriptionId: 'subscription-scheduler-public',
+      goalId: 'goal-scheduler-public',
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: 'skip',
+      currentOccurrenceOrdinal: 0,
+    }, policy());
+    await firstPort.schedule({
+      occurrence: {
+        subscriptionId: 'subscription-scheduler-public',
+        scheduleRevision: 1,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: '2026-10-05T00:00:00.000Z',
+      },
+      nowAt: '2026-10-05T00:00:00.000Z',
+    });
+    const claimAcquiredAt = new Date();
+    const claimLeaseUntil = new Date(claimAcquiredAt.getTime() + 250);
+    const firstDueAt = '2026-10-05T00:00:00.000Z';
+    const claim = await firstPort.claim({
+      ...claimRequest(),
+      dueAt: firstDueAt,
+      nowAt: claimAcquiredAt.toISOString(),
+      leaseUntil: claimLeaseUntil.toISOString(),
+    });
+    const committed = await firstPort.consumeExecution(claim.occurrenceId, claim);
+    assert.equal(dispatches, 1);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const restarted = new SubscriptionControlPort(
+      new JsonlOrganJournal(subscriptionFile),
+      schedulerScope,
+      subscriptionFile,
+      consumer,
+    );
+    const replay = await restarted.consumeExecution(claim.occurrenceId, claim);
+    assert.deepEqual(replay, committed);
+    assert.equal(dispatches, 1);
+  } finally {
+    await lease.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scheduler rejects an expired claim before durable first admission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-scheduler-expiry-unadmitted-'));
+  const workspace = join(root, 'workspace');
+  const controlRoot = join(root, 'control');
+  const subscriptionFile = join(root, 'subscriptions.jsonl');
+  const occurrenceJournal = join(root, 'occurrence.jsonl');
+  await mkdir(workspace, { recursive: true });
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const lease = await acquireDaemonLease(paths, { ownerId: 'scheduler-expiry-unadmitted' });
+  let dispatches = 0;
+  const consumer = new DurableOccurrenceConsumer({
+    lease,
+    scope: assetScope,
+    journal: new JsonlOrganJournal(occurrenceJournal),
+    checkpoints: new FileCheckpointStore(occurrenceJournal),
+    dispatch: {
+      async dispatch() {
+        dispatches += 1;
+        return production(terminalReceipt(dispatches));
+      },
+    },
+  });
+
+  try {
+    const port = new SubscriptionControlPort(
+      new JsonlOrganJournal(subscriptionFile),
+      schedulerScope,
+      subscriptionFile,
+      consumer,
+    );
+    await port.create({
+      subscriptionId: 'subscription-scheduler-public',
+      goalId: 'goal-scheduler-public',
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: 'skip',
+      currentOccurrenceOrdinal: 0,
+    }, policy());
+    await port.schedule({
+      occurrence: {
+        subscriptionId: 'subscription-scheduler-public',
+        scheduleRevision: 1,
+        occurrenceOrdinal: 1,
+        state: 'due',
+        dueAt: '2026-10-05T00:00:00.000Z',
+      },
+      nowAt: '2026-10-05T00:00:00.000Z',
+    });
+    const claimAcquiredAt = new Date();
+    const claim = await port.claim({
+      ...claimRequest(),
+      nowAt: claimAcquiredAt.toISOString(),
+      leaseUntil: new Date(claimAcquiredAt.getTime() + 250).toISOString(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    await assert.rejects(
+      () => port.consumeExecution(claim.occurrenceId, claim),
+      (error: unknown) => error instanceof DurableOccurrenceConsumerError && error.code === 'lease-expired',
+    );
+    assert.equal(dispatches, 0);
+    const records = await new JsonlOrganJournal(occurrenceJournal).replay();
+    assert.equal(
+      records.filter((record) => record.payload?.kind === 'occurrence-execution-admission').length,
+      0,
+    );
   } finally {
     await lease.release();
     await rm(root, { recursive: true, force: true });
