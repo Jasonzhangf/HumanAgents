@@ -1170,7 +1170,6 @@ export class UiRuntimeService {
           createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!(input),
         }),
       }),
-      implicitSubtaskExecutionAgent: this.createImplicitSubtaskExecutionAgent(),
       ...(options.workspaceRoot === undefined ? {} : {
         producedArtifacts: {
           read: (request) => readProducedArtifacts(options.workspaceRoot!, request.paths),
