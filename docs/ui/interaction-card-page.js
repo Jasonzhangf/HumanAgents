@@ -304,6 +304,11 @@ export function withTaskHistory(projection, query, result) {
   const page = result.page || {}
   const items = Array.isArray(page.items) ? page.items : []
   const latest = items.at(-1)
+  // Identity is a real reported fact, so it comes from the newest entry that
+  // actually reported it. A later turn-less entry (for example
+  // `execution.terminal`) must not erase a real turn or request id.
+  const turnCarrier = [...items].reverse().find((item) => item.turnId !== undefined && item.turnId !== null)
+  const requestCarrier = [...items].reverse().find((item) => item.requestId !== undefined && item.requestId !== null)
   return {
     ...projection,
     cardMetadata: latest
@@ -313,8 +318,8 @@ export function withTaskHistory(projection, query, result) {
             taskId: latest.taskId,
             operationId: latest.operationId,
             executionEpoch: latest.executionEpoch,
-            ...(latest.requestId === undefined ? {} : { requestId: latest.requestId }),
-            ...(latest.turnId === undefined ? {} : { turnId: latest.turnId }),
+            ...(requestCarrier === undefined ? {} : { requestId: requestCarrier.requestId }),
+            ...(turnCarrier === undefined ? {} : { turnId: turnCarrier.turnId }),
           },
           ...(projection.cardMetadata?.startedAt === undefined && items[0]?.occurredAt !== undefined
             ? { startedAt: items[0].occurredAt }
