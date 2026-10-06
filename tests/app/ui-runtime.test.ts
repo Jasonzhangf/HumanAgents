@@ -88,6 +88,7 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
+import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import { projectRuntimeTaskHistory } from '../../packages/app/src/ui-runtime/turn-history.js';
 import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
@@ -8492,4 +8493,200 @@ test('task dashboard never claims working or no-activity for a task that has no 
   assert.equal(liveness.silentForMs, undefined);
   assert.equal(liveness.silenceBudgetMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
   assert.equal(liveness.state === 'working' || liveness.state === 'no-activity', false);
+});
+
+test('the runtime error body keeps the original failure instead of restating the reported message', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-original-cause-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('test-lease', 1).code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const identity = () => ({
+    leaseId: 'lease-1',
+    generation: 7,
+    pid: process.pid,
+    processStartToken: 'test-process-start-token',
+  });
+  const uiRoot = join(process.cwd(), 'docs', 'ui');
+  interface ErrorCauseBody {
+    readonly name: string;
+    readonly message: string;
+    readonly code?: string;
+    readonly ownerId?: string;
+  }
+  interface ErrorBody {
+    readonly code: string;
+    readonly ownerId: string;
+    readonly message: string;
+    readonly nextAction: string;
+    readonly cause?: ErrorCauseBody;
+  }
+  const serviceAt = async (name: string): Promise<UiRuntimeService> => {
+    const serviceRoot = join(root, name);
+    await mkdir(serviceRoot, { recursive: true });
+    return serviceFor(serviceRoot, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  };
+
+  // The serve owner reports a lifecycle failure two ways: with no original
+  // failure at all, and wrapping the failure it actually hit. Both are the
+  // shapes the production restart edge produces.
+  const original = new Error('connect ECONNREFUSED 127.0.0.1:9');
+  const restartCases: readonly { readonly name: string; readonly error: AppLifecycleError }[] = [
+    {
+      name: 'without an original failure',
+      error: new AppLifecycleError(
+        'daemon-restart.owner-not-ready',
+        'serve owner has not completed startup',
+        'wait for the original serve CLI to report ready and retry restart',
+        'humanagent.app.serve',
+      ),
+    },
+    {
+      name: 'wrapping the real transport failure',
+      error: new AppLifecycleError(
+        'daemon-restart.request-failed',
+        'could not reach the active serve owner: connect ECONNREFUSED 127.0.0.1:9',
+        'confirm the original serve CLI is still running and retry restart there',
+        'humanagent.app.serve',
+        original,
+      ),
+    },
+  ];
+  const observedRestart: { readonly name: string; readonly status: number; readonly error: ErrorBody }[] = [];
+  for (const [index, entry] of restartCases.entries()) {
+    const server = await startUiRuntimeServer({
+      service: await serviceAt(`restart-${index}`),
+      accessControl,
+      uiRoot,
+      port: 0,
+      identity,
+      restart: () => {
+        throw entry.error;
+      },
+    });
+    try {
+      const response = await fetch(`${server.url}/api/runtime/restart`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessControl.supervisorToken('lease-1', 7)}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ leaseId: 'lease-1', generation: 7 }),
+      });
+      const body = await response.json() as { readonly error: ErrorBody };
+      observedRestart.push({ name: entry.name, status: response.status, error: body.error });
+    } finally {
+      await server.close();
+    }
+  }
+
+  // The lifecycle failure is reported with its own code and message, and the
+  // body must not also carry a `cause` that restates them: a cause field that
+  // repeats the reported message is a field filled to look non-empty, not an
+  // original failure.
+  const noOriginal = observedRestart[0]!;
+  assert.equal(noOriginal.status, 409);
+  assert.equal(noOriginal.error.code, 'daemon-restart.owner-not-ready');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(noOriginal.error, 'cause'),
+    false,
+    `a lifecycle failure with no original failure must not report a cause: ${JSON.stringify(noOriginal.error)}`,
+  );
+
+  const wrapped = observedRestart[1]!;
+  assert.equal(wrapped.status, 409);
+  assert.equal(wrapped.error.code, 'daemon-restart.request-failed');
+  const wrappedCause = wrapped.error.cause;
+  if (wrappedCause === undefined) {
+    throw new Error(`the wrapped original failure must be reported: ${JSON.stringify(wrapped.error)}`);
+  }
+  assert.equal(wrappedCause.name, 'Error');
+  assert.equal(wrappedCause.message, 'connect ECONNREFUSED 127.0.0.1:9');
+  assert.equal(wrappedCause.message === wrapped.error.message, false, `the cause must not restate the reported message: ${JSON.stringify(wrapped.error)}`);
+  assert.deepEqual(Object.keys(wrappedCause).sort(), ['message', 'name']);
+
+  // The identity port is a second real 409 producer: `cli.ts` ships exactly
+  // this failure for the window before the serve owner has a lease. The route
+  // is reachable only through that port, and in practice the listener accepts
+  // requests after startup finishes, so this branch is defensive today. It
+  // still must not invent a cause.
+  const startupServer = await startUiRuntimeServer({
+    service: await serviceAt('identity-not-ready'),
+    accessControl,
+    uiRoot,
+    port: 0,
+    identity: () => {
+      throw new AppLifecycleError(
+        'daemon-identity.owner-not-ready',
+        'serve owner has not completed startup',
+        'wait for the original serve CLI to report ready and retry identity inspection',
+        'humanagent.app.serve',
+      );
+    },
+  });
+  try {
+    const response = await fetch(`${startupServer.url}/api/runtime/identity`, {
+      headers: { authorization: `Bearer ${accessControl.supervisorToken('lease-1', 7)}` },
+    });
+    assert.equal(response.status, 409);
+    const body = await response.json() as { readonly error: ErrorBody };
+    assert.equal(body.error.code, 'daemon-identity.owner-not-ready');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(body.error, 'cause'),
+      false,
+      `a startup lifecycle failure with no original failure must not report a cause: ${JSON.stringify(body.error)}`,
+    );
+  } finally {
+    await startupServer.close();
+  }
+
+  // The generic branch is the one a route reaches with a failure that is not a
+  // typed runtime error. It must behave the same way.
+  const unexpectedCases: readonly { readonly name: string; readonly failure: Error }[] = [
+    { name: 'without an original failure', failure: new Error('due-time patrol read failed') },
+    {
+      name: 'wrapping the real journal failure',
+      failure: new Error('due-time patrol read failed', { cause: new Error('subscription journal unreadable') }),
+    },
+  ];
+  const observedUnexpected: { readonly name: string; readonly status: number; readonly error: ErrorBody }[] = [];
+  for (const [index, entry] of unexpectedCases.entries()) {
+    const server = await startUiRuntimeServer({
+      service: await serviceAt(`unexpected-${index}`),
+      accessControl,
+      uiRoot,
+      port: 0,
+      schedulerStatus: async () => {
+        throw entry.failure;
+      },
+    });
+    testSessionByOrigin.set(new URL(server.url).origin, cookie);
+    try {
+      const response = await fetch(`${server.url}/api/runtime/scheduler`);
+      const body = await response.json() as { readonly error: ErrorBody };
+      observedUnexpected.push({ name: entry.name, status: response.status, error: body.error });
+    } finally {
+      await server.close();
+    }
+  }
+
+  const unexpectedPlain = observedUnexpected[0]!;
+  assert.equal(unexpectedPlain.status, 500);
+  assert.equal(unexpectedPlain.error.code, 'ui-runtime.unexpected');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(unexpectedPlain.error, 'cause'),
+    false,
+    `an unexpected failure with no original failure must not report a cause: ${JSON.stringify(unexpectedPlain.error)}`,
+  );
+
+  const unexpectedWrapped = observedUnexpected[1]!;
+  assert.equal(unexpectedWrapped.status, 500);
+  const unexpectedCause = unexpectedWrapped.error.cause;
+  if (unexpectedCause === undefined) {
+    throw new Error(`the wrapped original failure must be reported: ${JSON.stringify(unexpectedWrapped.error)}`);
+  }
+  assert.equal(unexpectedCause.message, 'subscription journal unreadable');
+  assert.equal(unexpectedCause.message === unexpectedWrapped.error.message, false, `the cause must not restate the reported message: ${JSON.stringify(unexpectedWrapped.error)}`);
 });

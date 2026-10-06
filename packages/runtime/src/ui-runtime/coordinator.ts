@@ -375,13 +375,6 @@ export interface RuntimeTaskCoordinatorOptions {
     readonly executionAgent?: ExecutionAgentPort;
     readonly maxAttempts?: number;
   }) => RuntimeTaskAssembly;
-  /**
-   * Executor used by the implicit brain to run concrete subtasks after the
-   * provider execution has completed. When bound, confirmed requirements are
-   * dispatched as separate executor agents through the same task assembly's
-   * orchestration graph instead of only a single provider-execution assignment.
-   */
-  readonly implicitSubtaskExecutionAgent?: ExecutionAgentPort;
 }
 
 /** One file an execution wrote, as the reviewer must see it. */

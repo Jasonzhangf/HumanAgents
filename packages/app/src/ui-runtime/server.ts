@@ -98,7 +98,7 @@ function writeError(response: ServerResponse, error: unknown): void {
     return;
   }
   if (error instanceof AppLifecycleError) {
-    const cause = boundedErrorCause(error);
+    const cause = boundedErrorCause(error.cause);
     writeJson(response, 409, {
       error: {
         code: error.code,
@@ -110,7 +110,7 @@ function writeError(response: ServerResponse, error: unknown): void {
     });
     return;
   }
-  const cause = boundedErrorCause(error);
+  const cause = boundedErrorCause(error instanceof Error ? error.cause : undefined);
   writeJson(response, 500, {
     error: {
       code: 'ui-runtime.unexpected',
