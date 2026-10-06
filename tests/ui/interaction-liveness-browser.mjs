@@ -25,7 +25,9 @@
  *
  * The transport-loss case is why the transport fact is page-local: this harness
  * takes the browser offline, and a server-derived transport value would be
- * unfetchable at exactly that moment.
+ * unfetchable at exactly that moment. The `working` case also asserts the
+ * settled-stream rule, because the server closes the stream when the execution
+ * terminates and that expected close must not be rendered as a transport loss.
  *
  * Env:
  *   LIVENESS_E2E_EVIDENCE    required: execution-owned evidence root
@@ -327,10 +329,22 @@ async function runScenario(browser, scenario, result) {
 
     if (scenario === 'working') {
       const working = await waitForCardText(page, 'the card to report working', /工作中/, 60_000);
+      assert('the running card reports the live connection', working, /传输 已连接/);
       result.screenshots.push(await screenshot(page, shotDir, '01-working'));
       const settled = await waitForCardText(page, 'the card to reach a terminal state', /已完成|已失败/, 90_000);
+      // The server closes the SSE stream when the execution settles, so a naive
+      // renderer turns that expected close into a false transport alarm. The
+      // settled case is asserted here, so that false alarm cannot pass unnoticed.
+      const settledTransport = await waitForCardText(
+        page,
+        'the settled card to name the stream as closed by the terminal state',
+        /传输 已收拢/,
+        30_000,
+      );
+      assert('the settled card names the stream as closed by the terminal state', settledTransport, /传输 已收拢/);
+      assert('the settled card does not report a transport loss', settledTransport, /^(?!.*实时连接已断开)/s);
       result.screenshots.push(await screenshot(page, shotDir, '02-terminal'));
-      result.observations = { working: working.slice(0, 1200), settled: settled.slice(0, 1200) };
+      result.observations = { working: working.slice(0, 1200), settled: settled.slice(0, 1200), settledTransport: settledTransport.slice(0, 1200) };
       return result;
     }
 
