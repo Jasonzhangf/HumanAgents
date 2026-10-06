@@ -36,7 +36,8 @@ const { main, status } = makePageShell(
 )
 
 let drawer
-let lastTrigger
+let triggerNodeId
+let returnFocusPending = false
 let selectedNodeId
 let edgeFrame
 // The scope the page is currently showing, so a node click reloads the same scope with the node
@@ -151,7 +152,6 @@ function renderNodeCard(node, index) {
   // therefore selects the node and reloads; the returned `selectedNode` opens the drawer.
   card.addEventListener('click', () => {
     selectedNodeId = node.nodeId
-    lastTrigger = card
     void load(currentScopeRef)
   })
   return card
@@ -354,10 +354,40 @@ function buildDrawer() {
   const body = element('div', undefined, 'drawer-body')
   drawer.append(body)
   drawer.addEventListener('close', () => {
-    lastTrigger?.focus()
+    returnFocusPending = true
+    queueMicrotask(focusCurrentTrigger)
   })
   drawer.addEventListener('keydown', trapFocus)
   document.body.append(drawer)
+}
+
+// renderObservation replaces every flow node (clearNode(main)), so the node that
+// opened the drawer is detached by the time the dialog fires `close`. Hold the
+// trigger id instead of the element and resolve it in the CURRENT DOM.
+// Breadcrumb-back and enter-scope re-render into a scope where the original id
+// can be absent; those paths fall back to that scope's first node.
+function currentTriggerNode() {
+  const card = triggerNodeId
+    ? main.querySelector(`.flow-node[data-node-id="${CSS.escape(String(triggerNodeId))}"]`)
+    : null
+  return card ?? main.querySelector('.flow-node')
+}
+
+// Best effort right after `close`, while the pre-navigation DOM is still
+// present. Must not clear the pending flag: a scope navigation re-renders after
+// this and still needs the post-render pass below.
+function focusCurrentTrigger() {
+  if (!returnFocusPending || drawer?.open) return
+  currentTriggerNode()?.focus()
+}
+
+// Authoritative pass, scheduled by renderObservation after it rebuilds the flow
+// nodes. This is what re-establishes focus once the render replaced the trigger.
+function restoreFocusAfterRender() {
+  if (!returnFocusPending || drawer?.open) return
+  const target = currentTriggerNode()
+  if (target) target.focus()
+  returnFocusPending = false
 }
 
 function focusables() {
@@ -510,8 +540,8 @@ function renderDrawerSection(definition, node, handoffs, detail) {
   return section
 }
 
-function renderNodeDrawer(node, trigger, handoffs, detail) {
-  lastTrigger = trigger
+function renderNodeDrawer(node, handoffs, detail) {
+  triggerNodeId = node.nodeId
   const body = drawer.querySelector('.drawer-body')
   clearNode(body)
   const head = element('header', undefined, 'drawer-head')
@@ -658,6 +688,7 @@ function renderObservation(projection) {
   flowSection.append(canvas)
   main.append(flowSection)
   scheduleEdgeDraw(flow)
+  requestAnimationFrame(restoreFocusAfterRender)
   window.addEventListener('resize', () => scheduleEdgeDraw(flow))
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(() => scheduleEdgeDraw(flow))
@@ -669,12 +700,9 @@ function renderObservation(projection) {
   // the drawer opens once per selection and breadcrumb navigation starts from a clean state.
   const selected = projection.selectedNode
   if (selected && selectedNodeId === selected.nodeId) {
-    const card = canvas.querySelector(`.flow-node[data-node-id="${CSS.escape(String(selected.nodeId))}"]`)
-    const trigger = card || lastTrigger
     selectedNodeId = undefined
     renderNodeDrawer(
       projection.nodes.find((node) => node.nodeId === selected.nodeId) || { nodeId: selected.nodeId, title: selected.title },
-      trigger,
       currentHandoffs,
       selected,
     )
