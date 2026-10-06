@@ -31,6 +31,7 @@ import {
 } from '../../packages/app/src/ui-runtime/index.js';
 import { AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
+import type { ExplicitBrainInputInterpreter } from '../../packages/app/src/explicit-brain-runtime.js';
 import { SubscriptionControlError, SubscriptionControlPort } from '../../packages/runtime/src/subscriptions/index.js';
 import type { OccurrenceClaimRecord } from '../../packages/runtime/src/subscriptions/ports.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
@@ -318,7 +319,11 @@ function planProviderBinding(): ProviderBinding {
   };
 }
 
-function planService(root: string, subscriptionControl: SubscriptionControlPort): UiRuntimeService {
+function planService(
+  root: string,
+  subscriptionControl: SubscriptionControlPort,
+  explicitBrainInterpreter?: ExplicitBrainInputInterpreter,
+): UiRuntimeService {
   const binding = planProviderBinding();
   return new UiRuntimeService({
     mode: 'fake',
@@ -337,7 +342,7 @@ function planService(root: string, subscriptionControl: SubscriptionControlPort)
       roleId: 'execution',
     },
     subscriptionControl,
-    explicitBrainInterpreter: {
+    explicitBrainInterpreter: explicitBrainInterpreter ?? {
       async interpret() { throw new Error('explicit brain interpretation is not configured'); },
     },
   });
@@ -521,6 +526,226 @@ test('production final submit persists one real subscription per execution mode 
         (error: unknown) => error instanceof Error && error.message.includes('not part of the committed schedule'),
       );
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function sameSubmitInterpreter(): ExplicitBrainInputInterpreter {
+  return {
+    async interpret(input) {
+      return {
+        kind: 'requirement',
+        normalizedInput: input.rawInput,
+        knownFacts: [],
+        intent: 'create',
+        proposal: `create:${input.rawInput}`,
+        decisionRefs: ['decision:same-submit'],
+      };
+    },
+  };
+}
+
+// The real new-task form sends the execution policy inside the confirmation
+// submit, after interpretation has already minted a policy-less typed
+// revision. This is the exact path that previously returned 409
+// execution-plan.policy-immutable, so the test drives interpretation first and
+// then binds the policy on the same submit.
+test('same-submit execution policy binds the typed revision and persists one subscription per mode', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-subscription-same-submit-'));
+  try {
+    const cases = [
+      { suffix: 'once', policy: oncePlanPolicy },
+      { suffix: 'scheduled', policy: scheduledPlanPolicy },
+      { suffix: 'recurring', policy: recurringPlanPolicy },
+    ] as const;
+    for (const scenario of cases) {
+      const scenarioRoot = join(root, scenario.suffix);
+      await mkdir(scenarioRoot, { recursive: true });
+      const file = planSubscriptionFile(scenarioRoot);
+      const service = planService(scenarioRoot, planPort(scenarioRoot), sameSubmitInterpreter());
+      const interactionId = await service.receiveExplicitInput({
+        sourceRef: `ui:same-submit-${scenario.suffix}`,
+        rawInput: `create the ${scenario.suffix} task`,
+        channel: 'business',
+        requestKind: 'new-task-preview',
+      });
+      const interpreted = await service.interpretExplicitInput({ interactionId });
+      assert.equal(interpreted.state, 'awaiting-confirmation', `${scenario.suffix}: interpretation awaits confirmation`);
+      const arrivalRevision = interpreted.revision;
+      assert.ok(arrivalRevision, `${scenario.suffix}: interpretation minted a typed revision`);
+      assert.equal(arrivalRevision!.executionPolicy, undefined, `${scenario.suffix}: arrival revision carries no policy yet`);
+
+      const confirmation = {
+        interactionId,
+        draftId: interpreted.draft!.draftId,
+        inputRevision: 1,
+        confirmationRef: `confirmation:same-submit:${scenario.suffix}`,
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-10-05T00:00:00.000Z',
+        payloadRef: `asset://requirements/same-submit:${scenario.suffix}`,
+        goal: interpreted.draft!.proposal,
+        scope: interpreted.draft!.normalizedInput,
+        executionPolicy: scenario.policy,
+      };
+      const first = await service.confirmExplicitRequirement(confirmation);
+      assert.equal(first.requirement.status, 'submitted', `${scenario.suffix}: same-submit confirmation succeeds`);
+      const afterConfirm = await service.inspectExplicitInteraction(interactionId);
+      assert.equal(afterConfirm.state, 'confirmed', `${scenario.suffix}: interaction is confirmed`);
+      assert.ok(afterConfirm.revision, `${scenario.suffix}: confirmed revision is readable`);
+      assert.ok(
+        afterConfirm.revision!.revisionVersion > arrivalRevision!.revisionVersion,
+        `${scenario.suffix}: the policy binding minted a new revision version`,
+      );
+      assert.deepEqual(
+        afterConfirm.revision!.executionPolicy,
+        scenario.policy,
+        `${scenario.suffix}: the submit-time policy is stored on the revision`,
+      );
+
+      const plans = await readPersistedPlans(file);
+      const planEntries = Object.entries(plans)
+        .filter(([key]) => key.includes(first.requirement.requirementId));
+      assert.equal(planEntries.length, 1, `${scenario.suffix}: exactly one persisted subscription`);
+      assert.deepEqual(planEntries[0]![1].policy, scenario.policy, `${scenario.suffix}: persisted policy matches`);
+
+      const repeat = await service.confirmExplicitRequirement(confirmation);
+      assert.equal(
+        repeat.requirement.requirementId,
+        first.requirement.requirementId,
+        `${scenario.suffix}: repeated submit reuses the requirement`,
+      );
+      const [concurrentA, concurrentB] = await Promise.all([
+        service.confirmExplicitRequirement(confirmation),
+        service.confirmExplicitRequirement(confirmation),
+      ]);
+      assert.equal(
+        concurrentA.requirement.requirementId,
+        first.requirement.requirementId,
+        `${scenario.suffix}: concurrent submit A reuses the requirement`,
+      );
+      assert.equal(
+        concurrentB.requirement.requirementId,
+        first.requirement.requirementId,
+        `${scenario.suffix}: concurrent submit B reuses the requirement`,
+      );
+      const afterRepeats = await readPersistedPlans(file);
+      assert.equal(
+        Object.entries(afterRepeats).filter(([key]) => key.includes(first.requirement.requirementId)).length,
+        1,
+        `${scenario.suffix}: repeated and concurrent submits keep exactly one subscription`,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('same-submit policy binding keeps stale rejection, policy immutability, and the legacy path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-subscription-same-submit-guards-'));
+  try {
+    const service = planService(root, planPort(root), sameSubmitInterpreter());
+
+    // A caller that pins an older revision must still be rejected before any
+    // ledger write, even though the same submit carries a policy to bind.
+    const staleInteraction = await service.receiveExplicitInput({
+      sourceRef: 'ui:same-submit-stale',
+      rawInput: 'create the stale-pinned task',
+      channel: 'business',
+      requestKind: 'new-task-preview',
+    });
+    const staleInterpreted = await service.interpretExplicitInput({ interactionId: staleInteraction });
+    const staleArrival = staleInterpreted.revision!;
+    await assert.rejects(
+      () => service.confirmExplicitRequirement({
+        interactionId: staleInteraction,
+        draftId: staleInterpreted.draft!.draftId,
+        inputRevision: 1,
+        confirmationRef: 'confirmation:same-submit-stale',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-10-05T00:00:00.000Z',
+        payloadRef: 'asset://requirements/same-submit-stale',
+        draftRevisionVersion: staleArrival.revisionVersion + 5,
+        draftRevisionHash: staleArrival.revisionHash,
+        executionPolicy: oncePlanPolicy,
+      }),
+      (error: unknown) => (error as { readonly code?: string }).code === 'explicit-draft.confirmation-stale',
+    );
+    const staleAfter = await service.inspectExplicitInteraction(staleInteraction);
+    assert.equal(staleAfter.state, 'awaiting-confirmation', 'a stale confirmation leaves the interaction unconfirmed');
+    assert.equal(
+      staleAfter.revision!.revisionVersion,
+      staleArrival.revisionVersion,
+      'a stale confirmation does not mint a new revision',
+    );
+    assert.equal(
+      Object.keys(await readPersistedPlans(planSubscriptionFile(root))).length,
+      0,
+      'a stale confirmation writes no subscription',
+    );
+
+    // A revision that already carries a different policy cannot be rebound.
+    const immutableInteraction = await service.receiveExplicitInput({
+      sourceRef: 'ui:same-submit-immutable',
+      rawInput: 'create the immutable-policy task',
+      channel: 'business',
+      requestKind: 'new-task-preview',
+    });
+    const immutableInterpreted = await service.interpretExplicitInput({ interactionId: immutableInteraction });
+    await service.confirmExplicitRequirement({
+      interactionId: immutableInteraction,
+      draftId: immutableInterpreted.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:same-submit-immutable:once',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-05T00:00:00.000Z',
+      payloadRef: 'asset://requirements/same-submit-immutable',
+      goal: immutableInterpreted.draft!.proposal,
+      scope: immutableInterpreted.draft!.normalizedInput,
+      executionPolicy: oncePlanPolicy,
+    });
+    await assert.rejects(
+      () => service.confirmExplicitRequirement({
+        interactionId: immutableInteraction,
+        draftId: immutableInterpreted.draft!.draftId,
+        inputRevision: 1,
+        confirmationRef: 'confirmation:same-submit-immutable:recurring',
+        confirmedBy: 'human:operator',
+        confirmedAt: '2026-10-05T00:00:00.000Z',
+        payloadRef: 'asset://requirements/same-submit-immutable-recurring',
+        executionPolicy: recurringPlanPolicy,
+      }),
+      (error: unknown) => (error as { readonly code?: string }).code === 'execution-plan.policy-immutable'
+        && error instanceof Error
+        && error.message === `draft revision already carries a different execution policy: ${immutableInterpreted.draft!.draftId}`,
+    );
+
+    // Legacy confirmation without a request kind or policy is unchanged.
+    const legacyInteraction = await service.receiveExplicitInput({
+      sourceRef: 'ui:same-submit-legacy',
+      rawInput: 'create the legacy task',
+      channel: 'business',
+    });
+    await service.beginExplicitMatching(legacyInteraction);
+    await service.recordExplicitMatch(legacyInteraction, {
+      normalizedInput: 'create the legacy task',
+      matchedTasks: [],
+      knownFacts: [],
+    });
+    await service.proposeExplicitRequirement(legacyInteraction, {
+      proposedIntent: 'create',
+      proposal: 'create the legacy task',
+    });
+    const legacy = await service.inspectExplicitInteraction(legacyInteraction);
+    const legacyReceipt = await service.confirmExplicitRequirement({
+      draftId: legacy.draft!.draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:same-submit-legacy',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-05T00:00:00.000Z',
+      payloadRef: 'asset://requirements/same-submit-legacy',
+    });
+    assert.equal(legacyReceipt.requirement.status, 'submitted', 'the legacy confirmation path still succeeds');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -2521,13 +2521,19 @@ export class UiRuntimeService {
         409,
       );
     }
-    const revision = await this.ensureTypedDraftRevision(interactionId, {
-      executionPolicy: input.executionPolicy,
-      goal: input.goal,
-      scope: input.scope,
-      constraints: input.constraints,
-      deliverables: input.deliverables,
-    });
+    // Read the request-arrival revision before any mutation. A caller that
+    // pinned an explicit version/hash must match that arrival revision, so the
+    // same-submit policy refinement below can never be mistaken for staleness.
+    let revision = this.explicitIntake.currentDraftRevision(interactionId);
+    if (revision === undefined) {
+      revision = await this.ensureTypedDraftRevision(interactionId, {
+        executionPolicy: input.executionPolicy,
+        goal: input.goal,
+        scope: input.scope,
+        constraints: input.constraints,
+        deliverables: input.deliverables,
+      });
+    }
     if (revision === undefined) {
       throw new UiRuntimeApiError(
         'explicit-brain.typed-revision-required',
@@ -2537,22 +2543,6 @@ export class UiRuntimeService {
         409,
       );
     }
-    if (input.executionPolicy !== undefined
-      && canonicalJsonStringify(revision.executionPolicy ?? null) !== canonicalJsonStringify(input.executionPolicy)) {
-      // The execution type is part of the immutable revision. A revision that
-      // already fixed a different policy cannot be silently rebound at submit
-      // time; the caller must submit against a revision created with the policy.
-      throw new UiRuntimeApiError(
-        'execution-plan.policy-immutable',
-        RUNTIME_OWNER,
-        `draft revision already carries a different execution policy: ${revision.draftId}`,
-        'create the reviewable draft with the intended execution policy before final submission',
-        409,
-      );
-    }
-
-    const draftRevisionVersion = input.draftRevisionVersion ?? revision.revisionVersion;
-    const draftRevisionHash = input.draftRevisionHash ?? revision.revisionHash;
     if ((input.draftRevisionVersion !== undefined && input.draftRevisionVersion !== revision.revisionVersion)
       || (input.draftRevisionHash !== undefined && input.draftRevisionHash !== revision.revisionHash)) {
       throw new DraftRevisionError({
@@ -2565,6 +2555,32 @@ export class UiRuntimeService {
         actualRevisionHash: revision.revisionHash,
       });
     }
+    if (input.executionPolicy !== undefined) {
+      if (revision.executionPolicy !== undefined
+        && canonicalJsonStringify(revision.executionPolicy) !== canonicalJsonStringify(input.executionPolicy)) {
+        // The execution type is part of the immutable revision. A revision that
+        // already fixed a different policy cannot be silently rebound at submit
+        // time; the caller must submit against a revision created with the policy.
+        throw new UiRuntimeApiError(
+          'execution-plan.policy-immutable',
+          RUNTIME_OWNER,
+          `draft revision already carries a different execution policy: ${revision.draftId}`,
+          'create the reviewable draft with the intended execution policy before final submission',
+          409,
+        );
+      }
+      if (revision.executionPolicy === undefined) {
+        // Interpretation mints the reviewable draft before confirmation, so a
+        // submit that carries the execution policy must bind it through the
+        // revision owner as a new version. The app only names the base revision
+        // and the changed fields; the owner mints and persists the revision.
+        revision = await this.refineDraftWithExecutionPolicy(interactionId, revision, input, input.executionPolicy);
+        this.persistExplicitBrainState();
+      }
+    }
+
+    const draftRevisionVersion = revision.revisionVersion;
+    const draftRevisionHash = revision.revisionHash;
     this.confirmationLedger.registerRevision({
       interactionId,
       draftId: revision.draftId,
@@ -2612,6 +2628,38 @@ export class UiRuntimeService {
         inputRevision: submitted.requirement.inputRevision,
       },
     };
+  }
+
+  /**
+   * Bind the submit-time execution policy to the current typed revision. The
+   * revision owner mints the new version; the app only names the base revision
+   * and the fields to change, so the immutable revision structure stays with
+   * its owner. The normalized execution input changes with the refinement
+   * because the core requires every accepted refinement to update it.
+   */
+  private async refineDraftWithExecutionPolicy(
+    interactionId: string,
+    current: DraftRevision,
+    input: ConfirmExplicitRequirementInput,
+    executionPolicy: ExecutionPolicyDefinition,
+  ): Promise<DraftRevision> {
+    const fields: Record<string, unknown> = {
+      ...(input.goal === undefined ? {} : { goal: input.goal }),
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
+      ...(input.constraints === undefined ? {} : { constraints: input.constraints }),
+      ...(input.deliverables === undefined ? {} : { deliverables: input.deliverables }),
+      executionPolicy,
+    };
+    const normalizedInput = normalizedInputForDraftFields(current, fields);
+    const idempotencyKey = `final-submit-policy:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify(executionPolicy)}`;
+    return await this.explicitIntake.refineDraft(interactionId, {
+      draftId: current.draftId,
+      baseRevisionVersion: current.revisionVersion,
+      requestedRevisionHash: current.revisionHash,
+      fields: { ...fields, normalizedInput },
+      instructionRef: `final-submit-policy:${interactionId}`,
+      idempotencyKey,
+    });
   }
 
   /**
