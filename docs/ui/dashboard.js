@@ -40,6 +40,7 @@ function createProgressWidget() {
   phase.setAttribute('data-default', 'idle')
   const detail = element('span', '', 'progress-detail')
   const timer = element('time', '0.0s', 'progress-timer')
+  timer.setAttribute('aria-hidden', 'true')
   root.append(spinner, phase, detail, timer)
 
   let startTime = 0
