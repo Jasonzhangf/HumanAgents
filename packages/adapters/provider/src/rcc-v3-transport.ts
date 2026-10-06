@@ -794,11 +794,17 @@ export class RccV3ProviderTransport implements ProviderTransport {
         'capability',
         { kind: 'recover', ref: OWNER },
       ));
+      // The stream is fully observed and RCC v3 cannot continue it, so the
+      // execution record is finished: release it exactly like the other
+      // non-final settlements. Retaining it would keep close() pending forever
+      // and strand the runtime's failure cleanup.
+      active.resourceReleased = true;
+      this.executions.delete(executionKey(input));
       return {
         ...input,
         state: 'blocked',
         evidenceRefs: [evidenceRef],
-        resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
+        resourceRelease: { state: 'released', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
         error,
         ownerId: OWNER,

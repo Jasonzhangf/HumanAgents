@@ -1027,3 +1027,32 @@ test('RCC v3 still reports failed when the SSE stream closes without any termina
   assert.equal(settled.error?.code, 'transport.failure');
   assert.equal(settled.resourceRelease.state, 'released');
 });
+
+test('RCC v3 fully observed waiting settlement releases the session and allows close', async () => {
+  // The provider finished the round with tool calls pending and the stream is
+  // fully consumed. Continuation is unavailable for RCC v3, so the settlement
+  // must release the record: otherwise close() stays pending forever and the
+  // runtime cannot finish its failure cleanup.
+  const built = transportHarness();
+  seedActive(built.transport, chunks([
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-waiting-tools"}}\n\n',
+    `data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'call-waiting', name: 'file_read', arguments: '{"path":"marker.txt"}' },
+    })}\n\n`,
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-waiting-tools"}}\n\n',
+  ]));
+  for await (const _event of built.transport.observe(execution)) void _event;
+
+  const settled = await built.transport.settle(execution);
+  assert.equal(settled.state, 'blocked');
+  assert.equal(settled.resourceRelease.state, 'released');
+  assert.equal(settled.persistence.state, 'pending');
+  assert.equal(settled.error?.code, 'capability.continuation-unavailable');
+  assert.equal(settled.error?.ownerId, 'humanagent.provider-adapter.rcc-v3');
+  assert.equal(settled.error?.nextAction.kind, 'recover');
+  assert.equal(settled.nextAction?.kind, 'recover');
+  assert.equal((built.transport as unknown as { executions: Map<string, unknown> }).executions.has(executionKey()), false);
+  assert.equal((await built.transport.close(binding)).state, 'closed');
+});
