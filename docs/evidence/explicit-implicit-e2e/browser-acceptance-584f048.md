@@ -19,9 +19,14 @@ pnpm build
 node tests/app/real-browser-explicit-implicit-e2e.mjs
 ```
 
-> 该记录保留当时实际执行的命令。此脚本后来改名为
-> `tests/app/real-explicit-implicit-e2e.mjs`；`real-browser-explicit-implicit-e2e.mjs`
-> 在 `793b5b9` 已不存在，重放本记录时请用新路径。
+> 该记录保留当时实际执行的命令。该脚本**已被退役而非改名**：`fae4628`
+> （"retire stale real-browser-explicit-implicit-e2e script; relocate uncovered
+> checks into dashboard-e2e harness"）删除了 `tests/app/real-browser-explicit-implicit-e2e.mjs`
+> （−659 行），并把其中未被覆盖的浏览器检查搬进 `tests/app/dashboard-e2e`。
+> 因此重放本记录的**浏览器**观测请走 `tests/app/dashboard-e2e/runner.mjs`；
+> 同名的 `tests/app/real-explicit-implicit-e2e.mjs` 是另一件事——它驱动
+> CLI/HTTP Runtime API（真实 RCC 显式→隐式→执行闭环），不含 Chromium/Playwright，
+> 不能用来复现本记录的浏览器观测。
 
 ## Result
 
