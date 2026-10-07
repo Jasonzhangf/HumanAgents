@@ -428,7 +428,7 @@ export interface ProviderEventLike {
 
 **类型外输入的错误类型不是契约的一部分。** `sourceId`、`occurredAt` 缺失或非法时抛 `ContextEventError`。其余字段若违反 `ContextEventInput` 的类型（`scope` / `evidenceRefs` / `cost` 的结构非法），抛什么取决于**摘要规范化与 §11 校验中的先到者**：摘要要按 §9.5 递归重建嵌套对象，因此若某个对象型字段让这次重建解引用失败（`scope` 为 `null` / 非对象、元素为 `null`、元素 `scope` 为 `null`、`cost` 为 `null` 等），就抛原生 `TypeError`；否则由 §11 抛 `ContextEventError`。
 
-这些形状都会被显式拒绝或显式失败，不会静默产出错误事件（唯一例外是元素嵌套 scope 槽位的 `""` / `0` / `false`，见下）。本模块**不**为它们增加前置校验层：它们违反 `ContextEventInput` 的类型，类型正确的调用方无法构造，加校验层会违反「不为不可达场景增加校验层」。**因此本节不逐一列举这些形状**——列举会随实现细节漂移，且对合法调用方没有指导意义。需要精确行为时以 `validation.ts` 与 `normalize.ts` 的实现为准。
+本模块**不**为这些形状增加前置校验层：它们违反 `ContextEventInput` 的类型，类型正确的调用方无法构造，加校验层会违反「不为不可达场景增加校验层」。**因此本节不逐一列举这些形状**——列举会随实现细节漂移，且对合法调用方没有指导意义。需要精确行为时以 `validation.ts` 与 `normalize.ts` 的实现为准。
 
 **唯一需要调用方注意的两处取值变化**（本变更引入，均只影响摘要取值，不影响合法调用的语义）：
 
