@@ -115,4 +115,5 @@ args = ["--profile", "headless", "--json"]
   `MISSING_CREDENTIAL` 原文；`load` 在两个 shim 上返回 `capability-unavailable`。
 - 失败关闭：缺少 execution 段或 `command` 时组合/校验阶段报错，未知 `driverRef`
   报 `agent-driver-unsupported`。
-- focused tests：ACP 37、config 32、agent-templates 17，全部通过。
+- focused tests：ACP 39、config 32、agent-templates 17，全部通过。
+- 端到端复跑：`pnpm proof:acp-runtimes` 走真实配置与组合入口，三个 runtime 都通过。
