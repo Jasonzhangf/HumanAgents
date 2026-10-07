@@ -841,7 +841,7 @@ pnpm dagpipe:validate
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
 | 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**143** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
-| 6. 独立架构 review 绑定候选 SHA | 已完成（**逐轮结论、finding 计数、轮数与 BLOCKER 判定以 §16.2 表格为唯一真源**。本行不再复述「零 BLOCKER」，因为该术语未定义且 §16.2 中有多条 finding 标注「构成 FAIL」） |
+| 6. 独立架构 review 绑定候选 SHA | 已完成（**逐轮结论、finding 计数与轮次以 §16.2 表格为唯一真源**。§16.2 无「BLOCKER」列，故本行也不使用该未定义术语） |
 | 7. 按 review 结论修复并补测试 | 已完成（ISSUE-A / B / E / F / G / H 已处置，ISSUE-C / D 补测试；W4 在补测中追加发现的 O2 同属 ISSUE-E 类，已修并锁死） |
 | 8. 集成、候选自检与交付收口 | 进行中（组合最新 `origin/main`、最终 gate、merge 与 push） |
 
@@ -884,8 +884,11 @@ reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（该轮无阻断项）�
 | ISSUE-Y | 文档（task-20 发现） | §9.1 的「`dataDigest` 对非规范嵌套键序……（修复前不同）」**过度概括**：本变更前 `scope` 的键序**已稳定**（`scopeForDigest` 早已重建 `scope` 及其 `ScopedId` 叶子），真正不稳定的是 `evidenceRefs[]` 与 `cost` | 已修：限定为「本变更前不稳定的是 `evidenceRefs[]`（元素键序、`evidenceId`、`scope`）与 `cost`；`scope` 的键序此前已稳定」。Lead 用 `80b0bd7` 与当前候选做 6 组键序对照独立复验 |
 | ISSUE-Z | 文档（task-20 发现） | 消融行自己引入新的轮次断言与清单，且不实（轮数、把 §16 的 H/P/Q 混入 §9.1、漏 R/S/T），与 §16.2「唯一真源」的声明冲突 | 已修（连统计一起消融）：阅读约定与消融行都不再维护轮数与清单统计；第 6 行与步骤 1 的「N 轮」也一并去掉，改为指向 §16.2 |
 | ISSUE-AA | 文档（独立文档审计发现，**构成 FAIL**） | 三处 §16 不实陈述：①§16.1 结句称补测使「**删掉任一** digest 分支的 `consumed.add`」可被杀死，但 `case 'plan.proposed'` 的 `consumed.add(rejection.eventId)` 删除后 **`fail 0 / pass 143` 存活**（合法域内无测试可杀死，§8.2 已声明所需组合契约外）；②ISSUE-J 写 `cost === null` 是「**唯一**一个 §11 入口不抛 `ContextEventError` 的形状」，实测至少 **8 个**；③本表 ADVISORY 行的「75 passed / 0 failed」来自**未提交**的临时脚本，写成仓库套件属性会被误读为已提交测试 | 已修（3 处 + 2 处计数）：①§16.1 结句改为「使 `case 'plan.rejected'` 的 `consumed.add` 可被杀死」，并新增一段明确「**不要推广成任一站点**」、给出 10 站点的实测分布（9 杀 1 存活）与该变异对合法域不可达的理由；②ISSUE-J 去掉「唯一」，改为列出实测的 8 个形状；③ADVISORY 行标注矩阵为**未提交的临时脚本**、仓库套件仍为 143 例；④§16.1 表格的「被杀死」计数标注为**历史测量**（第 4 项在 143 例套件上实为 4，非 1）；⑤§16 第 6 行不再声称「零 BLOCKER」这一未定义术语。Lead 已独立复现 ①②④ |
+| ISSUE-AB | 文档（task-23 发现，**构成 FAIL**） | 修复 ISSUE-AA 时新加的一段说明被插进 §16.1 证据表内部（第 7 行与第 8/9 行之间，且带空行），GFM 表格被空行终止，**第 8/9 行退化为普通段落文本**，9 行表格变成 7 行 | 已修：该段移到第 9 行之后，表格恢复为连续的 9 个数据行，段内无空行。Lead 已用结构性检查复核（§16.1 表 = 9 数据行、无空行；全文 18 个表格 0 断表） |
+| ISSUE-AC | 文档（task-23 发现，**构成 FAIL**） | 修复 ISSUE-AA 时新增悬空前向引用：`:905` 写「第 4 项由 1 变为 4，**见 §16.3**」，但 §16.3 内没有任何第 4 项重测记录（该数字实际在 §16.1 自己的表格单元与说明段） | 已修：改为「见本表第 4 项与其后说明」。Lead 已复核全文不再有该悬空引用 |
+| ADVISORY | 文档（task-23 指出） | 同一披露在 `:917` 与 `:923` 两处重复维护（漂移面）；`:844` 称 BLOCKER 以 §16.2 为唯一真源，但该表无 BLOCKER 列；`:888` 的「312 个合法场景」无留档来源（review 侧差异脚本实为 **126 场景**） | 已修：重复披露合并为一处；`:844` 改为不使用 BLOCKER 术语并说明理由；312 场景数字不再引用，改列可复现佐证（删除该行 `fail 0 / pass 143`）与留档的实际场景数 126 |
 | ADVISORY | 透明性（task-16 建议） | §16.3 记「变异回放 20 条，`survived = 0`」，但该轮 `PC-2`（`allowedStatusOf` 丢掉 `SUPERSEDED_STATUS`）首轮为 **SKIP**（变异串与编译产物不匹配），改用真实编译文本重放后才 KILLED | 已补记于 §16.3，避免读者误以为 20 条在同一轮被评估 |
-| ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径。**佐证**：删除该行在当前 143 例套件上 `fail 0 / pass 143`（Lead 实测），确属行为等价；review 侧另做过 312 个合法场景的差分（该脚本未提交，场景数与「0 差异」无法从仓库复现） |
+| ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径。**可复现的佐证**：删除该行在当前 143 例套件上 `fail 0 / pass 143`（Lead 实测），确属行为等价。（原处置行写的「312 个合法场景，0 差异」无法追溯——review 侧留档的差异脚本是 **126 个场景**（`identicalExcludingDigest = 126`、`onlyDigestChanged = 0`），未见 312 场景的记录，故不再引用该数字。） |
 | ADVISORY | 类型外输入 | `cost` 传非对象（如 `5`）不抛错，其摘要表示由 `"cost":5` 变为 `"cost":{}` | 类型外输入，合法域无影响；不增加校验层（理由同 ISSUE-G）。已随 ISSUE-G 的边界说明一并记录 |
 
 ### 16.3 第二轮（task-15）增量复审的关键证据
@@ -902,7 +905,7 @@ reviewer-design 在 `55eb847` 上复跑 gate（`pnpm typecheck` / `pnpm test:con
 
 ### 16.1 Lead 的变异测试验收（测试有效性证据）
 
-`pnpm test:context-events` 全绿只证明「当前实现不被测试否决」，不证明「测试能发现缺陷」。Lead 因此在候选上做了 9 次人工变异（mutation），每次只改一处实现、其余不动，重编译后跑测试，再逐字还原（当时用 `cmp` 核对源文件逐字节一致；该核对的输出未留档，现由 `git status --porcelain` 为空佐证还原彻底）。**下表「被杀死」是各轮当时的测量值**，套件用例数随后从 130 增长到 143，同一变异在新套件上的杀死数可能更多（第 4 项即由 1 变为 4，见 §16.3）；它不是当前套件属性的断言：
+`pnpm test:context-events` 全绿只证明「当前实现不被测试否决」，不证明「测试能发现缺陷」。Lead 因此在候选上做了 9 次人工变异（mutation），每次只改一处实现、其余不动，重编译后跑测试，再逐字还原（当时用 `cmp` 核对源文件逐字节一致；该核对的输出未留档，现由 `git status --porcelain` 为空佐证还原彻底）。**下表「被杀死」是各轮当时的测量值**，套件用例数随后从 130 增长到 143，同一变异在新套件上的杀死数可能更多（第 4 项即由 1 变为 4，见本表第 4 项与其后说明）；它不是当前套件属性的断言：
 
 | # | 变异（`packages/context-events/src/`） | 被杀死 | 杀死的用例 |
 |---|---|---|---|
@@ -913,11 +916,11 @@ reviewer-design 在 `55eb847` 上复跑 gate（`pnpm typecheck` / `pnpm test:con
 | 5 | compact 成对分组改为逐条 `keepSingle`（拆散配对） | ✅ 1 | §10.3 成对保留/成对丢弃不变量 |
 | 6 | `DIGEST_OMIT_REASONS` 加入 `'pair'` | ✅ 1 | §11 `validateMemoryContextDigest` 拒绝 `'pair'` |
 | 7 | **删掉 `projector.ts` `case 'plan.rejected'` 的 `consumed.add`** | ❌ **存活 → 已用补测杀死** | — |
-
-**这张表绑定的是开发过程中间的未提交工作副本，不是任何一个已提交 revision。** 那一轮的候选是 124 例的未提交工作副本；仓库里不存在 124 例的 revision（已核实 `130 → 142 → 143` 是全部已提交档位）。二者都证明了这一点：第 7 项那个变异在**所有已提交档位上都杀死 4 例**（`47118d8`、`80b0bd7`、当前 HEAD 实测均为 `fail 4`，命中的是 §10.2 那 4 条「受限预算 / `omitted` 互斥」用例）；第 4 项从 1 升到 4 也是同一原因——补测之前中间态上没有那几条用例。**因此本表的「被杀死」不可从任一 revision 复现**，只能作为当时的测量记录读；当前套件（143 例）的变异杀死数应以重新测量的结果为准。
 | 8 | `nextAction` 去掉 `status === 'active'` 前置 | ✅ 2 | §10.1 未配对 `operation.failed` / 已配对打开事件 |
 | 9 | compact 中 superseded 的 `reason` 改为 `'budget'` | ✅ 1 | §10.3 superseded 不参与保留 |
 
+**这张表绑定的是开发过程中间的未提交工作副本，不是任何一个已提交 revision。** 那一轮的候选是 124 例的未提交工作副本；仓库里不存在 124 例的 revision（已核实 `130 → 142 → 143` 是全部已提交档位）。这解释了两处计数：第 7 项那个变异在**所有已提交档位上都杀死 4 例**（`47118d8`、`80b0bd7`、当前 HEAD 实测均为 `fail 4`，命中的是 §10.2 那 4 条「受限预算 / `omitted` 互斥」用例）；第 4 项从 1 升到 4 也出于同一原因——补测之前中间态上没有那几条用例。**因此本表的「被杀死」不可从任一 revision 复现**，只能作为当时的测量记录读；当前套件（143 例）的变异杀死数应以重新测量的结果为准。
+
 **第 7 项是真实覆盖漏洞，已修复**：`plan.rejected` 的 `priority` 为 2，天然参与 `summary`；在默认 `summaryBudgetBytes = 2048` 下，summary 循环恰好把它消费掉，于是 `omitted` 自然为空 —— 原测试无法区分「靠 summary 顺带消费」与「靠 switch 分支显式消费」。实测在 `summaryBudgetBytes: 0` 时该变异使同一 `eventId` **同时出现在 `decisions` 与 `omitted`**，正是 §10.2 `omitted` 定义（「未进入上述任一 digest **字段**的事件」）所禁止的。修复方式是在测试中补入**受限 summary 预算**下的断言，使 `case 'plan.rejected'` 的 `consumed.add` 可被杀死；实现本身无缺陷，改动只在测试侧。
 
-**不要把这句推广成「任一 `consumed.add` 都可被杀死」**：`projector.ts` 现有 10 个 `consumed.add` 站点，逐个删除后 9 个被杀死，**只有 `case 'plan.proposed'` 中的 `consumed.add(rejection.eventId)` 存活**（`fail 0 / pass 143`）。它要产生可观察差异，需要「被 superseded 的 `plan.rejected` 仍携带 `pairing`」，而 §8.2 已声明该组合在契约外，因此**合法域内没有测试能杀死它**——这不是覆盖漏洞。§16.2 的 ADVISORY 行已裁定保留该行代码。同理，第 4 项的「被杀死」计数是**当时 130 例候选**上的测量值；在现在的 143 例套件上同一变异杀死 **4** 例。表中「变异→杀死数」是**历史测量记录**，不是当前套件的属性。
+**不要把这句推广成「任一 `consumed.add` 都可被杀死」**：`projector.ts` 现有 10 个 `consumed.add` 站点，逐个删除后 9 个被杀死，**只有 `case 'plan.proposed'` 中的 `consumed.add(rejection.eventId)` 存活**（`fail 0 / pass 143`）。它要产生可观察差异，需要「被 superseded 的 `plan.rejected` 仍携带 `pairing`」，而 §8.2 已声明该组合在契约外，因此**合法域内没有测试能杀死它**——这不是覆盖漏洞。§16.2 的 ADVISORY 行已裁定保留该行代码。
