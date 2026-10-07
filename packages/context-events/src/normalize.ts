@@ -37,6 +37,7 @@ import { ContextEventError } from './errors.js';
 import { defaultStatusOf, labelOf } from './taxonomy.js';
 import type {
   CanonicalContextEvent,
+  ContextEventCost,
   ContextEventInput,
   ContextEventType,
 } from './types.js';
@@ -229,14 +230,14 @@ function digestOfConstructedEvent(
     occurredAt: input.occurredAt,
     scope: scopeForDigest(input.scope),
     summary,
-    evidenceRefs,
+    evidenceRefs: evidenceRefs.map(evidenceRefForDigest),
     supersededByEventId: input.supersededByEventId,
-    cost: input.cost,
+    cost: input.cost === undefined ? undefined : costForDigest(input.cost),
   };
   return `sha256:${sha256Hex(JSON.stringify(normalized))}`;
 }
 
-/** `ScopeRef` 的固定字段序投影，供摘要使用（§12）。 */
+/** `ScopeRef` 的固定字段序投影，供摘要使用（§9.5 / §12）。 */
 function scopeForDigest(scope: ScopeRef): Record<string, unknown> {
   return {
     organId: { scope: scope.organId.scope, value: scope.organId.value },
@@ -249,6 +250,35 @@ function scopeForDigest(scope: ScopeRef): Record<string, unknown> {
     ...(scope.operationId === undefined
       ? {}
       : { operationId: { scope: scope.operationId.scope, value: scope.operationId.value } }),
+  };
+}
+
+/**
+ * `EvidenceRef` 的固定字段序投影，供摘要使用（§9.5 / §12）。
+ *
+ * §9.5 要求被哈希的是**按固定字段序重建的规范化对象**，不是调用方传入的对象；
+ * §12 禁止直接哈希来源对象。`evidenceRefs` 是嵌套对象，若按引用参与哈希，
+ * 同一事实在不同键序下会得到不同 `dataDigest`。故此处与 `scope` 同样重建。
+ * `scope` 字段复用 `scopeForDigest`，递归规范化其内部键序。
+ */
+function evidenceRefForDigest(evidenceRef: EvidenceRef): Record<string, unknown> {
+  return {
+    evidenceId: evidenceRef.evidenceId,
+    kind: evidenceRef.kind,
+    source: evidenceRef.source,
+    locator: evidenceRef.locator,
+    ...(evidenceRef.digest === undefined ? {} : { digest: evidenceRef.digest }),
+    scope: scopeForDigest(evidenceRef.scope),
+  };
+}
+
+/** `ContextEventCost` 的固定字段序投影，供摘要使用（§9.5 / §12）。理由同 `evidenceRefForDigest`。 */
+function costForDigest(cost: ContextEventCost): Record<string, unknown> {
+  return {
+    ...(cost.tokensInput === undefined ? {} : { tokensInput: cost.tokensInput }),
+    ...(cost.tokensOutput === undefined ? {} : { tokensOutput: cost.tokensOutput }),
+    ...(cost.bytesAvoided === undefined ? {} : { bytesAvoided: cost.bytesAvoided }),
+    ...(cost.bytesRetrieved === undefined ? {} : { bytesRetrieved: cost.bytesRetrieved }),
   };
 }
 

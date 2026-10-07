@@ -296,6 +296,8 @@ export function assertPairingConsistent(events: readonly CanonicalContextEvent[]
 
 `applyPairingOutcome` 是 **`status` 改写的唯一 owner**。第 7 节说 `status` 会被配对结果改写；本函数就是那个改写者，任何其它位置不得改写 `status`。它按 `buildPairingIndex` 的结果返回**新数组**（不改输入）：为每个**已配对**的关闭事件补 `pairing.relatedEventId`，并按下面的改写表把已闭合的打开事件从 `defaultStatus` 改写为终态。**未配对的关闭事件不分配 `pairing`**（§9.3、§10.3、§11 第 11 项一致）。
 
+**不变量：`status === 'superseded'` 的事件不携带 `pairing`。** `buildPairingIndex` / `applyPairingOutcome` 一律跳过 superseded 事件，因此本模块产出的 canonical 事件永不出现该组合。这条是下游投影的前提，不是可选的：`compactContextEvents` 对 superseded 走 `reason: 'superseded'` 的丢弃分支（§10.3），而配对分组走整组同进同出；若某个 superseded 事件仍带 `pairing`，同一 `eventId` 会同时进入 `retained` 与 `omitted`，破坏 §10.3 的划分。§10.3 已要求输入必须是本函数的输出，故该组合属契约外输入；此处**显式**声明，以免被误读为未定义行为。本模块**不**为它增加运行时校验层（与「不为不可达场景增加校验层」一致）。
+
 | 打开事件 | 默认 status | 关闭事件 | 改写后 status |
 |---|---|---|---|
 | `error.detected` | `active` | `error.resolved` | `resolved` |
@@ -503,9 +505,9 @@ dsh 方言的 `tool` **必须**映射为 `unmapped`，不得映射成 `operation
 | `kind === 'terminal' && terminalState === 'succeeded'` | `operation.completed` |
 | `kind === 'terminal' && terminalState === 'waiting'` | `unmapped`（reason `waiting-is-not-terminal`） |
 | `kind === 'terminal' && 其它` | `operation.failed` |
+| `kind === 'model' \| 'output'` | `unmapped`（reason `unknown-kind`，高噪声显式列出） |
 
 本表 `terminal` 行只写「其它」而**不**写「其它 / 缺失」，与其他三张表的「其它 / 缺失」不同，这是真源差异而非笔误：`ProviderEvent.terminalState` 由 contracts 强制——`contracts/src/index.ts` 规定 `kind === 'terminal' && !terminalState` 直接抛错，因此在 provider-event 输入里 `terminalState` 不可能缺失；而 `AgentEvent.terminalState` 是可选的，`agent-semantic` / `agent-event` 两张表必须显式覆盖缺失情形。实现时 `terminal` 的缺失分支在 provider-event 表上是死代码，**不要**为它加额外校验层。
-| `kind === 'model' \| 'output'` | `unmapped`（reason `unknown-kind`，高噪声显式列出） |
 
 未命中任一规则的 raw kind 进入 `unmapped`，`reason: 'unknown-kind'`，不得静默丢弃。**已知 kind 但缺判据所需字段**时（如 `kind === 'tool' && toolPhase === 'result'` 却无 `toolResult`），同样进 `unmapped` 且 reason 仍用 `'unknown-kind'`（reason 词表本轮只有 3 值，不扩）；`rawKind` 必须回填原始 kind，不得吞掉来源信息。
 
@@ -606,13 +608,16 @@ export function createContextEvent(input: ContextEventInput): CanonicalContextEv
 ### 9.5 载荷与摘要
 
 - `payloadRef`：一律为 `` `context-event:${sourceId}` ``。`EventRecordLike` / `ProviderEventLike` 都不含 `payloadRef` 字段（`EventEnvelope` 只有 `payload?: BusinessPayload`），无来源可透传。
-- `dataDigest`：`sha256:<64 位小写十六进制>`，被哈希的是**按固定字段序重建的规范化对象**，不是调用方传入的对象（§12 禁止直接哈希来源对象）。固定字段序（`JSON.stringify` 的键序即此序）：
-  `type` → `sourceId` → `occurredAt` → `scope` → `summary` → `evidenceRefs` → `supersededByEventId` → `cost`。
-  `scope` 内部同样按固定键序重建：`organId` → `taskId` → `cycleId` → `operationId`。
+- `dataDigest`：`sha256:<64 位小写十六进制>`，被哈希的是**按固定字段序重建的规范化对象**，不是调用方传入的对象（§12 禁止直接哈希来源对象）。**「重建」递归适用于所有嵌套对象**：`evidenceRefs` 的元素与 `cost` 也是嵌套对象，若按引用参与哈希，同一事实在不同键序下会得到不同摘要。固定字段序（`JSON.stringify` 的键序即此序）：
+  顶层 `type` → `sourceId` → `occurredAt` → `scope` → `summary` → `evidenceRefs` → `supersededByEventId` → `cost`。
+  嵌套层同样按固定键序重建：
+  - `scope`（含 `evidenceRefs[].scope`）：`organId` → `taskId` → `cycleId` → `operationId`；
+  - `evidenceRefs[]`：`evidenceId` → `kind` → `source` → `locator` → `digest` → `scope`；
+  - `cost`：`tokensInput` → `tokensOutput` → `bytesAvoided` → `bytesRetrieved`。
   规则：
   1. **哈希的是最终写入事件的取值**，不是原始入参：`summary` 缺省时先补 `labelOf(type)` 再参与哈希，`evidenceRefs` 缺省时按 `[]` 参与哈希。因此摘要覆盖 canonical 事件上所有**原样存储**的数据字段。
   2. **`status` / `pairing` / `eventId` / `payloadRef` / `dataDigest` 一律不参与哈希**：`status` 与 `pairing` 会被 `applyPairingOutcome` 改写（§8.2），若纳入摘要，同一个事件在配对前后会得到不同摘要；`eventId` / `payloadRef` 由 `sourceId` 派生，已在摘要内。
-  3. **值为 `undefined` 的可选字段省略该键**（不写 `null`）；数组保持输入顺序不重排。
+  3. **值为 `undefined` 的可选字段省略该键**（不写 `null`）；数组保持输入顺序不重排（元素内部键序按上表规范化，数组顺序不重排）。
 
   由此得到一条不变量：`dataDigest` 在 `applyPairingOutcome` 前后**保持不变**。W4 必须锁死字段序与这条不变量。
 - `summary`：来源 `summary` 非空时透传；否则用 taxonomy `label`。
@@ -825,7 +830,7 @@ pnpm dagpipe:validate
 | 2. 阶段 0：Lead 落地并冻结 `types.ts` / `taxonomy.ts` / `errors.ts` | 已完成 |
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
-| 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（124 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见下） |
+| 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**130** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
 | 6. 独立架构 review 绑定候选 SHA | 待候选 commit 后派发（task-12） |
 | 7. 集成、候选自检与交付收口 | 待第 6 步 PASS |
 
