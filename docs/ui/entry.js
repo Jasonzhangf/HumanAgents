@@ -1,5 +1,6 @@
 import {
   api,
+  appendPairingEntry,
   clearNode,
   element,
   formatTime,
@@ -107,6 +108,7 @@ function setEntryError(error) {
     element('strong', error.code || 'request.failed'),
     element('p', `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`),
   )
+  appendPairingEntry(panel, error)
 }
 
 function renderDraft(snapshot) {
@@ -251,6 +253,7 @@ async function refreshQueue() {
     if (panel) {
       clearNode(panel)
       panel.append(element('p', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`, 'empty'))
+      appendPairingEntry(panel, error)
     }
   }
 }

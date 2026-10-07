@@ -29,6 +29,11 @@ export function isAuthSessionError(error) {
 // turned into an open redirect.
 export function sameOriginPath(value, fallback = '/dashboard.html') {
   if (typeof value !== 'string') return fallback
+  // Reject parser-significant separators and controls before trimming. URL and
+  // URLSearchParams normalize these into backslashes, tabs, or line breaks;
+  // accepting them would make a path that looks local resolve off-origin.
+  if (/[\\\u0000-\u001f\u007f]/.test(value)) return fallback
+  if (/%(?:5c|0[0-9a-f]|1[0-9a-f]|7f)/i.test(value)) return fallback
   const trimmed = value.trim()
   if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return fallback
   return trimmed

@@ -1,5 +1,6 @@
 import {
   api,
+  appendPairingEntry,
   element,
   formatTime,
   loadRuntimeStatus,
@@ -83,8 +84,7 @@ async function runBulkAction(action) {
     selectedTaskIds.clear()
     await loadTasks()
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the task action'}`
+    renderPageError(status, error, 'inspect the task action')
   }
 }
 
@@ -116,8 +116,7 @@ async function editTask(row) {
         await loadTasks()
       } catch (error) {
         save.disabled = false
-        status.dataset.tone = 'danger'
-        status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the task update'}`
+        renderPageError(status, error, 'inspect the task update')
       }
     })
     dialog.append(form)
@@ -125,8 +124,7 @@ async function editTask(row) {
     dialog.addEventListener('close', () => dialog.remove(), { once: true })
     dialog.showModal()
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the task'}`
+    renderPageError(status, error, 'inspect the task')
   }
 }
 
@@ -137,8 +135,7 @@ async function deleteTask(row) {
     selectedTaskIds.delete(row.taskId.value)
     await loadTasks()
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the task deletion'}`
+    renderPageError(status, error, 'inspect the task deletion')
   }
 }
 

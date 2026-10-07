@@ -300,7 +300,38 @@ try {
     { linked, resolved: linkUrl.href })
   await capture(page, 'shell-auth-missing')
 
-  // --- 3. the login page is served by the real runtime --------------------
+  // --- 3. every hostile path variant stays on the same-origin fallback -----
+  const hostilePaths = ['/%5Cevil.com', '/%09//evil.com']
+  // Import the actual shipped module in the page context rather than duplicating
+  // its parser logic in this proof.
+  const evaluatedHostile = await page.evaluate(async (values) => {
+    const module = await import('./runtime-api.js')
+    return values.map((value) => ({ value, resolved: module.sameOriginPath(value) }))
+  }, hostilePaths)
+  observe('hostile next path guards', evaluatedHostile)
+  record('backslash and encoded control path variants use the same-origin fallback',
+    evaluatedHostile.every((entry) => entry.resolved === '/dashboard.html'),
+    evaluatedHostile)
+
+  // --- 4. an expired runtime session still links from tasks.html -----------
+  const expiredTasksContext = await browser.newContext()
+  const expiredTasksPage = await expiredTasksContext.newPage()
+  await expiredTasksPage.route('**/api/tasks', async (route) => route.fulfill({
+    status: 401,
+    contentType: 'application/json',
+    body: JSON.stringify({ code: 'auth.session.expired', ownerId: ACCESS_CONTROL_OWNER, message: 'browser session has expired', nextAction: 'open the login page and pair this browser' }),
+  }))
+  await expiredTasksPage.goto(`${binding.serveBaseUrl}/tasks.html`, { waitUntil: 'domcontentloaded' })
+  await expiredTasksPage.waitForSelector('[data-auth-pair-link]', { timeout: 30_000 })
+  const expiredTasksLink = await expiredTasksPage.evaluate(() => document.querySelector('[data-auth-pair-link]')?.getAttribute('href') ?? '')
+  observe('tasks expired session pairing link', { expiredTasksLink })
+  record('tasks.html renders a real pairing link for an auth.session.expired mutation',
+    new URL(expiredTasksLink, `${binding.serveBaseUrl}/tasks.html`).searchParams.get('authCode') === 'auth.session.expired'
+      && new URL(expiredTasksLink, `${binding.serveBaseUrl}/tasks.html`).pathname === '/login.html',
+    { expiredTasksLink })
+  await expiredTasksContext.close()
+
+  // --- 5. the login page is served by the real runtime --------------------
   const loginResponse = await fetch(`${binding.serveBaseUrl}/login.html`)
   const loginBody = await loginResponse.text()
   observe('login.html response', {

@@ -1,5 +1,6 @@
 import {
   api,
+  appendPairingEntry,
   clearNode,
   element,
   formatTime,
@@ -500,7 +501,9 @@ async function renderInteraction(interactionId, currentTaskId) {
   }
 
   const showError = (error) => {
-    feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    clearNode(feedback)
+    feedback.append(element('span', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`))
+    appendPairingEntry(feedback, error)
     diagnosticText.textContent = [
       `code=${error.code || 'runtime.request.failed'}`,
       `owner=${error.ownerId || 'unknown'}`,
