@@ -386,9 +386,9 @@ test('cancel-future does not stop an already-claimed in-flight execution', async
   }
 });
 
-test('cancel-future on a claimed slot that has not started yet dispatches nothing', async () => {
+test('cancel-future inside the claim grace window still settles the claim it already committed', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-plan-control-claimed-cancel-'));
-  const startAt = new Date(Date.now() + 4_000).toISOString();
+  const startAt = new Date(Date.now() + 5_000).toISOString();
   const harness = await startHarness({ root, intervalMs: 250 });
   try {
     const requirementId = await persistPlan(harness, 'cancel the future inside the due-time grace window', scheduledPolicy(startAt));
@@ -402,21 +402,29 @@ test('cancel-future on a claimed slot that has not started yet dispatches nothin
 
     const cancelled = await receiptOf(await controlPlan(harness, subscriptionId, 'cancel-future', 'plan-control-claimed-cancel'));
     assert.equal(cancelled.status, 'applied');
-    assert.deepEqual(cancelled.supersededUnclaimedOccurrences, []);
+    assert.deepEqual(
+      cancelled.supersededUnclaimedOccurrences,
+      [],
+      'a claimed occurrence is not an unclaimed future slot and must not be superseded',
+    );
+    assert.ok(Date.now() < Date.parse(startAt), 'the control landed inside the grace window');
 
-    // Past the due instant the claimed slot must still not run: a cancelled plan
-    // never dispatches.
-    await new Promise((resolve) => setTimeout(resolve, Math.max(0, Date.parse(startAt) - Date.now()) + 1_500));
+    // `cancel-future` destroys the future schedule, so the cancelled plan must
+    // never receive another slot. The claim already committed inside the grace
+    // window is not revoked by the control: the scheduling graph must not stop a
+    // committed claim, so that claim still reaches its verified terminal at the
+    // slot time instead of staying `claimed` in the durable snapshot forever.
+    await waitFor(async () => {
+      const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+      assert.equal(planFor(status, requirementId).settlements.length, 1, issueText(status));
+    }, 30_000);
     const after = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
-    assert.equal(planFor(after, requirementId).state, 'cancelled');
-    assert.equal(after.executed, 0);
-    assert.equal(harness.port.starts.length, 0, 'a cancelled plan dispatched nothing after the due instant');
-    // Observed residual, NOT a desired end state: the patrol skips non-active
-    // plans, so the claim taken in the grace window is never driven to a
-    // settlement and stays `claimed` in the durable snapshot. This fence records
-    // the current behaviour; if the residual is ever fixed, update this assertion.
-    assert.equal(planFor(after, requirementId).occurrences[0]?.state, 'claimed');
-    assert.equal(planFor(after, requirementId).settlements.length, 0);
+    const plan = planFor(after, requirementId);
+    assert.equal(plan.state, 'cancelled', 'the cancellation remains the durable plan state');
+    assert.equal(plan.occurrences[0]?.state, 'consumed', 'the committed claim reached its terminal state');
+    assert.equal(plan.settlements[0]!.verificationStatus, 'success');
+    assert.equal(after.executed, 1, 'the committed claim ran exactly one execution');
+    assert.equal(harness.port.starts.length, 1, 'the control dispatched no replacement execution');
   } finally {
     await harness.close();
     await rm(root, { recursive: true, force: true });

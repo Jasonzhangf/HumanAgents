@@ -202,10 +202,15 @@ async function sectionClientUnit() {
     baseUrl: 'http://runtime.test',
     fetchImpl: async () => jsonResponse({
       error: {
-        code: 'execution-plan.control.conflict',
-        ownerId: 'humanagent.runtime.scheduler',
-        message: 'the plan already changed',
-        nextAction: 're-read the plan and choose again',
+        // A real control-route failure: another actor cancelled the plan between
+        // the read and this `cancel-future`, so the port rejects it with
+        // `invalid-state`. The runtime maps `SubscriptionControlError` to
+        // `execution-plan.${code}` under RUNTIME_OWNER, with this exact next
+        // action and a 409.
+        code: 'execution-plan.invalid-state',
+        ownerId: 'humanagent.runtime',
+        message: 'subscription is already cancelled',
+        nextAction: 'inspect the persisted execution plan before resubmitting',
       },
     }, 409),
   });
@@ -217,10 +222,10 @@ async function sectionClientUnit() {
   }
   record('plan-control surfaces a typed rejection as RuntimeApiError',
     rejection instanceof RuntimeApiError
-      && rejection.code === 'execution-plan.control.conflict'
-      && rejection.ownerId === 'humanagent.runtime.scheduler'
-      && rejection.message === 'the plan already changed'
-      && rejection.nextAction === 're-read the plan and choose again'
+      && rejection.code === 'execution-plan.invalid-state'
+      && rejection.ownerId === 'humanagent.runtime'
+      && rejection.message === 'subscription is already cancelled'
+      && rejection.nextAction === 'inspect the persisted execution plan before resubmitting'
       && rejection.status === 409,
     rejection && {
       name: rejection.name,
@@ -400,12 +405,15 @@ async function sectionDeterministic(browser, baseUrl, artifactDir) {
       const payload = request.postDataJSON();
       controlRequests.push(payload);
       if (planState.controlFails) {
+        // Another actor cancelled the plan first, so the port rejects this
+        // `cancel-future` with `invalid-state`; the control route maps that to
+        // `execution-plan.${code}` under RUNTIME_OWNER with this next action.
         return body({
           error: {
-            code: 'execution-plan.control.conflict',
-            ownerId: 'humanagent.runtime.scheduler',
-            message: '计划已被其他控制改变',
-            nextAction: '重新读取计划后再选择控制',
+            code: 'execution-plan.invalid-state',
+            ownerId: 'humanagent.runtime',
+            message: 'subscription is already cancelled',
+            nextAction: 'inspect the persisted execution plan before resubmitting',
           },
         }, 409);
       }
@@ -512,10 +520,10 @@ async function sectionDeterministic(browser, baseUrl, artifactDir) {
   observe('deterministic typed rejection', { clicked: cancelClicked, requests: [...controlRequests], surface: rejected });
   record('typed control rejection renders code, owner, message and next action',
     cancelClicked
-      && rejected.statusText.includes('execution-plan.control.conflict')
-      && rejected.statusText.includes('humanagent.runtime.scheduler')
-      && rejected.statusText.includes('计划已被其他控制改变')
-      && rejected.statusText.includes('重新读取计划后再选择控制'),
+      && rejected.statusText.includes('execution-plan.invalid-state')
+      && rejected.statusText.includes('humanagent.runtime')
+      && rejected.statusText.includes('subscription is already cancelled')
+      && rejected.statusText.includes('inspect the persisted execution plan before resubmitting'),
     rejected.statusText);
   record('a rejected control does not claim the plan changed',
     rejected.stateValue === 'suspended' && rejected.controls.resume === true,
@@ -640,9 +648,37 @@ async function waitForSchedulerPlan(auth, predicate, timeoutMs = 30_000) {
 }
 
 /**
+ * The due-time grace window is about one second wide, so the generic half-second
+ * poll is too coarse to reliably observe the deferred claim before its slot
+ * time. This poll is deliberately tight: the caller has to issue the control
+ * while the occurrence is claimed and still not due.
+ */
+async function waitForClaimedOccurrence(auth, subscriptionId, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  for (;;) {
+    const plans = await schedulerPlans(auth);
+    last = plans;
+    const plan = plans.find((candidate) => candidate.subscriptionId === subscriptionId);
+    if (plan && (plan.occurrences ?? []).some((occurrence) => occurrence.state === 'claimed')) return plan;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for the grace-window claim; last=${JSON.stringify(last).slice(0, 1200)}`);
+    }
+    await sleep(50);
+  }
+}
+
+/**
  * Confirm one `scheduled` execution policy through the real public explicit-flow
  * routes. These are the seeded routes the production RCC scheduler acceptance
  * uses: no live provider call, so the plan is durable within a bounded time.
+ *
+ * `startAt` may be a `string`, or a (possibly async) thunk that is evaluated
+ * immediately before the confirmation request. The explicit flow is
+ * provider-bound and can take tens of seconds under load, so a slot time chosen
+ * before it started would already be in the past by the time the plan becomes
+ * durable. A thunk keeps the slot time anchored to the instant the plan is
+ * actually created.
  */
 async function confirmScheduledPlan(auth, rawInput, startAt) {
   // `auth.json` forwards the body to fetch, which needs a string.
@@ -661,6 +697,7 @@ async function confirmScheduledPlan(auth, rawInput, startAt) {
   await post(`${route}/match`, { normalizedInput: rawInput, matchedTasks: [], knownFacts: [] });
   await post(`${route}/proposal`, { proposedIntent: 'create', proposal: `create:${rawInput}` });
   const snapshot = await auth.json(route);
+  const resolvedStartAt = typeof startAt === 'function' ? await startAt() : startAt;
   const confirmed = await post(`${route}/confirmation`, {
     draftId: snapshot.draft.draftId,
     inputRevision: 1,
@@ -679,7 +716,7 @@ async function confirmScheduledPlan(auth, rawInput, startAt) {
       latePolicy: 'run-once',
       busyPolicy: 'skip',
       executionMode: 'scheduled',
-      startAt,
+      startAt: resolvedStartAt,
     },
   });
   return { requirementId: confirmed.requirement?.requirementId ?? null, subscriptionId: `subscription:${confirmed.requirement?.requirementId ?? ''}` };
@@ -912,6 +949,83 @@ async function sectionReal(browser, artifactDir, root) {
     record('real cancel-future leaves the already-claimed in-flight execution settling',
       inFlightSettled.state === 'cancelled' && (inFlightSettled.settlements ?? []).length >= 1,
       inFlightSettled);
+
+    // --- cancel-future inside the claim grace window -------------------------
+    // A slot is claimed up to one second before its due time, and the real
+    // execution is deferred to the slot. The patrol ticks once a second, so the
+    // slot time is aligned to a tick boundary and chosen at the instant the plan
+    // becomes durable: the claim then lands a full second before the slot and the
+    // control below really is issued inside the window. Without the alignment the
+    // claim can fall arbitrarily close to the slot, and the scenario would
+    // silently stop testing the window at all.
+    const graceAnchor = { lastTickAt: undefined, startAt: undefined, confirmedAt: undefined };
+    const grace = await confirmScheduledPlan(auth, 'report the current date', async () => {
+      const phase = await auth.json('/api/runtime/scheduler');
+      const lastTick = Date.parse(phase.lastTickAt ?? '');
+      graceAnchor.lastTickAt = phase.lastTickAt;
+      graceAnchor.startAt = new Date((Number.isFinite(lastTick) ? lastTick : Date.now()) + 5_000).toISOString();
+      graceAnchor.confirmedAt = new Date().toISOString();
+      return graceAnchor.startAt;
+    });
+    const graceStartAt = graceAnchor.startAt;
+    const graceClaimed = await waitForClaimedOccurrence(auth, grace.subscriptionId, 30_000);
+    const graceOccurrence = (graceClaimed.occurrences ?? []).find((occurrence) => occurrence.state === 'claimed');
+    const graceClaimedAt = new Date().toISOString();
+    const claimedBeforeDue = Date.now() < Date.parse(graceStartAt);
+    const graceReceipt = await auth.json(`/api/plans/${encodeURIComponent(grace.subscriptionId)}/control`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'cancel-future',
+        idempotencyKey: `plan-control:proof:grace:${Date.now()}`,
+        requestedAt: new Date().toISOString(),
+      }),
+    });
+    observe('real grace-window cancel', {
+      startAt: graceStartAt,
+      lastTickAt: graceAnchor.lastTickAt,
+      confirmedAt: graceAnchor.confirmedAt,
+      claimedAt: graceClaimedAt,
+      claimedBeforeDue,
+      receipt: graceReceipt,
+      occurrence: graceOccurrence,
+    });
+    record('a claim taken inside the due-time grace window is committed and not superseded',
+      claimedBeforeDue === true
+        && graceReceipt.action === 'cancel-future'
+        && graceReceipt.status === 'applied'
+        && (graceReceipt.supersededUnclaimedOccurrences ?? []).length === 0,
+      { claimedBeforeDue, receipt: graceReceipt });
+
+    // The plan is cancelled, and the claim it already committed is driven to its
+    // terminal settlement instead of staying `claimed` forever.
+    const graceSettled = await waitForSchedulerPlan(
+      auth,
+      (plan) => plan.subscriptionId === grace.subscriptionId && (plan.settlements ?? []).length > 0,
+      180_000,
+    );
+    observe('real grace-window settlement', graceSettled);
+    record('cancel-future inside the grace window does not strand the claim it already committed',
+      graceSettled.state === 'cancelled'
+        && (graceSettled.occurrences ?? []).every((occurrence) => occurrence.state !== 'claimed')
+        && (graceSettled.settlements ?? []).length === 1
+        && graceSettled.settlements[0].occurrenceId === graceOccurrence?.occurrenceId,
+      graceSettled);
+
+    // The served plan list reports the same durable fact the control produced.
+    await page.goto(`${base}/dashboard.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      (id) => [...document.querySelectorAll('[data-plan-section]')].some((node) => node.dataset.planSubscription === id),
+      grace.subscriptionId,
+      { timeout: 30_000 },
+    );
+    const graceSurface = await readScopedPlanSurface(page, grace.subscriptionId);
+    observe('real grace-window plan surface', graceSurface);
+    record('the served plan list reports the cancelled plan after the grace-window control',
+      graceSurface.sectionPresent === true
+        && graceSurface.stateValue === 'cancelled'
+        && graceSurface.controls.pause === false
+        && graceSurface.controls['cancel-future'] === false,
+      graceSurface);
 
     // --- a real task with no persisted plan renders no plan section ----------
     const planLessCreated = await auth.json('/api/tasks', {
