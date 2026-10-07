@@ -831,9 +831,28 @@ pnpm dagpipe:validate
 | 2. 阶段 0：Lead 落地并冻结 `types.ts` / `taxonomy.ts` / `errors.ts` | 已完成 |
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
-| 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**130** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
-| 6. 独立架构 review 绑定候选 SHA | 待候选 commit 后派发（task-12） |
-| 7. 集成、候选自检与交付收口 | 待第 6 步 PASS |
+| 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**143** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
+| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12，**PASS**，零 BLOCKER；5 ISSUE + 3 ADVISORY，见 §16.2） |
+| 7. 按 review 结论修复并补测试 | 已完成（ISSUE-A / B / E / F 修复，ISSUE-C / D 补测试；W4 在补测中追加发现的 O2 同属 ISSUE-E 类，已修并锁死） |
+| 8. 集成、候选自检与交付收口 | 进行中（组合最新 `origin/main`、最终 gate、merge 与 push） |
+
+### 16.2 独立架构 review 结论与处置（task-12）
+
+reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同时复跑了 gate、逐文件 blob 核对了候选迁移，并做了自己的差分与变异探针。逐项处置：
+
+| 编号 | 类别 | 结论 | 处置 |
+|---|---|---|---|
+| — | 依赖上限 / 唯一 owner / `index.ts` 导出面 / 文档一致性 / 测试黑盒性 | PASS | 无需改动 |
+| ISSUE-A | 文档 | provider-event 表的 `kind === 'model' \| 'output'` 行被一段正文与表格隔开，渲染时丢行 | 已修：该行移回表内 |
+| ISSUE-B | 文档 | §16 记 124 例，实际 130 | 已修 |
+| ISSUE-C | 测试有效性 | `compact.ts` 的 `retained.sort(compareCandidates)` 零覆盖；变异 `sort(() => 0)` 存活，且合法输入上顺序真的会变 | 已补 3 例（priority / occurredAt / eventId 三级排序键各一，用 `deepEqual` 断言精确 `eventId` 序列）。Lead 独立复验：该变异现在被 3 例杀死 |
+| ISSUE-D | 测试有效性 | §9.5 的 digest 字段集合与字段序未锁死（去掉 `cost` / `evidenceRefs` / `supersededByEventId`、把 `status` 加进哈希均存活） | 已补 golden digest 用例（期望值用 `node:crypto` 按文档字段序独立重建）。Lead 独立复验：去掉 `cost` 现在被 3 例杀死 |
+| ISSUE-E | **代码** | §9.5 要求被哈希的是**重建**后的规范化对象、§12 禁止直接哈希来源对象，但实现只重建了 `scope`，`evidenceRefs` 与 `cost` 按引用参与哈希 → 同一事实在不同嵌套键序下得到不同 `dataDigest` | 已修：`evidenceRefs` 元素、`cost` 均按固定字段序重建；§9.5 写明「重建递归适用于所有嵌套对象」及三层嵌套键序 |
+| O2（W4 补测中发现） | **代码** | 同类的最后一处：`evidenceRefs[].evidenceId` 是 `ScopedId` 对象，仍按引用哈希 | 已修：`ScopedId` 的两个出现位置（`ScopeRef` 四槽位、`evidenceRefs[].evidenceId`）统一走同一个 `scopedIdForDigest`，使「漏掉任一位置」在结构上不可能；§9.5 写明该统一要求。已补用例逐个锁死两处 |
+| ISSUE-F | 契约边界 | `status === 'superseded'` 且带 `pairing` 的事件能通过 `validateCanonicalContextEvent`，此时 compact 会让同一 `eventId` 同时进 `retained` 与 `omitted` | 已按「不为不可达场景增加校验层」处置：**不改代码**，在 §8.2 显式声明「superseded 事件不携带 `pairing`」为下游投影的前提，并说明 §10.3 已要求输入是本函数输出、故该组合属契约外输入 |
+| ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分（312 个合法场景，0 差异）后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径 |
+
+**关于 ISSUE-E / O2 的意义**：这两条不是「测试没覆盖」而是**实现确实不符合 §9.5/§12**。若只按 §12 字面核对 `scope` 一处就收口，`dataDigest` 会在嵌套键序变化时漂移，而 `dataDigest` 是「同一事实的稳定身份」——配对前后不变这条不变量正是建立在它稳定之上的。修复后该不变量对**任意键序写法**成立。
 
 ### 16.1 Lead 的变异测试验收（测试有效性证据）
 
