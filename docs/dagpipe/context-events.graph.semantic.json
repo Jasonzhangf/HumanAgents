@@ -1,0 +1,10 @@
+{
+  "graph": "humanagent-context-events",
+  "labels": {
+    "event_source": "接收已提交的原始事件流",
+    "normalize": "归一化为标准事件",
+    "pairing": "建立错误与修复配对",
+    "projector": "生成叙述与记忆摘要投影",
+    "consume": "供界面与记忆消费"
+  }
+}

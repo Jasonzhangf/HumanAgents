@@ -29,7 +29,8 @@ UI 采用同一边界：HumanAgent 自己拥有 Organ Console、状态投影和�
 7. [Memory System](docs/architecture/memory-system.md)
 8. [生命周期与故障归属](docs/architecture/lifecycle-and-failure-ownership.md)
 9. [DSH 基线与 Milestone 1 适配准备](docs/architecture/dsh-baseline.md)
-10. [项目规则](AGENTS.md)
+10. [Context Events 事件统一抽象](docs/architecture/context-events.md)
+11. [项目规则](AGENTS.md)
 
 ## 当前收口
 
