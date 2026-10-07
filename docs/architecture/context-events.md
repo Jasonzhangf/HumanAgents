@@ -426,13 +426,13 @@ export interface ProviderEventLike {
 
 `createContextEvent`（§9.3）不走派生：`sourceId` / `occurredAt` / `scope` 全部由调用方显式提供；`sourceId` / `occurredAt` 缺失抛 `ContextEventError`，`scope` 见下段。它是这些派生规则的唯一实现者，四个适配器只负责把各自输入折算成 `ContextEventInput` 后调用它。
 
-**类型外输入的错误类型不是契约的一部分。** `sourceId`、`occurredAt` 缺失或非法时抛 `ContextEventError`。其余字段若违反 `ContextEventInput` 的类型（`scope` / `evidenceRefs` / `cost` 的结构非法），抛什么取决于**摘要规范化与 §11 校验中的先到者**：摘要要按 §9.5 递归重建嵌套对象，因此若某个对象型字段让这次重建解引用失败（`scope` 为 `null` / 非对象、元素为 `null`、元素 `scope` 为 `null`、`cost` 为 `null` 等），就抛原生 `TypeError`；否则由 §11 抛 `ContextEventError`。
+**类型外输入的错误类型不是契约的一部分。** `sourceId`、`occurredAt` 缺失或非法时抛 `ContextEventError`。其余字段若违反 `ContextEventInput` 的类型（`scope` / `evidenceRefs` / `cost` 的结构非法），错误类型**不保证**：它取决于摘要规范化与 §11 校验哪一个先触及该输入，既可能是原生 `TypeError`，也可能是 `ContextEventError`，**也可能不抛错**（例如 `cost` 传非对象，见下）。因此本节只说明该边界的存在，不逐一列举形状——列举会随实现细节漂移，且对合法调用方没有指导意义。需要精确行为时以 `validation.ts` 与 `normalize.ts` 的实现为准。
 
-本模块**不**为这些形状增加前置校验层：它们违反 `ContextEventInput` 的类型，类型正确的调用方无法构造，加校验层会违反「不为不可达场景增加校验层」。**因此本节不逐一列举这些形状**——列举会随实现细节漂移，且对合法调用方没有指导意义。需要精确行为时以 `validation.ts` 与 `normalize.ts` 的实现为准。
+本模块**不**为这些形状增加前置校验层：它们违反 `ContextEventInput` 的类型，类型正确的调用方无法构造，加校验层会违反「不为不可达场景增加校验层」。
 
 **唯一需要调用方注意的两处取值变化**（本变更引入，均只影响摘要取值，不影响合法调用的语义）：
 
-1. `dataDigest` 现在对**非规范嵌套键序**的输入给出与规范键序**相同**的摘要（修复前不同）。规范键序的输入摘要不变。
+1. `dataDigest` 现在对**非规范嵌套键序**的输入给出与规范键序**相同的**摘要。本变更前**不稳定**的是 `evidenceRefs[]`（元素键序、`evidenceId`、`scope`）与 `cost` 的键序；**`scope` 的键序在本变更前就已经稳定**（修复前即已重建），故本条的适用面限于前两者。规范键序的输入摘要不变。
 2. `cost` 传非对象（如 `5`）本就不抛错（既有行为），但其摘要表示由 `"cost":5` 变为 `{}`。
 
 ### 9.2 raw kind → canonical type 映射
@@ -836,12 +836,12 @@ pnpm dagpipe:validate
 
 | 步骤 | 状态 |
 |---|---|
-| 1. 本文独立 review PASS | 已完成（5 轮，末轮 PASS） |
+| 1. 本文独立 review PASS | 已完成（逐轮结论见 §16.2） |
 | 2. 阶段 0：Lead 落地并冻结 `types.ts` / `taxonomy.ts` / `errors.ts` | 已完成 |
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
 | 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**143** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
-| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS**；task-15 在 `55eb847` 上增量复审 **PASS**；task-16 在 `3479df4` 上文档增量确认 **PASS**；task-17 在 `2d48844` 上复核 FAIL；task-18 在 `9cc5cf1` 上复核 FAIL；task-19 复核。全部轮次零 BLOCKER。**finding 计数与轮次以 §16.2 表格为唯一真源**） |
+| 6. 独立架构 review 绑定候选 SHA | 已完成（全部轮次零 BLOCKER；**逐轮结论、finding 计数与轮次以 §16.2 表格为唯一真源**） |
 | 7. 按 review 结论修复并补测试 | 已完成（ISSUE-A / B / E / F / G / H 已处置，ISSUE-C / D 补测试；W4 在补测中追加发现的 O2 同属 ISSUE-E 类，已修并锁死） |
 | 8. 集成、候选自检与交付收口 | 进行中（组合最新 `origin/main`、最终 gate、merge 与 push） |
 
@@ -849,7 +849,7 @@ pnpm dagpipe:validate
 
 reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同时复跑了 gate、逐文件 blob 核对了候选迁移，并做了自己的差分与变异探针。逐项处置：
 
-**阅读约定**：下表按**发现顺序**记录每轮 finding 与**当时的**处置，因此早几行的「已修」描述的是当时引入、后被后续轮次推翻或消融的中间产物。**§9.1 的当前内容是唯一真源**；表内凡涉及类型外形状列举的行（ISSUE-G/I/J/L/M/N/O/V/W）最终都由末行「消融」统一覆盖——整份清单已删除。
+**阅读约定**：下表按**发现顺序**记录每轮 finding 与**当时的**处置，因此早几行的「已修」描述的是当时引入、后被后续轮次推翻或消融的中间产物。**§9.1 的当前内容是唯一真源**；凡涉及 §9.1 类型外形状列举的行，最终都由末行「消融」统一覆盖——整份清单已删除。**本表不维护轮数与清单统计**，以免随轮次漂移。
 
 | 编号 | 类别 | 结论 | 处置 |
 |---|---|---|---|
@@ -879,7 +879,10 @@ reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同
 | ISSUE-V | 文档（task-19 发现，**构成 FAIL**） | §9.1 缺口 2 的收尾对比句写「**同样的取值**放在顶层会抛 `ContextEventError`」，把 `undefined` 并入——实测顶层 `scope.taskId = undefined` **不抛错**。且 `undefined` 在本仓**类型合法**（无 `exactOptionalPropertyTypes`），是可选槽位的正常写法，与省略该槽位等价（摘要相同） | 已修：对比集合限定为 `""` / `0` / `false`（顶层抛 `ContextEventError`、嵌套静默接受，确实不对称），并单列一句说明 `undefined` 两层对称、等价于省略。Lead 已独立复验 |
 | ISSUE-W | 文档（task-19 发现） | §9.1 称「上述两个缺口……属既有行为」，但按同段 `cost` 的基准，缺口 2 在**构造入口**的 `TypeError` 症状是**本变更新引入的**：`evidenceRefForDigest` 之前不读嵌套 `scope` 槽位，那时嵌套 `taskId = null` 不抛错 | 已修：§9.1 拆分为——该入口的**不拦**是既有行为（`validation.ts` 未改），缺口 2 的 `TypeError` 症状是本变更新引入；缺口 1 两入口两 SHA 行为相同、属既有。Lead 已用 `80b0bd7` 与当前候选对照复验 |
 | ADVISORY | 覆盖缺口（task-19 指出） | §9.1 断言矩阵未覆盖顶层 `undefined`，且 §9.1 声称的 `assertConstructionInvariants` 两条判据完全未测 | 已补：矩阵加入顶层 `undefined`（两层对称、与省略等价）、三槽位 × 三值顶层对照、`evidenceRefs=null` 的摘要等价、以及自检的 `pairing` / `eventId` / `payloadRef` 三条判据。扩充后 **75 passed / 0 failed**。**说明**：自检仅在 `createContextEvent` 内部调用、未从 `index.ts` 导出，其两条 `throw` 分支在公开入口不可达（构造入口自身保证 `pairing === undefined` 且 ref 派生自 `sourceId`），故只能正向断言其产出 |
-| 消融 | §9.1 类型外形状清单 | **六轮复审中有六轮都在这一段找到不实陈述**（ISSUE-G/H/I/J/L/M/N/O/P/Q/T/U/V/W），全部围绕合法调用方**无法构造**的类型外输入 | 已按消融原则**删除整份形状清单**（约 3.0 KB → 约 1.0 KB）：§9.1 现在只保留①`sourceId`/`occurredAt` 的错误类型、②类型外输入的错误类型**不是契约的一部分**（由先到者决定，不逐一列举，需要时以实现为准）、③两处**调用方可见**的取值变化。理由：该清单随实现细节漂移、对合法调用方无指导意义，而每轮维护它都在引入新的不实陈述——这正是「只锁源码文本、无独立保障的断言应予消融」的情形。**六轮全部 finding 的根因是这段的过度具体化，而非契约缺陷**；代码自 `55eb847` 起未变 |
+| 消融 | §9.1 类型外形状清单 | 多轮复审反复在同一段找到不实陈述，且全部围绕合法调用方**无法构造**的类型外输入（逐轮明细见本表各行，此处不重复统计以免漂移） | 已按消融原则**删除整份形状清单**：§9.1 现在只保留①`sourceId`/`occurredAt` 的错误类型、②类型外输入的错误类型**不是契约的一部分**（不保证抛出类型、不逐一列举，需要时以实现为准）、③两处**调用方可见**的取值变化。理由：该清单随实现细节漂移、对合法调用方无指导意义，而每轮维护它都在引入新的不实陈述——这正是「只锁源码文本、无独立保障的断言应予消融」的情形。**根因是这段的过度具体化，而非契约缺陷**；代码自 `55eb847` 起未变 |
+| ISSUE-X | 文档（task-20 发现，**构成 FAIL**） | 消融时删掉了免责句却保留二分判据，§9.1 末句「否则由 §11 抛 `ContextEventError`」为假：`cost = 5` / `""` / `0` / `false` 与嵌套 `evidenceRefs[].scope.taskId = ""` 全部**不抛错**并产出真实事件，且与同节 `cost` 那条自相矛盾 | 已修（继续消融，不加措辞）：改为「错误类型**不保证**——取决于哪一个先触及该输入，可能是 `TypeError`、可能是 `ContextEventError`、**也可能不抛错**」。Lead 已独立复验 |
+| ISSUE-Y | 文档（task-20 发现） | §9.1 的「`dataDigest` 对非规范嵌套键序……（修复前不同）」**过度概括**：本变更前 `scope` 的键序**已稳定**（`scopeForDigest` 早已重建 `scope` 及其 `ScopedId` 叶子），真正不稳定的是 `evidenceRefs[]` 与 `cost` | 已修：限定为「本变更前不稳定的是 `evidenceRefs[]`（元素键序、`evidenceId`、`scope`）与 `cost`；`scope` 的键序此前已稳定」。Lead 用 `80b0bd7` 与当前候选做 6 组键序对照独立复验 |
+| ISSUE-Z | 文档（task-20 发现） | 消融行自己引入新的轮次断言与清单，且不实（轮数、把 §16 的 H/P/Q 混入 §9.1、漏 R/S/T），与 §16.2「唯一真源」的声明冲突 | 已修（连统计一起消融）：阅读约定与消融行都不再维护轮数与清单统计；第 6 行与步骤 1 的「N 轮」也一并去掉，改为指向 §16.2 |
 | ADVISORY | 透明性（task-16 建议） | §16.3 记「变异回放 20 条，`survived = 0`」，但该轮 `PC-2`（`allowedStatusOf` 丢掉 `SUPERSEDED_STATUS`）首轮为 **SKIP**（变异串与编译产物不匹配），改用真实编译文本重放后才 KILLED | 已补记于 §16.3，避免读者误以为 20 条在同一轮被评估 |
 | ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分（312 个合法场景，0 差异）后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径 |
 | ADVISORY | 类型外输入 | `cost` 传非对象（如 `5`）不抛错，其摘要表示由 `"cost":5` 变为 `"cost":{}` | 类型外输入，合法域无影响；不增加校验层（理由同 ISSUE-G）。已随 ISSUE-G 的边界说明一并记录 |
