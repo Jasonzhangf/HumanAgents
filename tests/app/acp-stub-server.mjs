@@ -8,7 +8,7 @@
  * speaks. Only the model answer is scripted, so the test exercises the real
  * transport, the real driver bookkeeping, and the real checkpoint commit.
  *
- * Usage: node acp-stub-server.mjs <answer-text> [hold] [hold-marker-path]
+ * Usage: node acp-stub-server.mjs <answer-text> [hold] [hold-marker-path] [cancel-marker-path]
  *
  * `hold` makes session/prompt stay in flight until session/cancel arrives. The
  * cancel then resolves the held turn with stopReason `cancelled`, which is what
@@ -16,6 +16,9 @@
  *
  * `hold-marker-path` names a file that is created when a prompt is held. A test
  * that stops a turn reads that file to know the turn is really in flight.
+ *
+ * `cancel-marker-path` names a file that is created when session/cancel is
+ * received. A test reads that file to prove the cancel reached this server.
  */
 
 import { writeFileSync } from 'node:fs';
@@ -23,6 +26,7 @@ import { writeFileSync } from 'node:fs';
 const answer = process.argv[2] ?? 'POGS';
 const holdPrompts = process.argv[3] === 'hold';
 const holdMarker = process.argv[4];
+const cancelMarker = process.argv[5];
 let buffer = '';
 let sessionSeq = 0;
 /** The prompt frames that are still in flight, by JSON-RPC request id. */
@@ -30,12 +34,21 @@ const inFlight = new Map();
 
 /** Reports that a turn is being held, so a test can stop it while it runs. */
 function markHeld() {
-  if (holdMarker === undefined) return;
+  writeMarker(holdMarker, 'held');
+}
+
+/** Reports that this server received session/cancel, so a test can see delivery. */
+function markCancelled() {
+  writeMarker(cancelMarker, 'cancelled');
+}
+
+/** The markers are test scaffolding; a write failure must not change the protocol. */
+function writeMarker(path, value) {
+  if (path === undefined) return;
   try {
-    writeFileSync(holdMarker, 'held');
+    writeFileSync(path, value);
   } catch {
-    // The marker is test scaffolding; a failure to write it must not change
-    // the protocol behaviour under test.
+    // Ignored on purpose: see the comment above.
   }
 }
 
@@ -96,6 +109,7 @@ function handle(frame) {
     // session/cancel is a notification: no response frame. It resolves every
     // held turn with stopReason `cancelled`, exactly as a real ACP agent stops
     // the work it was doing.
+    markCancelled();
     for (const held of inFlight.values()) answerPrompt(held, 'cancelled');
     inFlight.clear();
     return;
