@@ -431,11 +431,15 @@ const receipt = {
 };
 
 let failed = 0;
+// `playwright.chromium` is a BrowserType; `newContext` lives on a launched
+// Browser, so launch once per scenario and close it in the same scope.
 for (const scenario of scenarios) {
   process.stdout.write(`▶ ${scenario}\n`);
   const result = { scenario, assertions: [], screenshots: [] };
+  let browser;
   try {
-    await runScenario(playwright.chromium, scenario, result);
+    browser = await playwright.chromium.launch({ headless: true });
+    await runScenario(browser, scenario, result);
     result.status = 'PASS';
     receipt.scenarios.push(result);
     process.stdout.write(`  PASS ${result.assertions.length} assertions\n`);
@@ -445,6 +449,8 @@ for (const scenario of scenarios) {
     result.error = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
     receipt.scenarios.push(result);
     process.stdout.write(`  FAIL ${error instanceof Error ? error.message : String(error)}\n`);
+  } finally {
+    await browser?.close().catch(() => {});
   }
 }
 
