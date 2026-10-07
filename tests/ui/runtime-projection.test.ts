@@ -132,6 +132,34 @@ test('runtime API maps every real task state to its declared chip tone', async (
   assert.equal(stateTone('mystery-state'), 'gray');
 });
 
+test('the browser runtime API keeps the bounded original cause chain', async () => {
+  const { RuntimeApiError } = await import(runtimeApiModuleUrl);
+  const error = new RuntimeApiError({
+    code: 'ui-runtime.unexpected',
+    ownerId: 'humanagent.app',
+    message: 'implicit executor failed and settlement also failed: settle timed out',
+    nextAction: 'inspect the runtime error and retry from a new operation',
+    cause: {
+      name: 'Error',
+      message: 'executor could not reach its provider',
+      cause: { name: 'Error', message: 'connect ECONNREFUSED 127.0.0.1:4444' },
+    },
+  }, 500);
+  // The typed surface the human already sees must not regress.
+  assert.equal(error.code, 'ui-runtime.unexpected');
+  assert.equal(error.ownerId, 'humanagent.app');
+  assert.equal(/settlement also failed/.test(error.message), true, `expected the settlement failure in ${error.message}`);
+  assert.equal(error.nextAction, 'inspect the runtime error and retry from a new operation');
+  assert.equal(error.status, 500);
+  // The original executor failure survives instead of being collapsed to a
+  // status code, so the page can name the real cause.
+  const cause = (error as unknown as {
+    readonly cause?: { readonly message: string; readonly cause?: { readonly message: string } };
+  }).cause;
+  assert.equal(cause?.message, 'executor could not reach its provider');
+  assert.equal(cause?.cause?.message, 'connect ECONNREFUSED 127.0.0.1:4444');
+});
+
 test('runtime dashboard only reports hasRunning for execution-active tasks', () => {
   const dashboard = projectRuntimeDashboard({
     mode: 'fake',

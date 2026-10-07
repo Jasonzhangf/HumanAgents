@@ -10,7 +10,7 @@
       "input": "RuntimeLivenessInput { active, lastActivityAt?, lastActivitySource?, silenceBudgetMs?, observedAt }",
       "state": "RuntimeLivenessState = 'working' | 'no-activity' | 'waiting-for-answer' | 'failed' | 'idle' | 'unknown'",
       "projection": "RuntimeLivenessProjection { state, reason, observedAt, lastActivityAt?, lastActivitySource?, silentForMs?, silenceBudgetMs? }",
-      "transport": "页面本地事实 { connected: boolean, settled: boolean }；不是 RuntimeLivenessInput 的字段"
+      "transport": "页面本地事实 TransportState = 'connected' | 'settled' | 'lost' | 'unknown'；不是 RuntimeLivenessInput 的字段。用四值状态而不是 {connected, settled} 两个布尔：服务端在终态按契约关闭流（settled）与真实断线（lost）必须可区分，布尔对无法把 lost 与 unknown 分开"
     },
     "producerRules": {
       "active": "取自 lifecycle state：running 或 settling 为 true。不用进程内 running flag，因为「lifecycle 仍说 running 但很久无活动」正是本卡片必须暴露的卡死场景",
@@ -22,7 +22,7 @@
     "terminalContract": {
       "success": "rendered_liveness_truth：卡片顶部状态栏显示由真实信号推出的状态，并区分已连接/已断开/执行终态收拢",
       "failure": "已失败：reported error 优先于一切其他状态，卡片显示失败而不是继续声称工作中",
-      "disconnected": "实时连接已断开：传输事实为页面本地观测，断开时仍可读最近一次持久化投影，不显示过期的『工作中』",
+      "disconnected": "实时连接已断开：传输事实为页面本地观测，断开时仍可读最近一次持久化投影。落点：断开期间卡片保留最近一次服务端读回的活性结论，并把传输显式标为『实时连接已断开』；活性结论与静默秒数只来自那次读回的服务端投影，页面计时器不得推进它们，也不得在断线后产生任何新的进展。因此断线既不会被静默重试掩盖，也不会被页面时钟伪装成仍在工作",
       "noActivity": "无活动：lifecycle 为 active 但静默超过声明预算，显示观测到的静默事实，不伪造进度",
       "waiting": "待回答：lifecycle 等待人类或资源决策",
       "settledStream": "执行终态时服务端关闭流属于预期收拢，不得渲染为『实时连接已断开』",

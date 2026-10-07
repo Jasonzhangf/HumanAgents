@@ -475,12 +475,25 @@ async function renderInteraction(interactionId, currentTaskId) {
   main.append(panel)
   attachInteractionCardHost()
 
+  // The runtime keeps the original failure in a bounded cause chain instead of
+  // collapsing it to a status code. Show that chain, so a human can read why the
+  // executor failed and not only that the settlement failed.
+  const causeLines = (cause, depth = 0) => {
+    if (!cause || depth > 3) return []
+    const head = `${'  '.repeat(depth)}cause: ${cause.name}: ${cause.message}`
+    const rest = [cause.code && `code=${cause.code}`, cause.ownerId && `owner=${cause.ownerId}`]
+      .filter(Boolean)
+      .join(' ')
+    return [rest ? `${head} (${rest})` : head, ...causeLines(cause.cause, depth + 1)]
+  }
+
   const showError = (error) => {
     feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
     diagnosticText.textContent = [
       `code=${error.code || 'runtime.request.failed'}`,
       `owner=${error.ownerId || 'unknown'}`,
       `next=${error.nextAction || 'inspect the runtime error'}`,
+      ...causeLines(error.cause),
     ].join('\n')
     diagnostics.hidden = false
   }

@@ -168,14 +168,7 @@ async function startHarness({ scenario, root }) {
     binding,
     // The working case must stay observable long enough for the card to render
     // its live state; the gated cases hold the stream themselves.
-    //
-    // The no-activity case also releases its gate, and a replay that finishes in
-    // about a tenth of a second cannot be told apart from an instant completion:
-    // the card does return to 工作中, but only for the length of the replay. The
-    // resumed stream is therefore paced like the working case so the recovery is
-    // a state a real observer can actually sample. This changes the stimulus,
-    // not the assertion.
-    stepDelayMs: scenario === 'working' || scenario === 'no-activity' ? 1_200 : 20,
+    stepDelayMs: scenario === 'working' ? 1_200 : 20,
     mode: scenario === 'failure' ? 'fail' : scenario === 'working' ? 'complete' : 'stall',
   });
   const accessControl = await AccessControlService.open({
@@ -249,11 +242,11 @@ async function waitFor(label, predicate, timeoutMs, intervalMs = 250) {
   }
 }
 
-async function waitForCardText(page, label, pattern, timeoutMs) {
+async function waitForCardText(page, label, pattern, timeoutMs, intervalMs = 250) {
   return await waitFor(label, async () => {
     const text = await cardText(page).catch(() => '');
     return pattern.test(text) ? text : null;
-  }, timeoutMs);
+  }, timeoutMs, intervalMs);
 }
 
 /**
@@ -397,7 +390,11 @@ async function runScenario(browser, scenario, result) {
       assert('the card does not claim the task is still working', stalled, /^(?!.*工作中)/s);
       result.screenshots.push(await screenshot(page, shotDir, '02-no-activity'));
       harness.port.release();
-      const recovered = await waitForCardText(page, 'the card to return to working after real activity resumes', /工作中/, 60_000);
+      // The resumed replay is deliberately fast, so the working state it produces
+      // is brief. Poll far more often than the default so the recovery is
+      // observed rather than skipped between two samples; this changes how often
+      // the page is read, not what the replay does.
+      const recovered = await waitForCardText(page, 'the card to return to working after real activity resumes', /工作中/, 60_000, 25);
       assert('real activity resumes and the card says so', recovered, /工作中/);
       result.screenshots.push(await screenshot(page, shotDir, '03-recovered'));
       result.observations = { working: working.slice(0, 1200), stalled: stalled.slice(0, 1200), recovered: recovered.slice(0, 1200) };

@@ -233,6 +233,71 @@ try {
     }
   }
 
+  // GAP B proof: the bounded original cause the runtime reports must reach the
+  // human, not just a status code. The runtime stub answers the real
+  // explicit-interaction read with a 500 body shaped exactly like the one
+  // `writeError` produces (`boundedErrorCause`), and the page must show that
+  // chain in its diagnostics.
+  const causePage = await context.newPage();
+  const causeErrors = [];
+  causePage.on('pageerror', (error) => causeErrors.push(`pageerror: ${error.message}`));
+  await causePage.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url());
+    const fulfill = (payload, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(payload),
+    });
+    if (url.pathname === '/api/runtime/status') {
+      return fulfill({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true });
+    }
+    if (url.pathname === '/api/tasks/task-cause-proof') {
+      return fulfill({ taskId: 'task-cause-proof', title: 'cause proof', state: 'running', priorInput: '读取 README' });
+    }
+    if (url.pathname === '/api/explicit/interactions/interaction-cause-proof') {
+      return fulfill({
+        error: {
+          code: 'ui-runtime.unexpected',
+          ownerId: 'humanagent.app',
+          message: 'implicit executor failed and settlement also failed: settle timed out',
+          nextAction: 'inspect the runtime error and retry from a new operation',
+          cause: {
+            name: 'Error',
+            message: 'executor could not reach its provider',
+            cause: { name: 'Error', message: 'connect ECONNREFUSED 127.0.0.1:4444' },
+          },
+        },
+      }, 500);
+    }
+    return fulfill({ error: { code: 'not-found', message: `unexpected route ${url.pathname}`, ownerId: 'test', nextAction: 'none' } }, 404);
+  });
+  await causePage.goto(
+    `${server.url}/task.html?task=task-cause-proof&interaction=interaction-cause-proof`,
+    { waitUntil: 'domcontentloaded' },
+  );
+  const causeDiagnostics = await causePage.waitForFunction(() => {
+    const pre = [...document.querySelectorAll('details pre')]
+      .find((node) => (node.textContent ?? '').includes('cause:'));
+    if (!pre) return null;
+    const status = document.querySelector('[role="status"]')?.textContent ?? '';
+    return { diagnostics: pre.textContent, status };
+  }, undefined, { timeout: 20000 }).then((handle) => handle.jsonValue()).catch(() => null);
+  observe('task.html original cause diagnostics', causeDiagnostics);
+  record('the human sees the original executor failure, not only a status code',
+    Boolean(causeDiagnostics?.diagnostics)
+      && causeDiagnostics.diagnostics.includes('executor could not reach its provider')
+      && causeDiagnostics.diagnostics.includes('connect ECONNREFUSED 127.0.0.1:4444')
+      && causeDiagnostics.diagnostics.includes('inspect the runtime error'),
+    causeDiagnostics);
+  // The typed surface the page already showed must not regress either: the
+  // status line still names the settlement failure and the next action.
+  record('the original-cause path keeps the typed runtime message',
+    Boolean(causeDiagnostics?.status?.includes('settlement also failed')),
+    causeDiagnostics);
+  record('the original-cause path raises no page error', causeErrors.length === 0, [...causeErrors]);
+  await causePage.screenshot({ path: join(artifactDir, 'task-original-cause.png'), fullPage: true });
+  await causePage.close();
+
   // F01/F09 proof on the real dashboard entry with a controlled runtime stub.
   const eventPage = await context.newPage();
   const eventErrors = [];
