@@ -540,6 +540,50 @@ try {
     { authenticatedSurface, sessionAfterPair, statusAfterPair })
   await capture(page, 'post-pairing-dashboard')
 
+  // --- 6b. an already-paired browser short-circuits the login surface ------
+  // session_check has two mutually exclusive outcomes: an unpaired browser sees
+  // the pairing form, and a browser that already holds a valid cookie is sent
+  // straight back to the entry it asked for. The graph declares the second
+  // outcome as terminalContract.alreadyAuthenticated, so it needs its own
+  // black-box evidence: the same real session cookie, the same real login page.
+  const alreadyContext = await browser.newContext()
+  const pairedCookies = await context.cookies()
+  await alreadyContext.addCookies(pairedCookies)
+  const alreadyPage = await alreadyContext.newPage()
+  await alreadyPage.addInitScript(() => {
+    // sessionStorage survives same-origin navigation, so a pairing form that
+    // was visible only transiently is still observable after the redirect.
+    // Visibility is what matters: the card is static markup that stays hidden
+    // until the session read says this browser is unpaired.
+    const visible = (node) => Boolean(node) && (typeof node.checkVisibility === 'function'
+      ? node.checkVisibility()
+      : node.getClientRects().length > 0)
+    const note = () => {
+      try { sessionStorage.setItem('pairFormSeen', '1') } catch (_) { /* storage disabled */ }
+    }
+    const check = () => { if (visible(document.querySelector('[data-pair-card]'))) note() }
+    document.addEventListener('DOMContentLoaded', () => {
+      check()
+      new MutationObserver(check).observe(document.documentElement, {
+        childList: true, subtree: true, attributes: true,
+      })
+    })
+  })
+  await alreadyPage.goto(`${binding.serveBaseUrl}/login.html?next=%2Ftasks.html`, { waitUntil: 'domcontentloaded' })
+  await alreadyPage.waitForURL((url) => url.pathname === '/tasks.html', { timeout: 60_000 })
+  const alreadyPaired = await alreadyPage.evaluate(() => ({
+    url: location.href,
+    pairFormSeen: sessionStorage.getItem('pairFormSeen') === '1',
+    pairFormOnEntry: Boolean(document.querySelector('[data-pair-code]')),
+  }))
+  observe('already-paired entry', alreadyPaired)
+  record('an already-paired browser is redirected to the requested same-origin entry without the pairing form',
+    alreadyPaired.url.endsWith('/tasks.html')
+      && alreadyPaired.pairFormSeen === false
+      && alreadyPaired.pairFormOnEntry === false,
+    alreadyPaired)
+  await alreadyContext.close()
+
   // --- 7. the one-time code really is one-time ---------------------------
   const replayContext = await browser.newContext()
   const replayPage = await replayContext.newPage()

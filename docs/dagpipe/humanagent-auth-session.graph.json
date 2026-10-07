@@ -7,9 +7,10 @@
     "designStatus": "candidate",
     "capabilityStatus": "delivered",
     "controlPlaneBoundary": "supervisor challenge 与 supervisor token 只属于控制面 humanagent pair -> POST /api/auth/pair/challenge 这条独立边；它们不进入浏览器，也不写入任何业务 payload。浏览器只提交一次性配对码本身。",
-    "topologyNote": "单链拓扑：每个节点单入单出，整图单源单汇，outputs 恰好一个。配对的结果不是图的分支边——同一份提交决定在 access-control 服务端产出两种互斥终态，浏览器据此渲染不同终态视图，但两条终态收敛于同一个 render_auth_terminal 节点。这与 humanagent-observation-read（单一 browser_view 承载成功与失败）和 humanagent-task-liveness-display（单一 render_work_card_truth 承载连接与断开）的既有约定一致。",
+    "topologyNote": "单链拓扑：每个节点单入单出，整图单源单汇，outputs 恰好一个。L2 允许节点内部任意控制流（含早退），因此 session_check 有两个互斥结果：浏览器已持有有效会话 cookie 时直接早退到 success 终态（重定向回请求的同源入口，不渲染配对表单）；未配对时进入 login_surface。这条早退不是图的分支边，而是在 meta.terminalContract.alreadyAuthenticated 显式声明的终态路径。配对结果同样不是图的分支边——同一份提交在 access-control 服务端产出两种互斥终态，浏览器据此渲染不同终态视图，两条终态收敛于同一个 render_auth_terminal 节点。所有分支结果都在 meta.terminalContract 声明，与 observation-read（单一 browser_view 承载成功与失败）和 task-liveness-display（单一 render_work_card_truth 承载连接与断开）的既有约定一致。",
     "terminalContract": {
-      "success": "authenticated_terminal_view：配对码有效，access-control 签发 HttpOnly、SameSite 的持久浏览器会话 cookie，浏览器进入请求的入口并读取已鉴权的 runtime API 与 SSE",
+      "success": "authenticated_terminal_view：浏览器持有有效会话并读取已鉴权的 runtime API 与 SSE。两条互斥路径到达此终态：(a) session_check 读到有效 cookie 后早退，直接重定向回请求的同源入口；(b) 配对码有效，access-control 签发 HttpOnly、SameSite 的持久浏览器会话 cookie 后进入请求的入口。",
+      "alreadyAuthenticated": "authenticated_entry_redirect：已配对浏览器打开 login.html 时，session_check 读到 session.authenticated === true 并早退，把浏览器重定向回请求的同源入口；不渲染配对表单，不签发新 cookie。这是 success 终态的第一条路径，不是独立 terminal 节点。",
       "failure": "typed_pair_failure：配对码缺失、过期或无效时，浏览器渲染运行时自己的类型化错误 code/ownerId/message/nextAction，并保留重试动作；不产生会话 cookie",
       "unauthenticated": "login_surface：未配对浏览器读到 auth.session.missing/expired/invalid，产品壳指向真实登录页而不是留下死文案；这是提交前的入口状态，不是 terminal 节点",
       "cancel": "配对失败后不改变服务端状态，表单保持可再次提交",

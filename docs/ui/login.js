@@ -25,6 +25,7 @@ const entryTarget = sameOriginPath(queryParam('next'))
 
 const sessionState = document.querySelector('[data-auth-session-state]')
 const statusBanner = document.querySelector('[data-auth-status]')
+const pairCard = document.querySelector('[data-pair-card]')
 const form = document.querySelector('[data-pair-form]')
 const codeInput = document.querySelector('[data-pair-code]')
 const submitButton = document.querySelector('[data-pair-submit]')
@@ -119,11 +120,18 @@ async function boot() {
     }
     sessionState.textContent = '未配对'
     setBanner('warning', '这台浏览器还没有配对会话。填入一次性配对码即可继续。')
+    // The pairing card stays hidden until the session read says this browser is
+    // unpaired. A paired browser following a stale pairing link is redirected
+    // without ever seeing a code field it does not need.
+    pairCard.hidden = false
     codeInput.focus()
   } catch (error) {
     sessionState.textContent = '会话检查失败'
     setBanner('danger', '无法读取浏览器会话')
     showTypedError(error)
+    // The session could not be read, so pairing is the only remedy left; offer
+    // it instead of leaving the page with no action.
+    pairCard.hidden = false
   }
 }
 

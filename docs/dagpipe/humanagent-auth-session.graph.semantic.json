@@ -2,7 +2,7 @@
   "graph": "humanagent-auth-session",
   "labels": {
     "public_entry": "接收浏览器公开入口请求（无需会话）",
-    "session_check": "读取公开会话端点判断这台浏览器是否已配对；未配对时运行时的类型化拒绝（missing、expired、invalid）引导到登录面",
+    "session_check": "读取公开会话端点判断这台浏览器是否已配对；已配对则早退并重定向回请求的同源入口，未配对时运行时的类型化拒绝（missing、expired、invalid）引导到登录面",
     "login_surface": "登录页呈现类型化错误与一次性配对码表单；配对码由控制面 humanagent pair 产生，不属于浏览器业务载荷",
     "pair_submission": "同源提交配对码到公开配对端点并校验 Origin",
     "pair_settlement": "配对结果收拢：签发 HttpOnly、SameSite 的持久浏览器会话 cookie，或产出类型化失败并保留重试；两个互斥终态在此收敛",
