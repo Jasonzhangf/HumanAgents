@@ -18,6 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
@@ -201,6 +202,86 @@ function assertNoCanonicalEvent(fn: () => NormalizeResult, what: string): void {
     return;
   }
   assert.equal(result.events.length, 0, `${what} must not be silently mapped to a canonical event`);
+}
+
+/**
+ * §9.5：独立实现"按固定字段序重建的规范化对象 → sha256"。**不复用实现代码**，
+ * 否则字段序一旦改变，期望值与产出值会一起漂移，锁不死字段序。
+ *
+ * 字段序（§9.5，`JSON.stringify` 的键序即此序）：
+ *   顶层 `type` → `sourceId` → `occurredAt` → `scope` → `summary` → `evidenceRefs`
+ *        → `supersededByEventId` → `cost`
+ *   `scope`（含 `evidenceRefs[].scope`）：`organId` → `taskId` → `cycleId` → `operationId`
+ *   `evidenceRefs[]`：`evidenceId` → `kind` → `source` → `locator` → `digest` → `scope`
+ *   `cost`：`tokensInput` → `tokensOutput` → `bytesAvoided` → `bytesRetrieved`
+ * 值为 `undefined` 的可选键省略（不写 `null`）；数组保持输入顺序不重排。
+ */
+function scopedIdForDigest(id: { readonly scope: string; readonly value: string }): Record<string, unknown> {
+  return { scope: id.scope, value: id.value };
+}
+
+function scopeForDigest(scope: ScopeRefLike): Record<string, unknown> {
+  return {
+    organId: scopedIdForDigest(scope.organId),
+    ...(scope.taskId === undefined ? {} : { taskId: scopedIdForDigest(scope.taskId) }),
+    ...(scope.cycleId === undefined ? {} : { cycleId: scopedIdForDigest(scope.cycleId) }),
+    ...(scope.operationId === undefined ? {} : { operationId: scopedIdForDigest(scope.operationId) }),
+  };
+}
+
+function evidenceRefForDigest(ref: EvidenceRefLike): Record<string, unknown> {
+  return {
+    evidenceId: scopedIdForDigest(ref.evidenceId),
+    kind: ref.kind,
+    source: ref.source,
+    locator: ref.locator,
+    ...(ref.digest === undefined ? {} : { digest: ref.digest }),
+    scope: scopeForDigest(ref.scope),
+  };
+}
+
+type CostLike = NonNullable<ContextEventInput['cost']>;
+
+function costForDigest(cost: CostLike): Record<string, unknown> {
+  return {
+    ...(cost.tokensInput === undefined ? {} : { tokensInput: cost.tokensInput }),
+    ...(cost.tokensOutput === undefined ? {} : { tokensOutput: cost.tokensOutput }),
+    ...(cost.bytesAvoided === undefined ? {} : { bytesAvoided: cost.bytesAvoided }),
+    ...(cost.bytesRetrieved === undefined ? {} : { bytesRetrieved: cost.bytesRetrieved }),
+  };
+}
+
+/** §9.5 golden digest：按文档字段序重建规范化对象后求 sha256。 */
+function goldenDigestOf(input: ContextEventInput): string {
+  const summary = input.summary !== undefined && input.summary !== '' ? input.summary : labelOf(input.type);
+  const evidenceRefs = input.evidenceRefs ?? [];
+  const normalized = {
+    type: input.type,
+    sourceId: input.sourceId,
+    occurredAt: input.occurredAt,
+    scope: scopeForDigest(input.scope),
+    summary,
+    evidenceRefs: evidenceRefs.map(evidenceRefForDigest),
+    supersededByEventId: input.supersededByEventId,
+    cost: input.cost === undefined ? undefined : costForDigest(input.cost),
+  };
+  return `sha256:${createHash('sha256').update(JSON.stringify(normalized), 'utf8').digest('hex')}`;
+}
+
+/** §9.5 / §12：按文档字段序重建后的**规范 JSON 文本**，供逐字节比对字段序。 */
+function goldenDigestPayload(input: ContextEventInput): string {
+  const summary = input.summary !== undefined && input.summary !== '' ? input.summary : labelOf(input.type);
+  const evidenceRefs = input.evidenceRefs ?? [];
+  return JSON.stringify({
+    type: input.type,
+    sourceId: input.sourceId,
+    occurredAt: input.occurredAt,
+    scope: scopeForDigest(input.scope),
+    summary,
+    evidenceRefs: evidenceRefs.map(evidenceRefForDigest),
+    supersededByEventId: input.supersededByEventId,
+    cost: input.cost === undefined ? undefined : costForDigest(input.cost),
+  });
 }
 
 /**
@@ -544,6 +625,287 @@ test('§9.3 applyPairingOutcome 前后 dataDigest 不变（status/pairing 不参
   assert.notEqual(after[0].status, opened.status);
   assert.equal(after[0].dataDigest, opened.dataDigest);
   assert.equal(after[1].dataDigest, closed.dataDigest);
+});
+
+test('§9.5 golden digest 1/4：只含必填字段的最小事件，字段序 type→sourceId→occurredAt→scope→summary→evidenceRefs', () => {
+  const input: ContextEventInput = {
+    type: 'task.created',
+    sourceId: 'golden-min',
+    occurredAt: '2026-10-07T00:00:01.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+  };
+  const event = createContextEvent(input);
+  // 逐字节比对重建后的规范 JSON：字段序、缺省 summary 已补 label、evidenceRefs 为 []。
+  assert.equal(
+    goldenDigestPayload(input),
+    '{"type":"task.created","sourceId":"golden-min","occurredAt":"2026-10-07T00:00:01.000Z",' +
+      '"scope":{"organId":{"scope":"organ","value":"organ-1"}},"summary":"任务已创建","evidenceRefs":[]}',
+  );
+  assert.equal(event.dataDigest, goldenDigestOf(input));
+  assert.equal(
+    event.dataDigest,
+    'sha256:e56ef92ae1896f5a2b39b046ef70e53a52e2d535fc47b5dc133c0a90e6d73d75',
+  );
+});
+
+test('§9.5 golden digest 2/4：含 cost 时 cost 是最后一个顶层键，且其内部键序固定', () => {
+  const input: ContextEventInput = {
+    type: 'error.detected',
+    sourceId: 'golden-cost',
+    occurredAt: '2026-10-07T00:00:02.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+    summary: '摘要',
+    cost: { bytesRetrieved: 4, bytesAvoided: 3, tokensOutput: 2, tokensInput: 1 },
+  };
+  const event = createContextEvent(input);
+  assert.equal(
+    goldenDigestPayload(input),
+    '{"type":"error.detected","sourceId":"golden-cost","occurredAt":"2026-10-07T00:00:02.000Z",' +
+      '"scope":{"organId":{"scope":"organ","value":"organ-1"}},"summary":"摘要","evidenceRefs":[],' +
+      '"cost":{"tokensInput":1,"tokensOutput":2,"bytesAvoided":3,"bytesRetrieved":4}}',
+  );
+  assert.equal(event.dataDigest, goldenDigestOf(input));
+  // cost 参与哈希：去掉 cost 必然改变摘要。
+  assert.notEqual(event.dataDigest, createContextEvent({ ...input, cost: undefined }).dataDigest);
+  // cost 内部键序（入参顺序与规范顺序相反）不影响摘要。
+  assert.equal(
+    event.dataDigest,
+    createContextEvent({
+      ...input,
+      cost: { tokensInput: 1, tokensOutput: 2, bytesAvoided: 3, bytesRetrieved: 4 },
+    }).dataDigest,
+  );
+});
+
+test('§9.5 golden digest 3/4：含 evidenceRefs（含嵌套 scope）时字段序 evidenceId→kind→source→locator→digest→scope', () => {
+  const input: ContextEventInput = {
+    type: 'error.detected',
+    sourceId: 'golden-evidence',
+    occurredAt: '2026-10-07T00:00:03.000Z',
+    scope: {
+      organId: { scope: 'organ', value: 'organ-1' },
+      taskId: { scope: 'task', value: 'task-1' },
+    },
+    summary: '摘要',
+    evidenceRefs: [
+      {
+        evidenceId: { scope: 'evidence', value: 'evidence-1' },
+        kind: 'tool',
+        source: 'source-1',
+        locator: 'locator-1',
+        digest: 'sha256:deadbeef',
+        scope: {
+          cycleId: { scope: 'cycle', value: 'cycle-1' },
+          organId: { scope: 'organ', value: 'organ-1' },
+        },
+      },
+    ],
+  };
+  const event = createContextEvent(input);
+  assert.equal(
+    goldenDigestPayload(input),
+    '{"type":"error.detected","sourceId":"golden-evidence","occurredAt":"2026-10-07T00:00:03.000Z",' +
+      '"scope":{"organId":{"scope":"organ","value":"organ-1"},"taskId":{"scope":"task","value":"task-1"}},' +
+      '"summary":"摘要","evidenceRefs":[{"evidenceId":{"scope":"evidence","value":"evidence-1"},' +
+      '"kind":"tool","source":"source-1","locator":"locator-1","digest":"sha256:deadbeef",' +
+      '"scope":{"organId":{"scope":"organ","value":"organ-1"},"cycleId":{"scope":"cycle","value":"cycle-1"}}}]}',
+  );
+  assert.equal(event.dataDigest, goldenDigestOf(input));
+  // evidenceRefs 参与哈希：去掉后摘要必变。
+  assert.notEqual(event.dataDigest, createContextEvent({ ...input, evidenceRefs: undefined }).dataDigest);
+});
+
+test('§9.5 golden digest 4/4：含 supersededByEventId 时它是倒数第二个顶层键，且不哈希 status', () => {
+  const input: ContextEventInput = {
+    type: 'task.created',
+    sourceId: 'golden-superseded',
+    occurredAt: '2026-10-07T00:00:04.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+    supersededByEventId: 'context-event:newer',
+  };
+  const event = createContextEvent(input);
+  assert.equal(event.status, 'superseded');
+  assert.equal(
+    goldenDigestPayload(input),
+    '{"type":"task.created","sourceId":"golden-superseded","occurredAt":"2026-10-07T00:00:04.000Z",' +
+      '"scope":{"organId":{"scope":"organ","value":"organ-1"}},"summary":"任务已创建","evidenceRefs":[],' +
+      '"supersededByEventId":"context-event:newer"}',
+  );
+  assert.equal(event.dataDigest, goldenDigestOf(input));
+  // supersededByEventId 参与哈希：去掉后摘要必变（且 status 也随之变为默认值）。
+  const without = createContextEvent({ ...input, supersededByEventId: undefined });
+  assert.notEqual(event.dataDigest, without.dataDigest);
+  assert.notEqual(without.status, 'superseded');
+});
+
+test('§9.5 不参与哈希的字段：status / eventId / payloadRef / dataDigest / pairing 都不改变摘要', () => {
+  const input: ContextEventInput = {
+    type: 'error.detected',
+    sourceId: 'golden-nonhashed',
+    occurredAt: '2026-10-07T00:00:05.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+    summary: '摘要',
+  };
+  const base = createContextEvent(input);
+  const expected = goldenDigestOf(input);
+  assert.equal(base.dataDigest, expected);
+
+  // status 被改写（配对期）不改变摘要。
+  const paired = withPairing(withStatus(base, 'resolved'), {
+    pairId: 'pair:x',
+    role: 'opened',
+  });
+  assert.equal(paired.dataDigest, expected);
+  // eventId / payloadRef 与 sourceId 派生关系一致。
+  assert.equal(base.eventId, 'context-event:golden-nonhashed');
+  assert.equal(base.payloadRef, base.eventId);
+  // 把 status 塞进待哈希对象会改变摘要 —— 证明规范 JSON 里确实没有 status。
+  assert.notEqual(expected, `sha256:${createHash('sha256').update(goldenDigestPayload(input).replace('{"type"', '{"status":"active","type"'), 'utf8').digest('hex')}`);
+});
+
+test('§9.5 可选键为 undefined 时省略该键（不写 null），字段集合与字段序由此固定', () => {
+  const full: ContextEventInput = {
+    type: 'error.detected',
+    sourceId: 'golden-optional',
+    occurredAt: '2026-10-07T00:00:06.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+    summary: '摘要',
+    evidenceRefs: [],
+    cost: undefined,
+    supersededByEventId: undefined,
+  };
+  const sparse: ContextEventInput = {
+    type: 'error.detected',
+    sourceId: 'golden-optional',
+    occurredAt: '2026-10-07T00:00:06.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+    summary: '摘要',
+  };
+  const payload = goldenDigestPayload(full);
+  assert.equal(payload.includes('null'), false);
+  assert.equal(payload.includes('"cost"'), false);
+  assert.equal(payload.includes('"supersededByEventId"'), false);
+  assert.equal(createContextEvent(full).dataDigest, createContextEvent(sparse).dataDigest);
+  assert.equal(createContextEvent(full).dataDigest, goldenDigestOf(sparse));
+});
+
+test('§9.5 摘要覆盖全部原样存储的数据字段：逐字段扰动都会改变 dataDigest', () => {
+  const input: ContextEventInput = {
+    type: 'error.detected',
+    sourceId: 'golden-perturb',
+    occurredAt: '2026-10-07T00:00:07.000Z',
+    scope: { organId: { scope: 'organ', value: 'organ-1' } },
+    summary: '摘要',
+    evidenceRefs: [evidenceRef(1)],
+    cost: { tokensInput: 1 },
+  };
+  const baseline = createContextEvent(input).dataDigest;
+  // 每个参与哈希的字段扰动一次，摘要都必须变（哪些字段参与哈希由此逐个锁死）。
+  const perturbations: ReadonlyArray<readonly [string, ContextEventInput]> = [
+    ['type', { ...input, type: 'blocker.detected' }],
+    ['sourceId', { ...input, sourceId: 'golden-perturb-2' }],
+    ['occurredAt', { ...input, occurredAt: '2026-10-07T00:00:08.000Z' }],
+    ['scope', { ...input, scope: { organId: { scope: 'organ', value: 'organ-2' } } }],
+    ['summary', { ...input, summary: '另一个摘要' }],
+    ['evidenceRefs', { ...input, evidenceRefs: [] }],
+    ['cost', { ...input, cost: undefined }],
+  ];
+  for (const [field, perturbed] of perturbations) {
+    assert.notEqual(createContextEvent(perturbed).dataDigest, baseline, `${field} must participate in dataDigest`);
+  }
+  // supersededByEventId 单独一处（会让 status 变成 superseded，故不与上面混放）。
+  assert.notEqual(
+    createContextEvent({ ...input, supersededByEventId: 'context-event:newer' }).dataDigest,
+    baseline,
+    'supersededByEventId must participate in dataDigest',
+  );
+});
+
+test('§9.5 ISSUE-E：同一事实在不同嵌套键序下 dataDigest 相同（scope / evidenceRefs / cost 递归规范化）', () => {
+  const organId = { scope: 'organ', value: ORGAN } as const;
+  const task = { scope: 'task', value: 'task-1' } as const;
+  const cycle = { scope: 'cycle', value: 'cycle-1' } as const;
+  const operation = { scope: 'operation', value: 'operation-1' } as const;
+
+  // 顶层 scope：4 个可选 id 全给，键序正/反两版必须是同一事实。
+  const scopeForward = { organId, taskId: task, cycleId: cycle, operationId: operation };
+  const scopeReversed = { operationId: operation, cycleId: cycle, taskId: task, organId };
+  // evidenceRef：元素内部键序 + 元素 scope 内部键序，都与事实无关。
+  const evidenceForward = {
+    evidenceId: { scope: 'evidence', value: 'evidence-1' },
+    kind: 'tool',
+    source: 'source-1',
+    locator: 'locator-1',
+    digest: 'sha256:deadbeef',
+    scope: scopeForward,
+  } as const;
+  const evidenceReversed = {
+    scope: { operationId: operation, cycleId: cycle, taskId: task, organId },
+    digest: 'sha256:deadbeef',
+    locator: 'locator-1',
+    source: 'source-1',
+    kind: 'tool',
+    evidenceId: { scope: 'evidence', value: 'evidence-1' },
+  } as const;
+  // cost：4 个字段全给，键序正/反。
+  const costForward = { tokensInput: 1, tokensOutput: 2, bytesAvoided: 3, bytesRetrieved: 4 };
+  const costReversed = { bytesRetrieved: 4, bytesAvoided: 3, tokensOutput: 2, tokensInput: 1 };
+
+  const base = { type: 'error.detected', sourceId: 'nested-order', occurredAt: at(1) } as const;
+  const forward: ContextEventInput = {
+    ...base,
+    scope: scopeForward,
+    summary: '摘要',
+    evidenceRefs: [evidenceForward],
+    cost: costForward,
+  };
+  const reversed: ContextEventInput = {
+    cost: costReversed,
+    evidenceRefs: [evidenceReversed],
+    summary: '摘要',
+    scope: scopeReversed,
+    occurredAt: at(1),
+    sourceId: 'nested-order',
+    type: 'error.detected',
+  } as ContextEventInput;
+
+  assert.equal(createContextEvent(forward).dataDigest, createContextEvent(reversed).dataDigest);
+  // 与文档字段序独立算出的摘要一致（证明规范化的口径就是文档那一份）。
+  assert.equal(createContextEvent(forward).dataDigest, goldenDigestOf(forward));
+  assert.equal(goldenDigestOf(forward), goldenDigestOf(reversed));
+});
+
+test('§9.5 ISSUE-E：数组顺序仍然参与哈希（evidenceRefs 换序 → dataDigest 不同，不得重排）', () => {
+  const base = { type: 'error.detected', sourceId: 'array-order', occurredAt: at(1), scope: scope() } as const;
+  const first: EvidenceRefLike = {
+    evidenceId: { scope: 'evidence', value: 'evidence-1' },
+    kind: 'tool',
+    source: 'source-1',
+    locator: 'locator-1',
+    scope: scope(),
+  };
+  const second: EvidenceRefLike = {
+    evidenceId: { scope: 'evidence', value: 'evidence-2' },
+    kind: 'execution',
+    source: 'source-2',
+    locator: 'locator-2',
+    scope: scope(),
+  };
+  const forward = createContextEvent({ ...base, evidenceRefs: [first, second] });
+  const reversed = createContextEvent({ ...base, evidenceRefs: [second, first] });
+  assert.notEqual(forward.dataDigest, reversed.dataDigest);
+  // 数组顺序参与哈希，但元素内部键序不参与：换序后元素本身仍被规范化。
+  assert.equal(goldenDigestOf({ ...base, evidenceRefs: [first, second] }), forward.dataDigest);
+  assert.notEqual(
+    goldenDigestOf({ ...base, evidenceRefs: [first, second] }),
+    goldenDigestOf({ ...base, evidenceRefs: [second, first] }),
+  );
+  // 三个元素时同理（不只两元素特例）。
+  const third: EvidenceRefLike = { ...second, evidenceId: { scope: 'evidence', value: 'evidence-3' } };
+  assert.notEqual(
+    createContextEvent({ ...base, evidenceRefs: [first, second, third] }).dataDigest,
+    createContextEvent({ ...base, evidenceRefs: [first, third, second] }).dataDigest,
+  );
 });
 
 /* ================================================================== *
@@ -1892,6 +2254,97 @@ test('§10.3 sourceWatermark 透传，缺省为 0', () => {
   assert.equal(compactContextEvents(events, { budgetBytes: 100000, snapshotId: 's' }).sourceWatermark, 0);
 });
 
+/*
+ * ISSUE-C：`compact.ts` 的收尾 `retained.sort(compareCandidates)`（§10.3 L681
+ * 「`retained` 保持候选顺序」）此前零覆盖。变异 `retained.sort(() => 0)` 能存活，是因为
+ * **只有成对分组才会打乱顺序**：单条事件本来就按候选序逐条压入，收尾排序对它们是恒等变换。
+ * 只有当一对配对成员在候选序中**不相邻**（中间夹着一条单条事件）时，分组会按「先出现者」的
+ * 位置整体压入，从而把后出现的成员提到中间那条单条事件之前；收尾排序必须把它拉回候选序。
+ *
+ * 下面三条各构造一个这样的输入，并让三级排序键分别成为唯一的决定性键（低位键刻意取等或反向，
+ * 使断言能区分究竟是哪一级键在起作用）。三条都断言 `retained` 的**精确 eventId 序列**。
+ */
+
+test('§10.3 ISSUE-C：retained 保持候选顺序 —— priority 为决定性键', () => {
+  // plan.rejected(p2,@02) 与 plan.proposed(p3,@01) 配对；task.created(p2,@03) 夹在两者之间。
+  // 候选序：rejection(p2,@02) → created(p2,@03) → proposal(p3,@01)。
+  // 分组按先出现者 rejection 的位置整体压入，未排序时得到 rejection|proposal|created。
+  // 决定性键是 priority：created(p2) 必须排在 proposal(p3) 之前。
+  const events = applyPairingOutcome([
+    makeEvent('plan.proposed', { sourceId: 'k1-proposal', occurredAt: at(1) }),
+    makeEvent('plan.rejected', { sourceId: 'k1-rejection', occurredAt: at(2) }),
+    makeEvent('task.created', { sourceId: 'k1-created', occurredAt: at(3) }),
+  ]);
+  const snapshot = compactContextEvents(events, { budgetBytes: 100000, snapshotId: 'snapshot-k1' });
+
+  // 精确序列断言（不是长度、不是集合）：收尾排序一旦被去掉，序列会变成 rejection|proposal|created。
+  assert.deepEqual(snapshot.retained.map((event) => event.eventId), [
+    'context-event:k1-rejection',
+    'context-event:k1-created',
+    'context-event:k1-proposal',
+  ]);
+  // 决定性键确为 priority：occurredAt 顺序与最终顺序相反（proposal@01 却排在最后）。
+  assert.deepEqual(snapshot.retained.map((event) => priorityOf(event.type)), [2, 2, 3]);
+  assert.deepEqual(snapshot.retained.map((event) => event.occurredAt), [at(2), at(3), at(1)]);
+  // 配对成员必须整对保留（§11 第 23 项），且 retained 顺序即候选顺序。
+  assert.deepEqual(snapshot.omitted, []);
+  assert.deepEqual(
+    snapshot.retained.map((event) => [event.pairing?.role ?? null, event.status]),
+    [['rejected', 'rejected'], [null, 'completed'], ['opened', 'rejected']],
+  );
+});
+
+test('§10.3 ISSUE-C：retained 保持候选顺序 —— priority 相同，occurredAt 为决定性键', () => {
+  // error.detected(p1,@01) 与 error.resolved(p2,@05) 配对；task.created(p2,@03) 夹在两者之间。
+  // 候选序：detected(p1,@01) → created(p2,@03) → resolved(p2,@05)。
+  // 未排序时得到 detected|resolved|created；决定性键是 occurredAt（created 与 resolved 同为 p2）。
+  const events = applyPairingOutcome([
+    makeEvent('error.detected', { sourceId: 'k2-detected', occurredAt: at(1) }),
+    makeEvent('task.created', { sourceId: 'k2-created', occurredAt: at(3) }),
+    makeEvent('error.resolved', { sourceId: 'k2-resolved', occurredAt: at(5) }),
+  ]);
+  const snapshot = compactContextEvents(events, { budgetBytes: 100000, snapshotId: 'snapshot-k2' });
+
+  assert.deepEqual(snapshot.retained.map((event) => event.eventId), [
+    'context-event:k2-detected',
+    'context-event:k2-created',
+    'context-event:k2-resolved',
+  ]);
+  // created 与 resolved 同为 p2，故 priority 不足以决定，必须是 occurredAt 在起作用。
+  assert.deepEqual(snapshot.retained.map((event) => priorityOf(event.type)), [1, 2, 2]);
+  assert.deepEqual(snapshot.retained.map((event) => event.occurredAt), [at(1), at(3), at(5)]);
+  assert.deepEqual(snapshot.omitted, []);
+});
+
+test('§10.3 ISSUE-C：retained 保持候选顺序 —— priority 与 occurredAt 都相同，eventId 为决定性键', () => {
+  // error.detected(p1,@01) 与 error.resolved(p2,@05) 配对；task.created(p2,@05) 夹在两者之间。
+  // 候选序：detected(p1,@01) → k3-a-created(p2,@05) → k3-z-resolved(p2,@05)。
+  // 未排序时得到 detected|z-resolved|a-created；决定性键是 eventId（前两级键全相同）。
+  const events = applyPairingOutcome([
+    makeEvent('error.detected', { sourceId: 'k3-detected', occurredAt: at(1) }),
+    makeEvent('task.created', { sourceId: 'k3-a-created', occurredAt: at(5) }),
+    makeEvent('error.resolved', { sourceId: 'k3-z-resolved', occurredAt: at(5) }),
+  ]);
+  const snapshot = compactContextEvents(events, { budgetBytes: 100000, snapshotId: 'snapshot-k3' });
+
+  assert.deepEqual(snapshot.retained.map((event) => event.eventId), [
+    'context-event:k3-detected',
+    'context-event:k3-a-created',
+    'context-event:k3-z-resolved',
+  ]);
+  // 前两级键全相同，只有 eventId 能区分：a-created 必须排在 z-resolved 之前。
+  assert.deepEqual(snapshot.retained.map((event) => priorityOf(event.type)), [1, 2, 2]);
+  assert.deepEqual(snapshot.retained.map((event) => event.occurredAt), [at(1), at(5), at(5)]);
+  assert.deepEqual(snapshot.omitted, []);
+  // eventId 升序在**同级候选内**成立（独立核对，不依赖实现）：
+  // 只有 k3-a-created 与 k3-z-resolved 同优先级同 occurredAt，二者必须按 eventId 升序。
+  const sameTier = snapshot.retained
+    .filter((event) => priorityOf(event.type) === 2)
+    .map((event) => event.eventId);
+  assert.deepEqual([...sameTier].sort(), sameTier);
+  assert.deepEqual(sameTier, ['context-event:k3-a-created', 'context-event:k3-z-resolved']);
+});
+
 test('§11 第 21 项：compactContextEvents 入参校验抛 ContextEventError', () => {
   const events = [makeEvent('task.created', { sourceId: 'c-input-validation' })];
   expectContextEventError(() => compactContextEvents(events, { budgetBytes: 0, snapshotId: 's' }));
@@ -1983,4 +2436,20 @@ test('§14 端到端：适配器入口 → applyPairingOutcome → narrative/dig
  *     闭合集之外，测试只断言「不得被静默映射成 canonical 事件」，未断言具体错误类型，
  *     避免把契约未定义的错误形状固化为期望。
  *     `ProviderEventKind` 为 7 值闭合集且全部命中判据，故 provider-event 无此偏离。
+ *
+ * O2. §9.5「重建递归适用于所有嵌套对象」尚未完全达成（ISSUE-E 的残留）：
+ *     `normalize.ts` 的 `scopeForDigest` 把 `organId` / `taskId` / `cycleId` / `operationId`
+ *     逐个重建为 `{ scope, value }`，`costForDigest` 也按固定键序重建；但
+ *     `evidenceRefForDigest` 对 **`evidenceRefs[].evidenceId`** 仍按引用参与哈希
+ *     （`evidenceId: evidenceRef.evidenceId`），因此 `ScopedId` 的键序会泄漏进摘要。
+ *     实测（同一事实，仅 `evidenceId` 内部键序不同）：
+ *       `{scope:'evidence',value:'evidence-1'}` → sha256:c5280b2c…41cdb40
+ *       `{value:'evidence-1',scope:'evidence'}` → sha256:538dd337…8a8b331
+ *     两者都通过 `validateCanonicalContextEvent`，且 canonical 事件里的 `evidenceId`
+ *     原样保留各自键序。§9.5 规则 3 说「元素内部键序按上表规范化」，而 `evidenceRefs[]`
+ *     的固定键序表含 `evidenceId`；§9.5 开篇亦说明「按引用参与哈希会使同一事实得到不同摘要，
+ *     这正是要消除的情形」。故这属实现未覆盖的同类缺陷，**本文件不放宽断言去固化它**：
+ *     `§9.5 ISSUE-E` 用例只在 `evidenceId` 键序一致的前提下断言「同一事实 → 同一摘要」，
+ *     并在注释中标明该残留；修复后应把 `evidenceId` 的键序也纳入该用例。
+ *     （对照：`scope` 的 `organId` 等同类 `ScopedId` 已规范化，故 `scope` 侧无此问题。）
  */
