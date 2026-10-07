@@ -3,11 +3,12 @@ import { mkdir, open as openFile, readFile, realpath, stat } from 'node:fs/promi
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import { loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments } from '../../agent-templates/src/index.js';
+import { ENABLED_AGENT_DRIVER_REFS, loadBuiltinPromptSegments, validateConfiguredAgentBinding, type AgentRole as TemplateAgentRole, type LoadedAgentPromptSegments } from '../../agent-templates/src/index.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const INTERNAL_CONFIG_KEYS = ['controlRoot', 'agentCwd', 'sessionRoot', 'pluginManifest', 'configPolicy'] as const;
-export const AGENT_DRIVER_REFS = ['fake', 'dsh', 'rcc'] as const;
+/** Accepted `driverRef` values. The enablement policy is owned by agent-templates. */
+export const AGENT_DRIVER_REFS = ENABLED_AGENT_DRIVER_REFS;
 export type AgentDriverRef = (typeof AGENT_DRIVER_REFS)[number];
 export const AGENT_ROLES = ['interaction', 'orchestration', 'execution', 'review', 'memory'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -46,6 +47,24 @@ export interface ProviderRetryExecutionConfig {
   readonly candidates: readonly ProviderConfig[];
 }
 
+/**
+ * Execution surface for the three ACP runtimes. `driverRef` selects the
+ * runtime; `command` is the executable that provides it and `args` overrides
+ * the adaptor's protocol arguments. `opencode` ships a real ACP v1 server, so
+ * it is driven directly. `antigravity` and `acp-dsh` speak a native CLI
+ * protocol and are bridged by a shim.
+ *
+ * `command` is required: the host never guesses where a runtime binary lives.
+ * There is no fallback, so an ACP agent without this config fails closed at
+ * composition.
+ */
+export interface AcpExecutionConfig {
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly timeoutMs?: number;
+}
+
+
 export interface ProviderConfig {
   readonly provider: ProviderId;
   readonly binding: string;
@@ -76,6 +95,9 @@ export interface UserConfig {
     readonly stopTimeoutMs?: number;
     readonly dsh?: DshExecutionConfig;
     readonly providerRetry?: ProviderRetryExecutionConfig;
+    readonly opencode?: AcpExecutionConfig;
+    readonly antigravity?: AcpExecutionConfig;
+    readonly dshAcp?: AcpExecutionConfig;
   };
 }
 
@@ -446,6 +468,24 @@ function validateDshExecution(value: unknown, label: string): DshExecutionConfig
   };
 }
 
+function validateAcpExecution(value: unknown, label: string): AcpExecutionConfig {
+  const acp = asRecord(value, label);
+  rejectUnknownKeys(acp, ['command', 'args', 'timeoutMs'], label);
+  if (acp.command === undefined) {
+    fail('config-invalid', `${label}.command is required; the host never guesses a runtime path`);
+  }
+  const timeoutMs = acp.timeoutMs === undefined
+    ? undefined
+    : (typeof acp.timeoutMs !== 'number' || !Number.isSafeInteger(acp.timeoutMs) || acp.timeoutMs < 1
+        ? fail('config-invalid', `${label}.timeoutMs must be positive`)
+        : acp.timeoutMs);
+  return {
+    command: asString(acp.command, `${label}.command`),
+    ...(acp.args === undefined ? {} : { args: asStringArray(acp.args, `${label}.args`) }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+  };
+}
+
 function validateProviderConfig(value: unknown, label = 'provider'): ProviderConfig {
   const provider = asRecord(value, label);
   rejectUnknownKeys(provider, ['provider', 'binding', 'protocol', 'model', 'route', 'baseUrl'], label);
@@ -514,7 +554,7 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
   const memory = value.memory === undefined ? undefined : validateMemoryConfig(value.memory);
   const execution = value.execution === undefined ? undefined : asRecord(value.execution, 'execution');
   if (project) rejectUnknownKeys(project, ['defaultAgent', 'reviewRequired'], 'user project config');
-  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh', 'providerRetry'], 'user execution config');
+  if (execution) rejectUnknownKeys(execution, ['maxConcurrentTasks', 'stopTimeoutMs', 'dsh', 'providerRetry', 'opencode', 'antigravity', 'dshAcp'], 'user execution config');
   const maxConcurrentTasks = execution?.maxConcurrentTasks as unknown;
   const stopTimeoutMs = execution?.stopTimeoutMs as unknown;
   const providerRetry = execution?.providerRetry === undefined
@@ -536,6 +576,9 @@ export function validateUserConfig(value: Record<string, unknown>): UserConfig {
       ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs: stopTimeoutMs as number }),
       ...(execution.dsh === undefined ? {} : { dsh: validateDshExecution(execution.dsh, 'execution.dsh') }),
       ...(providerRetry === undefined ? {} : { providerRetry }),
+      ...(execution.opencode === undefined ? {} : { opencode: validateAcpExecution(execution.opencode, 'execution.opencode') }),
+      ...(execution.antigravity === undefined ? {} : { antigravity: validateAcpExecution(execution.antigravity, 'execution.antigravity') }),
+      ...(execution.dshAcp === undefined ? {} : { dshAcp: validateAcpExecution(execution.dshAcp, 'execution.dshAcp') }),
     }}),
   };
 }

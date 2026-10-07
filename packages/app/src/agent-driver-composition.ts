@@ -11,9 +11,16 @@ import {
   dshBaselineLock,
   type DshProfileDescriptor,
 } from '../../adapters/dsh/src/index.js';
-import type { AgentConfig, DshExecutionConfig, RuntimePaths } from '../../config/src/index.js';
+import type { AgentConfig, AcpExecutionConfig, DshExecutionConfig, RuntimePaths } from '../../config/src/index.js';
 import { FakeAgentDriver } from '../../adapters/testing/src/index.js';
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import {
+  createAcpClientDriver,
+  createAntigravityRuntime,
+  createDshRuntime,
+  createOpencodeRuntime,
+  type AcpRuntimeAdaptor,
+} from '../../adapters/acp/index.js';
 import {
   id,
   type AgentDriver,
@@ -283,6 +290,9 @@ export interface DshCompositionInput {
   readonly agent: AgentConfig;
   readonly paths: RuntimePaths;
   readonly dsh?: DshExecutionConfig;
+  readonly opencode?: AcpExecutionConfig;
+  readonly antigravity?: AcpExecutionConfig;
+  readonly dshAcp?: AcpExecutionConfig;
   /**
    * Serve-owned RCC port binding. It is required for an `rcc` agent so the
    * provider stream of a memory role cannot borrow the main operation's
@@ -304,14 +314,99 @@ export interface RccCompositionInput {
   readonly inputRefs: readonly string[];
 }
 
+const ACP_OWNER = 'humanagent.app.acp-composition';
+
+/**
+ * Builds the one shared ACP client driver for a configured ACP runtime. The
+ * runtime adaptor owns how to reach the engine (a real ACP server or a
+ * shim over a native CLI); the client driver owns the session lifecycle and
+ * the AgentDriver mapping so the runtimes cannot diverge.
+ *
+ * Evidence scope comes from HumanAgent, not from the runtime: the ACP session
+ * id stays inside the adaptor and never becomes an AgentRuntimeId.
+ */
+function composeAcpDriver(input: {
+  readonly runtime: AcpRuntimeAdaptor;
+  readonly workspace: string;
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly timeoutMs?: number;
+}): ComposedAgentDriver {
+  return {
+    driver: createAcpClientDriver({
+      runtime: input.runtime,
+      workspace: input.workspace,
+      command: input.command,
+      ...(input.args === undefined ? {} : { args: input.args }),
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+    }),
+  };
+}
+
 /**
  * Explicitly composes the configured driver. There is no fallback: an unknown
- * driverRef, a DSH agent without DSH execution config, or an RCC agent without
- * a serve-owned RCC port fails closed.
+ * driverRef, a DSH agent without DSH execution config, an ACP agent without
+ * its ACP execution config, or an RCC agent without a serve-owned RCC port
+ * fails closed.
  */
 export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDriver {
   if (input.agent.driverRef === 'fake') {
     return { driver: new FakeAgentDriver() };
+  }
+  if (input.agent.driverRef === 'opencode') {
+    const config = input.opencode;
+    if (!config) {
+      throw new AppLifecycleError(
+        'acp-config-missing',
+        'agent uses the opencode driver but execution.opencode is not configured',
+        'configure execution.opencode in the user config before running the agent',
+        ACP_OWNER,
+      );
+    }
+    const args = config.args ?? ['acp', '--pure'];
+    return composeAcpDriver({
+      runtime: createOpencodeRuntime({ args, ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }) }),
+      workspace: input.workspace,
+      command: config.command,
+      args,
+      ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+    });
+  }
+  if (input.agent.driverRef === 'antigravity') {
+    const config = input.antigravity;
+    if (!config) {
+      throw new AppLifecycleError(
+        'acp-config-missing',
+        'agent uses the antigravity driver but execution.antigravity is not configured',
+        'configure execution.antigravity in the user config before running the agent',
+        ACP_OWNER,
+      );
+    }
+    return composeAcpDriver({
+      runtime: createAntigravityRuntime({ ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }) }),
+      workspace: input.workspace,
+      command: config.command,
+      ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+    });
+  }
+  if (input.agent.driverRef === 'acp-dsh') {
+    const config = input.dshAcp;
+    if (!config) {
+      throw new AppLifecycleError(
+        'acp-config-missing',
+        'agent uses the acp-dsh driver but execution.dshAcp is not configured',
+        'configure execution.dshAcp in the user config before running the agent',
+        ACP_OWNER,
+      );
+    }
+    const args = config.args ?? ['--profile', 'headless', '--json'];
+    return composeAcpDriver({
+      runtime: createDshRuntime({ args, ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }) }),
+      workspace: input.workspace,
+      command: config.command,
+      args,
+      ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+    });
   }
   if (input.agent.driverRef === 'rcc') {
     const config = input.rcc;

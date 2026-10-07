@@ -195,6 +195,9 @@ export async function prepareAgentOperation(input: OpenAgentOperationInput): Pro
     agent,
     paths: input.paths,
     ...(input.configuration.effective.execution?.dsh === undefined ? {} : { dsh: input.configuration.effective.execution.dsh }),
+    ...(input.configuration.effective.execution?.opencode === undefined ? {} : { opencode: input.configuration.effective.execution.opencode }),
+    ...(input.configuration.effective.execution?.antigravity === undefined ? {} : { antigravity: input.configuration.effective.execution.antigravity }),
+    ...(input.configuration.effective.execution?.dshAcp === undefined ? {} : { dshAcp: input.configuration.effective.execution.dshAcp }),
     runtimeId,
     workspace: input.workspace,
   });
