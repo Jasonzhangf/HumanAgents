@@ -6,24 +6,24 @@
   },
   "nodes": {
     "event_source": {
-      "ownerPath": "docs/architecture/context-events.md",
-      "ownerRel": "docs/architecture/context-events.md"
+      "ownerPath": "packages/context-events/src/normalize.ts",
+      "ownerRel": "packages/context-events/src/normalize.ts"
     },
     "normalize": {
-      "ownerPath": "docs/architecture/context-events.md",
-      "ownerRel": "docs/architecture/context-events.md"
+      "ownerPath": "packages/context-events/src/normalize.ts",
+      "ownerRel": "packages/context-events/src/normalize.ts"
     },
     "pairing": {
-      "ownerPath": "docs/architecture/context-events.md",
-      "ownerRel": "docs/architecture/context-events.md"
+      "ownerPath": "packages/context-events/src/pairing.ts",
+      "ownerRel": "packages/context-events/src/pairing.ts"
     },
     "projector": {
-      "ownerPath": "docs/architecture/context-events.md",
-      "ownerRel": "docs/architecture/context-events.md"
+      "ownerPath": "packages/context-events/src/projector.ts",
+      "ownerRel": "packages/context-events/src/projector.ts"
     },
     "consume": {
-      "ownerPath": "packages/ui/projection/index.ts",
-      "ownerRel": "packages/ui/projection/index.ts"
+      "ownerPath": "packages/context-events/src/index.ts",
+      "ownerRel": "packages/context-events/src/index.ts"
     }
   }
 }
