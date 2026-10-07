@@ -80,8 +80,10 @@ humanagent --workspace /absolute/project
 
 命令输出的 URL 就是 WebUI 入口；默认只监听 `127.0.0.1`，正式局域网或 Tailscale
 监听需要显式传 `--host 0.0.0.0`（IPv4）或 `--host ::`（IPv6）。
-`/` 是状态入口，
-`/interaction.html` 是显式对话入口。页面提交首条业务输入后会创建显式 Agent
+`/` 是产品入口，从首页接受用户任务并经显式大脑生成可确认草稿；
+`/login.html` 是浏览器配对入口，未配对时产品壳指向此页；
+`/interaction.html` 是历史视觉原型，不是产品入口，产品导航也不链接它。
+页面提交首条业务输入后会创建显式 Agent
 session，写入 `~/.humanagent/main/sessions/explicit-brain.jsonl`。对项目执行的
 session 仍写入 `~/.humanagent/sessions/<project-key>/<session-id>.jsonl`；启动目录
 只作为 workspace，不改变这两个持久化位置。

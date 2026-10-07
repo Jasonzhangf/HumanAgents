@@ -76,6 +76,17 @@ function setCreateFeedback(message) {
   createTaskFeedback.textContent = message
 }
 
+/**
+ * The task form's own feedback line, plus the shared pairing entry. A typed
+ * session rejection must offer the login page on every mutation this form
+ * performs; plain text would drop the runtime's code/owner/nextAction and leave
+ * the user with no way to pair.
+ */
+function setCreateFeedbackError(error) {
+  setCreateFeedback(`${error.message} · ${error.nextAction || 'inspect runtime'}`)
+  appendPairingEntry(createTaskFeedback, error)
+}
+
 function showServerResult(result) {
   serverResult.textContent = JSON.stringify(result, null, 2)
 }
@@ -362,7 +373,7 @@ createTaskForm.addEventListener('submit', (event) => {
       await loadTasks()
       if (created.taskId?.value) await loadLiveEvents(created.taskId.value)
     } catch (error) {
-      setCreateFeedback(`${error.message} · ${error.nextAction || 'inspect runtime'}`)
+      setCreateFeedbackError(error)
     }
   })()
 })
@@ -383,7 +394,7 @@ updateTaskButton.addEventListener('click', () => void (async () => {
     setCreateFeedback(`已更新任务 ${taskIdValue}。`)
     await loadTasks()
   } catch (error) {
-    setCreateFeedback(`${error.message} · ${error.nextAction || 'inspect runtime'}`)
+    setCreateFeedbackError(error)
   }
 })())
 
@@ -404,7 +415,7 @@ deleteTaskButton.addEventListener('click', () => void (async () => {
     deleteTaskButton.disabled = true
     await loadTasks()
   } catch (error) {
-    setCreateFeedback(`${error.message} · ${error.nextAction || 'inspect runtime'}`)
+    setCreateFeedbackError(error)
   }
 })())
 

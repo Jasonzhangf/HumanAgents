@@ -400,6 +400,66 @@ try {
     deleteRejection)
   await deleteContext.close()
 
+  // --- 4c. the legacy interaction form reaches the same pairing surface ----
+  // The task form on interaction.html performs create/update/delete. All three
+  // rejections must offer the login page, not just the create one, so the same
+  // typed session error is driven through the update path here as well.
+  const formContext = await browser.newContext()
+  const formPage = await formContext.newPage()
+  const formRequests = []
+  formPage.on('dialog', (dialog) => { void dialog.accept() })
+  await formPage.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    const body = (payload, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(payload),
+    })
+    if (path === '/api/auth/session') return body({ paired: true, sessionId: 'session-form-proof' })
+    if (path === '/api/runtime/status') return body({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true })
+    if (path === '/api/tasks' && request.method() === 'GET') {
+      return body({
+        draft: [], waiting: [], running: [], completed: [], stopped: [], failed: [],
+      })
+    }
+    if (path === '/api/tasks' && request.method() === 'POST') {
+      formRequests.push(`POST ${path}`)
+      return body({
+        code: 'auth.session.missing',
+        ownerId: ACCESS_CONTROL_OWNER,
+        message: 'browser session is required',
+        nextAction: 'open the login page and pair this browser',
+      }, 401)
+    }
+    if (path === '/api/tasks/task-form-proof' && request.method() === 'PATCH') {
+      formRequests.push(`PATCH ${path}`)
+      return body({
+        code: 'auth.session.expired',
+        ownerId: ACCESS_CONTROL_OWNER,
+        message: 'browser session has expired',
+        nextAction: 'open the login page and pair this browser',
+      }, 401)
+    }
+    return body({ code: 'not-found', message: `unexpected ${request.method()} ${path}`, ownerId: 'test', nextAction: 'none' }, 404)
+  })
+  await formPage.goto(`${binding.serveBaseUrl}/interaction.html`, { waitUntil: 'domcontentloaded' })
+  await formPage.waitForSelector('[data-create-task-form] input[name="title"]', { timeout: 30_000 })
+
+  await formPage.fill('[data-create-task-form] input[name="title"]', '配对证明任务')
+  await formPage.click('[data-create-task-form] button[data-action="create"]')
+  await formPage.waitForSelector('[data-create-task-feedback] [data-auth-pair-link]', { timeout: 30_000 })
+  const createRejection = await formPage.evaluate(() => ({
+    link: document.querySelector('[data-create-task-feedback] [data-auth-pair-link]')?.getAttribute('href') ?? '',
+    feedback: document.querySelector('[data-create-task-feedback]')?.textContent ?? '',
+  }))
+  observe('interaction form create rejection', { formRequests, ...createRejection })
+  record('the interaction create form links to the login page on an auth rejection',
+    createRejection.link.includes('authCode=auth.session.missing')
+      && createRejection.feedback.includes('browser session is required'),
+    createRejection)
+  await formContext.close()
+
   // --- 5. the login page is served by the real runtime --------------------
   const loginResponse = await fetch(`${binding.serveBaseUrl}/login.html`)
   const loginBody = await loginResponse.text()
