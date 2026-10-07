@@ -8,7 +8,7 @@ import test from 'node:test';
 import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
 import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
-import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult } from '../../packages/contracts/src/index.js';
+import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
 import { DeterministicMemoryBackend, RootedMemoryPersistence } from '../../packages/adapters/memory/src/index.js';
@@ -836,6 +836,13 @@ class StopCloseDriver extends FakeAgentDriver {
       state: 'closed',
       evidenceRefs: [],
     };
+  }
+}
+
+/** A driver that refuses every stop request, while its settle would report `stopped`. */
+class RefusedStopDriver extends FakeAgentDriver {
+  async requestStop(input: { readonly runtimeId: string; readonly executionEpoch: number; readonly operationId: OperationId }): Promise<StopRequestReceipt> {
+    return { requested: false, operationId: input.operationId };
   }
 }
 
@@ -4386,6 +4393,39 @@ test('standalone app stop preserves manifest and provider close failures after s
   assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"stopped"/);
 });
 
+test('app stop never commits a stopped checkpoint from a refused stop request', async () => {
+  // The stop entry must not read a settlement that a refusal never produced.
+  // This driver refuses the stop, and its settle would report a stopped
+  // closure, so a stop that skips the refusal check would commit `stopped` for
+  // an operation that was never stopped.
+  const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-refused-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  await ensureControlLayout(paths);
+  const configuration = await loadConfiguration(paths);
+  const driver = new RefusedStopDriver({ 'session-stop-refused-assignment': 'stopped' });
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-stop-refused',
+    plan: 'default',
+    prompt: 'refuse the stop',
+    composed: { driver },
+  });
+  await controller.start();
+  await controller.submit();
+
+  const first = await controller.stop();
+  assert.equal(first.state, 'settling');
+  // A retry must fail the same way. It must not reach the stopped checkpoint by
+  // reading a settlement the refused request never produced.
+  const second = await controller.stop();
+  assert.equal(second.state, 'settling');
+
+  const content = await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8').catch(() => '');
+  assert.equal(content.includes('"outcome":"stopped"'), false);
+});
+
 test('app stop does not commit stopped when settle fails', async () => {
   const { controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-stop-settle-');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
@@ -6489,4 +6529,230 @@ test('an old lock handle cannot remove a replacement owner lock', async () => {
   const second = await store.acquire('session-replaced');
   await assert.rejects(() => first.release(), /owned by another runtime/);
   await second.release();
+});
+
+test('ACP opencode driver commits a stopped checkpoint through the real stop entry', async () => {
+  // The ordinary run path only ever settles a turn that already finished.
+  // This is the stop path: the engine holds a turn in flight, a stop arrives,
+  // and the closure must reach the journal as `stopped`. The stub holds
+  // session/prompt open until session/cancel arrives, so the cancel is the
+  // only event that can produce the terminal state.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-stop-');
+  const configPath = join(controlRoot, 'config.toml');
+  const stubDir = join(root, 'stop-stub');
+  await mkdir(stubDir, { recursive: true });
+  // The stub creates this file when it holds a turn, so the test stops a turn
+  // that is really in flight instead of guessing with a sleep.
+  const holdMarker = join(stubDir, 'turn-in-flight');
+  // The stub writes this file when it receives session/cancel, so the test can
+  // prove the cancel reached the engine instead of only observing the outcome.
+  const cancelMarker = join(stubDir, 'cancel-received');
+  const stub = join(process.cwd(), 'tests', 'app', 'acp-stub-server.mjs');
+  // A held turn only ends when the client closes the session. If the stop path
+  // regresses, this bound makes the engine exit on its own, so the test fails
+  // with a message instead of holding the test runner open. The real stop path
+  // finishes in well under a second.
+  const stubLifetimeMs = 15_000;
+
+  let config = await readFile(configPath, 'utf8');
+  config = config.replace('agentId = "interaction-default"', 'agentId = "interaction-acp-stop"');
+  config = config.replace('driverRef = "fake"', 'driverRef = "opencode"');
+  config = config.replace('defaultAgent = "interaction-default"', 'defaultAgent = "interaction-acp-stop"');
+  config = config.replace('reviewRequired = true', 'reviewRequired = false');
+  config = config.replace(
+    'stopTimeoutMs = 30000',
+    ['stopTimeoutMs = 20000', '', '[execution.opencode]', `command = "${process.execPath}"`, `args = ${JSON.stringify([stub, 'POGS', 'hold', holdMarker, cancelMarker, String(stubLifetimeMs)])}`, 'timeoutMs = 20000', ''].join('\n'),
+  );
+  await writeFile(configPath, config, 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  const controller = await openAgentOperation({
+    paths,
+    configuration,
+    workspace,
+    sessionId: 'session-acp-stop',
+    plan: 'default',
+    prompt: 'reply with exactly POGS',
+  });
+  try {
+    await controller.start();
+    const submitted = controller.submit();
+    // A stop control fences the runtime, so the in-flight submit is expected
+    // to fail once the stop begins. Attach the handler now so the rejection is
+    // never unhandled, and assert it below.
+    const submitOutcome = submitted.then(
+      () => 'resolved' as const,
+      (error: Error) => error,
+    );
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (await readFile(holdMarker, 'utf8').catch(() => '')) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(await readFile(holdMarker, 'utf8'), 'held', 'the engine never held a turn in flight');
+
+    const result = await controller.stop('black-box stop check');
+    assert.equal(result.state, 'stopped');
+    if (result.state !== 'stopped') throw new Error(`stop did not commit a stopped checkpoint: ${result.state}`);
+    assert.equal(result.checkpoint.outcome, 'stopped');
+    assert.equal(result.closure.state, 'stopped');
+
+    // The journal is the external record: it must show the stop and must not
+    // show an unresolved or successful turn for the same operation.
+    const journal = await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8');
+    assert.match(journal, /"outcome":"stopped"/);
+    assert.equal(journal.includes('"outcome":"unknown"'), false);
+    assert.equal(journal.includes('"outcome":"succeeded"'), false);
+    // The stop reached the engine: this file only exists because the engine
+    // process received session/cancel.
+    assert.equal(await readFile(cancelMarker, 'utf8'), 'cancelled', 'the engine never received session/cancel');
+
+    // A stopped turn never published an answer, so the held prompt must not
+    // have resolved as a completed turn.
+    const outcome = await submitOutcome;
+    assert.equal(outcome === 'resolved', false, 'a stopped turn must not have resolved as a completed turn');
+  } finally {
+    // Best effort: if the stop path regresses, the engine child would still be
+    // running, and its open pipes would keep the test process alive. Settling
+    // the execution again closes it. After a successful stop `settled` is
+    // already true, so this is a no-op.
+    await controller.releaseExecution().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('ACP configuration fails closed for a missing command and an unknown driver', async () => {
+  // The host never guesses a runtime path and never falls back to another
+  // driver, so both a missing ACP command and an unknown driverRef must be
+  // rejected while the configuration is loaded.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-config-');
+  const configPath = join(controlRoot, 'config.toml');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const shipped = await readFile(configPath, 'utf8');
+  try {
+    await writeFile(configPath, shipped.replace(
+      'stopTimeoutMs = 30000',
+      ['stopTimeoutMs = 20000', '', '[execution.opencode]', 'timeoutMs = 20000', ''].join('\n'),
+    ), 'utf8');
+    await assert.rejects(
+      () => loadConfiguration(paths),
+      (error: unknown) => (error as { code?: string }).code === 'config-invalid',
+    );
+
+    await writeFile(configPath, shipped.replace('driverRef = "fake"', 'driverRef = "no-such-driver"'), 'utf8');
+    await assert.rejects(
+      () => loadConfiguration(paths),
+      (error: unknown) => (error as { code?: string }).code === 'config-capability',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('ACP composition refuses an ACP agent that has no execution section', async () => {
+  // Composition has no fallback: an opencode agent without [execution.opencode]
+  // must fail instead of running another driver.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-missing-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const agent = {
+    agentId: 'interaction-acp-missing',
+    roleId: 'interaction' as const,
+    templateRef: 'builtin/interaction@1.0.0',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'] as const,
+    resourceClass: 'foreground' as const,
+  };
+  try {
+    assert.throws(
+      () => composeAgentDriver({
+        agent: { ...agent, driverRef: 'opencode' },
+        paths,
+        workspace,
+        runtimeId: 'runtime-acp-missing',
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'acp-config-missing',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('ACP opencode driver commits a checkpoint and a run manifest through the real run entry', async () => {
+  // The whole point of this test is that it never composes the driver directly:
+  // it edits the config a user edits, then calls the same entry the CLI calls.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-entry-');
+  const configPath = join(controlRoot, 'config.toml');
+  const stub = join(process.cwd(), 'tests', 'app', 'acp-stub-server.mjs');
+  let config = await readFile(configPath, 'utf8');
+  // The interaction agent is the default agent, so it is the one that runs.
+  // Only its identity changes and its driver is switched to ACP; the execution
+  // section gains the opencode entry. The shipped config supplies everything
+  // else, so this test edits the config a user edits instead of restating it.
+  config = config.replace('agentId = "interaction-default"', 'agentId = "interaction-acp"');
+  config = config.replace('driverRef = "fake"', 'driverRef = "opencode"');
+  config = config.replace('defaultAgent = "interaction-default"', 'defaultAgent = "interaction-acp"');
+  config = config.replace('reviewRequired = true', 'reviewRequired = false');
+  config = config.replace(
+    'stopTimeoutMs = 30000',
+    ['stopTimeoutMs = 20000', '', '[execution.opencode]', `command = "${process.execPath}"`, `args = ${JSON.stringify([stub, 'POGS'])}`, 'timeoutMs = 20000', ''].join('\n'),
+  );
+  await writeFile(configPath, config, 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  try {
+    const result = await runAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-acp-entry',
+      plan: 'default',
+      prompt: 'reply with exactly POGS',
+    });
+
+    // The committed checkpoint is the acceptance artifact: it proves the driver
+    // evidence carried the app scope, so the commit was allowed.
+    assert.equal(result.checkpoint.outcome, 'succeeded');
+    assert.equal(result.driverRef, 'opencode');
+    assert.equal(result.checkpoint.scope.organId.value, 'agent-interaction-acp');
+    assert.equal(result.checkpoint.scope.cycleId?.value, 'session-acp-entry-cycle-1');
+    assert.equal(result.checkpoint.scope.operationId?.value, result.operationId.value);
+    assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"succeeded"/);
+
+    // The real event vocabulary reached the app: an output chunk carrying the
+    // answer, then the terminal event that ends the observation loop.
+    assert.deepEqual(result.receipt.observedKinds, ['output', 'terminal']);
+    assert.equal(result.receipt.observedEvents[0]?.summary, 'POGS');
+    assert.equal(result.receipt.closure.state, 'succeeded');
+    const terminal = result.semanticEvents.at(-1);
+    assert.equal(terminal?.kind, 'execution.terminal');
+    assert.equal(terminal?.state, 'succeeded');
+    assert.equal(terminal?.terminalPhase, 'final');
+
+    // A run manifest must be readable for a driver outside the original
+    // hardcoded set; the CLI resume path depends on this.
+    const manifest = await readRunManifest(paths, 'session-acp-entry');
+    assert.equal(manifest.driverRef, 'opencode');
+    assert.equal(manifest.taskId.value, result.taskId.value);
+    assert.equal(manifest.operationId.value, result.operationId.value);
+
+    const resumed = await resumeAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-acp-entry',
+      plan: 'default',
+      prompt: 'reply with exactly POGS',
+      taskId: manifest.taskId,
+      cycleId: manifest.cycleId,
+      scope: manifest.scope,
+      executionEpoch: manifest.executionEpoch,
+      directiveRevision: manifest.directiveRevision,
+      agentId: manifest.agentId,
+      driverRef: manifest.driverRef,
+    });
+    assert.equal(resumed.recovered?.checkpoint.id.value, result.checkpoint.id.value);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

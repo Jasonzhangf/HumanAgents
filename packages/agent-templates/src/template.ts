@@ -3,6 +3,7 @@ import { AgentTemplateError } from './errors.js';
 import {
   AGENT_ROLE_IDS,
   AGENT_TEMPLATE_API_VERSION,
+  ENABLED_AGENT_DRIVER_REFS,
   type AgentRole,
   type AgentBuiltInTool,
   type AgentTemplateLoadInput,
@@ -564,7 +565,7 @@ export function validateConfiguredAgentBinding(binding: ConfiguredAgentBinding):
     throw new AgentTemplateError(`template ref is not locked to the configured role: ${binding.templateRef}`);
   }
   const version = binding.templateRef.slice(expectedPrefix.length);
-  if (binding.driverRef !== 'fake' && binding.driverRef !== 'dsh' && binding.driverRef !== 'rcc') {
+  if (!(ENABLED_AGENT_DRIVER_REFS as readonly string[]).includes(binding.driverRef)) {
     throw new AgentTemplateError(`driver is not enabled in the MVP host: ${binding.driverRef}`);
   }
   const skills = roleSkills(binding.roleId, version);

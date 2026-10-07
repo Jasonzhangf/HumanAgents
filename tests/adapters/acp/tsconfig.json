@@ -8,6 +8,7 @@
   },
   "include": [
     "./node-modules.d.ts",
+    "../../../tests/adapters/node-modules.d.ts",
     "../../../packages/adapters/acp/**/*.ts",
     "./**/*.ts"
   ]

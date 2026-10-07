@@ -23,6 +23,56 @@ export type {
   AcpFakeFailure,
   AcpFakeTransportOptions,
 } from './fake-transport.js';
+export {
+  ACP_PROTOCOL_VERSION,
+  assertAcpInitializeResult,
+  assertAcpNewSessionResult,
+  assertAcpPromptResult,
+  assertAcpSessionUpdateNotification,
+  decodeAcpFrame,
+  encodeAcpNotification,
+  encodeAcpRequest,
+} from './protocol.js';
+export type {
+  AcpAgentCapabilities,
+  AcpContentBlock,
+  AcpImplementationInfo,
+  AcpInitializeResult,
+  AcpJsonRpcError,
+  AcpJsonRpcNotification,
+  AcpJsonRpcRequest,
+  AcpJsonRpcResponse,
+  AcpMcpServerConfig,
+  AcpNewSessionResult,
+  AcpPromptResult,
+  AcpSessionUpdate,
+  AcpSessionUpdateNotification,
+  AcpStopReason,
+  AcpToolCall,
+  AcpToolCallStatus,
+  AcpTokenUsage,
+} from './protocol.js';
+export { AcpStdioBackend, AcpStdioBackendError, isJsonRpcError, jsonRpcErrorMessage } from './backend.js';
+export type { AcpStdioBackendOptions, AcpStdioSpawnOptions } from './backend.js';
+export { createAcpClientDriver } from './acp-client-driver.js';
+export type { AcpClientDriverOptions } from './acp-client-driver.js';
+export { OPENCODE_DEFAULT_ARGS, createOpencodeRuntime } from './opencode.js';
+export type { OpencodeRuntimeOptions } from './opencode.js';
+export { createAntigravityRuntime } from './antigravity.js';
+export type { AntigravityRuntimeOptions } from './antigravity.js';
+export { DSH_DEFAULT_ARGS, createDshRuntime } from './dsh.js';
+export type { DshRuntimeOptions } from './dsh.js';
+export type {
+  AcpRuntimeAdaptor,
+  AcpRuntimeCancelInput,
+  AcpRuntimeCancelResult,
+  AcpRuntimeCloseInput,
+  AcpRuntimeCloseResult as AcpClientRuntimeCloseResult,
+  AcpRuntimeOpenInput,
+  AcpRuntimeOpenResult,
+  AcpRuntimeSubmitInput,
+  AcpRuntimeSubmitResult,
+} from './runtime.js';
 export type {
   AcpCancelReceipt,
   AcpCancelRequest,

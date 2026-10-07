@@ -1,6 +1,13 @@
 export const AGENT_TEMPLATE_API_VERSION = 1;
 
 export const AGENT_ROLE_IDS = ['interaction', 'orchestration', 'execution', 'review', 'memory'] as const;
+
+/**
+ * Driver refs this host enables for a configured agent. This is the single
+ * owner of the enablement policy: the binding validator enforces it, and the
+ * config loader derives its accepted driverRef set from it.
+ */
+export const ENABLED_AGENT_DRIVER_REFS = ['fake', 'dsh', 'rcc', 'opencode', 'antigravity', 'acp-dsh'] as const;
 export type AgentRole = (typeof AGENT_ROLE_IDS)[number];
 export type AgentBuiltInTool =
   | 'checkpoint.inspect'

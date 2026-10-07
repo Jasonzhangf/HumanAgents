@@ -1,0 +1,49 @@
+{
+  "graph": "humanagent-acp-runtime-wiring",
+  "operator": {
+    "operator": "humanagent-acp-runtime-wiring",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "resolve_agent_config": {
+      "ownerPath": "packages/config/src/index.ts",
+      "ownerRel": "packages/config/src/index.ts"
+    },
+    "compose_acp_driver": {
+      "ownerPath": "packages/app/src/agent-driver-composition.ts",
+      "ownerRel": "packages/app/src/agent-driver-composition.ts"
+    },
+    "open_acp_session": {
+      "ownerPath": "packages/adapters/acp/acp-client-driver.ts",
+      "ownerRel": "packages/adapters/acp/acp-client-driver.ts"
+    },
+    "run_opencode_adaptor": {
+      "ownerPath": "packages/adapters/acp/opencode.ts",
+      "ownerRel": "packages/adapters/acp/opencode.ts"
+    },
+    "run_antigravity_shim": {
+      "ownerPath": "packages/adapters/acp/antigravity.ts",
+      "ownerRel": "packages/adapters/acp/antigravity.ts"
+    },
+    "run_dsh_shim": {
+      "ownerPath": "packages/adapters/acp/dsh.ts",
+      "ownerRel": "packages/adapters/acp/dsh.ts"
+    },
+    "observe_driver_events": {
+      "ownerPath": "packages/app/src/agent-execution.ts",
+      "ownerRel": "packages/app/src/agent-execution.ts"
+    },
+    "settle_acp_session": {
+      "ownerPath": "packages/app/src/agent-operation.ts",
+      "ownerRel": "packages/app/src/agent-operation.ts"
+    },
+    "commit_acp_checkpoint": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
+    },
+    "write_run_manifest": {
+      "ownerPath": "packages/app/src/run-manifest.ts",
+      "ownerRel": "packages/app/src/run-manifest.ts"
+    }
+  }
+}

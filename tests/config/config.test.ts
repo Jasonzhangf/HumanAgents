@@ -482,6 +482,46 @@ test('validates DSH execution config and keeps it user-owned', async () => {
   assert.equal(String(projectError).includes('project execution config contains unsupported key: dsh'), true);
 });
 
+test('requires an explicit executable for each ACP runtime execution config', () => {
+  const acpAgent = (driverRef: string) => ({
+    agentId: `interaction-${driverRef}`,
+    roleId: 'interaction',
+    templateRef: 'builtin/interaction@1.0.0',
+    driverRef,
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'],
+    resourceClass: 'foreground',
+  });
+
+  const valid = validateUserConfig({
+    schemaVersion: 1,
+    agents: [acpAgent('opencode'), acpAgent('antigravity'), acpAgent('acp-dsh')],
+    execution: {
+      opencode: { command: '/opt/opencode/bin/opencode', args: ['acp', '--pure'], timeoutMs: 120000 },
+      antigravity: { command: '/opt/agy/bin/agy' },
+      dshAcp: { command: '/opt/dsh/bin/dsh', args: ['--profile', 'headless', '--json'] },
+    },
+  });
+  assert.equal(valid.execution?.opencode?.command, '/opt/opencode/bin/opencode');
+  assert.equal(valid.execution?.antigravity?.command, '/opt/agy/bin/agy');
+  assert.equal(valid.execution?.dshAcp?.args?.[0], '--profile');
+
+  // The host never guesses where a runtime binary lives.
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [acpAgent('opencode')],
+    execution: { opencode: { args: ['acp', '--pure'] } },
+  }), /execution\.opencode\.command is required/);
+
+  assert.throws(() => validateUserConfig({
+    schemaVersion: 1,
+    agents: [acpAgent('acp-dsh')],
+    execution: { dshAcp: { command: '/opt/dsh/bin/dsh', prompt: 'x' } },
+  }), /unsupported key/);
+});
+
 test('validates a global provider separately from the agent driver and rejects unsupported providers', () => {
   const agents = [{
     agentId: 'interaction-default',

@@ -1,0 +1,445 @@
+{
+  "source": "real opencode 1.18.23 ACP session (opencode acp --pure), recorded 2026-10-07",
+  "note": "Server->client frames only, in arrival order. Long option/command lists are trimmed to three entries; every frame kind and field shape is preserved.",
+  "clientRequests": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/tmp/acp-recon",
+        "mcpServers": []
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "reply with exactly POGS"
+          }
+        ]
+      }
+    }
+  ],
+  "serverFrames": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": true,
+          "mcpCapabilities": {
+            "http": true,
+            "sse": true
+          },
+          "promptCapabilities": {
+            "embeddedContext": true,
+            "image": true
+          },
+          "sessionCapabilities": {
+            "close": {},
+            "fork": {},
+            "list": {},
+            "resume": {}
+          }
+        },
+        "authMethods": [
+          {
+            "description": "Run `opencode auth login` in the terminal",
+            "name": "Login with opencode",
+            "id": "opencode-login"
+          }
+        ],
+        "agentInfo": {
+          "name": "OpenCode",
+          "version": "1.18.23"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "configOptions": [
+          {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "routecodex/gpt-5.5",
+            "options": [
+              {
+                "value": "opencode-go/deepseek-v4-flash",
+                "name": "OpenCode Go/DeepSeek V4 Flash"
+              },
+              {
+                "value": "opencode-go/deepseek-v4-flash-vision-exp",
+                "name": "OpenCode Go/DeepSeek V4 Flash Vision Exp"
+              },
+              {
+                "value": "opencode-go/deepseek-v4-pro",
+                "name": "OpenCode Go/DeepSeek V4 Pro (New)"
+              }
+            ]
+          },
+          {
+            "id": "effort",
+            "name": "Effort",
+            "description": "Available effort levels for this model",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "low",
+            "options": [
+              {
+                "value": "low",
+                "name": "Low"
+              },
+              {
+                "value": "medium",
+                "name": "Medium"
+              },
+              {
+                "value": "high",
+                "name": "High"
+              }
+            ]
+          },
+          {
+            "id": "mode",
+            "name": "Session Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "build",
+            "options": [
+              {
+                "value": "build",
+                "name": "build",
+                "description": "The default agent. Executes tools based on configured permissions."
+              },
+              {
+                "value": "plan",
+                "name": "plan",
+                "description": "Plan mode. Disallows all edit tools."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "available_commands_update",
+          "availableCommands": [
+            {
+              "name": "agent-reach",
+              "description": "MUST USE when user wants to 调研/research/搜索/search/查/找/look up anything on the internet — e.g. 全网调研 X / 帮我调研一下 X / 查一下 X / 搜搜 X / 看看大家怎么评价 X / X 上有什么讨论 / research this topic。\nAlso MUST USE when user mentions any platform or shares any URL/链接: 小红书/xiaohongshu/xhs, Twitter/推特/X, B站/bilibili, Reddit, Facebook, Instagram, V2EX, LinkedIn/领英/招聘/求职/jobs, YouTube, GitHub code search, 小宇宙播客, 雪球/股票行情, RSS feeds, or any web URL.\n15 platforms, multi-backend routing (OpenCLI / per-platform CLIs / APIs). Zero config for 6 channels. Run `agent-reach doctor --json` to see which backend serves each platform right now.\nNOT for: 写报告/数据分析/翻译等内容加工（本 skill 只负责从互联网获取内容）； 发帖/评论/点赞等写操作；已有专门 skill 的平台（先用专门 skill）。\n【路由方式】SKILL.md 包含路由表和常用命令，复杂场景需按需阅读对应分类的 references/*.md。 分类：search / social (小红书/推特/B站/V2EX/Reddit/Facebook/Instagram) / career(LinkedIn) / dev(github) / web(网页/文章/RSS) / video(YouTube/B站/播客) / finance(雪球/股票)。\n"
+            },
+            {
+              "name": "agent-relay",
+              "description": "Set up or operate the self-hosted wrai.th relay when the user names agent-relay or the project selects it for messaging and task coordination."
+            },
+            {
+              "name": "agently-mail",
+              "description": "用 agently-cli 搜索、读取、发送和管理邮件及附件。"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "The"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " user"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " wants"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " me"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " to"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " reply"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " with"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " exactly"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": " \""
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "P"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "OG"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "S"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_thought_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "\"."
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "P"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "OG"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "msg_1176c4a93001GVVx7OITG4pHqw",
+          "content": {
+            "type": "text",
+            "text": "S"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "ses_ee893bc9fffewWO5Js83fKBgpL",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 22068,
+          "size": 262144,
+          "cost": {
+            "amount": 0,
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 22068,
+          "outputTokens": 4,
+          "totalTokens": 22085,
+          "thoughtTokens": 13
+        },
+        "_meta": {}
+      }
+    }
+  ]
+}
