@@ -59,7 +59,8 @@ open / submit / cancel / close
 - `submit` 跑一轮并返回 `outputText` 与 `stopReason`。
 - `cancel` 请求取消。取消被接受不等于已停止。
 - `close` 收拢会话，是停止完成的判定点。它等到进程真正退出后才返回；只发出信号
-  不算已停止。
+  不算已停止。`closed` 报告进程的真实状态：进程未退出时返回 `false`，会话条目保留，
+  后续 `close` 可以重试。
 - 恢复不由接缝提供。三个 runtime 都无法重开已持久化的会话，`AgentDriver.resume`
   因此直接以 `capability-unavailable` 失败，恢复走新 operation。
 

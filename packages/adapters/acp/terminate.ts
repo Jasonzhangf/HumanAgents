@@ -10,8 +10,10 @@ import type { ChildProcessLike } from 'node:child_process';
 
 const DEFAULT_GRACE_MS = 5000;
 
-export async function terminateProcess(process: ChildProcessLike, graceMs = DEFAULT_GRACE_MS): Promise<void> {
-  if (hasExited(process)) return;
+export async function terminateProcess(process: ChildProcessLike, graceMs = DEFAULT_GRACE_MS): Promise<boolean> {
+  if (hasExited(process)) return true;
+  // Attach before signalling so the exit cannot be missed.
+  const gone = exited(process);
   process.kill('SIGTERM');
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const forcedKill = new Promise<void>((resolve) => {
@@ -20,13 +22,23 @@ export async function terminateProcess(process: ChildProcessLike, graceMs = DEFA
       resolve();
     }, graceMs);
   });
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([exited(process), forcedKill]);
+    await Promise.race([gone, forcedKill]);
+    // SIGKILL is not instant either, and a signal that was sent is not a process
+    // that has stopped. The second wait is bounded so an unkillable process
+    // cannot hang the caller.
+    const deadline = new Promise<void>((resolve) => {
+      deadlineTimer = setTimeout(resolve, graceMs);
+    });
+    await Promise.race([gone, deadline]);
+    return hasExited(process);
   } finally {
-    // `Promise.race` does not cancel the loser, so the grace timer must be
+    // `Promise.race` does not cancel the loser, so the grace timers must be
     // cleared explicitly: otherwise a clean exit still holds the event loop
     // for the whole grace period after the caller has already moved on.
     if (killTimer !== undefined) clearTimeout(killTimer);
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
   }
 }
 

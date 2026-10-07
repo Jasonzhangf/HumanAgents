@@ -268,7 +268,6 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
     async close(input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {
       const state = sessions.get(input.sessionId);
       if (!state) return { closed: false };
-      sessions.delete(input.sessionId);
       try {
         if (state.backend.process.exitCode === null) {
           await state.backend.notifyAsync('session/close', { sessionId: state.sessionId });
@@ -288,7 +287,11 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           cause: error,
         });
       }
-      return { closed: true };
+      // `AcpStdioBackend.close` waits for the process to exit, so this reports
+      // the actual process state rather than the fact that a signal was sent.
+      const gone = state.backend.process.exitCode !== null || state.backend.process.signalCode !== null;
+      if (gone) sessions.delete(input.sessionId);
+      return { closed: gone };
     },
   };
 }

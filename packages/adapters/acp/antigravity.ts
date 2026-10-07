@@ -237,11 +237,12 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
     async close(input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {
       const state = sessions.get(input.sessionId);
       if (!state) return { closed: false };
-      sessions.delete(input.sessionId);
       // A signal that was only sent is not a stopped runtime, so the session is
-      // closed only after the process has actually exited.
-      if (state.active) await terminateProcess(state.active);
-      return { closed: true };
+      // closed only once the process has actually exited. A surviving process
+      // keeps its session entry so a later close can try again.
+      const gone = state.active === undefined || await terminateProcess(state.active);
+      if (gone) sessions.delete(input.sessionId);
+      return { closed: gone };
     },
   };
 }

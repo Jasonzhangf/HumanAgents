@@ -19,6 +19,7 @@ import {
 } from '../../../packages/adapters/acp/protocol.js';
 import { createAcpClientDriver } from '../../../packages/adapters/acp/acp-client-driver.js';
 import { AcpStdioBackend } from '../../../packages/adapters/acp/backend.js';
+import { terminateProcess } from '../../../packages/adapters/acp/terminate.js';
 import { createAntigravityRuntime } from '../../../packages/adapters/acp/antigravity.js';
 import { createDshRuntime } from '../../../packages/adapters/acp/dsh.js';
 import {
@@ -234,6 +235,43 @@ test('ACP backend does not hold the process open after a clean close', async () 
   assert.ok(exitMs < 4_000, `the process needed ${exitMs}ms to exit after close()`);
 });
 
+test('ACP process termination resolves only after the runtime has exited', async () => {
+  // The child keeps running for a moment after SIGTERM. A close that only sends
+  // the signal would resolve first, and the caller would report a stopped
+  // runtime that is still alive.
+  const child = spawn(process.execPath, [
+    '--input-type=module',
+    '--eval',
+    "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 250)); process.stdout.write('ready\\n'); setInterval(() => {}, 1000);",
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  // The handler must be installed before the signal arrives, otherwise the
+  // default action kills the child and the test would pass for the wrong reason.
+  await new Promise((resolve) => child.stdout.once('data', () => resolve(undefined)));
+
+  const startedAt = Date.now();
+  await terminateProcess(child, 5_000);
+  const elapsed = Date.now() - startedAt;
+
+  assert.notEqual(child.exitCode, null, 'the process was still running when termination resolved');
+  assert.ok(elapsed >= 200, `termination resolved after ${elapsed}ms, before the process exited`);
+});
+
+test('ACP process termination escalates to SIGKILL when the runtime ignores SIGTERM', async () => {
+  const child = spawn(process.execPath, [
+    '--input-type=module',
+    '--eval',
+    "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setInterval(() => {}, 1000);",
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await new Promise((resolve) => child.stdout.once('data', () => resolve(undefined)));
+
+  await terminateProcess(child, 300);
+
+  assert.ok(
+    child.exitCode !== null || child.signalCode !== null,
+    'the process survived the termination grace period',
+  );
+});
+
 test('ACP driver never settles a session that ran no turn as succeeded', async () => {
   const runtime = makeFakeRuntime();
   const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
@@ -285,6 +323,26 @@ test('ACP driver maps a cancelled turn to cancelled and settles as stopped', asy
 
   const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
   assert.equal(closure.state, 'stopped');
+});
+
+test('ACP driver settles a failed turn as failed even when the stop was refused', async () => {
+  const runtime = makeFakeRuntime({
+    submitFailure: failWith('transport-failure', 'the engine died mid-turn'),
+    cancelResult: { accepted: false },
+  });
+  const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
+  await driver.start(startInput());
+
+  await assert.rejects(
+    driver.submit({ taskId, executionEpoch: epoch, assignmentId, payload: submitPayload }),
+    (error: Error & { code?: string }) => error.code === 'transport-failure',
+  );
+  const receipt = await driver.requestStop({ runtimeId: 'runtime-a', executionEpoch: epoch, operationId });
+  assert.equal(receipt.requested, false);
+
+  // A refused stop must not turn the failed turn into a stopped one.
+  const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
+  assert.equal(closure.state, 'failed');
 });
 
 test('ACP driver does not report stopped from a cancel acceptance alone', async () => {
