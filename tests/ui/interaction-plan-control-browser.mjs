@@ -669,6 +669,119 @@ async function waitForClaimedOccurrence(auth, subscriptionId, timeoutMs = 30_000
 }
 
 /**
+ * Waits until the scheduler has materialised the plan's slot, without requiring
+ * that slot to hold a claim. The negative control must observe a real committed
+ * slot, and when that slot is already past due the occurrence may legitimately
+ * be `due`, `claimed` or `skipped-busy` depending on the committed busy policy,
+ * so requiring a claim would make the control depend on policy instead of on the
+ * window.
+ */
+async function waitForScheduledOccurrence(auth, subscriptionId, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  for (;;) {
+    const plans = await schedulerPlans(auth);
+    last = plans;
+    const plan = plans.find((candidate) => candidate.subscriptionId === subscriptionId);
+    if (plan && (plan.occurrences ?? []).length > 0) return plan;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for a scheduled occurrence on ${subscriptionId}; last=${JSON.stringify(last).slice(0, 1200)}`);
+    }
+    await sleep(100);
+  }
+}
+
+/**
+ * `lastTickAt` is stamped when a patrol tick *finishes*, so it is the only
+ * in-band witness of the tick grid the grace window is aligned to. A tick that
+ * is waiting on a real `consumeExecution` does not stamp it, so a busy runtime
+ * can leave the stamp tens of seconds old. Anchoring a slot on a stale stamp
+ * puts the slot in the past and the scenario silently stops testing the window,
+ * so the anchor is taken only from a stamp that is fresh.
+ */
+async function waitForFreshTick(auth, maxStalenessMs = 1_500, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStalenessMs = Number.POSITIVE_INFINITY;
+  for (;;) {
+    const phase = await auth.json('/api/runtime/scheduler');
+    const tick = Date.parse(phase.lastTickAt ?? '');
+    lastStalenessMs = Number.isFinite(tick) ? Date.now() - tick : Number.POSITIVE_INFINITY;
+    if (lastStalenessMs <= maxStalenessMs) return { lastTickAt: phase.lastTickAt, stalenessMs: lastStalenessMs };
+    if (Date.now() >= deadline) {
+      throw new Error(`scheduler lastTickAt stayed stale for ${String(timeoutMs)}ms (last staleness ${String(lastStalenessMs)}ms)`);
+    }
+    await sleep(200);
+  }
+}
+
+/**
+ * How long one real execution may take after its slot is claimed. This is the
+ * real provider tail, not the plan-control contract under test: the claim is
+ * durable the moment the scheduler calls `port.claim`, and `consumeExecution`
+ * then waits on the live provider before `settleOccurrence` can record a
+ * terminal receipt.
+ *
+ * The bound is set from measurements on this machine, not from a round number.
+ * A real execution of the harness's own task measured 108_764 ms
+ * (`settledAfterMs` in `gracefix-run2/checks.json`), and one recorded run left a
+ * committed claim unsettled 180_000 ms after the plan read. The wait therefore
+ * has to be a multiple of the observed tail, or a healthy execution is reported
+ * as a strand. 300_000 is ~2.8x the measured execution and still well inside the
+ * overall harness budget. The wait is also timed, and its timeout is recorded
+ * with the plan state and the plan's linked task, so evidence separates
+ * "provider still running" from "claim never settled".
+ */
+const SETTLEMENT_WAIT_MS = 300_000;
+
+/**
+ * One confirmation round-trip is enough to make the next plan durable, and the
+ * scheduler's claim grace window is exactly one patrol tick wide
+ * (`dueTimes` claims at `dueAt - 1_000`). So the grace-window scenario must put
+ * its slot past that latency, or the claim is already past due by the time the
+ * plan becomes durable and the scenario stops testing the window at all.
+ *
+ * Measure the real latency with a throwaway plan instead of assuming it: the
+ * measured value drives the real scenario's `lead`, and retrying with a larger
+ * lead only proves the scenario is being exercised, never weakens the check.
+ * The probe plan keeps a future `startAt`, so `dueTimes` never yields a slot and
+ * no claim, provider call, or execution is created.
+ */
+async function measureConfirmationRoundTripMs(auth) {
+  const startedAt = Date.now();
+  // The slot ordinal is derived from the wall-clock hour, so it is far enough
+  // from the grace-window and negative-control slots that a poll scoped to this
+  // ordinal cannot pick one of theirs up.
+  const probeOffsetMs = 9_000_000 + (startedAt % 3_600_000);
+  const probeStartAt = new Date(startedAt + probeOffsetMs).toISOString();
+  await confirmScheduledPlan(auth, 'measure the confirmation round trip', probeStartAt);
+  return Date.now() - startedAt;
+}
+
+/**
+ * The grace-window lead must clear the confirmation round trip, so it is a
+ * function of the round trip actually measured. `factor` gives headroom above
+ * the measurement: under load the provider round trip can grow between the probe
+ * and the real scenario, so a factor above one covers that growth. Each retry
+ * uses a wider factor than the one before, so a missed window retries with a
+ * wider lead instead of repeating the same placement.
+ */
+function graceWindowLeadTicks(measuredRoundTripMs, factor) {
+  return Math.max(5, Math.ceil((measuredRoundTripMs / 1_000) * factor) + 2);
+}
+
+/**
+ * `startAt` is computed from the scheduler's most recent tick, at the instant
+ * the confirmation request is sent. `lastTick` stays aligned to the 1s tick
+ * grid, so adding a whole number of ticks keeps the claim and the slot one tick
+ * apart.
+ */
+function graceWindowStartAt(lastTickAt, tickCount, now) {
+  const lastTick = Date.parse(lastTickAt ?? '');
+  const anchor = Number.isFinite(lastTick) ? lastTick : now;
+  return new Date(anchor + tickCount * 1_000).toISOString();
+}
+
+/**
  * Confirm one `scheduled` execution policy through the real public explicit-flow
  * routes. These are the seeded routes the production RCC scheduler acceptance
  * uses: no live provider call, so the plan is durable within a bounded time.
@@ -943,7 +1056,7 @@ async function sectionReal(browser, artifactDir, root) {
     const inFlightSettled = await waitForSchedulerPlan(
       auth,
       (plan) => plan.subscriptionId === scheduledSubscriptionId && (plan.settlements ?? []).length > 0,
-      180_000,
+      SETTLEMENT_WAIT_MS,
     );
     observe('real cancel-future in-flight settlement', inFlightSettled);
     record('real cancel-future leaves the already-claimed in-flight execution settling',
@@ -958,20 +1071,53 @@ async function sectionReal(browser, artifactDir, root) {
     // control below really is issued inside the window. Without the alignment the
     // claim can fall arbitrarily close to the slot, and the scenario would
     // silently stop testing the window at all.
-    const graceAnchor = { lastTickAt: undefined, startAt: undefined, confirmedAt: undefined };
-    const grace = await confirmScheduledPlan(auth, 'report the current date', async () => {
-      const phase = await auth.json('/api/runtime/scheduler');
-      const lastTick = Date.parse(phase.lastTickAt ?? '');
-      graceAnchor.lastTickAt = phase.lastTickAt;
-      graceAnchor.startAt = new Date((Number.isFinite(lastTick) ? lastTick : Date.now()) + 5_000).toISOString();
-      graceAnchor.confirmedAt = new Date().toISOString();
-      return graceAnchor.startAt;
-    });
-    const graceStartAt = graceAnchor.startAt;
-    const graceClaimed = await waitForClaimedOccurrence(auth, grace.subscriptionId, 30_000);
-    const graceOccurrence = (graceClaimed.occurrences ?? []).find((occurrence) => occurrence.state === 'claimed');
-    const graceClaimedAt = new Date().toISOString();
-    const claimedBeforeDue = Date.now() < Date.parse(graceStartAt);
+    //
+    // The measurement is not assumed: the confirmation round trip is provider
+    // bound and ranged from 13s to 130s on this machine, so the slot is placed
+    // at `lastTick + leadTicks` with `leadTicks` derived from a measured
+    // round-trip. The slot stays aligned to the 1s tick grid, which keeps the
+    // claim one tick ahead of the slot instead of arbitrarily close to it.
+    const graceAttempts = [];
+    const confirmationRoundTripMs = await measureConfirmationRoundTripMs(auth);
+    let grace = undefined;
+    let graceStartAt = undefined;
+    let graceOccurrence = undefined;
+    let claimedBeforeDue = false;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const leadTicks = graceWindowLeadTicks(confirmationRoundTripMs, attempt);
+      const tick = await waitForFreshTick(auth);
+      const startedAt = Date.now();
+      const attemptStartAt = graceWindowStartAt(tick.lastTickAt, leadTicks, startedAt);
+      grace = await confirmScheduledPlan(auth, 'report the current date', async () => attemptStartAt);
+      let settled = false;
+      let error;
+      try {
+        const claimedPlan = await waitForClaimedOccurrence(auth, grace.subscriptionId, 30_000);
+        graceOccurrence = (claimedPlan.occurrences ?? []).find((occurrence) => occurrence.state === 'claimed');
+        settled = (claimedPlan.settlements ?? []).length > 0;
+        claimedBeforeDue = Date.now() < Date.parse(attemptStartAt) && graceOccurrence !== undefined;
+      } catch (caught) {
+        error = caught instanceof Error ? caught.message : String(caught);
+      }
+      graceAttempts.push({
+        attempt,
+        leadTicks,
+        confirmationRoundTripMs,
+        anchorTickAt: tick.lastTickAt,
+        anchorStalenessMs: tick.stalenessMs,
+        startedAt: new Date(startedAt).toISOString(),
+        startAt: attemptStartAt,
+        confirmedAt: new Date().toISOString(),
+        claimedBeforeDue,
+        settled,
+        error,
+      });
+      if (claimedBeforeDue) {
+        graceStartAt = attemptStartAt;
+        break;
+      }
+    }
+    const graceAnchor = graceAttempts.at(-1);
     const graceReceipt = await auth.json(`/api/plans/${encodeURIComponent(grace.subscriptionId)}/control`, {
       method: 'POST',
       body: JSON.stringify({
@@ -982,9 +1128,11 @@ async function sectionReal(browser, artifactDir, root) {
     });
     observe('real grace-window cancel', {
       startAt: graceStartAt,
-      lastTickAt: graceAnchor.lastTickAt,
+      confirmationRoundTripMs,
+      anchorTickAt: graceAnchor.anchorTickAt,
+      anchorStalenessMs: graceAnchor.anchorStalenessMs,
       confirmedAt: graceAnchor.confirmedAt,
-      claimedAt: graceClaimedAt,
+      attempts: graceAttempts,
       claimedBeforeDue,
       receipt: graceReceipt,
       occurrence: graceOccurrence,
@@ -997,19 +1145,71 @@ async function sectionReal(browser, artifactDir, root) {
       { claimedBeforeDue, receipt: graceReceipt });
 
     // The plan is cancelled, and the claim it already committed is driven to its
-    // terminal settlement instead of staying `claimed` forever.
-    const graceSettled = await waitForSchedulerPlan(
-      auth,
-      (plan) => plan.subscriptionId === grace.subscriptionId && (plan.settlements ?? []).length > 0,
-      180_000,
-    );
-    observe('real grace-window settlement', graceSettled);
+    // terminal settlement instead of staying `claimed` forever. The wait is
+    // timed and bounded so a timeout is distinguishable in evidence from a plan
+    // that genuinely stopped settling.
+    const graceSettleStartedAt = Date.now();
+    let graceSettleResult;
+    try {
+      const timed = await waitForSchedulerPlan(
+        auth,
+        (plan) => plan.subscriptionId === grace.subscriptionId && (plan.settlements ?? []).length > 0,
+        SETTLEMENT_WAIT_MS,
+      );
+      graceSettleResult = { plan: timed, ms: Date.now() - graceSettleStartedAt, timedOut: false };
+    } catch (caught) {
+      const plan = (await schedulerPlans(auth))
+        .find((candidate) => candidate.subscriptionId === grace.subscriptionId);
+      graceSettleResult = {
+        plan,
+        ms: Date.now() - graceSettleStartedAt,
+        timedOut: true,
+        error: caught instanceof Error ? caught.message : String(caught),
+      };
+    }
+    const graceSettled = graceSettleResult.plan ?? {};
+    // The claim's live task is the discriminator between a provider that is still
+    // executing and a claim that never ran at all. A real execution has a task
+    // in flight; a stranded claim has no task bound to the plan at all.
+    const graceTask = await findPlanLinkedTaskOrUndefined(auth, grace.subscriptionId, 2_000);
+    observe('real grace-window settlement', {
+      ...graceSettled,
+      settledAfterMs: graceSettleResult.ms,
+      timedOut: graceSettleResult.timedOut,
+      error: graceSettleResult.error,
+      linkedTask: graceTask,
+      graceClaimedAt: graceAnchor.confirmedAt,
+      graceStartAt,
+    });
     record('cancel-future inside the grace window does not strand the claim it already committed',
       graceSettled.state === 'cancelled'
         && (graceSettled.occurrences ?? []).every((occurrence) => occurrence.state !== 'claimed')
         && (graceSettled.settlements ?? []).length === 1
         && graceSettled.settlements[0].occurrenceId === graceOccurrence?.occurrenceId,
       graceSettled);
+
+    // A deliberate negative control proves that the window guard is not always
+    // true. The control confirms a real plan whose slot is already an hour past,
+    // waits for that slot to be materialised, and then evaluates the same guard
+    // the scenario uses. Because the slot is past, no claim can land inside the
+    // window and the guard has to come out false; a guard that always returned
+    // true would fail here. The control runs after the grace plan has settled so
+    // its own execution cannot slow the settlement being measured.
+    const negativeStartAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    const negative = await confirmScheduledPlan(auth, 'report the current date', negativeStartAt);
+    const negativePlan = await waitForScheduledOccurrence(auth, negative.subscriptionId, 30_000);
+    const negativeClaimedOccurrence = (negativePlan.occurrences ?? []).find((occurrence) => occurrence.state === 'claimed');
+    const negativeClaimedBeforeDue = Date.now() < Date.parse(negativeStartAt) && negativeClaimedOccurrence !== undefined;
+    observe('grace-window negative control', {
+      startAt: negativeStartAt,
+      subscriptionId: negative.subscriptionId,
+      claimedBeforeDue: negativeClaimedBeforeDue,
+      occurrenceStates: (negativePlan.occurrences ?? []).map((occurrence) => occurrence.state),
+      occurrence: negativeClaimedOccurrence,
+    });
+    record('a slot already past due cannot be claimed inside the grace window',
+      negativeClaimedBeforeDue === false && (negativePlan.occurrences ?? []).length > 0,
+      { negativeClaimedBeforeDue, occurrenceStates: (negativePlan.occurrences ?? []).map((occurrence) => occurrence.state), startAt: negativeStartAt });
 
     // The served plan list reports the same durable fact the control produced.
     await page.goto(`${base}/dashboard.html`, { waitUntil: 'domcontentloaded' });
@@ -1141,7 +1341,7 @@ async function sectionReal(browser, artifactDir, root) {
     const dispatched = await waitForSchedulerPlan(
       auth,
       (plan) => plan.subscriptionId === pending.subscriptionId && (plan.settlements ?? []).length > 0,
-      180_000,
+      SETTLEMENT_WAIT_MS,
     );
     const dispatchedTask = await findPlanLinkedTask(auth, pending.subscriptionId, 60_000);
     observe('real resumed dispatch', { clicked: resumeClicked, plan: dispatched, task: dispatchedTask });
