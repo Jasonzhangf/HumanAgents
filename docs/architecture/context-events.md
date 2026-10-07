@@ -800,6 +800,8 @@ pnpm dagpipe:validate
 
 `docs/dagpipe/context-events.graph.json` 保持 5 节点 SESE 拓扑（`event_source → normalize → pairing → projector → consume`），输出 id 为 `user_view_and_memory_digest`。实现落地后，binding 的 `ownerPath` 从设计文档迁移到真实模块文件：
 
+`graph.json` 与 `graph.binding.json` 分工不同：前者承载拓扑（设计产物，本次**未修改**），后者承载 `ownerPath` 绑定（本次**已迁移**）。`graph.json` 的 `meta.baseline` 是设计成文时的基线记录，不是 gate——`dagpipe graph validate` 不校验它，全仓十余个 graph 的 `baseline` 均为各自成文时的提交（多数早于当前 HEAD），保留原值即可，不得把它当作完整性门禁逐轮刷新（见「校验消融」）。
+
 | node | 实现后 ownerPath |
 |---|---|
 | `event_source` | `packages/context-events/src/normalize.ts` |
