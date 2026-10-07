@@ -25,8 +25,15 @@ export function isAuthSessionError(error) {
   return typeof error?.code === 'string' && AUTH_SESSION_CODES.includes(error.code)
 }
 
-// Only a same-origin absolute path is accepted, so the pairing link can never be
-// turned into an open redirect.
+// Contract: a same-origin absolute path, optionally carrying a query string and
+// a fragment. `currentEntryPath()` passes `pathname + search`, so `?task=...`
+// must survive; `#` is accepted for the same reason. The guarantee is
+// same-origin only — callers pass the result to `URLSearchParams` and
+// `location.assign`, both of which keep a leading-slash path on this origin.
+// Percent-encoded separators inside the path are not rewritten to a scheme by
+// either, so they stay same-origin too; the cases that must be refused are the
+// ones a URL parser reinterprets as authority separators (a backslash and its
+// `%5c`/`%0a`-style encoded forms, and raw control bytes).
 export function sameOriginPath(value, fallback = '/dashboard.html') {
   if (typeof value !== 'string') return fallback
   // Reject parser-significant separators and controls before trimming. URL and

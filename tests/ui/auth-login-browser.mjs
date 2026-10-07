@@ -466,6 +466,39 @@ try {
     { landed })
   await redirectContext.close()
 
+  // --- 10. the accepted domain is path + query + fragment, and the refused
+  //         domain is exactly the parser-significant separators -------------
+  // `appendPairingEntry` passes `pathname + search`, so a query string must
+  // survive; and the guarantee is same-origin, not path-only, so a fragment is
+  // accepted. Encoded slashes are accepted too — the contract is same-origin,
+  // not path-only — and each accepted variant must be proven to stay on this
+  // origin once it goes through the real `new URL` consumption the login page
+  // uses. The variants that a URL parser rewrites into an authority separator
+  // must fall back instead. Both sides are asserted, because a guard that
+  // refuses everything would look just as green on the refusal side alone.
+  const guardCases = await page.evaluate(async (base) => {
+    const module = await import('./runtime-api.js')
+    const accepted = ['/dashboard.html?task=draft-1', '/task.html?id=a%20b#trace', '/%2f%2fevil.com']
+    const refused = ['/\\evil.com', '/%5cevil.com', '/%0a//evil.com', '//evil.com', 'https://evil.com/steal', 'relative/page', '', null]
+    const root = new URL(base).origin
+    const land = (value) => {
+      const resolved = module.sameOriginPath(value)
+      const actual = new URL(resolved, base)
+      return { value, resolved, actualHref: actual.href, sameOrigin: actual.origin === root }
+    }
+    return { accepted: accepted.map(land), refused: refused.map(land) }
+  }, binding.serveBaseUrl + '/dashboard.html')
+  observe('same-origin path guard domain', guardCases)
+  record('a query string and a fragment survive as the same-origin entry',
+    guardCases.accepted.every((entry) => entry.resolved === entry.value),
+    guardCases.accepted)
+  record('every accepted variant lands on this origin through the real URL consumer',
+    guardCases.accepted.every((entry) => entry.sameOrigin),
+    guardCases.accepted)
+  record('encoded or raw authority separators fall back to the same-origin entry',
+    guardCases.refused.every((entry) => entry.resolved === '/dashboard.html' && entry.sameOrigin),
+    guardCases.refused)
+
   observe('page errors', [...pageErrors])
   observe('console errors', [...consoleErrors])
   record('the pairing pages raise no uncaught page error', pageErrors.length === 0, pageErrors)
