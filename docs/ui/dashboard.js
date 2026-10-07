@@ -12,6 +12,15 @@ import {
   projectInteractionCardFromEntries,
   projectInteractionCardFromSnapshot,
 } from './interaction-card-page.js'
+import {
+  planActionsForState,
+  planControlErrorMessage,
+  planControlKey,
+  planControlPendingCopy,
+  planControlResultCopy,
+  planNextDueAt,
+  renderPlanSection,
+} from './plan-control.js'
 
 const REFRESH_MS = 4000
 const { main, status, interactionCardHosts } = makePageShell(
@@ -36,10 +45,11 @@ interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 // ── DOM regions: input panel (stable, never rebuilt) + list panel (refreshed) ──
 const inputRegion = element('section', undefined, 'quick-create')
 const statsRegion = element('section', undefined, 'stats')
+const plansRegion = element('section', undefined, 'plan-list')
 const listRegion = element('div', undefined, 'task-lists')
 main.append(inputRegion)
 if (interactionCardHost) main.append(interactionCardHost)
-main.append(statsRegion, listRegion)
+main.append(statsRegion, plansRegion, listRegion)
 
 // ── Interaction state (surVives refresh) ──
 const interaction = {
@@ -672,17 +682,99 @@ function renderDraftConfirmation(area, snap, textarea, submit, progress, autoCon
 // ── List panel (refreshed by polling) ──
 async function refreshLists() {
   try {
-    const [{ status: runtimeStatus, error }, dashboard, tasks] = await Promise.all([
+    const [{ status: runtimeStatus, error }, dashboard, tasks, scheduler] = await Promise.all([
       loadRuntimeStatus(),
       api.dashboard(),
       api.listTasks(),
+      // The scheduler read is the only surface that lists a plan which has no
+      // coordinator task yet. A failure here must not blank the task lists, so
+      // it is reported as its own typed notice instead of failing the page.
+      api.scheduler().catch((schedulerError) => ({ __error: schedulerError })),
     ])
     renderRuntimeStatus(status, runtimeStatus, error)
     renderStats(dashboard)
     renderTaskLists(dashboard, tasks)
+    renderPlanList(scheduler)
   } catch (error) {
     status.dataset.tone = 'danger'
     status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  }
+}
+
+/**
+ * The control notice belongs to the one plan it was issued against, so a
+ * result for plan A is never rendered under plan B.
+ */
+let planControlNotice = { subscriptionId: '', text: '' }
+
+async function runPlanControl(subscriptionId, action) {
+  planControlNotice = { subscriptionId, text: planControlPendingCopy(action) }
+  renderPlanList(lastSchedulerRead)
+  try {
+    const result = await api.planControl(subscriptionId, {
+      action,
+      idempotencyKey: planControlKey(subscriptionId, action),
+      requestedAt: new Date().toISOString(),
+    })
+    planControlNotice = { subscriptionId, text: planControlResultCopy(action, result) }
+  } catch (error) {
+    planControlNotice = { subscriptionId, text: planControlErrorMessage(error) }
+  }
+  await refreshLists()
+}
+
+let lastSchedulerRead
+
+/**
+ * Present every persisted execution plan the patrol reports. This includes a
+ * plan whose first occurrence has not been claimed yet, which no task page can
+ * show. Each plan renders its own durable state and only the controls that read
+ * makes available.
+ */
+function renderPlanList(scheduler) {
+  lastSchedulerRead = scheduler
+  clearNode(plansRegion)
+  const head = element('header', undefined, 'section-head')
+  const plans = scheduler?.plans ?? []
+  head.append(element('h2', '执行计划'), element('span', `${plans.length} 项`, 'section-meta'))
+  plansRegion.append(head)
+  const panel = element('div', undefined, 'panel')
+  if (scheduler?.__error) {
+    panel.append(element(
+      'p',
+      `读取执行计划失败 · ${scheduler.__error.message} · owner=${scheduler.__error.ownerId || 'unknown'} · next=${scheduler.__error.nextAction || 'inspect the runtime error'}`,
+      'empty',
+    ))
+  } else if (scheduler?.issue) {
+    panel.append(element('p', `计划巡逻上报：${scheduler.issue.code} · ${scheduler.issue.message} · next=${scheduler.issue.nextAction}`, 'empty'))
+  } else if (plans.length === 0) {
+    panel.append(element('p', '当前没有已持久化的执行计划。', 'empty'))
+  }
+  for (const plan of plans) {
+    panel.append(renderPlanSection(projectSchedulerPlan(plan), {
+      ...(planControlNotice.subscriptionId === plan.subscriptionId
+        ? { notice: planControlNotice.text }
+        : {}),
+      onControl: (action) => runPlanControl(plan.subscriptionId, action),
+    }))
+  }
+  plansRegion.append(panel)
+}
+
+/**
+ * Adapt one scheduler plan projection to the shared plan section. The list read
+ * carries no `can*` booleans, so the availability is restated from the durable
+ * `state` by the same rule the task dashboard projection publishes.
+ */
+function projectSchedulerPlan(plan) {
+  return {
+    subscriptionId: plan.subscriptionId,
+    state: plan.state,
+    nextDueAt: planNextDueAt(plan),
+    goalId: plan.goalId,
+    scheduleRevision: plan.scheduleRevision,
+    currentOccurrenceOrdinal: plan.currentOccurrenceOrdinal,
+    availableActions: planActionsForState(plan.state),
   }
 }
 
