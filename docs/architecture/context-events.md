@@ -851,7 +851,7 @@ pnpm dagpipe:validate
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
 | 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**143** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
-| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS**；task-15 在 `55eb847` 上增量复审 **PASS**；task-16 在 `3479df4` 上文档增量确认 **PASS**；task-17 在 `2d48844` 上复核 FAIL→修复后复核。四轮均零 BLOCKER。**finding 计数以 §16.2 表格行数为唯一真源：17 条 ISSUE（A–Q）+ 3 条 ADVISORY，另加 W4 补测发现的 O2**） |
+| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS**；task-15 在 `55eb847` 上增量复审 **PASS**；task-16 在 `3479df4` 上文档增量确认 **PASS**；task-17 在 `2d48844` 上复核 FAIL→修复后复核。四轮均零 BLOCKER。**finding 计数以 §16.2 表格行数为唯一真源**） |
 | 7. 按 review 结论修复并补测试 | 已完成（ISSUE-A / B / E / F / G / H 已处置，ISSUE-C / D 补测试；W4 在补测中追加发现的 O2 同属 ISSUE-E 类，已修并锁死） |
 | 8. 集成、候选自检与交付收口 | 进行中（组合最新 `origin/main`、最终 gate、merge 与 push） |
 
@@ -879,7 +879,9 @@ reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同
 | ISSUE-N | 文档（task-17 发现） | §9.1 小标题「结构缺失或为 `null` → 原生 `TypeError`」过宽：`evidenceRefs` 缺失 / `undefined` / `null` 由 `?? []` 兜底**不抛错**，`cost` 缺失也不抛错 | 已修：§9.1 单列一条说明这两个字段整体缺失/为 `null` 不进入该类，只有 `scope` 因无兜底而抛 `TypeError` |
 | ISSUE-O | 文档（task-17 发现） | §9.1 称 §11 入口「未受影响」易被读作可靠兜底，但 `evidenceRefs[].scope.{taskId,cycleId,operationId}` 为 `null`（或 `""` / `0` / `false`）时构造入口抛 `TypeError` 而 `validateCanonicalContextEvent` **不拦**（contracts `assertEvidenceRef` 用真值判断） | 已修：§9.1 明确该入口覆盖第一类的**大部分**而非全部，并列出两个已知缺口（`cost === null`、元素嵌套 scope 槽位），同时说明二者均为**既有行为**、本变更未改 `validation.ts`，且明确「该入口不是类型外输入的可靠兜底」 |
 | ISSUE-P | 文档（task-17 发现，**构成 FAIL**） | §16 第 6 行写「2 条 ADVISORY」，而 §16.2 实有 3 条；ISSUE-K 刚声明「计数与表格一致」后同一提交内再次失效（同类缺陷第三次复发） | 已修：§16 第 6 行改为与表格一致，并改为**按 §16.2 表格行数核对**后再写 |
-| ISSUE-Q | 文档（task-17 发现） | §16.2 标题仍写「（task-12）」，而该表已跨三轮；ISSUE-G 行仍保留修正前的宽口径 | 已修：标题改为跨三轮；ISSUE-G 行改写为与 §9.1 修正后的边界一致 |
+| ISSUE-Q | 文档（task-17 发现） | §16.2 标题仍写「（task-12）」，而该表已跨三轮；ISSUE-G 行仍保留修正前的宽口径 | 已修：标题改为跨四轮；ISSUE-G 行改写为与 §9.1 修正后的边界一致 |
+| ISSUE-R | 文档（Lead 自检发现） | §9.1 首句（原 `:427`）仍写「`scope` 缺失即抛 `ContextEventError`」，与紧随其后的边界段自相矛盾 | 已修：首句改为指向下段的精确边界 |
+| ISSUE-S | 文档（Lead 自检发现） | §9.1 把跨字段完整性归给 `assertConstructionInvariants`，但该自检只判 `pairing === undefined` 与 `eventId` / `payloadRef` 的派生一致，**不覆盖** scope / evidenceRefs 形状 | 已修：改为陈述事实——类型外输入的错误类型由**摘要规范化与 §11 校验中的先到者**决定，并写明该自检的实际判据 |
 | ADVISORY | 透明性（task-16 建议） | §16.3 记「变异回放 20 条，`survived = 0`」，但该轮 `PC-2`（`allowedStatusOf` 丢掉 `SUPERSEDED_STATUS`）首轮为 **SKIP**（变异串与编译产物不匹配），改用真实编译文本重放后才 KILLED | 已补记于 §16.3，避免读者误以为 20 条在同一轮被评估 |
 | ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分（312 个合法场景，0 差异）后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径 |
 | ADVISORY | 类型外输入 | `cost` 传非对象（如 `5`）不抛错，其摘要表示由 `"cost":5` 变为 `"cost":{}` | 类型外输入，合法域无影响；不增加校验层（理由同 ISSUE-G）。已随 ISSUE-G 的边界说明一并记录 |
