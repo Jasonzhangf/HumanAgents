@@ -7,7 +7,7 @@
   },
   "inputs": [
     {
-      "id": "session_plan",
+      "id": "user_configuration",
       "schema": "Object"
     }
   ],
@@ -17,7 +17,7 @@
       "operator": "humanagent-resolve-agent-config",
       "operator_version": "1",
       "inputs": [
-        "session_plan"
+        "user_configuration"
       ],
       "output": {
         "id": "agent_execution_config",
@@ -160,7 +160,7 @@
         "dsh_turn"
       ],
       "output": {
-        "id": "observed_events",
+        "id": "observed_terminal",
         "schema": "Object"
       },
       "input_selector": {
@@ -180,7 +180,7 @@
       "operator": "humanagent-settle-acp-session",
       "operator_version": "1",
       "inputs": [
-        "observed_events"
+        "observed_terminal"
       ],
       "output": {
         "id": "settled_closure",
@@ -289,7 +289,7 @@
     {
       "from": "observe_driver_events",
       "to": "settle_acp_session",
-      "arc_id": "observed_events"
+      "arc_id": "observed_terminal"
     },
     {
       "from": "settle_acp_session",

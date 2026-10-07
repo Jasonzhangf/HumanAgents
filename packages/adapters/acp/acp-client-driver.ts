@@ -58,7 +58,6 @@ interface DriverInstance {
   readonly assignmentId: string;
   readonly operationId: OperationId;
   readonly scope: ScopeRef;
-  readonly runtimeVersion: string;
   sessionId: string;
   stopRequested: boolean;
   closed: boolean;
@@ -161,7 +160,6 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       operationId: input.operationId,
       scope,
       sessionId: '',
-      runtimeVersion: runtime.version,
       stopRequested: false,
       closed: false,
       outputTexts: [],
@@ -422,23 +420,24 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       finishEvents(instance);
       const scope = instance.scope;
       const closeEvidence = evidence(OWNER, `acp/${runtime.runtime}/close/${instance.runtimeId}/${instance.executionEpoch}`, scope, []);
-      if (closeResult.closed && instance.stopRequested) {
-        return { state: 'stopped', evidenceRefs: closeEvidence };
-      }
-      if (closeResult.closed && instance.lastFailure !== undefined) {
-        return { state: 'failed', evidenceRefs: closeEvidence };
-      }
+      let state: AgentClosure['state'] = 'unknown';
       if (closeResult.closed) {
-        // The closure must agree with the terminal state the turn already
-        // reported. A truncated or refused turn is not a success, and a session
-        // that never ran a turn has no outcome to report: inventing `succeeded`
-        // there is exactly the fabricated success this seam forbids.
-        if (instance.lastStopReason === undefined) {
-          return { state: 'unknown', evidenceRefs: closeEvidence };
+        if (instance.stopRequested) {
+          state = 'stopped';
+        } else if (instance.lastFailure !== undefined) {
+          state = 'failed';
+        } else if (instance.lastStopReason !== undefined) {
+          // The closure must agree with the terminal state the turn already
+          // reported. A truncated or refused turn is not a success, and a
+          // session that never ran a turn has no outcome to report: inventing
+          // `succeeded` there is exactly the fabricated success this seam forbids.
+          state = terminalStateFor(instance.lastStopReason);
         }
-        return { state: terminalStateFor(instance.lastStopReason), evidenceRefs: closeEvidence };
       }
-      return { state: 'unknown', evidenceRefs: closeEvidence };
+      // A settled session is finished. Drop the instance so a later execution on
+      // the same driver object cannot observe this closed one.
+      instances.delete(key(instance.runtimeId, instance.executionEpoch));
+      return { state, evidenceRefs: closeEvidence };
     },
   };
 }

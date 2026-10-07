@@ -158,8 +158,6 @@ function handleLine(state: DshRunState, line: string): void {
 
 export interface DshRuntimeOptions {
   readonly args?: readonly string[];
-  readonly env?: Record<string, string | undefined>;
-  readonly cwd?: string;
   readonly timeoutMs?: number;
   readonly version?: string;
   readonly capabilities?: readonly string[];
@@ -207,7 +205,7 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
         runtimeId: input.runtimeId,
         sessionId,
         command: input.command,
-        cwd: options.cwd ?? input.workspace,
+        cwd: input.workspace,
         stderr: '',
         finalText: '',
       });
@@ -245,7 +243,6 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
         : [...args, input.prompt];
       const child = spawn(state.command, perTurnArgs, {
         cwd: state.cwd,
-        env: options.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       state.activeChild = child;
@@ -320,12 +317,12 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
       const state = requireState(input.sessionId);
       const child = state.activeChild;
       if (child === undefined || child.exitCode !== null) {
-        return { accepted: false, evidenceRef: `${OWNER}/cancel/${state.sessionId}/no-active` };
+        return { accepted: false };
       }
       child.kill('SIGTERM');
       // The submit promise rejects; the driver must not report stopped until the
       // session is closed.
-      return { accepted: true, evidenceRef: `${OWNER}/cancel/${state.sessionId}` };
+      return { accepted: true };
     },
 
     async close(input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {
@@ -334,7 +331,7 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
       sessions.delete(input.sessionId);
       const child = state.activeChild;
       if (child !== undefined && child.exitCode === null) child.kill('SIGTERM');
-      return { closed: true, evidenceRef: `${OWNER}/close/${state.sessionId}` };
+      return { closed: true };
     },
   };
 }

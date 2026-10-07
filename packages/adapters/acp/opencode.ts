@@ -8,7 +8,6 @@ import {
   assertAcpPromptResult,
   type AcpContentBlock,
   type AcpInitializeResult,
-  type AcpMcpServerConfig,
   type AcpNewSessionResult,
   type AcpPromptResult,
   type AcpSessionUpdateNotification,
@@ -62,7 +61,6 @@ interface OpenState {
   readonly backend: AcpStdioBackend;
   readonly runtimeId: string;
   readonly sessionId: string;
-  readonly backendRef: string;
   text: string;
   inFlightPrompt: Promise<SettledPrompt> | undefined;
 }
@@ -79,9 +77,6 @@ let requestSequence = 0;
 
 export interface OpencodeRuntimeOptions {
   readonly args?: readonly string[];
-  readonly env?: Record<string, string | undefined>;
-  readonly cwd?: string;
-  readonly mcpServers?: readonly AcpMcpServerConfig[];
   readonly timeoutMs?: number;
   readonly version?: string;
   readonly capabilities?: readonly string[];
@@ -124,8 +119,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
       const backend = new AcpStdioBackend({
         command: input.command,
         ...(spawnArgs.length > 0 ? { args: spawnArgs } : {}),
-        env: options.env,
-        cwd: options.cwd ?? input.workspace,
+        cwd: input.workspace,
         timeoutMs: openTimeout,
         onUpdate: (notification: AcpSessionUpdateNotification) => {
           const state = sessions.get(notification.sessionId);
@@ -163,7 +157,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
 
         const created = await backend.request('session/new', {
           cwd: input.workspace,
-          mcpServers: options.mcpServers ?? [],
+          mcpServers: [],
         }, nextId());
         if (isJsonRpcError(created)) {
           throw new AcpAdapterError({
@@ -175,13 +169,11 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           });
         }
         const session: AcpNewSessionResult = assertAcpNewSessionResult(created.result, 'session/new');
-        const backendRef = `${OWNER}/process/${backend.process.pid ?? 'unknown'}`;
 
         const state: OpenState = {
           backend,
           runtimeId: input.runtimeId,
           sessionId: session.sessionId,
-          backendRef,
           text: '',
           inFlightPrompt: undefined,
         };
@@ -239,7 +231,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
       if (!settled.ok) {
         state.text = previousText;
         if (settled.cancelled) {
-          return { stopReason: 'cancelled', outputText: '', evidenceRef: `${OWNER}/cancel/${state.sessionId}` };
+          return { stopReason: 'cancelled', outputText: '' };
         }
         throw new AcpAdapterError({
           code: 'transport-failure',
@@ -269,7 +261,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
       await state.backend.notifyAsync('session/cancel', { sessionId: state.sessionId }).catch(() => undefined);
       if (inFlight === undefined) {
         // No turn to cancel. Do not invent an acknowledgement.
-        return { accepted: false, evidenceRef: `${OWNER}/cancel/${state.sessionId}/no-turn` };
+        return { accepted: false };
       }
       const settled = await waitForPrompt(inFlight, cancelTimeout);
       if (settled === undefined) {
@@ -282,12 +274,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
         });
       }
       const cancelled = settled.cancelled || !settled.ok;
-      return {
-        accepted: cancelled,
-        evidenceRef: cancelled
-          ? `${OWNER}/cancel/${state.sessionId}`
-          : `${OWNER}/cancel/${state.sessionId}/ignored`,
-      };
+      return { accepted: cancelled };
     },
 
     async close(input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {
@@ -313,7 +300,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           cause: error,
         });
       }
-      return { closed: true, evidenceRef: state.backendRef };
+      return { closed: true };
     },
   };
 }

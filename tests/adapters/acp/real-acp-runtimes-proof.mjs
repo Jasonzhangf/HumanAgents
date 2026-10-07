@@ -34,6 +34,7 @@
  * already contains one.
  */
 
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -53,6 +54,21 @@ const TIMEOUT_MS = Number(process.env.HUMANAGENT_ACP_TIMEOUT_MS ?? 120_000);
 const REQUESTED = (process.env.HUMANAGENT_ACP_RUNTIMES ?? 'opencode,antigravity,acp-dsh')
   .split(',').map((value) => value.trim()).filter((value) => value.length > 0);
 const RECEIPT_PATH = resolve(process.env.HUMANAGENT_RECEIPT_PATH ?? join(repoRoot, 'dist', 'receipts', 'acp-runtimes-proof.json'));
+// A receipt that is not bound to a revision cannot be evidence for one.
+const CANDIDATE_REVISION = (() => {
+  try {
+    return execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return 'unknown';
+  }
+})();
+const WORKTREE_DIRTY = (() => {
+  try {
+    return execFileSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8' }).trim().length > 0;
+  } catch {
+    return true;
+  }
+})();
 const FIXED_WORKSPACE = process.env.HUMANAGENT_ACP_WORKSPACE;
 const OPENCODE_BASE_URL = process.env.HUMANAGENT_OPENCODE_BASE_URL;
 const OPENCODE_MODEL = process.env.HUMANAGENT_OPENCODE_MODEL;
@@ -213,6 +229,9 @@ async function runOne(which) {
     && checkpointText.includes('"outcome":"succeeded"')
     && resumed.recovered?.checkpoint.id.value === result.checkpoint.id.value;
   // The engine's wording is not our contract. What this receipt must prove is
+  // that the answer the driver returned is the same string the app published on
+  // its ordered `provider.output` stream: an answer cannot be committed without
+  // reaching the stream that every downstream role reads.
   // that the engine's bytes survive the transport, the driver, the app
   // projection and the event stream unchanged: the received answer is non-empty
   // and identical in the receipt and in the semantic event stream.
@@ -276,6 +295,8 @@ for (const which of REQUESTED) {
 const allPassed = results.every((result) => result.passed);
 writeFileSync(RECEIPT_PATH, JSON.stringify({
   generatedAt: new Date().toISOString(),
+  candidateRevision: CANDIDATE_REVISION,
+  worktreeDirty: WORKTREE_DIRTY,
   prompt: PROMPT,
   allPassed,
   results,

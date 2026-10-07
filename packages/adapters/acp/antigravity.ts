@@ -242,9 +242,9 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
         // The submit promise rejects with a transport failure; the acceptance
         // is real (the process was killed). The driver must not treat this as
         // `stopped` until the session is closed.
-        return { accepted: true, evidenceRef: `${OWNER}/cancel/${state.sessionId}` };
+        return { accepted: true };
       }
-      return { accepted: false, evidenceRef: `${OWNER}/cancel/${state.sessionId}/no-active` };
+      return { accepted: false };
     },
 
     async close(input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {
@@ -254,7 +254,7 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
       if (state.active && state.active.exitCode === null) {
         state.active.kill('SIGTERM');
       }
-      return { closed: true, evidenceRef: `${OWNER}/close/${state.sessionId}` };
+      return { closed: true };
     },
   };
 }

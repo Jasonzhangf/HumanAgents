@@ -304,7 +304,7 @@ test('ACP driver does not report stopped from a cancel acceptance alone', async 
 });
 
 test('ACP driver reports unknown instead of stopped when the runtime refuses to close', async () => {
-  const runtime = makeFakeRuntime({ closeResult: { closed: false, evidenceRef: 'evidence/a' } });
+  const runtime = makeFakeRuntime({ closeResult: { closed: false } });
   const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
   await driver.start(startInput());
 
@@ -396,7 +396,7 @@ function makeFakeRuntime(
     readonly loadFailure?: Error;
   } = {},
 ): AcpRuntimeAdaptor {
-  const closeResult: AcpRuntimeCloseResult = options.closeResult ?? { closed: true, evidenceRef: 'evidence/close' };
+  const closeResult: AcpRuntimeCloseResult = options.closeResult ?? { closed: true };
   return {
     runtime: 'opencode',
     version: 'test-runtime-1',

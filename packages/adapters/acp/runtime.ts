@@ -32,20 +32,16 @@ export interface AcpRuntimeSession {
 export interface AcpRuntimeSubmitResult extends AcpPromptResult {
   /** Final assistant text for this turn, already assembled by the runtime. */
   readonly outputText: string;
-  /** Optional native evidence produced by the runtime for this prompt. */
-  readonly evidenceRef?: string;
 }
 
 export interface AcpRuntimeCloseResult {
   /** Whether the runtime reported the session as actually closed. */
   readonly closed: boolean;
-  readonly evidenceRef?: string;
 }
 
 export interface AcpRuntimeCancelResult {
   /** Whether the runtime acknowledged the cancellation request. */
   readonly accepted: boolean;
-  readonly evidenceRef?: string;
 }
 
 export interface AcpRuntimeAdaptor {

@@ -6380,6 +6380,64 @@ test('an old lock handle cannot remove a replacement owner lock', async () => {
   await second.release();
 });
 
+test('ACP configuration fails closed for a missing command and an unknown driver', async () => {
+  // The host never guesses a runtime path and never falls back to another
+  // driver, so both a missing ACP command and an unknown driverRef must be
+  // rejected while the configuration is loaded.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-config-');
+  const configPath = join(controlRoot, 'config.toml');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const shipped = await readFile(configPath, 'utf8');
+  try {
+    await writeFile(configPath, shipped.replace(
+      'stopTimeoutMs = 30000',
+      ['stopTimeoutMs = 20000', '', '[execution.opencode]', 'timeoutMs = 20000', ''].join('\n'),
+    ), 'utf8');
+    await assert.rejects(
+      () => loadConfiguration(paths),
+      (error: unknown) => (error as { code?: string }).code === 'config-invalid',
+    );
+
+    await writeFile(configPath, shipped.replace('driverRef = "fake"', 'driverRef = "no-such-driver"'), 'utf8');
+    await assert.rejects(
+      () => loadConfiguration(paths),
+      (error: unknown) => (error as { code?: string }).code === 'config-capability',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('ACP composition refuses an ACP agent that has no execution section', async () => {
+  // Composition has no fallback: an opencode agent without [execution.opencode]
+  // must fail instead of running another driver.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-missing-');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const agent = {
+    agentId: 'interaction-acp-missing',
+    roleId: 'interaction' as const,
+    templateRef: 'builtin/interaction@1.0.0',
+    skills: ['input-normalization'],
+    tools: ['input.receive'],
+    permissions: ['task.read'],
+    memoryScopes: ['task'] as const,
+    resourceClass: 'foreground' as const,
+  };
+  try {
+    assert.throws(
+      () => composeAgentDriver({
+        agent: { ...agent, driverRef: 'opencode' },
+        paths,
+        workspace,
+        runtimeId: 'runtime-acp-missing',
+      }),
+      (error: unknown) => (error as { code?: string }).code === 'acp-config-missing',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('ACP opencode driver commits a checkpoint and a run manifest through the real run entry', async () => {
   // The whole point of this test is that it never composes the driver directly:
   // it edits the config a user edits, then calls the same entry the CLI calls.

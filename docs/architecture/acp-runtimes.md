@@ -3,7 +3,8 @@
 状态：`IMPLEMENTED / VERIFIED-ON-REAL-ENTRY`
 日期：2026-10-06
 证据：`pnpm proof:acp-runtimes` 的真实入口 receipt 在
-`dist/receipts/acp-runtimes-proof.json`（不在版本库内，需重新生成）
+`dist/receipts/acp-runtimes-proof.json`（不在版本库内，需重新生成）。该 receipt
+记录产生它的 `candidateRevision` 与 `worktreeDirty`，因此可以核对它属于哪个候选。
 适用范围：应用层到推理层的接线，以及 opencode / antigravity / dsh 三个执行后端的适配
 
 本文说明 HumanAgent 如何用一个 ACP 客户端驱动（client driver）加三个 runtime
@@ -109,20 +110,25 @@ args = ["--profile", "headless", "--json"]
 
 ## 7. 验证结果
 
-以下证据来自真实入口，不是 mock：
+真实入口证据（`pnpm proof:acp-runtimes`，receipt 记录 `candidateRevision`）：
 
 - 组合链路：真实用户配置 → `validateUserConfig` → `composeAgentDriver` →
   `AcpClientDriver` → adaptor → 真实引擎进程。三个 runtime 都返回 `POGS`，
-  `stopReason` 为 `end_turn`，闭包状态为 `succeeded`。
+  闭包状态为 `succeeded`，checkpoint 与 run manifest 的 scope 一致。
+- 答案投递：driver 返回的答案与 `provider.output` 事件拼出的答案相同。两者都由
+  同一次 submit 产生，因此这证明答案确实到了下游角色读取的事件流，不证明引擎
+  原始字节与最终字节的关系；harness 不断言固定令牌，因为上游对“原样复述”这类
+  prompt 的返回并不稳定。
 - 失败可见性：dsh 无凭据时 `submit` 以 `transport-failure` 抛出后端的
   `MISSING_CREDENTIAL` 原文；`load` 在两个 shim 上返回 `capability-unavailable`。
-- 失败关闭：缺少 execution 段或 `command` 时组合/校验阶段报错，未知 `driverRef`
-  报 `agent-driver-unsupported`。
-- focused tests：ACP 45、config 32、agent-templates 17，全部通过。
 - 端到端复跑：`pnpm proof:acp-runtimes` 走真实配置与组合入口，三个 runtime 都通过。
-- 字节保真：harness 断言 `answer === streamAnswer`，即 receipt 里的答案与
-  `provider.output` 事件拼出的答案逐字节相同；它不断言某个固定令牌，因为
-  上游对“原样复述”这类 prompt 的返回并不稳定。
+
+focused tests 证据（`pnpm test:acp` / `test:config` / `test:agent-templates` /
+`test:app`）：
+
+- ACP 45、config 32、agent-templates 17，全部通过。
+- 失败关闭：缺少 `[execution.opencode]` 段时 `acp-config-missing`；缺少
+  `command` 时 `config-invalid`；未知 `driverRef` 时 `config-capability`。
 - 回归用例：空转轮次不得判为 `succeeded`；被拒绝的空答案必须落为 `failed`；
   `close()` 之后不得残留 SIGKILL 宽限计时器把事件循环拖住。
 
@@ -132,7 +138,7 @@ args = ["--profile", "headless", "--json"]
 `...graph.semantic.json`，owner 绑定在 `...graph.binding.json`。图形为单源单汇：
 
 ```text
-session_plan → resolve_agent_config → compose_acp_driver → open_acp_session
+user_configuration → resolve_agent_config → compose_acp_driver → open_acp_session
    → { run_opencode_adaptor | run_antigravity_shim | run_dsh_shim }
    → observe_driver_events → settle_acp_session → commit_acp_checkpoint
    → write_run_manifest
