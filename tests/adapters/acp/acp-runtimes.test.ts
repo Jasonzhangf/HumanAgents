@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { id, type BusinessPayload, type OperationId } from '../../../packages/contracts/src/index.js';
 import {
@@ -386,4 +389,72 @@ test('ACP shim adaptor rejects a submit before a session is opened', async () =>
       (error: Error & { code?: string }) => error.code === 'session-not-found',
     );
   }
+});
+
+/**
+ * The dsh shim runs one process per turn. A shell script stands in for the CLI
+ * so the contract is locked without needing the real binary: the prompt arrives
+ * as a positional argument, and the script prints canned NDJSON run events.
+ */
+function dshStub(input: {
+  readonly lines: readonly string[];
+  readonly exitCode?: number;
+  readonly logPath?: string;
+}): readonly string[] {
+  const parts: string[] = [];
+  // The prompt is `$0` because it is passed after `sh -c <script>`; later turns
+  // add `--session-id <id>` ahead of it.
+  if (input.logPath !== undefined) parts.push(`printf '%s\\n' "$0" "$@" >> '${input.logPath}'`);
+  parts.push([`printf '%s\\n'`, ...input.lines.map((line) => `'${line}'`)].join(' '));
+  if (input.exitCode !== undefined) parts.push(`exit ${input.exitCode}`);
+  return ['-c', parts.join('; ')];
+}
+
+test('dsh shim runs one process per turn and resumes the persisted session id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'humanagent-dsh-stub-'));
+  const logPath = join(dir, 'args.log');
+  const args = dshStub({
+    logPath,
+    lines: [
+      '{"type":"session","sessionId":"session-stub-1"}',
+      '{"type":"status","phase":"turn_end","reason":{"kind":"completed"}}',
+      '{"type":"final","text":"POGS"}',
+    ],
+  });
+  const runtime = createDshRuntime({ args, timeoutMs: 10_000 });
+  const opened = await runtime.open({ runtimeId: 'runtime-dsh-oneshot', workspace: dir, command: '/bin/sh', args, timeoutMs: 10_000 });
+
+  const first = await runtime.submit({ runtimeId: opened.sessionId, sessionId: opened.sessionId, prompt: 'first', messageId: 'm-1', timeoutMs: 10_000 });
+  assert.equal(first.outputText, 'POGS');
+  assert.equal(first.stopReason, 'end_turn');
+
+  // A second turn proves the adaptor does not hold a session process open: the
+  // first process exited, and a fresh one serves this turn.
+  const second = await runtime.submit({ runtimeId: opened.sessionId, sessionId: opened.sessionId, prompt: 'second', messageId: 'm-2', timeoutMs: 10_000 });
+  assert.equal(second.outputText, 'POGS');
+
+  const invocations = (await readFile(logPath, 'utf8')).trim().split('\n');
+  // Turn one starts a session; turn two adopts the id the first turn reported.
+  assert.equal(invocations[0], 'first');
+  assert.equal(invocations.slice(1).join(' '), '--session-id session-stub-1 second');
+
+  const closed = await runtime.close({ runtimeId: opened.sessionId, sessionId: opened.sessionId, timeoutMs: 10_000 });
+  assert.equal(closed.closed, true);
+});
+
+test('dsh shim reports a failed turn instead of an empty success', async () => {
+  const args = dshStub({
+    exitCode: 1,
+    lines: [
+      '{"type":"status","phase":"turn_end","reason":{"kind":"error","error":{"code":"MISSING_CREDENTIAL"}}}',
+      '{"type":"final","text":""}',
+    ],
+  });
+  const runtime = createDshRuntime({ args, timeoutMs: 10_000 });
+  const opened = await runtime.open({ runtimeId: 'runtime-dsh-fail', workspace: '/tmp', command: '/bin/sh', args, timeoutMs: 10_000 });
+
+  await assert.rejects(
+    runtime.submit({ runtimeId: opened.sessionId, sessionId: opened.sessionId, prompt: 'x', messageId: 'm-1', timeoutMs: 10_000 }),
+    (error: Error & { code?: string }) => error.code === 'transport-failure' && /MISSING_CREDENTIAL/.test(error.message),
+  );
 });
