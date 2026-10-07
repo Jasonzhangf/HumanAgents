@@ -716,13 +716,31 @@ try {
     const module = await import('./runtime-api.js')
     const accepted = ['/dashboard.html?task=draft-1', '/task.html?id=a%20b#trace', '/%2f%2fevil.com']
     const refused = ['/\\evil.com', '/%5cevil.com', '/%0a//evil.com', '//evil.com', 'https://evil.com/steal', 'relative/page', '', null]
+    // Leading/trailing whitespace is trimmed and the caller receives the trimmed
+    // value, so these are asserted against the expected trimmed path rather than
+    // against the input. The refused group is the point of the class: trimming
+    // runs before the leading-slash and `//` checks, so whitespace can never
+    // smuggle an authority separator past them.
+    const whitespaceAccepted = [
+      { value: '  /tasks.html  ', expect: '/tasks.html' },
+      { value: '\u00a0/dashboard.html?task=draft-1\u00a0', expect: '/dashboard.html?task=draft-1' },
+      { value: '/ /evil.com', expect: '/ /evil.com' },
+      { value: '/ //evil.com', expect: '/ //evil.com' },
+      { value: '/\u00a0/evil.com', expect: '/\u00a0/evil.com' },
+    ]
+    const whitespaceRefused = ['\u00a0//evil.com', '\u00a0/\\evil.com', '   ', '\u00a0https://evil.com/steal']
     const root = new URL(base).origin
     const land = (value) => {
       const resolved = module.sameOriginPath(value)
       const actual = new URL(resolved, base)
       return { value, resolved, actualHref: actual.href, sameOrigin: actual.origin === root }
     }
-    return { accepted: accepted.map(land), refused: refused.map(land) }
+    return {
+      accepted: accepted.map(land),
+      refused: refused.map(land),
+      whitespaceAccepted: whitespaceAccepted.map((entry) => ({ ...entry, ...land(entry.value) })),
+      whitespaceRefused: whitespaceRefused.map(land),
+    }
   }, binding.serveBaseUrl + '/dashboard.html')
   observe('same-origin path guard domain', guardCases)
   record('a query string and a fragment survive as the same-origin entry',
@@ -734,6 +752,12 @@ try {
   record('encoded or raw authority separators fall back to the same-origin entry',
     guardCases.refused.every((entry) => entry.resolved === '/dashboard.html' && entry.sameOrigin),
     guardCases.refused)
+  record('leading and trailing whitespace is trimmed to a same-origin path',
+    guardCases.whitespaceAccepted.every((entry) => entry.resolved === entry.expect && entry.sameOrigin),
+    guardCases.whitespaceAccepted)
+  record('trimming cannot re-expose an authority separator and interior whitespace stays on this origin',
+    guardCases.whitespaceRefused.every((entry) => entry.resolved === '/dashboard.html' && entry.sameOrigin),
+    guardCases.whitespaceRefused)
 
   observe('page errors', [...pageErrors])
   observe('console errors', [...consoleErrors])

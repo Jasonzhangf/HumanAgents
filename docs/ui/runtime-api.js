@@ -34,6 +34,12 @@ export function isAuthSessionError(error) {
 // either, so they stay same-origin too; the cases that must be refused are the
 // ones a URL parser reinterprets as authority separators (a backslash and its
 // `%5c`/`%0a`-style encoded forms, and raw control bytes).
+// Leading and trailing whitespace is trimmed, and the caller receives the
+// trimmed value. Trimming cannot re-expose a refused form: the separator and
+// control checks run on the raw value first, and the leading-slash and `//`
+// checks run on the trimmed value, so `'\u00a0//evil.com'` still falls back.
+// Interior whitespace stays where it is and remains inside the path, which
+// keeps the result on this origin.
 export function sameOriginPath(value, fallback = '/dashboard.html') {
   if (typeof value !== 'string') return fallback
   // Reject parser-significant separators and controls before trimming. URL and
