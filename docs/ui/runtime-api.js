@@ -13,7 +13,12 @@ export const RUNTIME_EVENT_KINDS = Object.freeze([
 
 export class RuntimeApiError extends Error {
   constructor(body, status) {
-    super(body?.message || `Runtime API request failed with HTTP ${status}`)
+    // The runtime already shapes the original cause chain into a bounded body
+    // (boundedErrorCause). Keep it as the native Error cause so the caller can
+    // name the underlying failure instead of collapsing it to a status code.
+    super(body?.message || `Runtime API request failed with HTTP ${status}`, {
+      cause: body?.cause,
+    })
     this.name = 'RuntimeApiError'
     this.code = body?.code || 'runtime.request.failed'
     this.ownerId = body?.ownerId || 'humanagent.app'

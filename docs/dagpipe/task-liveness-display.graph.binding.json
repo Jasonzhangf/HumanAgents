@@ -42,28 +42,28 @@
       "productionEvidence": "runtime.ts:215 projectRuntimeTaskDashboard 在 source.liveness 存在时投影并把结果放进 RuntimeTaskDashboardProjection.liveness；优先级为 reported failure > 等待人类/资源决策 > 非 active > 观测静默对比声明预算"
     },
     "hold_transport_fact": {
-      "ownerPath": "docs/ui/task-dashboard.js",
-      "ownerRel": "docs/ui/task-dashboard.js",
-      "ownerSymbol": "EventSource(api.eventsUrl(operationId))",
-      "implementationStatus": "partial",
-      "productionWiringStatus": "unwired",
-      "productionWiringGap": "页面目前用事件流刷新 dashboard，但没有任何地方把流自身的 open/error/终态收拢记成 transport 事实，因此 interaction-work-card.js:926 的传输 chip 永远读到 undefined。契约 (packages/ui/contracts/runtime.ts:216) 明确传输事实不下发，只能由持有该流的页面本地判定"
+      "ownerPath": "docs/ui/task.js",
+      "ownerRel": "docs/ui/task.js",
+      "ownerSymbol": "subscribeTaskStream / setTransportState / effectiveTransport",
+      "implementationStatus": "implemented",
+      "productionWiringStatus": "wired",
+      "productionEvidence": "docs/ui/task.js:110 subscribeTaskStream 在 running/settling 时持有 EventSource，onopen 记 connected，受 terminalClosed/closingStream 保护的 onerror 记 lost，execution.terminal+terminalPhase==='final' 记 settled；:92 setTransportState 就地重渲染，:202 effectiveTransport 把终态收拢成 settled，因此服务端按契约关闭流不会被误报成传输丢失。已建立的流在静默掉线时不会触发 onerror，所以刷新失败也被记为 lost，成功读回则重开流并由 onopen 清除 lost（契约 packages/ui/contracts/runtime.ts 明确传输事实不下发，只能由持有该流的页面本地判定）"
     },
     "forward_to_work_card": {
       "ownerPath": "docs/ui/interaction-card-page.js",
       "ownerRel": "docs/ui/interaction-card-page.js",
-      "ownerSymbol": "projectInteractionCard",
-      "implementationStatus": "partial",
-      "productionWiringStatus": "unwired",
-      "productionWiringGap": "projectInteractionCard 的 cardMetadata 只透传 source/currentNode/ownerId/nextStep/nextAction/waitingOn/startedAt，不含 liveness 与 transport，所以传入的真实实时性事实到达不了渲染层"
+      "ownerSymbol": "projectInteractionCard / projectInteractionCardFromEntries",
+      "implementationStatus": "implemented",
+      "productionWiringStatus": "wired",
+      "productionEvidence": "projectInteractionCard 输出 cardMetadata 携带 liveness 与 transport，并新增 executionErrorTurn 把 runtime 错误的 message/code/nextAction 投影成可见 turn；projectInteractionCardFromEntries(entries, state, context) 转发 context.liveness 与 context.execution，docs/ui/task.js:164 projectTaskLiveness 即以此填充"
     },
     "render_work_card_truth": {
       "ownerPath": "docs/ui/interaction-work-card.js",
       "ownerRel": "docs/ui/interaction-work-card.js",
       "ownerSymbol": "mountInteractionWorkCard",
-      "implementationStatus": "partial",
-      "productionWiringStatus": "unwired",
-      "productionWiringGap": "interaction-work-card.js:926 已能渲染 传输 已连接/未连接，:904 已有已收拢分支，但没有任何上游填充 metadata.transport，也没有任何地方渲染 liveness 的 工作中/无活动/待回答/已失败 文案；全 docs/ui 中 liveness 出现 0 次"
+      "implementationStatus": "implemented",
+      "productionWiringStatus": "wired",
+      "productionEvidence": "renderStatus 非观测分支渲染 Provider/活性/传输 三个 chip（LIVENESS_STATE_LABELS 工作中/无活动/待回答/已失败/空闲/未知；TRANSPORT_STATE_LABELS 已连接/已收拢/实时连接已断开/未提供），事实列表新增 活性/活性原因/传输状态，renderConversation 通过 renderError 显示 下一步；tests/ui/interaction-liveness-browser.mjs 以真实浏览器断言这些文案"
     }
   }
 }

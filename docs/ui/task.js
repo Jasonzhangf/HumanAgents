@@ -43,6 +43,215 @@ const interactionCard = interactionCardHost
   : null
 interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 
+// ── Liveness + transport ─────────────────────────────────────────────────────
+//
+// The transport fact is page-local by contract (`RuntimeLivenessProjection`
+// deliberately carries no transport): only the page that holds the event stream
+// can observe a transport loss, and a server-derived value cannot be fetched
+// while that transport is down. This page holds the stream, so it keeps its own
+// `transportState`.
+//
+// `settled` is the close the server performs once the execution reached its
+// terminal state (`execution.terminal` with `terminalPhase==='final'`). The
+// browser fires `onerror` for that intentional close, so an `onerror` alone is
+// not a transport loss: a `lost` verdict needs both a real `onerror` and no
+// terminal close yet.
+//
+// The dashboard poll is what makes the card truthful while the execution is
+// live. It must keep running during `running`/`settling` — a stalled execution
+// emits no events, so only the poll can report that the activity has stopped.
+// Polling also stops being able to report once the execution is terminal, which
+// is when the card should hold its final state instead of re-observing.
+const DASHBOARD_POLL_MS = 750
+const TERMINAL_TASK_STATES = Object.freeze(['succeeded', 'failed', 'cancelled', 'stopped'])
+let transportState = 'unknown'
+let terminalClosed = false
+let taskStream = null
+let closingStream = false
+let subscribedOperationId
+let dashboardPollTimer = 0
+// The last dashboard read this page performed. A transport change re-renders
+// against it so a loss is visible before the next scheduled read.
+let lastDashboard
+
+function stopDashboardPoll() {
+  if (dashboardPollTimer) {
+    clearTimeout(dashboardPollTimer)
+    dashboardPollTimer = 0
+  }
+}
+
+function scheduleDashboardPoll(delayMs = DASHBOARD_POLL_MS) {
+  stopDashboardPoll()
+  dashboardPollTimer = setTimeout(() => {
+    dashboardPollTimer = 0
+    void refreshTaskDashboard().catch(() => {})
+  }, delayMs)
+}
+
+function setTransportState(next) {
+  if (transportState === next) return
+  transportState = next
+  // A transport change is itself a fact the card must show, and no dashboard
+  // read is scheduled between two SSE callbacks, so re-render against the last
+  // observed read. A loss therefore becomes visible immediately.
+  if (lastDashboard) updateTaskExecution(lastDashboard)
+}
+
+function closeTaskStream() {
+  if (!taskStream) return
+  closingStream = true
+  taskStream.close()
+  taskStream = undefined
+  closingStream = false
+  subscribedOperationId = undefined
+}
+
+function subscribeTaskStream(operationId) {
+  if (subscribedOperationId === operationId) return
+  closeTaskStream()
+  subscribedOperationId = operationId
+  terminalClosed = false
+  taskStream = new EventSource(api.eventsUrl(operationId))
+  taskStream.onopen = () => {
+    // A reconnected stream is a real transport fact; re-observe at once so the
+    // card reports the recovery without waiting a poll tick.
+    setTransportState('connected')
+    void refreshTaskDashboard().catch(() => {})
+  }
+  taskStream.onerror = () => {
+    if (closingStream) return
+    if (terminalClosed) return
+    setTransportState('lost')
+  }
+  for (const kind of [
+    'execution.started',
+    'provider.model',
+    'provider.output',
+    'provider.tool',
+    'provider.tool-result',
+    'provider.error',
+    'execution.settling',
+    'checkpoint.committed',
+    'execution.terminal',
+  ]) {
+    taskStream.addEventListener(kind, (message) => {
+      if (terminalClosed) return
+      let payload = {}
+      try {
+        payload = JSON.parse(message.data)
+      } catch {
+        payload = {}
+      }
+      if (payload.kind === 'execution.terminal' && payload.terminalPhase === 'final') {
+        terminalClosed = true
+        setTransportState('settled')
+        void refreshTaskDashboard().catch(() => {})
+        return
+      }
+      // A real event is a heartbeat for both facts: it proves the transport is
+      // attached, and it is the activity the dashboard read observes.
+      setTransportState('connected')
+      void refreshTaskDashboard().catch(() => {})
+    })
+  }
+}
+
+function projectTaskLiveness(dashboard) {
+  // The card is built from the interaction entries; the execution facts come
+  // from the runtime dashboard read the page performed. Both are reported
+  // facts, and the execution side may be absent.
+  return projectInteractionCardFromEntries(cardState.entries, activeInteractionId ? 'received' : 'awaiting-confirmation', {
+    liveness: dashboard.liveness,
+    execution: {
+      state: dashboard.state,
+      error: dashboard.error,
+      nextStep: dashboard.nextStep,
+    },
+  })
+}
+
+function updateTaskExecution(dashboard) {
+  // Rebuild the card from the interaction entries plus the runtime's own
+  // execution facts, keep the page-local transport fact on it, then re-apply
+  // the loaded history page so the trace is not dropped by the observation.
+  // `cardState.projection` stays the base that history is re-applied onto.
+  lastDashboard = dashboard
+  const base = projectTaskLiveness(dashboard)
+  const projection = {
+    ...base,
+    cardMetadata: { ...base.cardMetadata, transport: { state: effectiveTransport(dashboard) } },
+  }
+  cardState.projection = projection
+  interactionCard?.update(cardState.history
+    ? withTaskHistory(projection, cardState.history.query, cardState.history.result)
+    : projection)
+}
+
+/**
+ * The transport fact as the card must show it.
+ *
+ * A terminal execution means the server has closed the stream by design, so an
+ * `onerror` arriving from that close is an expected closure, not a loss. The
+ * server writes the terminal frame and then ends the response, so the browser
+ * can dispatch the close error before or after the terminal frame; deriving the
+ * fact from the observed execution state removes that race instead of relying
+ * on delivery order. A `lost` verdict therefore only survives while the
+ * execution is still live.
+ */
+function effectiveTransport(dashboard) {
+  return TERMINAL_TASK_STATES.includes(dashboard.state) ? 'settled' : transportState
+}
+
+async function refreshTaskDashboard() {
+  if (!interactionCard || !taskId || taskId === 'new') return
+  let dashboard
+  try {
+    dashboard = await api.taskDashboard(taskId)
+  } catch {
+    // A failed read is the only transport fact left once the event stream has
+    // stopped reporting. An established stream survives a silent network drop,
+    // so its `onerror` may never fire; the read failing is what proves this page
+    // can no longer observe the execution. Reporting that is the point of the
+    // card, so it is recorded instead of being retried in silence.
+    setTransportState('lost')
+    scheduleDashboardPoll()
+    return
+  }
+  if (!dashboard) return
+  if (TERMINAL_TASK_STATES.includes(dashboard.state)) {
+    // Terminal is the last thing worth observing. Hold the card here; do not
+    // keep re-observing a settled execution.
+    stopDashboardPoll()
+    if (subscribedOperationId) closeTaskStream()
+    updateTaskExecution(dashboard)
+    return
+  }
+  if (dashboard.operationId && ['running', 'settling'].includes(dashboard.state)) {
+    // A read that succeeds after a loss proves the connection is back. Re-open
+    // the stream so the recovery is an observed new connection rather than a
+    // stale `lost` carried over from the connection that failed. The stream's
+    // own `onopen` is what clears the loss here, because while an execution is
+    // live the stream is the transport this card reports on.
+    if (subscribedOperationId === dashboard.operationId && transportState === 'lost') {
+      closeTaskStream()
+    }
+    subscribeTaskStream(dashboard.operationId)
+  } else if (subscribedOperationId) {
+    closeTaskStream()
+  } else if (transportState === 'lost') {
+    // No stream is expected for this state, so the successful read is itself the
+    // proof of reachability that clears the loss. Without this a single failed
+    // read would leave a permanent false alarm on a task that has no live stream
+    // to reopen.
+    setTransportState('connected')
+  }
+  updateTaskExecution(dashboard)
+  // Keep polling while the execution is live: silence is the case this poll
+  // exists to detect, and silence produces no events of its own.
+  scheduleDashboardPoll()
+}
+
 // The card's trace is the runtime's own history for this task. It is loaded
 // from the public history surface, so the displayed turn ids and occurrence
 // times are the values the provider binding reported; when the task has no
@@ -386,6 +595,7 @@ function renderTask() {
   main.append(actions)
   attachInteractionCardHost()
   void loadTaskHistory()
+  void refreshTaskDashboard()
 }
 
 async function load() {

@@ -92,11 +92,75 @@ function cardFromEntries(entries, state = 'received', latestOccurredAt) {
   }
 }
 
+/**
+ * The only liveness copy the card may show. Every value comes from the runtime's
+ * own liveness projection (`projectRuntimeLiveness`); the card derives no timer
+ * and mints no state of its own. A state the runtime did not report stays
+ * absent instead of being guessed.
+ */
+const LIVENESS_LABELS = Object.freeze({
+  working: '工作中',
+  'no-activity': '无活动',
+  'waiting-for-answer': '待回答',
+  failed: '已失败',
+  idle: '空闲',
+  unknown: '未知',
+})
+
+function statusSeconds(millis) {
+  return millis === undefined ? undefined : Math.max(0, Math.round(millis / 1000))
+}
+
+/**
+ * The runtime's own execution error, lifted onto the card as a readable error
+ * turn. This is the only place the card may describe a failure: the message is
+ * the string the runtime reported, and the next action is the one it reported.
+ * Nothing is synthesized when the runtime reported no error.
+ */
+function executionErrorTurn(error) {
+  if (!error || !error.message) return undefined
+  return {
+    sourceKind: 'error',
+    markdown: error.message,
+    error: {
+      code: error.code,
+      message: error.message,
+      ownerId: error.ownerId,
+      nextStep: error.nextAction,
+    },
+  }
+}
+
+function livenessCopy(liveness) {
+  if (liveness === undefined || liveness === null) return undefined
+  const label = LIVENESS_LABELS[liveness.state]
+  if (label === undefined) return undefined
+  // Both figures are reported by the runtime; neither is a UI timer.
+  const seconds = statusSeconds(liveness.silentForMs)
+  if (seconds === undefined) return label
+  const budgetMs = Number(liveness.silenceBudgetMs)
+  return Number.isFinite(budgetMs)
+    ? `${label}，已静默 ${seconds} 秒（阈值 ${budgetMs} 毫秒）`
+    : `${label}，已静默 ${seconds} 秒`
+}
+
 function projectInteractionCard(input) {
+  const liveCopy = livenessCopy(input.liveness)
+  const executionTurn = executionErrorTurn(input.execution?.error)
   return {
     surface: 'interaction-work-card',
-    taskState: input.taskState,
-    statusbar: input.source,
+    // When the page observed the real execution, its state is the truth this
+    // card must show. The interaction's own lifecycle only supplies the state
+    // while there is no execution to observe.
+    taskState: input.execution?.state ?? input.taskState,
+    statusbar: liveCopy === undefined
+      ? input.source
+      : {
+          ...input.source,
+          detail: input.source?.detail
+            ? `${input.source.detail} · ${liveCopy}`
+            : liveCopy,
+        },
     cardMetadata: {
       source: input.card.source,
       currentNode: input.card.currentNode,
@@ -105,10 +169,15 @@ function projectInteractionCard(input) {
       nextAction: input.card.nextAction,
       waitingOn: input.card.waitingOn,
       startedAt: input.card.startedAt,
+      ...(input.liveness === undefined ? {} : { liveness: input.liveness }),
+      ...(input.transport === undefined ? {} : { transport: input.transport }),
     },
     conversation: {
       summary: input.conversation?.summary || { missing: true },
-      turns: input.conversation?.turns || [],
+      turns: [
+        ...(input.conversation?.turns || []),
+        ...(executionTurn === undefined ? [] : [executionTurn]),
+      ],
     },
     actions: input.actions || [],
     trace: { count: input.history?.items?.length ?? 0, items: input.history?.items ?? [] },
@@ -235,7 +304,13 @@ export function projectInteractionCardFromSnapshot(snapshot, state) {
   })
 }
 
-export function projectInteractionCardFromEntries(entries, state = 'received') {
+/**
+ * Projects the interaction card for a task. `context` carries the execution
+ * facts the page obtained from the runtime dashboard read model — the liveness
+ * projection and the runtime's own error. Both are facts the runtime reported;
+ * neither is derived here. They stay absent when the read reported none.
+ */
+export function projectInteractionCardFromEntries(entries, state = 'received', context = {}) {
   const effectiveEntries = entries.length > 0
     ? entries
     : [{
@@ -269,6 +344,8 @@ export function projectInteractionCardFromEntries(entries, state = 'received') {
       })),
     },
     actions: [],
+    ...(context.liveness === undefined ? {} : { liveness: context.liveness }),
+    ...(context.execution === undefined ? {} : { execution: context.execution }),
     // Same as the snapshot projection: the interaction page itself is not a
     // provider trace source, so the card reports the absent history explicitly.
     nodeCards: [],

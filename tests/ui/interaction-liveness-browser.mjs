@@ -25,7 +25,10 @@
  *
  * The transport-loss case is why the transport fact is page-local: this harness
  * takes the browser offline, and a server-derived transport value would be
- * unfetchable at exactly that moment. The `working` case also asserts the
+ * unfetchable at exactly that moment. Chromium's offline emulation does not tear
+ * down an already-established loopback EventSource, so the stream's own `onerror`
+ * may never fire; what the page can observe is that its next read fails, and that
+ * failed read is what must be rendered. The `working` case also asserts the
  * settled-stream rule, because the server closes the stream when the execution
  * terminates and that expected close must not be rendered as a transport loss.
  *
@@ -165,7 +168,14 @@ async function startHarness({ scenario, root }) {
     binding,
     // The working case must stay observable long enough for the card to render
     // its live state; the gated cases hold the stream themselves.
-    stepDelayMs: scenario === 'working' ? 1_200 : 20,
+    //
+    // The no-activity case also releases its gate, and a replay that finishes in
+    // about a tenth of a second cannot be told apart from an instant completion:
+    // the card does return to 工作中, but only for the length of the replay. The
+    // resumed stream is therefore paced like the working case so the recovery is
+    // a state a real observer can actually sample. This changes the stimulus,
+    // not the assertion.
+    stepDelayMs: scenario === 'working' || scenario === 'no-activity' ? 1_200 : 20,
     mode: scenario === 'failure' ? 'fail' : scenario === 'working' ? 'complete' : 'stall',
   });
   const accessControl = await AccessControlService.open({
@@ -246,6 +256,30 @@ async function waitForCardText(page, label, pattern, timeoutMs) {
   }, timeoutMs);
 }
 
+/**
+ * Navigate to the task page the liveness assertions observe.
+ *
+ * The dashboard navigates itself to its own task surface as soon as the
+ * dispatched task appears in the list, so an explicit navigation issued at the
+ * same moment races that page-initiated navigation. Chromium reports the loser
+ * as `net::ERR_ABORTED`. Retrying after the competing navigation settles reaches
+ * the intended page; it does not weaken any assertion, because a page that
+ * genuinely cannot load still fails every attempt and the card assertions below
+ * still have to pass.
+ */
+async function gotoTaskPage(page, url) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= 4 || !message.includes('ERR_ABORTED')) throw error;
+      await sleep(300);
+    }
+  }
+}
+
 /** Drive the real served dashboard intake: type, submit, confirm. Nothing else. */
 async function dispatchTaskThroughUi(page, harness) {
   await page.goto(`${harness.origin}/dashboard.html`, { waitUntil: 'domcontentloaded' });
@@ -321,9 +355,7 @@ async function runScenario(browser, scenario, result) {
     result.taskId = dispatched.taskId;
     result.confirmLabel = dispatched.confirmText;
 
-    await page.goto(`${harness.origin}/task.html?task=${encodeURIComponent(dispatched.taskId)}`, {
-      waitUntil: 'domcontentloaded',
-    });
+    await gotoTaskPage(page, `${harness.origin}/task.html?task=${encodeURIComponent(dispatched.taskId)}`);
     result.taskUrl = page.url();
     await page.waitForSelector(CARD_HOST, { timeout: 15_000 });
 

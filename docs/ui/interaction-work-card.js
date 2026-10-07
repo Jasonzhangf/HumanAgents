@@ -15,6 +15,27 @@ const TASK_STATE_LABELS = Object.freeze({
   stale: '过期',
 })
 
+// The live verdict of a running execution, reported by the runtime's own
+// liveness projection. The card only names it; it never derives a timer.
+const LIVENESS_STATE_LABELS = Object.freeze({
+  working: '工作中',
+  'no-activity': '无活动',
+  'waiting-for-answer': '待回答',
+  failed: '已失败',
+  idle: '空闲',
+  unknown: '未知',
+})
+
+// The page-local transport fact of the event stream this page holds.
+// `settled` is the close the server performs once the execution reached its
+// terminal state, so it is not a failure. Only `lost` is a real transport loss.
+const TRANSPORT_STATE_LABELS = Object.freeze({
+  connected: '已连接',
+  settled: '已收拢',
+  lost: '实时连接已断开',
+  unknown: '未提供',
+})
+
 const TRACE_KIND_LABELS = Object.freeze({
   user: '用户',
   assistant: '助手',
@@ -130,6 +151,40 @@ function boolLabel(value, trueLabel, falseLabel) {
   if (value === true) return trueLabel
   if (value === false) return falseLabel
   return '未提供'
+}
+
+function statusSeconds(millis) {
+  return Number.isFinite(millis) ? Math.max(0, Math.round(millis / 1000)) : undefined
+}
+
+/**
+ * Names the liveness verdict the runtime reported. The seconds figure is the
+ * runtime's own `silentForMs`, so the card never runs its own clock. An absent
+ * liveness fact reads as not provided instead of a definite verdict.
+ */
+function livenessLabel(liveness) {
+  if (!liveness) return '未提供'
+  const label = LIVENESS_STATE_LABELS[liveness.state]
+  if (label === undefined) return '未提供'
+  const seconds = statusSeconds(liveness.silentForMs)
+  if (seconds === undefined) return label
+  return `${label}（${seconds} 秒）`
+}
+
+/**
+ * Names the transport fact of the event stream this page holds. `settled` and
+ * `lost` are deliberately different: the first is the expected close after the
+ * execution reached its terminal state, the second is a real transport failure.
+ */
+function transportLabel(transport) {
+  if (!transport) return TRANSPORT_STATE_LABELS.unknown
+  return TRANSPORT_STATE_LABELS[transport.state] ?? TRANSPORT_STATE_LABELS.unknown
+}
+
+function transportStale(transport) {
+  if (!transport) return '未提供'
+  if (transport.state === 'settled' || transport.state === 'lost') return '否'
+  return boolLabel(transport.stale, '是', '否')
 }
 
 function scopedValue(value) {
@@ -923,10 +978,12 @@ function renderStatus(projection) {
     const providerChip = create('span', 'iwc-state-chip', `Provider ${valueOrUnknown(metadata.provider?.state)}`)
     providerChip.dataset.state = metadata.provider?.state || 'unknown'
     top.append(providerChip)
-    const transportChip = create('span', 'iwc-state-chip', `传输 ${boolLabel(metadata.transport?.connected, '已连接', '未连接')}`)
-    transportChip.dataset.state = metadata.transport === undefined || metadata.transport === null
-      ? 'unknown'
-      : metadata.transport.connected ? 'connected' : 'disconnected'
+    const livenessChip = create('span', 'iwc-state-chip', `活性 ${livenessLabel(metadata.liveness)}`)
+    livenessChip.dataset.state = metadata.liveness?.state || 'unknown'
+    top.append(livenessChip)
+    const transportCopy = transportLabel(metadata.transport)
+    const transportChip = create('span', 'iwc-state-chip', `传输 ${transportCopy}`)
+    transportChip.dataset.state = metadata.transport?.state || 'unknown'
     top.append(transportChip)
   }
   status.append(top)
@@ -947,13 +1004,15 @@ function renderStatus(projection) {
     : [
         ['当前节点', metadata.currentNode],
         ['责任方', metadata.ownerId],
+        ['活性', livenessLabel(metadata.liveness)],
+        ['活性原因', metadata.liveness?.reason],
         ['下一步', metadata.nextStep],
         ['下一步操作', metadata.nextAction],
         ['等待对象', metadata.waitingOn],
         ['开始时间', metadata.startedAt],
         ['Provider 最后事件', metadata.provider?.lastEventAt],
         ['传输最后同步', metadata.transport?.lastSyncedAt],
-        ['传输状态', `${boolLabel(metadata.transport?.connected, '已连接', '未连接')} · stale=${boolLabel(metadata.transport?.stale, '是', '否')}`],
+        ['传输状态', `${transportLabel(metadata.transport)} · stale=${transportStale(metadata.transport)}`],
         ['停止状态', `providerStopped=${boolLabel(metadata.settlement?.providerStopped, '是', '否')} · checkpointCommitted=${boolLabel(metadata.settlement?.checkpointCommitted, '是', '否')}`],
         ['最后业务更新', `${valueOrUnknown(metadata.lastBusiness?.kind)} · ${valueOrUnknown(metadata.lastBusiness?.at)} · ${valueOrUnknown(metadata.lastBusiness?.ref)}`],
       ])
