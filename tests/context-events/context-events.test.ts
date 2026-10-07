@@ -845,7 +845,9 @@ test('§9.5 ISSUE-E：同一事实在不同嵌套键序下 dataDigest 相同（s
     locator: 'locator-1',
     source: 'source-1',
     kind: 'tool',
-    evidenceId: { scope: 'evidence', value: 'evidence-1' },
+    // `evidenceId` 是 `ScopedId` 叶子；它的**自身**键序也必须被规范化（§9.5「ScopedId 叶子
+    // 统一按 `scope` → `value` 重建」，两处出现位置之一）。故此处连叶子一起反转。
+    evidenceId: { value: 'evidence-1', scope: 'evidence' },
   } as const;
   // cost：4 个字段全给，键序正/反。
   const costForward = { tokensInput: 1, tokensOutput: 2, bytesAvoided: 3, bytesRetrieved: 4 };
@@ -873,6 +875,107 @@ test('§9.5 ISSUE-E：同一事实在不同嵌套键序下 dataDigest 相同（s
   // 与文档字段序独立算出的摘要一致（证明规范化的口径就是文档那一份）。
   assert.equal(createContextEvent(forward).dataDigest, goldenDigestOf(forward));
   assert.equal(goldenDigestOf(forward), goldenDigestOf(reversed));
+  // 反转版（含 `evidenceId` 叶子反转）同样落在 golden 上：golden 与「键序无关」互相印证。
+  assert.equal(createContextEvent(reversed).dataDigest, goldenDigestOf(reversed));
+  // golden 的规范 JSON 里 `evidenceId` 叶子就是 `scope` → `value` 序。
+  assert.ok(goldenDigestPayload(reversed).includes('"evidenceId":{"scope":"evidence","value":"evidence-1"}'));
+  assert.equal(goldenDigestPayload(reversed).includes('"evidenceId":{"value":"evidence-1","scope":"evidence"}'), false);
+  // 硬编码期望值：把「同一事实只有键序不同」锁成单一摘要，任一位置的键序泄漏都会使此断言失败。
+  assert.equal(
+    createContextEvent(reversed).dataDigest,
+    'sha256:c5280b2c9022e3b23343d58ad6f23d2f86886c3c530cb1aa238bb100c41cdb40',
+  );
+});
+
+/*
+ * §9.5「`ScopedId` 叶子统一按 `scope` → `value` 重建」：`ScopedId` 在摘要里出现**两处**
+ * ——`ScopeRef` 的四个槽位与 `evidenceRefs[].evidenceId`——两处必须走同一个规范化函数。
+ * 上一条用例反转的是**槽位顺序**（organId 与 taskId 谁在前）；本条反转的是每个叶子
+ * **自身的** `{scope, value}` 键序，逐个出现位置验证，并证明该叶子仍真实参与哈希。
+ */
+test('§9.5 ISSUE-E：ScopedId 叶子统一按 scope→value 重建（两处出现位置逐个锁死）', () => {
+  const organLeaf = { scope: 'organ', value: ORGAN } as const;
+  const taskLeaf = { scope: 'task', value: 'task-1' } as const;
+  const cycleLeaf = { scope: 'cycle', value: 'cycle-1' } as const;
+  const operationLeaf = { scope: 'operation', value: 'operation-1' } as const;
+
+  const base = { type: 'error.detected', sourceId: 'scoped-id-leaf', occurredAt: at(1), summary: '摘要' } as const;
+
+  // 位置 1：顶层 `scope` 的四个槽位，每个槽位的 `ScopedId` 叶子键序反转。
+  const scopeForward: ScopeRefLike = {
+    organId: organLeaf,
+    taskId: taskLeaf,
+    cycleId: cycleLeaf,
+    operationId: operationLeaf,
+  };
+  const scopeLeafReversed: ScopeRefLike = {
+    organId: { value: ORGAN, scope: 'organ' },
+    taskId: { value: 'task-1', scope: 'task' },
+    cycleId: { value: 'cycle-1', scope: 'cycle' },
+    operationId: { value: 'operation-1', scope: 'operation' },
+  };
+  const scopeOnly: ContextEventInput = { ...base, scope: scopeForward };
+  assert.equal(
+    createContextEvent(scopeOnly).dataDigest,
+    createContextEvent({ ...base, scope: scopeLeafReversed }).dataDigest,
+  );
+  // 与 golden 一致：golden 的规范 JSON 里四个槽位都是 scope → value 序。
+  assert.equal(createContextEvent({ ...base, scope: scopeLeafReversed }).dataDigest, goldenDigestOf(scopeOnly));
+  assert.ok(goldenDigestPayload(scopeOnly).includes('"organId":{"scope":"organ","value":"organ-1"}'));
+  assert.equal(goldenDigestPayload(scopeOnly).includes('{"value":"organ-1","scope":"organ"}'), false);
+
+  // 位置 2：`evidenceRefs[].evidenceId` 与 `evidenceRefs[].scope` 的叶子键序反转。
+  const evidenceForward: EvidenceRefLike = {
+    evidenceId: { scope: 'evidence', value: 'evidence-1' },
+    kind: 'tool',
+    source: 'source-1',
+    locator: 'locator-1',
+    digest: 'sha256:deadbeef',
+    scope: scopeForward,
+  };
+  const evidenceLeafReversed: EvidenceRefLike = {
+    evidenceId: { value: 'evidence-1', scope: 'evidence' },
+    kind: 'tool',
+    source: 'source-1',
+    locator: 'locator-1',
+    digest: 'sha256:deadbeef',
+    scope: scopeLeafReversed,
+  };
+  const refsOnly: ContextEventInput = { ...base, scope: scopeForward, evidenceRefs: [evidenceForward] };
+  const refsReversed = createContextEvent({
+    ...base,
+    scope: scopeLeafReversed,
+    evidenceRefs: [evidenceLeafReversed],
+  });
+
+  assert.equal(createContextEvent(refsOnly).dataDigest, refsReversed.dataDigest);
+  // 两处一起反转仍等于按文档字段序独立算出的 golden：golden 与「键序无关」互相印证。
+  assert.equal(refsReversed.dataDigest, goldenDigestOf(refsOnly));
+  assert.equal(goldenDigestOf(refsOnly), goldenDigestOf({
+    ...base,
+    scope: scopeLeafReversed,
+    evidenceRefs: [evidenceLeafReversed],
+  }));
+  const payload = goldenDigestPayload(refsOnly);
+  assert.ok(payload.includes('"evidenceId":{"scope":"evidence","value":"evidence-1"}'));
+  assert.ok(payload.includes('"scope":{"organId":{"scope":"organ","value":"organ-1"}'));
+  assert.equal(payload.includes('"evidenceId":{"value":"evidence-1","scope":"evidence"}'), false);
+  assert.equal(payload.includes('{"value":"organ-1","scope":"organ"}'), false);
+
+  // 叶子**取值**仍然参与哈希：规范化只消除键序，不吞掉叶子。
+  const otherLeafValue = createContextEvent({
+    ...base,
+    scope: scopeForward,
+    evidenceRefs: [{ ...evidenceForward, evidenceId: { scope: 'evidence', value: 'evidence-2' } }],
+  });
+  assert.notEqual(otherLeafValue.dataDigest, createContextEvent(refsOnly).dataDigest);
+  // 槽位取值同样参与哈希。
+  const otherSlotValue = createContextEvent({
+    ...base,
+    scope: { ...scopeForward, organId: { scope: 'organ', value: 'organ-2' } },
+    evidenceRefs: [evidenceForward],
+  });
+  assert.notEqual(otherSlotValue.dataDigest, createContextEvent(refsOnly).dataDigest);
 });
 
 test('§9.5 ISSUE-E：数组顺序仍然参与哈希（evidenceRefs 换序 → dataDigest 不同，不得重排）', () => {
@@ -2437,19 +2540,15 @@ test('§14 端到端：适配器入口 → applyPairingOutcome → narrative/dig
  *     避免把契约未定义的错误形状固化为期望。
  *     `ProviderEventKind` 为 7 值闭合集且全部命中判据，故 provider-event 无此偏离。
  *
- * O2. §9.5「重建递归适用于所有嵌套对象」尚未完全达成（ISSUE-E 的残留）：
- *     `normalize.ts` 的 `scopeForDigest` 把 `organId` / `taskId` / `cycleId` / `operationId`
- *     逐个重建为 `{ scope, value }`，`costForDigest` 也按固定键序重建；但
- *     `evidenceRefForDigest` 对 **`evidenceRefs[].evidenceId`** 仍按引用参与哈希
- *     （`evidenceId: evidenceRef.evidenceId`），因此 `ScopedId` 的键序会泄漏进摘要。
- *     实测（同一事实，仅 `evidenceId` 内部键序不同）：
- *       `{scope:'evidence',value:'evidence-1'}` → sha256:c5280b2c…41cdb40
- *       `{value:'evidence-1',scope:'evidence'}` → sha256:538dd337…8a8b331
- *     两者都通过 `validateCanonicalContextEvent`，且 canonical 事件里的 `evidenceId`
- *     原样保留各自键序。§9.5 规则 3 说「元素内部键序按上表规范化」，而 `evidenceRefs[]`
- *     的固定键序表含 `evidenceId`；§9.5 开篇亦说明「按引用参与哈希会使同一事实得到不同摘要，
- *     这正是要消除的情形」。故这属实现未覆盖的同类缺陷，**本文件不放宽断言去固化它**：
- *     `§9.5 ISSUE-E` 用例只在 `evidenceId` 键序一致的前提下断言「同一事实 → 同一摘要」，
- *     并在注释中标明该残留；修复后应把 `evidenceId` 的键序也纳入该用例。
- *     （对照：`scope` 的 `organId` 等同类 `ScopedId` 已规范化，故 `scope` 侧无此问题。）
+ * O2. 【已修复，保留记录】§9.5「重建递归适用于所有嵌套对象」曾有一处未达成（ISSUE-E 的残留）：
+ *     `evidenceRefForDigest` 曾对 **`evidenceRefs[].evidenceId`** 按引用参与哈希
+ *     （`evidenceId: evidenceRef.evidenceId`），而 `scopeForDigest` 已把 `organId` / `taskId` /
+ *     `cycleId` / `operationId` 逐个重建为 `{ scope, value }`。因此 `ScopedId` 的键序会从该叶子
+ *     泄漏进摘要：同一事实 `{scope:'evidence',value:'evidence-1'}` → sha256:c5280b2c…41cdb40，
+ *     `{value:'evidence-1',scope:'evidence'}` → sha256:538dd337…8a8b331，两者都通过
+ *     `validateCanonicalContextEvent`。
+ *     已由 Lead 修复（`scopedIdForDigest` 成为 `ScopedId` 的唯一规范化 owner，
+ *     `ScopeRef` 四槽位与 `evidenceRefs[].evidenceId` 共用它；§9.5 补记该规则）。
+ *     本文件的 `§9.5 ISSUE-E：ScopedId 叶子统一按 scope→value 重建` 用例现已覆盖两处出现位置；
+ *     把 `evidenceId: scopedIdForDigest(...)` 改回按引用会使该用例变红（已实测）。
  */
