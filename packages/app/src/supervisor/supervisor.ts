@@ -345,7 +345,17 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 2_000;
+// Graceful takeover ceiling. Measured over 532 healthy takeover iterations
+// against the compiled CLI: the previous owner's SIGTERM-to-exit tail is
+// p99 2385ms under gate plus 48-96 busy-loop load, the real gate itself has
+// produced 3.8s+ exits, and the largest observed real exit was 8788ms under
+// 48-96-way oversubscription. The ceiling is not a delay: the healthy-host
+// median exit is 16ms, so ordinary takeovers are unaffected. Forced
+// termination is deliberately unavailable in this runtime, so this budget is
+// the only recovery path and must cover the measured tail with margin; the
+// typed daemon-takeover.failed error remains the honest fallback when the OS
+// still refuses to schedule the owner's shutdown.
+const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const DEFAULT_STOP_POLL_INTERVAL_MS = 25;
 
 function assertStopTimeout(value: number | undefined, label: string, fallback: number): number {

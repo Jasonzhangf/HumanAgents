@@ -1493,7 +1493,14 @@ test('CLI serve takes over the previous owner and keeps rooted memory across res
     duplicate.stderr.on('data', (chunk: Uint8Array) => { duplicateStderr += String(chunk); });
     const duplicateLaunch = await new Promise<{ readonly url: string }>((resolve, reject) => {
       let output = '';
-      const timeout = setTimeout(() => reject(new Error(`takeover serve startup timed out: ${output}; stderr=${duplicateStderr}`)), 5_000);
+      // The takeover serve cannot start until the previous owner finishes its
+      // graceful shutdown, whose ceiling is now 10s. 532 measured takeover
+      // iterations show the previous owner's SIGTERM-to-exit tail at p99
+      // 2385ms under gate plus 48-96 busy-loop load and up to 8788ms under
+      // heavy oversubscription, so a legitimate takeover can outlast the old
+      // 5s startup budget. This budget only covers the first serve that has to
+      // wait for the previous owner; it does not weaken the takeover assertion.
+      const timeout = setTimeout(() => reject(new Error(`takeover serve startup timed out: ${output}; stderr=${duplicateStderr}`)), 20_000);
       duplicate.stdout.on('data', (chunk: Uint8Array) => {
         output += String(chunk);
         try {
