@@ -401,9 +401,10 @@ try {
   await deleteContext.close()
 
   // --- 4c. the legacy interaction form reaches the same pairing surface ----
-  // The task form on interaction.html performs create/update/delete. All three
-  // rejections must offer the login page, not just the create one, so the same
-  // typed session error is driven through the update path here as well.
+  // The task form on interaction.html performs create/update/delete, and all
+  // three catches now route through the shared pairing entry. All three are
+  // driven here, because a proof that clicks only create would leave the other
+  // two fixes unverified at the public boundary.
   const formContext = await browser.newContext()
   const formPage = await formContext.newPage()
   const formRequests = []
@@ -419,12 +420,26 @@ try {
     if (path === '/api/auth/session') return body({ paired: true, sessionId: 'session-form-proof' })
     if (path === '/api/runtime/status') return body({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true })
     if (path === '/api/tasks' && request.method() === 'GET') {
+      // One row is listed so the real page can select it and enable save/delete.
       return body({
-        draft: [], waiting: [], running: [], completed: [], stopped: [], failed: [],
+        draft: [],
+        waiting: [],
+        running: [{
+          taskId: { value: 'task-form-proof' },
+          title: '配对证明任务',
+          state: 'running',
+          stateLabel: '运行中',
+          currentState: 'running',
+          updatedAt: new Date().toISOString(),
+        }],
+        completed: [], stopped: [], failed: [],
       })
     }
+    if (path === '/api/tasks/task-form-proof' && request.method() === 'GET') {
+      return body({ taskId: { value: 'task-form-proof' }, title: '配对证明任务', recentEvents: [] })
+    }
     if (path === '/api/tasks' && request.method() === 'POST') {
-      formRequests.push(`POST ${path}`)
+      formRequests.push('POST /api/tasks')
       return body({
         code: 'auth.session.missing',
         ownerId: ACCESS_CONTROL_OWNER,
@@ -433,11 +448,20 @@ try {
       }, 401)
     }
     if (path === '/api/tasks/task-form-proof' && request.method() === 'PATCH') {
-      formRequests.push(`PATCH ${path}`)
+      formRequests.push('PATCH /api/tasks/task-form-proof')
       return body({
         code: 'auth.session.expired',
         ownerId: ACCESS_CONTROL_OWNER,
         message: 'browser session has expired',
+        nextAction: 'open the login page and pair this browser',
+      }, 401)
+    }
+    if (path === '/api/tasks/task-form-proof' && request.method() === 'DELETE') {
+      formRequests.push('DELETE /api/tasks/task-form-proof')
+      return body({
+        code: 'auth.session.invalid',
+        ownerId: ACCESS_CONTROL_OWNER,
+        message: 'browser session is invalid',
         nextAction: 'open the login page and pair this browser',
       }, 401)
     }
@@ -446,18 +470,57 @@ try {
   await formPage.goto(`${binding.serveBaseUrl}/interaction.html`, { waitUntil: 'domcontentloaded' })
   await formPage.waitForSelector('[data-create-task-form] input[name="title"]', { timeout: 30_000 })
 
-  await formPage.fill('[data-create-task-form] input[name="title"]', '配对证明任务')
-  await formPage.click('[data-create-task-form] button[data-action="create"]')
-  await formPage.waitForSelector('[data-create-task-feedback] [data-auth-pair-link]', { timeout: 30_000 })
-  const createRejection = await formPage.evaluate(() => ({
+  // Read the pairing link the form surface is currently offering, if any.
+  const formRejection = () => formPage.evaluate(() => ({
     link: document.querySelector('[data-create-task-feedback] [data-auth-pair-link]')?.getAttribute('href') ?? '',
     feedback: document.querySelector('[data-create-task-feedback]')?.textContent ?? '',
   }))
-  observe('interaction form create rejection', { formRequests, ...createRejection })
+  const linkIsLogin = (link) => new URL(link, `${binding.serveBaseUrl}/interaction.html`).pathname === '/login.html'
+
+  // create
+  await formPage.fill('[data-create-task-form] input[name="title"]', '配对证明任务')
+  await formPage.click('[data-create-task-form] button[data-action="create"]')
+  await formPage.waitForSelector('[data-create-task-feedback] [data-auth-pair-link]', { timeout: 30_000 })
+  const createRejection = await formRejection()
+  observe('interaction form create rejection', createRejection)
   record('the interaction create form links to the login page on an auth rejection',
-    createRejection.link.includes('authCode=auth.session.missing')
+    linkIsLogin(createRejection.link)
+      && createRejection.link.includes('authCode=auth.session.missing')
       && createRejection.feedback.includes('browser session is required'),
     createRejection)
+
+  // update: select the real listed row, which enables save/delete.
+  await formPage.waitForSelector('.task-row', { timeout: 30_000 })
+  await formPage.click('.task-row')
+  await formPage.waitForFunction(
+    () => !document.querySelector('[data-create-task-form] button[data-action="update"]')?.disabled,
+    undefined, { timeout: 30_000 },
+  )
+  await formPage.click('[data-create-task-form] button[data-action="update"]')
+  await formPage.waitForSelector('[data-create-task-feedback] [data-auth-pair-link]', { timeout: 30_000 })
+  const updateRejection = await formRejection()
+  observe('interaction form update rejection', updateRejection)
+  record('the interaction update path links to the login page on an auth rejection',
+    linkIsLogin(updateRejection.link)
+      && updateRejection.link.includes('authCode=auth.session.expired')
+      && updateRejection.feedback.includes('browser session has expired'),
+    updateRejection)
+
+  // delete: the real confirmation dialog is accepted by the page-level handler.
+  await formPage.click('[data-create-task-form] button[data-action="delete"]')
+  await formPage.waitForSelector('[data-create-task-feedback] [data-auth-pair-link]', { timeout: 30_000 })
+  const deleteRejectionForm = await formRejection()
+  observe('interaction form delete rejection', deleteRejectionForm)
+  record('the interaction delete path links to the login page on an auth rejection',
+    linkIsLogin(deleteRejectionForm.link)
+      && deleteRejectionForm.link.includes('authCode=auth.session.invalid')
+      && deleteRejectionForm.feedback.includes('browser session is invalid'),
+    deleteRejectionForm)
+
+  record('all three interaction form mutations really reached the runtime',
+    ['POST /api/tasks', 'PATCH /api/tasks/task-form-proof', 'DELETE /api/tasks/task-form-proof']
+      .every((entry) => formRequests.includes(entry)),
+    formRequests)
   await formContext.close()
 
   // --- 5. the login page is served by the real runtime --------------------
