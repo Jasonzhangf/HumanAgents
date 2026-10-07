@@ -1,0 +1,237 @@
+{
+  "id": "humanagent-task-liveness-display",
+  "version": "1",
+  "meta": {
+    "title": "任务实时性事实从运行时快照到工作卡片真实呈现",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "partial",
+    "factContract": {
+      "input": "RuntimeLivenessInput { active, lastActivityAt?, lastActivitySource?, silenceBudgetMs?, observedAt }",
+      "state": "RuntimeLivenessState = 'working' | 'no-activity' | 'waiting-for-answer' | 'failed' | 'idle' | 'unknown'",
+      "projection": "RuntimeLivenessProjection { state, reason, observedAt, lastActivityAt?, lastActivitySource?, silentForMs?, silenceBudgetMs? }",
+      "transport": "页面本地事实 { connected: boolean, settled: boolean }；不是 RuntimeLivenessInput 的字段"
+    },
+    "producerRules": {
+      "active": "取自 lifecycle state：running 或 settling 为 true。不用进程内 running flag，因为「lifecycle 仍说 running 但很久无活动」正是本卡片必须暴露的卡死场景",
+      "lastActivityAt": "取 runtime 记录的最新事件时间与 provider 请求身份时间的较新者；record.updatedAt 故意排除：那是持久化改写的时刻，浏览器刷新会让真实的静默计时归零",
+      "silenceBudgetMs": "只读 DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs，是被声明的静默预算；UI 不自建计时器，该值只用于显示与比较",
+      "transport": "只能由持有该流的页面观测。服务端派生值在传输断开时取不到，因此传输事实不下发、不由 status 投影派生",
+      "noFakeProgress": "silentForMs 只与 silenceBudgetMs 比较得出观测事实；不推断 runtime 已经或将要干预，不显示百分比、剩余时间或预计完成"
+    },
+    "terminalContract": {
+      "success": "rendered_liveness_truth：卡片顶部状态栏显示由真实信号推出的状态，并区分已连接/已断开/执行终态收拢",
+      "failure": "已失败：reported error 优先于一切其他状态，卡片显示失败而不是继续声称工作中",
+      "disconnected": "实时连接已断开：传输事实为页面本地观测，断开时仍可读最近一次持久化投影，不显示过期的『工作中』",
+      "noActivity": "无活动：lifecycle 为 active 但静默超过声明预算，显示观测到的静默事实，不伪造进度",
+      "waiting": "待回答：lifecycle 等待人类或资源决策",
+      "settledStream": "执行终态时服务端关闭流属于预期收拢，不得渲染为『实时连接已断开』",
+      "cancel": "最后一次持久化投影保持可读"
+    },
+    "scopeBoundary": "本图只覆盖承载工作卡片的页面（docs/ui/index.html、dashboard.html、task.html）经真实 dashboard 读模型取得实时性并呈现；只读 Observation 页（observation.js）由 humanagent-observation-read 覆盖，不复用本图"
+  },
+  "inputs": [
+    {
+      "id": "task_surface_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "open_task_surface",
+      "operator": "humanagent-task-liveness-open-surface",
+      "operator_version": "1",
+      "inputs": [
+        "task_surface_request"
+      ],
+      "output": {
+        "id": "open_task_surface",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_task_dashboard",
+      "operator": "humanagent-task-liveness-read-dashboard",
+      "operator_version": "1",
+      "inputs": [
+        "open_task_surface"
+      ],
+      "output": {
+        "id": "runtime_task_dashboard",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "derive_liveness_facts",
+      "operator": "humanagent-task-liveness-derive-facts",
+      "operator_version": "1",
+      "inputs": [
+        "runtime_task_dashboard"
+      ],
+      "output": {
+        "id": "reported_liveness_facts",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_liveness_state",
+      "operator": "humanagent-task-liveness-project-state",
+      "operator_version": "1",
+      "inputs": [
+        "reported_liveness_facts"
+      ],
+      "output": {
+        "id": "projected_liveness",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "hold_transport_fact",
+      "operator": "humanagent-task-liveness-hold-transport",
+      "operator_version": "1",
+      "inputs": [
+        "projected_liveness"
+      ],
+      "output": {
+        "id": "page_transport_fact",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "forward_to_work_card",
+      "operator": "humanagent-task-liveness-forward",
+      "operator_version": "1",
+      "inputs": [
+        "page_transport_fact"
+      ],
+      "output": {
+        "id": "work_card_metadata",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_work_card_truth",
+      "operator": "humanagent-task-liveness-render",
+      "operator_version": "1",
+      "inputs": [
+        "work_card_metadata"
+      ],
+      "output": {
+        "id": "rendered_liveness_truth",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "open_task_surface",
+      "to": "read_task_dashboard",
+      "arc_id": "open_task_surface"
+    },
+    {
+      "from": "read_task_dashboard",
+      "to": "derive_liveness_facts",
+      "arc_id": "runtime_task_dashboard"
+    },
+    {
+      "from": "derive_liveness_facts",
+      "to": "project_liveness_state",
+      "arc_id": "reported_liveness_facts"
+    },
+    {
+      "from": "project_liveness_state",
+      "to": "hold_transport_fact",
+      "arc_id": "projected_liveness"
+    },
+    {
+      "from": "hold_transport_fact",
+      "to": "forward_to_work_card",
+      "arc_id": "page_transport_fact"
+    },
+    {
+      "from": "forward_to_work_card",
+      "to": "render_work_card_truth",
+      "arc_id": "work_card_metadata"
+    }
+  ],
+  "outputs": [
+    "rendered_liveness_truth"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "graph": "humanagent-task-liveness-display",
+  "labels": {
+    "open_task_surface": "在承载工作卡片的页面打开真实任务面",
+    "read_task_dashboard": "读取真实 dashboard 读模型（含已投影的实时性事实）",
+    "derive_liveness_facts": "从真实信号推导实时性事实，排除持久化改写时刻",
+    "project_liveness_state": "按真实事实投影实时性状态，不伪造进度",
+    "hold_transport_fact": "由持有该流的页面本地判定传输事实（已连接/已断开/预期收拢）",
+    "forward_to_work_card": "把实时性与传输事实转发进工作卡片元数据",
+    "render_work_card_truth": "渲染顶部状态栏与传输事实，区分失败/断线/无活动/待回答"
+  }
+}
