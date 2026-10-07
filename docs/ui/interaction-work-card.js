@@ -26,10 +26,17 @@ const LIVENESS_STATE_LABELS = Object.freeze({
   unknown: '未知',
 })
 
-// The page-local transport fact of the event stream this page holds.
-// `settled` is the close the server performs once the execution reached its
-// terminal state, so it is not a failure. Only `lost` is a real transport loss.
-const TRANSPORT_STATE_LABELS = Object.freeze({
+// The page-local stream fact of the event stream this page holds. `settled` is
+// the close the server performs once the execution reached its terminal state,
+// so it is not a failure. Only `lost` is a real transport loss.
+//
+// This fact rides on its OWN carrier (`cardMetadata.stream`) and never on
+// `cardMetadata.transport`. That field is the typed `InteractionTraceTransport`
+// declared in `packages/contracts/src/tool-execution.ts` as
+// `{ connected: boolean, lastSyncedAt: string, stale?, replayed?, cursor? }`.
+// It has no `state` field, so the four-value fact cannot live on it without
+// overloading a declared contract and failing its own validator.
+const STREAM_STATE_LABELS = Object.freeze({
   connected: '已连接',
   settled: '已收拢',
   lost: '实时连接已断开',
@@ -172,19 +179,60 @@ function livenessLabel(liveness) {
 }
 
 /**
- * Names the transport fact of the event stream this page holds. `settled` and
- * `lost` are deliberately different: the first is the expected close after the
- * execution reached its terminal state, the second is a real transport failure.
+ * Names the page-local stream fact of the event stream this page holds.
+ * `settled` and `lost` are deliberately different: the first is the expected
+ * close after the execution reached its terminal state, the second is a real
+ * transport failure.
  */
-function transportLabel(transport) {
-  if (!transport) return TRANSPORT_STATE_LABELS.unknown
-  return TRANSPORT_STATE_LABELS[transport.state] ?? TRANSPORT_STATE_LABELS.unknown
+function streamLabel(stream) {
+  if (!stream) return STREAM_STATE_LABELS.unknown
+  return STREAM_STATE_LABELS[stream.state] ?? STREAM_STATE_LABELS.unknown
 }
 
-function transportStale(transport) {
-  if (!transport) return '未提供'
-  if (transport.state === 'settled' || transport.state === 'lost') return '否'
-  return boolLabel(transport.stale, '是', '否')
+/**
+ * The staleness of the page-local stream fact. A closed stream (`settled`) or a
+ * lost one (`lost`) is not stale: it is not syncing at all. Only a live stream
+ * has a staleness the page can report, and it reports the declared fact.
+ */
+function streamStale(stream) {
+  if (!stream) return '未提供'
+  if (stream.state === 'settled' || stream.state === 'lost') return '否'
+  return boolLabel(stream.stale, '是', '否')
+}
+
+/**
+ * The declared `InteractionTraceTransport.connected` fact, used only as a
+ * fallback when the page holds no stream fact of its own. The two facts are
+ * different: the declared one describes the trace transport the read model
+ * carried, the page-local one describes the event stream this page holds.
+ */
+function transportConnectedLabel(transport) {
+  return boolLabel(transport?.connected, '已连接', '未连接')
+}
+
+/**
+ * The single transport reading the card shows. The page-local stream fact wins
+ * when the page holds one, because only that page can observe a stream loss.
+ * Otherwise the declared typed transport is the fact the projection carried.
+ * When neither exists the card states the absence instead of a definite value.
+ */
+function transportDisplay(metadata) {
+  const stream = metadata?.stream
+  if (stream && STREAM_STATE_LABELS[stream.state] !== undefined) {
+    return { label: STREAM_STATE_LABELS[stream.state], state: stream.state }
+  }
+  const transport = metadata?.transport
+  if (typeof transport?.connected === 'boolean') {
+    return transport.connected
+      ? { label: '已连接', state: 'connected' }
+      : { label: '未连接', state: 'disconnected' }
+  }
+  return { label: STREAM_STATE_LABELS.unknown, state: 'unknown' }
+}
+
+function transportStaleDisplay(metadata) {
+  if (metadata?.stream) return streamStale(metadata.stream)
+  return boolLabel(metadata?.transport?.stale, '是', '否')
 }
 
 function scopedValue(value) {
@@ -959,14 +1007,21 @@ function renderStatus(projection) {
   status.setAttribute('aria-label', observation ? '节点状态' : '任务状态')
   const top = create('div', 'iwc-status-top')
   const lifecycle = create('div', 'iwc-lifecycle')
-  if (!observation && (projection.taskState === 'running' || projection.taskState === 'settling')) {
+  // The animated dot is the card's own progress signal, so it may only run when
+  // the RUNTIME reported that the execution is actually working. Gating it on
+  // the lifecycle state alone animates forever during a reported `no-activity`
+  // stall, which is the fabricated progress this card must never show. A state
+  // the runtime did not report as `working` gets no dot.
+  if (!observation && metadata.liveness?.state === 'working') {
     const dot = create('span', 'iwc-activity-dot')
     dot.setAttribute('aria-hidden', 'true')
     lifecycle.append(dot)
   }
   const stateLabel = projection.stateLabel || TASK_STATE_LABELS[projection.taskState] || '未知'
   lifecycle.append(create('strong', 'iwc-lifecycle-label', stateLabel))
-  lifecycle.append(create('span', 'iwc-state-chip', observation ? `节点 ${stateLabel}` : `任务 ${valueOrUnknown(projection.taskState)}`))
+  // The chip names the same localized label. A raw `LifecycleState` value must
+  // never reach the human.
+  lifecycle.append(create('span', 'iwc-state-chip', observation ? `节点 ${stateLabel}` : `任务 ${stateLabel}`))
   top.append(lifecycle)
   const source = projection.statusbar
   const sourceChip = create('span', 'iwc-state-chip', observation ? `来源 ${source?.label || '只读投影'}` : `来源 ${source?.label || '未提供'}`)
@@ -981,9 +1036,9 @@ function renderStatus(projection) {
     const livenessChip = create('span', 'iwc-state-chip', `活性 ${livenessLabel(metadata.liveness)}`)
     livenessChip.dataset.state = metadata.liveness?.state || 'unknown'
     top.append(livenessChip)
-    const transportCopy = transportLabel(metadata.transport)
-    const transportChip = create('span', 'iwc-state-chip', `传输 ${transportCopy}`)
-    transportChip.dataset.state = metadata.transport?.state || 'unknown'
+    const transport = transportDisplay(metadata)
+    const transportChip = create('span', 'iwc-state-chip', `传输 ${transport.label}`)
+    transportChip.dataset.state = transport.state
     top.append(transportChip)
   }
   status.append(top)
@@ -1012,7 +1067,8 @@ function renderStatus(projection) {
         ['开始时间', metadata.startedAt],
         ['Provider 最后事件', metadata.provider?.lastEventAt],
         ['传输最后同步', metadata.transport?.lastSyncedAt],
-        ['传输状态', `${transportLabel(metadata.transport)} · stale=${transportStale(metadata.transport)}`],
+        ['传输连接', transportConnectedLabel(metadata.transport)],
+        ['传输状态', `${transportDisplay(metadata).label} · stale=${transportStaleDisplay(metadata)}`],
         ['停止状态', `providerStopped=${boolLabel(metadata.settlement?.providerStopped, '是', '否')} · checkpointCommitted=${boolLabel(metadata.settlement?.checkpointCommitted, '是', '否')}`],
         ['最后业务更新', `${valueOrUnknown(metadata.lastBusiness?.kind)} · ${valueOrUnknown(metadata.lastBusiness?.at)} · ${valueOrUnknown(metadata.lastBusiness?.ref)}`],
       ])

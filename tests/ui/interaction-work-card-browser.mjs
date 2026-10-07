@@ -410,6 +410,25 @@ try {
       })),
       detailBlocks: details.length,
       detailText: details.join('\n'),
+      // The status chips are read individually: the transport reading, the
+      // lifecycle reading and the animated progress dot are three separate
+      // facts, and each must be assertable on its own.
+      transportChip: (() => {
+        const node = [...document.querySelectorAll('#host .iwc-state-chip')]
+          .find((chip) => (chip.textContent ?? '').startsWith('传输'));
+        return node ? { text: node.textContent ?? '', state: node.dataset.state ?? '' } : null;
+      })(),
+      stateChip: (() => {
+        const node = [...document.querySelectorAll('#host .iwc-state-chip')]
+          .find((chip) => (chip.textContent ?? '').startsWith('任务'));
+        return node?.textContent ?? '';
+      })(),
+      transportConnectedRow: (() => {
+        const row = [...document.querySelectorAll('#host .iwc-fact')]
+          .find((node) => node.querySelector('dt')?.textContent === '传输连接');
+        return row ? `${row.querySelector('dt')?.textContent}=${row.querySelector('dd')?.textContent}` : '';
+      })(),
+      activityDot: Boolean(document.querySelector('#host .iwc-activity-dot')),
       pageText: document.body.innerText,
     };
   });
@@ -447,6 +466,91 @@ try {
   record('no technical identifier leaks into the human surfaces', leaks.length === 0, leaks);
   record('technical identifiers are retained in the trace detail blocks', card.detailText.includes('requestId') && card.detailText.includes('tool.callId') && card.detailText.includes('tool.outputDigest'), card.detailText.slice(0, 300));
   record('raw error semantics and evidence stay in the details', card.detailText.includes('memory-agent-source-invalid') && card.detailText.includes('sha256:evidence-memory-source') && card.detailText.includes('adapters.memory'), card.detailText.slice(0, 400));
+
+  // --- the declared typed transport is rendered as a real reading ----------
+  // `cardMetadata.transport` is the typed `InteractionTraceTransport`
+  // (`{ connected, lastSyncedAt, ... }`) declared in the contracts package. It
+  // has no `state` field, so the card must read its `connected` boolean. A card
+  // that can only read a four-value page-local `state` renders a conforming
+  // `{ connected: true }` as "not provided", which is a false absence.
+  record(
+    'a declared typed transport renders as attached instead of not-provided',
+    card.transportChip?.text === '传输 已连接'
+      && card.transportChip?.state === 'connected'
+      && card.transportConnectedRow === '传输连接=已连接',
+    { chip: card.transportChip, row: card.transportConnectedRow },
+  );
+
+  // --- the lifecycle chip is localized, never a raw enum -------------------
+  // The card must not print a raw `LifecycleState` value such as `running` or
+  // `failed` where the human reads the task state.
+  record(
+    'the lifecycle chip names the localized state and never the raw enum',
+    card.stateChip === '任务 运行中' && !/任务\s+(running|settling|failed|succeeded|cancelled|stopped)\b/.test(card.status),
+    { chip: card.stateChip, status: card.status.slice(0, 200) },
+  );
+
+  // --- the animated dot follows the REPORTED liveness ----------------------
+  // The dot is the card's own progress signal. Animating it whenever the
+  // lifecycle says running/settling fabricates progress during a reported
+  // stall, so it may only run while the runtime reports `working`.
+  const livenessProbe = await page.evaluate((base) => {
+    const mountWith = (liveness) => {
+      const host = document.createElement('div');
+      host.style.height = '600px';
+      document.body.append(host);
+      window.__mountInteractionWorkCard(host, {}).update({
+        ...base,
+        cardMetadata: { ...base.cardMetadata, liveness },
+      });
+      return host;
+    };
+    const read = (host) => ({
+      dot: Boolean(host.querySelector('.iwc-activity-dot')),
+      chip: [...host.querySelectorAll('.iwc-state-chip')]
+        .find((node) => (node.textContent ?? '').startsWith('活性'))?.textContent ?? '',
+      status: host.querySelector('.iwc-status')?.innerText ?? '',
+    });
+    return {
+      stalled: read(mountWith({
+        state: 'no-activity',
+        reason: 'no real activity for 42000 ms; the declared silence budget is 30000 ms',
+        observedAt: '2026-10-03T12:00:42Z',
+        silentForMs: 42_000,
+        silenceBudgetMs: 30_000,
+      })),
+      working: read(mountWith({ state: 'working', observedAt: '2026-10-03T12:00:00Z' })),
+    };
+  }, projection);
+  record(
+    'a reported stall renders no activity dot even while the lifecycle says running',
+    livenessProbe.stalled.dot === false && livenessProbe.stalled.chip.includes('无活动'),
+    livenessProbe.stalled,
+  );
+  record(
+    'a reported working execution renders the activity dot',
+    livenessProbe.working.dot === true && livenessProbe.working.chip.includes('工作中'),
+    livenessProbe.working,
+  );
+
+  // A failed execution must read as a failure in both the label and the chip.
+  const failureProbe = await page.evaluate((base) => {
+    const host = document.createElement('div');
+    host.style.height = '600px';
+    document.body.append(host);
+    window.__mountInteractionWorkCard(host, {}).update({ ...base, taskState: 'failed' });
+    return {
+      dot: Boolean(host.querySelector('.iwc-activity-dot')),
+      chip: [...host.querySelectorAll('.iwc-state-chip')]
+        .find((node) => (node.textContent ?? '').startsWith('任务'))?.textContent ?? '',
+      status: host.querySelector('.iwc-status')?.innerText ?? '',
+    };
+  }, projection);
+  record(
+    'a failed execution names the localized failure instead of the raw enum',
+    failureProbe.chip === '任务 失败' && failureProbe.status.includes('失败') && !failureProbe.status.includes('failed'),
+    failureProbe,
+  );
 
   // --- real provider turn identity ----------------------------------------
   // The label the card displays must be exactly the turn id the provider

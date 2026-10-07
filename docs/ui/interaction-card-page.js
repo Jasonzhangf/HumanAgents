@@ -153,6 +153,9 @@ function projectInteractionCard(input) {
     // card must show. The interaction's own lifecycle only supplies the state
     // while there is no execution to observe.
     taskState: input.execution?.state ?? input.taskState,
+    // The runtime already localizes its lifecycle state (`RuntimeTaskDashboardProjection.stateLabel`).
+    // Forwarding it is what keeps a raw `LifecycleState` enum out of the card.
+    ...(input.execution?.stateLabel === undefined ? {} : { stateLabel: input.execution.stateLabel }),
     statusbar: liveCopy === undefined
       ? input.source
       : {
@@ -170,7 +173,10 @@ function projectInteractionCard(input) {
       waitingOn: input.card.waitingOn,
       startedAt: input.card.startedAt,
       ...(input.liveness === undefined ? {} : { liveness: input.liveness }),
-      ...(input.transport === undefined ? {} : { transport: input.transport }),
+      // The page-local stream fact has its own carrier. `cardMetadata.transport`
+      // is the typed `InteractionTraceTransport` and must not be overloaded with
+      // a four-value page-local state.
+      ...(input.stream === undefined ? {} : { stream: input.stream }),
     },
     conversation: {
       summary: input.conversation?.summary || { missing: true },

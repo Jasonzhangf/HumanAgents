@@ -32,15 +32,25 @@
  * settled-stream rule, because the server closes the stream when the execution
  * terminates and that expected close must not be rendered as a transport loss.
  *
+ * The `corrupt-frame` case is the one place where the stream bytes are faulted:
+ * the real runtime server serializes every frame with `JSON.stringify`, so it
+ * cannot produce a frame the page fails to parse. A real HTTP SSE server writes
+ * one well-formed frame and then frames that are not valid JSON, and holds the
+ * connection open so no `onerror` can mask the defect. Only the URL of the
+ * execution-event stream is repointed; the page, its listener, its `EventSource`
+ * and every dashboard read stay real. A frame the page cannot parse must be
+ * surfaced as a transport fault instead of being counted as healthy progress.
+ *
  * Env:
  *   LIVENESS_E2E_EVIDENCE    required: execution-owned evidence root
- *   LIVENESS_E2E_SCENARIOS   default "working,no-activity,transport-lost,failure"
+ *   LIVENESS_E2E_SCENARIOS   default "working,no-activity,transport-lost,corrupt-frame,failure"
  *   LIVENESS_E2E_UI_ROOT     default <repo>/dist/app/ui
  *   LIVENESS_E2E_PLAYWRIGHT  default /opt/homebrew/lib/node_modules/playwright/index.js
  *   LIVENESS_E2E_KEEP_ROOT=1 keep the disposable runtime root for inspection
  */
 
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -51,7 +61,7 @@ const distRoot = join(repoRoot, 'dist', 'app');
 const evidenceRoot = process.env.LIVENESS_E2E_EVIDENCE?.trim();
 const uiRoot = resolve(process.env.LIVENESS_E2E_UI_ROOT ?? join(repoRoot, 'dist', 'app', 'ui'));
 const keepRoot = process.env.LIVENESS_E2E_KEEP_ROOT === '1';
-const scenarios = (process.env.LIVENESS_E2E_SCENARIOS ?? 'working,no-activity,transport-lost,failure')
+const scenarios = (process.env.LIVENESS_E2E_SCENARIOS ?? 'working,no-activity,transport-lost,corrupt-frame,failure')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
@@ -212,11 +222,81 @@ async function startHarness({ scenario, root }) {
   };
 }
 
-async function openPage(browser, harness) {
+/**
+ * A real HTTP server that answers one SSE endpoint with a well-formed frame and
+ * then frames the page cannot parse, keeping the connection open.
+ *
+ * A malformed frame cannot be produced by the real runtime server: it serializes
+ * every frame with `JSON.stringify`. Everything else in the `corrupt-frame`
+ * scenario stays real — the real page, the real `EventSource` implementation,
+ * the real page listener and the real dashboard reads. Only the stream bytes are
+ * faulted, which is exactly the fault under test. The connection is held open on
+ * purpose: a closed stream would fire `onerror` and mask the defect behind an
+ * unrelated transport loss.
+ */
+async function startFaultyStreamServer() {
+  const sockets = new Set();
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests += 1;
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'access-control-allow-origin': '*',
+    });
+    sockets.add(response.socket);
+    response.write('event: provider.output\ndata: {"kind":"provider.output"}\n\n');
+    const corrupt = setInterval(() => {
+      response.write('event: provider.output\ndata: {not json\n\n');
+    }, 120);
+    const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 1_000);
+    response.on('close', () => {
+      clearInterval(corrupt);
+      clearInterval(heartbeat);
+    });
+  });
+  await new Promise((settle) => server.listen(0, '127.0.0.1', settle));
+  return {
+    origin: `http://127.0.0.1:${server.address().port}`,
+    get requests() {
+      return requests;
+    },
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((settle) => server.close(settle));
+    },
+  };
+}
+
+async function openPage(browser, harness, options = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const [name, value] = harness.cookie.split('=');
   await context.addCookies([{ name, value, url: harness.origin, httpOnly: true, sameSite: 'Strict' }]);
   const page = await context.newPage();
+  if (options.faultyStreamOrigin) {
+    // Point ONLY the task page's execution-event stream at the faulted server.
+    // Every other request, including every dashboard read, stays on the real
+    // runtime origin.
+    await page.addInitScript((origin) => {
+      const Real = window.EventSource;
+      if (!location.pathname.endsWith('/task.html')) return;
+      window.EventSource = function (url, init) {
+        // The page builds this URL relative to its own origin, so resolve it
+        // first and only then repoint the execution-event stream.
+        let target = String(url);
+        try {
+          const resolved = new URL(target, location.href);
+          if (/^\/api\/executions\/[^/]+\/events$/.test(resolved.pathname)) {
+            target = `${origin}${resolved.pathname}${resolved.search}`;
+          }
+        } catch {
+          // A URL the page cannot resolve is left untouched.
+        }
+        return new Real(target, init);
+      };
+    }, options.faultyStreamOrigin);
+  }
   const consoleErrors = [];
   page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => {
@@ -331,6 +411,7 @@ async function runScenario(browser, scenario, result) {
   result.startedAt = new Date().toISOString();
   let harness;
   let opened;
+  let faultyStream;
   const assert = (label, observed, pattern) => {
     const text = typeof observed === 'string' ? observed : JSON.stringify(observed);
     const pass = pattern instanceof RegExp ? pattern.test(text) : observed === pattern;
@@ -339,7 +420,8 @@ async function runScenario(browser, scenario, result) {
   };
   try {
     harness = await startHarness({ scenario, root });
-    opened = await openPage(browser, harness);
+    if (scenario === 'corrupt-frame') faultyStream = await startFaultyStreamServer();
+    opened = await openPage(browser, harness, { faultyStreamOrigin: faultyStream?.origin });
     const { page } = opened;
     // The gate must be closed before the execution starts, otherwise the replay
     // can finish before the card is ever observed.
@@ -419,6 +501,39 @@ async function runScenario(browser, scenario, result) {
       return result;
     }
 
+    if (scenario === 'corrupt-frame') {
+      // The stream carries a well-formed frame and then frames the page cannot
+      // parse, and it stays open. A frame the page cannot parse is not an event:
+      // counting it as a heartbeat reads a corrupt stream as healthy progress.
+      // The loss window is short because the page legitimately reconnects after
+      // a loss, so the card is sampled at a tight interval and the assertion is
+      // that the fault is surfaced at all.
+      const attached = await waitForCardText(page, 'the card to report the attached stream', /传输 已连接/, 60_000, 50);
+      assert('the live connection is reported as attached', attached, /传输 已连接/);
+      result.screenshots.push(await screenshot(page, shotDir, '01-attached'));
+      // Recorded before the next assertion so a failure still carries the proof
+      // that the faulted stream really was the stream the page attached to.
+      result.observations = {
+        attached: attached.slice(0, 1200),
+        faultyStreamRequests: faultyStream?.requests ?? 0,
+      };
+      const corrupted = await waitForCardText(
+        page,
+        'the card to surface the frame it cannot parse',
+        /实时连接已断开/,
+        30_000,
+        25,
+      );
+      assert('an unparseable frame is surfaced as a transport fault', corrupted, /实时连接已断开/);
+      result.screenshots.push(await screenshot(page, shotDir, '02-corrupt-frame'));
+      result.observations = {
+        attached: attached.slice(0, 1200),
+        corrupted: corrupted.slice(0, 1200),
+        faultyStreamRequests: faultyStream?.requests ?? 0,
+      };
+      return result;
+    }
+
     if (scenario === 'failure') {
       const failed = await waitForCardText(page, 'the card to report the failure', /已失败/, 90_000);
       assert('the card reports the failure', failed, /已失败/);
@@ -438,6 +553,7 @@ async function runScenario(browser, scenario, result) {
     await harness?.close().catch((error) => {
       result.closeError = error instanceof Error ? error.message : String(error);
     });
+    await faultyStream?.close().catch(() => {});
     if (!keepRoot) await rm(root, { recursive: true, force: true }).catch(() => {});
     result.rootRetained = keepRoot ? root : null;
   }

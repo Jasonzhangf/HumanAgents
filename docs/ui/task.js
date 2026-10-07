@@ -137,11 +137,15 @@ function subscribeTaskStream(operationId) {
   ]) {
     taskStream.addEventListener(kind, (message) => {
       if (terminalClosed) return
-      let payload = {}
+      let payload
       try {
         payload = JSON.parse(message.data)
       } catch {
-        payload = {}
+        // A frame the page cannot parse is not an event. Counting it as a
+        // heartbeat would read a corrupt stream as healthy progress, so the
+        // transport is reported as lost instead of the failure being swallowed.
+        setTransportState('lost')
+        return
       }
       if (payload.kind === 'execution.terminal' && payload.terminalPhase === 'final') {
         terminalClosed = true
@@ -165,6 +169,9 @@ function projectTaskLiveness(dashboard) {
     liveness: dashboard.liveness,
     execution: {
       state: dashboard.state,
+      // The runtime's own localized label. Without it the card would fall back
+      // to a raw LifecycleState value and show the human `任务 failed`.
+      stateLabel: dashboard.stateLabel,
       error: dashboard.error,
       nextStep: dashboard.nextStep,
     },
@@ -180,7 +187,11 @@ function updateTaskExecution(dashboard) {
   const base = projectTaskLiveness(dashboard)
   const projection = {
     ...base,
-    cardMetadata: { ...base.cardMetadata, transport: { state: effectiveTransport(dashboard) } },
+    // The page-local four-value stream fact rides on its OWN carrier.
+    // `cardMetadata.transport` is the typed `InteractionTraceTransport`
+    // (`{connected, lastSyncedAt, ...}`) and has no `state` field, so writing the
+    // four-value fact there broke that declared shape.
+    cardMetadata: { ...base.cardMetadata, stream: { state: effectiveTransport(dashboard) } },
   }
   cardState.projection = projection
   interactionCard?.update(cardState.history
