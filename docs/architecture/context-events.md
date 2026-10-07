@@ -437,9 +437,9 @@ export interface ProviderEventLike {
 **§11 绑定的校验入口**：`validateCanonicalContextEvent` 覆盖上述第一类的**大部分**形状（第 5 项覆盖 `scope`，第 7 项覆盖 `evidenceRefs` 元素），而不是全部。两个已知缺口：
 
 1. **`cost === null`**：`validation.ts` 的 `cost` 检查只放过 `undefined`，随后读取 `cost.tokensInput`，故它也抛原生 `TypeError`。这是唯一一个**该入口**也抛 `TypeError` 的形状。
-2. **元素的嵌套 scope 槽位为 `null`**：`evidenceRefs[].scope.taskId` / `cycleId` / `operationId` 为 `null` 时，构造入口抛 `TypeError`，而 `validateCanonicalContextEvent` **不拦**——contracts 的 `assertEvidenceRef` 对这些槽位用真值判断。**更需注意**：这些槽位取 `""` / `0` / `false` / `undefined` 时，构造入口**不抛错**（`""` 等非 `null` 值不会让解引用失败），会产出一个带 `dataDigest` 的真实事件，`validateCanonicalContextEvent` 同样放过。即嵌套槽位**全链路静默接受**这些取值；对照之下，同样的取值放在**顶层** `scope.taskId` 会抛 `ContextEventError`。顶层与嵌套的行为不对称。
+2. **元素的嵌套 scope 槽位**：`evidenceRefs[].scope.taskId` / `cycleId` / `operationId` 为 `null` 时，构造入口抛 `TypeError`，而 `validateCanonicalContextEvent` **不拦**——contracts 的 `assertEvidenceRef` 对这些槽位用真值判断。**更需注意**：这些槽位取 `""` / `0` / `false` 时构造入口**不抛错**（非 `null` 值不会让解引用失败），会产出一个带 `dataDigest` 的真实事件，`validateCanonicalContextEvent` 同样放过——即嵌套槽位**全链路静默接受**这三个取值。对照之下，`""` / `0` / `false` 放在**顶层** `scope.taskId` / `cycleId` / `operationId` 会抛 `ContextEventError`：**顶层与嵌套在这三个取值上不对称**。**`undefined` 不属此列**——它是可选槽位的合法写法，顶层与嵌套都放过，且与省略该槽位等价（摘要相同）。
 
-**本变更未改动 `validation.ts`，上述两个缺口在本变更之前就存在，属既有行为。** 它们只影响违反 `ContextEventInput` 类型的输入，类型正确的调用方无法构造。
+**既有行为与本变更新引入必须分开看**（基准同下段）：`validateCanonicalContextEvent` 对缺口 2 的**不拦**是既有行为（本变更未改 `validation.ts`，改动前后该入口都放过这些槽位）；但缺口 2 在**构造入口**的 `TypeError` 症状是**本变更新引入的**——`evidenceRefForDigest` 之前不读取嵌套 `scope` 槽位，故那时嵌套 `taskId = null` 不抛错，本变更开始递归重建后才解引用失败。缺口 1（`cost === null`）两个入口在两个 SHA 上行为相同，属既有行为。这类形状都违反 `ContextEventInput` 的类型，类型正确的调用方无法构造。
 
 **`validateCanonicalContextEvent` 不是类型外输入的可靠兜底**：它对第一类的多数形状会抛 `ContextEventError`，但有上述两个缺口。构造入口的自检 `assertConstructionInvariants` 也不覆盖这些形状——它只判 `pairing === undefined` 与 `eventId` / `payloadRef` 的派生一致。因此类型外输入的错误类型由**摘要规范化与 §11 校验中的先到者**决定，这正是本段要精确说明的边界。
 
@@ -851,11 +851,11 @@ pnpm dagpipe:validate
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
 | 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**143** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
-| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS**；task-15 在 `55eb847` 上增量复审 **PASS**；task-16 在 `3479df4` 上文档增量确认 **PASS**；task-17 在 `2d48844` 上复核 FAIL→修复后复核。四轮均零 BLOCKER。**finding 计数以 §16.2 表格行数为唯一真源**） |
+| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS**；task-15 在 `55eb847` 上增量复审 **PASS**；task-16 在 `3479df4` 上文档增量确认 **PASS**；task-17 在 `2d48844` 上复核 FAIL；task-18 在 `9cc5cf1` 上复核 FAIL；task-19 复核。全部轮次零 BLOCKER。**finding 计数与轮次以 §16.2 表格为唯一真源**） |
 | 7. 按 review 结论修复并补测试 | 已完成（ISSUE-A / B / E / F / G / H 已处置，ISSUE-C / D 补测试；W4 在补测中追加发现的 O2 同属 ISSUE-E 类，已修并锁死） |
 | 8. 集成、候选自检与交付收口 | 进行中（组合最新 `origin/main`、最终 gate、merge 与 push） |
 
-### 16.2 独立架构 review 结论与处置（跨 task-12 / 15 / 16 / 17 / 18 五轮）
+### 16.2 独立架构 review 结论与处置（跨 task-12 起的全部复审轮次）
 
 reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同时复跑了 gate、逐文件 blob 核对了候选迁移，并做了自己的差分与变异探针。逐项处置：
 
@@ -879,11 +879,14 @@ reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同
 | ISSUE-N | 文档（task-17 发现） | §9.1 小标题「结构缺失或为 `null` → 原生 `TypeError`」过宽：`evidenceRefs` 缺失 / `undefined` / `null` 由 `?? []` 兜底**不抛错**，`cost` 缺失也不抛错 | 已修：§9.1 单列一条说明这两个字段整体缺失/为 `null` 不进入该类，只有 `scope` 因无兜底而抛 `TypeError` |
 | ISSUE-O | 文档（task-17 发现） | §9.1 称 §11 入口「未受影响」易被读作可靠兜底，但 `evidenceRefs[].scope.{taskId,cycleId,operationId}` 为 `null` 时构造入口抛 `TypeError` 而 `validateCanonicalContextEvent` **不拦**（contracts `assertEvidenceRef` 用真值判断） | 已修：§9.1 明确该入口覆盖第一类的**大部分**而非全部，并列出两个已知缺口（`cost === null`、元素嵌套 scope 槽位），同时说明二者均为**既有行为**、本变更未改 `validation.ts`，且明确「该入口不是类型外输入的可靠兜底」 |
 | ISSUE-P | 文档（task-17 发现，**构成 FAIL**） | §16 第 6 行写「2 条 ADVISORY」，而 §16.2 实有 3 条；ISSUE-K 刚声明「计数与表格一致」后同一提交内再次失效（同类缺陷第三次复发） | 已修：§16 第 6 行改为与表格一致，并改为**按 §16.2 表格行数核对**后再写 |
-| ISSUE-Q | 文档（task-17 发现） | §16.2 标题仍写「（task-12）」，而该表已跨三轮；ISSUE-G 行仍保留修正前的宽口径 | 已修：标题改为跨四轮；ISSUE-G 行改写为与 §9.1 修正后的边界一致 |
+| ISSUE-Q | 文档（task-17 发现） | §16.2 标题仍写「（task-12）」，而该表已跨多轮；ISSUE-G 行仍保留修正前的宽口径 | 已修：标题不再声明具体轮数（避免随轮次漂移）；ISSUE-G 行改写为与 §9.1 修正后的边界一致 |
 | ISSUE-R | 文档（Lead 自检发现） | §9.1 首句（原 `:427`）仍写「`scope` 缺失即抛 `ContextEventError`」，与紧随其后的边界段自相矛盾 | 已修：首句改为指向下段的精确边界 |
 | ISSUE-S | 文档（Lead 自检发现） | §9.1 把跨字段完整性归给 `assertConstructionInvariants`，但该自检只判 `pairing === undefined` 与 `eventId` / `payloadRef` 的派生一致，**不覆盖** scope / evidenceRefs 形状 | 已修：改为陈述事实——类型外输入的错误类型由**摘要规范化与 §11 校验中的先到者**决定，并写明该自检的实际判据 |
 | ISSUE-T | 文档（task-18 发现，**构成 FAIL**） | §9.1 断言 `evidenceRefs[].scope.{taskId,cycleId,operationId}` 取 `""` / `0` / `false` 时构造入口抛 `TypeError`——与实现相反：这些取值不让解引用失败，构造入口**不抛错**并产出带摘要的真实事件，`validateCanonicalContextEvent` 也放过（全链路静默接受）。只有 `null` 才抛 `TypeError`。对照下同样的取值在**顶层** `scope.taskId` 会抛 `ContextEventError` | 已修（2 处）：§9.1 与 ISSUE-O 行删去「（或 `""` / `0` / `false`）」，并写明嵌套槽位对非 `null` 取值**全链路静默接受**、与顶层的**不对称**。Lead 已独立复验 |
 | ISSUE-U | 文档（task-18 发现） | §9.1 首句主句仍字面声明 `scope` 缺失抛 `ContextEventError`（实现为 `TypeError`），括号指向下段可缓解但仍不实 | 已修：首句改为「`sourceId` / `occurredAt` 缺失抛 `ContextEventError`，`scope` 见下段」 |
+| ISSUE-V | 文档（task-19 发现，**构成 FAIL**） | §9.1 缺口 2 的收尾对比句写「**同样的取值**放在顶层会抛 `ContextEventError`」，把 `undefined` 并入——实测顶层 `scope.taskId = undefined` **不抛错**。且 `undefined` 在本仓**类型合法**（无 `exactOptionalPropertyTypes`），是可选槽位的正常写法，与省略该槽位等价（摘要相同） | 已修：对比集合限定为 `""` / `0` / `false`（顶层抛 `ContextEventError`、嵌套静默接受，确实不对称），并单列一句说明 `undefined` 两层对称、等价于省略。Lead 已独立复验 |
+| ISSUE-W | 文档（task-19 发现） | §9.1 称「上述两个缺口……属既有行为」，但按同段 `cost` 的基准，缺口 2 在**构造入口**的 `TypeError` 症状是**本变更新引入的**：`evidenceRefForDigest` 之前不读嵌套 `scope` 槽位，那时嵌套 `taskId = null` 不抛错 | 已修：§9.1 拆分为——该入口的**不拦**是既有行为（`validation.ts` 未改），缺口 2 的 `TypeError` 症状是本变更新引入；缺口 1 两入口两 SHA 行为相同、属既有。Lead 已用 `80b0bd7` 与当前候选对照复验 |
+| ADVISORY | 覆盖缺口（task-19 指出） | §9.1 断言矩阵未覆盖顶层 `undefined`，且 §9.1 声称的 `assertConstructionInvariants` 两条判据完全未测 | 已补：矩阵加入顶层 `undefined`（两层对称、与省略等价）、三槽位 × 三值顶层对照、`evidenceRefs=null` 的摘要等价、以及自检的 `pairing` / `eventId` / `payloadRef` 三条判据。扩充后 **75 passed / 0 failed**。**说明**：自检仅在 `createContextEvent` 内部调用、未从 `index.ts` 导出，其两条 `throw` 分支在公开入口不可达（构造入口自身保证 `pairing === undefined` 且 ref 派生自 `sourceId`），故只能正向断言其产出 |
 | ADVISORY | 透明性（task-16 建议） | §16.3 记「变异回放 20 条，`survived = 0`」，但该轮 `PC-2`（`allowedStatusOf` 丢掉 `SUPERSEDED_STATUS`）首轮为 **SKIP**（变异串与编译产物不匹配），改用真实编译文本重放后才 KILLED | 已补记于 §16.3，避免读者误以为 20 条在同一轮被评估 |
 | ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分（312 个合法场景，0 差异）后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径 |
 | ADVISORY | 类型外输入 | `cost` 传非对象（如 `5`）不抛错，其摘要表示由 `"cost":5` 变为 `"cost":{}` | 类型外输入，合法域无影响；不增加校验层（理由同 ISSUE-G）。已随 ISSUE-G 的边界说明一并记录 |
