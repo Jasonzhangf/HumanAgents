@@ -612,6 +612,7 @@ export function createContextEvent(input: ContextEventInput): CanonicalContextEv
   顶层 `type` → `sourceId` → `occurredAt` → `scope` → `summary` → `evidenceRefs` → `supersededByEventId` → `cost`。
   嵌套层同样按固定键序重建：
   - `scope`（含 `evidenceRefs[].scope`）：`organId` → `taskId` → `cycleId` → `operationId`；
+  - `ScopedId` 叶子统一按 `scope` → `value` 重建。`ScopedId` 在摘要里出现两处——`ScopeRef` 的四个槽位与 `evidenceRefs[].evidenceId`——**两处必须走同一个规范化函数**，否则漏掉任一处，该处的键序就会泄进 `dataDigest`；
   - `evidenceRefs[]`：`evidenceId` → `kind` → `source` → `locator` → `digest` → `scope`；
   - `cost`：`tokensInput` → `tokensOutput` → `bytesAvoided` → `bytesRetrieved`。
   规则：

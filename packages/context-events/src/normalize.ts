@@ -31,6 +31,7 @@ import type {
   ProviderTerminalState,
   ProviderToolStatus,
   ScopeRef,
+  ScopedId,
   TaskId,
 } from '../../contracts/src/index.js';
 import { ContextEventError } from './errors.js';
@@ -237,19 +238,26 @@ function digestOfConstructedEvent(
   return `sha256:${sha256Hex(JSON.stringify(normalized))}`;
 }
 
+/**
+ * `ScopedId` 的固定字段序投影，供摘要使用（§9.5 / §12）。
+ *
+ * `ScopedId` 是摘要里唯一的「叶子对象」，且出现在两个位置：`ScopeRef` 的四个槽位
+ * 与 `evidenceRefs[].evidenceId`。两者必须共用本函数——否则任一位置漏掉重建，
+ * 该位置的键序就会泄进 `dataDigest`（同一事实得到不同摘要）。
+ */
+function scopedIdForDigest(id: ScopedId): Record<string, unknown> {
+  return { scope: id.scope, value: id.value };
+}
+
 /** `ScopeRef` 的固定字段序投影，供摘要使用（§9.5 / §12）。 */
 function scopeForDigest(scope: ScopeRef): Record<string, unknown> {
   return {
-    organId: { scope: scope.organId.scope, value: scope.organId.value },
-    ...(scope.taskId === undefined
-      ? {}
-      : { taskId: { scope: scope.taskId.scope, value: scope.taskId.value } }),
-    ...(scope.cycleId === undefined
-      ? {}
-      : { cycleId: { scope: scope.cycleId.scope, value: scope.cycleId.value } }),
+    organId: scopedIdForDigest(scope.organId),
+    ...(scope.taskId === undefined ? {} : { taskId: scopedIdForDigest(scope.taskId) }),
+    ...(scope.cycleId === undefined ? {} : { cycleId: scopedIdForDigest(scope.cycleId) }),
     ...(scope.operationId === undefined
       ? {}
-      : { operationId: { scope: scope.operationId.scope, value: scope.operationId.value } }),
+      : { operationId: scopedIdForDigest(scope.operationId) }),
   };
 }
 
@@ -258,12 +266,13 @@ function scopeForDigest(scope: ScopeRef): Record<string, unknown> {
  *
  * §9.5 要求被哈希的是**按固定字段序重建的规范化对象**，不是调用方传入的对象；
  * §12 禁止直接哈希来源对象。`evidenceRefs` 是嵌套对象，若按引用参与哈希，
- * 同一事实在不同键序下会得到不同 `dataDigest`。故此处与 `scope` 同样重建。
- * `scope` 字段复用 `scopeForDigest`，递归规范化其内部键序。
+ * 同一事实在不同键序下会得到不同 `dataDigest`。故此处与 `scope` 同样重建：
+ * `scope` 复用 `scopeForDigest`，`evidenceId` 复用 `scopedIdForDigest`，
+ * 两者都递归规范化其内部键序。
  */
 function evidenceRefForDigest(evidenceRef: EvidenceRef): Record<string, unknown> {
   return {
-    evidenceId: evidenceRef.evidenceId,
+    evidenceId: scopedIdForDigest(evidenceRef.evidenceId),
     kind: evidenceRef.kind,
     source: evidenceRef.source,
     locator: evidenceRef.locator,
