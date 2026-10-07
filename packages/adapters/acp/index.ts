@@ -68,10 +68,8 @@ export type {
   AcpRuntimeCancelResult,
   AcpRuntimeCloseInput,
   AcpRuntimeCloseResult as AcpClientRuntimeCloseResult,
-  AcpRuntimeLoadInput,
   AcpRuntimeOpenInput,
   AcpRuntimeOpenResult,
-  AcpRuntimeSession as AcpClientRuntimeSession,
   AcpRuntimeSubmitInput,
   AcpRuntimeSubmitResult,
 } from './runtime.js';

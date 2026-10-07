@@ -160,7 +160,7 @@
         "dsh_turn"
       ],
       "output": {
-        "id": "observed_terminal",
+        "id": "observe_stage_done",
         "schema": "Object"
       },
       "input_selector": {
@@ -180,7 +180,7 @@
       "operator": "humanagent-settle-acp-session",
       "operator_version": "1",
       "inputs": [
-        "observed_terminal"
+        "observe_stage_done"
       ],
       "output": {
         "id": "settled_closure",
@@ -206,7 +206,7 @@
         "settled_closure"
       ],
       "output": {
-        "id": "computed_checkpoint",
+        "id": "committed_outcome",
         "schema": "Object"
       },
       "input_selector": {
@@ -226,7 +226,7 @@
       "operator": "humanagent-write-run-manifest",
       "operator_version": "1",
       "inputs": [
-        "computed_checkpoint"
+        "committed_outcome"
       ],
       "output": {
         "id": "run_manifest",
@@ -289,7 +289,7 @@
     {
       "from": "observe_driver_events",
       "to": "settle_acp_session",
-      "arc_id": "observed_terminal"
+      "arc_id": "observe_stage_done"
     },
     {
       "from": "settle_acp_session",
@@ -299,7 +299,7 @@
     {
       "from": "commit_acp_checkpoint",
       "to": "write_run_manifest",
-      "arc_id": "computed_checkpoint"
+      "arc_id": "committed_outcome"
     }
   ],
   "outputs": [

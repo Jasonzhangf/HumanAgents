@@ -31,8 +31,9 @@ import type { AcpRuntimeAdaptor, AcpRuntimeCloseResult, AcpRuntimeOpenResult, Ac
  * Identity rules enforced by construction:
  * - `runtimeId`, `taskId`, `executionEpoch`, `assignmentId`, `operationId` and
  *   `organId` come only from HumanAgent and are never minted by a runtime.
- * - The runtime's `sessionId` is recorded as correlation evidence, never used
- *   as a `TaskId`, `OperationId`, `CheckpointId` or `AgentRuntimeId`.
+ * - The runtime's `sessionId` is used only to address `submit`, `cancel` and
+ *   `close` on the adaptor. It is never used as a `TaskId`, `OperationId`,
+ *   `CheckpointId` or `AgentRuntimeId`.
  * - `cancel` accepted is not `stopped`: `settle` reports `stopped` only when
  *   the runtime confirms the session is closed after a cancellation.
  */
@@ -48,7 +49,6 @@ export interface AcpClientDriverOptions {
   readonly command: string;
   readonly args?: readonly string[];
   readonly timeoutMs?: number;
-  readonly promptFor?: (payload: BusinessPayload) => string;
 }
 
 interface DriverInstance {
@@ -104,7 +104,6 @@ function terminalStateFor(stopReason: AcpRuntimeSubmitResult['stopReason']): 'su
 export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDriver {
   const runtime = options.runtime;
   const timeoutMs = options.timeoutMs ?? 300_000;
-  const promptFor = options.promptFor ?? runtime.promptFor ?? defaultPromptFor;
   const instances = new Map<string, DriverInstance>();
 
   const key = (runtimeId: string, executionEpoch: number): string => `${runtimeId}:${executionEpoch}`;
@@ -214,30 +213,18 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
     },
 
     async resume(input: AgentResumeRequest): Promise<AgentHandle> {
-      const instance = openInstance(input);
-      instances.set(key(instance.runtimeId, instance.executionEpoch), instance);
-      try {
-        const loaded = await runtime.load({
-          runtimeId: instance.runtimeId,
-          sessionId: `ha-${instance.runtimeId}-${instance.executionEpoch}`,
-          workspace: options.workspace,
-          command: options.command,
-          ...(options.args === undefined ? {} : { args: options.args }),
-          timeoutMs,
-        });
-        instance.sessionId = loaded.sessionId;
-      } catch (error) {
-        instances.delete(key(instance.runtimeId, instance.executionEpoch));
-        throw new AcpAdapterError({
-          code: 'capability-unavailable',
-          message: error instanceof Error ? error.message : 'ACP runtime cannot load the requested checkpoint',
-          ownerId: OWNER,
-          nextAction: nextActionFor(OWNER, 'resume-not-supported'),
-          evidenceRefs: [],
-          cause: error,
-        });
-      }
-      return { runtimeId: instance.runtimeId, executionEpoch: instance.executionEpoch };
+      // No runtime behind this seam can reopen a persisted session, so recovery
+      // must fail closed instead of pretending the old session resumed. The
+      // identity checks still run first, so a malformed request reports its own
+      // error rather than an unavailable capability.
+      openInstance(input);
+      throw new AcpAdapterError({
+        code: 'capability-unavailable',
+        message: `ACP runtime ${runtime.runtime} cannot reopen a persisted session`,
+        ownerId: OWNER,
+        nextAction: nextActionFor(OWNER, 'resume-not-supported'),
+        evidenceRefs: [],
+      });
     },
 
     async submit(input: AgentInput): Promise<AgentOutput> {
@@ -263,7 +250,7 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
           evidenceRefs: [],
         });
       }
-      const prompt = promptFor(input.payload);
+      const prompt = defaultPromptFor(input.payload);
       const messageId = `ha-msg-${instance.runtimeId}-${instance.executionEpoch}-${instance.seq + 1}`;
       let result: AcpRuntimeSubmitResult;
       try {

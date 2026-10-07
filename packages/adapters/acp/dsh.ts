@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessLike } from 'node:child_process';
+import { terminateProcess } from './terminate.js';
 import { AcpAdapterError } from './errors.js';
 import type {
   AcpRuntimeAdaptor,
@@ -6,10 +7,8 @@ import type {
   AcpRuntimeCancelResult,
   AcpRuntimeCloseInput,
   AcpRuntimeCloseResult,
-  AcpRuntimeLoadInput,
   AcpRuntimeOpenInput,
   AcpRuntimeOpenResult,
-  AcpRuntimeSession,
   AcpRuntimeSubmitInput,
   AcpRuntimeSubmitResult,
 } from './runtime.js';
@@ -159,14 +158,12 @@ function handleLine(state: DshRunState, line: string): void {
 export interface DshRuntimeOptions {
   readonly args?: readonly string[];
   readonly timeoutMs?: number;
-  readonly version?: string;
-  readonly capabilities?: readonly string[];
 }
 
 export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAdaptor {
   const args = options.args ?? [...DSH_DEFAULT_ARGS];
   const timeoutMs = options.timeoutMs ?? 300_000;
-  const capabilities = options.capabilities ?? ['dsh', 'acp.shim', 'headless-json'] as const;
+  const capabilities = ['dsh', 'acp.shim', 'headless-json'] as const;
 
   function requireState(sessionId: string): DshRunState {
     const state = sessions.get(sessionId);
@@ -192,7 +189,7 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
 
   return {
     runtime: 'dsh',
-    version: options.version ?? VERSION,
+    version: VERSION,
     capabilities: [...capabilities],
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
@@ -210,16 +207,6 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
         finalText: '',
       });
       return { sessionId };
-    },
-
-    async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {
-      throw new AcpAdapterError({
-        code: 'capability-unavailable',
-        message: 'dsh headless one-shot has no resumable ACP session; load is not supported',
-        ownerId: OWNER,
-        nextAction: { kind: 'recover', ref: `${OWNER}/load-not-supported` },
-        evidenceRefs: [],
-      });
     },
 
     async submit(input: AcpRuntimeSubmitInput): Promise<AcpRuntimeSubmitResult> {
@@ -329,8 +316,9 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
       const state = sessions.get(input.sessionId);
       if (!state) return { closed: false };
       sessions.delete(input.sessionId);
-      const child = state.activeChild;
-      if (child !== undefined && child.exitCode === null) child.kill('SIGTERM');
+      // A signal that was only sent is not a stopped runtime, so the session is
+      // closed only after the process has actually exited.
+      if (state.activeChild) await terminateProcess(state.activeChild);
       return { closed: true };
     },
   };

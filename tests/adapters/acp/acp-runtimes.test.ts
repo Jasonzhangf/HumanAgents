@@ -30,10 +30,8 @@ import type {
   AcpRuntimeCancelResult,
   AcpRuntimeCloseInput,
   AcpRuntimeCloseResult,
-  AcpRuntimeLoadInput,
   AcpRuntimeOpenInput,
   AcpRuntimeOpenResult,
-  AcpRuntimeSession,
   AcpRuntimeSubmitInput,
   AcpRuntimeSubmitResult,
 } from '../../../packages/adapters/acp/runtime.js';
@@ -326,15 +324,15 @@ test('ACP driver keeps a close failure visible instead of resolving the session'
   );
 });
 
-test('ACP driver refuses a resume for a runtime without session load support', async () => {
-  const runtime = makeFakeRuntime({ loadFailure: failWith('capability-unavailable', 'load not supported') });
+test('ACP driver refuses a resume and names the runtime that cannot reopen a session', async () => {
+  const runtime = makeFakeRuntime();
   const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
-  // The driver keeps the runtime's own load error visible instead of hiding it
-  // behind a generic failure.
+  // No runtime behind this seam can reopen a persisted session, so resume must
+  // fail closed instead of pretending the old session resumed.
   await assert.rejects(
     driver.resume({ ...startInput(), checkpointId: id('checkpoint', 'cp-1') }),
     (error: Error & { code?: string; message: string }) =>
-      error.code === 'capability-unavailable' && /load not supported/.test(error.message),
+      error.code === 'capability-unavailable' && /opencode/.test(error.message),
   );
 });
 
@@ -357,6 +355,7 @@ test('ACP session id stays evidence only and is never a runtime id', async () =>
   const output = await driver.submit({ taskId, executionEpoch: epoch, assignmentId, payload: submitPayload });
   // The output payload must not leak the backend session id as an identity.
   assert.equal(output.payload.sessionId, undefined);
+  assert.equal(JSON.stringify(output.payload).includes('session-runtime-a'), false);
   assert.equal(output.assignmentId, assignmentId);
 });
 
@@ -393,7 +392,6 @@ function makeFakeRuntime(
     readonly cancelResult?: { readonly accepted: boolean; readonly evidenceRef?: string };
     readonly closeResult?: AcpRuntimeCloseResult;
     readonly closeFailure?: Error;
-    readonly loadFailure?: Error;
   } = {},
 ): AcpRuntimeAdaptor {
   const closeResult: AcpRuntimeCloseResult = options.closeResult ?? { closed: true };
@@ -408,11 +406,6 @@ function makeFakeRuntime(
       };
     },
 
-    async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {
-      if (options.loadFailure) throw options.loadFailure;
-      return { sessionId: 'session-resumed' };
-    },
-
     async submit(input: AcpRuntimeSubmitInput): Promise<AcpRuntimeSubmitResult> {
       if (options.submitFailure) throw options.submitFailure;
       const result = options.submitResult ?? { stopReason: 'end_turn' as const, outputText: 'POGS' };
@@ -424,7 +417,7 @@ function makeFakeRuntime(
     },
 
     async cancel(_input: AcpRuntimeCancelInput): Promise<AcpRuntimeCancelResult> {
-      return options.cancelResult ?? { accepted: true, evidenceRef: 'evidence/cancel' };
+      return options.cancelResult ?? { accepted: true };
     },
 
     async close(_input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {
@@ -462,18 +455,16 @@ test('ACP runtime shim rejects an unknown protocolVersion from initialize', asyn
   assert.throws(() => protocol.assertAcpInitializeResult({ protocolVersion: 0 }), /unsupported protocolVersion 0/);
 });
 
-test('ACP shim adaptor fails closed when load is requested', async () => {
-  for (const factory of [createAntigravityRuntime, createDshRuntime]) {
-    const runtime = factory();
+test('ACP driver refuses a resume on every runtime behind the seam', async () => {
+  for (const factory of [createOpencodeRuntime, createAntigravityRuntime, createDshRuntime]) {
+    const driver = createAcpClientDriver({
+      runtime: factory(),
+      workspace: '/workspace',
+      command: '/opt/homebrew/bin/does-not-exist',
+    });
     await assert.rejects(
-      runtime.load({
-        runtimeId: 'runtime-a',
-        sessionId: 'session-a',
-        workspace: '/workspace',
-        command: '/opt/homebrew/bin/does-not-exist',
-        timeoutMs: 100,
-      }),
-      (error: Error & { code?: string }) => error.code === 'capability-unavailable' && /not supported/.test(error.message),
+      driver.resume({ ...startInput(), checkpointId: id('checkpoint', 'cp-1') }),
+      (error: Error & { code?: string }) => error.code === 'capability-unavailable',
     );
   }
 });

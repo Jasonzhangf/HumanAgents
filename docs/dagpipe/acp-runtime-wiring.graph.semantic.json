@@ -7,9 +7,9 @@
     "run_opencode_adaptor": "经 opencode 真实 ACP v1 服务执行一轮",
     "run_antigravity_shim": "经 antigravity 一次性 CLI shim 执行一轮",
     "run_dsh_shim": "经 dsh headless 一次性 shim 执行一轮",
-    "observe_driver_events": "按 terminal 事件收束驱动事件流，产出可触发收拢的终态观测",
-    "settle_acp_session": "由已观测 terminal 事件触发，收拢执行闭包并关闭 ACP 会话",
+    "observe_driver_events": "按 terminal 事件或 stop 控制面收束驱动事件流",
+    "settle_acp_session": "观测阶段收束后收拢执行闭包并关闭 ACP 会话",
     "commit_acp_checkpoint": "在应用 scope 下提交 checkpoint；成功、失败与停止三种终态都经此节点",
-    "write_run_manifest": "写入可读 run manifest；HumanAgent 会话锁释放与会话关闭不在本图范围内"
+    "write_run_manifest": "按已提交结果写入可读 run manifest（不接收 checkpoint 数据）"
   }
 }

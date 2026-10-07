@@ -11,6 +11,7 @@
  * code. stderr is never parsed as a control signal.
  */
 import { spawn, type ChildProcessLike } from 'node:child_process';
+import { terminateProcess } from './terminate.js';
 import {
   ACP_JSONRPC,
   decodeAcpFrame,
@@ -28,7 +29,6 @@ export interface AcpStdioSpawnOptions {
   readonly command: string;
   readonly args?: readonly string[];
   readonly cwd?: string;
-  readonly env?: Record<string, string | undefined>;
 }
 
 export interface AcpStdioBackendOptions extends AcpStdioSpawnOptions {
@@ -81,7 +81,6 @@ export class AcpStdioBackend {
     this.onUpdate = options.onUpdate;
     this.process = spawn(options.command, options.args ? [...options.args] : [], {
       cwd: options.cwd,
-      env: options.env ? { ...process.env, ...options.env } : process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.process.stdout.on('data', (chunk: unknown) => this.consumeStdout(toUtf8(chunk)));
@@ -216,29 +215,8 @@ export class AcpStdioBackend {
     this.closed = true;
     this.failAll(new AcpStdioBackendError('transport-closed', 'ACP backend closed by client'));
     this.process.stdin.end();
-    this.process.kill('SIGTERM');
-    // `Promise.race` does not cancel the loser, so the SIGKILL grace timer must
-    // be cleared explicitly: otherwise a clean exit still holds the event loop
-    // for the whole grace period after `close` has already resolved.
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    const forcedKill = new Promise<number>((resolve) => {
-      killTimer = setTimeout(() => {
-        this.process.kill('SIGKILL');
-        resolve(1);
-      }, 5000);
-    });
-    try {
-      await Promise.race([waitForExit(this.process), forcedKill]);
-    } finally {
-      if (killTimer !== undefined) clearTimeout(killTimer);
-    }
+    await terminateProcess(this.process);
   }
-}
-
-function waitForExit(process: ChildProcessLike): Promise<number> {
-  return new Promise((resolve) => {
-    process.once('exit', () => resolve(0));
-  });
 }
 
 /** Decodes a raw stream chunk; no `Buffer`/`TextDecoder` dependency is assumed. */

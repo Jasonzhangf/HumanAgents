@@ -19,10 +19,8 @@ import type {
   AcpRuntimeCancelResult,
   AcpRuntimeCloseInput,
   AcpRuntimeCloseResult,
-  AcpRuntimeLoadInput,
   AcpRuntimeOpenInput,
   AcpRuntimeOpenResult,
-  AcpRuntimeSession,
   AcpRuntimeSubmitInput,
   AcpRuntimeSubmitResult,
 } from './runtime.js';
@@ -78,14 +76,12 @@ let requestSequence = 0;
 export interface OpencodeRuntimeOptions {
   readonly args?: readonly string[];
   readonly timeoutMs?: number;
-  readonly version?: string;
-  readonly capabilities?: readonly string[];
 }
 
 export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): AcpRuntimeAdaptor {
   const args = options.args ?? [...OPENCODE_DEFAULT_ARGS];
   const timeoutMs = options.timeoutMs ?? 300_000;
-  const capabilities = options.capabilities ?? ['opencode', 'acp.direct', 'acp.tool-call'];
+  const capabilities = ['opencode', 'acp.direct', 'acp.tool-call'];
 
   function requireState(sessionId: string): OpenState {
     const state = sessions.get(sessionId);
@@ -108,7 +104,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
 
   return {
     runtime: 'opencode',
-    version: options.version ?? VERSION,
+    version: VERSION,
     capabilities,
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
@@ -141,7 +137,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           clientInfo: {
             name: 'humanagent',
             title: 'HumanAgent ACP client',
-            version: options.version ?? VERSION,
+            version: VERSION,
           },
         }, nextId());
         if (isJsonRpcError(initialized)) {
@@ -184,16 +180,6 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
         await backend.close().catch(() => undefined);
         throw error;
       }
-    },
-
-    async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {
-      throw new AcpAdapterError({
-        code: 'capability-unavailable',
-        message: 'opencode runtime does not support loading a prior ACP session in this adapter',
-        ownerId: OWNER,
-        nextAction: { kind: 'recover', ref: `${OWNER}/load-not-supported` },
-        evidenceRefs: [],
-      });
     },
 
     async submit(input: AcpRuntimeSubmitInput): Promise<AcpRuntimeSubmitResult> {
@@ -273,8 +259,10 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           evidenceRefs: [],
         });
       }
-      const cancelled = settled.cancelled || !settled.ok;
-      return { accepted: cancelled };
+      // Only the in-flight prompt settling as `cancelled` confirms the cancel,
+      // as the header contract states. A turn that failed for any other reason
+      // is a failed turn, not an accepted cancellation.
+      return { accepted: settled.cancelled };
     },
 
     async close(input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {

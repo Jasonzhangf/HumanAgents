@@ -35,9 +35,10 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -51,7 +52,10 @@ const OPENCODE_COMMAND = process.env.HUMANAGENT_OPENCODE_COMMAND;
 const ANTIGRAVITY_COMMAND = process.env.HUMANAGENT_ANTIGRAVITY_COMMAND;
 const DSH_COMMAND = process.env.HUMANAGENT_DSH_COMMAND;
 const TIMEOUT_MS = Number(process.env.HUMANAGENT_ACP_TIMEOUT_MS ?? 120_000);
-const REQUESTED = (process.env.HUMANAGENT_ACP_RUNTIMES ?? 'opencode,antigravity,acp-dsh')
+// The delivery contract is all three runtimes. `HUMANAGENT_ACP_RUNTIMES` can
+// narrow the run for debugging, but a narrowed run cannot report PASS.
+const KNOWN_RUNTIMES = ['opencode', 'antigravity', 'acp-dsh'];
+const REQUESTED = (process.env.HUMANAGENT_ACP_RUNTIMES ?? KNOWN_RUNTIMES.join(','))
   .split(',').map((value) => value.trim()).filter((value) => value.length > 0);
 const RECEIPT_PATH = resolve(process.env.HUMANAGENT_RECEIPT_PATH ?? join(repoRoot, 'dist', 'receipts', 'acp-runtimes-proof.json'));
 // A receipt that is not bound to a revision cannot be evidence for one.
@@ -69,11 +73,56 @@ const WORKTREE_DIRTY = (() => {
     return true;
   }
 })();
+// The script imports the compiled entry, so a receipt must identify that
+// artifact: a revision alone cannot show which build produced the result.
+const ARTIFACT = (() => {
+  const hash = createHash('sha256');
+  let files = 0;
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      hash.update(relative(distApp, full));
+      hash.update('\0');
+      hash.update(readFileSync(full));
+      hash.update('\0');
+      files += 1;
+    }
+  };
+  try {
+    walk(distApp);
+  } catch (error) {
+    return { digest: `unreadable: ${error instanceof Error ? error.message : String(error)}`, files: 0 };
+  }
+  return { digest: hash.digest('hex'), files };
+})();
+
 const FIXED_WORKSPACE = process.env.HUMANAGENT_ACP_WORKSPACE;
 const OPENCODE_BASE_URL = process.env.HUMANAGENT_OPENCODE_BASE_URL;
 const OPENCODE_MODEL = process.env.HUMANAGENT_OPENCODE_MODEL;
 const OPENCODE_API_KEY = process.env.HUMANAGENT_OPENCODE_API_KEY ?? 'local-placeholder';
 const PROMPT = 'Reply with exactly one word: POGS. Nothing else.';
+
+if (REQUESTED.length === 0) {
+  console.error('HUMANAGENT_ACP_RUNTIMES selected no runtime; the proof must run at least one');
+  process.exit(2);
+}
+const unknownRuntimes = REQUESTED.filter((value) => !KNOWN_RUNTIMES.includes(value));
+if (unknownRuntimes.length > 0) {
+  console.error(`unknown runtime(s): ${unknownRuntimes.join(', ')}; known: ${KNOWN_RUNTIMES.join(', ')}`);
+  process.exit(2);
+}
+const uncoveredRuntimes = KNOWN_RUNTIMES.filter((value) => !REQUESTED.includes(value));
+
+// A receipt can only be attributed to a revision if the tree it was produced
+// from is that revision.
+if (WORKTREE_DIRTY) {
+  console.error('worktree is dirty; commit the candidate before generating a proof receipt');
+  process.exit(2);
+}
 
 const missing = [
   ...(REQUESTED.includes('opencode') && !OPENCODE_COMMAND ? ['HUMANAGENT_OPENCODE_COMMAND'] : []),
@@ -227,14 +276,15 @@ async function runOne(which) {
     && terminal?.state === 'succeeded'
     && terminal?.terminalPhase === 'final'
     && checkpointText.includes('"outcome":"succeeded"')
-    && resumed.recovered?.checkpoint.id.value === result.checkpoint.id.value;
+    // `resumeAgentOperation` reports a terminal checkpoint without running a new
+    // turn, so this proves the committed checkpoint is recallable through the
+    // recovery entry, not that a second turn ran.
+    && resumed.recovered?.checkpoint.id.value === result.checkpoint.id.value
+    && resumed.waitingReason === `checkpoint is terminal: ${result.checkpoint.outcome}`;
   // The engine's wording is not our contract. What this receipt must prove is
   // that the answer the driver returned is the same string the app published on
   // its ordered `provider.output` stream: an answer cannot be committed without
   // reaching the stream that every downstream role reads.
-  // that the engine's bytes survive the transport, the driver, the app
-  // projection and the event stream unchanged: the received answer is non-empty
-  // and identical in the receipt and in the semantic event stream.
   const answerPassed = answer.length > 0 && answer === streamAnswer;
   const passed = wiringPassed && answerPassed;
 
@@ -264,7 +314,10 @@ async function runOne(which) {
     eventKinds: semanticKinds,
     terminalPhase: terminal?.terminalPhase,
     providerClose: result.receipt.providerClose?.state,
-    resumed: resumed.recovered?.checkpoint.id.value === result.checkpoint.id.value,
+    recoveredCheckpointId: resumed.recovered?.checkpoint.id.value,
+    recoveryWaitingReason: resumed.waitingReason,
+    command: which === 'opencode' ? OPENCODE_COMMAND
+      : (which === 'antigravity' ? ANTIGRAVITY_COMMAND : DSH_COMMAND),
     sessionId,
     workspace,
     controlRoot,
@@ -281,7 +334,7 @@ for (const which of REQUESTED) {
     console.log(`  manifest=${result.manifest.driverRef} organ=${result.manifest.organId} op=${result.manifest.operationId}`);
     console.log(`  driver=${result.observedKinds.join(',')}`);
     console.log(`  semantic=${result.eventKinds.join(',')}`);
-    console.log(`  providerClose=${result.providerClose} resumed=${result.resumed}`);
+    console.log(`  providerClose=${result.providerClose} recovered=${result.recoveryWaitingReason}`);
     console.log(`  wiring=${result.wiringPassed ? 'PASS' : 'FAIL'} answer=${result.answerPassed ? 'PASS' : 'FAIL'}`);
     console.log(`  ${result.passed ? 'PASS' : 'FAIL'}`);
     results.push(result);
@@ -292,15 +345,31 @@ for (const which of REQUESTED) {
   }
 }
 
-const allPassed = results.every((result) => result.passed);
+// A subset run, or a run where a requested runtime produced no result, must not
+// be reportable as the full proof.
+const ranEveryRequested = results.length === REQUESTED.length
+  && REQUESTED.every((runtime) => results.some((result) => result.runtime === runtime));
+const allPassed = ranEveryRequested
+  && uncoveredRuntimes.length === 0
+  && results.every((result) => result.passed);
+const shortfall = [
+  ...(ranEveryRequested ? [] : ['not every requested runtime produced a result']),
+  ...(uncoveredRuntimes.length === 0 ? [] : [`not covered: ${uncoveredRuntimes.join(', ')}`]),
+];
 writeFileSync(RECEIPT_PATH, JSON.stringify({
   generatedAt: new Date().toISOString(),
   candidateRevision: CANDIDATE_REVISION,
   worktreeDirty: WORKTREE_DIRTY,
+  artifact: { digest: ARTIFACT.digest, files: ARTIFACT.files, root: relative(repoRoot, distApp) },
+  requested: REQUESTED,
+  knownRuntimes: KNOWN_RUNTIMES,
+  uncoveredRuntimes,
   prompt: PROMPT,
   allPassed,
   results,
 }, null, 2), 'utf8');
 console.log(`\nreceipt=${RECEIPT_PATH}`);
+console.log(`artifact=${ARTIFACT.digest} (${ARTIFACT.files} files)`);
+if (shortfall.length > 0) console.log(`shortfall=${shortfall.join('; ')}`);
 console.log(`overall=${allPassed ? 'PASS' : 'FAIL'}`);
 process.exit(allPassed ? 0 : 1);

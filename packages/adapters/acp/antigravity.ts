@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessLike } from 'node:child_process';
+import { terminateProcess } from './terminate.js';
 import { AcpAdapterError } from './errors.js';
 import type {
   AcpRuntimeAdaptor,
@@ -6,10 +7,8 @@ import type {
   AcpRuntimeCancelResult,
   AcpRuntimeCloseInput,
   AcpRuntimeCloseResult,
-  AcpRuntimeLoadInput,
   AcpRuntimeOpenInput,
   AcpRuntimeOpenResult,
-  AcpRuntimeSession,
   AcpRuntimeSubmitInput,
   AcpRuntimeSubmitResult,
 } from './runtime.js';
@@ -120,14 +119,12 @@ function runOneShot(
 
 export interface AntigravityRuntimeOptions {
   readonly timeoutMs?: number;
-  readonly version?: string;
-  readonly capabilities?: readonly string[];
   readonly args?: readonly string[];
 }
 
 export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}): AcpRuntimeAdaptor {
   const timeoutMs = options.timeoutMs ?? 300_000;
-  const capabilities = options.capabilities ?? ['antigravity', 'acp.shim', 'one-shot'] as const;
+  const capabilities = ['antigravity', 'acp.shim', 'one-shot'] as const;
 
   function requireState(sessionId: string): OpenState {
     const state = sessions.get(sessionId);
@@ -145,7 +142,7 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
 
   return {
     runtime: 'antigravity',
-    version: options.version ?? VERSION,
+    version: VERSION,
     capabilities: [...capabilities],
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
@@ -172,16 +169,6 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
       };
       sessions.set(sessionId, state);
       return { sessionId };
-    },
-
-    async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {
-      throw new AcpAdapterError({
-        code: 'capability-unavailable',
-        message: 'antigravity one-shot CLI has no resumable session; load is not supported',
-        ownerId: OWNER,
-        nextAction: { kind: 'recover', ref: `${OWNER}/load-not-supported` },
-        evidenceRefs: [],
-      });
     },
 
     async submit(input: AcpRuntimeSubmitInput): Promise<AcpRuntimeSubmitResult> {
@@ -251,9 +238,9 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
       const state = sessions.get(input.sessionId);
       if (!state) return { closed: false };
       sessions.delete(input.sessionId);
-      if (state.active && state.active.exitCode === null) {
-        state.active.kill('SIGTERM');
-      }
+      // A signal that was only sent is not a stopped runtime, so the session is
+      // closed only after the process has actually exited.
+      if (state.active) await terminateProcess(state.active);
       return { closed: true };
     },
   };

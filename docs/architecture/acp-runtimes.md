@@ -52,14 +52,16 @@ opencode 是真实 ACP v1 server，因此声明 `acp.direct` 能力；两个 shi
 `AcpRuntimeAdaptor` 是唯一接缝，方法固定为：
 
 ```text
-open / load / submit / cancel / close
+open / submit / cancel / close
 ```
 
 - `open` 建立会话。direct runtime 在这里初始化真实 ACP 会话；shim 只登记关联标识。
 - `submit` 跑一轮并返回 `outputText` 与 `stopReason`。
 - `cancel` 请求取消。取消被接受不等于已停止。
-- `close` 收拢会话，是停止完成的判定点。
-- `load` 对两个 shim 返回 `capability-unavailable`；一次性 CLI 没有可恢复的 ACP 会话。
+- `close` 收拢会话，是停止完成的判定点。它等到进程真正退出后才返回；只发出信号
+  不算已停止。
+- 恢复不由接缝提供。三个 runtime 都无法重开已持久化的会话，`AgentDriver.resume`
+  因此直接以 `capability-unavailable` 失败，恢复走新 operation。
 
 ACP 的 `sessionId`、`messageId` 只作为关联证据，不成为 HumanAgent 的 `TaskId`、
 `OperationId` 或 `CheckpointId`。
@@ -92,8 +94,10 @@ args = ["--profile", "headless", "--json"]
 ## 5. 取消与停止
 
 `cancel accepted != stopped`。adaptor 的 `cancel` 只报告“取消请求是否被接受”；
-只有 `close` 完成后，driver 才把闭包状态判为 `stopped`。对一次性 CLI，
-`cancel` 的实际动作是结束在飞进程，其拒绝结果由 `submit` 显式抛出，不被吞掉。
+只有 `close` 完成后，driver 才把闭包状态判为 `stopped`。三个 runtime 的 `close`
+都等到进程真正退出：opencode 经 `AcpStdioBackend`，两个 shim 经
+`terminateProcess`，两者都在宽限期后升级为 `SIGKILL`。对一次性 CLI，`cancel`
+的实际动作是结束在飞进程，其拒绝结果由 `submit` 显式抛出，不被吞掉。
 
 ## 6. 证据边界
 
@@ -119,16 +123,20 @@ args = ["--profile", "headless", "--json"]
   同一次 submit 产生，因此这证明答案确实到了下游角色读取的事件流，不证明引擎
   原始字节与最终字节的关系；harness 不断言固定令牌，因为上游对“原样复述”这类
   prompt 的返回并不稳定。
-- 失败可见性：dsh 无凭据时 `submit` 以 `transport-failure` 抛出后端的
-  `MISSING_CREDENTIAL` 原文；`load` 在两个 shim 上返回 `capability-unavailable`。
 - 端到端复跑：`pnpm proof:acp-runtimes` 走真实配置与组合入口，三个 runtime 都通过。
+  receipt 还记录被执行的 `dist/app` 产物摘要与每个 runtime 的 `command`，所以证据
+  能归因到该次构建与那些引擎。harness 要求三个 runtime 全部实际跑完；子集运行或
+  空选择不能报 PASS。
 
 focused tests 证据（`pnpm test:acp` / `test:config` / `test:agent-templates` /
 `test:app`）：
 
 - ACP 45、config 32、agent-templates 17，全部通过。
+- 失败可见性：dsh 无凭据时 `submit` 以 `transport-failure` 抛出后端的
+  `MISSING_CREDENTIAL` 原文。
 - 失败关闭：缺少 `[execution.opencode]` 段时 `acp-config-missing`；缺少
-  `command` 时 `config-invalid`；未知 `driverRef` 时 `config-capability`。
+  `command` 时 `config-invalid`；未知 `driverRef` 时 `config-capability`；任何
+  runtime 的 `resume` 报 `capability-unavailable`。
 - 回归用例：空转轮次不得判为 `succeeded`；被拒绝的空答案必须落为 `failed`；
   `close()` 之后不得残留 SIGKILL 宽限计时器把事件循环拖住。
 

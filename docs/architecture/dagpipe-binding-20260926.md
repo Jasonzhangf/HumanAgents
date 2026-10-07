@@ -132,7 +132,7 @@ Sink: `write_run_manifest`
 
 ## Findings
 
-- All eleven current graphs have exactly one source and one sink.
+- Every graph in `docs/dagpipe` has exactly one source and one sink.
 - All node owners resolve to files inside the allowed project roots.
 - No graph contains orphan nodes after binding validation.
 - The owner mapping stays inside existing HumanAgent module ownership:
