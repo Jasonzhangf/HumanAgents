@@ -16,6 +16,14 @@
 Journal、DSH Session、RCC raw frame 或 debug log。`index.html` 不呈现静态运行状态，
 队列确认和任务状态都来自 Runtime projection。
 
+## Interaction Work Card
+
+`interaction-work-card.js` / `interaction-work-card.css` 提供统一的交互工作卡组件。
+`dashboard.html` 与 `task.html` 都带有 `[data-interaction-work-card]` 静态挂载点。
+组件只消费 `packages/ui/projection` 的 `InteractionWorkCardProjection`；状态栏、
+对话和轨迹三段结构由组件渲染，技术引用保留在轨迹详情和状态技术详情内。
+页面 JS 的接线清单见当前任务回报，不在本 README 中展开。
+
 ## UI brief
 
 - Surface：Operator Console。

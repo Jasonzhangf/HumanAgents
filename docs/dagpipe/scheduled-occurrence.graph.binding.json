@@ -1,0 +1,80 @@
+{
+  "graph": "humanagent-scheduled-occurrence",
+  "operator": {
+    "operator": "humanagent-scheduled-occurrence",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "scheduler_patrol": {
+      "ownerPath": "packages/app/src/ui-runtime/scheduler.ts",
+      "ownerRel": "packages/app/src/ui-runtime/scheduler.ts",
+      "ownerSymbol": "UiRuntimeScheduler.tick",
+      "implementationStatus": "implemented",
+      "subscriptionControlOwnerPath": "packages/runtime/src/subscriptions/index.ts",
+      "subscriptionControlOwnerRel": "packages/runtime/src/subscriptions/index.ts",
+      "subscriptionControlOwnerSymbol": "SubscriptionControlPort.schedule",
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/scheduler.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/scheduler.ts",
+      "productionOwnerSymbol": "UiRuntimeScheduler.tick",
+      "productionEvidence": "startUiRuntime 在有 supervisor lease 时按真实时钟启动 patrol，每个 tick 依次 dueTimes→schedule→claim→consumeExecution→settleOccurrence；tests/app/scheduler-production-wiring.test.ts 生产同入口验证到点执行与 restart 不重复 dispatch",
+      "ablationFollowUp": "已完成：重复实现 packages/runtime/src/explicit-brain/scheduler-patrol.ts（SchedulerPatrol/SchedulerPatrolError/SchedulerPatrolPort）已于 validation-ablation 轮物理删除；本节点的唯一 owner 是 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler，其 snapshot/pause/resume 语义由 SubscriptionControlPort.snapshot/control 唯一持有"
+    },
+    "read_committed_subscription_state": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.snapshot",
+      "implementationStatus": "implemented"
+    },
+    "recover_pending_reminder": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.schedule",
+      "implementationStatus": "implemented"
+    },
+    "claim_due_occurrence": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.claim",
+      "implementationStatus": "implemented"
+    },
+    "validate_occurrence_domain": {
+      "ownerPath": "packages/core/src/subscription.ts",
+      "ownerRel": "packages/core/src/subscription.ts",
+      "ownerSymbol": "assertOccurrenceClaimLease",
+      "implementationStatus": "implemented"
+    },
+    "admit_occurrence_execution": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.consumeExecution",
+      "implementationStatus": "implemented"
+    },
+    "execute_occurrence_task": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.consumeExecution",
+      "implementationStatus": "implemented",
+      "consumerOwnerPath": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "consumerOwnerRel": "packages/app/src/ui-runtime/occurrence-consumer.ts",
+      "consumerOwnerSymbol": "DurableOccurrenceConsumer.executeOccurrence",
+      "publicConsumer": "humanagent-serve-task@3"
+    },
+    "settle_occurrence": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.settleOccurrence",
+      "implementationStatus": "implemented"
+    },
+    "publish_occurrence_result": {
+      "ownerPath": "packages/runtime/src/subscriptions/index.ts",
+      "ownerRel": "packages/runtime/src/subscriptions/index.ts",
+      "ownerSymbol": "SubscriptionControlPort.settleOccurrence",
+      "implementationStatus": "partial",
+      "projectionOwnerPath": "packages/ui/projection/runtime.ts",
+      "projectionOwnerRel": "packages/ui/projection/runtime.ts",
+      "projectionOwnerSymbol": "projectRuntimeTaskDashboard",
+      "terminalCoverage": "success/failed/rejected/missing/blocked/cancelled/cleanup 由 terminal receipt 保留；当前尚未在 product UI 显示全部终态"
+    }
+  }
+}

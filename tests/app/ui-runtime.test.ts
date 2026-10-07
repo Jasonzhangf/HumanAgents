@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,7 +8,9 @@ import test from 'node:test';
 import {
   PIPELINE_NODE_IDS,
   PIPELINE_ROWS,
+  ContractError,
   id,
+  validateInteractionTraceEntry,
   type Attention,
   type Checkpoint,
   type EvidenceRef,
@@ -31,7 +33,16 @@ import {
   type ScopeRef,
   type TaskId,
 } from '../../packages/contracts/src/index.js';
-import { ProviderAdapterError } from '../../packages/adapters/provider/src/index.js';
+import {
+  ProviderAdapter,
+  ProviderAdapterError,
+  ResponsesProviderCodec,
+  filesystemProviderEvidenceSink,
+  type ProviderTransport,
+} from '../../packages/adapters/provider/src/index.js';
+import { ImmutableAssetStore } from '../../packages/adapters/filesystem/src/index.js';
+import { DEFAULT_AGENT_IO_POLICY } from '../../packages/runtime/src/agent-io/types.js';
+import type { RuntimeLivenessProjection } from '../../packages/ui/contracts/runtime.js';
 import {
   digestAgentTemplate,
   type AgentTemplateManifest,
@@ -54,7 +65,9 @@ import {
   producedArtifactPaths,
   type RuntimeCheckpointBoundary,
   type RuntimeCheckpointBoundaryPort,
+  type RuntimeTaskEvent,
   type RuntimeTaskJournalRecord,
+  type RuntimeTaskSnapshot,
 } from '../../packages/runtime/src/ui-runtime/coordinator.js';
 import {
   FileCheckpointStore,
@@ -75,7 +88,10 @@ import {
   type ReviewAgentPort,
 } from '../../packages/runtime/src/orchestration/index.js';
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
-import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
+import { AppLifecycleError } from '../../packages/app/src/errors.js';
+import { projectRuntimeTaskHistory } from '../../packages/app/src/ui-runtime/turn-history.js';
+import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
+import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
 import {
   createProviderExplicitBrainInterpreter,
@@ -83,6 +99,29 @@ import {
 } from '../../packages/app/src/explicit-brain-runtime.js';
 
 const organId = id('organ', 'organ-ui-test');
+const rawFetch = globalThis.fetch.bind(globalThis);
+const testSessionByOrigin = new Map<string, string>();
+
+async function testAccessControl(root: string) {
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  return { accessControl, cookie: accessControl.sessionCookie(session).split(';')[0]! };
+}
+
+globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1] = {}) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const origin = new URL(url).origin;
+  const cookie = testSessionByOrigin.get(origin);
+  const headers = new Headers(init.headers ?? {});
+  if (cookie) headers.set('cookie', cookie);
+  const method = (init.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') headers.set('origin', origin);
+  return rawFetch(input, { ...init, headers });
+}) as typeof fetch;
 const builtinTemplateRoot = join(process.cwd(), 'packages', 'agent-templates', 'templates');
 const binding: ProviderBinding = {
   bindingId: 'binding-ui-test',
@@ -100,13 +139,18 @@ const unusedExplicitBrainInterpreter: ExplicitBrainInputInterpreter = {
   },
 };
 
-function startUiRuntime(
+async function startUiRuntime(
   options: Parameters<typeof startUiRuntimeOwner>[0],
 ): ReturnType<typeof startUiRuntimeOwner> {
-  return startUiRuntimeOwner({
+  const securityRoot = options.checkpointRoot;
+  const auth = options.accessControl ? undefined : await testAccessControl(securityRoot);
+  const runtime = await startUiRuntimeOwner({
     ...options,
+    ...(auth === undefined ? {} : { accessControl: auth.accessControl }),
     explicitBrainInterpreter: options.explicitBrainInterpreter ?? unusedExplicitBrainInterpreter,
   });
+  if (auth) testSessionByOrigin.set(new URL(runtime.server.url).origin, auth.cookie);
+  return runtime;
 }
 
 function explicitArgumentsDigest(args: Readonly<Record<string, unknown>>): string {
@@ -544,10 +588,85 @@ class CountingFakeReplayExecutionRuntimePort extends FakeReplayExecutionRuntimeP
   }
 }
 
+// The fake replay port intentionally omits summaries for model events. This
+// wrapper restores the real provider's framework summary so the implicit
+// executor projection can be tested against the same event shape.
+class SemanticModelSummaryReplayPort extends FakeReplayExecutionRuntimePort {
+  override async *observe(
+    input: Parameters<ExecutionRuntimePort['observe']>[0],
+  ): AsyncIterable<ProviderEvent> {
+    for await (const event of super.observe(input)) {
+      yield event.kind === 'model'
+        ? { ...event, summary: 'provider requested model work' }
+        : event;
+    }
+  }
+}
+
+// The execution port is the only boundary that sees the provider binding's own
+// request identity, so it is the independent oracle for the trace projection.
+// This port records the identity the driver handed it and stamps a fixed
+// provider-reported occurrence time on every event, which lets a test assert the
+// trace carries the values the provider reported rather than a render time.
+class TurnIdentityCapturingReplayPort extends FakeReplayExecutionRuntimePort {
+  readonly startIdentities: Array<{ readonly turnId?: string; readonly requestId?: string }> = [];
+  readonly observeIdentities: Array<{ readonly turnId?: string; readonly requestId?: string }> = [];
+  readonly providerOccurredAt = '2026-10-06T08:00:00.000Z';
+
+  override async start(input: ProviderStartInput): Promise<ProviderStartReceipt> {
+    // The driver spreads its request identity into the port input; the declared
+    // start input type does not name those fields, so read them structurally.
+    const identity = input as ProviderStartInput & { readonly turnId?: string; readonly requestId?: string };
+    this.startIdentities.push({ turnId: identity.turnId, requestId: identity.requestId });
+    return super.start(input);
+  }
+
+  override async *observe(
+    input: Parameters<ExecutionRuntimePort['observe']>[0],
+  ): AsyncIterable<ProviderEvent> {
+    this.observeIdentities.push({ turnId: input.turnId, requestId: input.requestId });
+    for await (const event of super.observe(input)) {
+      yield { ...event, occurredAt: this.providerOccurredAt };
+    }
+  }
+}
+
 function queuedDraftRow(list: ReturnType<UiRuntimeService['listTasks']>, draftId: string) {
   const row = list.draft.find((task) => task.taskId.value === `ui-task-implicit-${draftId}`);
   if (!row) throw new Error(`missing queued draft row for ${draftId}`);
   return row;
+}
+
+// Confirms one explicit requirement through the real service owner so FIFO
+// lifecycle tests share one deterministic producer instead of duplicating the
+// interaction state machine.
+async function confirmExplicitRequirementFor(service: UiRuntimeService, suffix: string): Promise<string> {
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: `ui:${suffix}`,
+    rawInput: `confirmed requirement ${suffix}`,
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: `confirmed requirement ${suffix}`,
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: `create ${suffix} work`,
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: `confirmation:${suffix}`,
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-03T00:00:00.000Z',
+    payloadRef: `asset://requirements/${suffix}`,
+  });
+  return interactionId;
 }
 
 class FailingInteractionClosurePort implements CheckpointClosurePort {
@@ -1407,12 +1526,20 @@ test('organ health probe and snapshot expose bounded dimensions, evidence, and i
     assert.match(snapshotError.error.nextAction, /health probe/u);
     assert.equal(probeCount, 0);
 
-    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`);
+    const legacyProbe = await fetch(`${runtime.server.url}/api/health/probe`);
+    assert.equal(legacyProbe.status, 405);
+    assert.equal(legacyProbe.headers.get('allow'), 'POST');
+    assert.equal(probeCount, 0);
+
+    const probeResponse = await fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(probeResponse.status, 200);
     assert.equal(probeCount, 1);
 
-    for (const path of ['/api/health/probe', '/api/health/snapshot']) {
-      const response = await fetch(`${runtime.server.url}${path}`);
+    const requests = [
+      fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' }),
+      fetch(`${runtime.server.url}/api/health/snapshot`),
+    ];
+    for (const response of await Promise.all(requests)) {
       assert.equal(response.status, 200);
       const body = await response.json() as {
         readonly surface: string;
@@ -1491,7 +1618,7 @@ test('expired organ health evidence is reported as stale unknown without changin
     memory: testMemory('project-ui-organ-health-stale'),
   });
   try {
-    const response = await fetch(`${runtime.server.url}/api/health/probe`);
+    const response = await fetch(`${runtime.server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(response.status, 200);
     const body = await response.json() as {
       readonly lifecycleState: string;
@@ -1603,13 +1730,21 @@ test('organ health HTTP preserves provider failure ownership and recovery eviden
     closurePort: runtimeJournal,
     memory: testMemory('project-ui-organ-health-error'),
   });
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
   const server = await startUiRuntimeServer({
     service,
+    accessControl,
     uiRoot: join(process.cwd(), 'docs', 'ui'),
     port: 0,
   });
+  testSessionByOrigin.set(new URL(server.url).origin, accessControl.sessionCookie(session).split(';')[0]!);
   try {
-    const response = await fetch(`${server.url}/api/health/probe`);
+    const response = await fetch(`${server.url}/api/health/probe`, { method: 'POST' });
     assert.equal(response.status, 409);
     const body = await response.json() as {
       readonly error: {
@@ -1844,8 +1979,8 @@ test('fake execution completes through Runtime projection with SSE, output, chec
   // The drawer panes read the detail projection's own typed fields, so the live service path must
   // carry the real tool steps and owning agent role, not just those of the flow node.
   assert.equal(selected.toolSteps.length, 1);
-  assert.equal(selected.toolSteps[0]?.returned, 'tool: fake://tool/1');
-  assert.equal(selected.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.match(selected.toolSteps[0]?.returned ?? '', /status=unknown · call=tool: fake:\/\/tool\/1/);
+  assert.equal(selected.toolSteps[0]?.name, '未标注工具');
   assert.equal(selected.ownerAgentRole, 'execution');
   assert.equal(selected.roleDisplay, '执行');
   assert.equal(selected.owner.length > 0, true);
@@ -1900,6 +2035,93 @@ test('provider tool-result output stays out of task output while remaining visib
   assert.equal(events.some((event) => event.kind === 'provider.output' && event.summary === 'REAL_FILE_CONTENT'), true);
 });
 
+test('observation pairs provider tool calls with results by callId and uses toolId as the display name', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-tool-callid-pair-'));
+  const port = new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      {
+        kind: 'tool',
+        state: 'tool',
+        summary: 'file.search call',
+        outputRefs: ['fake://tool-call/1'],
+        toolCall: { callId: 'call-1', toolId: 'file.search', arguments: { path: '.', query: 'marker', queryKind: 'literal' }, continuationRef: 'responses-tool-call' },
+      },
+      { kind: 'terminal', state: 'tool-waiting', summary: 'provider awaits the tool result', terminalState: 'waiting', nextAction: { kind: 'continue', ref: 'responses-tool-call' } },
+      { kind: 'output', state: 'output', summary: 'final answer', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  });
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'fake',
+    organId,
+    binding,
+    port,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-tool-result'),
+    providerTools: [RESPONSES_FILE_SEARCH_TOOL],
+    providerToolExecutor: {
+      async execute() {
+        return {
+          output: JSON.stringify([]),
+          outputRefs: ['fake://tool-result/1'],
+          evidenceRefs: [evidence('result', { organId })],
+          outputRef: 'fake://tool-result/1',
+          outputDigest: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+        };
+      },
+    },
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+  });
+  const task = service.createTask({ title: 'tool call pairing', directive: 'pair call and result' });
+  service.startExecution(task.taskId, { prompt: 'pair the tool round' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const executeNode = service.observation(task.taskId).nodes.find((node) => node.nodeId === 'pipeline.execute');
+  if (!executeNode) throw new Error('expected pipeline.execute node');
+  assert.equal(executeNode.toolSteps.length, 1);
+  assert.equal(executeNode.toolSteps[0]?.name, 'file.search');
+  assert.equal(executeNode.toolSteps[0]?.status, 'succeeded');
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /outputRef=fake:\/\/tool-result\/1/);
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /arguments=.*marker/);
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /durationMs=/);
+  assert.equal(executeNode.toolSteps[0]?.stepId, 'call-1');
+});
+
+test('task dashboard exposes full history with hasMore and no status-layer contradiction after success', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-dashboard-history-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
+    binding,
+    stepDelayMs: 1,
+    replay: [
+      ...Array.from({ length: 24 }, (_, index) => ({ kind: 'model' as const, state: 'model', summary: `model ${index + 1}` })),
+      { kind: 'output', state: 'output', summary: 'history final output', outputRefs: ['fake://output/1'] },
+      { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+    ],
+  }));
+  const task = service.createTask({ title: 'dashboard history', directive: 'show all history windows' });
+  service.startExecution(task.taskId, { prompt: 'show history' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const dashboard = service.taskDashboard(task.taskId);
+  // Full typed trajectory is carried for paging; the recent-events summary stays bounded.
+  assert.equal(dashboard.history.events.length, dashboard.history.total);
+  assert.equal(dashboard.history.events.length > 20, true);
+  assert.equal(dashboard.recentEvents.length, 20);
+  assert.equal(dashboard.history.hasMore, true);
+  assert.equal(dashboard.history.omitted, dashboard.history.total - 20);
+  assert.equal(dashboard.history.events[0]!.seq < dashboard.recentEvents[0]!.seq, true);
+  assert.match(dashboard.statusSections.business, /已完成/);
+  assert.match(dashboard.statusSections.waiting, /收拢/);
+  assert.equal(dashboard.statusSections.business.includes('尚未提交'), false);
+});
+
 test('observation projects all thirteen registry nodes in registry order with agent-frame ownership and real tool steps', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-observation-thirteen-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({
@@ -1947,8 +2169,8 @@ test('observation projects all thirteen registry nodes in registry order with ag
   const executeNode = observation.nodes.find((node) => node.nodeId === 'pipeline.execute');
   if (!executeNode) throw new Error('expected pipeline.execute node');
   assert.equal(executeNode.toolSteps.length, 1);
-  assert.equal(executeNode.toolSteps[0]?.returned, 'tool: fake://tool/1');
-  assert.equal(executeNode.toolSteps[0]?.name, 'humanagent.fake-provider');
+  assert.match(executeNode.toolSteps[0]?.returned ?? '', /status=unknown · call=tool: fake:\/\/tool\/1/);
+  assert.equal(executeNode.toolSteps[0]?.name, '未标注工具');
   // The provider reports `tool` without a terminal status; the step stays explicitly unknown.
   assert.equal(executeNode.toolSteps[0]?.status, 'unknown');
   assert.equal(executeNode.toolSteps[0]?.stepId.length > 0, true);
@@ -3644,6 +3866,310 @@ test('runtime restart hydrates dispatched state without starting the requirement
   assert.equal((await restarted.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
+test('runtime close quiesces pending implicit consumption before settling active executions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-quiescence-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  const interactionRoot = join(root, 'interactions');
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 5 });
+  const options = {
+    mode: 'fake' as const,
+    organId,
+    binding,
+    port,
+    checkpointRoot,
+    interactionRoot,
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    projectKey: 'project-ui-close-quiescence',
+    workspaceRoot: root,
+    memory: testMemory('project-ui-close-quiescence'),
+  };
+  const first = await startUiRuntime(options);
+  try {
+    await confirmExplicitRequirementFor(first.service, 'close-quiescence');
+    assert.equal(first.service.listTasks().counts.total, 1, 'confirmed requirement must be durably queued before close');
+    await first.close();
+    // Wait past the 100ms FIFO visibility window; the retired runtime must not
+    // dispatch the requirement after close has settled it.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(port.startPayloads.length, 0, 'retired runtime must not dispatch after close');
+    assert.equal(first.service.listTasks().counts.running, 0);
+  } finally {
+    await first.close().catch(() => undefined);
+  }
+
+  const replacement = await startUiRuntime(options);
+  try {
+    await waitFor(() => assert.equal(port.startPayloads.length, 1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(port.startPayloads.length, 1, 'replacement runtime must dispatch the durable requirement exactly once');
+    await waitFor(() => assert.equal(replacement.service.listTasks().counts.completed, 1));
+    assert.equal(replacement.service.listTasks().counts.total, 1);
+  } finally {
+    await replacement.close();
+  }
+});
+
+test('server close releases the single tracked auth expiry timer after active SSE streams close', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-auth-timer-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+    sessionTtlMs: 1_500,
+    pairingTtlMs: 1_500,
+  });
+  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('lease-timer', 1).code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 5_000 }));
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  const streams: Array<{ controller: AbortController; closed: Promise<void> }> = [];
+  try {
+    const task = service.createTask({ title: 'auth timer lifecycle' });
+    const started = service.startExecution(task.taskId, { prompt: 'hold three SSE streams open' });
+    for (let index = 0; index < 3; index += 1) {
+      const controller = new AbortController();
+      const stream = await fetch(`${server.url}/api/executions/${encodeURIComponent(started.operationId.value)}/events`, {
+        headers: { cookie },
+        signal: controller.signal,
+      });
+      assert.equal(stream.status, 200);
+      assert.match(stream.headers.get('content-type') ?? '', /text\/event-stream/);
+      const reader = stream.body!.getReader();
+      await reader.read();
+      streams.push({ controller, closed: (async () => {
+        try {
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) return;
+          }
+        } catch {
+          // Abort closes the reader; lifecycle assertions use server.close().
+        }
+      })() });
+    }
+    const receipt = await server.close();
+    assert.equal(receipt.activeSseEnded, 3, 'all active SSE streams must close with the server');
+    assert.equal(receipt.authTimersCleared, 1, 'server close must release the single tracked auth expiry timer');
+    for (const entry of streams) entry.controller.abort();
+    await Promise.all(streams.map((entry) => entry.closed));
+  } finally {
+    for (const entry of streams) entry.controller.abort();
+    await Promise.all(streams.map((entry) => entry.closed.catch(() => undefined)));
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('shared control-root credential invalidation is observed by every live access-control instance', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-shared-credential-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    const first = await AccessControlService.open({ credentialPath, create: true });
+    const second = await AccessControlService.open({ credentialPath });
+    const session = await first.consumePairingCode(first.createPairingChallenge('lease-shared', 1).code);
+
+    assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'valid');
+    const staleGeneration = session.sessionGeneration;
+    const generations = await Promise.all([
+      first.logout(),
+      second.logout(),
+    ]);
+    assert.deepEqual([...generations].sort((left, right) => left - right), [staleGeneration + 1, staleGeneration + 2]);
+    assert.equal(await first.readPersistedGeneration(), staleGeneration + 2);
+    assert.equal((await first.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
+    assert.equal((await second.verifySession(first.sessionCookie(session))).state, 'generation-mismatch');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('credential mutation lock survives crash recovery without stealing a live owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-lock-'));
+  const credentialPath = join(root, 'security', 'web-access.json');
+  const lockPath = `${credentialPath}.lock`;
+  const accessControl = await AccessControlService.open({ credentialPath, create: true });
+  try {
+    const holder = spawn(process.execPath, [
+      '-e',
+      [
+        "const fs = require('node:fs');",
+        `const handle = fs.openSync(${JSON.stringify(lockPath)}, fs.constants.O_RDWR | fs.constants.O_CREAT | 0x20 | fs.constants.O_NONBLOCK, 0o600);`,
+        "process.stdout.write('locked\\n');",
+        "process.on('SIGTERM', () => { fs.closeSync(handle); process.exit(0); });",
+        'setInterval(() => {}, 1000);',
+      ].join(''),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.stdout!.once('data', () => resolve());
+    });
+    await assert.rejects(
+      () => accessControl.logout(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.busy',
+    );
+    holder.kill('SIGTERM');
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.once('exit', () => resolve());
+    });
+    assert.equal(await accessControl.logout(), 2, 'released lock must allow the next generation mutation');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('credential read and write failures refuse pairing and logout explicitly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-failure-'));
+  try {
+    const credentialPath = join(root, 'security', 'web-access.json');
+    const accessControl = await AccessControlService.open({ credentialPath, create: true });
+    await writeFile(credentialPath, '{not-json}\n', 'utf8');
+    const challenge = accessControl.createPairingChallenge('lease-failure', 1);
+
+    await assert.rejects(
+      () => accessControl.consumePairingCode(challenge.code),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
+    await assert.rejects(
+      () => accessControl.logout(),
+      (error: unknown) => (error as { readonly code?: string }).code === 'auth.credentials.unavailable',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('runtime close settles active executions before propagating a credential watch failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-close-watch-failure-'));
+  const checkpointRoot = join(root, 'checkpoints');
+  let releaseExecution!: () => void;
+  const executionGate = new Promise<void>((resolve) => {
+    releaseExecution = resolve;
+  });
+  const port = new FirstOperationGatedReplayPort(
+    { binding, stepDelayMs: 100 },
+    executionGate,
+  );
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const watchFailure = new AccessControlError(
+    'auth.credentials.unavailable',
+    'web access credential is unavailable',
+    'repair the control-root credential path',
+    503,
+  );
+  let runtimeReceiverWatcherClosed: boolean | undefined;
+  const failingAccessControl = Object.create(accessControl) as AccessControlService;
+  failingAccessControl.closeCredentialWatch = async () => {
+    runtimeReceiverWatcherClosed = await accessControl.closeCredentialWatch.call(failingAccessControl);
+    assert.equal(runtimeReceiverWatcherClosed, true, 'shutdown must close the credential watcher owned by the runtime receiver');
+    throw watchFailure;
+  };
+  const runtime = await startUiRuntimeOwner({
+    mode: 'fake',
+    accessControl: failingAccessControl,
+    organId,
+    binding,
+    port,
+    checkpointRoot,
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    portNumber: 0,
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    memory: testMemory('project-ui-close-watch-failure'),
+  });
+  let closeStarted = false;
+  try {
+    const task = runtime.service.createTask({ title: 'watch failure close' });
+    runtime.service.startExecution(task.taskId, { prompt: 'hold open until watch failure' });
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'running'));
+
+    closeStarted = true;
+    const closed = runtime.close();
+    const rejection = closed.then(
+      (value: unknown) => {
+        throw new Error(`runtime.close() must reject with the original credential error; resolved with ${JSON.stringify(value)}`);
+      },
+      (error: unknown) => error,
+    );
+    await waitFor(() => assert.equal(runtime.service.taskDashboard(task.taskId).state, 'settling'));
+    releaseExecution();
+    assert.equal((await rejection as { readonly code?: string }).code, 'auth.credentials.unavailable');
+    assert.equal(
+      runtimeReceiverWatcherClosed,
+      true,
+      'injected failure must follow the actual runtime receiver closing its credential watcher',
+    );
+    assert.equal(
+      runtime.service.taskDashboard(task.taskId).state,
+      'stopped',
+      'listener close failure must not bypass standard task stop and checkpoint settlement',
+    );
+
+    const checkpoint = runtime.service.taskDashboard(task.taskId).checkpoint;
+    assert.equal(checkpoint?.outcome, 'stopped');
+    const checkpointFile = await readFile(
+      join(checkpointRoot, 'fake', `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
+      'utf8',
+    );
+    const records = checkpointFile
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { readonly kind?: string; readonly checkpoint?: { readonly outcome?: string } });
+    const stoppedCheckpoint = records.find(
+      (record) => record.kind === 'checkpoint' && record.checkpoint?.outcome === 'stopped',
+    );
+    assert.ok(stoppedCheckpoint, 'close must commit the stopped checkpoint before the original error is observable');
+
+    let retryError: unknown;
+    try {
+      await runtime.close();
+      throw new Error('repeated runtime.close() must expose the cached credential error');
+    } catch (error) {
+      retryError = error;
+    }
+    assert.equal((retryError as { readonly code?: string }).code, 'auth.credentials.unavailable');
+    assert.equal(runtime.service.listTasks().counts.running, 0);
+  } finally {
+    releaseExecution();
+    if (!closeStarted) await runtime.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('server close awaits credential watch drain and reports closure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-credential-watch-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  try {
+    const receipt = await server.close();
+    assert.equal(receipt.credentialWatchClosed, true, 'server close must release the credential watcher');
+    assert.equal(receipt.authTimersCleared, 0, 'an empty stream registry must not invent an auth timer release');
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('explicit brain status query never creates a task or FIFO entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-status-'));
   const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
@@ -4156,11 +4682,13 @@ test('explicit brain accepts a clarification answer over HTTP and re-enters inte
 
 test('UI runtime assembly rejects an unconfigured production explicit brain before startup', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-unconfigured-'));
+  const auth = await testAccessControl(root);
   await assert.rejects(
     () => startUiRuntimeOwner({
       mode: 'fake',
       organId,
       binding,
+      accessControl: auth.accessControl,
       port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
       checkpointRoot: join(root, 'checkpoints'),
       evidenceRoot: join(root, 'evidence'),
@@ -4534,6 +5062,65 @@ test('runtime output concatenates repeated provider deltas without suffix dedupe
   service.startExecution(task.taskId, { prompt: 'run repeated deltas' });
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).output, 'aa');
+});
+
+test('provider output without readable text never projects artifact refs into task output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-output-artifact-ref-'));
+  const artifactRef = 'humanagent.provider-adapter:response.content_part.added:part-msg-1:sha256:c45b5b';
+  try {
+    class MissingOutputSummaryReplayPort extends FakeReplayExecutionRuntimePort {
+      override async *observe(
+        input: Parameters<ExecutionRuntimePort['observe']>[0],
+      ): AsyncIterable<ProviderEvent> {
+        for await (const event of super.observe(input)) {
+          if (event.kind === 'output' && event.outputRefs?.includes(artifactRef)) {
+            const { summary: _summary, ...withoutSummary } = event;
+            yield withoutSummary;
+          } else {
+            yield event;
+          }
+        }
+      }
+    }
+
+    const service = serviceFor(root, new MissingOutputSummaryReplayPort({
+      binding,
+      stepDelayMs: 1,
+      replay: [
+        { kind: 'output', state: 'output', summary: 'ignored snapshot summary', outputRefs: [artifactRef] },
+        { kind: 'output', state: 'output', summary: 'real model reply', outputRefs: ['humanagent.provider-adapter:response.output_text.done:text-msg-1:sha256:done'] },
+        { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+      ],
+    }));
+    const task = service.createTask({ title: 'provider artifact ref', directive: 'keep the task output readable' });
+    service.startExecution(task.taskId, { prompt: 'read the marker and reply' });
+    await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+    const dashboard = service.taskDashboard(task.taskId);
+    assert.equal(dashboard.output, 'real model reply');
+    assert.equal(dashboard.output.includes('humanagent.provider-adapter:'), false);
+
+    const observation = service.observation(task.taskId);
+    const executionNode = observation.scope.nodes.find((node) => node.nodeId === 'pipeline.execute');
+    assert.equal(executionNode?.summary, 'real model reply');
+    assert.equal(executionNode?.summary.includes('humanagent.provider-adapter:'), false);
+
+    const providerScope = service.observation(
+      task.taskId,
+      undefined,
+      `task://${task.taskId.value}/observation/pipeline.execute`,
+    );
+    assert.equal(
+      providerScope.scope.nodes.some((node) => node.summary.includes('humanagent.provider-adapter:')),
+      false,
+    );
+    assert.equal(
+      providerScope.scope.nodes.some((node) => node.summary === '未投影'),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('responses delta and completion replay projects output text exactly once', async () => {
@@ -5728,23 +6315,28 @@ test('SSE replay honors Last-Event-ID without returning already delivered events
   assert.deepEqual(service.eventsSince(started.operationId, 'unknown-event'), all);
 });
 
-test('ui runtime server refuses to bind the unauthenticated control API outside loopback', async () => {
+test('ui runtime wildcard listener keeps sensitive APIs behind access control', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-host-guard-'));
-  await assert.rejects(async () => {
-    await startUiRuntime({
-      mode: 'fake',
-      organId,
-      binding,
-      port: buildFakeExecutionPort(binding),
-      checkpointRoot: join(root, 'checkpoints'),
-      evidenceRoot: join(root, 'evidence'),
-      uiRoot: join(process.cwd(), 'docs', 'ui'),
-      providerState: 'ready',
-      host: '0.0.0.0',
-      portNumber: 0,
-      memory: testMemory('project-ui-host-guard'),
-    });
-  }, /loopback/);
+  const runtime = await startUiRuntime({
+    mode: 'fake',
+    organId,
+    binding,
+    port: buildFakeExecutionPort(binding),
+    checkpointRoot: join(root, 'checkpoints'),
+    evidenceRoot: join(root, 'evidence'),
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    providerState: 'ready',
+    host: '0.0.0.0',
+    portNumber: 0,
+    memory: testMemory('project-ui-host-guard'),
+  });
+  try {
+    assert.equal(runtime.server.listenAddress, '0.0.0.0');
+    const tasks = await fetch(`${runtime.server.url.replace('0.0.0.0', '127.0.0.1')}/api/tasks`);
+    assert.equal(tasks.status, 401);
+  } finally {
+    await runtime.server.close();
+  }
 });
 
 test('ui runtime server formats IPv6 loopback URLs with brackets', async () => {
@@ -5783,30 +6375,30 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   const link = rule('.task-row-link');
   const head = rule('.task-row--head');
 
-  // The runtime row is a three-track shell: checkbox, the multi-column link, actions.
+  // The runtime row is a five-track shell: checkbox, title, status, time, actions.
   assert.match(row, /grid-template-columns:\s*var\(--task-columns\)/);
-  assert.match(tasksCss, /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+auto;/);
-
-  // The link spans that middle track and owns the eight data columns itself,
-  // so the time cell never overflows onto an implicit second row.
-  assert.match(link, /display:\s*grid;/);
-  assert.match(link, /grid-column:\s*2;/);
   assert.match(
-    link,
-    /grid-template-columns:\s*minmax\(140px,\s*1\.5fr\)\s+minmax\(74px,\s*0\.5fr\)\s+minmax\(92px,\s*0\.85fr\)\s+minmax\(104px,\s*1fr\)\s+minmax\(132px,\s*1\.25fr\)\s+minmax\(58px,\s*0\.4fr\)\s+minmax\(104px,\s*0\.8fr\)\s+minmax\(96px,\s*0\.7fr\);/s,
+    tasksCss,
+    /--task-columns:\s*44px\s+minmax\(0,\s*1fr\)\s+84px\s+108px\s+116px;/s,
   );
 
-  // The header keeps the same nine tracks instead of inheriting the three-track shell.
-  assert.match(head, /grid-template-columns:\s*44px/);
-  assert.equal((head.match(/minmax\(/g) ?? []).length, 8);
+  // The link spans the title, status and time tracks through subgrid, so every
+  // cell stays in the shared five-track row without an implicit second row.
+  assert.match(link, /display:\s*grid;/);
+  assert.match(link, /grid-column:\s*2\s*\/\s*5;/);
+  assert.match(link, /grid-template-columns:\s*subgrid;/);
 
-  // The dense table is only safe once the viewport can actually fit the link's
-  // minimum track sum plus the checkbox, actions, gaps, panel padding and page
-  // margin. Derive that budget from the stylesheet so the breakpoint cannot be
-  // lowered below it again (the 1081px regression this replaced).
-  const trackMinima = [...(link.match(/minmax\((\d+)px/g) ?? [])].map((value) => Number(value.replace(/\D/g, '')));
-  assert.equal(trackMinima.length, 8);
-  const linkMin = trackMinima.reduce((total, value) => total + value, 0) + 7 * 12;
+  // The header uses the shared five-track shell and positions its first label
+  // after the checkbox, so the labels stay aligned with the data cells.
+  assert.equal(head.includes('grid-template-columns'), false);
+  assert.match(tasksCss, /\.task-row\s*\{\s*display:\s*grid;/s);
+  assert.match(tasksCss, /\.task-row--head:first-child\s+\.task-cell-label:first-child\s*\{\s*grid-column:\s*2;/s);
+
+  // The five-track table is only safe once the viewport can actually fit the
+  // fixed status/time/actions tracks plus the checkbox, gaps, panel padding and
+  // page margin. Derive that budget from the stylesheet so the narrow-screen
+  // branch cannot silently break the dense layout.
+  const linkMin = 84 + 108 + 116 + 2 * 12;
 
   const checkbox = Number(rule('.task-row-check').match(/width:\s*(\d+)px/)?.[1]);
   const actions = Number(rule('.task-row-actions').match(/min-width:\s*(\d+)px/)?.[1]);
@@ -5815,28 +6407,29 @@ test('task list styles keep the link contents inside the desktop task grid', asy
   const rowGaps = 2 * Number(tasksCss.match(/--task-gap:\s*\d+px\s+(\d+)px/)?.[1]);
   const requiredViewport = checkbox + linkMin + actions + rowGaps + panelPadding + pageMargin;
 
-  const dense = tasksCss.match(/@media\s*\(min-width:\s*(\d+)px\)\s*\{\s*\.task-cell--time\s*\{\s*grid-column:\s*8;/s);
-  if (!dense) throw new Error('expected a dense breakpoint pinning .task-cell--time to grid-column 8');
+  const wide = 560;
   assert.ok(
-    Number(dense[1]) >= requiredViewport,
-    `dense breakpoint ${dense[1]}px is below the ${requiredViewport}px the link minimum needs`,
+    wide < requiredViewport,
+    `the narrow-screen branch at ${wide}px cannot fit the ${requiredViewport}px track budget`,
   );
 
-  // The wrap branch must cover everything below the dense breakpoint and lay
-  // the link out as wrapped tracks rather than the eight dense ones.
-  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{\s*grid-template-columns:\s*repeat\((\d+),/);
+  // The narrow branch must cover the small viewport and lay the link out as one
+  // wrapped track rather than the dense subgrid.
+  const wrap = tasksCss.match(/@media\s*\(max-width:\s*(\d+)px\)\s*\{[\s\S]*?\.task-row-link\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/);
   if (!wrap) throw new Error('expected the wrap breakpoint to lay the link out as wrapped tracks');
-  assert.equal(Number(wrap[1]), Number(dense[1]) - 1);
-  assert.ok(Number(wrap[2]) < 8);
+  assert.ok(Number(wrap[1]) <= wide);
 });
 
 test('restart control endpoint accepts an owner-scoped request without becoming a task operation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-restart-control-'));
+  const auth = await testAccessControl(root);
+  const supervisorToken = auth.accessControl.supervisorToken('lease-1', 7);
   const received: Array<{ readonly leaseId: string; readonly generation: number }> = [];
   const runtime = await startUiRuntime({
     mode: 'fake',
     organId,
     binding,
+    accessControl: auth.accessControl,
     port: buildFakeExecutionPort(binding),
     checkpointRoot: join(root, 'checkpoints'),
     evidenceRoot: join(root, 'evidence'),
@@ -5844,6 +6437,12 @@ test('restart control endpoint accepts an owner-scoped request without becoming 
     providerState: 'ready',
     portNumber: 0,
     memory: testMemory('project-ui-restart-control'),
+    identity: () => ({
+      leaseId: 'lease-1',
+      generation: 7,
+      pid: process.pid,
+      processStartToken: 'test-process-start-token',
+    }),
     restart: (input) => {
       received.push(input);
       return {
@@ -5859,7 +6458,10 @@ test('restart control endpoint accepts an owner-scoped request without becoming 
   try {
     const response = await fetch(`${runtime.server.url}/api/runtime/restart`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${supervisorToken}`,
+        'content-type': 'application/json',
+      },
       body: JSON.stringify({ leaseId: 'lease-1', generation: 7 }),
     });
     assert.equal(response.status, 202);
@@ -6416,7 +7018,7 @@ test('startExecution rejects a task that is not allowed to start after stop-cont
   assert.deepEqual(service.taskDashboard(task.taskId).allowedActions, ['retry-stop']);
   const retryResult = await service.retryStop(task.taskId);
   assert.equal(retryResult.state, 'settling');
-  assert.throws(
+  await assert.rejects(
     () => service.deleteTask(task.taskId),
     (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'task.busy',
   );
@@ -6669,7 +7271,7 @@ test('UI checkpoint boundary failure leaves the committed checkpoint explicitly 
       && event.terminalPhase === 'final'),
     true,
   );
-  assert.deepEqual(service.deleteTask(task.taskId), { taskId: task.taskId.value, deleted: true });
+  assert.deepEqual(await service.deleteTask(task.taskId), { taskId: task.taskId.value, deleted: true });
   const checkpointJournal = await readFile(
     join(root, `task-${task.taskId.value}-cycle-ui-cycle-1.jsonl`),
     'utf8',
@@ -7151,6 +7753,10 @@ test('actual UI entry follows the provider-neutral composition and keeps hook, c
   const failedTask = failingService.createTask({ title: 'composition failure' });
   const failedStart = failingService.startExecution(failedTask.taskId, { prompt: 'must fail visibly' });
   await waitFor(() => assert.equal(failingService.taskDashboard(failedTask.taskId).state, 'failed'));
+  const failedDashboard = failingService.taskDashboard(failedTask.taskId);
+  assert.match(failedDashboard.statusSections.business, /失败/);
+  assert.match(failedDashboard.statusSections.waiting, /已收拢：failed/);
+  assert.equal(failedDashboard.statusSections.business.includes('尚未提交'), false);
   const failedEvents = failingService.eventsSince(failedStart.operationId);
   assert.equal(failedEvents.some((event) => event.kind === 'provider.error' && event.ownerId === 'ui-runtime-blocking-hook'), true);
   assert.equal(failedEvents.some((event) => event.kind === 'checkpoint.committed' && event.state === 'failed'), true);
@@ -7197,6 +7803,73 @@ test('multiple appended inputs drain FIFO across successive executions of one ta
   await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
   assert.equal(service.taskDashboard(task.taskId).executionEpoch, 3);
   await waitFor(() => assert.equal(service.status().implicitScheduling, undefined));
+});
+
+test('implicit executor produced output excludes provider semantic model summaries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-implicit-output-summary-'));
+  try {
+    const port = new SemanticModelSummaryReplayPort({
+      binding,
+      stepDelayMs: 1,
+      replay: [
+        { kind: 'model', state: 'model', summary: 'ignored model summary' },
+        { kind: 'output', state: 'output', summary: 'hello ', outputRefs: ['fake://output/1'] },
+        { kind: 'output', state: 'output', summary: 'world', outputRefs: ['fake://output/2'] },
+        { kind: 'terminal', state: 'succeeded', summary: 'execution succeeded', terminalState: 'succeeded' },
+      ],
+    });
+    const service = serviceFor(root, port);
+    const executionAgent = (service as unknown as {
+      createImplicitSubtaskExecutionAgent(): ExecutionAgentPort;
+    }).createImplicitSubtaskExecutionAgent();
+    const taskId = id('task', 'task-implicit-output-summary');
+    const scope: ScopeRef = {
+      organId,
+      taskId,
+      cycleId: id('cycle', 'cycle-implicit-output-summary'),
+      operationId: id('operation', 'operation-implicit-output-summary'),
+    };
+    const result = await executionAgent.execute({
+      assignment: {
+        assignmentId: 'assignment-implicit-output-summary',
+        taskId,
+        pipelineNodeId: 'pipeline.execute',
+        attempt: 1,
+        executionEpoch: 1,
+        inputRevision: 1,
+        objective: 'summarize the model reply',
+        targetRefs: ['artifact://implicit-output-summary'],
+        expectedOutputRefs: ['artifact://implicit-output-summary'],
+        acceptanceCriteriaDigest: 'sha256:implicit-output-summary',
+        successCriteria: ['the reply is projected'],
+        failureCriteria: ['the reply is not projected'],
+        incompleteCriteria: ['the reply is incomplete'],
+        requiredCapabilities: ['provider.execution'],
+        mergeGate: 'required',
+      },
+      agentId: 'agent-implicit-output-summary',
+      executionEpoch: 1,
+      attempt: 1,
+      lease: {
+        leaseId: 'lease-implicit-output-summary',
+        runtimeId: 'runtime-implicit-output-summary',
+        generation: 1,
+        executionEpoch: 1,
+        ownerId: 'ui-runtime-test',
+        assignmentId: 'assignment-implicit-output-summary',
+        capabilities: ['provider.execution'],
+      },
+      scope,
+    });
+    assert.ok('status' in result);
+    const workResult = result as Extract<typeof result, { readonly status: string }>;
+    assert.equal(workResult.status, 'succeeded');
+    assert.equal(workResult.summary, 'implicit executor agent-implicit-output-summary succeeded: hello world');
+    assert.deepEqual(workResult.producedArtifactBodies, ['hello world']);
+    assert.equal(workResult.summary.includes('provider requested model work'), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('produced artifact paths count only file-producing calls, in order and without repeats', () => {
@@ -7430,4 +8103,590 @@ test('produced artifact truncation honours its byte bound for multibyte content'
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('runtime history reports the provider-reported turn identity and event time across restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-turn-identity-'));
+  const journalPath = join(root, 'ui-runtime-journal.jsonl');
+  const journal = new UiRuntimeJournal(journalPath);
+  const port = new TurnIdentityCapturingReplayPort({ binding, stepDelayMs: 1 });
+  const service = serviceFor(root, port, 'fake', 'ready', journal);
+  const task = service.createTask({ title: 'turn identity projection' });
+  service.startExecution(task.taskId, { prompt: 'project the real turn identity' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  // The execution port is the only boundary that sees the provider binding's own
+  // request identity, so it is the independent oracle for everything below.
+  assert.ok(port.observeIdentities.length > 0, 'the provider binding must have observed the execution');
+  const reported = port.observeIdentities[0]!;
+  const reportedTurnId = reported.turnId;
+  const reportedRequestId = reported.requestId;
+  if (reportedTurnId === undefined) throw new Error('the provider binding must report a turn id');
+  if (reportedRequestId === undefined) throw new Error('the provider binding must report a request id');
+  assert.match(reportedTurnId, /^turn-/);
+  for (const identity of port.observeIdentities) {
+    assert.equal(identity.turnId, reportedTurnId, 'one execution stays inside one provider turn');
+    assert.equal(identity.requestId, reportedRequestId);
+  }
+
+  const history = service.history(task.taskId, { limit: 50 });
+  assert.equal(history.ok, true);
+  if (!history.ok) throw new Error('history must project the runtime trace');
+  assert.ok(history.page.items.length > 0, 'a succeeded execution must have a trace');
+  // The provider-reported occurrence time is the real event time; a render or
+  // receipt time would not be this exact value.
+  const providerEntries = history.page.items.filter((entry) => entry.kind !== 'status');
+  assert.ok(providerEntries.length > 0);
+  for (const entry of providerEntries) {
+    assert.equal(entry.turnId, reportedTurnId);
+    assert.equal(entry.requestId, reportedRequestId);
+    assert.equal(entry.occurredAt, port.providerOccurredAt);
+  }
+  // The runtime's own pre-provider event has no provider turn, and the trace
+  // reports that absence explicitly instead of synthesizing an identifier.
+  const started = history.page.items.find((entry) => entry.seq === 1);
+  assert.equal(started?.state, 'running');
+  assert.equal(started?.turnId, undefined);
+  assert.equal(started?.requestId, undefined);
+  // No entry may carry a synthesized identifier of the retired `<seq>.<ref>` shape.
+  for (const entry of history.page.items) {
+    if (entry.turnId === undefined) continue;
+    assert.equal(/^\d+\./.test(entry.turnId), false, entry.turnId);
+  }
+
+  const pipeline = service.observation(task.taskId, 'pipeline.execute').selectedNode;
+  assert.equal(pipeline?.turnId, reportedTurnId);
+
+  // The real identity and event time are persisted in the runtime journal, which
+  // is what makes them restart-readable rather than process-local.
+  const persisted = journal.replay().filter((record) => record.kind === 'operation.event');
+  assert.ok(persisted.length > 0);
+  const persistedTurnIds = new Set(
+    persisted.flatMap((record) => (record.kind === 'operation.event' && record.event.turnId !== undefined ? [record.event.turnId] : [])),
+  );
+  assert.deepEqual([...persistedTurnIds], [reportedTurnId]);
+  assert.ok(
+    persisted.some((record) => record.kind === 'operation.event' && record.event.providerOccurredAt === port.providerOccurredAt),
+    'the provider-reported event time must be journaled',
+  );
+
+  // Restart from the same control root: the trace must read back the same real
+  // turn identity and the same provider-reported event time.
+  const restarted = serviceFor(root, new TurnIdentityCapturingReplayPort({ binding, stepDelayMs: 1 }), 'fake', 'ready', journal);
+  await restarted.hydrate();
+  const replayed = restarted.history(task.taskId, { limit: 50 });
+  assert.equal(replayed.ok, true);
+  if (!replayed.ok) throw new Error('history must project the replayed runtime trace');
+  assert.deepEqual(
+    replayed.page.items.map((entry) => [entry.seq, entry.turnId, entry.occurredAt]),
+    history.page.items.map((entry) => [entry.seq, entry.turnId, entry.occurredAt]),
+  );
+  assert.equal(restarted.observation(task.taskId, 'pipeline.execute').selectedNode?.turnId, reportedTurnId);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('runtime history reports the explicit no-turn state for a task with no provider event', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-turn-identity-absent-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const task = service.createTask({ title: 'no provider turn yet' });
+  const history = service.history(task.taskId, { limit: 20 });
+  assert.equal(history.ok, true);
+  if (!history.ok) throw new Error('history must project an empty real trace');
+  assert.deepEqual(history.page.items, []);
+  assert.equal(history.page.hasMore, false);
+  assert.equal(service.observation(task.taskId, 'pipeline.execute').selectedNode?.turnId, undefined);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('runtime history states real tool pairing and keeps a succeeded result verifiable', () => {
+  const taskId = id('task', 'turn-identity-tool-pairing');
+  const scope: ScopeRef = { organId, taskId };
+  const runtimeEvent = (seq: number, over: Partial<RuntimeTaskEvent>): RuntimeTaskEvent => ({
+    eventId: `event-${seq}`,
+    seq,
+    occurredAt: '2026-10-06T08:00:00.000Z',
+    taskId,
+    operationId: 'operation-turn-identity',
+    executionEpoch: 1,
+    kind: 'provider.tool',
+    state: 'running',
+    summary: `runtime event ${seq}`,
+    evidenceRefs: [evidence(`tool-${seq}`, scope)],
+    ...over,
+  });
+  // The projection reads the runtime event stream; that is the real input shape
+  // the runtime coordinator journals, so this exercises the real projection.
+  const snapshot = {
+    events: [
+      runtimeEvent(1, { kind: 'provider.tool', callId: 'call-returned', toolId: 'file.read' }),
+      runtimeEvent(2, { kind: 'provider.tool-result', callId: 'call-returned', toolId: 'file.read', status: 'succeeded' }),
+      runtimeEvent(3, { kind: 'provider.tool', callId: 'call-open', toolId: 'file.list' }),
+    ],
+  } as unknown as RuntimeTaskSnapshot;
+
+  const history = projectRuntimeTaskHistory(snapshot, { limit: 20 });
+  assert.equal(history.ok, true);
+  if (!history.ok) throw new Error('history must project the runtime events');
+  const returned = history.page.items.find((entry) => entry.kind === 'tool-call' && entry.tool?.callId === 'call-returned');
+  const open = history.page.items.find((entry) => entry.kind === 'tool-call' && entry.tool?.callId === 'call-open');
+  const result = history.page.items.find((entry) => entry.kind === 'tool-result');
+  if (!returned || !open || !result) throw new Error('the projection must carry every reported tool event');
+
+  // Pairing is a real reported fact: the call that has a result event is paired,
+  // and the call with no result is explicitly not returned. A real succeeded
+  // result must therefore never render as "未返回".
+  assert.equal(returned.tool?.paired, true);
+  assert.equal(open.tool?.paired, false);
+  assert.equal(result.tool?.paired, true);
+
+  // The succeeded result points at the returned side through its evidence ref,
+  // so the projection never invents an output ref or digest for it.
+  assert.equal(result.tool?.status, 'succeeded');
+  assert.equal(result.tool?.outputRef, undefined);
+  assert.equal(result.tool?.outputDigest, undefined);
+  assert.ok(result.evidenceRefs.length > 0, 'a succeeded tool result must keep a real evidence pointer');
+  // The public contract accepts this real shape: it does not throw.
+  validateInteractionTraceEntry(result);
+
+  // The same success with no pointer at all is rejected by the public contract,
+  // so no surface can present it as a bare success claim.
+  assert.throws(
+    () => validateInteractionTraceEntry({ ...result, evidenceRefs: [] }),
+    (error: unknown) => error instanceof ContractError,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Gap B: the original failure must survive to the client.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real provider transport whose probe fails. The adapter itself is the real
+ * producer of the reported error and of its `cause` chain: `callTransport`
+ * wraps the transport failure and keeps it as the cause.
+ */
+function failingProbeTransport(failure: Error): ProviderTransport {
+  return {
+    probe: async () => {
+      throw failure;
+    },
+    start: async () => {
+      throw new Error('start must not be called by the health probe');
+    },
+    resume: async () => {
+      throw new Error('resume must not be called by the health probe');
+    },
+    submit: async () => {
+      throw new Error('submit must not be called by the health probe');
+    },
+    observe: () => {
+      throw new Error('observe must not be called by the health probe');
+    },
+    requestStop: async () => {
+      throw new Error('requestStop must not be called by the health probe');
+    },
+    settle: async () => {
+      throw new Error('settle must not be called by the health probe');
+    },
+    close: async () => {
+      throw new Error('close must not be called by the health probe');
+    },
+  };
+}
+
+test('organ health HTTP keeps the original transport failure behind the provider adapter error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-organ-health-cause-'));
+  // Four real links. The adapter reports the first; the rest are the original
+  // failure the human needs. Only the deepest link must stay unexposed.
+  const deepest = new Error('level-4 deepest transport detail');
+  const level3 = new Error('level-3 connect detail', { cause: deepest });
+  const level2 = new Error('level-2 socket detail', { cause: level3 });
+  const transportFailure = new Error('level-1 transport failure', { cause: level2 });
+  const adapter = new ProviderAdapter({
+    binding,
+    routeRef: 'organ-health-cause-route',
+    codec: new ResponsesProviderCodec(),
+    transport: failingProbeTransport(transportFailure),
+    evidence: filesystemProviderEvidenceSink(new ImmutableAssetStore(join(root, 'assets'))),
+  });
+  const runtimeJournal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = new UiRuntimeService({
+    mode: 'rcc',
+    organId,
+    binding,
+    port: adapter,
+    checkpointStoreFor: (taskId, cycleId) => new FileCheckpointStore(join(root, `task-${taskId.value}-cycle-${cycleId.value}.jsonl`)),
+    attentionPort: attentionPort(),
+    providerState: 'ready',
+    explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+    journal: runtimeJournal,
+    closurePort: runtimeJournal,
+    memory: testMemory('project-ui-organ-health-cause'),
+  });
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const challenge = accessControl.createPairingChallenge('test-lease', 1);
+  const session = await accessControl.consumePairingCode(challenge.code);
+  const server = await startUiRuntimeServer({
+    service,
+    accessControl,
+    uiRoot: join(process.cwd(), 'docs', 'ui'),
+    port: 0,
+  });
+  testSessionByOrigin.set(new URL(server.url).origin, accessControl.sessionCookie(session).split(';')[0]!);
+  try {
+    const response = await fetch(`${server.url}/api/health/probe`, { method: 'POST' });
+    assert.equal(response.status, 409);
+    const body = await response.json() as {
+      readonly error: {
+        readonly code: string;
+        readonly ownerId: string;
+        readonly message: string;
+        readonly nextAction: string;
+        readonly evidenceRefs: readonly { readonly evidenceId: { readonly value: string } }[];
+        readonly cause?: {
+          readonly name: string;
+          readonly message: string;
+          readonly cause?: {
+            readonly name: string;
+            readonly message: string;
+            readonly cause?: {
+              readonly name: string;
+              readonly message: string;
+              readonly cause?: unknown;
+            };
+          };
+        };
+      };
+    };
+    // The typed contract is unchanged: the real adapter produced this failure.
+    assert.equal(body.error.code, 'transport.failure');
+    assert.equal(body.error.ownerId, 'humanagent.provider-adapter');
+    assert.equal(body.error.message, 'level-1 transport failure');
+    assert.match(body.error.nextAction, /recover:humanagent\.provider-adapter/);
+    assert.equal(body.error.evidenceRefs.length, 1);
+
+    // The original failure is retained instead of being dropped.
+    const cause = body.error.cause;
+    if (cause === undefined) throw new Error('the error body must keep the original failure the adapter reported');
+    assert.equal(cause.name, 'Error');
+    assert.equal(cause.message, 'level-1 transport failure');
+    assert.equal(cause.cause?.message, 'level-2 socket detail');
+    assert.equal(cause.cause?.cause?.message, 'level-3 connect detail');
+    // Bounded: the fourth link is not exposed, and no stack or extra property
+    // travels with the chain.
+    assert.equal(cause.cause?.cause?.cause, undefined);
+    assert.deepEqual(Object.keys(cause).sort(), ['cause', 'message', 'name']);
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Gap A: the dashboard must state what the runtime really observed.
+// ---------------------------------------------------------------------------
+
+type DashboardView = ReturnType<UiRuntimeService['taskDashboard']>;
+
+/** The dashboard's real liveness projection, or a failure when it is absent. */
+function livenessOf(dashboard: DashboardView): RuntimeLivenessProjection {
+  const liveness = (dashboard as { readonly liveness?: RuntimeLivenessProjection }).liveness;
+  if (liveness === undefined) {
+    throw new Error('the task dashboard must carry the liveness projection derived from real facts');
+  }
+  return liveness;
+}
+
+test('task dashboard states no-activity only past the declared silence budget and returns to working on real activity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-liveness-dashboard-'));
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const port = new FirstOperationGatedReplayPort({ binding, stepDelayMs: 50 }, firstGate);
+  let now = new Date('2026-10-06T12:00:00.000Z');
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, () => now);
+
+  const task = service.createTask({ title: 'liveness target', directive: 'observe real activity' });
+  service.startExecution(task.taskId, { prompt: 'observe real activity' });
+  await port.firstStarted;
+  // The execution started and reported a real event, then the provider stream
+  // stays silent: this is the stalled case, produced by a real gate.
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'running'));
+  const started = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(started.state, 'working');
+  assert.equal(started.silenceBudgetMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  // The activity instant is the newest real report, and its source names the
+  // real signal that produced it. Nothing here is invented by the dashboard.
+  assert.match(started.lastActivitySource ?? '', /^(provider\.request-identity|runtime\.event\.)/);
+  const activityMs = Date.parse(started.lastActivityAt ?? '');
+  assert.ok(Number.isFinite(activityMs), `the dashboard must report a real activity instant, got ${String(started.lastActivityAt)}`);
+  assert.ok(
+    (started.silentForMs ?? Number.NaN) < DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs,
+    `a running execution with fresh activity must not be reported as stalled, got silentForMs=${String(started.silentForMs)}`,
+  );
+
+  // One millisecond below the declared budget the execution is still working.
+  // The comparison matches the real watchdog, which fires at `>=` the budget.
+  now = new Date(activityMs + DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs - 1);
+  const belowBudget = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(belowBudget.state, 'working');
+  assert.equal(belowBudget.silentForMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs - 1);
+
+  // At the declared budget the silence is real, is measured, and is named.
+  now = new Date(activityMs + DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  const stalled = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(stalled.state, 'no-activity');
+  assert.equal(stalled.silentForMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  assert.equal(stalled.lastActivityAt, started.lastActivityAt);
+  assert.equal(
+    stalled.reason,
+    `no real activity for ${DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs} ms; the declared silence budget is ${DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs} ms`,
+  );
+
+  // Real activity resumes, so the card returns to working instead of staying
+  // stalled on a timer.
+  releaseFirst();
+  await waitFor(() => assert.equal(livenessOf(service.taskDashboard(task.taskId)).state, 'working'));
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+  const settled = livenessOf(service.taskDashboard(task.taskId));
+  assert.equal(settled.state, 'idle');
+  assert.equal(settled.silentForMs, undefined);
+});
+
+test('task dashboard never claims working or no-activity for a task that has no real execution activity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-liveness-no-activity-'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:liveness-no-activity',
+    rawInput: 'a requirement that is admitted but not dispatched',
+    channel: 'business',
+  });
+  await service.beginExplicitMatching(interactionId);
+  await service.recordExplicitMatch(interactionId, {
+    normalizedInput: 'a requirement that is admitted but not dispatched',
+    matchedTasks: [],
+    knownFacts: [],
+  });
+  await service.proposeExplicitRequirement(interactionId, {
+    proposedIntent: 'create',
+    proposal: 'create a queued requirement',
+  });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  await service.confirmExplicitRequirement({
+    draftId: proposed.draft!.draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:liveness-no-activity',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-06T12:00:00.000Z',
+    payloadRef: 'asset://requirements/liveness-no-activity',
+  });
+
+  const queued = queuedDraftRow(service.listTasks(), 'draft-1');
+  const liveness = livenessOf(service.taskDashboard(queued.taskId));
+  // Nothing is executing, so no activity claim is made at all.
+  assert.equal(liveness.state, 'idle');
+  assert.equal(liveness.lastActivityAt, undefined);
+  assert.equal(liveness.silentForMs, undefined);
+  assert.equal(liveness.silenceBudgetMs, DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs);
+  assert.equal(liveness.state === 'working' || liveness.state === 'no-activity', false);
+});
+
+test('the runtime error body keeps the original failure instead of restating the reported message', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-original-cause-'));
+  const accessControl = await AccessControlService.open({
+    credentialPath: join(root, 'security', 'web-access.json'),
+    create: true,
+  });
+  const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('test-lease', 1).code);
+  const cookie = accessControl.sessionCookie(session).split(';')[0]!;
+  const identity = () => ({
+    leaseId: 'lease-1',
+    generation: 7,
+    pid: process.pid,
+    processStartToken: 'test-process-start-token',
+  });
+  const uiRoot = join(process.cwd(), 'docs', 'ui');
+  interface ErrorCauseBody {
+    readonly name: string;
+    readonly message: string;
+    readonly code?: string;
+    readonly ownerId?: string;
+  }
+  interface ErrorBody {
+    readonly code: string;
+    readonly ownerId: string;
+    readonly message: string;
+    readonly nextAction: string;
+    readonly cause?: ErrorCauseBody;
+  }
+  const serviceAt = async (name: string): Promise<UiRuntimeService> => {
+    const serviceRoot = join(root, name);
+    await mkdir(serviceRoot, { recursive: true });
+    return serviceFor(serviceRoot, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }));
+  };
+
+  // The serve owner reports a lifecycle failure two ways: with no original
+  // failure at all, and wrapping the failure it actually hit. Both are the
+  // shapes the production restart edge produces.
+  const original = new Error('connect ECONNREFUSED 127.0.0.1:9');
+  const restartCases: readonly { readonly name: string; readonly error: AppLifecycleError }[] = [
+    {
+      name: 'without an original failure',
+      error: new AppLifecycleError(
+        'daemon-restart.owner-not-ready',
+        'serve owner has not completed startup',
+        'wait for the original serve CLI to report ready and retry restart',
+        'humanagent.app.serve',
+      ),
+    },
+    {
+      name: 'wrapping the real transport failure',
+      error: new AppLifecycleError(
+        'daemon-restart.request-failed',
+        'could not reach the active serve owner: connect ECONNREFUSED 127.0.0.1:9',
+        'confirm the original serve CLI is still running and retry restart there',
+        'humanagent.app.serve',
+        original,
+      ),
+    },
+  ];
+  const observedRestart: { readonly name: string; readonly status: number; readonly error: ErrorBody }[] = [];
+  for (const [index, entry] of restartCases.entries()) {
+    const server = await startUiRuntimeServer({
+      service: await serviceAt(`restart-${index}`),
+      accessControl,
+      uiRoot,
+      port: 0,
+      identity,
+      restart: () => {
+        throw entry.error;
+      },
+    });
+    try {
+      const response = await fetch(`${server.url}/api/runtime/restart`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessControl.supervisorToken('lease-1', 7)}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ leaseId: 'lease-1', generation: 7 }),
+      });
+      const body = await response.json() as { readonly error: ErrorBody };
+      observedRestart.push({ name: entry.name, status: response.status, error: body.error });
+    } finally {
+      await server.close();
+    }
+  }
+
+  // The lifecycle failure is reported with its own code and message, and the
+  // body must not also carry a `cause` that restates them: a cause field that
+  // repeats the reported message is a field filled to look non-empty, not an
+  // original failure.
+  const noOriginal = observedRestart[0]!;
+  assert.equal(noOriginal.status, 409);
+  assert.equal(noOriginal.error.code, 'daemon-restart.owner-not-ready');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(noOriginal.error, 'cause'),
+    false,
+    `a lifecycle failure with no original failure must not report a cause: ${JSON.stringify(noOriginal.error)}`,
+  );
+
+  const wrapped = observedRestart[1]!;
+  assert.equal(wrapped.status, 409);
+  assert.equal(wrapped.error.code, 'daemon-restart.request-failed');
+  const wrappedCause = wrapped.error.cause;
+  if (wrappedCause === undefined) {
+    throw new Error(`the wrapped original failure must be reported: ${JSON.stringify(wrapped.error)}`);
+  }
+  assert.equal(wrappedCause.name, 'Error');
+  assert.equal(wrappedCause.message, 'connect ECONNREFUSED 127.0.0.1:9');
+  assert.equal(wrappedCause.message === wrapped.error.message, false, `the cause must not restate the reported message: ${JSON.stringify(wrapped.error)}`);
+  assert.deepEqual(Object.keys(wrappedCause).sort(), ['message', 'name']);
+
+  // The identity port is a second real 409 producer: `cli.ts` ships exactly
+  // this failure for the window before the serve owner has a lease. The route
+  // is reachable only through that port, and in practice the listener accepts
+  // requests after startup finishes, so this branch is defensive today. It
+  // still must not invent a cause.
+  const startupServer = await startUiRuntimeServer({
+    service: await serviceAt('identity-not-ready'),
+    accessControl,
+    uiRoot,
+    port: 0,
+    identity: () => {
+      throw new AppLifecycleError(
+        'daemon-identity.owner-not-ready',
+        'serve owner has not completed startup',
+        'wait for the original serve CLI to report ready and retry identity inspection',
+        'humanagent.app.serve',
+      );
+    },
+  });
+  try {
+    const response = await fetch(`${startupServer.url}/api/runtime/identity`, {
+      headers: { authorization: `Bearer ${accessControl.supervisorToken('lease-1', 7)}` },
+    });
+    assert.equal(response.status, 409);
+    const body = await response.json() as { readonly error: ErrorBody };
+    assert.equal(body.error.code, 'daemon-identity.owner-not-ready');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(body.error, 'cause'),
+      false,
+      `a startup lifecycle failure with no original failure must not report a cause: ${JSON.stringify(body.error)}`,
+    );
+  } finally {
+    await startupServer.close();
+  }
+
+  // The generic branch is the one a route reaches with a failure that is not a
+  // typed runtime error. It must behave the same way.
+  const unexpectedCases: readonly { readonly name: string; readonly failure: Error }[] = [
+    { name: 'without an original failure', failure: new Error('due-time patrol read failed') },
+    {
+      name: 'wrapping the real journal failure',
+      failure: new Error('due-time patrol read failed', { cause: new Error('subscription journal unreadable') }),
+    },
+  ];
+  const observedUnexpected: { readonly name: string; readonly status: number; readonly error: ErrorBody }[] = [];
+  for (const [index, entry] of unexpectedCases.entries()) {
+    const server = await startUiRuntimeServer({
+      service: await serviceAt(`unexpected-${index}`),
+      accessControl,
+      uiRoot,
+      port: 0,
+      schedulerStatus: async () => {
+        throw entry.failure;
+      },
+    });
+    testSessionByOrigin.set(new URL(server.url).origin, cookie);
+    try {
+      const response = await fetch(`${server.url}/api/runtime/scheduler`);
+      const body = await response.json() as { readonly error: ErrorBody };
+      observedUnexpected.push({ name: entry.name, status: response.status, error: body.error });
+    } finally {
+      await server.close();
+    }
+  }
+
+  const unexpectedPlain = observedUnexpected[0]!;
+  assert.equal(unexpectedPlain.status, 500);
+  assert.equal(unexpectedPlain.error.code, 'ui-runtime.unexpected');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(unexpectedPlain.error, 'cause'),
+    false,
+    `an unexpected failure with no original failure must not report a cause: ${JSON.stringify(unexpectedPlain.error)}`,
+  );
+
+  const unexpectedWrapped = observedUnexpected[1]!;
+  assert.equal(unexpectedWrapped.status, 500);
+  const unexpectedCause = unexpectedWrapped.error.cause;
+  if (unexpectedCause === undefined) {
+    throw new Error(`the wrapped original failure must be reported: ${JSON.stringify(unexpectedWrapped.error)}`);
+  }
+  assert.equal(unexpectedCause.message, 'subscription journal unreadable');
+  assert.equal(unexpectedCause.message === unexpectedWrapped.error.message, false, `the cause must not restate the reported message: ${JSON.stringify(unexpectedWrapped.error)}`);
 });

@@ -204,6 +204,62 @@ export interface RuntimeTaskDashboardProjection {
   readonly executionEpoch?: number;
   readonly allowedActions: readonly string[];
   readonly observationRef: string;
+  /** Real execution liveness as the runtime observed it; absent when no facts were reported. */
+  readonly liveness?: RuntimeLivenessProjection;
+}
+
+/**
+ * Real liveness facts. Every field is a reported observation: the projection
+ * derives a state from them and never invents one. `silenceBudgetMs` is the
+ * single declared silence budget (agent-io policy); it is not a UI timer.
+ *
+ * The event-transport fact is deliberately absent here. The only observer that
+ * can read a transport loss is the page that holds the stream, and a
+ * server-derived value cannot be fetched while that transport is down. The
+ * transport fact therefore travels on the card's own transport field.
+ */
+export interface RuntimeLivenessInput {
+  /** True while the runtime is executing this task (running or settling). */
+  readonly active: boolean;
+  /** Newest real activity timestamp reported for this task; absent when none was reported. */
+  readonly lastActivityAt?: string;
+  /** Which real runtime signal produced `lastActivityAt`. */
+  readonly lastActivitySource?: string;
+  /** Declared silence budget in milliseconds. */
+  readonly silenceBudgetMs?: number;
+  /** Real clock reading used for the derivation. */
+  readonly observedAt: string;
+}
+
+/**
+ * Liveness states with a real producer.
+ *
+ * `no-activity` is named for the signal that actually exists at this boundary:
+ * the declared silence budget measured against the newest real activity
+ * instant. The runtime's separate no-progress budget is owned inside `agent-io`
+ * and is not mirrored here.
+ */
+export type RuntimeLivenessState =
+  | 'working'
+  | 'no-activity'
+  | 'waiting-for-answer'
+  | 'failed'
+  | 'idle'
+  | 'unknown';
+
+/**
+ * Liveness as observed, not as judged. `reason` states the observed fact (for
+ * example "no real activity for 42000 ms; the declared silence budget is 30000
+ * ms"); it never claims that the runtime already intervened or will intervene.
+ */
+export interface RuntimeLivenessProjection {
+  readonly state: RuntimeLivenessState;
+  readonly reason: string;
+  readonly observedAt: string;
+  readonly lastActivityAt?: string;
+  readonly lastActivitySource?: string;
+  readonly silentForMs?: number;
+  readonly silenceBudgetMs?: number;
 }
 
 // Normalized SSE event stream. Carries domain lifecycle only; never raw RCC

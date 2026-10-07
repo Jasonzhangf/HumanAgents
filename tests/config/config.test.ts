@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { symlinkSync } from 'node:fs';
-import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -25,12 +25,15 @@ test('resolves all persistence below control root and keeps workspace separate',
   const paths = await resolveRuntimePaths({ controlRoot: join(root, 'control'), workspace });
   await ensureControlLayout(paths);
   assert.equal(paths.agentCwd, paths.controlRoot);
+  assert.equal(paths.securityRoot, join(paths.controlRoot, 'security'));
+  assert.equal(paths.webAccessCredentialPath, join(paths.controlRoot, 'security', 'web-access.json'));
   assert.equal(paths.mainRoot, join(paths.controlRoot, 'main'));
   assert.equal(paths.mainSessionsRoot, join(paths.controlRoot, 'main', 'sessions'));
   assert.equal(paths.projectRoot, join(paths.controlRoot, 'sessions', paths.projectKey));
   assert.equal(paths.sessionsRoot, paths.projectRoot);
   assert.equal(paths.projectRoot === paths.workspaceCwd, false);
   assert.equal(paths.projectRoot.startsWith(paths.controlRoot), true);
+  assert.equal((await stat(paths.securityRoot)).mode & 0o777, 0o700);
   assert.equal(paths.workspaceCwd, await realpath(workspace));
   assert.equal(paths.projectKey, (await realpath(workspace)).replaceAll('/', '-') || '-');
   const loaded = await loadConfiguration(paths);

@@ -21,6 +21,58 @@ a, button { cursor: pointer; }
 a:focus-visible, button:focus-visible { outline: 2px solid #111; outline-offset: 3px; }
 
 .task-dashboard { min-height: 100vh; }
+
+.status-layers {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.history-gap {
+  padding: 10px 12px;
+}
+
+.event-list .event-detail {
+  display: grid;
+  gap: 4px 12px;
+  grid-template-columns: minmax(80px, max-content) minmax(0, 1fr);
+  margin: 8px 0 0;
+}
+
+.event-detail dt {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.event-detail dd {
+  color: var(--ink-soft);
+  font-size: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.event-seq {
+  color: var(--ink-faint);
+  font-size: 11px;
+  margin-inline-start: 8px;
+}
+.history-pager {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 6px 12px;
+}
+.history-turn {
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+}
+.history-turn:first-child {
+  border-top: none;
+}
+.history-turn-title {
+  color: var(--ink-soft);
+  font-size: 12px;
+  margin: 0 0 6px;
+}
 .task-dashboard-header { align-items: center; border-bottom: 1px solid var(--line); display: flex; gap: 24px; justify-content: space-between; padding: 12px clamp(16px, 4vw, 48px); }
 .brand-line, .task-dashboard-header nav { align-items: center; display: flex; gap: 14px; }
 .brand-line > a { font-size: 14px; font-weight: 750; text-decoration: none; }

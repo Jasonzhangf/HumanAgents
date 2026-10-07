@@ -14,6 +14,7 @@ import {
   readDaemonLease,
   runSupervisorStartup,
 } from '../../../packages/app/src/supervisor/index.js';
+import { AccessControlService } from '../../../packages/app/src/ui-runtime/access-control.js';
 
 async function fixture(): Promise<RuntimePaths> {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-supervisor-'));
@@ -22,6 +23,7 @@ async function fixture(): Promise<RuntimePaths> {
   await mkdir(workspace);
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
+  await AccessControlService.open({ credentialPath: paths.webAccessCredentialPath, create: true });
   return paths;
 }
 
@@ -420,7 +422,10 @@ test('real child-process crash leaves a stale owner that cannot commit after tak
   await takeover.release();
 });
 
-async function startLeaseChild(paths: RuntimePaths, behavior: 'exit-on-term' | 'ignore-term'): Promise<{ readonly pid: number; readonly leaseId: string }> {
+async function startLeaseChild(
+  paths: RuntimePaths,
+  behavior: 'exit-on-term' | 'delay-term',
+): Promise<{ readonly pid: number; readonly leaseId: string; readonly stop: () => Promise<void> }> {
   const supervisorModule = new URL('../../../packages/app/src/supervisor/index.js', import.meta.url).href;
   const script = `
     import { createServer } from 'node:http';
@@ -449,7 +454,7 @@ async function startLeaseChild(paths: RuntimePaths, behavior: 'exit-on-term' | '
     if (!address || typeof address === 'string') throw new Error('identity server did not bind');
     await lease.setControlEndpoint({ host: '127.0.0.1', port: address.port });
     console.log(JSON.stringify({ pid: process.pid, leaseId: lease.record.leaseId }));
-    process.on('SIGTERM', ${behavior === 'exit-on-term' ? '() => process.exit(0)' : '() => {}'});
+    process.on('SIGTERM', ${behavior === 'exit-on-term' ? '() => process.exit(0)' : '() => setTimeout(() => process.exit(0), 150)'});
     setInterval(() => {}, 1000);
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -463,7 +468,19 @@ async function startLeaseChild(paths: RuntimePaths, behavior: 'exit-on-term' | '
     child.once('error', reject);
     child.once('exit', (code) => reject(new Error(`lease child exited before ready: ${code}`)));
   });
-  return JSON.parse(line) as { readonly pid: number; readonly leaseId: string };
+  const receipt = JSON.parse(line) as { readonly pid: number; readonly leaseId: string };
+  return {
+    ...receipt,
+    stop: async () => {
+      if (!processIsAliveForTest(receipt.pid)) return;
+      process.kill(receipt.pid, 'SIGTERM');
+      const deadline = Date.now() + 2_000;
+      while (processIsAliveForTest(receipt.pid)) {
+        if (Date.now() >= deadline) throw new Error(`lease child ${receipt.pid} did not exit after SIGTERM`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    },
+  };
 }
 
 test('hm startup gracefully takes over a live daemon and records the new generation', async () => {
@@ -473,7 +490,7 @@ test('hm startup gracefully takes over a live daemon and records the new generat
     const startup = await runSupervisorStartup(paths, [], {
       lease: {
         ownerId: 'humanagent.app.serve',
-        takeover: { reason: 'new hm serve process takes over the previous daemon', stop: { gracefulTimeoutMs: 500, forceTimeoutMs: 500 } },
+        takeover: { reason: 'new hm serve process takes over the previous daemon', stop: { gracefulTimeoutMs: 500 } },
       },
     });
     assert.equal(startup.lease.record.generation, 2);
@@ -482,32 +499,32 @@ test('hm startup gracefully takes over a live daemon and records the new generat
     assert.equal(startup.lease.record.takeover?.gracefulStopError, undefined);
     await startup.dispose();
   } finally {
-    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+    await child.stop();
   }
 });
 
-test('hm startup force-stops a daemon that ignores graceful stop', async () => {
+test('hm startup fails explicitly when a daemon does not exit after SIGTERM', async () => {
   const paths = await fixture();
-  const child = await startLeaseChild(paths, 'ignore-term');
+  const child = await startLeaseChild(paths, 'delay-term');
   try {
-    const startup = await runSupervisorStartup(paths, [], {
-      lease: {
-        ownerId: 'humanagent.app.serve',
-        takeover: { reason: 'new hm serve process takes over an unresponsive daemon', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 500, pollIntervalMs: 5 } },
-      },
-    });
-    assert.equal(startup.lease.record.generation, 2);
-    assert.equal(startup.lease.record.takeover?.previousLeaseId, child.leaseId);
-    assert.equal(startup.lease.record.takeover?.termination, 'forced');
-    await startup.dispose();
+    await assert.rejects(
+      () => runSupervisorStartup(paths, [], {
+        lease: {
+          ownerId: 'humanagent.app.serve',
+          takeover: { reason: 'new hm serve process waits for term timeout', stop: { gracefulTimeoutMs: 30, pollIntervalMs: 5 } },
+        },
+      }),
+      (error: any) => error.code === 'daemon-takeover.failed' && /did not exit after SIGTERM/u.test(error.message),
+    );
+    assert.equal(processIsAliveForTest(child.pid), true);
   } finally {
-    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+    await child.stop();
   }
 });
 
 test('hm startup does not publish a replacement lease when graceful signaling is denied', async () => {
   const paths = await fixture();
-  const child = await startLeaseChild(paths, 'ignore-term');
+  const child = await startLeaseChild(paths, 'delay-term');
   const processWithKill = process as unknown as {
     kill: (pid: number, signal: number | string) => void;
   };
@@ -524,7 +541,7 @@ test('hm startup does not publish a replacement lease when graceful signaling is
       () => runSupervisorStartup(paths, [], {
         lease: {
           ownerId: 'humanagent.app.serve',
-          takeover: { reason: 'signal permission failure', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 30, pollIntervalMs: 5 } },
+          takeover: { reason: 'signal permission failure', stop: { gracefulTimeoutMs: 30, pollIntervalMs: 5 } },
         },
       }),
       (error: any) => error.code === 'daemon-takeover.failed',
@@ -534,13 +551,13 @@ test('hm startup does not publish a replacement lease when graceful signaling is
     assert.equal(lease?.disposedAt, undefined);
   } finally {
     processWithKill.kill = originalKill;
-    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+    await child.stop();
   }
 });
 
 test('hm startup refuses to signal a live PID whose process identity was reused', async () => {
   const paths = await fixture();
-  const child = await startLeaseChild(paths, 'ignore-term');
+  const child = await startLeaseChild(paths, 'delay-term');
   try {
     const leasePath = daemonLeasePath(paths);
     const raw = JSON.parse(await readFile(leasePath, 'utf8')) as Record<string, unknown>;
@@ -549,14 +566,14 @@ test('hm startup refuses to signal a live PID whose process identity was reused'
       () => runSupervisorStartup(paths, [], {
         lease: {
           ownerId: 'humanagent.app.serve',
-          takeover: { reason: 'reject reused pid', stop: { gracefulTimeoutMs: 30, forceTimeoutMs: 30, pollIntervalMs: 5 } },
+          takeover: { reason: 'reject reused pid', stop: { gracefulTimeoutMs: 30, pollIntervalMs: 5 } },
         },
       }),
       (error: any) => error.code === 'daemon-takeover.identity-mismatch',
     );
     assert.equal(processIsAliveForTest(child.pid), true);
   } finally {
-    if (processIsAliveForTest(child.pid)) killForTest(child.pid, 'SIGKILL');
+    await child.stop();
   }
 });
 
@@ -570,7 +587,7 @@ test('lease validation rejects process-group PID values before takeover can sign
       () => acquireDaemonLease(paths, {
         takeover: {
           reason: 'reject process-group pid',
-          stop: { gracefulTimeoutMs: 1, forceTimeoutMs: 1, pollIntervalMs: 1 },
+          stop: { gracefulTimeoutMs: 1, pollIntervalMs: 1 },
         },
       }),
       (error: any) => error.code === 'daemon-lease-corrupt',
@@ -585,8 +602,4 @@ function processIsAliveForTest(pid: number): boolean {
   } catch (error) {
     return (error as { code?: string }).code === 'EPERM';
   }
-}
-
-function killForTest(pid: number, signal: 'SIGKILL'): void {
-  (process as unknown as { kill(pid: number, signal: 'SIGKILL'): void }).kill(pid, signal);
 }

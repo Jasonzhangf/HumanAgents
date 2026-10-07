@@ -144,12 +144,16 @@ export interface PipelineNodeToolStepProjection {
   readonly statusDisplay: string;
   readonly returned: string;
   readonly occurredAt?: string;
+  /** Real provider turn identity for this step; absent when the source reported none. */
+  readonly turnId?: string;
 }
 
 export interface PipelineNodeActivityProjection {
   readonly activityRef: string;
   readonly summary: string;
   readonly occurredAt?: string;
+  /** Real provider turn identity for this activity; absent when the source reported none. */
+  readonly turnId?: string;
 }
 
 export interface PipelineNodeProjection {
@@ -369,6 +373,8 @@ export interface ObservationNodeDetailProjection {
   readonly roleDisplay: string;
   readonly iteration: number;
   readonly updatedAt?: string;
+  /** Real provider turn identity for this node; absent when the source reported none. */
+  readonly turnId?: string;
   readonly summary: string;
   readonly inputs: readonly NodePreviewProjection[];
   readonly outputs: readonly NodePreviewProjection[];

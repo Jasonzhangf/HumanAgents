@@ -8,6 +8,7 @@ import {
   type ProviderCapabilities,
   type ProviderCloseResult,
   type ProviderEvent,
+  type ProviderRequestLifecycleEvent,
   type ProviderReadiness,
   type ProviderRecoveryResult,
   type ProviderSettlement,
@@ -18,7 +19,19 @@ import {
   type ProviderSubmitInput,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
-import { ProviderAgentDriver, ProviderAdapterError, type ProviderAgentEvent } from '../../../packages/adapters/provider/src/index.js';
+import {
+  ResponsesProviderCodec,
+  ProviderAdapter,
+  ProviderAgentDriver,
+  ProviderAdapterError,
+  createV3ProviderHttpTransport,
+  type ProviderAgentEvent,
+  type ProviderEvidenceSink,
+  type ProviderEvidenceWrite,
+  type V3ProviderFetch,
+  type V3ProviderFetchInit,
+  type V3ProviderFetchResponse,
+} from '../../../packages/adapters/provider/src/index.js';
 
 const organ = id('organ', 'organ-a');
 const taskId = id('task', 'task-a');
@@ -912,4 +925,202 @@ test('provider agent driver honors the configured tool round limit', async () =>
     /tool round limit was exceeded/,
   );
   assert.equal(executions, 3);
+});
+
+function deferred<T = void>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
+function recordingEvidenceSink(): {
+  readonly sink: ProviderEvidenceSink;
+  readonly writes: ProviderEvidenceWrite[];
+} {
+  const writes: ProviderEvidenceWrite[] = [];
+  const content = new Map<string, Uint8Array>();
+  const sink: ProviderEvidenceSink = {
+    async write(input) {
+      const ref: EvidenceRef = {
+        evidenceId: id('evidence', `provider-driver-${input.type}-${writes.length + 1}`),
+        kind: input.kind,
+        source: 'provider-agent-driver-test',
+        locator: input.locator,
+        scope: input.scope,
+      };
+      writes.push(input);
+      content.set(ref.evidenceId.value, new TextEncoder().encode(
+        typeof input.content === 'string' ? input.content : JSON.stringify(input.content),
+      ));
+      return ref;
+    },
+    async read(ref) {
+      const bytes = content.get(ref.evidenceId.value);
+      if (!bytes) throw new Error(`missing provider evidence ${ref.evidenceId.value}`);
+      return bytes;
+    },
+  };
+  return { sink, writes };
+}
+
+function realProviderAdapter(fetch: V3ProviderFetch): ProviderAdapter {
+  const captured = recordingEvidenceSink();
+  const transport = createV3ProviderHttpTransport({
+    binding,
+    baseUrl: 'http://127.0.0.1:4444',
+    evidence: captured.sink,
+    fetch,
+  });
+  return new ProviderAdapter({
+    binding,
+    routeRef: 'test-route',
+    codec: new ResponsesProviderCodec(),
+    transport,
+    evidence: captured.sink,
+  });
+}
+
+function delayedResponse(body: AsyncIterable<Uint8Array>): V3ProviderFetchResponse {
+  return {
+    status: 200,
+    body,
+    text: async () => '',
+  };
+}
+
+async function* chunks(values: readonly string[]): AsyncIterable<Uint8Array> {
+  for (const value of values) yield new TextEncoder().encode(value);
+}
+
+test('provider agent driver mints one stable turn id across a real request lifecycle', async () => {
+  const firstFetchStarted = deferred<V3ProviderFetchInit>();
+  const releaseFirstFetch = deferred<void>();
+  const requests: Array<{ readonly url: string; readonly init: V3ProviderFetchInit }> = [];
+  const fetch: V3ProviderFetch = async (url, init) => {
+    requests.push({ url, init });
+    if (requests.length === 1) {
+      firstFetchStarted.resolve(init);
+      await releaseFirstFetch.promise;
+      return delayedResponse(chunks([
+        `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-round-1' } })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: '' },
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'function_call', call_id: 'call-readme', name: 'file_read', arguments: '{"path":"README.md"}' },
+        })}\n\n`,
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-round-1' } })}\n\n`,
+      ]));
+    }
+    return delayedResponse(chunks([
+      `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp-round-2' } })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.output_text.done', item_id: 'final-message', text: 'README.md read' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-round-2' } })}\n\n`,
+    ]));
+  };
+  const lifecycle: ProviderRequestLifecycleEvent[] = [];
+  const observed: ProviderAgentEvent[] = [];
+  const instance = new ProviderAgentDriver({
+    port: realProviderAdapter(fetch),
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute({ call }) {
+        return {
+          output: JSON.stringify({ path: call.arguments.path, content: 'README_CONTENT' }),
+          outputRefs: ['asset://provider-tool/readme'],
+          evidenceRefs: [evidence],
+        };
+      },
+    },
+    onRequestLifecycle(event) {
+      lifecycle.push(event);
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+
+  const submit = instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'read README.md' } });
+  await firstFetchStarted.promise;
+  assert.deepEqual(lifecycle.map((event) => event.phase), ['dispatching']);
+  const turnId = lifecycle[0]?.turnId;
+  assert.equal(typeof turnId, 'string');
+  assert.notEqual(turnId, '');
+  const initialRequestId = lifecycle[0]?.requestId;
+  assert.equal(typeof initialRequestId, 'string');
+  assert.notEqual(initialRequestId, '');
+
+  releaseFirstFetch.resolve();
+  await submit;
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) observed.push(event);
+  const settled = await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
+
+  assert.equal(settled.state, 'succeeded');
+  assert.deepEqual(lifecycle.map((event) => event.phase), [
+    'dispatching',
+    'dispatched',
+    'waiting',
+    'dispatching',
+    'dispatched',
+    'settled',
+  ]);
+  assert.equal(lifecycle.every((event) => event.turnId === turnId), true);
+  const continuationDispatch = lifecycle.filter((event) => event.phase === 'dispatching')[1];
+  assert.ok(continuationDispatch);
+  assert.equal(continuationDispatch.parentRequestId, initialRequestId);
+  assert.notEqual(continuationDispatch.requestId, initialRequestId);
+  assert.equal(lifecycle[2]?.externalResponseId, 'resp-round-1');
+  assert.equal(lifecycle.at(-1)?.externalResponseId, 'resp-round-2');
+
+  const initialEvent = observed.find((event) => event.providerEvent.turnId === turnId && event.providerEvent.requestId === initialRequestId);
+  const continuationEvent = observed.find((event) => event.providerEvent.requestId === continuationDispatch.requestId);
+  assert.ok(initialEvent);
+  assert.ok(continuationEvent);
+  assert.equal(initialEvent.providerEvent.occurredAt.endsWith('Z'), true);
+  assert.equal(continuationEvent.providerEvent.parentRequestId, initialRequestId);
+  assert.equal(requests.length, 2);
+});
+
+test('provider agent driver publishes a failed lifecycle endpoint when the initial fetch fails', async () => {
+  const lifecycle: ProviderRequestLifecycleEvent[] = [];
+  const instance = new ProviderAgentDriver({
+    port: realProviderAdapter(async () => {
+      throw new Error('local provider connection refused');
+    }),
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    onRequestLifecycle(event) {
+      lifecycle.push(event);
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await assert.rejects(
+    () => instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'fail' } }),
+    /connection refused/,
+  );
+  assert.deepEqual(lifecycle.map((event) => event.phase), ['dispatching', 'failed']);
+  assert.equal(lifecycle.every((event) => event.turnId === lifecycle[0]?.turnId), true);
+  assert.equal(lifecycle[1]?.requestId, lifecycle[0]?.requestId);
+  assert.equal(lifecycle.some((event) => event.phase === 'dispatched'), false);
 });

@@ -213,5 +213,6 @@ export {
   UiRuntimeApiError,
   UiRuntimeService,
 } from './ui-runtime/index.js';
+export { AccessControlError, AccessControlService } from './ui-runtime/access-control.js';
 export type { UiRuntimeMemoryComposition } from './ui-runtime/index.js';
 export type { RccModeConfig, UiRuntime, UiRuntimeLaunchOptions } from './ui-runtime/index.js';

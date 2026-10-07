@@ -1,5 +1,6 @@
 import {
   id,
+  validateProviderRequestLifecycleEvent,
   type AgentCapabilities,
   type AgentClosure,
   type AgentDriver,
@@ -16,10 +17,13 @@ import {
   type ProviderCloseResult,
   type ProviderEvent,
   type ProviderError,
+  type ProviderRequestLifecycleEvent,
   type ProviderExecutionIdentityRef,
   type ProviderSettlement,
   type ProviderStartInput,
   type ProviderSubmitResult,
+  type ProviderStartReceipt,
+  type ProviderStopReceipt,
   type ProviderToolCall,
   type ProviderToolResult,
   type ProviderToolStatus,
@@ -27,6 +31,7 @@ import {
   type StopRequestReceipt,
   type TaskId,
 } from '../../../contracts/src/index.js';
+import { randomUUID } from 'node:crypto';
 import { ProviderAdapterError } from './errors.js';
 
 export interface ProviderAgentDriverOptions {
@@ -43,6 +48,8 @@ export interface ProviderAgentDriverOptions {
   readonly tools?: ProviderStartInput['tools'];
   readonly executeTool?: ProviderToolExecutionPort;
   readonly maxToolRounds?: number;
+  readonly onRequestLifecycle?: (event: ProviderRequestLifecycleEvent) => void;
+  readonly now?: () => Date;
 }
 
 export interface ProviderToolExecutionResult {
@@ -66,7 +73,13 @@ export interface ProviderToolExecutionPort {
 
 export interface ProviderAgentEvent extends AgentEvent {
   readonly summary?: string;
-  readonly providerEvent: ProviderEvent;
+  readonly providerEvent: ProviderRequestScopedEvent;
+}
+
+export interface ProviderRequestScopedEvent extends ProviderEvent {
+  readonly turnId: string;
+  readonly requestId: string;
+  readonly occurredAt: string;
 }
 
 function operationEvidence(scope: ScopeRef, operationId: OperationId): EvidenceRef {
@@ -98,6 +111,27 @@ function identity(options: ProviderAgentDriverOptions): ProviderExecutionIdentit
   };
 }
 
+function isProviderError(value: unknown): value is ProviderError {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<ProviderError>;
+  return typeof candidate.errorId === 'string'
+    && typeof candidate.code === 'string'
+    && typeof candidate.message === 'string'
+    && Array.isArray(candidate.evidenceRefs);
+}
+
+interface RequestAttempt {
+  readonly turnId: string;
+  readonly requestId: string;
+  readonly parentRequestId?: string;
+  externalResponseId?: string;
+  terminalPhase?: ProviderRequestLifecycleEvent['phase'];
+}
+
+function requestIdentity(kind: 'turn' | 'request'): string {
+  return `${kind}-${randomUUID()}`;
+}
+
 export class ProviderAgentDriver implements AgentDriver {
   readonly kind = 'humanagent.provider-agent-driver';
 
@@ -110,9 +144,13 @@ export class ProviderAgentDriver implements AgentDriver {
   private toolCompletion?: Promise<void>;
   private continuationCompletion?: Promise<void>;
   private initialPayload?: AgentInput['payload'];
+  private turnId?: string;
+  private activeRequest?: RequestAttempt;
+  private readonly now: () => Date;
 
   constructor(private readonly options: ProviderAgentDriverOptions) {
     this.evidenceRef = operationEvidence(options.scope, options.operationId);
+    this.now = options.now ?? (() => new Date());
   }
 
   async capabilities(): Promise<AgentCapabilities> {
@@ -146,19 +184,26 @@ export class ProviderAgentDriver implements AgentDriver {
     if (input.taskId.value !== this.options.taskId.value || input.executionEpoch !== this.options.executionEpoch) {
       throw this.error('runtime.identity.mismatch', 'provider submit is not bound to the current execution', 'submit', 'runtime');
     }
-    const receipt = await this.options.port.start({
-      runtimeId: this.options.runtimeId,
-      taskId: this.options.taskId,
-      operationId: this.options.operationId,
-      executionEpoch: this.options.executionEpoch,
-      inputRefs: [...this.options.inputRefs],
-      evidenceRefs: [this.evidenceRef],
-      payload: input.payload,
-      ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
-    });
-    this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
+    const request = this.nextRequest();
+    this.publishLifecycle(request, 'dispatching');
+    let receipt: ProviderStartReceipt;
+    try {
+      receipt = await this.options.port.start({
+        ...identity(this.options),
+        ...this.currentRequestIdentity(),
+        inputRefs: [...this.options.inputRefs],
+        evidenceRefs: [this.evidenceRef],
+        payload: input.payload,
+        ...(this.options.tools === undefined ? {} : { tools: this.options.tools }),
+      });
+      this.assertProviderIdentity(receipt, 'provider start receipt', 'start');
+    } catch (cause) {
+      if (!this.stopping) this.publishFailed(request, cause, 'start');
+      throw cause;
+    }
     this.providerStarted = true;
     this.initialPayload = input.payload;
+    this.publishLifecycle(request, 'dispatched', [], receipt.evidenceRefs);
     return {
       taskId: input.taskId,
       executionEpoch: input.executionEpoch,
@@ -184,14 +229,13 @@ export class ProviderAgentDriver implements AgentDriver {
       const toolCalls: ProviderToolCall[] = [];
       let terminal: ProviderEvent | undefined;
       for await (const providerEvent of this.options.port.observe({
-          runtimeId: this.options.runtimeId,
-          taskId: this.options.taskId,
-          operationId: this.options.operationId,
-          executionEpoch: this.options.executionEpoch,
+          ...identity(this.options),
+          ...this.currentRequestIdentity(),
       })) {
         this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
         if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
         if (providerEvent.terminalState !== undefined) terminal = providerEvent;
+        this.publishObservedLifecycle(providerEvent);
         if (providerEvent.terminalState === 'waiting' && providerEvent.nextAction?.ref === 'responses-tool-call') continue;
         yield this.agentEvent(providerEvent);
       }
@@ -268,9 +312,12 @@ export class ProviderAgentDriver implements AgentDriver {
       const continuationCompletion = new Promise<void>((resolve) => { completeContinuation = resolve; });
       this.continuationCompletion = continuationCompletion;
       let submitted: ProviderSubmitResult;
+      const continuation = this.nextRequest();
+      this.publishLifecycle(continuation, 'dispatching');
       try {
         submitted = await this.options.port.submit({
           ...identity(this.options),
+          ...this.continuationRequestIdentity(continuation),
           inputRefs: [...this.options.inputRefs],
           evidenceRefs: toolHistory.flatMap(({ result }) => result.evidenceRefs),
           payload: this.initialPayload ?? inputPayloadMissing(),
@@ -283,11 +330,15 @@ export class ProviderAgentDriver implements AgentDriver {
             output: result.output,
           })),
         });
+        this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
+        if (!this.stopping) this.publishLifecycle(continuation, 'dispatched', [], submitted.evidenceRefs);
+      } catch (cause) {
+        if (!this.stopping) this.publishFailed(continuation, cause, 'submit');
+        throw cause;
       } finally {
         completeContinuation();
         if (this.continuationCompletion === continuationCompletion) this.continuationCompletion = undefined;
       }
-      this.assertProviderIdentity(submitted, 'provider tool continuation receipt', 'submit');
       if (submitted.status !== 'accepted' && submitted.status !== 'completed') {
         throw this.error('tool.continuation.rejected', submitted.error?.message ?? 'provider rejected the tool continuation', 'submit', 'runtime');
       }
@@ -303,14 +354,19 @@ export class ProviderAgentDriver implements AgentDriver {
     }
     this.stopping = true;
     this.toolController?.abort(new DOMException('operator requested stop', 'AbortError'));
-    const receipt = await this.options.port.requestStop({
-      runtimeId: this.options.runtimeId,
-      taskId: this.options.taskId,
-      operationId: input.operationId,
-      executionEpoch: input.executionEpoch,
-      reason: 'operator requested stop',
-      ownerId: this.options.ownerId ?? 'humanagent.app',
-    });
+    let receipt: ProviderStopReceipt;
+    try {
+      receipt = await this.options.port.requestStop({
+        ...identity(this.options),
+        ...this.currentRequestIdentity(),
+        operationId: input.operationId,
+        reason: 'operator requested stop',
+        ownerId: this.options.ownerId ?? 'humanagent.app',
+      });
+    } catch (cause) {
+      if (!this.stopping && this.activeRequest) this.publishFailed(this.activeRequest, cause, 'stop');
+      throw cause;
+    }
     this.assertProviderIdentity(receipt, 'provider stop receipt', 'stop');
     return { requested: receipt.status !== 'rejected', operationId: receipt.operationId };
   }
@@ -321,14 +377,28 @@ export class ProviderAgentDriver implements AgentDriver {
     }
     if (this.toolCompletion) await this.toolCompletion;
     if (this.continuationCompletion) await this.continuationCompletion;
-    const settlement = await this.options.port.settle({
-      runtimeId: this.options.runtimeId,
-      taskId: this.options.taskId,
-      operationId: this.options.operationId,
-      executionEpoch: this.options.executionEpoch,
-    });
+    let settlement: ProviderSettlement;
+    try {
+      settlement = await this.options.port.settle({
+        ...identity(this.options),
+        ...this.currentRequestIdentity(),
+      });
+    } catch (cause) {
+      if (!this.stopping && this.activeRequest) this.publishFailed(this.activeRequest, cause, 'settle');
+      throw cause;
+    }
     this.assertProviderIdentity(settlement, 'provider settlement', 'settle');
     this.providerSettlement = settlement;
+    const request = this.activeRequest;
+    if (request !== undefined && request.terminalPhase === undefined) {
+      if (settlement.state === 'cancelled' || settlement.state === 'stopped') {
+        this.publishLifecycle(request, 'cancelled', [], settlement.evidenceRefs, request.externalResponseId);
+      } else if (settlement.state === 'succeeded') {
+        this.publishLifecycle(request, 'settled', [], settlement.evidenceRefs, request.externalResponseId);
+      } else if (settlement.error !== undefined) {
+        this.publishFailed(request, settlement.error, 'settle');
+      }
+    }
     return { state: settlement.state, evidenceRefs: [...settlement.evidenceRefs] };
   }
 
@@ -341,6 +411,7 @@ export class ProviderAgentDriver implements AgentDriver {
   }
 
   private agentEvent(providerEvent: ProviderEvent): ProviderAgentEvent {
+    const scoped = this.scopeProviderEvent(providerEvent);
     return {
       taskId: providerEvent.taskId,
       executionEpoch: providerEvent.executionEpoch,
@@ -350,8 +421,113 @@ export class ProviderAgentDriver implements AgentDriver {
       evidenceRefs: providerEvent.evidenceRefs,
       summary: providerEvent.summary,
       ...(providerEvent.terminalState === undefined ? {} : { terminalState: providerEvent.terminalState }),
-      providerEvent,
+      providerEvent: scoped,
     };
+  }
+
+  private scopeProviderEvent(providerEvent: ProviderEvent): ProviderRequestScopedEvent {
+    if (this.activeRequest === undefined) {
+      throw this.error('runtime.request.missing', 'provider event arrived outside a request scope', 'observe', 'runtime');
+    }
+    if (providerEvent.turnId !== undefined && providerEvent.turnId !== this.activeRequest.turnId) {
+      throw this.error('runtime.identity.mismatch', 'provider event turn id does not match the active driver attempt', 'observe', 'runtime');
+    }
+    if (providerEvent.requestId !== undefined && providerEvent.requestId !== this.activeRequest.requestId) {
+      throw this.error('runtime.identity.mismatch', 'provider event request id does not match the active request', 'observe', 'runtime');
+    }
+    if (providerEvent.parentRequestId !== undefined && providerEvent.parentRequestId !== this.activeRequest.parentRequestId) {
+      throw this.error('runtime.identity.mismatch', 'provider event parent request id does not match the active request', 'observe', 'runtime');
+    }
+    return {
+      ...providerEvent,
+      turnId: this.activeRequest.turnId,
+      requestId: this.activeRequest.requestId,
+      ...(this.activeRequest.parentRequestId === undefined ? {} : { parentRequestId: this.activeRequest.parentRequestId }),
+      occurredAt: providerEvent.occurredAt ?? this.now().toISOString(),
+      ...(providerEvent.externalResponseId === undefined ? {} : { externalResponseId: providerEvent.externalResponseId }),
+    } as ProviderRequestScopedEvent;
+  }
+
+  private nextRequest(): RequestAttempt {
+    const parentRequestId = this.activeRequest?.requestId;
+    const request = {
+      turnId: this.turnId ?? requestIdentity('turn'),
+      requestId: requestIdentity('request'),
+      ...(parentRequestId === undefined ? {} : { parentRequestId }),
+    };
+    this.turnId = request.turnId;
+    this.activeRequest = request;
+    return request;
+  }
+
+  private continuationRequestIdentity(request: RequestAttempt): { readonly turnId: string; readonly requestId: string; readonly parentRequestId?: string } {
+    return {
+      turnId: request.turnId,
+      requestId: request.requestId,
+      ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
+    };
+  }
+
+  private currentRequestIdentity(): { readonly turnId?: string; readonly requestId?: string; readonly parentRequestId?: string } {
+    return this.activeRequest === undefined
+      ? {}
+      : {
+          turnId: this.activeRequest.turnId,
+          requestId: this.activeRequest.requestId,
+          ...(this.activeRequest.parentRequestId === undefined ? {} : { parentRequestId: this.activeRequest.parentRequestId }),
+        };
+  }
+
+  private publishLifecycle(
+    request: RequestAttempt,
+    phase: ProviderRequestLifecycleEvent['phase'],
+    extraEvidenceRefs: readonly EvidenceRef[] = [],
+    baseEvidenceRefs: readonly EvidenceRef[] = [],
+    externalResponseId?: string,
+    error?: ProviderError,
+  ): void {
+    if (this.options.onRequestLifecycle === undefined) return;
+    const evidenceRefs = [...baseEvidenceRefs, ...extraEvidenceRefs];
+    const event: ProviderRequestLifecycleEvent = {
+      ...identity(this.options),
+      ...request,
+      phase,
+      occurredAt: this.now().toISOString(),
+      evidenceRefs: evidenceRefs.length === 0 ? [{ ...this.evidenceRef }] : evidenceRefs,
+      ...(externalResponseId === undefined ? {} : { externalResponseId }),
+      ...(error === undefined ? {} : { error }),
+    };
+    validateProviderRequestLifecycleEvent(event);
+    if (phase === 'failed' || phase === 'cancelled' || phase === 'settled') request.terminalPhase = phase;
+    this.options.onRequestLifecycle(event);
+  }
+
+  private publishFailed(
+    request: RequestAttempt,
+    cause: unknown,
+    phase: 'start' | 'submit' | 'stop' | 'settle' | 'observe',
+  ): void {
+    if (request.terminalPhase !== undefined) return;
+    const error = cause instanceof ProviderAdapterError
+      ? cause.providerError
+      : isProviderError(cause)
+        ? cause
+        : this.error(
+            'provider.request.failed',
+            cause instanceof Error ? cause.message : 'provider request failed',
+            phase,
+          ).providerError;
+    this.publishLifecycle(request, 'failed', [], [], undefined, error);
+  }
+
+  private publishObservedLifecycle(event: ProviderEvent): void {
+    if (this.activeRequest === undefined) return;
+    if (event.externalResponseId !== undefined) this.activeRequest.externalResponseId = event.externalResponseId;
+    if (event.kind === 'terminal' && event.terminalState === 'waiting') {
+      this.publishLifecycle(this.activeRequest, 'waiting', event.evidenceRefs);
+    } else if (event.kind === 'error') {
+      this.publishFailed(this.activeRequest, event.error === undefined ? new Error('provider emitted an error event') : event.error, 'observe');
+    }
   }
 
   private toolResultEvents(

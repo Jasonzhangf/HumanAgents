@@ -13,7 +13,12 @@ export const RUNTIME_EVENT_KINDS = Object.freeze([
 
 export class RuntimeApiError extends Error {
   constructor(body, status) {
-    super(body?.message || `Runtime API request failed with HTTP ${status}`)
+    // The runtime already shapes the original cause chain into a bounded body
+    // (boundedErrorCause). Keep it as the native Error cause so the caller can
+    // name the underlying failure instead of collapsing it to a status code.
+    super(body?.message || `Runtime API request failed with HTTP ${status}`, {
+      cause: body?.cause,
+    })
     this.name = 'RuntimeApiError'
     this.code = body?.code || 'runtime.request.failed'
     this.ownerId = body?.ownerId || 'humanagent.app'
@@ -74,6 +79,28 @@ export function createRuntimeApi(options = {}) {
       method: 'POST',
       body: JSON.stringify(confirmation),
     }),
+    scheduler: () => request('/api/runtime/scheduler'),
+    planControl: (subscriptionId, { action, idempotencyKey, requestedAt }) => request(`/api/plans/${encodeURIComponent(subscriptionId)}/control`, {
+      method: 'POST',
+      body: JSON.stringify({ action, idempotencyKey, requestedAt }),
+    }),
+    // 修改: a typed edit against the exact revision the caller is looking at. The
+    // runtime rejects a stale base revision instead of editing a newer one.
+    refineExplicitDraft: (interactionId, input) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/refine`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    // 重新整理: re-run the explicit brain over the original input, optionally
+    // with a human correction.
+    regenerateExplicitDraft: (interactionId, input = {}) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    // 放弃: the durable closure. The response carries the abandon receipt.
+    rejectExplicitDraft: (interactionId, input) => request(`/api/explicit/interactions/${encodeURIComponent(interactionId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
     dispatchNextExplicitRequirement: () => request('/api/explicit/dispatch-next', { method: 'POST' }),
     memorySummary: ({ namespace = 'project', query = '', limit = 20 } = {}) => {
       const params = new URLSearchParams({ namespace, limit: String(limit) })
@@ -86,6 +113,13 @@ export function createRuntimeApi(options = {}) {
     }),
     taskDetail: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}`),
     taskDashboard: (taskId) => request(`/api/tasks/${encodeURIComponent(taskId)}/dashboard`),
+    taskHistory: (taskId, { cursor, limit = 20, kinds, search } = {}) => {
+      const query = new URLSearchParams({ limit: String(limit) })
+      if (cursor) query.set('cursor', cursor)
+      if (search) query.set('search', search)
+      for (const kind of kinds || []) query.append('kind', kind)
+      return request(`/api/tasks/${encodeURIComponent(taskId)}/history?${query}`)
+    },
     observation: (taskId, scopeRef, selectedNodeId) => {
       const query = new URLSearchParams()
       if (scopeRef) query.set('scope', scopeRef)

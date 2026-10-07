@@ -1,5 +1,5 @@
 import { lstatSync } from 'node:fs';
-import { mkdir, open as openFile, readFile, realpath, stat } from 'node:fs/promises';
+import { chmod, mkdir, open as openFile, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
@@ -114,6 +114,8 @@ export interface InternalConfig {
 export interface RuntimePaths {
   readonly controlRoot: string;
   readonly agentCwd: string;
+  readonly securityRoot: string;
+  readonly webAccessCredentialPath: string;
   readonly mainRoot: string;
   readonly mainSessionsRoot: string;
   readonly workspaceCwd: string;
@@ -789,6 +791,8 @@ export async function resolveRuntimePaths(options: { readonly workspace: string;
   return {
     controlRoot,
     agentCwd: controlRoot,
+    securityRoot: join(controlRoot, 'security'),
+    webAccessCredentialPath: join(controlRoot, 'security', 'web-access.json'),
     mainRoot: join(controlRoot, 'main'),
     mainSessionsRoot: join(controlRoot, 'main', 'sessions'),
     workspaceCwd,
@@ -832,13 +836,14 @@ export async function ensureControlLayout(paths: RuntimePaths): Promise<void> {
   const rootPrefix = normalize(paths.controlRoot).endsWith(sep) ? normalize(paths.controlRoot) : `${normalize(paths.controlRoot)}${sep}`;
   if (!normalize(paths.projectRoot).startsWith(rootPrefix)) fail('path-policy', 'project storage escaped control root');
   const directories = [
-    paths.mainRoot, paths.mainSessionsRoot, paths.projectRoot, paths.sessionsRoot, paths.journalRoot, paths.checkpointsRoot, paths.indexRoot,
+    paths.securityRoot, paths.mainRoot, paths.mainSessionsRoot, paths.projectRoot, paths.sessionsRoot, paths.journalRoot, paths.checkpointsRoot, paths.indexRoot,
     paths.artifactsRoot, paths.memoryRoot, join(paths.memoryRoot, 'project'), join(paths.memoryRoot, 'tasks'),
     paths.userRoot, paths.globalMemoryRoot, join(paths.globalMemoryRoot, 'index'), join(paths.globalMemoryRoot, 'artifacts'),
     join(paths.globalMemoryRoot, 'summaries'), paths.locksRoot, paths.runNotesRoot, join(paths.controlRoot, 'plugins'),
   ];
   const files = [
     paths.projectManifest,
+    paths.webAccessCredentialPath,
     join(paths.controlRoot, 'internal.toml'),
     join(paths.controlRoot, 'config.toml'),
     join(paths.userRoot, 'profile.toml'),
@@ -849,6 +854,7 @@ export async function ensureControlLayout(paths: RuntimePaths): Promise<void> {
     rejectSymlinkComponents(managedPath, paths.controlRoot);
   }
   for (const directory of directories) await mkdir(directory, { recursive: true });
+  await chmod(paths.securityRoot, 0o700);
   await writeIfMissing(join(paths.controlRoot, 'internal.toml'), defaultInternalToml());
   await writeIfMissing(join(paths.controlRoot, 'config.toml'), defaultUserToml());
   await writeIfMissing(join(paths.userRoot, 'profile.toml'), 'schemaVersion = 1\n');

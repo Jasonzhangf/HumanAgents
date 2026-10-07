@@ -1,0 +1,29 @@
+{
+  "graph": "humanagent-context-events",
+  "operator": {
+    "operator": "humanagent-context-events",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "event_source": {
+      "ownerPath": "docs/architecture/context-events.md",
+      "ownerRel": "docs/architecture/context-events.md"
+    },
+    "normalize": {
+      "ownerPath": "docs/architecture/context-events.md",
+      "ownerRel": "docs/architecture/context-events.md"
+    },
+    "pairing": {
+      "ownerPath": "docs/architecture/context-events.md",
+      "ownerRel": "docs/architecture/context-events.md"
+    },
+    "projector": {
+      "ownerPath": "docs/architecture/context-events.md",
+      "ownerRel": "docs/architecture/context-events.md"
+    },
+    "consume": {
+      "ownerPath": "packages/ui/projection/index.ts",
+      "ownerRel": "packages/ui/projection/index.ts"
+    }
+  }
+}

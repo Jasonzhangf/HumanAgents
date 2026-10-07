@@ -7,55 +7,73 @@
   "nodes": {
     "sensory_inbox": {
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+      "ownerRel": "packages/app/src/ui-runtime/service.ts",
+      "ownerSymbol": "UiRuntimeService"
     },
     "explicit_normalize": {
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake"
     },
-    "explicit_confirm": {
+    "create_reviewable_draft": {
       "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
-      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts"
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake.createDraft"
     },
-    "implicit_classify": {
-      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
-      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
+    "revise_draft_to_approval": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake.refineDraft"
     },
-    "interactive_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "confirm_exact_revision": {
+      "ownerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "ownerSymbol": "ExplicitIntake.confirmDraftRevision",
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerSymbol": "UiRuntimeService.confirmExplicitRequirement"
     },
-    "execution_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "validate_draft_revision": {
+      "ownerPath": "packages/core/src/draft-revision.ts",
+      "ownerRel": "packages/core/src/draft-revision.ts",
+      "ownerSymbol": "assertDraftRevisionCurrent",
+      "publicExportOwnerPath": "packages/core/src/index.ts",
+      "publicExportOwnerRel": "packages/core/src/index.ts"
     },
-    "research_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "submit_single_authorization": {
+      "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerSymbol": "RequirementSubmissionOwner.submitFinal",
+      "confirmationOwnerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "confirmationOwnerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "confirmationOwnerSymbol": "ExplicitIntake.confirmDraftRevision",
+      "queueOwnerPath": "packages/runtime/src/intake/requirement-inbox.ts",
+      "queueOwnerRel": "packages/runtime/src/intake/requirement-inbox.ts",
+      "queueOwnerSymbol": "RequirementInbox.append",
+      "rejectionOwnerPath": "packages/runtime/src/explicit-brain/router.ts",
+      "rejectionOwnerRel": "packages/runtime/src/explicit-brain/router.ts",
+      "rejectionOwnerSymbol": "rejectDraftRevision",
+      "markSubmittedOwnerPath": "packages/runtime/src/intake/explicit-intake.ts",
+      "markSubmittedOwnerRel": "packages/runtime/src/intake/explicit-intake.ts",
+      "markSubmittedOwnerSymbol": "ExplicitIntake.markRevisionSubmitted",
+      "duplicateTerminal": "duplicate-submit",
+      "staleTerminal": "confirmation-stale",
+      "productionWiringStatus": "wired",
+      "productionOwnerPath": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerRel": "packages/app/src/ui-runtime/service.ts",
+      "productionOwnerSymbol": "UiRuntimeService.confirmTypedExplicitRequirement",
+      "productionEvidence": "confirmTypedExplicitRequirement 调用 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）"
     },
-    "maintenance_queue": {
-      "ownerPath": "packages/runtime/src/intake/requirement-inbox.ts",
-      "ownerRel": "packages/runtime/src/intake/requirement-inbox.ts"
+    "compile_execution_policy": {
+      "ownerPath": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerRel": "packages/runtime/src/explicit-brain/router.ts",
+      "ownerSymbol": "ExecutionPolicyCompiler"
     },
-    "task_correlate_or_create": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
-    },
-    "resource_admission": {
-      "ownerPath": "packages/runtime/src/admission/implicit-admission.ts",
-      "ownerRel": "packages/runtime/src/admission/implicit-admission.ts"
-    },
-    "pipeline_execute": {
-      "ownerPath": "packages/runtime/src/ui-runtime/coordinator.ts",
-      "ownerRel": "packages/runtime/src/ui-runtime/coordinator.ts"
-    },
-    "settle": {
-      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
-      "ownerRel": "packages/runtime/src/checkpoints/submission.ts"
-    },
-    "task_output": {
-      "ownerPath": "packages/ui/projection/runtime.ts",
-      "ownerRel": "packages/ui/projection/runtime.ts"
+    "persist_authorized_plan": {
+      "ownerPath": "packages/adapters/jsonl/src/index.ts",
+      "ownerRel": "packages/adapters/jsonl/src/index.ts",
+      "ownerSymbol": "JsonlOrganJournal.transaction"
     }
   }
 }

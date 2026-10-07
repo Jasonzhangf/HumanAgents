@@ -1,0 +1,70 @@
+{
+  "id": "humanagent-context-events",
+  "version": "1",
+  "meta": {
+    "title": "发生事件从来源到 UI/Memory 消费的统一领域投影",
+    "baseline": "22d8268fe4785a154fa5c910c6b54712fc2c3967"
+  },
+  "inputs": [
+    { "id": "raw_event_stream", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "event_source",
+      "operator": "humanagent-context-events-source",
+      "operator_version": "1",
+      "inputs": ["raw_event_stream"],
+      "output": { "id": "raw_events", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "normalize",
+      "operator": "humanagent-context-events-normalize",
+      "operator_version": "1",
+      "inputs": ["raw_events"],
+      "output": { "id": "canonical_events", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "pairing",
+      "operator": "humanagent-context-events-pairing",
+      "operator_version": "1",
+      "inputs": ["canonical_events"],
+      "output": { "id": "paired_events", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "projector",
+      "operator": "humanagent-context-events-projector",
+      "operator_version": "1",
+      "inputs": ["paired_events"],
+      "output": { "id": "narrative_and_digest", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "consume",
+      "operator": "humanagent-context-events-consume",
+      "operator_version": "1",
+      "inputs": ["narrative_and_digest"],
+      "output": { "id": "user_view_and_memory_digest", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "event_source", "to": "normalize", "arc_id": "raw_events" },
+    { "from": "normalize", "to": "pairing", "arc_id": "canonical_events" },
+    { "from": "pairing", "to": "projector", "arc_id": "paired_events" },
+    { "from": "projector", "to": "consume", "arc_id": "narrative_and_digest" }
+  ],
+  "outputs": ["user_view_and_memory_digest"]
+}
