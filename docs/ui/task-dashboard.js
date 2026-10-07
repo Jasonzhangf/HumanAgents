@@ -197,6 +197,7 @@ const PLAN_ACTION_FIELDS = {
 }
 
 let planControlNotice = ''
+let planControlError
 
 /**
  * The dashboard read states the control facts as booleans. Only `true` is an
@@ -210,6 +211,7 @@ function planAvailableActions(plan) {
 
 async function runPlanControl(subscriptionId, action) {
   planControlNotice = planControlPendingCopy(action)
+  planControlError = undefined
   renderDashboard()
   try {
     const result = await api.planControl(subscriptionId, {
@@ -221,8 +223,10 @@ async function runPlanControl(subscriptionId, action) {
     await refresh()
   } catch (error) {
     // A typed rejection is a real outcome, not a hidden failure: the re-read
-    // keeps the page truthful about the plan the runtime still reports.
+    // keeps the page truthful about the plan the runtime still reports, and the
+    // rejection itself stays available so a session error still offers pairing.
     planControlNotice = planControlErrorMessage(error)
+    planControlError = error
     renderDashboard()
     await refresh().catch(setRefreshError)
   }
@@ -233,6 +237,7 @@ function renderTaskPlanSection(plan) {
     { ...plan, availableActions: planAvailableActions(plan) },
     {
       notice: planControlNotice || undefined,
+      ...(planControlError === undefined ? {} : { error: planControlError }),
       onControl: (action) => runPlanControl(plan.subscriptionId, action),
     },
   )

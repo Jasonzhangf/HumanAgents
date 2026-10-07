@@ -706,10 +706,10 @@ async function refreshLists() {
  * The control notice belongs to the one plan it was issued against, so a
  * result for plan A is never rendered under plan B.
  */
-let planControlNotice = { subscriptionId: '', text: '' }
+let planControlNotice = { subscriptionId: '', text: '', error: undefined }
 
 async function runPlanControl(subscriptionId, action) {
-  planControlNotice = { subscriptionId, text: planControlPendingCopy(action) }
+  planControlNotice = { subscriptionId, text: planControlPendingCopy(action), error: undefined }
   renderPlanList(lastSchedulerRead)
   try {
     const result = await api.planControl(subscriptionId, {
@@ -717,9 +717,12 @@ async function runPlanControl(subscriptionId, action) {
       idempotencyKey: planControlKey(subscriptionId, action),
       requestedAt: new Date().toISOString(),
     })
-    planControlNotice = { subscriptionId, text: planControlResultCopy(action, result) }
+    planControlNotice = { subscriptionId, text: planControlResultCopy(action, result), error: undefined }
   } catch (error) {
-    planControlNotice = { subscriptionId, text: planControlErrorMessage(error) }
+    // Keep the rejection itself as the notice's payload so the shared renderer
+    // can add the pairing entry. Overwriting the message first loses the code
+    // that decides whether pairing is the right recovery.
+    planControlNotice = { subscriptionId, text: planControlErrorMessage(error), error }
   }
   await refreshLists()
 }
@@ -755,7 +758,10 @@ function renderPlanList(scheduler) {
   for (const plan of plans) {
     panel.append(renderPlanSection(projectSchedulerPlan(plan), {
       ...(planControlNotice.subscriptionId === plan.subscriptionId
-        ? { notice: planControlNotice.text }
+        ? {
+            notice: planControlNotice.text,
+            ...(planControlNotice.error === undefined ? {} : { error: planControlNotice.error }),
+          }
         : {}),
       onControl: (action) => runPlanControl(plan.subscriptionId, action),
     }))
@@ -811,7 +817,7 @@ function taskRow(row) {
   const actions = element('div', undefined, 'task-item-actions')
   actions.append(
     actionButton('编辑', () => openEditDialog(row)),
-    actionButton('删除', true, () => runDelete(row)),
+    actionButton('删除', true, (btn) => runDelete(row, btn)),
   )
   item.append(link, actions)
   return item

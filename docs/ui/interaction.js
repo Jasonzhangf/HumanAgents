@@ -316,7 +316,10 @@ async function loadTasks() {
     tasks = list
     renderTasks(list)
   } catch (error) {
-    clearNode(taskList); taskList.append(element('li', `${error.message} · ${error.nextAction || 'inspect runtime'}`, 'task-row-empty'))
+    clearNode(taskList)
+    const failure = element('li', `${error.message} · ${error.nextAction || 'inspect runtime'}`, 'task-row-empty')
+    taskList.append(failure)
+    appendPairingEntry(failure, error)
   }
 }
 
