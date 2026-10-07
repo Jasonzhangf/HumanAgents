@@ -55,6 +55,11 @@ interface OpenState {
   readonly workspace: string;
   /** Executable resolved at open time from the ACP open request. */
   readonly command: string;
+  /**
+   * Flags the operator configured for `agy`. The shim owns the protocol flags
+   * (`-p`, `--output-format`), so these are placed before them.
+   */
+  readonly args: readonly string[];
   active?: ChildProcessLike;
 }
 
@@ -117,6 +122,7 @@ export interface AntigravityRuntimeOptions {
   readonly timeoutMs?: number;
   readonly version?: string;
   readonly capabilities?: readonly string[];
+  readonly args?: readonly string[];
 }
 
 export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}): AcpRuntimeAdaptor {
@@ -159,7 +165,13 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
       const sessionId = input.sessionIdFor
         ? input.sessionIdFor(input.runtimeId)
         : `ha-${input.runtimeId}-shim`;
-      const state: OpenState = { runtimeId: input.runtimeId, sessionId, workspace: input.workspace, command: input.command };
+      const state: OpenState = {
+        runtimeId: input.runtimeId,
+        sessionId,
+        workspace: input.workspace,
+        command: input.command,
+        args: input.args ?? options.args ?? [],
+      };
       sessions.set(sessionId, state);
       return {
         sessionId,
@@ -186,7 +198,7 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
 
     async submit(input: AcpRuntimeSubmitInput): Promise<AcpRuntimeSubmitResult> {
       const state = requireState(input.sessionId);
-      const args = ['-p', input.prompt, '--output-format', JSON_OUTPUT_FORMAT];
+      const args = [...state.args, '-p', input.prompt, '--output-format', JSON_OUTPUT_FORMAT];
       const run = await runOneShot(state.command, args, state.workspace, input.timeoutMs ?? timeoutMs, (child) => { state.active = child; });
       if (run.killed) {
         throw new AcpAdapterError({

@@ -475,6 +475,31 @@ test('dsh shim runs one process per turn and resumes the persisted session id', 
   assert.equal(closed.closed, true);
 });
 
+/**
+ * `execution.antigravity.args` is operator config, so it must actually reach
+ * `agy`. A shell script stands in for the CLI and records its argv; the shim
+ * owns `-p` and `--output-format`, so those must follow the configured flags.
+ */
+test('antigravity shim passes the configured args to the CLI ahead of its own protocol flags', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'humanagent-agy-stub-'));
+  const logPath = join(dir, 'args.log');
+  const script = `printf '%s\\n' "$0" "$@" >> '${logPath}'; printf '%s\\n' '{"status":"SUCCESS","response":"POGS"}'`;
+  const args = ['-c', script];
+  const runtime = createAntigravityRuntime({ args, timeoutMs: 10_000 });
+  const opened = await runtime.open({ runtimeId: 'runtime-agy-args', workspace: dir, command: '/bin/sh', args, timeoutMs: 10_000 });
+
+  const turn = await runtime.submit({ runtimeId: opened.sessionId, sessionId: opened.sessionId, prompt: 'hello', messageId: 'm-1', timeoutMs: 10_000 });
+  assert.equal(turn.outputText, 'POGS');
+  assert.equal(turn.stopReason, 'end_turn');
+
+  // If the configured args were dropped, `/bin/sh` would never run the script,
+  // so this file would not exist at all.
+  const argv = (await readFile(logPath, 'utf8')).trim().split('\n');
+  assert.deepEqual(argv, ['-p', 'hello', '--output-format', 'json']);
+
+  await runtime.close({ runtimeId: opened.sessionId, sessionId: opened.sessionId, timeoutMs: 10_000 });
+});
+
 test('dsh shim reports a failed turn instead of an empty success', async () => {
   const args = dshStub({
     exitCode: 1,

@@ -19,6 +19,8 @@ import {
   createAntigravityRuntime,
   createDshRuntime,
   createOpencodeRuntime,
+  DSH_DEFAULT_ARGS,
+  OPENCODE_DEFAULT_ARGS,
   type AcpRuntimeAdaptor,
 } from '../../adapters/acp/index.js';
 import {
@@ -363,7 +365,7 @@ export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDri
         ACP_OWNER,
       );
     }
-    const args = config.args ?? ['acp', '--pure'];
+    const args = config.args ?? OPENCODE_DEFAULT_ARGS;
     return composeAcpDriver({
       runtime: createOpencodeRuntime({ args, ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }) }),
       workspace: input.workspace,
@@ -383,9 +385,13 @@ export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDri
       );
     }
     return composeAcpDriver({
-      runtime: createAntigravityRuntime({ ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }) }),
+      runtime: createAntigravityRuntime({
+        ...(config.args === undefined ? {} : { args: config.args }),
+        ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+      }),
       workspace: input.workspace,
       command: config.command,
+      ...(config.args === undefined ? {} : { args: config.args }),
       ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
     });
   }
@@ -399,7 +405,7 @@ export function composeAgentDriver(input: DshCompositionInput): ComposedAgentDri
         ACP_OWNER,
       );
     }
-    const args = config.args ?? ['--profile', 'headless', '--json'];
+    const args = config.args ?? DSH_DEFAULT_ARGS;
     return composeAcpDriver({
       runtime: createDshRuntime({ args, ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }) }),
       workspace: input.workspace,
