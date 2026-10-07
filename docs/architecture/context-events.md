@@ -426,7 +426,14 @@ export interface ProviderEventLike {
 
 `createContextEvent`（§9.3）不走派生：`sourceId` / `occurredAt` / `scope` 全部由调用方显式提供，缺失即抛 `ContextEventError`。它是这些派生规则的唯一实现者，四个适配器只负责把各自输入折算成 `ContextEventInput` 后调用它。
 
-**该承诺的精确边界（`sourceId` / `occurredAt` 抛 `ContextEventError`；`scope` 与 `evidenceRefs` 的畸形形状抛原生 `TypeError`）**：`sourceId`、`occurredAt` 缺失或非法时由 §11 校验抛出 `ContextEventError`。但 `scope` 与 `evidenceRefs` 的**类型外**形状（`scope === undefined`、`scope === {}`、`evidenceRefs` 非数组、元素为 `null` 或缺 `evidenceId`）会在校验运行**之前**被摘要规范化解引用（§9.5 要求重建嵌套对象，必然读取 `scope.organId` 与 `evidenceRef.evidenceId`），因而以原生 `TypeError` 终止。这是显式的 fail-fast，不是静默成功，也不产出任何事件。本模块**不**为这些形状增加前置校验层：它们违反 `ContextEventInput` 的类型，类型正确的调用方无法构造，加校验层会违反「不为不可达场景增加校验层」。**§11 绑定的校验入口未受影响**：`validateCanonicalContextEvent` 对同样的畸形形状仍全部抛 `ContextEventError`（第 1–15 项，含 `evidenceRefs` 元素形状）。
+**该承诺的精确边界**：`sourceId`、`occurredAt` 缺失或非法时由 §11 校验抛出 `ContextEventError`。`scope` / `evidenceRefs` / `cost` 的错误则分两类，判据是**摘要规范化是否需要解引用一个 `null` / `undefined` 的对象，或把一个非数组当数组**（§9.5 要求重建嵌套对象，因此必然读取 `scope.organId`、`evidenceRef.evidenceId`、`evidenceRef.scope` 与 `cost` 的四个键）：
+
+- **结构缺失或为 `null` → 原生 `TypeError`**。摘要规范化在校验运行**之前**执行（`normalize.ts` 的摘要计算早于其后的 `validateCanonicalContextEvent`），因此这些形状以 `TypeError` 终止。共 14 种：`scope` 为 `undefined` / `null` / `{}`；`scope.organId` 为 `null`；`scope.taskId` 为 `null`；`evidenceRefs` 非数组；元素为 `null`；元素为 `123`；元素缺 `evidenceId`；元素 `evidenceId` 为 `null`；元素 `scope` 缺 `organId`；元素 `scope` 为 `null`；元素 `scope.organId` 为 `null`；`cost` 为 `null`。
+- **字段取值非法但结构存在 → 仍抛 `ContextEventError`**（由 §11 第 1–15 项判定）：`evidenceRefs[].kind` 取值不在闭合 union 内、`source` / `locator` 为空串、`digest` 非字符串、`evidenceId.scope` 取值错、`scope.organId` 缺 `value`、`scope.organId.scope` 取值错等。即主词只覆盖「解引用会失败」的形状，**不是**「任何类型外取值」。
+
+两种终止都是显式 fail-fast，不是静默成功，都不产出任何事件。本模块**不**为这些形状增加前置校验层：它们违反 `ContextEventInput` 的类型，类型正确的调用方无法构造，加校验层会违反「不为不可达场景增加校验层」。
+
+**§11 绑定的校验入口未受影响**：`validateCanonicalContextEvent` 对上述 14 种形状中的 13 种仍抛 `ContextEventError`（第 5 项覆盖 `scope`，第 7 项覆盖 `evidenceRefs` 元素）。**唯一例外是 `cost === null`**：`validation.ts` 的 `cost` 检查只放过 `undefined`，随后读取 `cost.tokensInput`，故它也抛原生 `TypeError`。这是既有行为（本变更之前相同），不是本次引入。另需注意 `cost` 传非对象（如 `5`）**不抛错**，其摘要表示为 `{}`；同样是既有行为。
 
 ### 9.2 raw kind → canonical type 映射
 
@@ -834,7 +841,7 @@ pnpm dagpipe:validate
 | 3. 阶段 1：W1 / W2 / W3 并发实现（第 13 节隔离，写入范围互不重叠） | 已完成（含 W2 第二轮消融：`node:crypto`、`closedStatusOf` 单一真源、`dataDigest` 口径、删除就地自检） |
 | 4. 阶段 2：Lead 完成 `index.ts`、tsconfig、`package.json`、dagpipe binding 迁移 | 已完成 |
 | 5. 阶段 3：W4 写测试并通过第 14 节 gate | 已完成（**143** 例，`pnpm test:context-events` exit 0；Lead 做过变异测试验收，见 §16.1） |
-| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS** 零 BLOCKER；task-15 在 `55eb847` 上增量复审 **PASS** 零 BLOCKER。两轮合计 8 条 ISSUE（A–H）+ 1 条 ADVISORY + W4 补测发现的 O2，逐条处置见 §16.2） |
+| 6. 独立架构 review 绑定候选 SHA | 已完成（task-12 在 `80b0bd7` 上 **PASS** 零 BLOCKER；task-15 在 `55eb847` 上增量复审 **PASS** 零 BLOCKER；task-16 在 `3479df4` 上文档增量确认 **PASS** 零 BLOCKER。三轮合计 11 条 ISSUE（A–K）+ 2 条 ADVISORY + W4 补测发现的 O2，逐条处置见 §16.2） |
 | 7. 按 review 结论修复并补测试 | 已完成（ISSUE-A / B / E / F / G / H 已处置，ISSUE-C / D 补测试；W4 在补测中追加发现的 O2 同属 ISSUE-E 类，已修并锁死） |
 | 8. 集成、候选自检与交付收口 | 进行中（组合最新 `origin/main`、最终 gate、merge 与 push） |
 
@@ -853,7 +860,11 @@ reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同
 | O2（W4 补测中发现） | **代码** | 同类的最后一处：`evidenceRefs[].evidenceId` 是 `ScopedId` 对象，仍按引用哈希 | 已修：`ScopedId` 的两个出现位置（`ScopeRef` 四槽位、`evidenceRefs[].evidenceId`）统一走同一个 `scopedIdForDigest`，使「漏掉任一位置」在结构上不可能；§9.5 写明该统一要求。已补用例逐个锁死两处 |
 | ISSUE-F | 契约边界 | `status === 'superseded'` 且带 `pairing` 的事件能通过 `validateCanonicalContextEvent`，此时 compact 会让同一 `eventId` 同时进 `retained` 与 `omitted` | 已按「不为不可达场景增加校验层」处置：**不改代码**，在 §8.2 显式声明「superseded 事件不携带 `pairing`」为下游投影的前提，并说明 §10.3 已要求输入是本函数输出、故该组合属契约外输入 |
 | ISSUE-G | 错误类型（task-15 发现） | 摘要规范化（§9.5 要求重建嵌套对象，必然读取 `scope.organId` / `evidenceRef.evidenceId`）在校验**之前**运行，因此类型外的畸形 `scope` / `evidenceRefs` 由原生 `TypeError` 而非 `ContextEventError` 终止 | 已按「不为不可达场景增加校验层」处置：**不改代码**，在 §9.1 写明该承诺的精确边界（`sourceId` / `occurredAt` 抛 `ContextEventError`；`scope` / `evidenceRefs` 的类型外形状抛原生 `TypeError`，仍是显式 fail-fast）。§11 绑定的 `validateCanonicalContextEvent` **未受影响**，对同样形状仍全部抛 `ContextEventError`（Lead 已复验 5 种形状） |
-| ISSUE-H | 文档 | §16 第 6 行的 finding 计数与 §16.2 表格不符 | 已修：改为与表格一致的 8 条 ISSUE（A–H）+ 1 条 ADVISORY + O2。原数字来自 task-12 报告表头的笔误，被原样继承 |
+| ISSUE-H | 文档 | §16 第 6 行的 finding 计数与 §16.2 表格不符 | 已修：改为与表格一致的计数。原数字来自 task-12 报告表头的笔误，被原样继承 |
+| ISSUE-I | 文档（task-16 发现） | §9.1 的主词「`scope` 与 `evidenceRefs` 的类型外形状」比实现**宽**：字段级类型外取值（`evidenceRefs[].kind` / `source` / `locator` / `digest` 非法、`scope.organId` 缺 `value`）仍抛 `ContextEventError`；且括号列举不完备（实测 14 种形状抛 `TypeError`，原列举只覆盖 5 种） | 已修：§9.1 改为先给**判据**（是否解引用 `null` / `undefined` 对象、是否把非数组当数组），再完整列举 14 种形状，并单列「字段取值非法但结构存在 → 仍抛 `ContextEventError`」一类。Lead 已独立复验 |
+| ISSUE-J | 文档（task-16 发现） | §9.1 完全没提 `cost`。`cost === null` 在 `createContextEvent` **和** `validateCanonicalContextEvent` 上都抛原生 `TypeError`，是**唯一**一个 §11 入口不抛 `ContextEventError` 的形状（既有行为，非本次引入）；而 `cost` 非对象（`5`）不抛错 | 已修：§9.1 明确 `cost === null` 是该唯一例外并标注为既有行为；`cost` 非对象不抛错、摘要表示为 `{}` 也一并记录 |
+| ISSUE-K | 文档（task-16 发现） | §16 第 6 行与 ISSUE-H 处置行都写「1 条 ADVISORY」，而 §16.2 表格有 2 条 ADVISORY 行 | 已修：两处计数改为与表格一致 |
+| ADVISORY | 透明性（task-16 建议） | §16.3 记「变异回放 20 条，`survived = 0`」，但该轮 `PC-2`（`allowedStatusOf` 丢掉 `SUPERSEDED_STATUS`）首轮为 **SKIP**（变异串与编译产物不匹配），改用真实编译文本重放后才 KILLED | 已补记于 §16.3，避免读者误以为 20 条在同一轮被评估 |
 | ADVISORY | 消融 | `projector.ts` 的 `case 'plan.proposed'` 中 `consumed.add(rejection.eventId)` 是否属重复登记 | review 独立差分（312 个合法场景，0 差异）后裁定**保留**：它与 `case 'plan.rejected'` 的登记语义不同（前者是「本分支产出的引用必须被消费」，后者是「本事件进入 decisions」），使 `plan.proposed` 分支局部自洽，不是同一语义的双路径 |
 | ADVISORY | 类型外输入 | `cost` 传非对象（如 `5`）不抛错，其摘要表示由 `"cost":5` 变为 `"cost":{}` | 类型外输入，合法域无影响；不增加校验层（理由同 ISSUE-G）。已随 ISSUE-G 的边界说明一并记录 |
 
@@ -861,8 +872,8 @@ reviewer-design 在候选 `80b0bd7` 上给出 **PASS**（零 BLOCKER）。它同
 
 reviewer-design 在 `55eb847` 上复跑 gate（`pnpm typecheck` / `pnpm test:context-events` **143/143** / `pnpm dagpipe:validate` 16 graphs，全部 exit 0），并做了**独立于 Lead 的**验证：
 
-- **修复完整性**：对重建后的哈希对象做结构遍历，出现的对象形状只有 6 类（顶层、`scope`、`ScopedId`、`EvidenceRef`、`EvidenceRef.scope`、`cost`），**无第五类未重建对象**；深层与逐层反键序摘要全部不变，逐叶子取值扰动摘要全变。
-- **变异回放 20 条，`survived = 0`**：`evidenceRefs` / `cost` / `evidenceId` / `evidenceRefs[].scope` / 四个 `scope` 槽位各自改回按引用 —— 全部 KILLED；`D-2`…`D-8`（去 `evidenceRefs`、去 `supersededByEventId`、加 `status`、顶层重排、`cost` 提前、`cost` 内部键序、`evidenceRef` 字段序）全部 KILLED。还原后逐文件字节核对一致。
+- **修复完整性**：对重建后的哈希对象做结构遍历，出现的对象形状只有 6 类（顶层、`scope`、`ScopedId`、`EvidenceRef`、`EvidenceRef.scope`、`cost`），**无未归类对象**；深层与逐层反键序摘要全部不变，逐叶子取值扰动摘要全变。
+- **变异回放 20 条，`survived = 0`**：`evidenceRefs` / `cost` / `evidenceId` / `evidenceRefs[].scope` / 四个 `scope` 槽位各自改回按引用 —— 全部 KILLED；`D-2`…`D-8`（去 `evidenceRefs`、去 `supersededByEventId`、加 `status`、顶层重排、`cost` 提前、`cost` 内部键序、`evidenceRef` 字段序）全部 KILLED。还原后逐文件字节核对一致。**注**：20 条中的 `PC-2`（`allowedStatusOf` 丢掉 `SUPERSEDED_STATUS`）首轮为 **SKIP** —— 变异串与编译产物不匹配（`occurrence = 0`），并非「存活」；改用真实编译文本重放后 KILLED（134/9）。`survived = 0` 对全部 20 条成立。
 - **取值变化的精确界定**：**规范键序输入在 `80b0bd7` 与 `55eb847` 上摘要完全相同**；只有非规范嵌套键序的输入摘要才改变。即「摘要值变化」只落在修复目标本身，不是面扩散。
 - **无回归**：126 个合法场景 `onlyDigestChanged = 0`；公开面 30 个导出与函数 arity 无变化；仓库内无 `packages/context-events` 外部导入者、无 `dataDigest` 消费者。
 - **O2 复现**：用「只把 `evidenceId` 改回按引用、其余保持修复后」的中间态代码**精确复现**了 O2 记录的两个修复前摘要，并以 `shasum -a 256` 对该 fixture 的规范 JSON 做第三次独立复核。
