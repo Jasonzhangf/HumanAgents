@@ -1,5 +1,6 @@
 import {
   api,
+  appendPairingEntry,
   clearNode,
   element,
   formatTime,
@@ -7,6 +8,7 @@ import {
   makePageShell,
   observationHref,
   queryParam,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
@@ -499,7 +501,9 @@ async function renderInteraction(interactionId, currentTaskId) {
   }
 
   const showError = (error) => {
-    feedback.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    clearNode(feedback)
+    feedback.append(element('span', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`))
+    appendPairingEntry(feedback, error)
     diagnosticText.textContent = [
       `code=${error.code || 'runtime.request.failed'}`,
       `owner=${error.ownerId || 'unknown'}`,
@@ -651,6 +655,5 @@ async function load() {
 }
 
 void load().catch((error) => {
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  renderPageError(status, error)
 })

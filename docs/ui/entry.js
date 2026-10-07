@@ -1,11 +1,13 @@
 import {
   api,
+  appendPairingEntry,
   clearNode,
   element,
   formatTime,
   loadRuntimeStatus,
   makePageShell,
   observationHref,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
@@ -106,6 +108,7 @@ function setEntryError(error) {
     element('strong', error.code || 'request.failed'),
     element('p', `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`),
   )
+  appendPairingEntry(panel, error)
 }
 
 function renderDraft(snapshot) {
@@ -250,6 +253,7 @@ async function refreshQueue() {
     if (panel) {
       clearNode(panel)
       panel.append(element('p', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`, 'empty'))
+      appendPairingEntry(panel, error)
     }
   }
 }
@@ -501,8 +505,7 @@ async function executeSubmission(submission, clarificationAnswer) {
 function handleSubmissionError(error, button) {
   appendCardError(error)
   setEntryError(error)
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`
+  renderPageError(status, error, 'inspect the runtime error')
   if (button) button.textContent = interactionId ? '重试本次提交' : '重试提交'
 }
 
@@ -540,7 +543,9 @@ function renderForm() {
   timezone.name = 'timezone'
   timezone.required = true
   timezone.value = timeZone()
-  form.append(field('时区', timezone))
+  const timezoneField = field('时区', timezone)
+  timezoneField.dataset.executionField = 'scheduled recurring'
+  form.append(timezoneField)
 
   const startAt = element('input')
   startAt.name = 'scheduledStartAt'
@@ -624,6 +629,14 @@ function renderForm() {
     for (const node of form.querySelectorAll('[data-recurring-frequency]')) {
       node.hidden = modeValue !== 'recurring' || !node.dataset.recurringFrequency.split(' ').includes(frequency.value)
     }
+    // A control inside a hidden field must not stay `required`: the browser
+    // would otherwise block the simple 单次 submission on fields the human
+    // never sees. The default execution policy is 单次, so only the task input,
+    // the execution type and the submit action are shown until the human picks
+    // 定时 or 周期.
+    const rendered = (control) => !control.closest('[hidden]')
+    timezone.required = rendered(timezone)
+    startAt.required = rendered(startAt)
     submitButton.textContent = modeValue === 'once' ? '创建并执行' : '保存执行计划'
   }
   mode.addEventListener('change', syncExecutionFields)
@@ -679,6 +692,5 @@ async function load() {
 }
 
 void load().catch((error) => {
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  renderPageError(status, error)
 })

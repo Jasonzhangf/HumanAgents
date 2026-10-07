@@ -1,0 +1,14 @@
+{
+  "graph": "humanagent-auth-session",
+  "labels": {
+    "public_entry": "接收浏览器公开入口请求（无需会话）",
+    "session_check": "读取公开会话端点判断这台浏览器是否已配对",
+    "unauthenticated_rejection": "运行时返回类型化会话拒绝：missing、expired 或 invalid",
+    "login_surface": "登录页呈现类型化错误与一次性配对码表单；配对码由控制面 humanagent pair 产生，不属于浏览器业务载荷",
+    "pair_submission": "同源提交配对码到公开配对端点并校验 Origin",
+    "pair_failure_terminal": "配对码缺失、过期或无效时终止于类型化用户可见错误与重试动作",
+    "session_cookie": "签发 HttpOnly、SameSite 的持久浏览器会话 cookie",
+    "authenticated_runtime_read": "携带浏览器会话读取已鉴权的 runtime API 与 SSE",
+    "render_auth_terminal": "渲染终态：进入请求的入口，或显示类型化错误与重试动作"
+  }
+}

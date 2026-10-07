@@ -1,0 +1,125 @@
+{
+  "id": "humanagent-auth-session",
+  "version": "1",
+  "meta": {
+    "title": "浏览器配对：公开入口到已鉴权运行时（控制面配对码不是浏览器业务载荷）",
+    "baseline": "11dc1e30a40c232d959ccc121d00a56735faa061",
+    "designStatus": "candidate",
+    "capabilityStatus": "delivered",
+    "controlPlaneBoundary": "supervisor challenge 与 supervisor token 只属于控制面 humanagent pair -> POST /api/auth/pair/challenge 这条独立边；它们不进入浏览器，也不写入任何业务 payload。浏览器只提交一次性配对码本身。",
+    "terminalContract": {
+      "success": "session_cookie：公开配对端点返回 200 并签发 HttpOnly、SameSite 的持久浏览器会话 cookie，随后浏览器进入请求的入口并读取已鉴权的 runtime API/SSE",
+      "failure": "pair_failure_terminal：配对码缺失、过期或无效时，浏览器渲染运行时自己的类型化错误 code/ownerId/message/nextAction，并保留重试动作；不产生会话 cookie",
+      "unauthenticated": "unauthenticated_rejection：未配对浏览器读到 auth.session.missing/expired/invalid，产品壳指向真实登录页而不是留下死文案",
+      "cancel": "配对失败后不改变服务端状态，表单保持可再次提交",
+      "blocked": "控制面没有可用 serve owner 时 humanagent pair 显式失败，浏览器保持未配对而不是伪造会话"
+    }
+  },
+  "inputs": [
+    { "id": "public_entry_request", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "public_entry",
+      "operator": "humanagent-auth-public-entry",
+      "operator_version": "1",
+      "inputs": ["public_entry_request"],
+      "output": { "id": "entry_request", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "session_check",
+      "operator": "humanagent-auth-session-check",
+      "operator_version": "1",
+      "inputs": ["entry_request"],
+      "output": { "id": "session_state", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "unauthenticated_rejection",
+      "operator": "humanagent-auth-session-rejection",
+      "operator_version": "1",
+      "inputs": ["session_state"],
+      "output": { "id": "auth_rejection", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "login_surface",
+      "operator": "humanagent-auth-login-surface",
+      "operator_version": "1",
+      "inputs": ["auth_rejection"],
+      "output": { "id": "login_form", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "pair_submission",
+      "operator": "humanagent-auth-pair-submission",
+      "operator_version": "1",
+      "inputs": ["login_form"],
+      "output": { "id": "pair_decision", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "pair_failure_terminal",
+      "operator": "humanagent-auth-pair-failure",
+      "operator_version": "1",
+      "inputs": ["pair_decision"],
+      "output": { "id": "typed_pair_failure", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "session_cookie",
+      "operator": "humanagent-auth-session-cookie",
+      "operator_version": "1",
+      "inputs": ["pair_decision"],
+      "output": { "id": "browser_session", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "authenticated_runtime_read",
+      "operator": "humanagent-auth-authenticated-read",
+      "operator_version": "1",
+      "inputs": ["browser_session"],
+      "output": { "id": "authenticated_runtime", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "render_auth_terminal",
+      "operator": "humanagent-auth-terminal-view",
+      "operator_version": "1",
+      "inputs": ["typed_pair_failure", "authenticated_runtime"],
+      "output": { "id": "auth_terminal_view", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "public_entry", "to": "session_check", "arc_id": "entry_request" },
+    { "from": "session_check", "to": "unauthenticated_rejection", "arc_id": "session_state" },
+    { "from": "unauthenticated_rejection", "to": "login_surface", "arc_id": "auth_rejection" },
+    { "from": "login_surface", "to": "pair_submission", "arc_id": "login_form" },
+    { "from": "pair_submission", "to": "pair_failure_terminal", "arc_id": "pair_decision" },
+    { "from": "pair_submission", "to": "session_cookie", "arc_id": "pair_decision" },
+    { "from": "pair_failure_terminal", "to": "render_auth_terminal", "arc_id": "typed_pair_failure" },
+    { "from": "session_cookie", "to": "authenticated_runtime_read", "arc_id": "browser_session" },
+    { "from": "authenticated_runtime_read", "to": "render_auth_terminal", "arc_id": "authenticated_runtime" }
+  ],
+  "outputs": ["auth_terminal_view"]
+}

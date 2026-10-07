@@ -11,6 +11,7 @@
 // A scheduled plan has no coordinator task until its first claim, so addressing
 // the plan by its own id is the only edge that can reach it.
 import { element } from './runtime-api.js'
+import { appendPairingEntry } from './runtime-shell.js'
 
 /**
  * The real durable `SubscriptionState` set. There is no `paused`: pausing a
@@ -211,6 +212,10 @@ export function renderPlanSection(plan, options = {}) {
   notice.dataset.planStatus = 'true'
   notice.setAttribute('role', 'status')
   notice.setAttribute('aria-live', 'polite')
+  // A control rejection whose typed body is a session error must still offer the
+  // real pairing entry. The notice is the plan's own status surface, so the link
+  // lives with the text it belongs to instead of a page-wide banner.
+  if (options.error) appendPairingEntry(notice, options.error)
   panel.append(notice)
 
   const details = element('details')

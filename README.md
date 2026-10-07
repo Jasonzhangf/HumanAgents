@@ -104,6 +104,8 @@ mismatch。
 `serve --host` 只接受 `0.0.0.0`、`::`、`127.0.0.1` 或 `::1`；接口地址和域名
 不可作为监听参数。监听放开后，Web 访问仍要求本地 `humanagent pair` 建立浏览器
 session，未配对客户端不能调用任务、执行、stop、runtime identity 或 SSE 接口。
+未配对时运行时返回 `auth.session.missing`，产品壳指向真实配对页 `/login.html`；
+在该页输入 `humanagent pair` 打印的一次性配对码即完成同源配对。
 Supervisor 控制端点始终只接受 loopback socket 加派生 token，不跟随 wildcard 监听。
 局域网明文 HTTP 的风险仍存在；本实现不提供 TLS 或公网部署。
 `pnpm package:release` 只消费已经通过 review、且 source/artifact/stage digest 都匹配的 manifest；它不会覆盖 pending review，也不会替代 `build:release` 的候选构建。

@@ -1,4 +1,5 @@
 import { createRuntimeApi, clearNode, element, formatTime, stateTone } from './runtime-api.js'
+import { appendPairingEntry } from './runtime-shell.js'
 
 const api = createRuntimeApi()
 
@@ -82,6 +83,7 @@ function showServerResult(result) {
 function showError(error) {
   const message = `${readable(error.message, 'Runtime API request failed')} · owner=${readable(error.ownerId, 'unknown')} · next=${readable(error.nextAction, 'inspect runtime error')}`
   setFeedback(message)
+  appendPairingEntry(feedback, error)
   diagnostic.textContent = message
   showServerResult({ error: message, code: readable(error.code, 'runtime.request.failed') })
 }
@@ -314,7 +316,10 @@ async function loadTasks() {
     tasks = list
     renderTasks(list)
   } catch (error) {
-    clearNode(taskList); taskList.append(element('li', `${error.message} · ${error.nextAction || 'inspect runtime'}`, 'task-row-empty'))
+    clearNode(taskList)
+    const failure = element('li', `${error.message} · ${error.nextAction || 'inspect runtime'}`, 'task-row-empty')
+    taskList.append(failure)
+    appendPairingEntry(failure, error)
   }
 }
 

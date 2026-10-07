@@ -5,6 +5,7 @@ import {
   loadRuntimeStatus,
   makePageShell,
   observationHref,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskDetailHref,
@@ -56,8 +57,7 @@ function formatPreciseTime(value) {
 }
 
 function setRefreshError(error) {
-  status.dataset.tone = 'danger'
-  status.textContent = `读取任务失败：${error instanceof Error ? error.message : String(error)}`
+  renderPageError(status, error)
 }
 
 function isReplay(event) {
@@ -197,6 +197,7 @@ const PLAN_ACTION_FIELDS = {
 }
 
 let planControlNotice = ''
+let planControlError
 
 /**
  * The dashboard read states the control facts as booleans. Only `true` is an
@@ -210,6 +211,7 @@ function planAvailableActions(plan) {
 
 async function runPlanControl(subscriptionId, action) {
   planControlNotice = planControlPendingCopy(action)
+  planControlError = undefined
   renderDashboard()
   try {
     const result = await api.planControl(subscriptionId, {
@@ -221,8 +223,10 @@ async function runPlanControl(subscriptionId, action) {
     await refresh()
   } catch (error) {
     // A typed rejection is a real outcome, not a hidden failure: the re-read
-    // keeps the page truthful about the plan the runtime still reports.
+    // keeps the page truthful about the plan the runtime still reports, and the
+    // rejection itself stays available so a session error still offers pairing.
     planControlNotice = planControlErrorMessage(error)
+    planControlError = error
     renderDashboard()
     await refresh().catch(setRefreshError)
   }
@@ -233,6 +237,7 @@ function renderTaskPlanSection(plan) {
     { ...plan, availableActions: planAvailableActions(plan) },
     {
       notice: planControlNotice || undefined,
+      ...(planControlError === undefined ? {} : { error: planControlError }),
       onControl: (action) => runPlanControl(plan.subscriptionId, action),
     },
   )
@@ -452,7 +457,7 @@ async function stopExecution() {
       ? `stopped · operation=${result.operationId}`
       : `stop=${result.state} · operation=${result.operationId}`
   } catch (error) {
-    actionStatus.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    renderPageError(actionStatus, error)
     await refresh().catch(setRefreshError)
   }
 }
@@ -466,7 +471,7 @@ async function retryStopExecution() {
       ? `stopped · operation=${result.operationId}`
       : `stop=${result.state} · operation=${result.operationId}`
   } catch (error) {
-    actionStatus.textContent = `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`
+    renderPageError(actionStatus, error)
     await refresh().catch(setRefreshError)
   }
 }
@@ -537,8 +542,7 @@ async function load() {
     renderRuntimeStatus(status, runtimeStatus, error)
     await refresh()
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+    renderPageError(status, error)
   }
 }
 

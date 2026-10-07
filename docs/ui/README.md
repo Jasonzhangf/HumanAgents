@@ -7,6 +7,8 @@
 任务详情与输入决策：[task.html](task.html)  
 运行任务看板：[task-dashboard.html](task-dashboard.html)  
 后台观测：[observation.html](observation.html)  
+浏览器配对入口：[login.html](login.html)（仅使用公开 `GET /api/auth/session` 与同源
+`POST /api/auth/pair`；未配对时产品壳指向此页，配对码由控制面 `humanagent pair` 产生）
 历史视觉原型（非产品入口）：
 [interaction.html](interaction.html)
 

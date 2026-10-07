@@ -1,5 +1,6 @@
 import {
   api,
+  appendPairingEntry,
   clearNode,
   element,
   loadRuntimeStatus,
@@ -23,6 +24,7 @@ function showReviewError(error) {
     element('strong', error.code),
     element('span', ` · ${error.message} · owner=${error.ownerId} · next=${error.nextAction}`),
   )
+  appendPairingEntry(status, error)
 }
 
 function render(view) {
@@ -92,6 +94,7 @@ async function refresh() {
     status.dataset.tone = 'danger'
     clearNode(status)
     status.append(element('strong', error.code || 'memory.request.failed'), element('span', ` · ${error.message} · ${error.nextAction}`))
+    appendPairingEntry(status, error)
   }
 }
 

@@ -1,9 +1,11 @@
 import {
   api,
+  appendPairingEntry,
   element,
   formatTime,
   loadRuntimeStatus,
   makePageShell,
+  renderPageError,
   renderRuntimeStatus,
   taskDashboardHref,
 } from './runtime-shell.js'
@@ -696,8 +698,7 @@ async function refreshLists() {
     renderTaskLists(dashboard, tasks)
     renderPlanList(scheduler)
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+    renderPageError(status, error)
   }
 }
 
@@ -705,10 +706,10 @@ async function refreshLists() {
  * The control notice belongs to the one plan it was issued against, so a
  * result for plan A is never rendered under plan B.
  */
-let planControlNotice = { subscriptionId: '', text: '' }
+let planControlNotice = { subscriptionId: '', text: '', error: undefined }
 
 async function runPlanControl(subscriptionId, action) {
-  planControlNotice = { subscriptionId, text: planControlPendingCopy(action) }
+  planControlNotice = { subscriptionId, text: planControlPendingCopy(action), error: undefined }
   renderPlanList(lastSchedulerRead)
   try {
     const result = await api.planControl(subscriptionId, {
@@ -716,9 +717,12 @@ async function runPlanControl(subscriptionId, action) {
       idempotencyKey: planControlKey(subscriptionId, action),
       requestedAt: new Date().toISOString(),
     })
-    planControlNotice = { subscriptionId, text: planControlResultCopy(action, result) }
+    planControlNotice = { subscriptionId, text: planControlResultCopy(action, result), error: undefined }
   } catch (error) {
-    planControlNotice = { subscriptionId, text: planControlErrorMessage(error) }
+    // Keep the rejection itself as the notice's payload so the shared renderer
+    // can add the pairing entry. Overwriting the message first loses the code
+    // that decides whether pairing is the right recovery.
+    planControlNotice = { subscriptionId, text: planControlErrorMessage(error), error }
   }
   await refreshLists()
 }
@@ -745,6 +749,7 @@ function renderPlanList(scheduler) {
       `读取执行计划失败 · ${scheduler.__error.message} · owner=${scheduler.__error.ownerId || 'unknown'} · next=${scheduler.__error.nextAction || 'inspect the runtime error'}`,
       'empty',
     ))
+    appendPairingEntry(panel, scheduler.__error)
   } else if (scheduler?.issue) {
     panel.append(element('p', `计划巡逻上报：${scheduler.issue.code} · ${scheduler.issue.message} · next=${scheduler.issue.nextAction}`, 'empty'))
   } else if (plans.length === 0) {
@@ -753,7 +758,10 @@ function renderPlanList(scheduler) {
   for (const plan of plans) {
     panel.append(renderPlanSection(projectSchedulerPlan(plan), {
       ...(planControlNotice.subscriptionId === plan.subscriptionId
-        ? { notice: planControlNotice.text }
+        ? {
+            notice: planControlNotice.text,
+            ...(planControlNotice.error === undefined ? {} : { error: planControlNotice.error }),
+          }
         : {}),
       onControl: (action) => runPlanControl(plan.subscriptionId, action),
     }))
@@ -809,7 +817,7 @@ function taskRow(row) {
   const actions = element('div', undefined, 'task-item-actions')
   actions.append(
     actionButton('编辑', () => openEditDialog(row)),
-    actionButton('删除', true, () => runDelete(row)),
+    actionButton('删除', true, (btn) => runDelete(row, btn)),
   )
   item.append(link, actions)
   return item
@@ -874,7 +882,9 @@ function openEditDialog(row) {
       await refreshLists()
     } catch (error) {
       save.disabled = false
-      err.textContent = `${error.message || error} · owner=${error.ownerId || 'unknown'}`
+      clearNode(err)
+      err.append(element('span', `${error.message || error} · owner=${error.ownerId || 'unknown'}`))
+      appendPairingEntry(err, error)
     }
   })
   cancel.addEventListener('click', () => dialog.close())
