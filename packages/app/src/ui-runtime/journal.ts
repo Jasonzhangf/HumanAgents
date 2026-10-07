@@ -52,6 +52,18 @@ function requirePositiveInteger(record: Record<string, unknown>, key: string, fi
   }
 }
 
+/**
+ * Optional non-empty string field. Absence is a valid, explicit state: a provider
+ * turn id that was never reported must stay absent instead of being invented.
+ */
+function requireOptionalRecordString(record: Record<string, unknown>, key: string, filePath: string, line: number): void {
+  const value = record[key];
+  if (value === undefined) return;
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must be a non-empty string when present`);
+  }
+}
+
 function checkpointIdKey(id: Checkpoint['id']): string {
   return `${id.scope}:${id.value}`;
 }
@@ -107,6 +119,10 @@ function validateRuntimeEvent(value: unknown, filePath: string, line: number): v
   requireRecordString(event, 'kind', filePath, line);
   requireRecordString(event, 'state', filePath, line);
   requireRecordString(event, 'summary', filePath, line);
+  requireOptionalRecordString(event, 'turnId', filePath, line);
+  requireOptionalRecordString(event, 'requestId', filePath, line);
+  requireOptionalRecordString(event, 'parentRequestId', filePath, line);
+  requireOptionalRecordString(event, 'providerOccurredAt', filePath, line);
   validateEvidenceRefs(event.evidenceRefs, filePath, line);
 }
 

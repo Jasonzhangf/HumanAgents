@@ -33,16 +33,15 @@
 
 候选含未提交改动时，身份须同时记录 HEAD SHA、HEAD tree、`git diff --binary HEAD` 的 SHA-256、tracked/untracked 状态和 harness digest；所有会影响运行或测试的 untracked 输入须逐项列出并 hash。源码、测试或 harness 任一变动都会使旧 receipt 失效，必须从该状态重跑受影响的真实 E2E。
 
-真实浏览器验收必须显式设定 receipt 与截图目录，例如：
+真实浏览器验收必须由受版本控制的 runner 显式设定 receipt 与截图目录，命令自身即入口：
 
 ```sh
-mkdir -p dist/receipts/dashboard-e2e
-HUMANAGENT_BROWSER_RECEIPT_PATH=dist/receipts/dashboard-e2e/local-file.json \
-HUMANAGENT_BROWSER_SHOT_DIR=dist/receipts/dashboard-e2e/local-file-shots \
-node tests/app/real-browser-explicit-implicit-e2e.mjs
+pnpm e2e:dashboard:local-file-search
 ```
 
-此兼容脚本只覆盖本地文件读取；即使运行成功，也不证明本地搜索、网络搜索或 AItest。
+runner 把 `receipt.md`、`evidence.json` 与截图写到该候选的
+`dist/receipts/dashboard-e2e/<scenario>/`；命令未产出 receipt 或 receipt 的 `result`
+不是 `SUCCESS` 时，该场景为 `INCOMPLETE`。不要再用已退役的独立兼容脚本充当浏览器验收。
 
 ## 标准浏览器入口合同
 
@@ -54,9 +53,13 @@ pnpm e2e:dashboard:local-file-search
 pnpm e2e:dashboard:aitest
 ```
 
-每条命令必须从真实 Dashboard 建立隔离 runtime/workspace，执行真实业务能力并验证成功终态；不得调用 API 代替浏览器用户流程。本次修复的成功、失败和取消断言必须分别由 runner 执行。命令缺失、runner 不支持对应场景或 capability 未接线时，该类为 `INCOMPLETE`，不能退回使用本地文件读取脚本、mock、checker-only 或一次 Provider 调用计数。
+每条命令必须从真实 Dashboard 建立隔离 runtime/workspace，执行真实业务能力并验证成功终态；不得调用 API 代替浏览器用户流程。本次修复的成功、失败和取消断言必须分别由 runner 执行。命令缺失、runner 不支持对应场景或 capability 未接线时，该类为 `INCOMPLETE`，不能退回使用 mock、checker-only 或一次 Provider 调用计数。
 
-当前 `package.json` 尚未提供这三个命令，当前 browser harness 也只执行 `file.read`，不执行搜索动作、不验证匹配路径，AItest checker 也不验证 task 语义/视觉结果。因此 runner 和三个命令仍是实现 gate；完成实现并通过这些命令前，三类浏览器 E2E 均不得标记通过。
+三条命令已在 `package.json` 落地，runner 与三个场景模块位于 `tests/app/dashboard-e2e/`。
+命令存在不等于场景已通过：`web-search` 受
+[`docs/architecture/hand-search-websearch-plan.md`](../architecture/hand-search-websearch-plan.md)
+的门禁约束，`aitest` 受 checker 与人工观察记录约束；只有各自 receipt 绑定当前候选且
+`result: SUCCESS` 时该场景才可标记通过。
 
 AItest 的 checker 成功不能代替 task 语义验收：必须保存 checker 原始 stdout/exit code 和人工观察记录。用户取消或 checker/结果验证失败时，Dashboard 必须有明确非成功终态；网络搜索失败时须展示真实 Provider 错误，不得伪造空结果成功。本地搜索结果为零时须显示真实的零命中结果，不能把搜索未执行表现成零命中。
 
@@ -103,8 +106,14 @@ pnpm test:app
 pnpm test:ui
 pnpm test:runtime
 pnpm test:hand
-node tests/app/real-browser-explicit-implicit-e2e.mjs
+pnpm e2e:dashboard:local-file-search
 ```
+
+`pnpm e2e:dashboard:local-file-search` 是三类浏览器 E2E 中已被实际观测到成功的一条：
+它以 exit 0 结束并把 `SUCCESS` receipt 写到
+`dist/receipts/dashboard-e2e/local-file-search/`。`pnpm e2e:dashboard:web-search` 与
+`pnpm e2e:dashboard:aitest` 同样已在 `package.json` 落地，但各自仍受其门禁约束（见
+§三类真实任务）；它们未产出绑定当前候选的 `SUCCESS` receipt 前不得计为通过。
 
 Retry-10 coordinator tests are not run by `pnpm test:runtime` today. When
 Retry-10 is in scope, the same candidate must also run this explicit gate and
@@ -117,9 +126,9 @@ pnpm exec tsc -p tests/runtime/orchestration/tsconfig.json \
   dist/tests/tests/runtime/orchestration/retry-cycle-coordinator.test.js
 ```
 
-候选验证必须在同一个精确候选树中按顺序执行。`provider`、`app`、`ui`、`runtime` 和 `hand` gate 的原始退出码与日志路径都要绑定到候选 SHA/tree；修复后只重跑受影响 gate，但最终候选仍须包含完整的适用结果。上面的浏览器脚本只证明其实际覆盖的本地文件读取路径；网络搜索和 AItest 必须各有独立的真实 Dashboard 流程与 receipt，不能因为该命令通过而略过。
+候选验证必须在同一个精确候选树中按顺序执行。`provider`、`app`、`ui`、`runtime` 和 `hand` gate 的原始退出码与日志路径都要绑定到候选 SHA/tree；修复后只重跑受影响 gate，但最终候选仍须包含完整的适用结果。上面的 `pnpm e2e:dashboard:local-file-search` 只证明它实际覆盖的本地搜索路径；网络搜索和 AItest 必须各有独立的真实 Dashboard 流程与 receipt，不能因为该命令通过而略过。
 
-`real-explicit-implicit-e2e.mjs` 和 `real-failure-cleanup-proof.mjs` 是真实 Runtime/API 证明，不是这三类浏览器任务的替代品。runner 的每个场景都必须在 `finally` 按上面的 settled/未 settled 两分支完成收口。已 settled 的 task 必须关闭本轮 browser context、停止精确归属本轮的服务 PID，并核验 PID 退出、端口关闭和临时路径删除；未 settled 的 task 必须保留并记录恢复所需的服务 PID/端口/路径、recovery owner 和下一步，标 `INCOMPLETE`，不得宣称清理完成。正常成功路径不得设置保留临时 root 的开关。失败、超时和取消都须写 `INCOMPLETE` receipt，且报告真实清理或恢复资源状态。`pnpm e2e:dashboard:*` 命令及三类场景目前尚未落地，故本规则目前定义了放行合同，不代表验收已通过。
+`real-explicit-implicit-e2e.mjs` 和 `real-failure-cleanup-proof.mjs` 是真实 Runtime/API 证明，不是这三类浏览器任务的替代品。runner 的每个场景都必须在 `finally` 按上面的 settled/未 settled 两分支完成收口。已 settled 的 task 必须关闭本轮 browser context、停止精确归属本轮的服务 PID，并核验 PID 退出、端口关闭和临时路径删除；未 settled 的 task 必须保留并记录恢复所需的服务 PID/端口/路径、recovery owner 和下一步，标 `INCOMPLETE`，不得宣称清理完成。正常成功路径不得设置保留临时 root 的开关。失败、超时和取消都须写 `INCOMPLETE` receipt，且报告真实清理或恢复资源状态。三个 `pnpm e2e:dashboard:*` 命令与三类场景均已落地；本规则定义放行合同，具体场景是否通过只由绑定当前候选的 receipt 证明。
 
 正式安装验证顺序：在已 review 且 clean 的候选执行 `pnpm build:release`、`pnpm release:check`、`pnpm run install:global`；随后从任意非仓库目录执行 `humanagent --version`，再以 `humanagent --workspace <本轮专属 workspace> --port <空闲 loopback 端口>` 启动正式 WebUI，并用新浏览器页面复核输入、确认、turn、工具结果和最终输出。receipt 记录候选 SHA/tree、release manifest 中的 artifact 路径与 SHA-256、安装命令结果、`command -v humanagent` 的实际路径与 binary SHA-256、版本响应、服务 PID/端口/health、页面截图及清理证据。实际 binary 必须来自已验候选 release artifact；不得用候选源码版本或 `connected` 状态替代安装与运行态证据。
 

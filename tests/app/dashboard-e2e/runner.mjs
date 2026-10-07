@@ -43,7 +43,7 @@ import {
   stopTaskAndSettle,
 } from './lib/cleanup.mjs';
 import { assertTerminalFor, countTurnEvidenceFor, journalPathFor } from './lib/journal.mjs';
-import { buildReceipt, writeIncompleteReceipt, writeReceipt } from './lib/receipt.mjs';
+import { buildReceipt, writeReceipt } from './lib/receipt.mjs';
 import { runAitestScenario } from './scenarios/aitest.mjs';
 import { runLocalFileSearchScenario } from './scenarios/local-file-search.mjs';
 import { runWebSearchScenario } from './scenarios/web-search.mjs';
@@ -186,6 +186,11 @@ export async function runScenario(scenario, options = {}) {
     draft: evidence.draft ?? binding.draft ?? null,
     confirmStatus: evidence.confirmStatus ?? binding.confirmStatus ?? null,
     draftRowsBeforeConfirm: evidence.draftRowsBeforeConfirm ?? binding.draftRowsBeforeConfirm ?? null,
+    // The cleanup stage ran above; carry its real recorded outcome into the
+    // receipt. When it did not record one, this stays null and the receipt says
+    // so instead of implying success.
+    cleanup: binding.cleanup ?? null,
+    cleaned: binding.cleaned ?? null,
   });
   const written = await writeReceipt(binding, receipt);
 

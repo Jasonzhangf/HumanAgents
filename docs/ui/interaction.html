@@ -71,12 +71,21 @@
         <dl class="inspection-grid" data-inspection></dl>
       </section>
 
+      <section class="panel draft-feedback-panel" data-region="draft-feedback" aria-live="polite">
+        <header class="section-head">
+          <h2>整理反馈（只读）</h2>
+          <span class="section-meta">不会写入任何可编辑输入控件</span>
+        </header>
+        <dl class="inspection-grid" data-draft-feedback>
+          <div><dt>状态</dt><dd>尚未生成整理反馈。</dd></div>
+        </dl>
+      </section>
+
       <section class="panel matching-panel" data-region="matching">
         <header class="section-head">
           <h2>3. Matching / match result</h2>
         </header>
         <form data-explicit-match class="form-grid">
-          <label>规范化输入 <input name="normalizedInput" required /></label>
           <label>已知事实（每行一项） <textarea name="knownFacts" placeholder="可选"></textarea></label>
           <label>匹配任务（JSON 数组） <textarea name="matchedTasks" placeholder="例如：[]"></textarea></label>
           <div class="action-row">

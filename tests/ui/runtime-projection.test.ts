@@ -11,7 +11,10 @@ import {
 import { UiProjectionError, type UiDataSource } from '../../packages/ui/contracts/models.js';
 import {
   projectRuntimeDashboard,
+  projectRuntimeTaskDashboard,
   projectRuntimeTaskList,
+  type RuntimeLivenessInput,
+  type RuntimeLivenessProjection,
   type RuntimeTaskSnapshotInput,
 } from '../../packages/ui/projection/runtime.js';
 
@@ -127,6 +130,34 @@ test('runtime API maps every real task state to its declared chip tone', async (
     expectedTones,
   );
   assert.equal(stateTone('mystery-state'), 'gray');
+});
+
+test('the browser runtime API keeps the bounded original cause chain', async () => {
+  const { RuntimeApiError } = await import(runtimeApiModuleUrl);
+  const error = new RuntimeApiError({
+    code: 'ui-runtime.unexpected',
+    ownerId: 'humanagent.app',
+    message: 'implicit executor failed and settlement also failed: settle timed out',
+    nextAction: 'inspect the runtime error and retry from a new operation',
+    cause: {
+      name: 'Error',
+      message: 'executor could not reach its provider',
+      cause: { name: 'Error', message: 'connect ECONNREFUSED 127.0.0.1:4444' },
+    },
+  }, 500);
+  // The typed surface the human already sees must not regress.
+  assert.equal(error.code, 'ui-runtime.unexpected');
+  assert.equal(error.ownerId, 'humanagent.app');
+  assert.equal(/settlement also failed/.test(error.message), true, `expected the settlement failure in ${error.message}`);
+  assert.equal(error.nextAction, 'inspect the runtime error and retry from a new operation');
+  assert.equal(error.status, 500);
+  // The original executor failure survives instead of being collapsed to a
+  // status code, so the page can name the real cause.
+  const cause = (error as unknown as {
+    readonly cause?: { readonly message: string; readonly cause?: { readonly message: string } };
+  }).cause;
+  assert.equal(cause?.message, 'executor could not reach its provider');
+  assert.equal(cause?.cause?.message, 'connect ECONNREFUSED 127.0.0.1:4444');
 });
 
 test('runtime dashboard only reports hasRunning for execution-active tasks', () => {
@@ -361,3 +392,165 @@ test('observation projection fails explicitly on unknown nodes, undeclared owner
     /node\.absent/,
   );
 });
+
+// ── Real liveness truth (task-6) ────────────────────────────────────────────
+// The work card must distinguish "still working" from "nothing is happening".
+// Every state below is derived from facts the runtime actually reported: the
+// task lifecycle and the newest real activity timestamp. A state with no real
+// producer surfaces as `unknown`, never as a claim.
+//
+// The event-transport fact is deliberately NOT part of this projection: the
+// only observer that can read a transport loss is the page holding the stream,
+// and a server-derived value is unfetchable exactly when the transport is down.
+// The transport fact therefore lives on the card's own `cardMetadata.transport`,
+// fed by the page's real EventSource.
+
+const SILENCE_BUDGET_MS = 30_000;
+
+function livenessTask(
+  state: RuntimeTaskSnapshotInput['state'],
+  liveness: RuntimeLivenessInput | undefined,
+  overrides: Partial<RuntimeTaskSnapshotInput> = {},
+): RuntimeTaskSnapshotInput {
+  return {
+    taskId: id('task', 'task-liveness'),
+    title: 'liveness task',
+    state,
+    currentState: state,
+    nextStep: 'next',
+    updatedAt: '2026-10-06T12:00:00.000Z',
+    input: '',
+    output: '',
+    currentNode: 'provider.turn',
+    allowedActions: [],
+    recentEvents: [],
+    ...(liveness === undefined ? {} : { liveness }),
+    ...overrides,
+  };
+}
+
+function livenessFacts(overrides: Partial<RuntimeLivenessInput> = {}): RuntimeLivenessInput {
+  return {
+    active: true,
+    lastActivityAt: '2026-10-06T12:00:00.000Z',
+    silenceBudgetMs: SILENCE_BUDGET_MS,
+    observedAt: '2026-10-06T12:00:05.000Z',
+    ...overrides,
+  };
+}
+
+function livenessOf(task: RuntimeTaskSnapshotInput): RuntimeLivenessProjection {
+  const liveness = projectRuntimeTaskDashboard(task, 'fake').liveness;
+  if (!liveness) throw new Error('expected the runtime dashboard to carry a liveness projection');
+  return liveness;
+}
+
+test('runtime dashboard reports working only from real recent activity', () => {
+  const liveness = livenessOf(livenessTask('running', livenessFacts()));
+  assert.equal(liveness.state, 'working');
+  assert.equal(liveness.lastActivityAt, '2026-10-06T12:00:00.000Z');
+  assert.equal(liveness.observedAt, '2026-10-06T12:00:05.000Z');
+  assert.equal(liveness.silentForMs, 5_000);
+  assert.equal(liveness.silenceBudgetMs, SILENCE_BUDGET_MS);
+  assert.equal(/5000/.test(liveness.reason), true, liveness.reason);
+  assert.equal(/30000/.test(liveness.reason), true, liveness.reason);
+});
+
+test('runtime liveness projection carries no transport state', () => {
+  const liveness = livenessOf(livenessTask('running', livenessFacts()));
+  assert.equal(Object.prototype.hasOwnProperty.call(liveness, 'transport'), false);
+  assert.equal('transport' in liveness, false);
+});
+
+test('runtime dashboard reports no-activity only past the declared silence budget', () => {
+  const stalled = livenessOf(livenessTask('running', livenessFacts({
+    observedAt: '2026-10-06T12:00:40.000Z',
+  })));
+  assert.equal(stalled.state, 'no-activity');
+  assert.equal(stalled.silentForMs, 40_000);
+  assert.equal(stalled.silenceBudgetMs, SILENCE_BUDGET_MS);
+
+  const atBudget = livenessOf(livenessTask('running', livenessFacts({
+    observedAt: '2026-10-06T12:00:30.000Z',
+  })));
+  assert.equal(atBudget.state, 'no-activity');
+
+  const justUnder = livenessOf(livenessTask('running', livenessFacts({
+    observedAt: '2026-10-06T12:00:29.999Z',
+  })));
+  assert.equal(justUnder.state, 'working');
+});
+
+test('runtime dashboard returns to working when real activity resumes', () => {
+  const stalled = livenessOf(livenessTask('running', livenessFacts({
+    observedAt: '2026-10-06T12:00:40.000Z',
+  })));
+  assert.equal(stalled.state, 'no-activity');
+
+  const recovered = livenessOf(livenessTask('running', livenessFacts({
+    lastActivityAt: '2026-10-06T12:00:39.000Z',
+    observedAt: '2026-10-06T12:00:40.000Z',
+  })));
+  assert.equal(recovered.state, 'working');
+  assert.equal(recovered.silentForMs, 1_000);
+});
+
+test('runtime dashboard reports unknown instead of inventing progress without a real timestamp', () => {
+  const liveness = livenessOf(livenessTask('running', {
+    active: true,
+    silenceBudgetMs: SILENCE_BUDGET_MS,
+    observedAt: '2026-10-06T12:10:00.000Z',
+  }));
+  assert.equal(liveness.state, 'unknown');
+  assert.equal(liveness.lastActivityAt, undefined);
+  assert.equal(liveness.silentForMs, undefined);
+  assert.equal(/no real activity timestamp/.test(liveness.reason), true, liveness.reason);
+});
+
+test('runtime dashboard refuses to derive no-activity from an unusable silence budget', () => {
+  const liveness = livenessOf(livenessTask('running', livenessFacts({
+    silenceBudgetMs: 0,
+    observedAt: '2026-10-06T12:10:00.000Z',
+  })));
+  assert.equal(liveness.state, 'unknown');
+  assert.equal(/silence budget/.test(liveness.reason), true, liveness.reason);
+});
+
+test('runtime dashboard keeps failure and waiting-for-answer as explicit liveness states', () => {
+  const failed = livenessOf(livenessTask('failed', livenessFacts({
+    active: false,
+    observedAt: '2026-10-06T12:00:10.000Z',
+  }), {
+    error: {
+      code: 'provider.transport.failure',
+      message: 'transport failed',
+      ownerId: 'humanagent.provider-adapter',
+      retryable: false,
+      nextAction: 'retry',
+    },
+  }));
+  assert.equal(failed.state, 'failed');
+
+  const waiting = livenessOf(livenessTask('waiting', livenessFacts({ active: false })));
+  assert.equal(waiting.state, 'waiting-for-answer');
+
+  const blocked = livenessOf(livenessTask('blocked', livenessFacts({ active: false })));
+  assert.equal(blocked.state, 'waiting-for-answer');
+});
+
+test('runtime dashboard reports idle instead of a liveness claim when nothing is executing', () => {
+  const settled = livenessOf(livenessTask('succeeded', livenessFacts({
+    active: false,
+    observedAt: '2026-10-06T12:01:00.000Z',
+  })));
+  assert.equal(settled.state, 'idle');
+
+  const unknownState = livenessOf(livenessTask('unknown', livenessFacts({ active: false })));
+  assert.equal(unknownState.state, 'unknown');
+});
+
+test('runtime dashboard omits liveness when the runtime reported no real facts', () => {
+  const dashboard = projectRuntimeTaskDashboard(livenessTask('running', undefined), 'fake');
+  assert.equal(dashboard.liveness, undefined);
+});
+

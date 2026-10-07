@@ -348,6 +348,8 @@ export interface ObservationNodeSource {
   readonly ownerAgentRole?: AgentRoleDisplay;
   readonly iteration?: number;
   readonly updatedAt?: string;
+  /** Real provider turn identity for this node; absent when the source reported none. */
+  readonly turnId?: string;
   readonly inputRefs: readonly string[];
   readonly outputRefs: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
@@ -363,6 +365,7 @@ export interface ObservationNodeActivitySource {
   readonly activityRef: string;
   readonly summary: string;
   readonly occurredAt?: string;
+  readonly turnId?: string;
 }
 
 export interface ObservationNodeToolStepSource {
@@ -371,6 +374,7 @@ export interface ObservationNodeToolStepSource {
   readonly status: PipelineNodeToolStepStatus;
   readonly returned: string;
   readonly occurredAt?: string;
+  readonly turnId?: string;
 }
 
 export interface ObservationAgentFrameSource {
@@ -780,6 +784,7 @@ function toObservationDetail(
     roleDisplay: AGENT_ROLE_LABELS[role],
     iteration: source.iteration ?? frame.iteration,
     updatedAt: source.updatedAt,
+    ...(source.turnId === undefined ? {} : { turnId: source.turnId }),
     summary: source.summary,
     inputs: source.inputRefs.map((ref) => ({ ref, label: ref })),
     outputs: source.outputRefs.map((ref) => ({ ref, label: ref })),
@@ -841,6 +846,7 @@ function toPipelineNodeToolStep(source: ObservationNodeToolStepSource): Pipeline
     statusDisplay: TOOL_STEP_STATUS_LABELS[status],
     returned: source.returned,
     occurredAt: source.occurredAt,
+    ...(source.turnId === undefined ? {} : { turnId: source.turnId }),
   };
 }
 
@@ -851,6 +857,7 @@ function toPipelineNodeActivity(source: ObservationNodeActivitySource): Pipeline
     activityRef: source.activityRef,
     summary: source.summary,
     occurredAt: source.occurredAt,
+    ...(source.turnId === undefined ? {} : { turnId: source.turnId }),
   };
 }
 
@@ -1080,3 +1087,4 @@ export function projectMemoryInteraction(input: MemoryInteractionSurfaceInput): 
 }
 
 export * from './runtime.js';
+export * from './interaction-work-card.js';

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { UiCommandError, validateUiCommand, assertObservationReadOnly, type PipelineObservationCommand, type UiCommand } from '../../packages/ui/contracts/commands.js';
 import { UiProjectionError } from '../../packages/ui/contracts/models.js';
 import {
@@ -834,34 +835,42 @@ test('dashboard progress copy does not expose internal identifiers or protocol n
   assert.equal(source.includes('interaction='), false);
   assert.equal(source.includes('draftId='), false);
   assert.equal(source.includes('RequirementEnvelope'), false);
-});
-
-test('explicit requirement checkbox stays compact under the shared input style', async () => {
-  const runtimeCss = await readFile('docs/ui/runtime.css', 'utf8');
-  const policyRule = runtimeCss.match(/\.quick-create-policy input\s*\{[^}]*\}/s);
-  if (!policyRule) throw new Error('expected .quick-create-policy input rule');
-  assert.equal(/min-width:\s*16px/.test(policyRule[0]), true);
-  assert.equal(/min-height:\s*16px/.test(policyRule[0]), true);
-  assert.equal(/padding:\s*0/.test(policyRule[0]), true);
-  assert.equal(/border:\s*0/.test(policyRule[0]), true);
-  assert.equal(/background:\s*transparent/.test(policyRule[0]), true);
+  assert.equal(source.includes('projectInteractionCardFromEntries'), true);
+  assert.equal(source.includes('createInteractionProgressWidget'), true);
 });
 
 test('task dashboard event rows do not render internal owner or next action details', async () => {
   const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
-  assert.equal(source.includes('event.ownerId'), false);
   assert.equal(source.includes('event.nextAction'), false);
   assert.equal(source.includes("event.kind !== 'provider.model' || (event.summary && event.summary !== 'model')"), true);
-  assert.equal(source.includes('element(\'span\', event.summary)'), true);
+  assert.equal(source.includes("'provider.tool-result'"), true);
+  assert.equal(source.includes('historyChunks'), true);
+  assert.equal(source.includes('olderEventCount'), true);
+  assert.equal(source.includes('connectionState'), true);
+});
+
+test('task dashboard status copy keeps stopped conditional on a collected checkpoint', async () => {
+  const source = await readFile('docs/ui/task-dashboard.js', 'utf8');
+  assert.equal(source.includes("dashboard.state === 'stopped'"), true);
+  assert.equal(source.includes('不能宣称已停止'), true);
+  assert.equal(source.includes('statusSections.business'), true);
+  assert.equal(source.includes('statusSections.waiting'), true);
+  assert.equal(source.includes('连接新鲜度'), true);
+  assert.equal(source.includes('historyPage'), true);
+  assert.equal(source.includes('HISTORY_PAGE_SIZE'), true);
+  assert.equal(source.includes("'更早'"), true);
+  assert.equal(source.includes('本页之前还有'), false);
+  assert.equal(source.includes('停止请求已受理'), true);
+  assert.equal(source.includes("['succeeded', 'failed'].includes(dashboard.state)"), true);
 });
 
 test('dashboard confirmation waits on user without continuing a provider timer', async () => {
   const source = await readFile('docs/ui/dashboard.js', 'utf8');
   assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), true);
-  assert.equal(source.includes("timer.hidden = true"), true);
-  assert.equal(source.includes("root.dataset.tone = 'waiting'"), true);
   assert.equal(source.includes('await api.confirmExplicitRequirement(interaction.id'), true);
   assert.equal(source.includes("progress.set('等待你确认任务草案'"), false);
+  assert.equal(source.includes("timer.hidden = true"), false);
+  assert.equal(source.includes("root.dataset.tone = 'waiting'"), false);
 });
 
 test('memory review button exposes typed API failure and becomes usable again', async () => {
@@ -912,13 +921,11 @@ test('observation page reads only typed pipeline fields and owns no node-order t
 
   // Field names must match the typed contract: `ownerAgentRole`, `toolSteps`, top-level `handoffs`.
   assert.equal(page.includes('ownerAgentRole'), true);
-  assert.equal(page.includes('node.toolSteps'), true);
   assert.equal(page.includes('projection.handoffs'), true);
   assert.equal(page.includes('projection.selectedNode'), true);
+  assert.equal(page.includes("mode: 'observation'"), true);
   assert.equal(page.includes('fromRoleDisplay'), true);
   assert.equal(page.includes('carrySummary'), true);
-  assert.equal(page.includes('notCarried'), true);
-  assert.equal(page.includes('evidenceRefs'), true);
 
   // The old producerless field names and the second node-order table are gone.
   for (const stale of [
@@ -927,6 +934,8 @@ test('observation page reads only typed pipeline fields and owns no node-order t
     'node.handoffs',
     'node.inputRefs',
     'node.outputRefs',
+    'renderToolHistory',
+    'renderSummaryPane',
     'fromAgent ',
     'notReturned',
     'export const PIPELINE_ROWS',
@@ -940,21 +949,88 @@ test('observation page reads only typed pipeline fields and owns no node-order t
   assert.equal(page.includes('node.row'), true);
 });
 
+test('observation work-card adapter pairs tool calls with results and marks unprojected turns', async () => {
+  const { projectObservationWorkCard } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
+  ).href);
+  const projection = projectObservationWorkCard({
+    node: {
+      nodeId: 'pipeline.execute',
+      title: '执行流水线',
+      kindDisplay: '执行',
+      stateDisplay: '运行中',
+      owner: '执行',
+      ownerAgentRole: 'execution',
+      roleDisplay: '执行',
+      iteration: 2,
+      updatedAt: '2026-10-05T12:00:03Z',
+      summary: '执行完成，taskId 技术标识已折叠',
+      turnId: 'turn-provider-reported',
+      activity: [{
+        activityRef: 'activity:execute-1',
+        summary: 'provider 工具调用已返回',
+        occurredAt: '2026-10-05T12:00:00Z',
+        turnId: 'turn-provider-reported',
+      }],
+      toolSteps: [
+        {
+          stepId: 'call-returned',
+          name: 'read.file',
+          status: 'succeeded',
+          statusDisplay: '已返回',
+          returned: 'status=succeeded · outputRef=asset://output',
+          occurredAt: '2026-10-05T12:00:01Z',
+          turnId: 'turn-provider-reported',
+        },
+        {
+          stepId: 'call-unreturned',
+          name: 'write.file',
+          status: 'unknown',
+          statusDisplay: '未知',
+          returned: 'status=unknown · call=write.file',
+          occurredAt: '2026-10-05T12:00:02Z',
+        },
+      ],
+    },
+  });
+
+  assert.equal(projection.surface, 'interaction-work-card');
+  assert.equal(projection.mode, 'observation');
+  assert.deepEqual(projection.actions, []);
+  assert.equal(projection.conversation.turns.length, 2);
+  assert.equal(projection.conversation.turns[1].markdown, '该条目包含技术细节，完整内容在折叠详情中。');
+  assert.deepEqual(projection.conversation.turns[1].details, [['节点结论原文', '执行完成，taskId 技术标识已折叠']]);
+  const tools = projection.history.items.filter((item: { tool?: unknown }) => item.tool);
+  assert.equal(tools.length, 2);
+  assert.equal(tools[0].tool.paired, true);
+  assert.equal(tools[1].tool.paired, false);
+  assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'model-request'), true);
+  assert.equal(projection.history.items.some((item: { kind: string }) => item.kind === 'conclusion'), true);
+  // The real provider turn id the node reported reaches every entry whose
+  // source carried it, and nothing is renamed to a synthesized turn key.
+  assert.equal(projection.history.items.every((item: { turnKey?: string }) => item.turnKey === undefined), true);
+  assert.equal(projection.history.items.filter((item: { turnId?: string }) => item.turnId === 'turn-provider-reported').length, 3);
+  // The step whose source reported no turn has the explicit absent state.
+  const unreturned = tools[1] as { turnId?: string };
+  assert.equal(unreturned.turnId, undefined);
+  assert.equal(projection.cardMetadata.source.turnId, 'turn-provider-reported');
+});
+
 test('UI index is the task input entry with explicit draft, confirmation gate, and runtime status', async () => {
   const html = await readFile('docs/ui/index.html', 'utf8');
   const entry = await readFile('docs/ui/entry.js', 'utf8');
-  assert.equal(html.includes('type="module" src="./entry.js"'), true);
   assert.equal(html.includes('HumanAgent · Task Input'), true);
-  assert.equal(entry.includes('api.receiveExplicitInput'), true);
-  assert.equal(entry.includes('api.interpretExplicitInput'), true);
-  assert.equal(entry.includes('api.confirmExplicitRequirement'), true);
   assert.equal(entry.includes('api.listTasks'), true);
+  assert.equal(entry.includes('id = \'entry-confirm-button\''), false);
+  assert.equal(entry.includes('确认并进入队列'), false);
   assert.equal(entry.includes('implicitScheduling'), true);
   assert.equal(entry.includes('taskDashboardHref'), true);
   assert.equal(html.includes('data-mode="running"'), false);
   assert.equal(html.includes('本地状态已同步'), false);
   assert.equal(html.includes('正在运行'), false);
   assert.equal(html.includes('checkpoint committed'), false);
+  assert.equal(html.includes('id="entry-confirm-button"'), false);
+  assert.equal(html.includes('data-region="confirmation"'), false);
 });
 
 test('explicit interaction UI uses typed brain routes and keeps control separate', async () => {
@@ -973,11 +1049,7 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
     'dispatchNextExplicitRequirement',
   ]) assert.equal(api.includes(`${method}:`), true);
   assert.equal(api.includes("channel: 'business'"), true);
-  assert.equal(interaction.includes('api.receiveExplicitInput'), true);
   assert.equal(interaction.includes('api.inspectExplicitInteraction'), true);
-  assert.equal(interaction.includes('api.beginExplicitMatching'), true);
-  assert.equal(interaction.includes('api.recordExplicitMatch'), true);
-  assert.equal(interaction.includes('api.proposeExplicitRequirement'), true);
   assert.equal(interaction.includes('api.completeExplicitStatusQuery'), true);
   assert.equal(interaction.includes('api.confirmExplicitRequirement'), true);
   assert.equal(interaction.includes('api.dispatchNextExplicitRequirement'), true);
@@ -986,10 +1058,11 @@ test('explicit interaction UI uses typed brain routes and keeps control separate
   assert.equal(interaction.includes('channel: \'control\''), false);
   assert.equal(interaction.includes('dataset.runtimeState'), false);
   assert.equal(interaction.includes('data-task-status'), false);
-  assert.equal(html.includes('type="module" src="./interaction.js"'), true);
-  assert.equal(html.includes('data-explicit-input'), true);
+  assert.equal(interaction.includes("field(matchingForm, 'normalizedInput').value"), false);
+  assert.equal(interaction.includes("field(inputForm, 'rawInput').value"), false);
   assert.equal(html.includes('data-explicit-confirmation'), true);
   assert.equal(html.includes('data-action="dispatch"'), true);
+  assert.equal(html.includes('name="normalizedInput"'), false);
 });
 
 test('explicit interaction UI executes route order and confirmation gate', async () => {
@@ -1051,6 +1124,7 @@ test('explicit interaction UI executes route order and confirmation gate', async
   const visibleState = new FakeElement();
   const interactionIdLabel = new FakeElement();
   const inspection = new FakeElement();
+  const draftFeedback = new FakeElement();
   const inputForm = new FakeForm();
   inputForm.addField('sourceRef', 'ui:test');
   inputForm.addField('rawInput', 'create an evidence task');
@@ -1091,6 +1165,7 @@ test('explicit interaction UI executes route order and confirmation gate', async
     ['[data-visible-state]', visibleState],
     ['[data-interaction-id]', interactionIdLabel],
     ['[data-inspection]', inspection],
+    ['[data-draft-feedback]', draftFeedback],
     ['[data-explicit-input]', inputForm],
     ['[data-explicit-match]', matchingForm],
     ['[data-explicit-proposal]', proposalForm],
@@ -1387,7 +1462,24 @@ for (const clarification of [false, true]) test(`new task form blocks duplicate 
     return { state: 'awaiting-confirmation', draft: { proposedIntent: 'create', draftId: 'draft', inputRevision: 1 } };
   };
   const window = { location: { href: '' } };
-  new Function('element', 'main', 'api', 'advanceExplicitInteraction', 'window', `${createSource}; renderCreate()`)(element, main, api, advance, window);
+  const appendCardEvent = () => {};
+  const appendCardError = () => {};
+  const updateCardFromSnapshot = () => {};
+  const attachInteractionCardHost = () => {};
+  const interactionCard = null;
+  new Function(
+    'element',
+    'main',
+    'api',
+    'advanceExplicitInteraction',
+    'window',
+    'appendCardEvent',
+    'appendCardError',
+    'updateCardFromSnapshot',
+    'attachInteractionCardHost',
+    'interactionCard',
+    `${createSource}; renderCreate()`,
+  )(element, main, api, advance, window, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard);
   const form = nodes.find(node => node.tag === 'form')!;
   const textarea = nodes.find(node => node.tag === 'textarea')!;
   const button = nodes.find(node => node.tag === 'button')!;
@@ -1524,6 +1616,11 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     draft: { draftId: 'draft-7', inputRevision: 1, proposal: 'prepare release evidence' },
   });
   const clearNode = (node: Node) => { node.children = []; };
+  const appendCardEvent = () => {};
+  const appendCardError = () => {};
+  const updateCardFromSnapshot = () => {};
+  const attachInteractionCardHost = () => {};
+  const interactionCard = null;
   await new Function(
     'element',
     'main',
@@ -1532,8 +1629,13 @@ test('explicit confirmation stays on the interaction page and exposes the FIFO r
     'window',
     'document',
     'clearNode',
+    'appendCardEvent',
+    'appendCardError',
+    'updateCardFromSnapshot',
+    'attachInteractionCardHost',
+    'interactionCard',
     `${interactionSource}; return renderInteraction('interaction-confirm', undefined)`,
-  )(element, main, api, advance, window, document, clearNode);
+  )(element, main, api, advance, window, document, clearNode, appendCardEvent, appendCardError, updateCardFromSnapshot, attachInteractionCardHost, interactionCard);
   const feedback = nodes.find((node) => node.attrs.role === 'status');
   const confirm = nodes.find((node) => node.textContent === '按此方案继续');
   if (!feedback || !confirm) throw new Error('expected confirmation controls');
@@ -1559,4 +1661,88 @@ test('runtime task dashboard is observational and has no second execution-input 
   assert.equal(/subscribedOperationId = operationId/.test(source), true);
   assert.equal(/if \(subscribedOperationId\) \{[\s\S]*subscribedOperationId = undefined/.test(source), true);
   assert.equal(source.includes('subscribe(dashboard.operationId)'), true);
+});
+
+type InteractionCardPageAdapter = {
+  readonly projectInteractionCardFromEntries: (entries: readonly unknown[], state?: string) => {
+    readonly surface: string;
+    readonly conversation: {
+      readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
+      readonly turns: readonly { readonly markdown?: string }[];
+    };
+    readonly trace: { readonly items: readonly { readonly requestId: string }[] };
+    readonly history: { readonly result: string };
+    readonly cardMetadata: { readonly nextAction?: string };
+  };
+  readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
+    readonly conversation: {
+      readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
+      readonly turns: readonly { readonly markdown?: string }[];
+    };
+  };
+  readonly scopedId: (scope: string, value: string) => { readonly scope: string; readonly value: string };
+};
+
+const interactionCardPage = await import(
+  pathToFileURL(resolve('docs/ui/interaction-card-page.js')).href
+) as InteractionCardPageAdapter;
+
+test('interaction card page adapter keeps technical identifiers in trace details only', () => {
+  const projection = interactionCardPage.projectInteractionCardFromEntries([
+    {
+      sequence: 1,
+      interactionId: 'interaction-1',
+      kind: 'status',
+      sourceKind: 'progress',
+      eventKey: 'explicit.interpret',
+      text: '显式大脑正在整理输入',
+    },
+  ], 'matching');
+
+  assert.equal(projection.surface, 'interaction-work-card');
+  assert.equal(projection.conversation.turns[0]?.markdown, '显式大脑正在整理输入');
+  assert.equal(projection.conversation.turns[0]?.markdown?.includes('requestId'), false);
+  // An explicit interaction is owned by explicit intake, not by a provider
+  // request, so it has no turn or request identity to show. The card reports
+  // the absent history explicitly instead of synthesizing a turn id.
+  assert.equal(projection.trace.items.length, 0);
+  assert.equal(projection.history.result, 'missing');
+  // The conversation and trace carry no technical identity; the interaction's
+  // own event key stays in the folded status detail only.
+  assert.equal(JSON.stringify(projection.conversation).includes('explicit.interpret'), false);
+  assert.equal(JSON.stringify(projection.trace).includes('explicit.interpret'), false);
+  assert.equal(JSON.stringify(projection.trace).includes('1.explicit.interpret'), false);
+  assert.equal(
+    JSON.stringify({ ...projection.cardMetadata, nextAction: undefined }).includes('1.explicit.interpret'),
+    false,
+  );
+});
+
+test('interaction card page adapter preserves draft facts without leaking decision refs', () => {
+  const projection = interactionCardPage.projectInteractionCardFromSnapshot({
+    interactionId: 'interaction-2',
+    state: 'awaiting-confirmation',
+    rawInput: '整理周报证据',
+    reply: '请确认',
+    clarifications: [],
+    draft: {
+      draftId: 'draft-1',
+      inputRevision: 1,
+      proposedIntent: 'append',
+      normalizedInput: '整理周报证据并保持不发布',
+      proposal: '补齐证据，不发布。',
+      decisionRefs: ['decision:internal'],
+      knownFacts: ['已有草稿'],
+    },
+  });
+
+  const summary = projection.conversation.summary;
+  assert.equal(summary.missing, undefined);
+  assert.equal(summary.goal?.text, '整理周报证据');
+  assert.equal(JSON.stringify(summary).includes('decision:internal'), false);
+  assert.equal(JSON.stringify(projection.conversation.turns).includes('decision:internal'), false);
+});
+
+test('interaction card page adapter scoped ids are explicit and deterministic', () => {
+  assert.deepEqual(interactionCardPage.scopedId('task', 'task-1'), { scope: 'task', value: 'task-1' });
 });

@@ -8,12 +8,20 @@ import {
   type RuntimeRecentOutputProjection,
   type RuntimeStatusProjection,
   type RuntimeSurfaceState,
+  type RuntimeLivenessInput,
+  type RuntimeLivenessProjection,
   type RuntimeTaskCheckpointProjection,
   type RuntimeTaskDashboardProjection,
   type RuntimeTaskErrorProjection,
   type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
+} from '../contracts/runtime.js';
+
+export type {
+  RuntimeLivenessInput,
+  RuntimeLivenessProjection,
+  RuntimeLivenessState,
 } from '../contracts/runtime.js';
 
 const STATE_LABELS: Record<LifecycleState, string> = {
@@ -61,6 +69,13 @@ export interface RuntimeTaskSnapshotInput {
   readonly recentEvents: readonly RuntimeTaskEventProjection[];
   readonly checkpoint?: RuntimeTaskCheckpointProjection;
   readonly error?: RuntimeTaskErrorProjection;
+  /**
+   * Real execution liveness facts reported by the runtime: whether an execution
+   * is active, the newest activity timestamp the runtime actually recorded, and
+   * the declared silence budget. Absent when the caller reported no liveness
+   * facts; the projection then claims nothing.
+   */
+  readonly liveness?: RuntimeLivenessInput;
 }
 
 export interface RuntimeDashboardInput {
@@ -196,7 +211,16 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
   };
 }
 
-export function projectRuntimeTaskDashboard(source: RuntimeTaskSnapshotInput, mode: RuntimeMode): RuntimeTaskDashboardProjection {
+export function projectRuntimeTaskDashboard(
+  source: RuntimeTaskSnapshotInput,
+  mode: RuntimeMode,
+): RuntimeTaskDashboardProjection {
+  const liveness = source.liveness === undefined
+    ? undefined
+    : projectRuntimeLiveness(source.liveness, {
+        state: source.state,
+        hasError: source.error !== undefined,
+      });
   return {
     surface: 'runtime-task-dashboard',
     mode,
@@ -215,5 +239,100 @@ export function projectRuntimeTaskDashboard(source: RuntimeTaskSnapshotInput, mo
     executionEpoch: source.executionEpoch,
     allowedActions: source.allowedActions,
     observationRef: `task://${source.taskId.value}/observation`,
+    ...(liveness === undefined ? {} : { liveness }),
+  };
+}
+
+/**
+ * Derives the single liveness state from real reported facts. Precedence:
+ * reported failure, then a lifecycle that waits for a human or resource
+ * decision, then a non-active execution, then the observed silence against the
+ * declared budget.
+ *
+ * States that have no real producer stay `unknown`; this function never turns a
+ * missing signal into a claim about progress. The event-transport fact is not
+ * an input: only the page holding the stream observes it, so it is carried on
+ * the card's own transport field instead of being derived here.
+ */
+export function projectRuntimeLiveness(
+  facts: RuntimeLivenessInput,
+  task: { readonly state: LifecycleState; readonly hasError: boolean },
+): RuntimeLivenessProjection {
+  const base = {
+    observedAt: facts.observedAt,
+    ...(facts.lastActivityAt === undefined ? {} : { lastActivityAt: facts.lastActivityAt }),
+    ...(facts.lastActivitySource === undefined ? {} : { lastActivitySource: facts.lastActivitySource }),
+    ...(facts.silenceBudgetMs === undefined ? {} : { silenceBudgetMs: facts.silenceBudgetMs }),
+  };
+
+  if (task.hasError || task.state === 'failed' || task.state === 'cancelled') {
+    return {
+      ...base,
+      state: 'failed',
+      reason: `the execution reported failure (state: ${task.state})`,
+    };
+  }
+  if (task.state === 'waiting' || task.state === 'blocked') {
+    return {
+      ...base,
+      state: 'waiting-for-answer',
+      reason: `the execution is waiting for a human or resource decision (state: ${task.state})`,
+    };
+  }
+  if (!facts.active) {
+    if (task.state === 'unknown' || task.state === 'stale') {
+      return {
+        ...base,
+        state: 'unknown',
+        reason: `the reported execution state is ${task.state}; no execution activity is observable`,
+      };
+    }
+    return {
+      ...base,
+      state: 'idle',
+      reason: `no execution is active (state: ${task.state})`,
+    };
+  }
+
+  const budget = facts.silenceBudgetMs;
+  if (budget === undefined || !Number.isFinite(budget) || budget <= 0) {
+    return {
+      ...base,
+      state: 'unknown',
+      reason: 'the declared silence budget is not a usable duration, so no activity state is derived',
+    };
+  }
+  if (facts.lastActivityAt === undefined) {
+    return {
+      ...base,
+      state: 'unknown',
+      reason: 'the runtime reported no real activity timestamp for this execution yet',
+    };
+  }
+
+  const observedMs = Date.parse(facts.observedAt);
+  const activityMs = Date.parse(facts.lastActivityAt);
+  if (!Number.isFinite(observedMs) || !Number.isFinite(activityMs)) {
+    return {
+      ...base,
+      state: 'unknown',
+      reason: 'the reported observation or activity timestamp is not a usable time',
+    };
+  }
+
+  const silentForMs = Math.max(0, observedMs - activityMs);
+  if (silentForMs >= budget) {
+    return {
+      ...base,
+      state: 'no-activity',
+      silentForMs,
+      reason: `no real activity for ${silentForMs} ms; the declared silence budget is ${budget} ms`,
+    };
+  }
+  return {
+    ...base,
+    state: 'working',
+    silentForMs,
+    reason: `real activity ${silentForMs} ms ago; the declared silence budget is ${budget} ms`,
   };
 }

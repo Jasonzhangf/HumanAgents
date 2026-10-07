@@ -1,20 +1,51 @@
 {
   "id": "humanagent-explicit-requirement",
-  "version": "1",
+  "version": "2",
   "meta": {
-    "title": "用户任务确认后进入隐式队列并执行到任务输出",
-    "baseline": "0189d5893baa5cc42d06e98ce7bc09dbc99e3b7a"
+    "title": "用户新任务从可读草稿、修订、精确确认到单次最终提交并进入需求队列与执行计划",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "partial",
+    "ownershipContract": {
+      "W1": "contracts-only shared exports; no runtime implementation",
+      "W1b": "core draft invariant and runtime intake/router; consumes W1 and existing journal port",
+      "W2": "subscription core exports only after W1b serial handoff",
+      "W4": "UI consumers require W1 exports and W3 runtime/projection handoff"
+    },
+    "terminalContract": {
+      "success": "persisted_execution_plan",
+      "failure": "draft revision or authorization failure returns explicit error and preserves input",
+      "cancel": "rejected closure before dispatch; in-flight stop is separate",
+      "blocked": "clarification required; draft remains editable",
+      "cleanup": "interaction closure receipt retained; stale confirmation explicitly rejected",
+      "duplicate": "same draft revision and idempotency key returns existing finalSubmit receipt without a second requirement append or dispatch",
+      "staleRevision": "old confirmation or old revision is rejected with explicit confirmation-stale or stale-revision failure and the current draft remains editable",
+      "rejectClosure": "explicit rejectDraft records a durable DraftRejectClosure and keeps the interaction input available for a later retry of the same request path",
+      "restart": "preview, revision history, confirmation, final-submit receipt, and inbox transaction replay from explicit-intake and requirement-inbox durable state"
+    },
+    "productionWiringStatus": "WIRED",
+    "productionWiringGap": "本图关键边已接线：confirmTypedExplicitRequirement 调用真实的 RequirementSubmissionOwner.submitFinal，并在 executionPolicy 存在时经 persistAuthorizedExecutionPlan→SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2819-2831, 2949-2972）；端到端到点执行由 packages/app/src/ui-runtime/scheduler.ts 驱动。仍在的相邻事实（不阻断本图）：RequirementSubmissionOwner 的 RequirementSubmitPort.submit 仍是只回显 requirementId 的桩（service.ts:1007），执行计划落库不经该桩",
+    "productionWiringOwner": "T14",
+    "productionWiringEvidence": "packages/app/src/ui-runtime/service.ts:2819 submitFinal 与 :2972 SubscriptionControlPort.create；packages/runtime/src/explicit-brain/router.ts:617 RequirementSubmissionOwner.submitFinal/rejectDraftRevision；tests/app/scheduler-production-wiring.test.ts 经真实 HTTP 确认路径落成计划并到期执行"
   },
   "inputs": [
-    { "id": "user_task_input", "schema": "Object" }
+    {
+      "id": "user_task_input",
+      "schema": "Object"
+    }
   ],
   "nodes": [
     {
       "id": "sensory_inbox",
       "operator": "humanagent-sensory-inbox",
       "operator_version": "1",
-      "inputs": ["user_task_input"],
-      "output": { "id": "raw_interaction", "schema": "Object" },
+      "inputs": [
+        "user_task_input"
+      ],
+      "output": {
+        "id": "raw_interaction",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
@@ -23,139 +54,166 @@
       "id": "explicit_normalize",
       "operator": "humanagent-explicit-normalize",
       "operator_version": "1",
-      "inputs": ["raw_interaction"],
-      "output": { "id": "normalized_intent", "schema": "Object" },
+      "inputs": [
+        "raw_interaction"
+      ],
+      "output": {
+        "id": "normalized_intent",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "explicit_confirm",
-      "operator": "humanagent-explicit-confirm",
+      "id": "create_reviewable_draft",
+      "operator": "humanagent-explicit-draft",
       "operator_version": "1",
-      "inputs": ["normalized_intent"],
-      "output": { "id": "confirmed_requirement", "schema": "Object" },
+      "inputs": [
+        "normalized_intent"
+      ],
+      "output": {
+        "id": "reviewable_draft",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "implicit_classify",
-      "operator": "humanagent-implicit-classify",
+      "id": "revise_draft_to_approval",
+      "operator": "humanagent-draft-revision",
       "operator_version": "1",
-      "inputs": ["confirmed_requirement"],
-      "output": { "id": "classified_requirement", "schema": "Object" },
+      "inputs": [
+        "reviewable_draft"
+      ],
+      "output": {
+        "id": "approved_draft_revision",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "interactive_queue",
-      "operator": "humanagent-interactive-queue",
+      "id": "confirm_exact_revision",
+      "operator": "humanagent-draft-confirmation",
       "operator_version": "1",
-      "inputs": ["classified_requirement"],
-      "output": { "id": "interactive_queue_item", "schema": "Object" },
+      "inputs": [
+        "approved_draft_revision"
+      ],
+      "output": {
+        "id": "confirmed_draft_revision",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "execution_queue",
-      "operator": "humanagent-execution-queue",
+      "id": "validate_draft_revision",
+      "operator": "humanagent-draft-revision-invariants",
       "operator_version": "1",
-      "inputs": ["classified_requirement"],
-      "output": { "id": "execution_queue_item", "schema": "Object" },
+      "inputs": [
+        "confirmed_draft_revision"
+      ],
+      "output": {
+        "id": "validated_draft_revision",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "research_queue",
-      "operator": "humanagent-research-queue",
+      "id": "submit_single_authorization",
+      "operator": "humanagent-final-submit",
       "operator_version": "1",
-      "inputs": ["classified_requirement"],
-      "output": { "id": "research_queue_item", "schema": "Object" },
+      "inputs": [
+        "validated_draft_revision"
+      ],
+      "output": {
+        "id": "authorized_requirement",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "maintenance_queue",
-      "operator": "humanagent-maintenance-queue",
+      "id": "compile_execution_policy",
+      "operator": "humanagent-execution-policy",
       "operator_version": "1",
-      "inputs": ["classified_requirement"],
-      "output": { "id": "maintenance_queue_item", "schema": "Object" },
+      "inputs": [
+        "authorized_requirement"
+      ],
+      "output": {
+        "id": "execution_plan",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     },
     {
-      "id": "task_correlate_or_create",
-      "operator": "humanagent-task-correlate-or-create",
+      "id": "persist_authorized_plan",
+      "operator": "humanagent-plan-persist",
       "operator_version": "1",
-      "inputs": ["interactive_queue_item", "execution_queue_item", "research_queue_item", "maintenance_queue_item"],
-      "output": { "id": "task_binding", "schema": "Object" },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
-      "id": "resource_admission",
-      "operator": "humanagent-resource-admission",
-      "operator_version": "1",
-      "inputs": ["task_binding"],
-      "output": { "id": "admitted_execution", "schema": "Object" },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
-      "id": "pipeline_execute",
-      "operator": "humanagent-pipeline-execute",
-      "operator_version": "1",
-      "inputs": ["admitted_execution"],
-      "output": { "id": "execution_evidence", "schema": "Object" },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
-      "id": "settle",
-      "operator": "humanagent-settle",
-      "operator_version": "1",
-      "inputs": ["execution_evidence"],
-      "output": { "id": "settled_checkpoint", "schema": "Object" },
-      "input_selector": { "include": [], "exclude": [], "predicate": null },
-      "output_selector": { "include": [], "exclude": [], "predicate": null },
-      "iterator": "Whole"
-    },
-    {
-      "id": "task_output",
-      "operator": "humanagent-task-output",
-      "operator_version": "1",
-      "inputs": ["settled_checkpoint"],
-      "output": { "id": "completed_task", "schema": "Object" },
+      "inputs": [
+        "execution_plan"
+      ],
+      "output": {
+        "id": "persisted_execution_plan",
+        "schema": "Object"
+      },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
       "output_selector": { "include": [], "exclude": [], "predicate": null },
       "iterator": "Whole"
     }
   ],
   "edges": [
-    { "from": "sensory_inbox", "to": "explicit_normalize", "arc_id": "raw_interaction" },
-    { "from": "explicit_normalize", "to": "explicit_confirm", "arc_id": "normalized_intent" },
-    { "from": "explicit_confirm", "to": "implicit_classify", "arc_id": "confirmed_requirement" },
-    { "from": "implicit_classify", "to": "interactive_queue", "arc_id": "classified_requirement" },
-    { "from": "implicit_classify", "to": "execution_queue", "arc_id": "classified_requirement" },
-    { "from": "implicit_classify", "to": "research_queue", "arc_id": "classified_requirement" },
-    { "from": "implicit_classify", "to": "maintenance_queue", "arc_id": "classified_requirement" },
-    { "from": "interactive_queue", "to": "task_correlate_or_create", "arc_id": "interactive_queue_item" },
-    { "from": "execution_queue", "to": "task_correlate_or_create", "arc_id": "execution_queue_item" },
-    { "from": "research_queue", "to": "task_correlate_or_create", "arc_id": "research_queue_item" },
-    { "from": "maintenance_queue", "to": "task_correlate_or_create", "arc_id": "maintenance_queue_item" },
-    { "from": "task_correlate_or_create", "to": "resource_admission", "arc_id": "task_binding" },
-    { "from": "resource_admission", "to": "pipeline_execute", "arc_id": "admitted_execution" },
-    { "from": "pipeline_execute", "to": "settle", "arc_id": "execution_evidence" },
-    { "from": "settle", "to": "task_output", "arc_id": "settled_checkpoint" }
+    {
+      "from": "sensory_inbox",
+      "to": "explicit_normalize",
+      "arc_id": "raw_interaction"
+    },
+    {
+      "from": "explicit_normalize",
+      "to": "create_reviewable_draft",
+      "arc_id": "normalized_intent"
+    },
+    {
+      "from": "create_reviewable_draft",
+      "to": "revise_draft_to_approval",
+      "arc_id": "reviewable_draft"
+    },
+    {
+      "from": "revise_draft_to_approval",
+      "to": "confirm_exact_revision",
+      "arc_id": "approved_draft_revision"
+    },
+    {
+      "from": "confirm_exact_revision",
+      "to": "validate_draft_revision",
+      "arc_id": "confirmed_draft_revision"
+    },
+    {
+      "from": "validate_draft_revision",
+      "to": "submit_single_authorization",
+      "arc_id": "validated_draft_revision"
+    },
+    {
+      "from": "submit_single_authorization",
+      "to": "compile_execution_policy",
+      "arc_id": "authorized_requirement"
+    },
+    {
+      "from": "compile_execution_policy",
+      "to": "persist_authorized_plan",
+      "arc_id": "execution_plan"
+    }
   ],
-  "outputs": ["completed_task"]
+  "outputs": [
+    "persisted_execution_plan"
+  ]
 }

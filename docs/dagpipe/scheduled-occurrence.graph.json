@@ -1,0 +1,332 @@
+{
+  "id": "humanagent-scheduled-occurrence",
+  "version": "1",
+  "meta": {
+    "title": "单个到期 occurrence 从 scheduler patrol、已提交订阅状态、认领、执行、收拢到结果投影",
+    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "designStatus": "candidate",
+    "capabilityStatus": "partial",
+    "controlContract": {
+      "request": "SubscriptionControlRequest = ModifySubscriptionControlRequest | PauseSubscriptionControlRequest | ResumeSubscriptionControlRequest | CancelFutureSubscriptionControlRequest",
+      "receipt": "SubscriptionControlReceipt { subscriptionId, action, status, policyRevision, scheduleRevision, idempotencyKey, requestHash, supersededUnclaimedOccurrences, controlRef }",
+      "sharedTransactionResource": "packages/adapters/jsonl/src/index.ts:transaction",
+      "competition": "subscription-control commits typed state and receipt; this graph reads committed subscription state and rechecks state/revision in the same JSONL transaction before claim; no cross-graph edge or second control truth",
+      "linearization": [
+        "control committed before claim supersedes old unclaimed occurrences; claim returns typed stale/conflict and cannot start new execution",
+        "claim committed before control keeps the authorized immutable policy snapshot for that executionEpoch; future pause/cancel-future does not stop in-flight execution",
+        "two modifies from the same base revision produce exactly one applied receipt and typed stale/conflict for the losers",
+        "duplicate idempotencyKey with the same requestHash returns the existing receipt; different content returns conflict",
+        "resume generates deterministic future slots and never reissues superseded occurrences",
+        "journal restart replay restores committed subscription state and receipts"
+      ]
+    },
+    "executionContract": {
+      "callee": "humanagent-serve-task@2",
+      "entry": "persisted_execution_plan",
+      "exit": "task_terminal_projection",
+      "executeNode": "execute_occurrence_task",
+      "settleNode": "settle_occurrence",
+      "recoveryIdentity": "OccurrenceTaskBinding { occurrenceId, subscriptionId, scheduleRevision, occurrenceOrdinal, taskId, operationId, executionEpoch, inputArtifactDigest }",
+      "requiredReceipt": "ServeTaskTerminalReceipt { taskId, operationId, executionEpoch, inputArtifactDigest, verification: TaskVerificationResult, terminalCheckpointRef, settlementReceiptRef, recoveryResponsibility }",
+      "verificationAuthority": "W3 retained tree public task-verification bridge in packages/runtime/src/ui-runtime/task-verification.ts exists in this candidate; the occurrence terminal receipt derives its verification from the really committed coordinator checkpoint (packages/app/src/ui-runtime/occurrence-terminal.ts) and the scheduler does not own a second verifier",
+      "settlementRule": "settle_occurrence consumes only a verified serve-task terminal/settlement receipt; checker failed/missing/rejected, identity mismatch, stale executionEpoch, or pending verification cannot be projected as occurrence success; cancelled requires a settled stop",
+      "identityFencing": "core validates task/operation/executionEpoch/inputArtifactDigest; JSONL atomically commits occurrence settle and receipt",
+      "replayRule": "execute_occurrence_task executes or resumes exactly one business execution for OccurrenceTaskBinding; duplicate, concurrent, and restart calls return or await the same terminal receipt and never dispatch a second business execution; settlement and verification receipts remain authoritative",
+      "consumerCapability": "DELIVERED: OccurrenceConsumerRouter implements ServeTaskConsumerPort with ownsFirstAdmissionAuthority=true and delegates to DurableOccurrenceConsumer.forTaskCycle over the persisted OccurrenceTaskBinding; execute-or-resume, authoritative checkpoint settlement and TaskVerificationResult are proven by the production same-entry acceptance test (tests/app/scheduler-production-wiring.test.ts) and the durable consumer suites",
+      "crossGraph": "typed invocation of the public serve-task input/output contract; no cross-graph node edge, back-edge, second lifecycle, or second persistence truth"
+    },
+    "recoveryContract": {
+      "busyReminder": "schedule({busy:true}) commits occurrence=reminder-pending and reminder=pending; the same slot with schedule({busy:false}) in recover_pending_reminder atomically commits occurrence=due and reminder=consumed only when active current revision is not invalidated and existing late/max/end rules still permit execution; when latePolicy=skip and nowAt > dueAt, it instead atomically commits occurrence=skipped-busy and matching reminder=invalidated, consumes the ordinal with existing skipped-busy accounting, and marks subscription exhausted when maxOccurrences is reached",
+      "slotIdentity": "recovery preserves original occurrenceId, subscriptionId, scheduleRevision, occurrenceOrdinal, and dueAt for both due recovery and skipped-busy late closure; it never recreates the slot, bypasses claim, executes a skipped slot, or introduces a browser timer",
+      "busyRetry": "a repeated busy schedule returns the existing reminder-pending occurrence; after late-skip closure, repeated schedule returns the same skipped-busy occurrence and never adds a second reminder",
+      "controlCompetition": "modify, pause, and cancel-future invalidate matching unclaimed occurrences and pending reminders in the control transaction; recovery cannot revive them",
+      "restart": "JsonlOrganJournal replay restores reminder-pending, pending reminder, late-skip closed skipped-busy plus invalidated, claim, and settlement state before recovery, claim, or idempotent replay",
+      "executionRecovery": "recovery of an interrupted execute-before-settle window is consumer-owned by OccurrenceTaskBinding; the scheduler does not add a generic execution registry or duplicate terminal truth"
+    },
+    "terminalContract": {
+      "success": "publish_occurrence_result only after verified serve-task terminal/settlement receipt and atomic occurrence settle",
+      "failure": "non-success verification remains a non-success occurrence outcome with recovery responsibility; attention.opened with retry-scheduler-patrol",
+      "blocked": "attention.opened with resource-waiting",
+      "cancelFuture": "subscription cancelled before occurrence claim; in-flight stop is separate",
+      "cleanup": "occurrence consumed, skipped-busy, or invalidated; matching reminder consumed or invalidated; lease released; journal receipt retained",
+      "executionRecovery": "duplicate, concurrent, or restarted execute-or-resume returns the same execution terminal identity without a second business dispatch"
+    },
+    "executionModeContract": {
+      "once": "单个 dueAt 到期的合法触发；执行成功后 occurrence 进入 consumed 终态",
+      "scheduled": "startAt 到期的单个计划触发；执行成功后 occurrence 进入 consumed 终态",
+      "recurring": "按 intervalMinutes/cadence 生成的每个 occurrence 都是独立 SESE 子图；每次触发使用新的 occurrenceId 与 ordinal，不回写上一 occurrence 的任务真源"
+    },
+    "occurrenceIsolation": "每次 occurrence 从 read_committed_subscription_state 重新建立独立执行身份；不在跨功能 DAG 中画回边或复用上一执行的状态",
+    "controlIsolation": "pause 或 cancel-future 只使尚未 claim 的 occurrence/reminder 失效；已 claim 的在途执行由 serve-task stop/settle 独立收口，不能在调度图内自动停止",
+    "schedulerPatrolContract": {
+      "owner": "packages/app/src/ui-runtime/scheduler.ts",
+      "entry": "UiRuntimeScheduler.tick/patrolPlan",
+      "scope": "只读取已存在 Subscription 并按 dueAt 调用 SubscriptionControlPort.list/dueTimes/schedule/claim/consumeExecution/settleOccurrence；不创建 Subscription，不执行任务轮次",
+      "terminal": "每个 tick 用 consumeExecution→settleOccurrence 收拢已 claim 的 occurrence；端口不可读时以 typed issue scheduler.plans-unreadable/scheduler.plan-failed 暴露，无 supervisor lease 时以 scheduler.lease.unavailable 显式失败且不 dispatch，不伪装 occurrence 成功"
+    },
+    "productionWiringStatus": "WIRED",
+    "productionWiringGap": "due 时间触发已由 packages/app/src/ui-runtime/scheduler.ts 的 UiRuntimeScheduler 在 startUiRuntime 内按真实时钟组装并驱动 schedule→claim→consumeExecution→settleOccurrence；production app 已把已确认草稿 revision 的 executionPolicy 经 SubscriptionControlPort.create 落成 Subscription（packages/app/src/ui-runtime/service.ts:2830 persistAuthorizedExecutionPlan→:2972 port.create），并已组装 OccurrenceConsumerRouter/DurableOccurrenceConsumer。真实剩余缺口：(1) 已 claim 且未 settle 的 occurrence 在 owner 仍存活但结果未知时按 in-progress 拒绝重新 dispatch，进程内 unknown-outcome 停摆不会自愈；(2) patrol 间隔大于约 1s 时 latePolicy=skip 的槽位可能错过；(3) dueTimes/policySlotOrdinal 每 tick 为 O(总槽位)，需要游标或闭式解；(4) 已闭合：订阅 pause/resume/cancel-future 语义的唯一 owner 是 packages/runtime/src/subscriptions/index.ts 的 SubscriptionControlPort.control，production 入口 POST /api/plans/{subscriptionId}/control 经 packages/app/src/ui-runtime/service.ts 的 UiRuntimeService.controlExecutionPlan 调用该 owner；本图不新增控制入口，只读取已提交的订阅状态（scheduler runTick 对非 active plan 直接跳过），控制与到期派发仍是两条独立边。原重复实现 SchedulerPatrol.pause/resume 只是该 owner 的纯转发，已随 packages/runtime/src/explicit-brain/scheduler-patrol.ts 在本轮 validation-ablation 物理删除，删除未移除任何已接线能力",
+    "productionWiringOwner": "T14",
+    "productionWiringEvidence": "packages/app/src/ui-runtime/scheduler.ts:117 UiRuntimeScheduler；packages/app/src/ui-runtime/occurrence-router.ts:34 OccurrenceConsumerRouter；packages/app/src/ui-runtime/index.ts:startUiRuntime 组装并 start/stop；packages/app/src/ui-runtime/service.ts:2972 SubscriptionControlPort.create；tests/app/scheduler-production-wiring.test.ts 生产同入口 5 用例全通过"
+  },
+  "inputs": [
+    {
+      "id": "due_occurrence",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "scheduler_patrol",
+      "operator": "humanagent-schedule-patrol",
+      "operator_version": "1",
+      "inputs": [
+        "due_occurrence"
+      ],
+      "output": {
+        "id": "scheduler_patrol_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_committed_subscription_state",
+      "operator": "humanagent-schedule-subscription-read",
+      "operator_version": "1",
+      "inputs": [
+        "scheduler_patrol_receipt"
+      ],
+      "output": {
+        "id": "committed_subscription_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "recover_pending_reminder",
+      "operator": "humanagent-schedule-reminder-recovery",
+      "operator_version": "1",
+      "inputs": [
+        "committed_subscription_state"
+      ],
+      "output": {
+        "id": "recovered_due_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "claim_due_occurrence",
+      "operator": "humanagent-schedule-occurrence-claim",
+      "operator_version": "1",
+      "inputs": [
+        "recovered_due_occurrence"
+      ],
+      "output": {
+        "id": "claimed_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "validate_occurrence_domain",
+      "operator": "humanagent-occurrence-invariants",
+      "operator_version": "1",
+      "inputs": [
+        "claimed_occurrence"
+      ],
+      "output": {
+        "id": "validated_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "admit_occurrence_execution",
+      "operator": "humanagent-schedule-admission",
+      "operator_version": "1",
+      "inputs": [
+        "validated_occurrence"
+      ],
+      "output": {
+        "id": "admitted_execution",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "execute_occurrence_task",
+      "operator": "humanagent-schedule-execute",
+      "operator_version": "1",
+      "inputs": [
+        "admitted_execution"
+      ],
+      "output": {
+        "id": "verified_task_terminal_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "settle_occurrence",
+      "operator": "humanagent-schedule-settle",
+      "operator_version": "1",
+      "inputs": [
+        "verified_task_terminal_receipt"
+      ],
+      "output": {
+        "id": "consumed_occurrence",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_occurrence_result",
+      "operator": "humanagent-schedule-result",
+      "operator_version": "1",
+      "inputs": [
+        "consumed_occurrence"
+      ],
+      "output": {
+        "id": "occurrence_result_projection",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "scheduler_patrol",
+      "to": "read_committed_subscription_state",
+      "arc_id": "scheduler_patrol_receipt"
+    },
+    {
+      "from": "read_committed_subscription_state",
+      "to": "recover_pending_reminder",
+      "arc_id": "committed_subscription_state"
+    },
+    {
+      "from": "recover_pending_reminder",
+      "to": "claim_due_occurrence",
+      "arc_id": "recovered_due_occurrence"
+    },
+    {
+      "from": "claim_due_occurrence",
+      "to": "validate_occurrence_domain",
+      "arc_id": "claimed_occurrence"
+    },
+    {
+      "from": "validate_occurrence_domain",
+      "to": "admit_occurrence_execution",
+      "arc_id": "validated_occurrence"
+    },
+    {
+      "from": "admit_occurrence_execution",
+      "to": "execute_occurrence_task",
+      "arc_id": "admitted_execution"
+    },
+    {
+      "from": "execute_occurrence_task",
+      "to": "settle_occurrence",
+      "arc_id": "verified_task_terminal_receipt"
+    },
+    {
+      "from": "settle_occurrence",
+      "to": "publish_occurrence_result",
+      "arc_id": "consumed_occurrence"
+    }
+  ],
+  "outputs": [
+    "occurrence_result_projection"
+  ]
+}

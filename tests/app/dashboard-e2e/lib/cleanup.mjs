@@ -66,13 +66,13 @@ export async function stopTaskAndSettle(binding, taskId, options = {}) {
   const url = `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(target)}/stop`;
   let stopResponse;
   try {
-    const response = await fetch(url, { method: 'POST' });
+    const response = await (binding.auth?.fetch ?? fetch)(url, { method: 'POST' });
     stopResponse = { status: response.status, body: await response.text() };
   } catch (error) {
     return { stopped: false, reason: `stop request failed: ${error.message}`, state: null, settled: false };
   }
   const state = await pollUntil('task settled', async () => {
-    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(target)}/dashboard`).catch(() => null);
+    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(target)}/dashboard`, {}, binding.auth).catch(() => null);
     if (probe && ['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
     return null;
   }, SETTLE_TIMEOUT_MS).catch(() => null);

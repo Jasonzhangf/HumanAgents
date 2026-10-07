@@ -8,6 +8,8 @@ import type {
 
 export const ADMISSION_QUEUE_KINDS = ['interactive', 'execution', 'research', 'maintenance'] as const;
 export type AdmissionQueueKind = (typeof ADMISSION_QUEUE_KINDS)[number];
+export const ACTIVE_ADMISSION_QUEUE_KINDS = ['interactive', 'execution'] as const;
+export type ActiveAdmissionQueueKind = (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number];
 
 export interface AdmissionQueueConfig {
   readonly kind: AdmissionQueueKind;

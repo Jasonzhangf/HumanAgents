@@ -7,7 +7,7 @@ import {
 } from '../../../contracts/src/index.js';
 import { AdmissionError } from './errors.js';
 import {
-  ADMISSION_QUEUE_KINDS,
+  ACTIVE_ADMISSION_QUEUE_KINDS,
   type AdmissionCheckInput,
   type AdmissionDecision,
   type AdmissionQueueConfig,
@@ -23,11 +23,9 @@ import {
 
 const DEFAULT_OWNER_ID = 'runtime-coordinator';
 
-const DEFAULT_QUEUE_CONFIGS: Readonly<Record<AdmissionQueueKind, AdmissionQueueConfig>> = {
+const DEFAULT_QUEUE_CONFIGS: Readonly<Record<(typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number], AdmissionQueueConfig>> = {
   interactive: { kind: 'interactive', concurrencyLimit: 1, maxBacklog: 32 },
   execution: { kind: 'execution', concurrencyLimit: 1, maxBacklog: 32 },
-  research: { kind: 'research', concurrencyLimit: 1, maxBacklog: 32 },
-  maintenance: { kind: 'maintenance', concurrencyLimit: 1, maxBacklog: 32 },
 };
 
 function assertNonNegativeSafeInteger(value: number, label: string): void {
@@ -41,13 +39,13 @@ function assertNonEmpty(value: string, label: string): void {
 }
 
 function assertQueueRegistered(queue: AdmissionQueueKind, registeredQueues: readonly AdmissionQueueKind[]): void {
-  if (!ADMISSION_QUEUE_KINDS.includes(queue) || !registeredQueues.includes(queue)) {
-    throw new AdmissionError(`admission queue is not registered: ${queue}`);
+  if (!ACTIVE_ADMISSION_QUEUE_KINDS.includes(queue as (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number]) || !registeredQueues.includes(queue)) {
+    throw new AdmissionError(`admission queue is not active: ${queue}`);
   }
 }
 
 export function validateQueueConfig(config: AdmissionQueueConfig): void {
-  assertQueueRegistered(config.kind, ADMISSION_QUEUE_KINDS);
+  assertQueueRegistered(config.kind, ACTIVE_ADMISSION_QUEUE_KINDS as unknown as readonly AdmissionQueueKind[]);
   assertNonNegativeSafeInteger(config.concurrencyLimit, 'queue concurrency limit');
   assertNonNegativeSafeInteger(config.maxBacklog, 'queue max backlog');
 }
@@ -73,7 +71,10 @@ export function classifyConfirmedRequirement(envelope: RequirementEnvelope): Adm
 }
 
 export function defaultAdmissionQueueConfig(kind: AdmissionQueueKind): AdmissionQueueConfig {
-  return { ...DEFAULT_QUEUE_CONFIGS[kind] };
+  if (!ACTIVE_ADMISSION_QUEUE_KINDS.includes(kind as (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number])) {
+    throw new AdmissionError(`admission queue is not active: ${kind}`);
+  }
+  return { ...DEFAULT_QUEUE_CONFIGS[kind as (typeof ACTIVE_ADMISSION_QUEUE_KINDS)[number]] };
 }
 
 export class RequirementAdmissionError extends Error {

@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assertNotExpired,
+  ContractError,
   id,
   type Attention,
   type AgentMemoryContext,
@@ -21,6 +22,9 @@ import {
   type CycleId,
   type ExecutionRuntimePort,
   type EvidenceRef,
+  type Checkpoint,
+  type Occurrence,
+  type OccurrenceTaskBinding,
   type MemoryActorContext,
   type CanonicalMemoryScope,
   type MemoryComparisonView,
@@ -39,9 +43,22 @@ import {
   type ProviderEvent,
   type StopRequestReceipt,
   type TaskId,
+  canonicalJsonStringify,
+  type AuthorizedRequirement,
+  type DraftRevision,
+  type DraftRevisionInput,
+  type DraftRejectClosure,
+  type ExecutionPolicyDefinition,
+  type Subscription,
+  type SubscriptionControlReceipt,
+  type SubscriptionControlRequest,
+  type SubscriptionState,
   type InteractionDecision,
+  type InteractionHistoryQuery,
+  type InteractionHistoryResult,
   type WorkResult,
 } from '../../../contracts/src/index.js';
+import { DraftRevisionError } from '../../../core/src/draft-revision.js';
 import type { AttentionPort } from '../../../runtime/src/control/attention.js';
 import { loadBuiltinAgentTemplate, type MemoryContextPolicy } from '../../../agent-templates/src/index.js';
 import type { CheckpointJournalPort } from '../../../runtime/src/checkpoints/ports.js';
@@ -68,12 +85,21 @@ import {
 import {
   type ConfirmationLedgerState,
   ConfirmationLedger,
+  ExecutionPolicyCompiler,
   ExplicitBrainRouterError,
   type PersistedSubmittedReceipt,
+  type PersistedFinalSubmitReceipt,
   RequirementSubmissionOwner,
   type RequirementSubmitReceipt,
 } from '../../../runtime/src/explicit-brain/router.js';
-import { IntakeError } from '../../../runtime/src/intake/errors.js';
+import {
+  nextPolicySlotAfter,
+  SubscriptionControlError,
+  type SubscriptionControlPort,
+  type SubscriptionSnapshot,
+} from '../../../runtime/src/subscriptions/index.js';
+import type { OccurrenceClaimRecord } from '../../../runtime/src/subscriptions/ports.js';
+import { ExplicitIntakeError, IntakeError } from '../../../runtime/src/intake/errors.js';
 import {
   ADMISSION_QUEUE_KINDS,
   ImplicitBrainFifo,
@@ -88,6 +114,7 @@ import type { RequirementEnvelope } from '../../../contracts/src/index.js';
 import {
   RuntimeTaskControlError,
   RuntimeTaskCoordinator,
+  RuntimeTaskEvent,
   producedArtifactBody,
   producedArtifactPaths,
   type RuntimeCheckpointBoundaryPort,
@@ -98,6 +125,10 @@ import {
   type RuntimeTaskAssembly,
   type RuntimeTaskSnapshot,
 } from '../../../runtime/src/ui-runtime/coordinator.js';
+// The declared silence budget is owned by the agent-io policy. The dashboard
+// reports it as the budget it was measured against; it is never restated here.
+import { DEFAULT_AGENT_IO_POLICY } from '../../../runtime/src/agent-io/types.js';
+import { projectRuntimeTaskHistory } from './turn-history.js';
 import {
   MemoryCoordinator,
   MemoryCoordinatorError,
@@ -122,10 +153,12 @@ import {
 } from '../../../adapters/provider/src/index.js';
 import {
   type RuntimeDashboardProjection,
+  type RuntimeLivenessInput,
   type RuntimeSseEvent,
   type RuntimeStatusProjection,
   type RuntimeTaskDashboardProjection,
   type RuntimeTaskErrorProjection,
+  type RuntimeTaskEventProjection,
   type RuntimeTaskListProjection,
   type TaskDetailProjection,
   type OrganHealthProjection,
@@ -160,6 +193,12 @@ import {
   createExplicitBrainRuntime,
   type ExplicitBrainRuntime,
 } from '../explicit-brain-runtime.js';
+import {
+  occurrenceTerminalProduction,
+  OccurrenceTerminalError,
+  type CommittedExecutionCheckpoint,
+} from './occurrence-terminal.js';
+import type { OccurrenceTerminalProduction } from './occurrence-consumer.js';
 
 const APP_OWNER = 'humanagent.app';
 const RUNTIME_OWNER = 'humanagent.runtime';
@@ -168,6 +207,52 @@ const PROVIDER_EXECUTION_CAPABILITY = 'provider.execution';
 // task list) before the background drain starts consuming it. A macrotask-only
 // delay is too short for a second localhost request to sample the queued state.
 const QUEUED_VISIBILITY_WINDOW_MS = 100;
+
+export type RuntimeExecutionMode = 'once' | 'scheduled' | 'recurring';
+
+/**
+ * Read-only display projection of one persisted execution plan.
+ *
+ * `state` is the durable `SubscriptionState` verbatim; the projection never
+ * invents a second vocabulary, so a terminal plan keeps its real cause.
+ *
+ * `canPause`/`canResume`/`canCancelFuture` restate the guards the control owner
+ * enforces in `decideSubscriptionControl`: pause requires `active`, resume
+ * requires `suspended`, and cancel-future is refused only when the plan is
+ * already `cancelled`. They are advisory display facts; the port re-checks them
+ * inside its own transaction, so a stale client action still gets the durable
+ * typed rejection and this projection never becomes a control truth.
+ *
+ * `nextDueAt` is the next committed policy slot after the durable
+ * `currentOccurrenceOrdinal`, named by the same slot owner `dueTimes`/`schedule`
+ * use. It is omitted when the committed schedule has no further slot.
+ */
+export interface RuntimeTaskPlanProjection {
+  readonly subscriptionId: string;
+  readonly state: SubscriptionState;
+  readonly executionMode: RuntimeExecutionMode;
+  readonly nextDueAt?: string;
+  readonly canPause: boolean;
+  readonly canResume: boolean;
+  readonly canCancelFuture: boolean;
+}
+
+type RuntimeTaskDashboardView = RuntimeTaskDashboardProjection & {
+  readonly history: {
+    readonly events: readonly RuntimeTaskEventProjection[];
+    readonly hasMore: boolean;
+    readonly total: number;
+    readonly omitted: number;
+    readonly gap: boolean;
+  };
+  readonly statusSections: {
+    readonly business: string;
+    readonly waiting: string;
+    readonly connection: string;
+  };
+  /** The persisted plan this task belongs to; absent when the task has no plan. */
+  readonly plan?: RuntimeTaskPlanProjection;
+};
 
 const LIFECYCLE_STATES = new Set([
   'created',
@@ -232,6 +317,12 @@ export interface UiRuntimeServiceOptions {
   readonly explicitBrainAgentTargets?: readonly ExplicitBrainAgentTarget[];
   readonly explicitBrainInterpreter: ExplicitBrainInputInterpreter;
   readonly memory: UiRuntimeMemoryComposition;
+  /**
+   * The single owner of persisted execution plans (subscriptions). The app
+   * assembly injects the durable port; the service only wires the confirmed
+   * revision's execution policy into it.
+   */
+  readonly subscriptionControl?: SubscriptionControlPort;
   readonly providerRetryConfig?: {
     readonly config: RetryCycleConfigSet;
     readonly journalRoot: string;
@@ -249,6 +340,32 @@ export interface UiRuntimeServiceOptions {
 
 export interface ExplicitBrainReceipt {
   readonly requirement: RequirementSubmitReceipt;
+}
+
+/**
+ * The new-task form's single authorization submit. When it carries an
+ * execution policy the runtime takes the typed draft-revision path: it creates
+ * or refines the exact revision, confirms it, and submits it once. Without an
+ * execution policy the legacy confirmation path is unchanged.
+ */
+export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft {
+  readonly executionPolicy?: ExecutionPolicyDefinition;
+  readonly goal?: string;
+  readonly scope?: string;
+  readonly constraints?: readonly string[];
+  readonly deliverables?: readonly string[];
+  readonly idempotencyKey?: string;
+  readonly draftRevisionVersion?: number;
+  readonly draftRevisionHash?: string;
+}
+
+export interface RefineExplicitDraftInput {
+  readonly draftId: string;
+  readonly baseRevisionVersion: number;
+  readonly requestedRevisionHash: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly instructionRef?: string;
+  readonly idempotencyKey?: string;
 }
 
 export interface ExplicitBrainDispatchReceipt {
@@ -444,6 +561,10 @@ function observationNodeFacts(
             ...base,
             state: task.state,
             summary: task.output || task.currentState,
+            // The provider binding's own turn identity. `requestIdentity` is the
+            // request the binding reported before the first event arrived; the
+            // newest event turn id is the durable record of the same identity.
+            ...(latestTurnId(task) === undefined ? {} : { turnId: latestTurnId(task)! }),
             inputRefs: [`operation://${task.operationId}/input`],
             outputRefs: task.output ? [`operation://${task.operationId}/output`] : [],
             evidenceRefs: task.events.flatMap((event) => event.evidenceRefs).slice(-5),
@@ -563,34 +684,216 @@ function observationHandoffs(
 }
 
 /**
+ * The real provider turn identity of a task, taken from the runtime events the
+ * provider binding stamped, or from the identity the binding reported for the
+ * in-flight request. It is undefined when the provider never reported one.
+ */
+function latestTurnId(task: RuntimeTaskSnapshot): string | undefined {
+  const fromEvents = task.events.reduce<string | undefined>((found, event) => event.turnId ?? found, undefined);
+  return fromEvents ?? task.requestIdentity?.turnId;
+}
+
+/**
  * Tool-call history from `provider.tool` events only: the step id, the owner that reported the call,
  * its status and the returned content. Model-private reasoning is never part of an event, so it can
  * never reach this projection.
  */
 function observationToolSteps(task: RuntimeTaskSnapshot): ObservationNodeToolStepSource[] {
-  return task.events
-    .filter((event) => event.kind === 'provider.tool')
-    .flatMap((event) => {
-      const stepId = event.evidenceRefs[0]?.locator ?? event.eventId;
-      const name = event.ownerId ?? event.evidenceRefs[0]?.source ?? '未标注工具';
-      const returned = event.summary.trim() || event.evidenceRefs.map((ref) => ref.locator).join(', ');
-      if (!stepId.trim() || !name.trim() || !returned.trim()) return [];
-      return [{
-        stepId,
-        name,
-        status: event.state === 'succeeded' || event.state === 'failed' || event.state === 'blocked' || event.state === 'cancelled'
-          ? event.state
-          : 'unknown',
-        returned,
-        occurredAt: event.occurredAt,
-      }];
+  const calls = new Map<string, RuntimeTaskEvent>();
+  for (const event of task.events.filter((item) => item.kind === 'provider.tool')) {
+    const key = event.callId ?? `${event.eventId}`;
+    if (!calls.has(key)) calls.set(key, event);
+  }
+  const resultsByCall = new Map<string, RuntimeTaskEvent>();
+  for (const event of task.events.filter((item) => item.kind === 'provider.tool-result')) {
+    const key = event.callId ?? event.eventId;
+    if (!resultsByCall.has(key)) resultsByCall.set(key, event);
+  }
+  const steps: ObservationNodeToolStepSource[] = [];
+  for (const [key, call] of calls) {
+    const result = resultsByCall.get(key);
+    const status = result ? resultStatus(result) : 'unknown';
+    const name = result?.toolId ?? call.toolId ?? '未标注工具';
+    const stepId = call.callId ?? result?.callId ?? call.eventId;
+    const durationMs = result
+      ? Math.max(0, Date.parse(result.occurredAt) - Date.parse(call.occurredAt))
+      : undefined;
+    const returned = result
+      ? [
+          `status=${status}`,
+          result.outputRef ? `outputRef=${result.outputRef}` : result.outputDigest ? `outputDigest=${result.outputDigest}` : 'output=missing',
+          call.arguments === undefined ? '' : `arguments=${JSON.stringify(call.arguments)}`,
+          result.error ? `error=${result.error.code}: ${result.error.message}` : '',
+          Number.isFinite(durationMs) ? `durationMs=${durationMs}` : '',
+          result.evidenceRefs.length > 0 ? `evidenceRefs=${result.evidenceRefs.length}` : '',
+        ].filter(Boolean).join(' · ')
+      : [
+          'status=unknown',
+          `call=${call.summary.trim() || call.eventId}`,
+          call.arguments === undefined ? '' : `arguments=${JSON.stringify(call.arguments)}`,
+        ].filter(Boolean).join(' · ');
+    if (!stepId.trim() || !name.trim()) continue;
+    steps.push({
+      stepId,
+      name,
+      status,
+      returned,
+      occurredAt: call.occurredAt,
+      ...(call.turnId === undefined ? {} : { turnId: call.turnId }),
     });
+  }
+  return steps;
+}
+
+/**
+ * Build the liveness facts from real runtime signals only.
+ *
+ * The newest real activity instant is the latest of
+ *   - the request identity the provider binding itself reported for this task,
+ *     and
+ *   - the newest runtime event's own occurrence time.
+ * `record.updatedAt` is deliberately not a source: the UI-driven paths also
+ * write it, so it would let a browser refresh reset a real silence measurement.
+ *
+ * `active` comes from the lifecycle state, not from any internal running flag.
+ * A task whose lifecycle still says `running` is exactly the stalled case this
+ * projection must surface.
+ */
+function runtimeLivenessInput(
+  task: RuntimeTaskSnapshot,
+  observedAt: string,
+): RuntimeLivenessInput {
+  const requestIdentityAt = task.requestIdentity?.occurredAt;
+  const newestEvent = task.events.length === 0 ? undefined : task.events[task.events.length - 1];
+  let lastActivityAt = requestIdentityAt;
+  let lastActivitySource = requestIdentityAt === undefined ? undefined : 'provider.request-identity';
+  // The runtime's own record of the newest event wins a tie, because that is the
+  // instant the runtime observed the activity it recorded.
+  if (newestEvent !== undefined && (lastActivityAt === undefined || Date.parse(newestEvent.occurredAt) >= Date.parse(lastActivityAt))) {
+    lastActivityAt = newestEvent.occurredAt;
+    lastActivitySource = `runtime.event.${newestEvent.kind}`;
+  }
+  return {
+    active: task.state === 'running' || task.state === 'settling',
+    ...(lastActivityAt === undefined ? {} : { lastActivityAt, lastActivitySource }),
+    silenceBudgetMs: DEFAULT_AGENT_IO_POLICY.maxSilentDurationMs,
+    observedAt,
+  };
+}
+
+function runtimeTaskDashboard(
+  task: RuntimeTaskSnapshot,
+  mode: 'fake' | 'rcc',
+  liveness?: RuntimeLivenessInput,
+): RuntimeTaskDashboardView {
+  const projected = projectRuntimeTaskDashboard({
+    ...task,
+    ...(liveness === undefined ? {} : { liveness }),
+  }, mode);
+  const history = task.events;
+  const omitted = Math.max(0, history.length - task.recentEvents.length);
+  const stateLabel = projected.stateLabel;
+  const hasCheckpoint = task.checkpoint !== undefined;
+  const resultAvailable = task.output.trim().length > 0;
+  const requestedStopWithoutReceipt = (task.state === 'stopped' || task.state === 'cancelled') && !hasCheckpoint;
+  return {
+    ...projected,
+    history: {
+      events: history.slice(),
+      hasMore: omitted > 0,
+      total: history.length,
+      omitted,
+      gap: omitted > 0,
+    },
+    statusSections: {
+      business: resultAvailable
+        ? `${stateLabel} · 结果可用`
+        : requestedStopWithoutReceipt
+          ? '停止 / 取消请求已受理 · 尚未收拢'
+        : task.state === 'succeeded'
+          ? '已完成 · 结果不可用'
+          : hasCheckpoint
+            ? `${stateLabel} · checkpoint 已提交`
+            : stateLabel,
+      waiting: hasCheckpoint
+        ? `已收拢：${task.checkpoint!.outcome} · checkpoint seq=${task.checkpoint!.seq}`
+        : task.state === 'running'
+          ? `等待执行结果：${task.currentNode}`
+          : task.state === 'settling'
+            ? `等待 checkpoint 收拢：${task.currentNode}`
+            : task.state === 'blocked'
+              ? '等待资源或人工处理后才能继续'
+              : task.state === 'failed'
+                ? '执行失败；等待错误证据和资源收拢'
+                : task.state === 'stopped' || task.state === 'cancelled'
+                  ? `停止/取消请求已受理；等待收拢 receipt（当前节点：${task.currentNode}）`
+                  : `当前节点：${task.currentNode}`,
+      connection: '由浏览器 SSE 连接状态呈现',
+    },
+  };
+}
+
+function resultStatus(event: RuntimeTaskEvent): ObservationNodeToolStepSource['status'] {
+  if (event.status === 'succeeded' || event.status === 'failed' || event.status === 'blocked' || event.status === 'cancelled') return event.status;
+  if (event.error) return 'failed';
+  if (event.kind === 'provider.tool-result') return 'succeeded';
+  return 'unknown';
+}
+
+/**
+ * Build the execution input for a revision edit from the user-facing fields.
+ * Callers that submit structured text fields (goal/scope/constraints/
+ * deliverables) do not repeat the same content in a technical field. Policy
+ * binding uses the core's policy-only refinement path instead.
+ */
+function normalizedInputForDraftFields(
+  current: DraftRevision,
+  fields: Readonly<Record<string, unknown>>,
+): string {
+  if (typeof fields.normalizedInput === 'string') return fields.normalizedInput;
+  const goal = typeof fields.goal === 'string' ? fields.goal : current.goal;
+  const scope = typeof fields.scope === 'string' ? fields.scope : current.scope;
+  const constraints = Array.isArray(fields.constraints)
+    ? fields.constraints.filter((entry): entry is string => typeof entry === 'string')
+    : current.constraints;
+  const deliverables = Array.isArray(fields.deliverables)
+    ? fields.deliverables.filter((entry): entry is string => typeof entry === 'string')
+    : current.deliverables;
+  return canonicalJsonStringify({
+    goal,
+    scope,
+    constraints,
+    deliverables,
+  });
 }
 
 function apiError(error: unknown): UiRuntimeApiError {
   if (error instanceof UiRuntimeApiError) return error;
   if (error instanceof IntakeError) {
     return new UiRuntimeApiError(error.name, error.owner, error.message, error.nextAction, 409);
+  }
+  if (error instanceof DraftRevisionError) {
+    // The draft-revision owner keeps the original failure code and message so a
+    // stale revision is rejected with a readable, structured error instead of a
+    // generic 500.
+    return new UiRuntimeApiError(
+      `explicit-draft.${error.code}`,
+      'humanagent.core.draft-revision',
+      error.message,
+      error.code === 'stale-revision' || error.code === 'confirmation-stale' || error.code === 'revision-hash-mismatch'
+        ? 'reload the current draft revision and confirm the exact version'
+        : 'inspect the draft revision before retrying',
+      409,
+    );
+  }
+  if (error instanceof SubscriptionControlError) {
+    return new UiRuntimeApiError(
+      `execution-plan.${error.code}`,
+      RUNTIME_OWNER,
+      error.message,
+      'inspect the persisted execution plan before resubmitting',
+      error.code === 'not-found' ? 404 : 409,
+    );
   }
   if (error instanceof RequirementAdmissionError) {
     const { decision } = error;
@@ -666,6 +969,10 @@ function apiError(error: unknown): UiRuntimeApiError {
       providerError.nextAction ? `${providerError.nextAction.kind}${providerError.nextAction.ref ? `:${providerError.nextAction.ref}` : ''}` : 'inspect provider evidence',
       409,
       providerError.evidenceRefs,
+      // The adapter's own message states the phase that failed; the failure it
+      // wrapped is the original error the human needs. It is passed through
+      // unchanged and stays absent when the adapter reported no original error.
+      error.cause,
     );
   }
   return new UiRuntimeApiError(
@@ -674,6 +981,8 @@ function apiError(error: unknown): UiRuntimeApiError {
     error instanceof Error ? error.message : String(error),
     'inspect the runtime error and retry from a new operation',
     500,
+    undefined,
+    error instanceof Error ? error.cause : undefined,
   );
 }
 
@@ -687,6 +996,68 @@ function interactionClosurePersistenceError(error: unknown): UiRuntimeApiError {
   );
 }
 
+/**
+ * The single owner of the confirmed-execution-plan subscription id convention.
+ * `persistAuthorizedExecutionPlan` mints the id and the scheduled occurrence
+ * dispatch resolves the requirement back from it.
+ */
+function subscriptionIdForRequirement(requirementId: string): string {
+  return `subscription:${requirementId}`;
+}
+
+/**
+ * Read-only display projection of one persisted execution plan.
+ *
+ * `state` is the durable `SubscriptionState` verbatim: the projection never
+ * invents a second vocabulary, so a terminal plan keeps its real cause.
+ *
+ * `canPause`/`canResume`/`canCancelFuture` restate the guards the control owner
+ * enforces in `decideSubscriptionControl`: pause requires `active`, resume
+ * requires `suspended`, and cancel-future is refused only when the plan is
+ * already `cancelled`. They are advisory display facts; the port re-checks them
+ * inside its own transaction, so a stale client action still gets the durable
+ * typed rejection and this projection never becomes a control truth.
+ *
+ * `nextDueAt` is the next committed policy slot after the durable
+ * `currentOccurrenceOrdinal`, named by the same slot owner `dueTimes`/`schedule`
+ * use. It is omitted when the committed schedule has no further slot.
+ */
+function projectExecutionPlan(snapshot: SubscriptionSnapshot): RuntimeTaskPlanProjection {
+  const subscription = snapshot.subscription;
+  const next = nextPolicySlotAfter(snapshot.policy, subscription.currentOccurrenceOrdinal);
+  return {
+    subscriptionId: subscription.subscriptionId,
+    state: subscription.state,
+    executionMode: snapshot.policy.executionMode,
+    ...(next === undefined ? {} : { nextDueAt: next.dueAt }),
+    canPause: subscription.state === 'active',
+    canResume: subscription.state === 'suspended',
+    canCancelFuture: subscription.state !== 'cancelled',
+  };
+}
+
+function requirementIdForSubscription(subscriptionId: string): string {
+  const prefix = 'subscription:';
+  if (!subscriptionId.startsWith(prefix) || subscriptionId.length === prefix.length) {
+    throw new UiRuntimeApiError(
+      'scheduled-occurrence.plan-identity-invalid',
+      RUNTIME_OWNER,
+      `execution plan id is not a requirement subscription: ${subscriptionId}`,
+      'inspect the persisted execution plan identity before dispatching it',
+      409,
+    );
+  }
+  return subscriptionId.slice(prefix.length);
+}
+
+/**
+ * Upper bound on how long the scheduled-occurrence dispatch waits for the real
+ * execution terminal. A provider that never terminates must not pin the patrol
+ * forever; the wait fails explicitly and the occurrence stays claimed with its
+ * durable recovery responsibility instead of being reported as settled.
+ */
+const SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS = 30 * 60_000;
+
 export class UiRuntimeService {
   private readonly mode: 'fake' | 'rcc';
   private readonly coordinator: RuntimeTaskCoordinator;
@@ -694,6 +1065,7 @@ export class UiRuntimeService {
   private readonly explicitIntake = new ExplicitIntake();
   private readonly confirmationLedger = new ConfirmationLedger();
   private readonly requirementSubmissions: RequirementSubmissionOwner;
+  private readonly subscriptionControl?: SubscriptionControlPort;
   private readonly dispatchLedger = new Map<string, DispatchLedgerEntry>();
   private readonly requirementAdmissions = new Map<string, RequirementAdmissionObservation>();
   private readonly queuedRequirements = new Map<string, QueuedRequirementObservation>();
@@ -709,6 +1081,8 @@ export class UiRuntimeService {
   private dispatchTail: Promise<void> = Promise.resolve();
   private implicitConsumerEnabled = false;
   private implicitConsumerScheduled = false;
+  private implicitConsumerTimer: ReturnType<typeof setTimeout> | undefined;
+  private implicitConsumptionRun: Promise<void> | undefined;
   private implicitConsumerIssue: UiRuntimeApiError | undefined;
   private implicitTerminalIssue: UiRuntimeApiError | undefined;
   private implicitTerminalRequirement: Pick<RequirementEnvelope, 'requirementId' | 'draftId' | 'fifoSeq'> | undefined;
@@ -719,6 +1093,7 @@ export class UiRuntimeService {
 
   constructor(private readonly options: UiRuntimeServiceOptions) {
     this.memory = options.memory;
+    this.subscriptionControl = options.subscriptionControl;
     this.explicitBrainInterpreter = options.explicitBrainInterpreter;
     this.explicitBrainTraceJournal = new DecisionTraceJournal({
       load: () => this.explicitBrainTraceRecords,
@@ -795,7 +1170,6 @@ export class UiRuntimeService {
           createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!(input),
         }),
       }),
-      implicitSubtaskExecutionAgent: this.createImplicitSubtaskExecutionAgent(),
       ...(options.workspaceRoot === undefined ? {} : {
         producedArtifacts: {
           read: (request) => readProducedArtifacts(options.workspaceRoot!, request.paths),
@@ -1212,6 +1586,7 @@ export class UiRuntimeService {
       scope: input.scope,
       inputRefs: input.inputRefs,
       ownerId: input.ownerId,
+      onRequestLifecycle: (event) => this.coordinator.recordProviderRequestIdentity(event),
       ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
       ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
       ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
@@ -1238,6 +1613,7 @@ export class UiRuntimeService {
           scope: { ...input.scope, operationId },
           inputRefs: [...input.assignment.targetRefs, input.assignment.objective],
           ownerId: RUNTIME_OWNER,
+          onRequestLifecycle: (event) => this.coordinator.recordProviderRequestIdentity(event),
           ...(this.options.providerTools === undefined ? {} : { tools: this.options.providerTools }),
           ...(this.options.providerToolExecutor === undefined ? {} : { executeTool: this.options.providerToolExecutor }),
           ...(this.options.providerToolRoundLimit === undefined ? {} : { maxToolRounds: this.options.providerToolRoundLimit }),
@@ -1282,7 +1658,10 @@ export class UiRuntimeService {
         await driver.settle({ runtimeId, executionEpoch: input.executionEpoch });
         const settlement = driver.settlement();
         if (!settlement) throw new Error('implicit executor did not expose settlement');
-        const producedOutput = events.map((event) => event.summary ?? '').join('');
+        const producedOutput = events
+          .filter((event) => event.providerEvent?.kind === 'output' && event.summary !== undefined)
+          .map((event) => event.summary ?? '')
+          .join('');
         const status: WorkResult['status'] = settlement.state === 'succeeded'
           ? 'succeeded'
           : settlement.state === 'waiting'
@@ -1384,12 +1763,17 @@ export class UiRuntimeService {
     }
   }
 
-  deleteTask(taskId: TaskId): { readonly taskId: string; readonly deleted: true } {
+  async deleteTask(taskId: TaskId): Promise<{ readonly taskId: string; readonly deleted: true }> {
+    // Resolve the durable plan link before the delete removes the task record.
+    const snapshot = await this.executionPlanSnapshotForTask(taskId);
+    let deleted: { readonly taskId: string; readonly deleted: true };
     try {
-      return { taskId: this.coordinator.deleteTask(taskId).taskId.value, deleted: true };
+      deleted = { taskId: this.coordinator.deleteTask(taskId).taskId.value, deleted: true };
     } catch (error) {
       throw apiError(error);
     }
+    if (snapshot !== undefined) await this.cancelOrphanedExecutionPlan(taskId, snapshot);
+    return deleted;
   }
 
   async bulkTaskAction(taskIds: readonly TaskId[], action: 'delete' | 'stop'): Promise<{
@@ -1407,7 +1791,7 @@ export class UiRuntimeService {
     }[] = [];
     for (const taskId of taskIds) {
       try {
-        if (action === 'delete') this.deleteTask(taskId);
+        if (action === 'delete') await this.deleteTask(taskId);
         else await this.stop(taskId);
         results.push({ taskId: taskId.value, state: 'succeeded' });
       } catch (error) {
@@ -1602,11 +1986,158 @@ export class UiRuntimeService {
     });
   }
 
-  taskDashboard(taskId: TaskId): RuntimeTaskDashboardProjection {
+  taskDashboard(taskId: TaskId): RuntimeTaskDashboardView {
     try {
-      return projectRuntimeTaskDashboard(this.coordinatorOrQueuedTaskSnapshot(taskId), this.mode);
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      return runtimeTaskDashboard(task, this.mode, runtimeLivenessInput(task, this.now().toISOString()));
     } catch (error) {
       throw apiError(error);
+    }
+  }
+
+  /**
+   * The task dashboard plus the persisted plan this task belongs to, when it has
+   * one. The plan is a durable read, so the HTTP read model is composed here and
+   * the synchronous `taskDashboard` stays free of journal I/O for the internal
+   * callers that only need task state.
+   */
+  async taskDashboardWithPlan(taskId: TaskId): Promise<RuntimeTaskDashboardView> {
+    const dashboard = this.taskDashboard(taskId);
+    const plan = await this.executionPlanForTask(taskId);
+    return plan === undefined ? dashboard : { ...dashboard, plan };
+  }
+
+  /**
+   * The persisted plan a task belongs to, as a read-only display projection.
+   * Absent when the task has no persisted plan.
+   */
+  async executionPlanForTask(taskId: TaskId): Promise<RuntimeTaskPlanProjection | undefined> {
+    const snapshot = await this.executionPlanSnapshotForTask(taskId);
+    return snapshot === undefined ? undefined : projectExecutionPlan(snapshot);
+  }
+
+  /**
+   * The single production caller of the persisted plan control edge.
+   *
+   * The caller names the plan and the intent; `expectedPolicyRevision` is read
+   * from the authoritative snapshot here and is never declared by the caller, and
+   * the port re-checks it inside its own transaction. `expectedScheduleRevision`
+   * is deliberately NOT sent: it is optional for these actions, and the schedule
+   * revision moves on every applied control, so sending the freshly read value
+   * would make an honest retry of the same request look like a `conflict`
+   * instead of the durable `duplicate` the port already knows how to report. The
+   * state guards inside the transaction (`invalid-state`) still decide whether the
+   * transition is legal.
+   */
+  async controlExecutionPlan(
+    subscriptionId: string,
+    input: {
+      readonly action: 'pause' | 'resume' | 'cancel-future';
+      readonly idempotencyKey: string;
+      readonly requestedAt: string;
+    },
+  ): Promise<SubscriptionControlReceipt> {
+    const port = this.subscriptionControl;
+    if (!port) {
+      throw new UiRuntimeApiError(
+        'execution-plan.control-unavailable',
+        RUNTIME_OWNER,
+        'execution plan control is not wired to the UI runtime',
+        'start the UI runtime with the durable subscription control port',
+        503,
+      );
+    }
+    const snapshot = await this.subscriptionSnapshot(port, subscriptionId);
+    if (snapshot === undefined) {
+      throw new UiRuntimeApiError(
+        'execution-plan.not-found',
+        RUNTIME_OWNER,
+        `no persisted execution plan: ${subscriptionId}`,
+        'read the persisted execution plans before controlling one',
+        404,
+      );
+    }
+    try {
+      return await port.control({
+        subscriptionId,
+        action: input.action,
+        expectedPolicyRevision: snapshot.policy.policyRevision,
+        idempotencyKey: input.idempotencyKey,
+        requestedAt: input.requestedAt,
+      });
+    } catch (error) {
+      if (error instanceof ContractError) {
+        throw new UiRuntimeApiError(
+          'execution-plan.invalid-request',
+          RUNTIME_OWNER,
+          error.message,
+          'send a supported action, a non-empty idempotencyKey and a canonical requestedAt instant',
+          400,
+        );
+      }
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Resolve the persisted plan a task belongs to from durable links only. Two
+   * links exist and no third registry is added:
+   *   - a scheduled occurrence task is bound by the `OccurrenceClaimRecord.taskId`
+   *     the scheduler claimed it with;
+   *   - a confirmed requirement's own task is bound by the dispatch ledger entry,
+   *     whose requirement id names the plan.
+   */
+  private async executionPlanSnapshotForTask(taskId: TaskId): Promise<SubscriptionSnapshot | undefined> {
+    const port = this.subscriptionControl;
+    if (!port) return undefined;
+    for (const entry of this.dispatchLedger.values()) {
+      if (entry.taskId.value !== taskId.value) continue;
+      const envelope = this.requirementInbox.find(entry.draftId);
+      if (!envelope) continue;
+      const snapshot = await this.subscriptionSnapshot(port, subscriptionIdForRequirement(envelope.requirementId));
+      if (snapshot !== undefined) return snapshot;
+    }
+    for (const snapshot of await port.list()) {
+      if (snapshot.claims.some((claim) => claim.taskId.value === taskId.value)) return snapshot;
+    }
+    return undefined;
+  }
+
+  /**
+   * A deleted task must not leave a plan behind that keeps dispatching. The
+   * mechanism is the plan's own control edge (`cancel-future`), not a second
+   * lifecycle: a plan that is not `active` or `suspended` cannot dispatch, since
+   * `assertOccurrenceClaimable` requires `active`, so those states are left as
+   * they are and their durable cause is not overwritten.
+   *
+   * The task is deleted first, so a rejected delete (`task.busy`,
+   * `task.not.found`) never destroys a schedule. The two journals have no shared
+   * transaction, so a control failure after a successful delete is reported
+   * explicitly instead of being swallowed.
+   */
+  private async cancelOrphanedExecutionPlan(taskId: TaskId, snapshot: SubscriptionSnapshot): Promise<void> {
+    const port = this.subscriptionControl;
+    if (!port) return;
+    if (snapshot.subscription.state !== 'active' && snapshot.subscription.state !== 'suspended') return;
+    const idempotencyKey = `plan-orphan-cancel:${taskId.value}`;
+    try {
+      await port.control({
+        subscriptionId: snapshot.subscription.subscriptionId,
+        action: 'cancel-future',
+        expectedPolicyRevision: snapshot.policy.policyRevision,
+        idempotencyKey,
+        requestedAt: this.now().toISOString(),
+      });
+    } catch (error) {
+      throw new UiRuntimeApiError(
+        'execution-plan.orphan-cancel-failed',
+        RUNTIME_OWNER,
+        `task ${taskId.value} was deleted but its execution plan ${snapshot.subscription.subscriptionId} is still live: ${error instanceof Error ? error.message : String(error)}`,
+        `cancel the orphaned plan through POST /api/plans/${encodeURIComponent(snapshot.subscription.subscriptionId)}/control`,
+        409,
+        undefined,
+        error,
+      );
     }
   }
 
@@ -1703,6 +2234,7 @@ export class UiRuntimeService {
         outputRefs: event.kind === 'provider.output' ? event.evidenceRefs.map((ref) => ref.locator) : [],
         evidenceRefs: event.evidenceRefs,
         updatedAt: event.occurredAt,
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
       }));
       const scopes: Record<string, ObservationScopeSource> = {
         [rootScopeRef]: {
@@ -1758,6 +2290,30 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * The public trace of one task. It projects the runtime's own events, so every
+   * entry carries the turn identity and occurrence time the provider binding
+   * reported; a task with no provider event yet returns an empty real page
+   * instead of a synthesized trace.
+   */
+  history(taskId: TaskId, query: InteractionHistoryQuery): InteractionHistoryResult {
+    try {
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      return projectRuntimeTaskHistory(task, query);
+    } catch (error) {
+      if (error instanceof ContractError) {
+        throw new UiRuntimeApiError(
+          'history.query.invalid',
+          APP_OWNER,
+          error.message,
+          'send a valid history query',
+          400,
+        );
+      }
+      throw apiError(error);
+    }
+  }
+
   startExecution(taskId: TaskId, input: { readonly prompt: string; readonly orchestrate?: boolean }): { readonly operationId: OperationId; readonly executionEpoch: number } {
     try {
       const status = this.status();
@@ -1777,6 +2333,154 @@ export class UiRuntimeService {
     } catch (error) {
       throw apiError(error);
     }
+  }
+
+  /**
+   * The production seam between the durable occurrence consumer and the real
+   * execution coordinator. It creates or reuses the task for the immutable
+   * occurrence binding, starts exactly the operation the occurrence was claimed
+   * with, waits for the real terminal, and returns the durable terminal
+   * production for the consumer's own lifecycle scope.
+   *
+   * There is no second verification truth: the returned verification and
+   * checkpoint are derived from the checkpoint the coordinator really committed.
+   */
+  async executeScheduledOccurrence(input: {
+    readonly occurrence: Occurrence;
+    readonly policy: ExecutionPolicyDefinition;
+    readonly claim: OccurrenceClaimRecord;
+    readonly binding: OccurrenceTaskBinding;
+    readonly scope: ScopeRef;
+    readonly previousCheckpoint: Checkpoint | null;
+  }): Promise<OccurrenceTerminalProduction> {
+    try {
+      const status = this.status();
+      if (status.state !== 'ready' && status.state !== 'degraded') {
+        const providerError = this.options.providerError;
+        throw new UiRuntimeApiError(
+          providerError?.code ?? `provider.readiness.${status.providerState}`,
+          providerError?.ownerId ?? 'humanagent.provider-adapter',
+          providerError?.message ?? `provider readiness is ${status.providerState}`,
+          providerError?.nextAction ?? 'inspect provider readiness',
+          409,
+        );
+      }
+      const prompt = this.scheduledOccurrencePrompt(input.binding);
+      const title = `计划执行 ${input.binding.occurrenceId}`;
+      const existing = this.coordinator.taskSnapshots().find((task) => task.taskId.value === input.binding.taskId.value);
+      if (existing !== undefined && (existing.title !== title || existing.directive !== prompt)) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.task-identity-conflict',
+          RUNTIME_OWNER,
+          `occurrence task ${input.binding.taskId.value} already belongs to different task content`,
+          'inspect the persisted occurrence task identity before dispatching it',
+          409,
+        );
+      }
+      const task = existing ?? this.coordinator.createTask({ taskId: input.binding.taskId, title, directive: prompt });
+      const started = this.coordinator.startExecution(task.taskId, {
+        prompt,
+        operationId: input.binding.operationId,
+        ...(this.options.runtimeComposition?.createTaskAssembly === undefined ? {} : { orchestrate: true }),
+      });
+      if (started.operationId.value !== input.binding.operationId.value || started.executionEpoch !== input.binding.executionEpoch) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.execution-identity-conflict',
+          RUNTIME_OWNER,
+          `started execution ${started.operationId.value}@${started.executionEpoch} does not match occurrence binding ${input.binding.operationId.value}@${input.binding.executionEpoch}`,
+          'inspect the persisted occurrence claim before dispatching it',
+          409,
+        );
+      }
+      await this.awaitScheduledOccurrenceTerminal(started.operationId);
+      const snapshot = this.coordinator.taskSnapshot(task.taskId);
+      const committed = snapshot.checkpoint;
+      if (committed === undefined) {
+        throw new UiRuntimeApiError(
+          'scheduled-occurrence.checkpoint-missing',
+          RUNTIME_OWNER,
+          `execution ${started.operationId.value} terminated without a committed checkpoint`,
+          'inspect the execution terminal evidence before retrying the occurrence',
+          409,
+        );
+      }
+      return occurrenceTerminalProduction({
+        binding: input.binding,
+        claim: input.claim,
+        policy: input.policy,
+        scope: input.scope,
+        previousCheckpoint: input.previousCheckpoint,
+        committed: committed as CommittedExecutionCheckpoint,
+      });
+    } catch (error) {
+      if (error instanceof OccurrenceTerminalError) {
+        throw new UiRuntimeApiError(error.code, RUNTIME_OWNER, error.message, 'inspect the committed execution checkpoint', 409);
+      }
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * The real business input for one execution plan. The plan carries only the
+   * requirement identity, so the confirmed requirement envelope is the single
+   * source of the prompt; a plan whose requirement is gone fails closed instead
+   * of running a synthetic prompt.
+   */
+  private scheduledOccurrencePrompt(binding: OccurrenceTaskBinding): string {
+    const requirementId = requirementIdForSubscription(binding.subscriptionId);
+    const envelope = this.requirementInbox
+      .exportState()
+      .envelopes
+      .find((candidate) => candidate.requirementId === requirementId);
+    if (envelope === undefined || !envelope.normalizedInput.trim()) {
+      throw new UiRuntimeApiError(
+        'scheduled-occurrence.requirement-missing',
+        RUNTIME_OWNER,
+        `no confirmed requirement is retained for execution plan ${binding.subscriptionId}`,
+        'inspect the persisted execution plan before dispatching it',
+        409,
+      );
+    }
+    return envelope.normalizedInput;
+  }
+
+  private awaitScheduledOccurrenceTerminal(operationId: OperationId): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let unsubscribe: () => void = () => {};
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsubscribe();
+        reject(new UiRuntimeApiError(
+          'scheduled-occurrence.terminal-timeout',
+          RUNTIME_OWNER,
+          `execution ${operationId.value} did not reach a terminal state within ${SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS}ms`,
+          'inspect the running execution and the provider before retrying the occurrence',
+          504,
+        ));
+      }, SCHEDULED_OCCURRENCE_TERMINAL_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      const isFinalTerminal = (event: RuntimeSseEvent): boolean =>
+        event.kind === 'execution.terminal' && event.terminalPhase === 'final';
+      try {
+        const subscription = this.coordinator.subscribeReplay(operationId, undefined, (event) => {
+          if (isFinalTerminal(event)) finish();
+        });
+        unsubscribe = subscription.unsubscribe;
+        if (subscription.replay.some(isFinalTerminal)) finish();
+      } catch (error) {
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
   }
 
   async stop(taskId: TaskId): Promise<{ readonly state: string; readonly operationId?: string }> {
@@ -1856,6 +2560,11 @@ export class UiRuntimeService {
     this.requirementInbox.restoreState(restored.inbox);
     this.confirmationLedger.restoreState(restored.confirmationLedger);
     this.requirementSubmissions.restoreSubmittedReceipts(restored.submittedSubmissions ?? []);
+    this.requirementSubmissions.restoreFinalReceipts(
+      (restored as RuntimeExplicitBrainJournalState & {
+        readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
+      }).finalSubmissions ?? [],
+    );
     this.explicitBrainTraceRecords.length = 0;
     this.explicitBrainTraceRecords.push(...(restored.decisionTraces ?? []).map((record) => structuredClone(record)));
     this.dispatchLedger.clear();
@@ -1894,6 +2603,24 @@ export class UiRuntimeService {
       }
     }
     this.scheduleImplicitConsumption();
+  }
+
+  /**
+   * Retires the runtime's background FIFO ownership: new implicit consumption is
+   * disabled, the visibility timer is cancelled, and any already-running drain
+   * cycle is awaited before the caller settles active executions.
+   */
+  async quiesceImplicitConsumption(): Promise<void> {
+    this.implicitConsumerEnabled = false;
+    if (this.implicitConsumerTimer !== undefined) {
+      clearTimeout(this.implicitConsumerTimer);
+      this.implicitConsumerTimer = undefined;
+    }
+    this.implicitConsumerScheduled = false;
+    // A timer that already fired before the flag flipped can still be draining;
+    // its loop observes the disabled flag and stops after the current dispatch.
+    await this.implicitConsumptionRun;
+    await this.dispatchTail;
   }
 
   implicitSchedulingIssue(): UiRuntimeApiError | undefined {
@@ -2000,6 +2727,9 @@ export class UiRuntimeService {
           proposal: interpreted.proposal,
           decisionRefs: interpreted.decisionRefs,
         });
+        // The reviewable draft exists now, so mint the typed revision before
+        // confirmation. The public GET can then project it for editing.
+        await this.ensureTypedDraftRevision(snapshot.interactionId);
       }
       this.persistExplicitBrainState();
       return await this.explicitIntake.inspect(snapshot.interactionId);
@@ -2081,6 +2811,142 @@ export class UiRuntimeService {
     }
   }
 
+  /**
+   * Apply a typed field edit to the current draft revision. The intake owns the
+   * revision invariant: a stale base version/hash is rejected and the current
+   * revision is left untouched. The app only validates and forwards.
+   */
+  async refineExplicitDraft(interactionId: string, input: RefineExplicitDraftInput): Promise<ExplicitInteractionSnapshot> {
+    try {
+      const instructionRef = input.instructionRef ?? 'user-edit';
+      const current = this.explicitIntake.currentDraftRevision(interactionId);
+      if (current === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.typed-revision-required',
+          'humanagent.runtime.explicit-intake',
+          `interaction has no typed draft revision to refine: ${interactionId}`,
+          'generate the reviewable draft before editing it',
+          409,
+        );
+      }
+      const fields = {
+        ...input.fields,
+        normalizedInput: normalizedInputForDraftFields(current, input.fields),
+      };
+      const idempotencyKey = input.idempotencyKey ?? `refine:${input.draftId}:${input.baseRevisionVersion}:${input.requestedRevisionHash}:${createHash('sha256').update(canonicalJsonStringify(fields)).digest('hex')}`;
+      await this.explicitIntake.refineDraft(interactionId, {
+        draftId: input.draftId,
+        baseRevisionVersion: input.baseRevisionVersion,
+        requestedRevisionHash: input.requestedRevisionHash,
+        fields,
+        instructionRef,
+        idempotencyKey,
+      });
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Regenerate the reviewable draft ("重新整理"). Re-runs the explicit-brain
+   * interpreter and applies the regenerated content to the current typed
+   * revision as a refinement, so the caller observes a new revision identity.
+   * When the interpreter returns the same execution input, the current revision
+   * stays authoritative and no new revision is minted.
+   */
+  async regenerateExplicitDraft(interactionId: string, instruction?: string): Promise<ExplicitInteractionSnapshot> {
+    try {
+      const snapshot = await this.explicitIntake.inspect(interactionId);
+      if (snapshot.state !== 'awaiting-confirmation' && snapshot.state !== 'awaiting-intent') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.regeneration-state-invalid',
+          'humanagent.runtime.explicit-brain',
+          `explicit draft cannot be regenerated from ${snapshot.state}`,
+          'inspect the current interaction state before regenerating the draft',
+          409,
+        );
+      }
+      const correction = instruction?.trim();
+      const revision = this.explicitIntake.currentDraftRevision(interactionId);
+      const taskCandidates = this.coordinator.taskSnapshots().map((task) => ({
+        taskId: task.taskId.value,
+        title: task.title,
+        status: task.state,
+        currentInput: task.input || task.directive,
+      }));
+      const interpreted = await this.explicitBrainInterpreter.interpret({
+        interactionId: snapshot.interactionId,
+        inputRevision: this.explicitIntake.inputRevision(snapshot.interactionId),
+        sourceRef: snapshot.sourceRef,
+        rawInput: correction === undefined || correction === ''
+          ? snapshot.rawInput
+          : `${snapshot.rawInput}\n\nUser correction: ${correction}`,
+        clarifications: snapshot.clarifications ?? [],
+        taskCandidates,
+      });
+      if (interpreted.kind !== 'requirement') {
+        throw new UiRuntimeApiError(
+          'explicit-brain.regeneration-not-a-requirement',
+          'humanagent.runtime.explicit-brain',
+          'regeneration only applies to requirement drafts',
+          'answer the clarification or submit a new input instead',
+          409,
+        );
+      }
+      await this.explicitIntake.propose(interactionId, {
+        proposedIntent: interpreted.intent,
+        proposal: interpreted.proposal,
+        decisionRefs: interpreted.decisionRefs,
+      });
+      if (revision !== undefined && interpreted.normalizedInput !== revision.normalizedInput) {
+        await this.explicitIntake.refineDraft(interactionId, {
+          draftId: revision.draftId,
+          baseRevisionVersion: revision.revisionVersion,
+          requestedRevisionHash: revision.revisionHash,
+          fields: {
+            goal: interpreted.proposal,
+            scope: interpreted.normalizedInput,
+            normalizedInput: interpreted.normalizedInput,
+            proposal: interpreted.proposal,
+            proposedIntent: interpreted.intent,
+            knownFacts: interpreted.knownFacts,
+          },
+          instructionRef: `regenerate:${snapshot.sourceRef}`,
+          idempotencyKey: `regenerate:${interactionId}:${revision.revisionVersion}:${canonicalJsonStringify(interpreted.normalizedInput)}`,
+        });
+      }
+      this.persistExplicitBrainState();
+      return await this.explicitIntake.inspect(interactionId);
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
+  /**
+   * Formal draft rejection ("放弃"). Drives the typed reject through the router
+   * owner so the closure is durable and the interaction can never be submitted,
+   * and returns the closure receipt (reason + terminal revision identity).
+   */
+  async rejectExplicitDraftRevision(
+    interactionId: string,
+    input: { readonly reason: string; readonly rejectionId?: string; readonly closedAt?: string },
+  ): Promise<DraftRejectClosure> {
+    try {
+      const closure = await this.requirementSubmissions.rejectDraftRevision(this.explicitIntake, {
+        interactionId,
+        reason: input.reason,
+        ...(input.rejectionId === undefined ? {} : { rejectionId: input.rejectionId }),
+        ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }),
+      });
+      this.persistExplicitBrainState();
+      return closure;
+    } catch (error) {
+      throw apiError(error);
+    }
+  }
+
   async completeExplicitStatusQuery(interactionId: string): Promise<StatusQueryReceipt> {
     try {
       await this.explicitIntake.beginStatusCheck(interactionId);
@@ -2092,8 +2958,14 @@ export class UiRuntimeService {
     }
   }
 
-  async confirmExplicitRequirement(input: ConfirmRequirementDraft): Promise<ExplicitBrainReceipt> {
+  async confirmExplicitRequirement(input: ConfirmExplicitRequirementInput): Promise<ExplicitBrainReceipt> {
     try {
+      // A typed draft revision (or an execution policy that requests one) must
+      // final-submit through the exact revision path. The legacy path stays for
+      // interactions that never created a typed revision.
+      if (this.requiresTypedFinalSubmit(input)) {
+        return await this.confirmTypedExplicitRequirement(input);
+      }
       const confirmed: ConfirmedRequirementDraft = await this.explicitIntake.prepareConfirmation(input);
       this.confirmationLedger.registerDraft({
         interactionId: confirmed.interactionId,
@@ -2118,22 +2990,362 @@ export class UiRuntimeService {
         confirmationRef: confirmed.confirmationRef,
         inputRevision: confirmed.inputRevision,
       });
-      const envelope = this.requirementInbox.find(confirmed.draftId);
-      if (envelope) {
-        this.queuedRequirements.set(envelope.draftId, {
-          requirementId: envelope.requirementId,
-          draftId: envelope.draftId,
-          fifoSeq: envelope.fifoSeq,
-          normalizedInput: envelope.normalizedInput,
-          queue: classifyConfirmedRequirement(envelope),
-        });
-      }
+      this.projectConfirmedRequirement(confirmed.draftId);
       this.persistExplicitBrainState();
       this.scheduleImplicitConsumption();
       return { requirement };
     } catch (error) {
       throw apiError(error);
     }
+  }
+
+  private requiresTypedFinalSubmit(input: ConfirmExplicitRequirementInput): boolean {
+    if (input.executionPolicy !== undefined) return true;
+    if (input.interactionId === undefined) return false;
+    return this.explicitIntake.currentDraftRevision(input.interactionId) !== undefined;
+  }
+
+  /**
+   * The typed final-submit path: exact revision confirmation plus one
+   * `submitFinal` authorization. The execution policy, when present, is
+   * compiled and persisted as exactly one subscription.
+   */
+  private async confirmTypedExplicitRequirement(
+    input: ConfirmExplicitRequirementInput,
+  ): Promise<ExplicitBrainReceipt> {
+    const interactionId = input.interactionId;
+    if (interactionId === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.interaction-required',
+        'humanagent.runtime.explicit-brain',
+        'typed final submit requires the owning interaction identity',
+        'confirm the exact interaction that owns the draft revision',
+        409,
+      );
+    }
+    // Bind the caller to the draft and input revision that existed when this
+    // request arrived. Policy refinement may mint a typed revision with a new
+    // internal draft id, but it must never replace the caller's identity before
+    // this check.
+    const arrivalSnapshot = await this.explicitIntake.inspect(interactionId);
+    const arrivalDraft = arrivalSnapshot.draft;
+    const arrivalMatches = arrivalDraft !== undefined
+      && input.draftId === arrivalDraft.draftId
+      && input.inputRevision === arrivalDraft.inputRevision;
+    const confirmedReplayMatches = arrivalSnapshot.state === 'confirmed'
+      && arrivalSnapshot.confirmation !== undefined
+      && input.inputRevision === arrivalSnapshot.confirmation.inputRevision
+      && input.confirmationRef === arrivalSnapshot.confirmation.confirmationRef
+      && input.confirmedBy === arrivalSnapshot.confirmation.confirmedBy
+      && input.confirmedAt === arrivalSnapshot.confirmation.confirmedAt
+      && input.payloadRef === arrivalSnapshot.confirmation.payloadRef;
+    if (!arrivalMatches && !confirmedReplayMatches) {
+      throw new DraftRevisionError({
+        code: 'confirmation-stale',
+        message: `confirmation addresses draft ${input.draftId} input revision ${input.inputRevision}, but the interaction-arrival draft is ${arrivalDraft?.draftId ?? 'missing'} input revision ${arrivalDraft?.inputRevision ?? 'missing'}`,
+        draftId: arrivalDraft?.draftId ?? input.draftId,
+        expectedRevisionVersion: input.inputRevision,
+        actualRevisionVersion: arrivalDraft?.inputRevision,
+      });
+    }
+    // Read the request-arrival typed revision before any policy refinement.
+    let revision = this.explicitIntake.currentDraftRevision(interactionId);
+    if (revision === undefined) {
+      revision = await this.ensureTypedDraftRevision(interactionId, {
+        executionPolicy: input.executionPolicy,
+        goal: input.goal,
+        scope: input.scope,
+        constraints: input.constraints,
+        deliverables: input.deliverables,
+      });
+    }
+    if (revision === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.typed-revision-required',
+        'humanagent.runtime.explicit-intake',
+        `interaction has no reviewable typed draft revision to confirm: ${interactionId}`,
+        'generate the reviewable draft before final submission',
+        409,
+      );
+    }
+    if ((input.draftRevisionVersion !== undefined && input.draftRevisionVersion !== revision.revisionVersion)
+      || (input.draftRevisionHash !== undefined && input.draftRevisionHash !== revision.revisionHash)) {
+      throw new DraftRevisionError({
+        code: 'confirmation-stale',
+        message: 'confirmation is not bound to the current draft revision',
+        draftId: revision.draftId,
+        ...(input.draftRevisionVersion === undefined ? {} : { expectedRevisionVersion: input.draftRevisionVersion }),
+        ...(input.draftRevisionHash === undefined ? {} : { expectedRevisionHash: input.draftRevisionHash }),
+        actualRevisionVersion: revision.revisionVersion,
+        actualRevisionHash: revision.revisionHash,
+      });
+    }
+    if (input.executionPolicy !== undefined) {
+      if (revision.executionPolicy !== undefined
+        && canonicalJsonStringify(revision.executionPolicy) !== canonicalJsonStringify(input.executionPolicy)) {
+        // The execution type is part of the immutable revision. A revision that
+        // already fixed a different policy cannot be silently rebound at submit
+        // time; the caller must submit against a revision created with the policy.
+        throw new UiRuntimeApiError(
+          'execution-plan.policy-immutable',
+          RUNTIME_OWNER,
+          `draft revision already carries a different execution policy: ${revision.draftId}`,
+          'create the reviewable draft with the intended execution policy before final submission',
+          409,
+        );
+      }
+      if (revision.executionPolicy === undefined) {
+        // Interpretation mints the reviewable draft before confirmation, so a
+        // submit that carries the execution policy must bind it through the
+        // revision owner as a new version. The app only names the base revision
+        // and the changed fields; the owner mints and persists the revision.
+        revision = await this.refineDraftWithExecutionPolicy(interactionId, revision, input, input.executionPolicy);
+        this.persistExplicitBrainState();
+      }
+    }
+
+    const draftRevisionVersion = revision.revisionVersion;
+    const draftRevisionHash = revision.revisionHash;
+    this.confirmationLedger.registerRevision({
+      interactionId,
+      draftId: revision.draftId,
+      inputRevision: revision.inputRevision,
+      draftRevisionVersion,
+      draftRevisionHash,
+      normalizedInput: revision.normalizedInput,
+      intent: revision.proposedIntent,
+      payloadRef: input.payloadRef,
+      requestKind: 'new-task-create',
+    });
+    const confirmation = await this.explicitIntake.confirmDraftRevision({
+      interactionId,
+      draftId: revision.draftId,
+      draftRevisionVersion,
+      draftRevisionHash,
+      confirmationRef: input.confirmationRef,
+      confirmedBy: input.confirmedBy,
+      confirmedAt: input.confirmedAt,
+      payloadRef: input.payloadRef,
+    });
+    this.confirmationLedger.confirmRevision(confirmation);
+
+    // Making the confirmed requirement visible to the FIFO consumer and
+    // persisting the execution plan it owns must be one step for that consumer.
+    // Otherwise a drain can observe the requirement while its plan is still
+    // missing, read the missing plan as "this requirement owns no future
+    // execution", and dispatch a scheduled requirement immediately. The
+    // dispatch lock is the single owner of FIFO consumption, so holding it
+    // across both writes keeps the requirement out of the immediate path.
+    const submitted = await this.withDispatchLock(async () => {
+      const receipt = await this.requirementSubmissions.submitFinal({
+        interactionId,
+        draftId: revision.draftId,
+        inputRevision: revision.inputRevision,
+        draftRevisionVersion,
+        draftRevisionHash,
+        confirmationRef: input.confirmationRef,
+        idempotencyKey: input.idempotencyKey ?? `final-submit:${revision.draftId}:${draftRevisionVersion}:${input.confirmationRef}`,
+        requestKind: 'new-task-create',
+      });
+      if (revision.executionPolicy !== undefined) {
+        await this.persistAuthorizedExecutionPlan(receipt.requirement, revision.executionPolicy);
+      }
+      return receipt;
+    });
+    this.projectConfirmedRequirement(revision.draftId);
+    this.persistExplicitBrainState();
+    this.scheduleImplicitConsumption();
+    return {
+      requirement: {
+        status: submitted.status,
+        requirementId: submitted.requirement.requirementId,
+        draftId: submitted.requirement.draftId,
+        inputRevision: submitted.requirement.inputRevision,
+      },
+    };
+  }
+
+  /**
+   * Bind the submit-time execution policy to the current typed revision. The
+   * revision owner mints the new version; the app only names the base revision
+   * and the changed policy, so the immutable revision structure stays with its
+   * owner. The task body remains the human-readable normalized input.
+   */
+  private async refineDraftWithExecutionPolicy(
+    interactionId: string,
+    current: DraftRevision,
+    input: ConfirmExplicitRequirementInput,
+    executionPolicy: ExecutionPolicyDefinition,
+  ): Promise<DraftRevision> {
+    const fields: Record<string, unknown> = {
+      ...(input.goal === undefined ? {} : { goal: input.goal }),
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
+      ...(input.constraints === undefined ? {} : { constraints: input.constraints }),
+      ...(input.deliverables === undefined ? {} : { deliverables: input.deliverables }),
+      executionPolicy,
+    };
+    const idempotencyKey = `final-submit-policy:${interactionId}:${current.draftId}:${current.revisionVersion}:${canonicalJsonStringify(executionPolicy)}`;
+    return await this.explicitIntake.refineDraft(interactionId, {
+      draftId: current.draftId,
+      baseRevisionVersion: current.revisionVersion,
+      requestedRevisionHash: current.revisionHash,
+      fields,
+      instructionRef: `final-submit-policy:${interactionId}`,
+      idempotencyKey,
+    });
+  }
+
+  /**
+   * The single writer of a typed draft revision. The draft-generation path
+   * calls this as soon as the reviewable draft exists, so the public surface
+   * can project and edit the revision before confirmation. The final-submit
+   * path reuses the same implementation only when no revision exists yet, so a
+   * submit that carries the execution policy still bakes that policy into the
+   * one immutable revision. `undefined` means the interaction is not a typed
+   * draft (no draft requestKind), so the legacy draft path stays in force.
+   */
+  private async ensureTypedDraftRevision(
+    interactionId: string,
+    options: {
+      readonly executionPolicy?: ExecutionPolicyDefinition;
+      readonly goal?: string;
+      readonly scope?: string;
+      readonly constraints?: readonly string[];
+      readonly deliverables?: readonly string[];
+    } = {},
+  ): Promise<DraftRevision | undefined> {
+    const alreadyCreated = this.explicitIntake.currentDraftRevision(interactionId);
+    if (alreadyCreated !== undefined) return alreadyCreated;
+    const snapshot = await this.explicitIntake.inspect(interactionId);
+    const draft = snapshot.draft;
+    if (!draft) return undefined;
+    try {
+      await this.explicitIntake.createDraft(interactionId, {
+        goal: options.goal ?? draft.proposal,
+        scope: options.scope ?? draft.normalizedInput,
+        constraints: options.constraints,
+        deliverables: options.deliverables,
+        normalizedInput: draft.normalizedInput,
+        proposedIntent: draft.proposedIntent,
+        proposal: draft.proposal,
+        matchedTasks: draft.matchedTasks,
+        knownFacts: draft.knownFacts,
+        decisionRefs: draft.decisionRefs,
+        ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }),
+      });
+    } catch (error) {
+      // A concurrent caller may have created the revision first. Reuse that
+      // exact revision instead of failing the racing caller.
+      if (error instanceof ExplicitIntakeError && error.code === 'draft-already-created') {
+        return this.explicitIntake.currentDraftRevision(interactionId);
+      }
+      // An untyped interaction keeps its legacy draft: the runtime refuses to
+      // mint a typed revision without a typed draft requestKind.
+      if (error instanceof ExplicitIntakeError && error.code === 'typed-request-kind-required') {
+        return undefined;
+      }
+      throw error;
+    }
+    return this.explicitIntake.currentDraftRevision(interactionId);
+  }
+
+  /**
+   * Compile the confirmed revision's execution policy and persist exactly one
+   * subscription. Repeating or racing the same revision reuses the durable
+   * subscription identity instead of creating a second plan.
+   */
+  private async persistAuthorizedExecutionPlan(
+    requirement: AuthorizedRequirement,
+    definition: ExecutionPolicyDefinition,
+  ): Promise<void> {
+    const port = this.subscriptionControl;
+    if (!port) {
+      throw new UiRuntimeApiError(
+        'execution-plan.persist-unavailable',
+        RUNTIME_OWNER,
+        'execution plan persistence is not wired to the UI runtime',
+        'start the UI runtime with the durable subscription control port',
+        503,
+      );
+    }
+    const compiled = new ExecutionPolicyCompiler().compile(requirement, definition);
+    const subscriptionId = subscriptionIdForRequirement(requirement.requirementId);
+    const existing = await this.subscriptionSnapshot(port, subscriptionId);
+    if (existing) {
+      if (existing.policyHash !== compiled.policyHash) {
+        throw new UiRuntimeApiError(
+          'execution-plan.policy-conflict',
+          RUNTIME_OWNER,
+          `subscription already exists with a different policy: ${subscriptionId}`,
+          'inspect the persisted execution plan before resubmitting',
+          409,
+        );
+      }
+      return;
+    }
+    const subscription: Subscription = {
+      subscriptionId,
+      goalId: requirement.requirementId,
+      scheduleRevision: 1,
+      state: 'active',
+      busyPolicy: definition.busyPolicy,
+      currentOccurrenceOrdinal: 0,
+    };
+    try {
+      await port.create(subscription, compiled.definition, subscriptionId);
+    } catch (error) {
+      if (error instanceof SubscriptionControlError && error.code === 'conflict') {
+        const raced = await this.subscriptionSnapshot(port, subscriptionId);
+        if (raced && raced.policyHash === compiled.policyHash) return;
+      }
+      throw error;
+    }
+  }
+
+  private async subscriptionSnapshot(
+    port: SubscriptionControlPort,
+    subscriptionId: string,
+  ): Promise<SubscriptionSnapshot | undefined> {
+    try {
+      return await port.snapshot(subscriptionId);
+    } catch (error) {
+      if (error instanceof SubscriptionControlError && error.code === 'not-found') return undefined;
+      throw error;
+    }
+  }
+
+  private projectConfirmedRequirement(draftId: string): void {
+    const envelope = this.requirementInbox.find(draftId);
+    if (!envelope) return;
+    this.queuedRequirements.set(envelope.draftId, {
+      requirementId: envelope.requirementId,
+      draftId: envelope.draftId,
+      fifoSeq: envelope.fifoSeq,
+      normalizedInput: envelope.normalizedInput,
+      queue: classifyConfirmedRequirement(envelope),
+    });
+  }
+
+  /** Prevent future execution plans from entering the immediate FIFO path. */
+  private async checkExecutionPolicyGate(
+    envelope: RequirementEnvelope,
+  ): Promise<boolean> {
+    const port = this.subscriptionControl;
+    if (port === undefined) return false;
+    const subscriptionId = subscriptionIdForRequirement(envelope.requirementId);
+    let snapshot: SubscriptionSnapshot | undefined;
+    try {
+      snapshot = await port.snapshot(subscriptionId);
+    } catch (error) {
+      if (!(error instanceof SubscriptionControlError) || error.code !== 'not-found') throw error;
+    }
+    if (!snapshot || snapshot.policy.executionMode === 'once') return false;
+    await this.requirementInbox.acknowledge({
+      consumerId: RUNTIME_OWNER,
+      requirementId: envelope.requirementId,
+    });
+    this.persistExplicitBrainState();
+    return true;
   }
 
   async dispatchNextExplicitRequirement(): Promise<ExplicitBrainDispatchReceipt> {
@@ -2231,6 +3443,21 @@ export class UiRuntimeService {
         this.dispatchLedger.set(consumed.draftId, dispatchEntry);
         this.persistExplicitBrainState();
       }
+      if (await this.checkExecutionPolicyGate(consumed)) {
+        return {
+          kind: 'dispatched',
+          receipt: {
+            requirement: {
+              requirementId: consumed.requirementId,
+              draftId: consumed.draftId,
+              fifoSeq: consumed.fifoSeq,
+            },
+            taskId: dispatchEntry.taskId,
+            operationId: dispatchEntry.operationId,
+            executionEpoch: 0,
+          },
+        };
+      }
       return {
         kind: 'dispatched',
         receipt: await this.completePreparedDispatch(consumed, dispatchEntry),
@@ -2277,6 +3504,20 @@ export class UiRuntimeService {
       this.queuedRequirements.delete(envelope.draftId);
       this.dispatchLedger.set(envelope.draftId, dispatchEntry);
       this.persistExplicitBrainState();
+    }
+    if (await this.checkExecutionPolicyGate(envelope)) {
+      return {
+        status: 'succeeded',
+        envelope,
+        admission,
+        ownerId: RUNTIME_OWNER,
+        scope,
+        executionEpoch: 0,
+        inputRevision,
+        taskId: dispatchEntry.taskId,
+        operationId: dispatchEntry.operationId.value,
+        evidenceRefs: [],
+      };
     }
     const receipt = await this.completePreparedDispatch(envelope, dispatchEntry, false);
     return {
@@ -2449,11 +3690,20 @@ export class UiRuntimeService {
     // Drain after a short visibility window, not on the next macrotask, so the
     // confirming HTTP response is written and a following status/task read can
     // still observe the requirement as a genuine queued FIFO entry.
-    setTimeout(() => {
+    this.implicitConsumerTimer = setTimeout(() => {
+      this.implicitConsumerTimer = undefined;
       this.implicitConsumerScheduled = false;
-      void this.consumePendingRequirements().catch((error) => {
-        this.implicitConsumerIssue = apiError(error);
-      });
+      const run = this.consumePendingRequirements();
+      this.implicitConsumptionRun = run;
+      void run.then(
+        () => {
+          if (this.implicitConsumptionRun === run) this.implicitConsumptionRun = undefined;
+        },
+        (error: unknown) => {
+          this.implicitConsumerIssue = apiError(error);
+          if (this.implicitConsumptionRun === run) this.implicitConsumptionRun = undefined;
+        },
+      );
     }, QUEUED_VISIBILITY_WINDOW_MS);
   }
 
@@ -2622,18 +3872,22 @@ export class UiRuntimeService {
   }
 
   private persistExplicitBrainState(): void {
+    const state: RuntimeExplicitBrainJournalState & {
+      readonly finalSubmissions?: readonly PersistedFinalSubmitReceipt[];
+    } = {
+      intake: this.explicitIntake.exportState(),
+      inbox: this.requirementInbox.exportState(),
+      confirmationLedger: this.confirmationLedger.exportState(),
+      dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
+      requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
+      submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
+      finalSubmissions: this.requirementSubmissions.finalReceipts(),
+      decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
+      taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
+    };
     (this.options.interactionJournal ?? this.options.journal)?.append({
       kind: 'explicit-brain.state',
-      state: {
-        intake: this.explicitIntake.exportState(),
-        inbox: this.requirementInbox.exportState(),
-        confirmationLedger: this.confirmationLedger.exportState(),
-        dispatchLedger: [...this.dispatchLedger.values()].map((entry) => structuredClone(entry)),
-        requirementAdmissions: [...this.requirementAdmissions.values()].map((admission) => structuredClone(admission)),
-        submittedSubmissions: this.requirementSubmissions.submittedReceipts() as readonly PersistedSubmittedReceipt[],
-        decisionTraces: this.explicitBrainTraceRecords.map((record) => structuredClone(record)),
-        taskInputRevisions: this.coordinator.exportTaskInputRevisions().map((entry) => structuredClone(entry)),
-      },
+      state,
     });
   }
 }

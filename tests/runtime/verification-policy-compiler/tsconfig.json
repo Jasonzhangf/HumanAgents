@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "../../..",
+    "outDir": "../../../dist/tests/runtime/verification-policy-compiler",
+    "noEmitOnError": true
+  },
+  "include": [
+    "**/*.ts",
+    "../../../packages/contracts/src/**/*.ts",
+    "../../../packages/runtime/src/**/*.ts"
+  ]
+}

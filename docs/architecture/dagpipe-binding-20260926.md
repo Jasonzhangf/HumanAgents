@@ -122,6 +122,74 @@ Sink: `browser_view`
 - `pnpm dagpipe:validate` now fails if a binding file is missing, mismatched,
   or points at a non-existent owner.
 
+## 2026-10-03 interaction redesign candidate
+
+Interaction redesign design candidate revises `explicit-requirement`,
+`serve-task`, and `observation-read` graph files plus their semantic and
+binding siblings, and adds `subscription-control` and
+`scheduled-occurrence`. Candidate details are in
+`docs/ui/interaction-redesign-plan-2026-10-03.md`; this section records that
+the binding gate remains the same and currently validates every
+`docs/dagpipe/*.graph.json`. The graphs remain design candidates and do not
+claim scheduler capability.
+
+The redesign also corrects owner bindings that were previously too broad:
+
+- `humanagent-explicit-requirement`: `validate_draft_revision` binds to
+  `packages/core/src/index.ts`, with the W1b invariant implemented in the new
+  `packages/core/src/draft-revision.ts` and exported from the bound public
+  index; `persist_authorized_plan` binds to
+  `packages/adapters/jsonl/src/index.ts`.
+- `humanagent-subscription-control`: a separate SESE graph for public
+  `SubscriptionControlRequest` -> runtime orchestration -> JSONL transaction
+  critical section -> core domain decision -> JSONL atomic commit -> durable
+  control receipt. New `subscriptions/` and `subscription.ts` code does not
+  exist yet, so binding uses existing owner paths as a design binding and
+  records `plannedOwnerPath` / `pending`; it does not claim a running
+  capability.
+- `humanagent-scheduled-occurrence`: atomic claim and settle bind to
+  `packages/adapters/jsonl/src/index.ts`; `validate_occurrence_domain` binds to
+  `packages/core/src/index.ts`; `read_committed_subscription_state` reads the
+  committed subscription state and `claim_due_occurrence` rechecks
+  state/revision in the same JSONL transaction. The due path no longer applies
+  subscription control. `execute_occurrence_task` invokes the public
+  `humanagent-serve-task@2` subflow and returns only its verified
+  `ServeTaskTerminalReceipt`; `settle_occurrence` consumes that receipt and
+  cannot project checker failed/missing/rejected, identity mismatch, stale
+  epoch, or pending verification as occurrence success. This is a typed
+  public input/output call between two independent SESE graphs, not a
+  cross-graph node edge, back-edge, scheduler verifier, or second lifecycle
+  truth. Both subscription graphs share the JSONL transaction resource and
+  typed control receipt data edge, with no cross-graph edge, cycle, or second
+  control truth.
+- `humanagent-serve-task`: `validate_plan_lifecycle` binds to
+  `packages/core/src/index.ts`; `verify_task_result` binds to
+  `packages/runtime/src/ui-runtime/coordinator.ts`, with W3 extracting the
+  concrete bridge as `packages/runtime/src/ui-runtime/task-verification.ts`;
+  `checkpoint_commit` binds to `packages/adapters/jsonl/src/index.ts`.
+- `humanagent-observation-read`: `browser_view` binds to the actually served
+  `docs/ui/observation.js`, not the unused
+  `packages/ui/surfaces/dsh-dashboard-replay.html`.
+
+Shared contracts remain the first implementation dependency: W1 is
+contracts-only and exports `TaskVerificationResult` /
+`ServeTaskTerminalReceipt`, W1b implements draft-domain/intake after W1, W2
+receives the core export handoff only after W1b, and W3/W4 receive `server.ts`
+/ `runtime-api.js` only after the network worker hands them off. W2 may land
+the domain/Journal/claim skeleton first, but final `due -> execute -> settle`
+acceptance depends on the W3 task-verification bridge; no scheduler
+independent execution path is allowed. The W3 task-verification node consumes
+task/operation/executionEpoch and the immutable input artifact digest;
+`OperationVerifierDecision` remains operation-scoped and is not claimed as a
+task-verification contract.
+W3 owns `packages/runtime/src/gateway/ports.ts`; after landing the concrete
+`task-verification.ts` bridge it also synchronizes
+`serve-task.graph.binding.json`. W2 synchronizes the scheduled-occurrence
+binding to its real owner; W3 synchronizes the subscription-control binding
+after the W2 handoff. The two subscription bindings have one writer at a time.
+Scheduling, serve, projection, and acceptance workers must not create a second
+lifecycle or persistence truth outside these bindings.
+
 ## SESE statement
 
 Each graph is a single-source single-exit DAG with a real owner path on every
@@ -141,8 +209,9 @@ pnpm dagpipe:gate
 
 Expected results:
 
-- `pnpm dagpipe:validate` prints `validated 5 DAGpipe graph(s)`.
-- `pnpm dagpipe:bind` prints five `bound <graph>: <n> nodes ok` lines.
+- `pnpm dagpipe:validate` prints `validated <n> DAGpipe graph(s)` where `<n>` is
+  the directory graph count.
+- `pnpm dagpipe:bind` prints one `bound <graph>: <n> nodes ok` line per graph.
 - `node --test tests/release/dagpipe-binding.test.mjs` prints all binding
   fail-closed fixtures passing.
 - `pnpm dagpipe:gate` runs `dagpipe:validate` followed by `test:release` and

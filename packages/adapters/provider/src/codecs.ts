@@ -245,6 +245,7 @@ function eventBase(
   eventId: string,
   label: string,
   evidenceRefs?: readonly EvidenceRef[],
+  externalResponseId?: string,
 ): Omit<ProviderEvent, 'kind'> {
   return {
     runtimeId: execution.runtimeId,
@@ -253,6 +254,7 @@ function eventBase(
     executionEpoch: execution.executionEpoch,
     eventId,
     evidenceRefs: evidenceRefs ?? [evidence(scope, label)],
+    ...(externalResponseId === undefined ? {} : { externalResponseId }),
   };
 }
 
@@ -289,9 +291,17 @@ function semanticModelSummary(type: string): string {
   }
 }
 
-function modelEvent(execution: ProviderExecutionIdentityRef, scope: ScopeRef, type: string, eventId: string, evidenceRefs?: readonly EvidenceRef[], summary?: string): ProviderEvent {
+function modelEvent(
+  execution: ProviderExecutionIdentityRef,
+  scope: ScopeRef,
+  type: string,
+  eventId: string,
+  evidenceRefs?: readonly EvidenceRef[],
+  summary?: string,
+  externalResponseId?: string,
+): ProviderEvent {
   return {
-    ...eventBase(execution, scope, type, eventId, type, evidenceRefs),
+    ...eventBase(execution, scope, type, eventId, type, evidenceRefs, externalResponseId),
     kind: 'model',
     summary: summary ?? semanticModelSummary(type),
   };
@@ -305,9 +315,10 @@ function outputEvent(
   outputRefs: readonly string[],
   evidenceRefs?: readonly EvidenceRef[],
   summary?: string,
+  externalResponseId?: string,
 ): ProviderEvent {
   return {
-    ...eventBase(execution, scope, type, eventId, type, evidenceRefs),
+    ...eventBase(execution, scope, type, eventId, type, evidenceRefs, externalResponseId),
     kind: 'output',
     outputRefs,
     ...(summary === undefined ? {} : { summary }),
@@ -329,10 +340,11 @@ function ownedEvent(
     readonly evidenceRefs?: readonly EvidenceRef[];
     readonly summary?: string;
     readonly toolCall?: ProviderEvent['toolCall'];
+    readonly externalResponseId?: string;
   } = {},
 ): ProviderEvent {
   return {
-    ...eventBase(execution, scope, type, eventId, label),
+    ...eventBase(execution, scope, type, eventId, label, undefined, extra.externalResponseId),
     kind,
     ownerId: OWNER,
     nextAction,
@@ -342,6 +354,7 @@ function ownedEvent(
     ...(extra.evidenceRefs === undefined ? {} : { evidenceRefs: extra.evidenceRefs }),
     ...(extra.summary === undefined ? {} : { summary: extra.summary }),
     ...(extra.toolCall === undefined ? {} : { toolCall: extra.toolCall }),
+    ...(extra.externalResponseId === undefined ? {} : { externalResponseId: extra.externalResponseId }),
   };
 }
 
@@ -566,7 +579,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
         const marked = context.responsesRequestStartEmitted.get(responseId);
         if (marked) return { events: [] };
         context.responsesRequestStartEmitted.set(responseId, true);
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs, REQUEST_START_SUMMARY)] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `response/${responseId}`), evidenceRefs, REQUEST_START_SUMMARY, responseId)] };
       }
       case 'response.output_item.added': {
         requireNumber(record, 'output_index', context.execution, raw.type);
@@ -796,7 +809,7 @@ export class ResponsesProviderCodec implements ProviderCodec<ResponsesWireReques
               eventId(context, raw.type, `response/${responseId}`),
               raw.type,
               next,
-              { terminalState: raw.type === 'response.incomplete' || waitingForTool ? 'waiting' : 'succeeded', evidenceRefs },
+              { terminalState: raw.type === 'response.incomplete' || waitingForTool ? 'waiting' : 'succeeded', evidenceRefs, externalResponseId: responseId },
             ),
           ],
         };
@@ -1177,7 +1190,7 @@ export class AnthropicProviderCodec implements ProviderCodec<AnthropicWireReques
         const message = requireObject(record, 'message', context.execution, raw.type);
         const messageId = requireString(message, 'id', context.execution, raw.type);
         const evidenceRefs = [await captureEvidence(context, raw.type, `message/${messageId}`)];
-        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs, 'provider requested model work')] };
+        return { events: [modelEvent(context.execution, context.scope, raw.type, eventId(context, raw.type, `message/${messageId}`), evidenceRefs, 'provider requested model work', messageId)] };
       }
       case 'content_block_start': {
         requireNumber(record, 'index', context.execution, raw.type);
