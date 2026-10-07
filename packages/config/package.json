@@ -1,7 +1,7 @@
 {
   "name": "@humanagent/config",
-  "version": "0.1.22",
-  "releaseVersion": "0.1.0022",
+  "version": "0.1.23",
+  "releaseVersion": "0.1.0023",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
