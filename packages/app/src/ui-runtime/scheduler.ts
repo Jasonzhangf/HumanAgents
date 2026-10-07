@@ -1,10 +1,11 @@
 // App-owned due-time patrol for persisted execution plans.
 //
 // The subscription control port owns the persisted plan truth, slot arithmetic,
-// claims and settlements. This module is only the clock: it enumerates active
-// plans, asks the port which slots are due, and drives schedule → claim →
-// consumeExecution → settleOccurrence for one slot at a time. It never invents a
-// slot, a claim, or a terminal outcome.
+// claims and settlements. This module is only the clock: it enumerates persisted
+// plans, resumes a committed claim for any of them, and drives schedule → claim →
+// consumeExecution → settleOccurrence for one slot at a time, while only an
+// active plan may receive a new slot. It never invents a slot, a claim, or a
+// terminal outcome.
 import { createHash } from 'node:crypto';
 
 import {
@@ -253,7 +254,9 @@ export class UiRuntimeScheduler {
       return;
     }
     for (const snapshot of snapshots) {
-      if (snapshot.subscription.state !== 'active') continue;
+      // Every persisted plan is patrolled. `patrolPlan` decides for itself
+      // whether the plan may still receive a new slot, because a plan that is no
+      // longer `active` can still hold a committed claim that has to settle.
       try {
         await this.patrolPlan(snapshot, lease, now, nowAt, busy);
       } catch (error) {
@@ -298,6 +301,12 @@ export class UiRuntimeScheduler {
       await this.consume(occurrence, claim);
       consumed.add(occurrence.occurrenceId);
     }
+
+    // Only an active plan may receive a NEW slot. A plan that left `active`
+    // while a slot was claimed (`cancel-future` during the claim grace window)
+    // must not be scheduled again, but the claim resumed above is already
+    // committed and still has to reach its settlement.
+    if (subscription.state !== 'active') return;
 
     // 2. Schedule a newly due slot.
     const due = await this.options.port.dueTimes({

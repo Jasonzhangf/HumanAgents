@@ -21,6 +21,7 @@ import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtim
 import {
   binding,
   bindingFor,
+  controlPlan,
   CountingExecutionPort,
   issueText,
   persistPlan,
@@ -30,6 +31,7 @@ import {
   scheduledPolicy,
   startHarness,
   waitFor,
+  type ControlReceiptView,
   type SchedulerStatusView,
   type TaskDashboardView,
   type TaskListView,
@@ -261,6 +263,82 @@ test('a busy runtime skips a due occurrence under busyPolicy skip and dispatches
     assert.equal(harness.port.starts.length, 1, 'the busy plan dispatched no second execution');
   } finally {
     harness.port.release();
+    await harness.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancel-future inside the claim grace window still drives the persisted claim to settlement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-scheduler-production-cancel-grace-'));
+  const harness = await startHarness({ root, intervalMs: 100 });
+  try {
+    const startAt = new Date(Date.now() + 5_000).toISOString();
+    const policy = scheduledPolicy(startAt);
+    const requirementId = await persistPlan(harness, 'cancel the grace-window claim', policy);
+    const subscriptionId = `subscription:${requirementId}`;
+    const occurrenceId = `${subscriptionId}::1::1`;
+
+    // The patrol claims the slot up to one second before its due time and then
+    // deliberately defers the real execution until the slot time.
+    await waitFor(async () => {
+      const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+      const occurrence = planFor(status, requirementId).occurrences[0];
+      assert.equal(occurrence?.state, 'claimed');
+      assert.equal(occurrence?.occurrenceId, occurrenceId);
+    }, 5_500);
+    assert.ok(Date.now() < Date.parse(startAt), 'the claim is inside the grace window');
+    assert.equal(harness.port.starts.length, 0, 'nothing executed before the slot time');
+
+    // cancel-future lands while the claim is persisted but not yet due. The
+    // claim is already committed, so it is not one of the unclaimed slots the
+    // control supersedes.
+    const cancelled = await controlPlan(harness, subscriptionId, 'cancel-future', `cancel-grace:${occurrenceId}`);
+    const cancelledText = await cancelled.text();
+    assert.equal(cancelled.status, 200, cancelledText);
+    const receipt = JSON.parse(cancelledText) as ControlReceiptView;
+    assert.equal(receipt.status, 'applied');
+    assert.equal(receipt.action, 'cancel-future');
+    assert.equal(
+      receipt.supersededUnclaimedOccurrences.includes(occurrenceId),
+      false,
+      'a claimed occurrence is not superseded by the control',
+    );
+    assert.ok(Date.now() < Date.parse(startAt), 'the control landed inside the grace window');
+
+    const afterControl = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    assert.equal(planFor(afterControl, requirementId).state, 'cancelled');
+
+    // The plan is no longer active, so it must never receive a new slot. The
+    // persisted claim, however, is already committed and must still reach a
+    // terminal settlement instead of staying `claimed` forever.
+    await waitFor(async () => {
+      const status = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+      const plan = planFor(status, requirementId);
+      assert.equal(
+        plan.settlements.length,
+        1,
+        `occurrence=${plan.occurrences[0]?.state ?? 'absent'} executed=${status.executed} ${issueText(status)}`,
+      );
+    }, Math.max(1_000, Date.parse(startAt) - Date.now()) + 15_000);
+
+    const settled = await harness.json<SchedulerStatusView>('/api/runtime/scheduler');
+    const plan = planFor(settled, requirementId);
+    assert.equal(plan.state, 'cancelled', 'the cancellation remains the durable plan state');
+    assert.equal(plan.occurrences[0]?.state, 'consumed', 'the persisted claim reached its terminal state');
+    assert.equal(plan.settlements[0]?.occurrenceId, occurrenceId);
+    assert.equal(plan.settlements[0]?.verificationStatus, 'success');
+    assert.equal(harness.port.starts.length, 1, 'the committed claim ran exactly one real execution');
+    assert.equal(settled.executed, 1);
+
+    // The settlement is durable: one admission and one terminal receipt for the
+    // exact binding the patrol claimed.
+    const expectedBinding = bindingFor(occurrenceId, policy, startAt);
+    const admissionCommitId = await occurrenceExecutionAdmissionCommitId(expectedBinding);
+    const receiptCommitId = await occurrenceTerminalReceiptCommitId(expectedBinding);
+    const journal = await readConsumerJournal(harness, occurrenceId);
+    assert.equal(journal.filter((record) => record.commitId === admissionCommitId).length, 1);
+    assert.equal(journal.filter((record) => record.commitId === receiptCommitId).length, 1);
+  } finally {
     await harness.close();
     await rm(root, { recursive: true, force: true });
   }
