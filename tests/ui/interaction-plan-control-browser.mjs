@@ -692,6 +692,19 @@ async function waitForScheduledOccurrence(auth, subscriptionId, timeoutMs = 30_0
 }
 
 /**
+ * The production grace-window rule (`scheduler.ts`: `Date.parse(occurrence.dueAt)
+ * > now`): a claim whose slot is still ahead of the clock sits inside the window
+ * and has to wait for the slot instead of executing early. The positive scenario
+ * and the negative control both evaluate this one expression against the
+ * occurrence the runtime really produced, so the two results together show the
+ * rule discriminates instead of being a constant.
+ */
+function claimInsideGraceWindow(occurrence, atMs) {
+  if (occurrence?.dueAt === undefined) return undefined;
+  return Date.parse(occurrence.dueAt) > atMs;
+}
+
+/**
  * `lastTickAt` is stamped when a patrol tick *finishes*, so it is the only
  * in-band witness of the tick grid the grace window is aligned to. A tick that
  * is waiting on a real `consumeExecution` does not stamp it, so a busy runtime
@@ -1188,28 +1201,49 @@ async function sectionReal(browser, artifactDir, root) {
         && graceSettled.settlements[0].occurrenceId === graceOccurrence?.occurrenceId,
       graceSettled);
 
-    // A deliberate negative control proves that the window guard is not always
-    // true. The control confirms a real plan whose slot is already an hour past,
-    // waits for that slot to be materialised, and then evaluates the same guard
-    // the scenario uses. Because the slot is past, no claim can land inside the
-    // window and the guard has to come out false; a guard that always returned
-    // true would fail here. The control runs after the grace plan has settled so
-    // its own execution cannot slow the settlement being measured.
+    // A deliberate negative control proves the window guard is not always true.
+    // It confirms a real plan whose slot is already an hour past, waits for the
+    // runtime to materialise that slot, and evaluates the SAME production rule
+    // the positive scenario evaluates, against the occurrence the runtime really
+    // produced. A past slot is not inside the window, so the rule has to come out
+    // false on real runtime data. The control runs after the grace plan has
+    // settled so its own execution cannot slow the settlement being measured.
     const negativeStartAt = new Date(Date.now() - 60 * 60_000).toISOString();
     const negative = await confirmScheduledPlan(auth, 'report the current date', negativeStartAt);
     const negativePlan = await waitForScheduledOccurrence(auth, negative.subscriptionId, 30_000);
-    const negativeClaimedOccurrence = (negativePlan.occurrences ?? []).find((occurrence) => occurrence.state === 'claimed');
-    const negativeClaimedBeforeDue = Date.now() < Date.parse(negativeStartAt) && negativeClaimedOccurrence !== undefined;
+    const negativeOccurrences = negativePlan.occurrences ?? [];
+    const negativeOccurrence = negativeOccurrences[0];
+    const negativeObservedAtMs = Date.now();
+    const negativeDueIsPast = negativeOccurrence?.dueAt !== undefined
+      && Date.parse(negativeOccurrence.dueAt) <= negativeObservedAtMs;
+    const negativeInsideWindow = claimInsideGraceWindow(negativeOccurrence, negativeObservedAtMs);
+    // The positive side, evaluated through the same expression on its own
+    // occurrence: the claim was committed while the slot was still ahead.
+    const positiveInsideWindow = claimInsideGraceWindow(graceOccurrence, Date.parse(graceAnchor.confirmedAt));
     observe('grace-window negative control', {
       startAt: negativeStartAt,
       subscriptionId: negative.subscriptionId,
-      claimedBeforeDue: negativeClaimedBeforeDue,
-      occurrenceStates: (negativePlan.occurrences ?? []).map((occurrence) => occurrence.state),
-      occurrence: negativeClaimedOccurrence,
+      observedAt: new Date(negativeObservedAtMs).toISOString(),
+      dueAt: negativeOccurrence?.dueAt,
+      dueIsPast: negativeDueIsPast,
+      insideWindow: negativeInsideWindow,
+      positiveInsideWindow,
+      occurrenceStates: negativeOccurrences.map((occurrence) => occurrence.state),
+      occurrence: negativeOccurrence,
     });
-    record('a slot already past due cannot be claimed inside the grace window',
-      negativeClaimedBeforeDue === false && (negativePlan.occurrences ?? []).length > 0,
-      { negativeClaimedBeforeDue, occurrenceStates: (negativePlan.occurrences ?? []).map((occurrence) => occurrence.state), startAt: negativeStartAt });
+    record('a slot already past due is not inside the claim grace window',
+      negativeOccurrences.length > 0
+        && negativeDueIsPast === true
+        && negativeInsideWindow === false
+        && positiveInsideWindow === true,
+      {
+        dueAt: negativeOccurrence?.dueAt,
+        dueIsPast: negativeDueIsPast,
+        insideWindow: negativeInsideWindow,
+        positiveInsideWindow,
+        occurrenceStates: negativeOccurrences.map((occurrence) => occurrence.state),
+        startAt: negativeStartAt,
+      });
 
     // The served plan list reports the same durable fact the control produced.
     await page.goto(`${base}/dashboard.html`, { waitUntil: 'domcontentloaded' });

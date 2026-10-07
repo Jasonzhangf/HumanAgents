@@ -1,6 +1,10 @@
-# HumanAgent 交互改造 — DAG 现状与目标状态
+# HumanAgent 交互改造 — DAG 现状与目标状态（`25d656c` 时点快照）
 
-证据根：`docs/dagpipe/`（12 张图，`pnpm dagpipe:validate` 12/12 valid）
+本文件是 `25d656c`（worktree `interaction-ui-finalize-20261006`）时点的**历史快照**，不是当前图清单。
+下文所有「现状」均指该时点。当前图集合与合法性以 `pnpm dagpipe:validate` 的输出为唯一真源，
+本文件不再复述图数量：写作时为 12 张，`793b5b9` 时已为 16 张。
+
+证据根：`docs/dagpipe/`
 候选 SHA：`25d656c`（worktree `interaction-ui-finalize-20261006`）
 
 ---

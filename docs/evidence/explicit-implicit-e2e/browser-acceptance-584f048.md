@@ -19,6 +19,10 @@ pnpm build
 node tests/app/real-browser-explicit-implicit-e2e.mjs
 ```
 
+> 该记录保留当时实际执行的命令。此脚本后来改名为
+> `tests/app/real-explicit-implicit-e2e.mjs`；`real-browser-explicit-implicit-e2e.mjs`
+> 在 `793b5b9` 已不存在，重放本记录时请用新路径。
+
 ## Result
 
 The script launches a real headless Chromium, loads the served HumanAgent UI
