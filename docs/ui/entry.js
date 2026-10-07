@@ -540,7 +540,9 @@ function renderForm() {
   timezone.name = 'timezone'
   timezone.required = true
   timezone.value = timeZone()
-  form.append(field('时区', timezone))
+  const timezoneField = field('时区', timezone)
+  timezoneField.dataset.executionField = 'scheduled recurring'
+  form.append(timezoneField)
 
   const startAt = element('input')
   startAt.name = 'scheduledStartAt'
@@ -624,6 +626,14 @@ function renderForm() {
     for (const node of form.querySelectorAll('[data-recurring-frequency]')) {
       node.hidden = modeValue !== 'recurring' || !node.dataset.recurringFrequency.split(' ').includes(frequency.value)
     }
+    // A control inside a hidden field must not stay `required`: the browser
+    // would otherwise block the simple 单次 submission on fields the human
+    // never sees. The default execution policy is 单次, so only the task input,
+    // the execution type and the submit action are shown until the human picks
+    // 定时 or 周期.
+    const rendered = (control) => !control.closest('[hidden]')
+    timezone.required = rendered(timezone)
+    startAt.required = rendered(startAt)
     submitButton.textContent = modeValue === 'once' ? '创建并执行' : '保存执行计划'
   }
   mode.addEventListener('change', syncExecutionFields)
