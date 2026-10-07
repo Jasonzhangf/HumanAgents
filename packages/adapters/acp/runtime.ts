@@ -23,18 +23,15 @@ import type {
  * may reach into `AcpClientDriver` internals, and no domain identity may be
  * minted here.
  *
- * `onCancel` is the runtime-owned cancellation hook. A `direct` runtime wires
- * it to the ACP `session/cancel` call. A `shim` runtime that has no native
- * cancel must instead stop its own process there; killing the process is the
- * honest cancellation primitive for a one-shot CLI, and the driver treats the
- * resulting rejection as a cancellation rather than silently downgrading it.
+ * Cancellation is owned by the adaptor's `cancel` method, not by a callback:
+ * a `direct` runtime sends the ACP `session/cancel` request, and a `shim`
+ * runtime that has no native cancel stops its own process. Killing the process
+ * is the honest cancellation primitive for a one-shot CLI.
  */
 
 export interface AcpRuntimeSession {
   /** Identity of the live session as known by the runtime. */
   readonly sessionId: string;
-  /** Whether this session can be reopened by a later `load`. */
-  readonly resumable: boolean;
 }
 
 export interface AcpRuntimeSubmitResult extends AcpPromptResult {
@@ -68,9 +65,6 @@ export interface AcpRuntimeAdaptor {
   readonly capabilities: readonly string[];
 
   readonly promptFor?: (payload: BusinessPayload) => string;
-
-  /** Optional cancellation hook invoked by the driver on `requestStop`. */
-  readonly onCancel?: (input: AcpRuntimeCancelHook) => void;
 
   /** Establishes the ACP session. Must validate `initialize` protocolVersion. */
   open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult>;
@@ -138,12 +132,4 @@ export interface AcpRuntimeCloseInput {
   readonly runtimeId: string;
   readonly sessionId: string;
   readonly timeoutMs?: number;
-}
-
-/** Runtime-owned cancellation sink handed to a shim at `open` time. */
-export interface AcpRuntimeCancelHook {
-  readonly runtimeId: string;
-  readonly sessionId: string;
-  /** Called once by the driver on `requestStop`. */
-  readonly cancel: () => void;
 }

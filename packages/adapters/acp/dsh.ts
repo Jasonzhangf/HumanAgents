@@ -48,7 +48,7 @@ import type {
 
 const OWNER = 'humanagent.acp-runtime.dsh';
 const VERSION = 'dsh-0.2.x';
-const DEFAULT_ARGS = ['--profile', 'headless', '--json'] as const;
+export const DSH_DEFAULT_ARGS = ['--profile', 'headless', '--json'] as const;
 
 interface DshRunState {
   readonly runtimeId: string;
@@ -166,7 +166,7 @@ export interface DshRuntimeOptions {
 }
 
 export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAdaptor {
-  const args = options.args ?? [...DEFAULT_ARGS];
+  const args = options.args ?? [...DSH_DEFAULT_ARGS];
   const timeoutMs = options.timeoutMs ?? 300_000;
   const capabilities = options.capabilities ?? ['dsh', 'acp.shim', 'headless-json'] as const;
 

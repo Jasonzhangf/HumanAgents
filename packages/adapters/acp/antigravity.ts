@@ -219,10 +219,10 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
         });
       }
       const record = parsed as { status?: unknown; response?: unknown; error?: unknown };
-      if (record.status !== 'SUCCESS' || typeof record.response !== 'string') {
+      if (record.status !== 'SUCCESS' || typeof record.response !== 'string' || record.response.length === 0) {
         throw new AcpAdapterError({
           code: 'transport-failure',
-          message: `antigravity CLI returned status ${String(record.status)}: ${record.error ? JSON.stringify(record.error) : 'missing response'}`,
+          message: `antigravity CLI returned status ${String(record.status)}: ${record.error ? JSON.stringify(record.error) : record.status === 'SUCCESS' ? 'empty response' : 'missing response'}`,
           ownerId: OWNER,
           nextAction: { kind: 'recover', ref: `${OWNER}/unexpected-status` },
           evidenceRefs: [],

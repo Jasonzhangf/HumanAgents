@@ -58,7 +58,7 @@ import type {
 
 const OWNER = 'humanagent.acp-runtime.opencode';
 const VERSION = 'opencode-1.18.x';
-const DEFAULT_ARGS = ['acp', '--pure'] as const;
+export const OPENCODE_DEFAULT_ARGS = ['acp', '--pure'] as const;
 
 interface OpenState {
   readonly backend: AcpStdioBackend;
@@ -91,7 +91,7 @@ export interface OpencodeRuntimeOptions {
 }
 
 export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): AcpRuntimeAdaptor {
-  const args = options.args ?? [...DEFAULT_ARGS];
+  const args = options.args ?? [...OPENCODE_DEFAULT_ARGS];
   const timeoutMs = options.timeoutMs ?? 300_000;
   const capabilities = options.capabilities ?? ['opencode', 'acp.direct', 'acp.tool-call'];
 

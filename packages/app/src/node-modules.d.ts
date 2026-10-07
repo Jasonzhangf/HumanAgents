@@ -39,7 +39,7 @@ declare module 'node:child_process' {
     setEncoding(encoding: string): void;
   }
 
-  interface WritableLike {
+  interface WritableLike extends EventEmitter {
     write(chunk: string): boolean;
     end(): void;
   }

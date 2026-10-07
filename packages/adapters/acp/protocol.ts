@@ -338,7 +338,3 @@ export function isAcpResponse(frame: AcpJsonRpcResponse | AcpJsonRpcNotification
   return 'id' in frame && frame.id !== undefined;
 }
 
-/** Builds the evidence locator for a wire frame without leaking secrets into ids. */
-export function acpEvidenceLocator(ownerId: string, frame: 'request' | 'response' | 'notification', method: string, index: number): string {
-  return `acp/${ownerId}/${frame}/${method}/${index}`;
-}

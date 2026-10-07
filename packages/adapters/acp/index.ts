@@ -56,15 +56,14 @@ export { AcpStdioBackend, AcpStdioBackendError, isJsonRpcError, jsonRpcErrorMess
 export type { AcpStdioBackendOptions, AcpStdioSpawnOptions } from './backend.js';
 export { createAcpClientDriver } from './acp-client-driver.js';
 export type { AcpClientDriverOptions } from './acp-client-driver.js';
-export { createOpencodeRuntime } from './opencode.js';
+export { OPENCODE_DEFAULT_ARGS, createOpencodeRuntime } from './opencode.js';
 export type { OpencodeRuntimeOptions } from './opencode.js';
 export { createAntigravityRuntime } from './antigravity.js';
 export type { AntigravityRuntimeOptions } from './antigravity.js';
-export { createDshRuntime } from './dsh.js';
+export { DSH_DEFAULT_ARGS, createDshRuntime } from './dsh.js';
 export type { DshRuntimeOptions } from './dsh.js';
 export type {
   AcpRuntimeAdaptor,
-  AcpRuntimeCancelHook,
   AcpRuntimeCancelInput,
   AcpRuntimeCancelResult,
   AcpRuntimeCloseInput,

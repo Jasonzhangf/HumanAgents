@@ -16,6 +16,7 @@ import type {
   TaskId,
 } from '../../contracts/src/index.js';
 import { AcpAdapterError } from './errors.js';
+import type { AcpStopReason } from './protocol.js';
 import type { AcpRuntimeAdaptor, AcpRuntimeCloseResult, AcpRuntimeOpenResult, AcpRuntimeSubmitResult } from './runtime.js';
 
 /**
@@ -51,13 +52,6 @@ export interface AcpClientDriverOptions {
   readonly mcpServers?: readonly { readonly name: string; readonly type?: string; readonly command?: string; readonly args?: readonly string[]; readonly url?: string; readonly headers?: Record<string, string> }[];
   readonly timeoutMs?: number;
   readonly promptFor?: (payload: BusinessPayload) => string;
-  /** Evidence scope supplied by the composing app; the driver never mints scopes. */
-  readonly scopeFor?: (input: {
-    readonly runtimeId: string;
-    readonly taskId: TaskId;
-    readonly operationId: OperationId;
-    readonly executionEpoch: number;
-  }) => ScopeRef;
 }
 
 interface DriverInstance {
@@ -67,19 +61,15 @@ interface DriverInstance {
   readonly assignmentId: string;
   readonly operationId: OperationId;
   readonly scope: ScopeRef;
-  readonly runtimeKind: 'direct' | 'shim';
   readonly runtimeVersion: string;
   sessionId: string;
-  resumed: boolean;
-  backendRef: string;
-  protocol: 'acp-v1' | 'shim';
   stopRequested: boolean;
   closed: boolean;
   readonly outputTexts: string[];
   readonly events: AgentEvent[];
   readonly eventWaiters: Array<(done: boolean) => void>;
   lastFailure?: Error;
-  lastStopReason?: string;
+  lastStopReason?: AcpStopReason;
   seq: number;
 }
 
@@ -87,10 +77,6 @@ function defaultPromptFor(payload: BusinessPayload): string {
   if (typeof payload.prompt === 'string') return payload.prompt;
   if (typeof payload.question === 'string') return payload.question;
   return JSON.stringify(payload);
-}
-
-export class AcpClientDriverError extends AcpAdapterError {
-  readonly sessionId?: string;
 }
 
 function evidence(ownerId: string, locator: string, scope: ScopeRef, refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
@@ -105,6 +91,18 @@ function evidence(ownerId: string, locator: string, scope: ScopeRef, refs: reado
 
 function nextActionFor(ownerId: string, ref: string) {
   return { kind: 'recover' as const, ref: `${ownerId}/${ref}` };
+}
+
+/** Maps an ACP stop reason onto the HumanAgent terminal state vocabulary. */
+function terminalStateFor(stopReason: AcpRuntimeSubmitResult['stopReason']): 'succeeded' | 'cancelled' | 'failed' | 'blocked' | 'unknown' {
+  switch (stopReason) {
+    case 'end_turn': return 'succeeded';
+    case 'cancelled': return 'cancelled';
+    case 'max_tokens':
+    case 'max_turn_requests': return 'failed';
+    case 'refusal': return 'blocked';
+    default: return 'unknown';
+  }
 }
 
 export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDriver {
@@ -129,21 +127,6 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
     return instance;
   }
 
-  function scopeFor(input: {
-    readonly runtimeId: string;
-    readonly taskId: TaskId;
-    readonly operationId: OperationId;
-    readonly executionEpoch: number;
-  }): ScopeRef {
-    if (options.scopeFor) return options.scopeFor(input);
-    return {
-      organId: { scope: 'organ' as const, value: `acp-${input.runtimeId}` },
-      taskId: input.taskId,
-      cycleId: { scope: 'cycle' as const, value: `${input.runtimeId}-cycle` },
-      operationId: input.operationId,
-    };
-  }
-
   function pushEvent(instance: DriverInstance, event: AgentEvent): void {
     instance.events.push(event);
     for (const waiter of instance.eventWaiters.splice(0)) waiter(false);
@@ -164,12 +147,15 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
         evidenceRefs: [],
       });
     }
-    const scope = scopeFor({
-      runtimeId: input.runtimeId,
+    // Evidence scope is HumanAgent's, never minted here. It is built from the
+    // identity the app already supplied in the start request, so the driver's
+    // evidence carries the same scope the checkpoint will be committed under.
+    const scope: ScopeRef = {
+      organId: input.organId,
       taskId: input.taskId,
+      ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
       operationId: input.operationId,
-      executionEpoch: input.executionEpoch,
-    });
+    };
     return {
       runtimeId: input.runtimeId,
       taskId: input.taskId,
@@ -178,11 +164,7 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       operationId: input.operationId,
       scope,
       sessionId: '',
-      resumed: false,
-      backendRef: '',
-      runtimeKind: runtime.kind,
       runtimeVersion: runtime.version,
-      protocol: 'acp-v1',
       stopRequested: false,
       closed: false,
       outputTexts: [],
@@ -214,15 +196,6 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       });
     }
     instance.sessionId = opened.sessionId;
-    instance.backendRef = opened.backendRef;
-    instance.protocol = opened.protocol;
-    pushEvent(instance, {
-      taskId: instance.taskId,
-      executionEpoch: instance.executionEpoch,
-      kind: 'execution.started',
-      summary: `${runtime.runtime} acp session ${opened.sessionId}`,
-      evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/open/${instance.runtimeId}/${instance.executionEpoch}`, instance.scope, []),
-    });
   }
 
   return {
@@ -263,7 +236,6 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
           timeoutMs,
         });
         instance.sessionId = loaded.sessionId;
-        instance.resumed = true;
       } catch (error) {
         instances.delete(key(instance.runtimeId, instance.executionEpoch));
         throw new AcpAdapterError({
@@ -327,18 +299,39 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       instance.lastStopReason = result.stopReason;
       if (result.stopReason === 'cancelled') instance.stopRequested = true;
       const text = result.outputText ?? '';
-      if (text.length > 0) instance.outputTexts.push(text);
+      // A completed turn must carry an answer: the turn answer is the only
+      // channel that feeds downstream roles, so an empty completed turn is a
+      // protocol failure. Other stop reasons are outcomes in their own right.
+      if (text.length === 0 && result.stopReason === 'end_turn') {
+        throw new AcpAdapterError({
+          code: 'protocol-error',
+          message: `ACP runtime ${runtime.runtime} returned an empty turn answer`,
+          ownerId: OWNER,
+          nextAction: nextActionFor(OWNER, 'empty-turn-answer'),
+          evidenceRefs: [],
+        });
+      }
+      // The turn answer travels as ordered chunk summaries, which is how every
+      // consumer of `observe` reads provider output. Keeping the answer out of
+      // the event stream would leave downstream roles with only lifecycle text.
+      if (text.length > 0) {
+        instance.outputTexts.push(text);
+        pushEvent(instance, {
+          taskId: instance.taskId,
+          executionEpoch: instance.executionEpoch,
+          kind: 'output',
+          summary: text,
+          evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/submit/${instance.runtimeId}/${messageId}`, instance.scope, []),
+        });
+      }
+      // `terminal` is this codebase's terminal event kind for an agent driver.
+      // Consumers stop their observation loop on exactly this kind.
       pushEvent(instance, {
         taskId: instance.taskId,
         executionEpoch: instance.executionEpoch,
-        kind: 'execution.terminal',
-        summary: `acp turn settled: ${result.stopReason}`,
+        kind: 'terminal',
+        terminalState: terminalStateFor(result.stopReason),
         evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/submit/${instance.runtimeId}/${messageId}`, instance.scope, []),
-        terminalState: result.stopReason === 'end_turn' ? 'succeeded'
-          : result.stopReason === 'cancelled' ? 'cancelled'
-          : result.stopReason === 'max_tokens' ? 'failed'
-          : result.stopReason === 'refusal' ? 'blocked'
-          : 'unknown',
       });
       finishEvents(instance);
       return {
@@ -431,28 +424,23 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       }
       instance.closed = closeResult.closed;
       finishEvents(instance);
+      const scope = instance.scope;
+      const closeEvidence = evidence(OWNER, `acp/${runtime.runtime}/close/${instance.runtimeId}/${instance.executionEpoch}`, scope, []);
       if (closeResult.closed && instance.stopRequested) {
-        return {
-          state: 'stopped',
-          evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/close/${instance.runtimeId}/${instance.executionEpoch}`, instance.scope, []),
-        };
+        return { state: 'stopped', evidenceRefs: closeEvidence };
       }
       if (closeResult.closed && instance.lastFailure !== undefined) {
-        return {
-          state: 'failed',
-          evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/close/${instance.runtimeId}/${instance.executionEpoch}`, instance.scope, []),
-        };
+        return { state: 'failed', evidenceRefs: closeEvidence };
       }
       if (closeResult.closed) {
-        return {
-          state: 'succeeded',
-          evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/close/${instance.runtimeId}/${instance.executionEpoch}`, instance.scope, []),
-        };
+        // The closure must agree with the terminal state the turn already
+        // reported. A truncated or refused turn is not a success.
+        const terminalState = instance.lastStopReason === undefined
+          ? 'succeeded'
+          : terminalStateFor(instance.lastStopReason);
+        return { state: terminalState === 'succeeded' ? 'succeeded' : terminalState, evidenceRefs: closeEvidence };
       }
-      return {
-        state: 'unknown',
-        evidenceRefs: evidence(OWNER, `acp/${runtime.runtime}/close/${instance.runtimeId}/${instance.executionEpoch}`, instance.scope, []),
-      };
+      return { state: 'unknown', evidenceRefs: closeEvidence };
     },
   };
 }

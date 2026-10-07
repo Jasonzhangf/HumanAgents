@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { id, type BusinessPayload, type OperationId } from '../../../packages/contracts/src/index.js';
+import { id, type BusinessPayload, type CycleId, type OperationId, type OrganId } from '../../../packages/contracts/src/index.js';
 import {
   ACP_JSONRPC,
   ACP_PROTOCOL_VERSION,
@@ -43,13 +43,20 @@ const epoch = 1;
 
 const submitPayload: BusinessPayload = { prompt: 'reply with exactly POGS' };
 
-function startInput(overrides: { readonly runtimeId?: string; readonly assignmentId?: string; readonly operationId?: OperationId } = {}) {
+function startInput(overrides: {
+  readonly runtimeId?: string;
+  readonly assignmentId?: string;
+  readonly operationId?: OperationId;
+  readonly organId?: OrganId;
+  readonly cycleId?: CycleId;
+} = {}) {
   return {
     runtimeId: overrides.runtimeId ?? 'runtime-a',
     taskId,
     executionEpoch: epoch,
     assignmentId: overrides.assignmentId ?? assignmentId,
-    organId: id('organ', 'organ-a'),
+    organId: overrides.organId ?? id('organ', 'organ-a'),
+    cycleId: overrides.cycleId ?? id('cycle', 'task-a-cycle-1'),
     operationId: overrides.operationId ?? operationId,
   };
 }
@@ -132,6 +139,27 @@ test('ACP driver requires HumanAgent-owned identity before opening a session', a
   );
 });
 
+test('ACP driver evidence scope comes from the app, never minted by the driver', async () => {
+  const runtime = makeFakeRuntime();
+  const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
+  const handle = await driver.start(startInput({
+    organId: id('organ', 'organ-a'),
+    cycleId: id('cycle', 'task-a-cycle-1'),
+    operationId,
+  }));
+  const output = await driver.submit({ taskId, executionEpoch: epoch, assignmentId, payload: submitPayload });
+
+  const scopes = output.evidenceRefs.map((ref) => ref.scope);
+  assert.equal(scopes.length, 1);
+  for (const scope of scopes) {
+    assert.equal(scope.organId.value, 'organ-a');
+    assert.equal(scope.taskId?.value, 'task-a');
+    assert.equal(scope.cycleId?.value, 'task-a-cycle-1');
+    assert.equal(scope.operationId?.value, 'operation-a');
+  }
+  await driver.settle(handle);
+});
+
 test('ACP driver returns the runtime output and settles as succeeded', async () => {
   const runtime = makeFakeRuntime();
   const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
@@ -150,7 +178,8 @@ test('ACP driver returns the runtime output and settles as succeeded', async () 
   assert.equal(closure.state, 'succeeded');
 
   const events = await eventsPromise;
-  assert.deepEqual(events.map((event) => event.kind), ['execution.started', 'execution.terminal']);
+  assert.deepEqual(events.map((event) => event.kind), ['output', 'terminal']);
+  assert.equal(events[0]!.summary, 'POGS');
   assert.equal(events[1]!.terminalState, 'succeeded');
 });
 test('ACP driver surfaces a submit failure as a failure, never as success', async () => {
@@ -259,13 +288,17 @@ test('ACP session id stays evidence only and is never a runtime id', async () =>
  * instead wait for `settle`, which is not the real consumption pattern.
  */
 async function collectEvents(
-  driver: { readonly observe: (input: { readonly runtimeId: string }) => AsyncIterable<{ readonly kind: string; readonly terminalState?: string }> },
+  driver: { readonly observe: (input: { readonly runtimeId: string }) => AsyncIterable<{ readonly kind: string; readonly summary?: string; readonly terminalState?: string }> },
   runtimeId: string,
-): Promise<Array<{ readonly kind: string; readonly terminalState?: string }>> {
-  const events: Array<{ readonly kind: string; readonly terminalState?: string }> = [];
+): Promise<Array<{ readonly kind: string; readonly summary?: string; readonly terminalState?: string }>> {
+  const events: Array<{ readonly kind: string; readonly summary?: string; readonly terminalState?: string }> = [];
   for await (const event of driver.observe({ runtimeId })) {
-    events.push({ kind: event.kind, ...(event.terminalState === undefined ? {} : { terminalState: event.terminalState }) });
-    if (event.terminalState !== undefined) break;
+    events.push({
+      kind: event.kind,
+      ...(event.summary === undefined ? {} : { summary: event.summary }),
+      ...(event.terminalState === undefined ? {} : { terminalState: event.terminalState }),
+    });
+    if (event.kind === 'terminal') break;
   }
   return events;
 }
@@ -306,7 +339,7 @@ function makeFakeRuntime(
 
     async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {
       if (options.loadFailure) throw options.loadFailure;
-      return { sessionId: 'session-resumed', resumable: false };
+      return { sessionId: 'session-resumed' };
     },
 
     async submit(input: AcpRuntimeSubmitInput): Promise<AcpRuntimeSubmitResult> {

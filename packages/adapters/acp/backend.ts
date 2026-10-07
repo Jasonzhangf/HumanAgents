@@ -8,8 +8,7 @@
  *
  * A closed backend fails every subsequent call with `transport-closed`; a
  * JSON-RPC error response fails the matching call with the server's error
- * code. Unexpected stderr is captured into the evidence locator path but never
- * parsed as a control signal.
+ * code. stderr is never parsed as a control signal.
  */
 import { spawn, type ChildProcessLike } from 'node:child_process';
 import {
@@ -37,8 +36,6 @@ export interface AcpStdioBackendOptions extends AcpStdioSpawnOptions {
   readonly timeoutMs?: number;
   /** Called for every validated `session/update` notification. */
   readonly onUpdate?: (update: AcpSessionUpdateNotification) => void;
-  /** Called with stderr chunks for evidence. */
-  readonly onStderr?: (chunk: string) => void;
 }
 
 /**
@@ -69,7 +66,6 @@ export class AcpStdioBackendError extends Error {
 export class AcpStdioBackend {
   readonly process: ChildProcessLike;
   readonly onUpdate?: (update: AcpSessionUpdateNotification) => void;
-  readonly onStderr?: (chunk: string) => void;
   private readonly timeoutMs: number;
   private readonly lock = new WriteLock();
   private readonly pending = new Map<string | number, {
@@ -79,27 +75,23 @@ export class AcpStdioBackend {
   }>();
   private readonly stdoutBuffer: string[] = [];
   private closed = false;
-  private readonly stderrTail: string[] = [];
 
   constructor(options: AcpStdioBackendOptions) {
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.onUpdate = options.onUpdate;
-    this.onStderr = options.onStderr;
     this.process = spawn(options.command, options.args ? [...options.args] : [], {
       cwd: options.cwd,
       env: options.env ? { ...process.env, ...options.env } : process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.process.stdout.on('data', (chunk: unknown) => this.consumeStdout(toUtf8(chunk)));
-    this.process.stderr.on('data', (chunk: unknown) => {
-      const text = toUtf8(chunk);
-      this.stderrTail.push(text);
-      if (this.stderrTail.length > 16) this.stderrTail.shift();
-      this.onStderr?.(text);
-    });
     this.process.on('error', (error: Error) => {
       this.failAll(new AcpStdioBackendError('transport-failure', `ACP backend spawn failed: ${error.message}`, error));
     });
+    // A write racing the server's exit raises EPIPE on the stream. Without a
+    // listener that error is uncaught and takes the process down with it;
+    // closing the connection is the only outcome a caller can take.
+    this.process.stdin.on('error', () => {});
     this.process.on('close', (code: number | null, signal: string | null) => {
       this.closed = true;
       this.failAll(new AcpStdioBackendError(
@@ -107,10 +99,6 @@ export class AcpStdioBackend {
         `ACP backend exited (code=${code}, signal=${signal ?? 'none'})`,
       ));
     });
-  }
-
-  get stderrEvidence(): string {
-    return this.stderrTail.join('').slice(-2000);
   }
 
   /**

@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { AgentDriverRef, RuntimePaths } from '../../config/src/index.js';
+import { AGENT_DRIVER_REFS, type AgentDriverRef, type RuntimePaths } from '../../config/src/index.js';
 import type { OperationId, ScopeRef, TaskId } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
 
@@ -55,7 +55,12 @@ function validateRunManifest(value: unknown, expectedSessionId: string): RunMani
   if (value.schemaVersion !== 1) return corrupt('run manifest schema version is invalid');
   if (value.sessionId !== expectedSessionId) return corrupt('run manifest session identity does not match its file');
   if (typeof value.agentId !== 'string' || !ID_PATTERN.test(value.agentId)) return corrupt('run manifest agent identity is invalid');
-  if (value.driverRef !== 'fake' && value.driverRef !== 'dsh' && value.driverRef !== 'rcc') return corrupt('run manifest driver is invalid');
+  // The enabled driverRef set has one owner. A manifest written by this host
+  // must stay readable by the same host, so this check derives from that set
+  // instead of repeating it.
+  if (typeof value.driverRef !== 'string' || !(AGENT_DRIVER_REFS as readonly string[]).includes(value.driverRef)) {
+    return corrupt('run manifest driver is invalid');
+  }
   if (typeof value.runtimeId !== 'string' || !ID_PATTERN.test(value.runtimeId)) {
     return corrupt('run manifest runtime identity is invalid');
   }

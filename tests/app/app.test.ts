@@ -6379,3 +6379,82 @@ test('an old lock handle cannot remove a replacement owner lock', async () => {
   await assert.rejects(() => first.release(), /owned by another runtime/);
   await second.release();
 });
+
+test('ACP opencode driver commits a checkpoint and a run manifest through the real run entry', async () => {
+  // The whole point of this test is that it never composes the driver directly:
+  // it edits the config a user edits, then calls the same entry the CLI calls.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-entry-');
+  const configPath = join(controlRoot, 'config.toml');
+  const stub = join(process.cwd(), 'tests', 'app', 'acp-stub-server.mjs');
+  let config = await readFile(configPath, 'utf8');
+  // The interaction agent is the default agent, so it is the one that runs.
+  // Only its identity changes and its driver is switched to ACP; the execution
+  // section gains the opencode entry. The shipped config supplies everything
+  // else, so this test edits the config a user edits instead of restating it.
+  config = config.replace('agentId = "interaction-default"', 'agentId = "interaction-acp"');
+  config = config.replace('driverRef = "fake"', 'driverRef = "opencode"');
+  config = config.replace('defaultAgent = "interaction-default"', 'defaultAgent = "interaction-acp"');
+  config = config.replace('reviewRequired = true', 'reviewRequired = false');
+  config = config.replace(
+    'stopTimeoutMs = 30000',
+    ['stopTimeoutMs = 20000', '', '[execution.opencode]', `command = "${process.execPath}"`, `args = ${JSON.stringify([stub, 'POGS'])}`, 'timeoutMs = 20000', ''].join('\n'),
+  );
+  await writeFile(configPath, config, 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  try {
+    const result = await runAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-acp-entry',
+      plan: 'default',
+      prompt: 'reply with exactly POGS',
+    });
+
+    // The committed checkpoint is the acceptance artifact: it proves the driver
+    // evidence carried the app scope, so the commit was allowed.
+    assert.equal(result.checkpoint.outcome, 'succeeded');
+    assert.equal(result.driverRef, 'opencode');
+    assert.equal(result.checkpoint.scope.organId.value, 'agent-interaction-acp');
+    assert.equal(result.checkpoint.scope.cycleId?.value, 'session-acp-entry-cycle-1');
+    assert.equal(result.checkpoint.scope.operationId?.value, result.operationId.value);
+    assert.match(await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8'), /"outcome":"succeeded"/);
+
+    // The real event vocabulary reached the app: an output chunk carrying the
+    // answer, then the terminal event that ends the observation loop.
+    assert.deepEqual(result.receipt.observedKinds, ['output', 'terminal']);
+    assert.equal(result.receipt.observedEvents[0]?.summary, 'POGS');
+    assert.equal(result.receipt.closure.state, 'succeeded');
+    const terminal = result.semanticEvents.at(-1);
+    assert.equal(terminal?.kind, 'execution.terminal');
+    assert.equal(terminal?.state, 'succeeded');
+    assert.equal(terminal?.terminalPhase, 'final');
+
+    // A run manifest must be readable for a driver outside the original
+    // hardcoded set; the CLI resume path depends on this.
+    const manifest = await readRunManifest(paths, 'session-acp-entry');
+    assert.equal(manifest.driverRef, 'opencode');
+    assert.equal(manifest.taskId.value, result.taskId.value);
+    assert.equal(manifest.operationId.value, result.operationId.value);
+
+    const resumed = await resumeAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-acp-entry',
+      plan: 'default',
+      prompt: 'reply with exactly POGS',
+      taskId: manifest.taskId,
+      cycleId: manifest.cycleId,
+      scope: manifest.scope,
+      executionEpoch: manifest.executionEpoch,
+      directiveRevision: manifest.directiveRevision,
+      agentId: manifest.agentId,
+      driverRef: manifest.driverRef,
+    });
+    assert.equal(resumed.recovered?.checkpoint.id.value, result.checkpoint.id.value);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
