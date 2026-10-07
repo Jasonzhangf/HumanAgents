@@ -3,11 +3,34 @@ import {
   createRuntimeApi,
   element,
   formatTime,
+  isAuthSessionError,
+  loginHref,
   queryParam,
   stateTone,
 } from './runtime-api.js'
 
 export const api = createRuntimeApi()
+
+// The path the browser is on now. Pairing must return the user to the entry that
+// actually failed instead of dropping them on a default page.
+function currentEntryPath() {
+  return `${location.pathname}${location.search}`
+}
+
+/**
+ * A typed session rejection says "pair this browser", so the surface that shows
+ * it must carry a real link to the page that pairs. The runtime's own
+ * code/owner/message/nextAction are preserved verbatim; the link only adds the
+ * entry the user was trying to reach.
+ */
+export function appendPairingEntry(target, error) {
+  if (!isAuthSessionError(error)) return false
+  const link = element('a', '打开登录页并配对这台浏览器', 'auth-pair-link')
+  link.href = loginHref(error, currentEntryPath())
+  link.dataset.authPairLink = 'true'
+  target.append(link)
+  return true
+}
 
 export async function loadRuntimeStatus() {
   try {
@@ -26,6 +49,7 @@ export function renderRuntimeStatus(target, status, error) {
       element('strong', 'Runtime 未连接'),
       element('span', ` ${error.message} · ${error.ownerId} · ${error.nextAction}`),
     )
+    appendPairingEntry(target, error)
     return
   }
   target.dataset.tone = status.state === 'ready' ? 'success' : 'warning'
@@ -90,6 +114,23 @@ export function showError(target, error) {
     element('strong', error.code || 'request.failed'),
     element('p', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`),
   )
+  appendPairingEntry(target, error)
+}
+
+/**
+ * The page-level failure banner. A business read can reject before any status
+ * projection renders, and when that rejection is a typed session error the page
+ * must still offer the real pairing entry instead of leaving the runtime's
+ * "open the login page" instruction as dead text.
+ */
+export function renderPageError(target, error, fallbackNext = 'check runtime') {
+  clearNode(target)
+  target.dataset.tone = 'danger'
+  target.append(element(
+    'span',
+    `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || fallbackNext}`,
+  ))
+  appendPairingEntry(target, error)
 }
 
 export function taskIdFromQuery(required = true) {

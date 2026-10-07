@@ -1,9 +1,11 @@
 import {
   api,
+  appendPairingEntry,
   element,
   formatTime,
   loadRuntimeStatus,
   makePageShell,
+  renderPageError,
   renderRuntimeStatus,
   taskDashboardHref,
 } from './runtime-shell.js'
@@ -696,8 +698,7 @@ async function refreshLists() {
     renderTaskLists(dashboard, tasks)
     renderPlanList(scheduler)
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+    renderPageError(status, error)
   }
 }
 
@@ -745,6 +746,7 @@ function renderPlanList(scheduler) {
       `读取执行计划失败 · ${scheduler.__error.message} · owner=${scheduler.__error.ownerId || 'unknown'} · next=${scheduler.__error.nextAction || 'inspect the runtime error'}`,
       'empty',
     ))
+    appendPairingEntry(panel, scheduler.__error)
   } else if (scheduler?.issue) {
     panel.append(element('p', `计划巡逻上报：${scheduler.issue.code} · ${scheduler.issue.message} · next=${scheduler.issue.nextAction}`, 'empty'))
   } else if (plans.length === 0) {
@@ -874,7 +876,9 @@ function openEditDialog(row) {
       await refreshLists()
     } catch (error) {
       save.disabled = false
-      err.textContent = `${error.message || error} · owner=${error.ownerId || 'unknown'}`
+      clearNode(err)
+      err.append(element('span', `${error.message || error} · owner=${error.ownerId || 'unknown'}`))
+      appendPairingEntry(err, error)
     }
   })
   cancel.addEventListener('click', () => dialog.close())

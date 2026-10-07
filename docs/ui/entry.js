@@ -1,11 +1,13 @@
 import {
   api,
+  appendPairingEntry,
   clearNode,
   element,
   formatTime,
   loadRuntimeStatus,
   makePageShell,
   observationHref,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
@@ -106,6 +108,7 @@ function setEntryError(error) {
     element('strong', error.code || 'request.failed'),
     element('p', `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`),
   )
+  appendPairingEntry(panel, error)
 }
 
 function renderDraft(snapshot) {
@@ -250,6 +253,7 @@ async function refreshQueue() {
     if (panel) {
       clearNode(panel)
       panel.append(element('p', `${error.message} · owner=${error.ownerId} · next=${error.nextAction}`, 'empty'))
+      appendPairingEntry(panel, error)
     }
   }
 }
@@ -501,8 +505,7 @@ async function executeSubmission(submission, clarificationAnswer) {
 function handleSubmissionError(error, button) {
   appendCardError(error)
   setEntryError(error)
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`
+  renderPageError(status, error, 'inspect the runtime error')
   if (button) button.textContent = interactionId ? '重试本次提交' : '重试提交'
 }
 
@@ -689,6 +692,5 @@ async function load() {
 }
 
 void load().catch((error) => {
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  renderPageError(status, error)
 })

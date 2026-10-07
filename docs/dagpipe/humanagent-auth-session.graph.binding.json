@@ -1,0 +1,45 @@
+{
+  "graph": "humanagent-auth-session",
+  "operator": {
+    "operator": "humanagent-auth-session",
+    "operator_version": "1"
+  },
+  "nodes": {
+    "public_entry": {
+      "ownerPath": "docs/ui/runtime-shell.js",
+      "ownerRel": "docs/ui/runtime-shell.js"
+    },
+    "session_check": {
+      "ownerPath": "docs/ui/login.js",
+      "ownerRel": "docs/ui/login.js"
+    },
+    "unauthenticated_rejection": {
+      "ownerPath": "packages/app/src/ui-runtime/server.ts",
+      "ownerRel": "packages/app/src/ui-runtime/server.ts"
+    },
+    "login_surface": {
+      "ownerPath": "docs/ui/login.html",
+      "ownerRel": "docs/ui/login.html"
+    },
+    "pair_submission": {
+      "ownerPath": "docs/ui/login.js",
+      "ownerRel": "docs/ui/login.js"
+    },
+    "pair_failure_terminal": {
+      "ownerPath": "docs/ui/login.js",
+      "ownerRel": "docs/ui/login.js"
+    },
+    "session_cookie": {
+      "ownerPath": "packages/app/src/ui-runtime/access-control.ts",
+      "ownerRel": "packages/app/src/ui-runtime/access-control.ts"
+    },
+    "authenticated_runtime_read": {
+      "ownerPath": "docs/ui/runtime-api.js",
+      "ownerRel": "docs/ui/runtime-api.js"
+    },
+    "render_auth_terminal": {
+      "ownerPath": "docs/ui/runtime-shell.js",
+      "ownerRel": "docs/ui/runtime-shell.js"
+    }
+  }
+}

@@ -37,6 +37,7 @@
     "test:provider": "pnpm build:contracts && pnpm build:app && tsc -p tests/adapters/provider/tsconfig.json && node --test dist/tests-provider/tests/adapters/provider/provider-adapter.test.js dist/tests-provider/tests/adapters/provider/provider-agent-driver.test.js dist/tests-provider/tests/adapters/provider/provider-replay.test.js dist/tests-provider/tests/adapters/provider/rcc-v3-transport.test.js",
     "test:ui": "pnpm build:contracts && pnpm build:app && tsc -p tests/ui/tsconfig.json && node --test dist/tests/tests/ui/ui.test.js dist/tests/tests/ui/runtime-projection.test.js dist/tests/tests/ui/interaction-projection-public.test.js",
     "proof:observation-drawer": "node tests/ui/interaction-observation-drawer-browser.mjs",
+    "proof:auth-login": "node tests/ui/auth-login-browser.mjs",
     "proof:ui-provider-loop": "node tests/app/real-ui-provider-loop.mjs",
     "proof:failure-cleanup": "node tests/app/real-failure-cleanup-proof.mjs",
     "proof:cordis-host-closeout": "node tests/app/real-cordis-host-closeout.mjs",

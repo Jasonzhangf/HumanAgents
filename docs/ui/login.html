@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent browser pairing entry" />
+    <title>HumanAgent · 浏览器配对</title>
+    <link rel="stylesheet" href="./runtime.css" />
+    <link rel="stylesheet" href="./login.css" />
+  </head>
+  <body>
+    <main id="main-content" class="page" data-login-page="true">
+      <section class="page-heading">
+        <div>
+          <p class="eyebrow">浏览器会话</p>
+          <h1>配对这台浏览器</h1>
+          <p class="lede">
+            运行时用一次性配对码把浏览器会话绑定到本机控制面。配对成功后，你会回到刚才请求的那个页面。
+          </p>
+        </div>
+        <span class="section-meta" data-auth-session-state>检查会话中…</span>
+      </section>
+
+      <div class="status-banner" role="status" aria-live="polite" data-auth-status>
+        正在检查浏览器会话…
+      </div>
+
+      <section class="login-card" aria-labelledby="pair-form-title">
+        <h2 id="pair-form-title">一次性配对码</h2>
+        <form data-pair-form novalidate>
+          <label class="login-field">
+            <span>配对码</span>
+            <input
+              name="code"
+              type="text"
+              autocomplete="one-time-code"
+              spellcheck="false"
+              data-pair-code
+              aria-describedby="pair-hint"
+            />
+          </label>
+          <p class="login-hint" id="pair-hint">
+            在运行 HumanAgent 的机器上执行 <code>humanagent pair</code>，把返回的配对码填到这里。
+            配对码只生效一次，默认两分钟后过期。
+          </p>
+          <button class="button button--primary" type="submit" data-pair-submit>配对并进入</button>
+        </form>
+      </section>
+
+      <section
+        class="login-card login-card--error"
+        data-auth-error
+        hidden
+        aria-labelledby="pair-error-title"
+      >
+        <h2 id="pair-error-title">配对被拒绝</h2>
+        <dl class="login-error-detail" data-auth-error-detail></dl>
+        <p class="login-hint" data-auth-error-retry hidden></p>
+      </section>
+
+      <p class="login-hint">
+        配对码属于控制面：它只经 <code>POST /api/auth/pair</code> 交给运行时，不会写进任何业务请求。
+      </p>
+    </main>
+    <script type="module" src="./login.js"></script>
+  </body>
+</html>
