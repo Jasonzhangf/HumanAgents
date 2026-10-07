@@ -6,6 +6,7 @@ import {
   loadRuntimeStatus,
   makePageShell,
   observationHref,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
@@ -501,8 +502,7 @@ async function executeSubmission(submission, clarificationAnswer) {
 function handleSubmissionError(error, button) {
   appendCardError(error)
   setEntryError(error)
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`
+  renderPageError(status, error, 'inspect the runtime error')
   if (button) button.textContent = interactionId ? '重试本次提交' : '重试提交'
 }
 
@@ -679,6 +679,5 @@ async function load() {
 }
 
 void load().catch((error) => {
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  renderPageError(status, error)
 })

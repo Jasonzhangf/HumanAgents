@@ -11,6 +11,44 @@ export const RUNTIME_EVENT_KINDS = Object.freeze([
   'attention.resolved',
 ])
 
+// The runtime gates every business read behind a browser session. These are the
+// three typed codes it returns when that session is absent, expired or invalid,
+// and they are the only errors whose nextAction tells the user to pair this
+// browser. They name the entry the shell must offer.
+export const AUTH_SESSION_CODES = Object.freeze([
+  'auth.session.missing',
+  'auth.session.expired',
+  'auth.session.invalid',
+])
+
+export function isAuthSessionError(error) {
+  return typeof error?.code === 'string' && AUTH_SESSION_CODES.includes(error.code)
+}
+
+// Only a same-origin absolute path is accepted, so the pairing link can never be
+// turned into an open redirect.
+export function sameOriginPath(value, fallback = '/dashboard.html') {
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return fallback
+  return trimmed
+}
+
+// The pairing entry, carrying the entry that failed and the typed rejection the
+// runtime produced for it. The login page renders those exact fields, so the
+// user sees the runtime's own code/owner/message/nextAction instead of a dead
+// instruction to open a page that does not exist.
+export function loginHref(error, next) {
+  const params = new URLSearchParams({ next: sameOriginPath(next) })
+  if (isAuthSessionError(error)) {
+    params.set('authCode', error.code)
+    params.set('authOwner', error.ownerId ?? '')
+    params.set('authMessage', error.message ?? '')
+    params.set('authNext', error.nextAction ?? '')
+  }
+  return `./login.html?${params.toString()}`
+}
+
 export class RuntimeApiError extends Error {
   constructor(body, status) {
     // The runtime already shapes the original cause chain into a bounded body
@@ -43,6 +81,13 @@ export function createRuntimeApi(options = {}) {
 
   return {
     status: () => request('/api/runtime/status'),
+    // The only two public auth edges the browser is allowed to use. The pairing
+    // challenge and the supervisor token stay in the control plane.
+    authSession: () => request('/api/auth/session'),
+    authPair: (code) => request('/api/auth/pair', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
     dashboard: () => request('/api/dashboard'),
     listTasks: () => request('/api/tasks'),
     updateTask: (taskId, input) => request(`/api/tasks/${encodeURIComponent(taskId)}`, {

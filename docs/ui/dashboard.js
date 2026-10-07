@@ -4,6 +4,7 @@ import {
   formatTime,
   loadRuntimeStatus,
   makePageShell,
+  renderPageError,
   renderRuntimeStatus,
   taskDashboardHref,
 } from './runtime-shell.js'
@@ -696,8 +697,7 @@ async function refreshLists() {
     renderTaskLists(dashboard, tasks)
     renderPlanList(scheduler)
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+    renderPageError(status, error)
   }
 }
 

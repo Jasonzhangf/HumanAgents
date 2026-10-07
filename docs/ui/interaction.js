@@ -1,4 +1,5 @@
 import { createRuntimeApi, clearNode, element, formatTime, stateTone } from './runtime-api.js'
+import { appendPairingEntry } from './runtime-shell.js'
 
 const api = createRuntimeApi()
 
@@ -82,6 +83,7 @@ function showServerResult(result) {
 function showError(error) {
   const message = `${readable(error.message, 'Runtime API request failed')} · owner=${readable(error.ownerId, 'unknown')} · next=${readable(error.nextAction, 'inspect runtime error')}`
   setFeedback(message)
+  appendPairingEntry(feedback, error)
   diagnostic.textContent = message
   showServerResult({ error: message, code: readable(error.code, 'runtime.request.failed') })
 }

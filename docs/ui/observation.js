@@ -4,6 +4,7 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskIdFromQuery,
@@ -671,8 +672,7 @@ async function load(scopeRef) {
     currentScopeRef = scopeRef
     renderObservation(projection)
   } catch (error) {
-    status.dataset.tone = 'danger'
-    status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+    renderPageError(status, error)
   }
 }
 

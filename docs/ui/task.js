@@ -7,6 +7,7 @@ import {
   makePageShell,
   observationHref,
   queryParam,
+  renderPageError,
   renderRuntimeStatus,
   stateTone,
   taskDashboardHref,
@@ -651,6 +652,5 @@ async function load() {
 }
 
 void load().catch((error) => {
-  status.dataset.tone = 'danger'
-  status.textContent = `${error.message} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'check runtime'}`
+  renderPageError(status, error)
 })
