@@ -8,7 +8,7 @@
  * speaks. Only the model answer is scripted, so the test exercises the real
  * transport, the real driver bookkeeping, and the real checkpoint commit.
  *
- * Usage: node acp-stub-server.mjs <answer-text> [hold] [hold-marker-path] [cancel-marker-path]
+ * Usage: node acp-stub-server.mjs <answer-text> [hold] [hold-marker-path] [cancel-marker-path] [exit-after-ms]
  *
  * `hold` makes session/prompt stay in flight until session/cancel arrives. The
  * cancel then resolves the held turn with stopReason `cancelled`, which is what
@@ -19,6 +19,11 @@
  *
  * `cancel-marker-path` names a file that is created when session/cancel is
  * received. A test reads that file to prove the cancel reached this server.
+ *
+ * `exit-after-ms` bounds this server's lifetime. A held turn only ends when the
+ * client closes the session, so without a bound a broken stop path would leave
+ * this process running and hold the test runner open. A working stop path
+ * finishes far below any bound a test would set.
  */
 
 import { writeFileSync } from 'node:fs';
@@ -27,6 +32,7 @@ const answer = process.argv[2] ?? 'POGS';
 const holdPrompts = process.argv[3] === 'hold';
 const holdMarker = process.argv[4];
 const cancelMarker = process.argv[5];
+const exitAfterMs = Number(process.argv[6]);
 let buffer = '';
 let sessionSeq = 0;
 /** The prompt frames that are still in flight, by JSON-RPC request id. */
@@ -137,3 +143,7 @@ process.stdin.on('data', (chunk) => {
 
 // Exit when the client closes stdin; this is the real process lifecycle.
 process.stdin.on('end', () => process.exit(0));
+
+if (Number.isFinite(exitAfterMs) && exitAfterMs > 0) {
+  setTimeout(() => process.exit(0), exitAfterMs);
+}

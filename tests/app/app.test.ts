@@ -6548,6 +6548,11 @@ test('ACP opencode driver commits a stopped checkpoint through the real stop ent
   // prove the cancel reached the engine instead of only observing the outcome.
   const cancelMarker = join(stubDir, 'cancel-received');
   const stub = join(process.cwd(), 'tests', 'app', 'acp-stub-server.mjs');
+  // A held turn only ends when the client closes the session. If the stop path
+  // regresses, this bound makes the engine exit on its own, so the test fails
+  // with a message instead of holding the test runner open. The real stop path
+  // finishes in well under a second.
+  const stubLifetimeMs = 15_000;
 
   let config = await readFile(configPath, 'utf8');
   config = config.replace('agentId = "interaction-default"', 'agentId = "interaction-acp-stop"');
@@ -6556,7 +6561,7 @@ test('ACP opencode driver commits a stopped checkpoint through the real stop ent
   config = config.replace('reviewRequired = true', 'reviewRequired = false');
   config = config.replace(
     'stopTimeoutMs = 30000',
-    ['stopTimeoutMs = 20000', '', '[execution.opencode]', `command = "${process.execPath}"`, `args = ${JSON.stringify([stub, 'POGS', 'hold', holdMarker, cancelMarker])}`, 'timeoutMs = 20000', ''].join('\n'),
+    ['stopTimeoutMs = 20000', '', '[execution.opencode]', `command = "${process.execPath}"`, `args = ${JSON.stringify([stub, 'POGS', 'hold', holdMarker, cancelMarker, String(stubLifetimeMs)])}`, 'timeoutMs = 20000', ''].join('\n'),
   );
   await writeFile(configPath, config, 'utf8');
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
