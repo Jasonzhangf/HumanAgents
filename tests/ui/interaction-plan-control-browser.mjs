@@ -715,6 +715,63 @@ async function findPlanLinkedTask(auth, subscriptionId, timeoutMs = 60_000) {
   }
 }
 
+/**
+ * The same link lookup, but absence is a legitimate answer: a plan that has not
+ * dispatched anything has no task bound to it, and that is exactly the fact a
+ * suspended plan has to prove at its due time.
+ */
+async function findPlanLinkedTaskOrUndefined(auth, subscriptionId, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = taskRowsOf(await auth.json('/api/tasks'));
+    for (const row of rows) {
+      const taskIdValue = row.taskId?.value;
+      if (taskIdValue === undefined) continue;
+      const dashboard = await auth.json(`/api/tasks/${encodeURIComponent(taskIdValue)}/dashboard`);
+      if (dashboard.plan?.subscriptionId === subscriptionId) return { taskId: taskIdValue, plan: dashboard.plan };
+    }
+    if (Date.now() >= deadline) return undefined;
+    await sleep(250);
+  }
+}
+
+/**
+ * The plan list renders one section per persisted plan, so a read or a click
+ * has to name the plan it belongs to. Plan A's result must never be read as
+ * plan B's.
+ */
+function readScopedPlanSurface(page, subscriptionId) {
+  return page.evaluate((id) => {
+    const section = [...document.querySelectorAll('[data-plan-section]')]
+      .find((node) => node.dataset.planSubscription === id);
+    const control = (action) => section?.querySelector(`[data-plan-action="${action}"]`);
+    return {
+      sectionPresent: Boolean(section),
+      subscriptionId: section?.dataset.planSubscription ?? '',
+      stateText: section?.querySelector('[data-plan-state]')?.textContent ?? '',
+      stateValue: section?.querySelector('[data-plan-state]')?.dataset.planState ?? '',
+      modeText: section?.querySelector('[data-plan-mode]')?.textContent ?? '',
+      modeValue: section?.querySelector('[data-plan-mode]')?.dataset.planMode ?? '',
+      nextDueText: section?.querySelector('[data-plan-next-due]')?.textContent ?? '',
+      nextDueValue: section?.querySelector('[data-plan-next-due]')?.dataset.planNextDue ?? '',
+      statusText: section?.querySelector('[data-plan-status]')?.textContent ?? '',
+      controls: {
+        pause: Boolean(control('pause')),
+        resume: Boolean(control('resume')),
+        'cancel-future': Boolean(control('cancel-future')),
+      },
+      pageText: document.body.innerText,
+    };
+  }, subscriptionId);
+}
+
+async function clickScopedControl(page, subscriptionId, action) {
+  const locator = page.locator(`[data-plan-section][data-plan-subscription="${subscriptionId}"] [data-plan-action="${action}"]`);
+  if (await locator.count() === 0) return false;
+  await locator.first().click();
+  return true;
+}
+
 async function sectionReal(browser, artifactDir, root) {
   const binding = {
     attemptId: 'plan-control-proof',
@@ -835,8 +892,158 @@ async function sectionReal(browser, artifactDir, root) {
         && cancelledPlan.state === 'cancelled',
       { surface: cancelled, plan: cancelledPlan });
 
+    // The served pages raise no error of their own across the whole real
+    // pause/resume/cancel-future sequence. This is evaluated here, before the
+    // deliberate rejection below, because that rejection is a real 409 and the
+    // browser logs every non-2xx response as a console error.
     observe('real page errors', [...pageErrors]);
     record('real plan-control page raises no page errors', pageErrors.length === 0, pageErrors);
+
+    // The already-claimed in-flight execution the control cancelled must still
+    // reach its durable terminal and settle: `cancel-future` destroys the future
+    // schedule, it does not revoke an execution that was already authorized for
+    // the claimed epoch.
+    const inFlightSettled = await waitForSchedulerPlan(
+      auth,
+      (plan) => plan.subscriptionId === scheduledSubscriptionId && (plan.settlements ?? []).length > 0,
+      180_000,
+    );
+    observe('real cancel-future in-flight settlement', inFlightSettled);
+    record('real cancel-future leaves the already-claimed in-flight execution settling',
+      inFlightSettled.state === 'cancelled' && (inFlightSettled.settlements ?? []).length >= 1,
+      inFlightSettled);
+
+    // --- a real task with no persisted plan renders no plan section ----------
+    const planLessCreated = await auth.json('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'plan-control-proof plan-less task', directive: 'report the current date' }),
+    });
+    const planLessTaskId = planLessCreated.taskId?.value ?? planLessCreated.taskId;
+    const planLessRead = await auth.json(`/api/tasks/${encodeURIComponent(planLessTaskId)}/dashboard`);
+    observe('real plan-less task read', { taskId: planLessTaskId, plan: planLessRead.plan });
+    record('a real task with no persisted plan has no plan in its dashboard read',
+      typeof planLessTaskId === 'string' && planLessTaskId !== '' && planLessRead.plan === undefined,
+      { taskId: planLessTaskId, plan: planLessRead.plan });
+    await page.goto(`${base}/task-dashboard.html?task=${encodeURIComponent(planLessTaskId)}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.page-heading', { timeout: 30_000 });
+    await sleep(500);
+    const planLessSurface = await readPlanSurface(page);
+    observe('real plan-less surface', planLessSurface);
+    record('a real plan-less task renders no plan section on the served page',
+      planLessSurface.sectionPresent === false && !planLessSurface.pageText.includes('执行计划'),
+      planLessSurface);
+
+    // --- a real plan with no task yet: the scheduler plan list, the dispatch
+    //     gating of a suspended plan, and the typed rejection a stale control
+    //     earns from the production edge --------------------------------------
+    const futureStartAt = new Date(Date.now() + 15_000).toISOString();
+    const pending = await confirmScheduledPlan(auth, 'report the current date', futureStartAt);
+    const pendingPlan = await waitForSchedulerPlan(
+      auth,
+      (plan) => plan.subscriptionId === pending.subscriptionId && plan.state === 'active',
+      30_000,
+    );
+    observe('real task-less plan', pendingPlan);
+    record('a real plan with no claimed task yet is listed by the scheduler',
+      pendingPlan.subscriptionId === pending.subscriptionId && pendingPlan.state === 'active',
+      pendingPlan);
+
+    await page.goto(`${base}/dashboard.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      (id) => [...document.querySelectorAll('[data-plan-section]')].some((node) => node.dataset.planSubscription === id),
+      pending.subscriptionId,
+      { timeout: 30_000 },
+    );
+    const listed = await readScopedPlanSurface(page, pending.subscriptionId);
+    observe('real plan list surface', listed);
+    record('the real scheduler plan list shows a plan that has no task yet and offers pause',
+      listed.sectionPresent
+        && listed.stateValue === 'active'
+        && listed.controls.pause === true
+        && listed.controls['cancel-future'] === true,
+      listed);
+
+    // The list polls on a fixed interval. Let one poll land first, so the stale
+    // read below is measured against a freshly rendered section instead of
+    // racing the page's own refresh.
+    await sleep(4_200);
+
+    // Pause the plan out of band through the same production edge, then click the
+    // control the page still renders from its stale read. The port re-checks
+    // inside its transaction, so the click is a real rejection and the page has
+    // to render it instead of hiding it.
+    await auth.json(`/api/plans/${encodeURIComponent(pending.subscriptionId)}/control`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'pause',
+        idempotencyKey: `plan-control:proof:stale:${Date.now()}`,
+        requestedAt: new Date().toISOString(),
+      }),
+    });
+    const stalePauseClicked = await clickScopedControl(page, pending.subscriptionId, 'pause');
+    await page.waitForFunction(
+      (id) => {
+        const section = [...document.querySelectorAll('[data-plan-section]')]
+          .find((node) => node.dataset.planSubscription === id);
+        return (section?.querySelector('[data-plan-status]')?.textContent ?? '').includes('execution-plan.');
+      },
+      pending.subscriptionId,
+      { timeout: 30_000 },
+    ).catch(() => {});
+    const rejected = await readScopedPlanSurface(page, pending.subscriptionId);
+    observe('real typed rejection', { clicked: stalePauseClicked, surface: rejected });
+    record('a real stale control renders the typed rejection with code, owner, message and next action',
+      stalePauseClicked === true
+        && rejected.statusText.includes('execution-plan.invalid-state')
+        && rejected.statusText.includes('humanagent.runtime')
+        && rejected.statusText.includes('only active subscriptions can pause')
+        && rejected.statusText.includes('next='),
+      rejected.statusText);
+
+    // Nothing may be dispatched at the due time of a suspended plan.
+    await sleep(Math.max(0, Date.parse(futureStartAt) - Date.now()) + 2_000);
+    const duringDue = await waitForSchedulerPlan(auth, (plan) => plan.subscriptionId === pending.subscriptionId, 30_000);
+    const duringLinked = await findPlanLinkedTaskOrUndefined(auth, pending.subscriptionId, 2_000);
+    observe('real suspended plan at its due time', { plan: duringDue, linkedTask: duringLinked });
+    record('a suspended real plan dispatches nothing at its due time',
+      duringDue.state === 'suspended'
+        && (duringDue.occurrences ?? []).length === 0
+        && (duringDue.settlements ?? []).length === 0
+        && duringLinked === undefined,
+      { plan: duringDue, linkedTask: duringLinked });
+
+    // Resume re-arms the slot: the assertion is a real dispatch that settles, not
+    // a state move back to active.
+    await page.waitForFunction(
+      (id) => {
+        const section = [...document.querySelectorAll('[data-plan-section]')]
+          .find((node) => node.dataset.planSubscription === id);
+        return Boolean(section?.querySelector('[data-plan-action="resume"]'));
+      },
+      pending.subscriptionId,
+      { timeout: 30_000 },
+    ).catch(() => {});
+    const resumeClicked = await clickScopedControl(page, pending.subscriptionId, 'resume');
+    const dispatched = await waitForSchedulerPlan(
+      auth,
+      (plan) => plan.subscriptionId === pending.subscriptionId && (plan.settlements ?? []).length > 0,
+      180_000,
+    );
+    const dispatchedTask = await findPlanLinkedTask(auth, pending.subscriptionId, 60_000);
+    observe('real resumed dispatch', { clicked: resumeClicked, plan: dispatched, task: dispatchedTask });
+    record('resuming a real plan dispatches a real occurrence that settles',
+      resumeClicked === true
+        && dispatched.state === 'active'
+        && (dispatched.settlements ?? []).length === 1
+        && dispatchedTask.plan.subscriptionId === pending.subscriptionId,
+      { plan: dispatched, task: dispatchedTask });
+
+    // The deliberate rejection is the only additional browser log: the page
+    // itself still raises no error of its own.
+    observe('real page errors after the deliberate rejection', [...pageErrors]);
+    record('the deliberate rejection adds no page error beyond the browser log of its own 409',
+      pageErrors.every((entry) => entry.includes('409')),
+      pageErrors);
     await page.screenshot({ path: join(artifactDir, 'plan-control-real.png'), fullPage: true });
     await context.close();
   } finally {
