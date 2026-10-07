@@ -843,7 +843,11 @@ async function runDelete(row, btn) {
     await refreshLists()
   } catch (error) {
     btn.disabled = false
-    window.alert(`删除失败：${error.message || error}`)
+    // The page banner is the one dashboard surface that carries the shared
+    // pairing entry, so an expired or revoked session on delete offers the real
+    // login page. An alert would be a dead end: it cannot hold a link, and it
+    // would drop the runtime's own code/owner/nextAction.
+    renderPageError(status, error, 'inspect the task deletion')
   }
 }
 

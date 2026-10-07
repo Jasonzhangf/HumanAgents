@@ -331,6 +331,75 @@ try {
     { expiredTasksLink })
   await expiredTasksContext.close()
 
+  // --- 4b. an expired session on dashboard task deletion offers pairing -----
+  // The dashboard delete path is reachable now, so its rejection is a real
+  // surface: a session that expires after the page loaded must still offer the
+  // login page instead of a dead-end message.
+  const deleteContext = await browser.newContext()
+  const deletePage = await deleteContext.newPage()
+  const deleteRequests = []
+  deletePage.on('dialog', (dialog) => { void dialog.accept() })
+  await deletePage.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    const body = (payload, status = 200) => route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(payload),
+    })
+    if (path === '/api/auth/session') return body({ paired: true, sessionId: 'session-delete-proof' })
+    if (path === '/api/runtime/status') return body({ state: 'ready', mode: 'fake', providerState: 'ready', connected: true })
+    if (path === '/api/dashboard') {
+      return body({ hasRunning: true, taskCount: 1, waitingDecisionCount: 0, recentFailures: [] })
+    }
+    if (path === '/api/tasks') {
+      return body({
+        draft: [],
+        waiting: [],
+        running: [{
+          taskId: { value: 'task-delete-auth-proof' },
+          title: '删除授权证明任务',
+          state: 'running',
+          stateLabel: '运行中',
+          currentState: 'running',
+          nextStep: '',
+          updatedAt: new Date().toISOString(),
+        }],
+        completed: [],
+        stopped: [],
+      })
+    }
+    if (path === '/api/runtime/scheduler') return body({ plans: [], issue: null })
+    if (path === '/api/tasks/task-delete-auth-proof' && request.method() === 'DELETE') {
+      deleteRequests.push(request.method())
+      return body({
+        code: 'auth.session.expired',
+        ownerId: ACCESS_CONTROL_OWNER,
+        message: 'browser session has expired',
+        nextAction: 'open the login page and pair this browser',
+      }, 401)
+    }
+    return body({ code: 'not-found', message: `unexpected ${request.method()} ${path}`, ownerId: 'test', nextAction: 'none' }, 404)
+  })
+  await deletePage.goto(`${binding.serveBaseUrl}/dashboard.html`, { waitUntil: 'domcontentloaded' })
+  await deletePage.waitForSelector('.task-item-actions button.button--danger', { timeout: 30_000 })
+  await deletePage.click('.task-item-actions button.button--danger')
+  await deletePage.waitForSelector('.status-banner [data-auth-pair-link]', { timeout: 30_000 })
+  const deleteRejection = await deletePage.evaluate(() => ({
+    link: document.querySelector('.status-banner [data-auth-pair-link]')?.getAttribute('href') ?? '',
+    banner: document.querySelector('.status-banner')?.textContent ?? '',
+  }))
+  observe('dashboard delete auth rejection', { deleteRequests, ...deleteRejection })
+  record('a dashboard delete really reached the runtime before the rejection',
+    deleteRequests.length === 1,
+    deleteRequests)
+  record('an expired session on dashboard task deletion links to the real login page',
+    new URL(deleteRejection.link, `${binding.serveBaseUrl}/dashboard.html`).pathname === '/login.html'
+      && new URL(deleteRejection.link, `${binding.serveBaseUrl}/dashboard.html`).searchParams.get('authCode') === 'auth.session.expired'
+      && deleteRejection.banner.includes('browser session has expired'),
+    deleteRejection)
+  await deleteContext.close()
+
   // --- 5. the login page is served by the real runtime --------------------
   const loginResponse = await fetch(`${binding.serveBaseUrl}/login.html`)
   const loginBody = await loginResponse.text()
