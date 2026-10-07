@@ -704,3 +704,76 @@ test('dsh shim reports a failed turn instead of an empty success', async () => {
     (error: Error & { code?: string }) => error.code === 'transport-failure' && /MISSING_CREDENTIAL/.test(error.message),
   );
 });
+
+/**
+ * The recorded session of a real engine. A hand-written stub only sends the
+ * update kinds its author thought of; this fixture is what opencode 1.18.23
+ * actually sent, including `agent_thought_chunk`, `usage_update`,
+ * `available_commands_update`, and a `session/new` result with `configOptions`.
+ *
+ * Two things are asserted. First, the real decoders accept every recorded
+ * server frame, which is what makes the fixture's content matter. Second, the
+ * real driver and the real opencode adaptor run that recording end to end.
+ */
+test('ACP driver consumes a recorded real engine session end to end', async () => {
+  // Compiled tests live under dist/, so walk up to the repo root the same way
+  // the provider replay test does, then name the fixture and the server there.
+  const root = new URL(`${'../'.repeat(/\/dist\//.test(import.meta.url) ? 5 : 3)}`, import.meta.url);
+  const server = new URL('tests/adapters/acp/replay-acp-server.mjs', root).pathname;
+  const fixturePath = new URL('tests/adapters/acp/fixtures/opencode-acp-session.json', root).pathname;
+
+  // Every frame a real engine sent must decode. A decoder that only tolerates
+  // the shapes its author imagined fails on this recording.
+  const fixture = JSON.parse(await readFile(fixturePath, 'utf8')) as {
+    readonly serverFrames: readonly (Record<string, unknown> & { readonly id?: unknown; readonly params?: unknown; readonly result?: unknown })[];
+  };
+  assert.ok(fixture.serverFrames.length >= 20, 'the recording lost its frames');
+  const kinds = new Set<string>();
+  for (const raw of fixture.serverFrames) {
+    const frame = decodeAcpFrame(JSON.stringify(raw));
+    if (isAcpResponse(frame)) {
+      if (frame.id === 1) assertAcpInitializeResult(frame.result, 'initialize');
+      else if (frame.id === 2) assertAcpNewSessionResult(frame.result, 'session/new');
+      else assertAcpPromptResult(frame.result, 'session/prompt');
+      continue;
+    }
+    const update = assertAcpSessionUpdateNotification((frame as { readonly params: unknown }).params);
+    kinds.add(update.update.sessionUpdate);
+  }
+  // The recording must keep the kinds the hand-written stub never sends, or it
+  // would no longer cover anything the stub does not.
+  for (const kind of ['agent_thought_chunk', 'usage_update', 'available_commands_update', 'agent_message_chunk']) {
+    assert.ok(kinds.has(kind), `the recording no longer carries ${kind}`);
+  }
+
+  // A held turn only ends when the client closes the session, so the server is
+  // given a lifetime bound. If the run below fails, the bound lets the server
+  // exit on its own instead of holding the test runner open.
+  const runtime = createOpencodeRuntime({ args: [server, fixturePath, '15000'], timeoutMs: 20_000 });
+  const driver = createAcpClientDriver({ runtime, workspace: tmpdir(), command: process.execPath });
+
+  const handle = await driver.start(startInput());
+  const eventsPromise = collectEvents(driver, 'runtime-a');
+  try {
+    const output = await driver.submit({ taskId, executionEpoch: epoch, assignmentId, payload: submitPayload });
+
+    // The answer is assembled from the recorded chunk order, and the recorded
+    // `end_turn` maps to a successful closure.
+    assert.equal(output.payload.outputText, 'POGS');
+    assert.equal(output.payload.stopReason, 'end_turn');
+
+    const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
+    assert.equal(closure.state, 'succeeded');
+
+    const events = await eventsPromise;
+    assert.deepEqual(events.map((event) => event.kind), ['output', 'terminal']);
+    assert.equal(events[0]!.summary, 'POGS');
+    assert.equal(events[1]!.terminalState, 'succeeded');
+    assert.equal(handle.runtimeId, 'runtime-a');
+  } finally {
+    // Best effort. After a successful settle the instance is already gone, so
+    // this is a no-op; after a failure it closes the engine child, whose open
+    // pipes would otherwise keep the test runner alive.
+    await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch }).catch(() => undefined);
+  }
+});

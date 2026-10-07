@@ -140,7 +140,18 @@ ACP 是双工协议：`session/cancel` 是停止在飞轮次的唯一手段，�
 focused tests 证据（`pnpm test:acp` / `test:config` / `test:agent-templates` /
 `test:app`）：
 
-- ACP 50、config 32、agent-templates 17，全部通过。
+- ACP 51、config 32、agent-templates 17，全部通过。
+- 录制回放：`tests/adapters/acp/fixtures/opencode-acp-session.json` 保存一次真实
+  opencode 1.18.23 会话的服务端帧，`replay-acp-server.mjs` 按这些帧应答。用例先
+  用真实 decoder 解出每一帧，并断言录制仍带 stub 从不发送的类型：
+  `agent_thought_chunk`、`usage_update`、`available_commands_update`；再让真实
+  `AcpClientDriver` 与真实 opencode adaptor 跑完整条录制。该层不需要引擎、凭据或
+  网络，这是 stub 与真实同入口证明都覆盖不到的组合。
+  红测确认它真正依赖真实形状：把 `agent_thought_chunk` 从允许列表移除后立即失败并
+  报出未知更新类型；把夹具换成只含 stub 形状的最小集后同样失败。
+  边界：`assertAcpNewSessionResult` 只读取 `sessionId`，所以录制里的
+  `configOptions` 与 `usage_update` 的字段值只经过解帧，不被逐字段断言。
+  长列表在夹具中裁到三项，帧类型与字段形状保持不变。
 - 失败可见性：dsh 无凭据时 `submit` 以 `transport-failure` 抛出后端的
   `MISSING_CREDENTIAL` 原文。
 - 失败关闭：缺少 `[execution.opencode]` 段时 `acp-config-missing`；缺少
