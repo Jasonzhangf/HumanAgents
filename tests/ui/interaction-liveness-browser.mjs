@@ -435,7 +435,18 @@ async function runScenario(browser, scenario, result) {
     await page.waitForSelector(CARD_HOST, { timeout: 15_000 });
 
     if (scenario === 'working') {
-      const working = await waitForCardText(page, 'the card to report working', /工作中/, 60_000);
+      // The transport projection attaches on its own stream frame, so the card
+      // can report the task as working one render before it names the live
+      // connection. Waiting only for `工作中` and then asserting `传输 已连接` on
+      // that same render raced the attach (1 failure in 3 observed runs). Wait
+      // for both facts in the same render; a card that never attaches still
+      // fails on the bounded timeout, so the assertion keeps its force.
+      const working = await waitForCardText(
+        page,
+        'the card to report working with the live connection attached',
+        /^(?=[\s\S]*工作中)(?=[\s\S]*传输 已连接)/,
+        60_000,
+      );
       assert('the running card reports the live connection', working, /传输 已连接/);
       result.screenshots.push(await screenshot(page, shotDir, '01-working'));
       const settled = await waitForCardText(page, 'the card to reach a terminal state', /已完成|已失败/, 90_000);
@@ -484,7 +495,14 @@ async function runScenario(browser, scenario, result) {
     }
 
     if (scenario === 'transport-lost') {
-      const working = await waitForCardText(page, 'the card to report working', /工作中/, 60_000);
+      // Same attach race as the working scenario above: wait for the working
+      // verdict and the attached transport in one render before asserting it.
+      const working = await waitForCardText(
+        page,
+        'the card to report working with the live connection attached',
+        /^(?=[\s\S]*工作中)(?=[\s\S]*传输 已连接)/,
+        60_000,
+      );
       assert('the live connection is reported as attached', working, /传输 已连接/);
       result.screenshots.push(await screenshot(page, shotDir, '01-attached'));
       await opened.context.setOffline(true);
