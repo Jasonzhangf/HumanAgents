@@ -3,10 +3,13 @@
 // `DurableOccurrenceConsumer` fixes one lifecycle scope at construction and
 // rejects any binding whose task/operation identity differs, so the scheduler
 // cannot use a single consumer for every plan. This router is the single owner
-// of consumer construction: it memoizes one durable consumer per immutable
-// binding identity and delegates `executeOccurrence`. Memoizing matters because
-// the consumer holds the in-flight single-dispatch map; rebuilding a consumer
-// per tick would lose that guarantee inside one process.
+// of consumer construction: it retains one durable consumer per immutable
+// binding identity while an execution is in flight and delegates
+// `executeOccurrence`. Retaining matters because the consumer holds the
+// in-flight single-dispatch map; rebuilding a consumer per tick would lose that
+// guarantee inside one process. Retention must not outlive the dispatch: a
+// settled occurrence is released, and the next execution for that identity
+// rebuilds a consumer that replays the committed journal receipt.
 import { join } from 'node:path';
 
 import type {
@@ -42,12 +45,29 @@ export interface OccurrenceConsumerRouterOptions {
   readonly now?: () => string;
 }
 
+// A consumer plus the number of calls currently executing through it. One
+// registry holds both facts, so retention and in-flight state cannot drift.
+interface RetainedConsumer {
+  readonly consumer: DurableOccurrenceConsumer;
+  inFlightCalls: number;
+}
+
 export class OccurrenceConsumerRouter implements ServeTaskConsumerPort {
   readonly ownsFirstAdmissionAuthority = true;
 
-  private readonly consumers = new Map<string, DurableOccurrenceConsumer>();
+  private readonly consumers = new Map<string, RetainedConsumer>();
 
   constructor(private readonly options: OccurrenceConsumerRouterOptions) {}
+
+  /**
+   * Read-only observation of how many per-binding consumers this router
+   * currently retains. A retained consumer is one whose execution is in flight;
+   * a settled consumer is released, because the next execution for the same
+   * identity rebuilds one and replays the committed journal receipt.
+   */
+  get retainedConsumerCount(): number {
+    return this.consumers.size;
+  }
 
   async executeOccurrence(input: {
     readonly occurrence: Occurrence;
@@ -55,10 +75,6 @@ export class OccurrenceConsumerRouter implements ServeTaskConsumerPort {
     readonly claim: OccurrenceClaimRecord;
     readonly binding: OccurrenceTaskBinding;
   }): Promise<ServeTaskTerminalReceipt> {
-    return this.consumerFor(input.binding).executeOccurrence(input);
-  }
-
-  private consumerFor(binding: OccurrenceTaskBinding): DurableOccurrenceConsumer {
     const lease = this.options.lease();
     if (lease === undefined) {
       throw new DurableOccurrenceConsumerError(
@@ -66,18 +82,26 @@ export class OccurrenceConsumerRouter implements ServeTaskConsumerPort {
         'no active supervisor lease is available for occurrence execution',
       );
     }
-    const identity = [
-      binding.occurrenceId,
-      binding.taskId.value,
-      binding.operationId.value,
-      String(binding.executionEpoch),
-      binding.inputArtifactDigest,
-      // A different lease is a different execution owner: its consumer must be
-      // rebuilt so the in-flight single-dispatch map cannot outlive the owner
-      // that proved liveness for it.
-      lease.record.leaseId,
-      String(lease.record.generation),
-    ].join('|');
+    const identity = identityFor(input.binding, lease);
+    const retained = this.consumerFor(identity, input.binding, lease);
+    retained.inFlightCalls += 1;
+    try {
+      return await retained.consumer.executeOccurrence(input);
+    } finally {
+      // Release the consumer only once no call for this identity is in flight.
+      // The next call for an already-settled occurrence then rebuilds a consumer
+      // and replays the committed journal receipt, which is the design intent:
+      // the in-memory map only has to cover a dispatch that is still running.
+      retained.inFlightCalls -= 1;
+      if (retained.inFlightCalls === 0) this.consumers.delete(identity);
+    }
+  }
+
+  private consumerFor(
+    identity: string,
+    binding: OccurrenceTaskBinding,
+    lease: SupervisorLease,
+  ): RetainedConsumer {
     const existing = this.consumers.get(identity);
     if (existing !== undefined) return existing;
 
@@ -88,7 +112,23 @@ export class OccurrenceConsumerRouter implements ServeTaskConsumerPort {
       dispatch: this.options.dispatch,
       ...(this.options.now === undefined ? {} : { now: this.options.now }),
     });
-    this.consumers.set(identity, consumer);
-    return consumer;
+    const retained: RetainedConsumer = { consumer, inFlightCalls: 0 };
+    this.consumers.set(identity, retained);
+    return retained;
   }
+}
+
+function identityFor(binding: OccurrenceTaskBinding, lease: SupervisorLease): string {
+  return [
+    binding.occurrenceId,
+    binding.taskId.value,
+    binding.operationId.value,
+    String(binding.executionEpoch),
+    binding.inputArtifactDigest,
+    // A different lease is a different execution owner: its consumer must be
+    // rebuilt so the in-flight single-dispatch map cannot outlive the owner
+    // that proved liveness for it.
+    lease.record.leaseId,
+    String(lease.record.generation),
+  ].join('|');
 }
