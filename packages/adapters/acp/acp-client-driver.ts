@@ -378,7 +378,11 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
         sessionId: instance.sessionId,
         timeoutMs,
       });
-      instance.stopRequested = cancelled.accepted;
+      // A stop request only ever turns true, never back to false. Recording a
+      // later refusal would erase an earlier accepted stop, and `settle` would
+      // then report `failed` for an operation that a stop request had really
+      // stopped. The receipt still reports this attempt's result.
+      if (cancelled.accepted) instance.stopRequested = true;
       return { requested: cancelled.accepted, operationId: instance.operationId };
     },
 

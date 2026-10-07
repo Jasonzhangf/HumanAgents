@@ -176,19 +176,28 @@ export class AcpStdioBackend {
   /**
    * Sends a JSON-RPC request and awaits its response. The caller supplies the
    * id; correlation is strictly local to this backend.
+   *
+   * Only the frame write is serialized, never the response await. Holding the
+   * write lock until the response arrived would keep `session/cancel` from
+   * reaching a server that is still busy with this turn, so an in-flight turn
+   * could not be cancelled until this request timed out.
    */
   request(method: string, params: unknown, id: string | number): Promise<AcpJsonRpcResponse> {
     this.ensureOpen();
-    return this.lock.run(() => {
-      this.ensureOpen();
-      const frame = encodeAcpRequest(method, id, params);
-      return new Promise<AcpJsonRpcResponse>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.pending.delete(id);
-          reject(new AcpStdioBackendError('no-response', `ACP backend did not respond to ${method} within ${this.timeoutMs}ms`));
-        }, this.timeoutMs);
-        this.pending.set(id, { resolve, reject, timer });
+    const frame = encodeAcpRequest(method, id, params);
+    return new Promise<AcpJsonRpcResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new AcpStdioBackendError('no-response', `ACP backend did not respond to ${method} within ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      void this.lock.run(async () => {
+        this.ensureOpen();
         this.process.stdin.write(frame);
+      }).catch((error: unknown) => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error instanceof Error ? error : new AcpStdioBackendError('transport-closed', String(error)));
       });
     });
   }
@@ -200,9 +209,10 @@ export class AcpStdioBackend {
   }
 
   /**
-   * Sends a notification on the backend's write lock so that a concurrent
-   * `request` call cannot interleave between the notification frame and the
-   * request frame. The ACP server processes frames in order.
+   * Sends a notification on the backend's write lock, so a notification frame
+   * is never interleaved with a request frame. `request` releases the lock
+   * after writing its own frame, so this does not wait for that request to
+   * answer.
    */
   async notifyAsync(method: string, params: unknown): Promise<void> {
     await this.lock.run(async () => {

@@ -205,12 +205,6 @@ function writeAcpConfig(controlRoot, driverRef) {
   writeFileSync(join(controlRoot, 'config.toml'), lines.join('\n'), 'utf8');
 }
 
-const acpExecutionFor = {
-  opencode: ['opencode', 'HUMANAGENT_OPENCODE_ARGS', ['acp', '--pure']],
-  antigravity: ['antigravity', undefined, undefined],
-  'acp-dsh': ['dshAcp', 'HUMANAGENT_DSH_ARGS', ['--profile', 'headless', '--json']],
-};
-
 async function runOne(which) {
   const tag = `${which}-${process.pid}`;
   const workspace = FIXED_WORKSPACE ?? mkdtempSync(join(tmpdir(), `humanagent-acp-${which}-`));

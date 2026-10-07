@@ -235,6 +235,50 @@ test('ACP backend does not hold the process open after a clean close', async () 
   assert.ok(exitMs < 4_000, `the process needed ${exitMs}ms to exit after close()`);
 });
 
+test('ACP backend delivers a cancel notification while a request is still in flight', async () => {
+  // ACP is duplex: session/cancel is the only way to stop a running turn, and it
+  // must reach a server that is still busy answering session/prompt. If the
+  // backend kept its write lock until the response arrived, the cancel frame
+  // would sit behind that request, and a running turn could not be stopped.
+  const serverScript = [
+    "let buffer = '';",
+    'let held;',
+    "process.stdin.on('data', (chunk) => {",
+    "  buffer += chunk.toString('utf8');",
+    '  for (;;) {',
+    "    const index = buffer.indexOf('\\n');",
+    '    if (index === -1) return;',
+    '    const line = buffer.slice(0, index);',
+    '    buffer = buffer.slice(index + 1);',
+    "    if (!line.trim()) continue;",
+    '    const frame = JSON.parse(line);',
+    "    if (frame.method === 'hold') { held = frame.id; continue; }",
+    "    if (frame.method === 'session/cancel' && held !== undefined) {",
+    "      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: held, result: { stopReason: 'cancelled' } }) + '\\n');",
+    '      held = undefined;',
+    '    }',
+    '  }',
+    '});',
+  ].join('\n');
+  const backend = new AcpStdioBackend({
+    command: process.execPath,
+    args: ['--input-type=module', '--eval', serverScript],
+    timeoutMs: 2_000,
+  });
+  try {
+    const held = backend.request('hold', {}, 1);
+    // Let the request frame reach the server before the cancel is sent.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await backend.notifyAsync('session/cancel', {});
+    // The server can only answer the held request after it received the cancel,
+    // so a resolved request proves the cancel overtook the in-flight request.
+    const response = await held;
+    assert.equal((response.result as { stopReason?: string }).stopReason, 'cancelled');
+  } finally {
+    await backend.close();
+  }
+});
+
 test('ACP process termination resolves only after the runtime has exited', async () => {
   // The child keeps running for a moment after SIGTERM. A close that only sends
   // the signal would resolve first, and the caller would report a stopped
@@ -345,6 +389,26 @@ test('ACP driver settles a failed turn as failed even when the stop was refused'
   assert.equal(closure.state, 'failed');
 });
 
+test('ACP driver keeps an accepted stop even when a later stop attempt is refused', async () => {
+  const runtime = makeFakeRuntime({
+    submitResult: { stopReason: 'cancelled', outputText: '' },
+    cancelResult: [{ accepted: true }, { accepted: false }],
+  });
+  const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
+  await driver.start(startInput());
+
+  const first = await driver.requestStop({ runtimeId: 'runtime-a', executionEpoch: epoch, operationId });
+  assert.equal(first.requested, true);
+  // The retry finds no turn in flight and is refused. That refusal must not
+  // erase the stop that was already accepted, otherwise settle reports the
+  // operation as failed although a stop really stopped it.
+  const second = await driver.requestStop({ runtimeId: 'runtime-a', executionEpoch: epoch, operationId });
+  assert.equal(second.requested, false);
+
+  const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
+  assert.equal(closure.state, 'stopped');
+});
+
 test('ACP driver does not report stopped from a cancel acceptance alone', async () => {
   const runtime = makeFakeRuntime();
   const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
@@ -447,12 +511,13 @@ function makeFakeRuntime(
   options: {
     readonly submitResult?: { readonly stopReason: 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled'; readonly outputText: string };
     readonly submitFailure?: Error;
-    readonly cancelResult?: { readonly accepted: boolean; readonly evidenceRef?: string };
+    readonly cancelResult?: AcpRuntimeCancelResult | readonly AcpRuntimeCancelResult[];
     readonly closeResult?: AcpRuntimeCloseResult;
     readonly closeFailure?: Error;
   } = {},
 ): AcpRuntimeAdaptor {
   const closeResult: AcpRuntimeCloseResult = options.closeResult ?? { closed: true };
+  let cancelCalls = 0;
   return {
     runtime: 'opencode',
     version: 'test-runtime-1',
@@ -475,7 +540,13 @@ function makeFakeRuntime(
     },
 
     async cancel(_input: AcpRuntimeCancelInput): Promise<AcpRuntimeCancelResult> {
-      return options.cancelResult ?? { accepted: true };
+      const scripted = options.cancelResult;
+      if (Array.isArray(scripted)) {
+        const next = scripted[Math.min(cancelCalls, scripted.length - 1)];
+        cancelCalls += 1;
+        return next ?? { accepted: false };
+      }
+      return (scripted as AcpRuntimeCancelResult | undefined) ?? { accepted: true };
     },
 
     async close(_input: AcpRuntimeCloseInput): Promise<AcpRuntimeCloseResult> {

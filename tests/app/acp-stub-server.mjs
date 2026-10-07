@@ -8,15 +8,59 @@
  * speaks. Only the model answer is scripted, so the test exercises the real
  * transport, the real driver bookkeeping, and the real checkpoint commit.
  *
- * Usage: node acp-stub-server.mjs <answer-text>
+ * Usage: node acp-stub-server.mjs <answer-text> [hold] [hold-marker-path]
+ *
+ * `hold` makes session/prompt stay in flight until session/cancel arrives. The
+ * cancel then resolves the held turn with stopReason `cancelled`, which is what
+ * a real ACP agent does. Without `hold`, a prompt answers immediately.
+ *
+ * `hold-marker-path` names a file that is created when a prompt is held. A test
+ * that stops a turn reads that file to know the turn is really in flight.
  */
 
+import { writeFileSync } from 'node:fs';
+
 const answer = process.argv[2] ?? 'POGS';
+const holdPrompts = process.argv[3] === 'hold';
+const holdMarker = process.argv[4];
 let buffer = '';
 let sessionSeq = 0;
+/** The prompt frames that are still in flight, by JSON-RPC request id. */
+const inFlight = new Map();
+
+/** Reports that a turn is being held, so a test can stop it while it runs. */
+function markHeld() {
+  if (holdMarker === undefined) return;
+  try {
+    writeFileSync(holdMarker, 'held');
+  } catch {
+    // The marker is test scaffolding; a failure to write it must not change
+    // the protocol behaviour under test.
+  }
+}
 
 function send(frame) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...frame })}\n`);
+}
+
+/** Streams the scripted answer and resolves one prompt with the given stop reason. */
+function answerPrompt(frame, stopReason) {
+  // The answer travels as an ACP session/update notification, exactly as a
+  // real ACP agent streams its message chunks.
+  if (stopReason !== 'cancelled') {
+    send({
+      method: 'session/update',
+      params: {
+        sessionId: frame.params?.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: frame.params?.messageId ?? 'stub-message',
+          content: { type: 'text', text: answer },
+        },
+      },
+    });
+  }
+  send({ id: frame.id, result: { stopReason } });
 }
 
 function handle(frame) {
@@ -37,25 +81,23 @@ function handle(frame) {
     return;
   }
   if (frame.method === 'session/prompt') {
-    const sessionId = frame.params?.sessionId;
-    // The answer travels as an ACP session/update notification, exactly as a
-    // real ACP agent streams its message chunks.
-    send({
-      method: 'session/update',
-      params: {
-        sessionId,
-        update: {
-          sessionUpdate: 'agent_message_chunk',
-          messageId: frame.params?.messageId ?? 'stub-message',
-          content: { type: 'text', text: answer },
-        },
-      },
-    });
-    send({ id: frame.id, result: { stopReason: 'end_turn' } });
+    if (holdPrompts) {
+      // Stay in flight until the client cancels this turn. A held turn is the
+      // only state in which a cancel is accepted, so this is what makes the
+      // stop path reachable.
+      inFlight.set(frame.id, frame);
+      markHeld();
+      return;
+    }
+    answerPrompt(frame, 'end_turn');
     return;
   }
   if (frame.method === 'session/cancel') {
-    // session/cancel is a notification: no response frame.
+    // session/cancel is a notification: no response frame. It resolves every
+    // held turn with stopReason `cancelled`, exactly as a real ACP agent stops
+    // the work it was doing.
+    for (const held of inFlight.values()) answerPrompt(held, 'cancelled');
+    inFlight.clear();
     return;
   }
   if (frame.id !== undefined) {

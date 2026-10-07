@@ -100,6 +100,14 @@ args = ["--profile", "headless", "--json"]
 `terminateProcess`，两者都在宽限期后升级为 `SIGKILL`。对一次性 CLI，`cancel`
 的实际动作是结束在飞进程，其拒绝结果由 `submit` 显式抛出，不被吞掉。
 
+`stopRequested` 只增不减。一次被接受的停止之后，后续被拒绝的停止请求不得把它
+抹掉，否则 `settle` 会把一次真的停止报成 `failed`。停止请求的收据仍按本次尝试的
+真实结果报告 `requested`。
+
+ACP 是双工协议：`session/cancel` 是停止在飞轮次的唯一手段，所以它必须能超过仍未
+应答的 `session/prompt`。`AcpStdioBackend` 的写锁因此只覆盖“写一帧”，不覆盖等待
+应答。锁跨越等待会让 cancel 排在请求之后，在飞轮次只有等该请求超时才能停止。
+
 ## 6. 证据边界
 
 - opencode 走真实 ACP v1：`initialize` / `session/new` / `session/prompt` 与
@@ -132,14 +140,20 @@ args = ["--profile", "headless", "--json"]
 focused tests 证据（`pnpm test:acp` / `test:config` / `test:agent-templates` /
 `test:app`）：
 
-- ACP 45、config 32、agent-templates 17，全部通过。
+- ACP 50、config 32、agent-templates 17，全部通过。
 - 失败可见性：dsh 无凭据时 `submit` 以 `transport-failure` 抛出后端的
   `MISSING_CREDENTIAL` 原文。
 - 失败关闭：缺少 `[execution.opencode]` 段时 `acp-config-missing`；缺少
   `command` 时 `config-invalid`；未知 `driverRef` 时 `config-capability`；任何
   runtime 的 `resume` 报 `capability-unavailable`。
 - 回归用例：空转轮次不得判为 `succeeded`；被拒绝的空答案必须落为 `failed`；
-  `close()` 之后不得残留 SIGKILL 宽限计时器把事件循环拖住。
+  `close()` 之后不得残留 SIGKILL 宽限计时器把事件循环拖住；一次被接受的停止
+  不得被后续被拒绝的停止抹掉；`session/cancel` 必须能在 `session/prompt` 仍未
+  应答时送达，服务端收到 cancel 后应答该请求即为送达证据。
+- 真实入口停止证据：`test:app` 用真实配置与真实组合入口启动 opencode，让引擎把
+  `session/prompt` 保持在飞（stub 以 `hold` 模式运行，并在挂起时写出标记文件），
+  再调用真实停止入口。断言 journal 出现 `"outcome":"stopped"`，且同一 operation
+  不出现 `"outcome":"unknown"` 或 `"outcome":"succeeded"`。
 
 ## 8. 设计 DAG
 
@@ -157,5 +171,11 @@ user_configuration → resolve_agent_config → compose_acp_driver → open_acp_
 是唯一汇点，成功、失败与停止三种终态都汇入它。语义事件投影
 （`projectExecutionSemanticEvents`）发生在 manifest 之后，属于运行结果投影而不在
 本图声明的 `run_manifest` 输出内，因此不进入本图。
+
+停止控制面从图外进入 `settle_acp_session`：它不经过
+`run_*_adaptor` 与 `observe_driver_events`，所以本图保持单源单汇。进入的前提是
+该 operation 已有一次被接受的停止请求；`settle_acp_session` 只有在
+`close.closed === true` 且已请求停止时，才把闭包判为 `stopped`，否则失败关闭并
+由控制面显式报错。
 
 用 `pnpm dagpipe:validate` 与 `pnpm dagpipe:bind` 校验。

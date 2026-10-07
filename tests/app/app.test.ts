@@ -6491,6 +6491,79 @@ test('an old lock handle cannot remove a replacement owner lock', async () => {
   await second.release();
 });
 
+test('ACP opencode driver commits a stopped checkpoint through the real stop entry', async () => {
+  // The ordinary run path only ever settles a turn that already finished.
+  // This is the stop path: the engine holds a turn in flight, a stop arrives,
+  // and the closure must reach the journal as `stopped`. The stub holds
+  // session/prompt open until session/cancel arrives, so the cancel is the
+  // only event that can produce the terminal state.
+  const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-acp-stop-');
+  const configPath = join(controlRoot, 'config.toml');
+  const stubDir = join(root, 'stop-stub');
+  await mkdir(stubDir, { recursive: true });
+  // The stub creates this file when it holds a turn, so the test stops a turn
+  // that is really in flight instead of guessing with a sleep.
+  const holdMarker = join(stubDir, 'turn-in-flight');
+  const stub = join(process.cwd(), 'tests', 'app', 'acp-stub-server.mjs');
+
+  let config = await readFile(configPath, 'utf8');
+  config = config.replace('agentId = "interaction-default"', 'agentId = "interaction-acp-stop"');
+  config = config.replace('driverRef = "fake"', 'driverRef = "opencode"');
+  config = config.replace('defaultAgent = "interaction-default"', 'defaultAgent = "interaction-acp-stop"');
+  config = config.replace('reviewRequired = true', 'reviewRequired = false');
+  config = config.replace(
+    'stopTimeoutMs = 30000',
+    ['stopTimeoutMs = 20000', '', '[execution.opencode]', `command = "${process.execPath}"`, `args = ${JSON.stringify([stub, 'POGS', 'hold', holdMarker])}`, 'timeoutMs = 20000', ''].join('\n'),
+  );
+  await writeFile(configPath, config, 'utf8');
+  const paths = await resolveRuntimePaths({ controlRoot, workspace });
+  const configuration = await loadConfiguration(paths);
+  try {
+    const controller = await openAgentOperation({
+      paths,
+      configuration,
+      workspace,
+      sessionId: 'session-acp-stop',
+      plan: 'default',
+      prompt: 'reply with exactly POGS',
+    });
+    await controller.start();
+    const submitted = controller.submit();
+    // A stop control fences the runtime, so the in-flight submit is expected
+    // to fail once the stop begins. Attach the handler now so the rejection is
+    // never unhandled, and assert it below.
+    const submitOutcome = submitted.then(
+      () => 'resolved' as const,
+      (error: Error) => error,
+    );
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (await readFile(holdMarker, 'utf8').catch(() => '')) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(await readFile(holdMarker, 'utf8'), 'held', 'the engine never held a turn in flight');
+
+    const result = await controller.stop('black-box stop check');
+    assert.equal(result.state, 'stopped');
+    if (result.state !== 'stopped') throw new Error(`stop did not commit a stopped checkpoint: ${result.state}`);
+    assert.equal(result.checkpoint.outcome, 'stopped');
+    assert.equal(result.closure.state, 'stopped');
+
+    // The journal is the external record: it must show the stop and must not
+    // show an unresolved or successful turn for the same operation.
+    const journal = await readFile(join(paths.journalRoot, 'checkpoints.jsonl'), 'utf8');
+    assert.match(journal, /"outcome":"stopped"/);
+    assert.equal(journal.includes('"outcome":"unknown"'), false);
+    assert.equal(journal.includes('"outcome":"succeeded"'), false);
+
+    // A stopped turn never published an answer, so the held prompt must not
+    // have resolved as a completed turn.
+    const outcome = await submitOutcome;
+    assert.equal(outcome === 'resolved', false, 'a stopped turn must not have resolved as a completed turn');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('ACP configuration fails closed for a missing command and an unknown driver', async () => {
   // The host never guesses a runtime path and never falls back to another
   // driver, so both a missing ACP command and an unknown driverRef must be
