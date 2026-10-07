@@ -334,20 +334,25 @@ async function waitForCardText(page, label, pattern, timeoutMs, intervalMs = 250
  *
  * The dashboard navigates itself to its own task surface as soon as the
  * dispatched task appears in the list, so an explicit navigation issued at the
- * same moment races that page-initiated navigation. Chromium reports the loser
- * as `net::ERR_ABORTED`. Retrying after the competing navigation settles reaches
- * the intended page; it does not weaken any assertion, because a page that
- * genuinely cannot load still fails every attempt and the card assertions below
- * still have to pass.
+ * same moment races that page-initiated navigation. Playwright reports the loser
+ * in one of two wordings for the same condition — `net::ERR_ABORTED`, or
+ * `Navigation to ... is interrupted by another navigation to ...` — and the
+ * retry has to accept both; matching only the first let the second abort the
+ * whole `transport-lost` scenario. Retrying after the competing navigation
+ * settles reaches the intended page; it does not weaken any assertion, because a
+ * page that genuinely cannot load still fails every attempt and the card
+ * assertions below still have to pass.
  */
 async function gotoTaskPage(page, url) {
+  const supersededByCompetingNavigation = (message) =>
+    message.includes('ERR_ABORTED') || message.includes('interrupted by another navigation');
   for (let attempt = 0; ; attempt += 1) {
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20_000 });
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (attempt >= 4 || !message.includes('ERR_ABORTED')) throw error;
+      if (attempt >= 4 || !supersededByCompetingNavigation(message)) throw error;
       await sleep(300);
     }
   }
