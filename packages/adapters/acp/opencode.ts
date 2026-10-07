@@ -6,9 +6,7 @@ import {
   assertAcpInitializeResult,
   assertAcpNewSessionResult,
   assertAcpPromptResult,
-  type AcpAgentCapabilities,
   type AcpContentBlock,
-  type AcpImplementationInfo,
   type AcpInitializeResult,
   type AcpMcpServerConfig,
   type AcpNewSessionResult,
@@ -65,7 +63,6 @@ interface OpenState {
   readonly runtimeId: string;
   readonly sessionId: string;
   readonly backendRef: string;
-  readonly implementation: AcpImplementationInfo;
   text: string;
   inFlightPrompt: Promise<SettledPrompt> | undefined;
 }
@@ -116,9 +113,7 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
 
   return {
     runtime: 'opencode',
-    kind: 'direct',
     version: options.version ?? VERSION,
-    evidenceRef: `${OWNER}/stdio`,
     capabilities,
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
@@ -129,8 +124,8 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
       const backend = new AcpStdioBackend({
         command: input.command,
         ...(spawnArgs.length > 0 ? { args: spawnArgs } : {}),
-        env: input.env ?? options.env,
-        cwd: input.cwd ?? options.cwd ?? input.workspace,
+        env: options.env,
+        cwd: options.cwd ?? input.workspace,
         timeoutMs: openTimeout,
         onUpdate: (notification: AcpSessionUpdateNotification) => {
           const state = sessions.get(notification.sessionId);
@@ -164,11 +159,11 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
             evidenceRefs: [],
           });
         }
-        const initialize: AcpInitializeResult = assertAcpInitializeResult(initialized.result, 'initialize');
+        assertAcpInitializeResult(initialized.result, 'initialize');
 
         const created = await backend.request('session/new', {
           cwd: input.workspace,
-          mcpServers: input.mcpServers ?? options.mcpServers ?? [],
+          mcpServers: options.mcpServers ?? [],
         }, nextId());
         if (isJsonRpcError(created)) {
           throw new AcpAdapterError({
@@ -180,7 +175,6 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           });
         }
         const session: AcpNewSessionResult = assertAcpNewSessionResult(created.result, 'session/new');
-        const implementation: AcpImplementationInfo = initialize.agentInfo ?? { name: 'opencode', version: 'unknown' };
         const backendRef = `${OWNER}/process/${backend.process.pid ?? 'unknown'}`;
 
         const state: OpenState = {
@@ -188,21 +182,12 @@ export function createOpencodeRuntime(options: OpencodeRuntimeOptions = {}): Acp
           runtimeId: input.runtimeId,
           sessionId: session.sessionId,
           backendRef,
-          implementation,
           text: '',
           inFlightPrompt: undefined,
         };
         sessions.set(session.sessionId, state);
 
-        const agentCapabilities: AcpAgentCapabilities = initialize.agentCapabilities ?? {};
-        return {
-          sessionId: session.sessionId,
-          initialize,
-          implementation,
-          capabilities: agentCapabilities,
-          protocol: 'acp-v1',
-          backendRef,
-        };
+        return { sessionId: session.sessionId };
       } catch (error) {
         await backend.close().catch(() => undefined);
         throw error;

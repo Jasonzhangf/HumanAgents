@@ -1,12 +1,7 @@
 import type { BusinessPayload } from '../../contracts/src/index.js';
 import type {
-  AcpAgentCapabilities,
-  AcpInitializeResult,
-  AcpImplementationInfo,
-  AcpMcpServerConfig,
   AcpNewSessionResult,
   AcpPromptResult,
-  AcpSessionUpdateNotification,
 } from './protocol.js';
 
 /**
@@ -54,12 +49,13 @@ export interface AcpRuntimeCancelResult {
 }
 
 export interface AcpRuntimeAdaptor {
-  /** Runtime identifier used as the `driverRef` in HumanAgent config. */
+  /**
+   * Runtime identifier used as the `driverRef` in HumanAgent config. Whether the
+   * runtime speaks ACP v1 on the wire or bridges a native protocol is stated
+   * once, in `capabilities`, and reaches HumanAgent through the driver.
+   */
   readonly runtime: 'opencode' | 'antigravity' | 'dsh';
-  /** `direct` speaks standard ACP v1 on the wire; `shim` bridges a native protocol. */
-  readonly kind: 'direct' | 'shim';
   readonly version: string;
-  readonly evidenceRef?: string;
 
   /** Runtime-owned capabilities, mapped into HumanAgent capability names. */
   readonly capabilities: readonly string[];
@@ -88,20 +84,16 @@ export interface AcpRuntimeOpenInput {
   /** ACP server spawn target. */
   readonly command: string;
   readonly args?: readonly string[];
-  readonly env?: Record<string, string | undefined>;
-  readonly cwd?: string;
-  readonly mcpServers?: readonly AcpMcpServerConfig[];
   readonly timeoutMs?: number;
   readonly sessionIdFor?: (runtimeId: string) => string;
 }
 
-export interface AcpRuntimeOpenResult extends AcpNewSessionResult {
-  readonly initialize: AcpInitializeResult;
-  readonly implementation: AcpImplementationInfo;
-  readonly capabilities: AcpAgentCapabilities;
-  readonly protocol: 'acp-v1' | 'shim';
-  readonly backendRef: string;
-}
+/**
+ * What a runtime must hand back after opening a session. Only the session id
+ * crosses the seam: the driver owns the ACP conversation, and the adaptor keeps
+ * its own handshake result, process reference and protocol variant private.
+ */
+export type AcpRuntimeOpenResult = AcpNewSessionResult;
 
 export interface AcpRuntimeLoadInput {
   readonly runtimeId: string;
@@ -109,8 +101,6 @@ export interface AcpRuntimeLoadInput {
   readonly workspace: string;
   readonly command: string;
   readonly args?: readonly string[];
-  readonly env?: Record<string, string | undefined>;
-  readonly cwd?: string;
   readonly timeoutMs?: number;
 }
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +18,7 @@ import {
   isAcpResponse,
 } from '../../../packages/adapters/acp/protocol.js';
 import { createAcpClientDriver } from '../../../packages/adapters/acp/acp-client-driver.js';
+import { AcpStdioBackend } from '../../../packages/adapters/acp/backend.js';
 import { createAntigravityRuntime } from '../../../packages/adapters/acp/antigravity.js';
 import { createDshRuntime } from '../../../packages/adapters/acp/dsh.js';
 import {
@@ -199,6 +201,82 @@ test('ACP driver surfaces a submit failure as a failure, never as success', asyn
   assert.equal(closure.state, 'failed');
 });
 
+test('ACP backend does not hold the process open after a clean close', async () => {
+  // The SIGKILL grace timer is a fallback for a child that ignores SIGTERM. If
+  // `close` never clears it, the timer keeps the event loop alive for the whole
+  // grace period after `close` has already resolved, so a short-lived process
+  // cannot exit. That symptom is only visible from outside the closing process,
+  // so run the close in a child and measure how long the child takes to exit.
+  const backendUrl = new URL('../../../packages/adapters/acp/backend.js', import.meta.url).href;
+  const script = [
+    `import { AcpStdioBackend } from ${JSON.stringify(backendUrl)};`,
+    'const started = Date.now();',
+    `const backend = new AcpStdioBackend({ command: process.execPath, args: ['-e', 'process.stdin.resume()'] });`,
+    'await backend.close();',
+    'const closeMs = Date.now() - started;',
+    '// Wait for the report to flush before letting the process exit.',
+    'await new Promise((resolve) => {',
+    '  process.stdout.write(JSON.stringify({ closeMs }) + "\\n", () => resolve(undefined));',
+    '});',
+  ].join('\n');
+
+  const spawnedAt = Date.now();
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+  child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+  const code = await new Promise<number | null>((resolve) => child.once('exit', (value) => resolve(value)));
+  const exitMs = Date.now() - spawnedAt;
+
+  assert.equal(code, 0, stderr);
+  const report = JSON.parse(stdout.trim()) as { closeMs: number };
+  assert.ok(report.closeMs < 4_000, `close() waited ${report.closeMs}ms`);
+  // With the grace timer leaked the child cannot exit before the timer fires.
+  assert.ok(exitMs < 4_000, `the process needed ${exitMs}ms to exit after close()`);
+});
+
+test('ACP driver never settles a session that ran no turn as succeeded', async () => {
+  const runtime = makeFakeRuntime();
+  const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
+  await driver.start(startInput());
+
+  // No turn was submitted, so there is no outcome to report. Claiming success
+  // here would be a fabricated result on a public seam.
+  const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
+  assert.equal(closure.state, 'unknown');
+});
+
+test('ACP driver settles a refused empty turn as failed, never as succeeded', async () => {
+  // A server that answers `end_turn` with no message chunk: the turn completed
+  // by the server's own account but produced no answer, so the driver rejects it.
+  const runtime = makeFakeRuntime({ submitResult: { stopReason: 'end_turn', outputText: '' } });
+  const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
+  await driver.start(startInput());
+
+  await assert.rejects(
+    driver.submit({ taskId, executionEpoch: epoch, assignmentId, payload: submitPayload }),
+    (error: Error & { code?: string }) => error.code === 'protocol-error' && /empty turn answer/.test(error.message),
+  );
+
+  // The rejection must survive into the closure: it is the only place the app
+  // can read the outcome of a turn that threw.
+  const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
+  assert.equal(closure.state, 'failed');
+});
+
+test('ACP driver maps a truncated turn to failed instead of succeeded', async () => {
+  const runtime = makeFakeRuntime({ submitResult: { stopReason: 'max_tokens', outputText: 'partial' } });
+  const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
+  await driver.start(startInput());
+
+  const output = await driver.submit({ taskId, executionEpoch: epoch, assignmentId, payload: submitPayload });
+  assert.equal(output.payload.stopReason, 'max_tokens');
+
+  const closure = await driver.settle({ runtimeId: 'runtime-a', executionEpoch: epoch });
+  assert.equal(closure.state, 'failed');
+});
+
 test('ACP driver maps a cancelled turn to cancelled and settles as stopped', async () => {
   const runtime = makeFakeRuntime({ submitResult: { stopReason: 'cancelled', outputText: '' } });
   const driver = createAcpClientDriver({ runtime, workspace: '/workspace', command: '/bin/true' });
@@ -321,19 +399,12 @@ function makeFakeRuntime(
   const closeResult: AcpRuntimeCloseResult = options.closeResult ?? { closed: true, evidenceRef: 'evidence/close' };
   return {
     runtime: 'opencode',
-    kind: 'shim',
     version: 'test-runtime-1',
-    evidenceRef: 'evidence/runtime',
     capabilities: ['acp.shim'],
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
       return {
         sessionId: input.sessionIdFor ? input.sessionIdFor(input.runtimeId) : `session-${input.runtimeId}`,
-        initialize: { protocolVersion: ACP_PROTOCOL_VERSION, agentInfo: { name: 'test-runtime', version: 'test-runtime-1' } },
-        implementation: { name: 'test-runtime', version: 'test-runtime-1' },
-        capabilities: {},
-        protocol: 'shim',
-        backendRef: 'evidence/backend',
       };
     },
 
@@ -367,9 +438,6 @@ test('ACP runtime shim reports its protocol honestly instead of claiming ACP v1'
   const opencode = createOpencodeRuntime();
   const antigravity = createAntigravityRuntime();
   const dsh = createDshRuntime();
-  assert.equal(opencode.kind, 'direct');
-  assert.equal(antigravity.kind, 'shim');
-  assert.equal(dsh.kind, 'shim');
   assert.equal(opencode.runtime, 'opencode');
   assert.equal(antigravity.runtime, 'antigravity');
   assert.equal(dsh.runtime, 'dsh');

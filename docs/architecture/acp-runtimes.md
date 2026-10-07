@@ -2,6 +2,8 @@
 
 状态：`IMPLEMENTED / VERIFIED-ON-REAL-ENTRY`
 日期：2026-10-06
+证据：`pnpm proof:acp-runtimes` 的真实入口 receipt 在
+`dist/receipts/acp-runtimes-proof.json`（不在版本库内，需重新生成）
 适用范围：应用层到推理层的接线，以及 opencode / antigravity / dsh 三个执行后端的适配
 
 本文说明 HumanAgent 如何用一个 ACP 客户端驱动（client driver）加三个 runtime
@@ -30,18 +32,19 @@ adaptor 充当协议 shim，把一次性 CLI 的输入输出映射到 ACP 会话
 
 ## 2. 三个 runtime 的真实协议面
 
-| runtime | kind | 真实接口 | 会话模型 |
+| runtime | 协议声明 | 真实接口 | 会话模型 |
 | --- | --- | --- | --- |
-| opencode | `direct` | `opencode acp --pure`，stdio 上的 ACP v1 NDJSON | 常驻进程，支持多轮 |
-| antigravity | `shim` | `agy -p "<prompt>" --output-format json` | 一次性进程，每轮一个 |
-| dsh | `shim` | `dsh --profile headless --json <task>` | 一次性进程，每轮一个 |
+| opencode | `acp.direct` | `opencode acp --pure`，stdio 上的 ACP v1 NDJSON | 常驻进程，支持多轮 |
+| antigravity | `acp.shim` | `agy -p "<prompt>" --output-format json` | 一次性进程，每轮一个 |
+| dsh | `acp.shim` | `dsh --profile headless --json <task>` | 一次性进程，每轮一个 |
 
 两个 shim 的关键事实：antigravity 和 dsh 都**不是**常驻 stdin 服务。dsh
 headless 会一直读 stdin 直到 EOF，然后跑一轮并退出。因此 adaptor 必须每轮起一个
 进程，不能把 prompt 写进一个长驻进程而不关闭 stdin；否则第一轮就会永久阻塞。
 
-opencode 是真实 ACP v1 server，所以 `kind` 为 `direct`，`protocol` 为 `acp`；
-两个 shim 的 `protocol` 为 `shim`，adaptor 不冒充 ACP v1 能力。
+opencode 是真实 ACP v1 server，因此声明 `acp.direct` 能力；两个 shim 声明
+`acp.shim`，不冒充 ACP v1。协议变体只在这一处声明，由 driver 的 `capabilities()`
+上抛给 HumanAgent；adaptor 不再另设一个无人读取的 `kind` 字段。
 
 ## 3. 接缝
 
@@ -115,5 +118,29 @@ args = ["--profile", "headless", "--json"]
   `MISSING_CREDENTIAL` 原文；`load` 在两个 shim 上返回 `capability-unavailable`。
 - 失败关闭：缺少 execution 段或 `command` 时组合/校验阶段报错，未知 `driverRef`
   报 `agent-driver-unsupported`。
-- focused tests：ACP 39、config 32、agent-templates 17，全部通过。
+- focused tests：ACP 45、config 32、agent-templates 17，全部通过。
 - 端到端复跑：`pnpm proof:acp-runtimes` 走真实配置与组合入口，三个 runtime 都通过。
+- 字节保真：harness 断言 `answer === streamAnswer`，即 receipt 里的答案与
+  `provider.output` 事件拼出的答案逐字节相同；它不断言某个固定令牌，因为
+  上游对“原样复述”这类 prompt 的返回并不稳定。
+- 回归用例：空转轮次不得判为 `succeeded`；被拒绝的空答案必须落为 `failed`；
+  `close()` 之后不得残留 SIGKILL 宽限计时器把事件循环拖住。
+
+## 8. 设计 DAG
+
+本接线的设计图产物是 `docs/dagpipe/acp-runtime-wiring.graph.json`，语义标签在
+`...graph.semantic.json`，owner 绑定在 `...graph.binding.json`。图形为单源单汇：
+
+```text
+session_plan → resolve_agent_config → compose_acp_driver → open_acp_session
+   → { run_opencode_adaptor | run_antigravity_shim | run_dsh_shim }
+   → observe_driver_events → settle_acp_session → commit_acp_checkpoint
+   → write_run_manifest
+```
+
+三个 adaptor 节点互斥：一次运行按 `driverRef` 只走其中一个。`write_run_manifest`
+是唯一汇点，成功、失败与停止三种终态都汇入它。语义事件投影
+（`projectExecutionSemanticEvents`）发生在 manifest 之后，属于运行结果投影而不在
+本图声明的 `run_manifest` 输出内，因此不进入本图。
+
+用 `pnpm dagpipe:validate` 与 `pnpm dagpipe:bind` 校验。

@@ -112,9 +112,27 @@ Sink: `browser_view`
 | `observation_projection` | `packages/ui/projection/runtime.ts` | 生成流水线观测投影 |
 | `browser_view` | `packages/ui/surfaces/dsh-dashboard-replay.html` | 渲染浏览器只读视图 |
 
+### humanagent-acp-runtime-wiring
+
+Source: `resolve_agent_config`
+Sink: `write_run_manifest`
+
+| Node | ownerPath / ownerRel | Semantic label |
+| --- | --- | --- |
+| `resolve_agent_config` | `packages/config/src/index.ts` | 解析 agent 与 ACP 执行配置 |
+| `compose_acp_driver` | `packages/app/src/agent-driver-composition.ts` | 按 driverRef 组合 ACP 驱动与 runtime adaptor |
+| `open_acp_session` | `packages/adapters/acp/acp-client-driver.ts` | 打开 ACP 会话并绑定 HumanAgent scope |
+| `run_opencode_adaptor` | `packages/adapters/acp/opencode.ts` | 经 opencode 真实 ACP v1 服务执行一轮 |
+| `run_antigravity_shim` | `packages/adapters/acp/antigravity.ts` | 经 antigravity 一次性 CLI shim 执行一轮 |
+| `run_dsh_shim` | `packages/adapters/acp/dsh.ts` | 经 dsh headless 一次性 shim 执行一轮 |
+| `observe_driver_events` | `packages/app/src/agent-execution.ts` | 按 terminal 事件收束驱动事件流 |
+| `settle_acp_session` | `packages/app/src/agent-operation.ts` | 收拢执行闭包并关闭 ACP 会话 |
+| `commit_acp_checkpoint` | `packages/runtime/src/checkpoints/submission.ts` | 在应用 scope 下提交 checkpoint |
+| `write_run_manifest` | `packages/app/src/run-manifest.ts` | 写入可读 run manifest |
+
 ## Findings
 
-- All five current graphs have exactly one source and one sink.
+- All eleven current graphs have exactly one source and one sink.
 - All node owners resolve to files inside the allowed project roots.
 - No graph contains orphan nodes after binding validation.
 - The owner mapping stays inside existing HumanAgent module ownership:
@@ -141,8 +159,8 @@ pnpm dagpipe:gate
 
 Expected results:
 
-- `pnpm dagpipe:validate` prints `validated 5 DAGpipe graph(s)`.
-- `pnpm dagpipe:bind` prints five `bound <graph>: <n> nodes ok` lines.
+- `pnpm dagpipe:validate` prints `validated 11 DAGpipe graph(s)`.
+- `pnpm dagpipe:bind` prints eleven `bound <graph>: <n> nodes ok` lines.
 - `node --test tests/release/dagpipe-binding.test.mjs` prints all binding
   fail-closed fixtures passing.
 - `pnpm dagpipe:gate` runs `dagpipe:validate` followed by `test:release` and

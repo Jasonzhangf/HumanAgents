@@ -217,16 +217,21 @@ export class AcpStdioBackend {
     this.failAll(new AcpStdioBackendError('transport-closed', 'ACP backend closed by client'));
     this.process.stdin.end();
     this.process.kill('SIGTERM');
-    const exit = Promise.race([
-      waitForExit(this.process),
-      new Promise<number>((resolve) => {
-        setTimeout(() => {
-          this.process.kill('SIGKILL');
-          resolve(1);
-        }, 5000);
-      }),
-    ]);
-    await exit;
+    // `Promise.race` does not cancel the loser, so the SIGKILL grace timer must
+    // be cleared explicitly: otherwise a clean exit still holds the event loop
+    // for the whole grace period after `close` has already resolved.
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const forcedKill = new Promise<number>((resolve) => {
+      killTimer = setTimeout(() => {
+        this.process.kill('SIGKILL');
+        resolve(1);
+      }, 5000);
+    });
+    try {
+      await Promise.race([waitForExit(this.process), forcedKill]);
+    } finally {
+      if (killTimer !== undefined) clearTimeout(killTimer);
+    }
   }
 }
 

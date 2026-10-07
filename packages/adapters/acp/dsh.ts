@@ -194,9 +194,7 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
 
   return {
     runtime: 'dsh',
-    kind: 'shim',
     version: options.version ?? VERSION,
-    evidenceRef: `${OWNER}/headless-json`,
     capabilities: [...capabilities],
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
@@ -209,21 +207,11 @@ export function createDshRuntime(options: DshRuntimeOptions = {}): AcpRuntimeAda
         runtimeId: input.runtimeId,
         sessionId,
         command: input.command,
-        cwd: input.cwd ?? options.cwd ?? input.workspace,
+        cwd: options.cwd ?? input.workspace,
         stderr: '',
         finalText: '',
       });
-      return {
-        sessionId,
-        initialize: {
-          protocolVersion: 1,
-          agentInfo: { name: 'dsh', version: VERSION },
-        },
-        implementation: { name: 'dsh', version: VERSION },
-        capabilities: {},
-        protocol: 'shim',
-        backendRef: `${OWNER}/oneshot`,
-      };
+      return { sessionId };
     },
 
     async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {

@@ -1,0 +1,308 @@
+{
+  "id": "humanagent-acp-runtime-wiring",
+  "version": "1",
+  "meta": {
+    "title": "ACP 运行时接线：从会话方案到已提交 checkpoint 与 run manifest",
+    "baseline": "f9cc5d18bc6ecbd6f2734b33c515005cc1aaa48b"
+  },
+  "inputs": [
+    {
+      "id": "session_plan",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "resolve_agent_config",
+      "operator": "humanagent-resolve-agent-config",
+      "operator_version": "1",
+      "inputs": [
+        "session_plan"
+      ],
+      "output": {
+        "id": "agent_execution_config",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "compose_acp_driver",
+      "operator": "humanagent-compose-acp-driver",
+      "operator_version": "1",
+      "inputs": [
+        "agent_execution_config"
+      ],
+      "output": {
+        "id": "composed_driver",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "open_acp_session",
+      "operator": "humanagent-open-acp-session",
+      "operator_version": "1",
+      "inputs": [
+        "composed_driver"
+      ],
+      "output": {
+        "id": "acp_session",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "run_opencode_adaptor",
+      "operator": "humanagent-run-opencode-adaptor",
+      "operator_version": "1",
+      "inputs": [
+        "acp_session"
+      ],
+      "output": {
+        "id": "opencode_turn",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "run_antigravity_shim",
+      "operator": "humanagent-run-antigravity-shim",
+      "operator_version": "1",
+      "inputs": [
+        "acp_session"
+      ],
+      "output": {
+        "id": "antigravity_turn",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "run_dsh_shim",
+      "operator": "humanagent-run-dsh-shim",
+      "operator_version": "1",
+      "inputs": [
+        "acp_session"
+      ],
+      "output": {
+        "id": "dsh_turn",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "observe_driver_events",
+      "operator": "humanagent-observe-driver-events",
+      "operator_version": "1",
+      "inputs": [
+        "opencode_turn",
+        "antigravity_turn",
+        "dsh_turn"
+      ],
+      "output": {
+        "id": "observed_events",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "settle_acp_session",
+      "operator": "humanagent-settle-acp-session",
+      "operator_version": "1",
+      "inputs": [
+        "observed_events"
+      ],
+      "output": {
+        "id": "settled_closure",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_acp_checkpoint",
+      "operator": "humanagent-commit-acp-checkpoint",
+      "operator_version": "1",
+      "inputs": [
+        "settled_closure"
+      ],
+      "output": {
+        "id": "computed_checkpoint",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "write_run_manifest",
+      "operator": "humanagent-write-run-manifest",
+      "operator_version": "1",
+      "inputs": [
+        "computed_checkpoint"
+      ],
+      "output": {
+        "id": "run_manifest",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "resolve_agent_config",
+      "to": "compose_acp_driver",
+      "arc_id": "agent_execution_config"
+    },
+    {
+      "from": "compose_acp_driver",
+      "to": "open_acp_session",
+      "arc_id": "composed_driver"
+    },
+    {
+      "from": "open_acp_session",
+      "to": "run_opencode_adaptor",
+      "arc_id": "acp_session"
+    },
+    {
+      "from": "open_acp_session",
+      "to": "run_antigravity_shim",
+      "arc_id": "acp_session"
+    },
+    {
+      "from": "open_acp_session",
+      "to": "run_dsh_shim",
+      "arc_id": "acp_session"
+    },
+    {
+      "from": "run_opencode_adaptor",
+      "to": "observe_driver_events",
+      "arc_id": "opencode_turn"
+    },
+    {
+      "from": "run_antigravity_shim",
+      "to": "observe_driver_events",
+      "arc_id": "antigravity_turn"
+    },
+    {
+      "from": "run_dsh_shim",
+      "to": "observe_driver_events",
+      "arc_id": "dsh_turn"
+    },
+    {
+      "from": "observe_driver_events",
+      "to": "settle_acp_session",
+      "arc_id": "observed_events"
+    },
+    {
+      "from": "settle_acp_session",
+      "to": "commit_acp_checkpoint",
+      "arc_id": "settled_closure"
+    },
+    {
+      "from": "commit_acp_checkpoint",
+      "to": "write_run_manifest",
+      "arc_id": "computed_checkpoint"
+    }
+  ],
+  "outputs": [
+    "run_manifest"
+  ]
+}

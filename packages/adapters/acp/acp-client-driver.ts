@@ -47,9 +47,6 @@ export interface AcpClientDriverOptions {
   readonly workspace: string;
   readonly command: string;
   readonly args?: readonly string[];
-  readonly env?: Record<string, string | undefined>;
-  readonly cwd?: string;
-  readonly mcpServers?: readonly { readonly name: string; readonly type?: string; readonly command?: string; readonly args?: readonly string[]; readonly url?: string; readonly headers?: Record<string, string> }[];
   readonly timeoutMs?: number;
   readonly promptFor?: (payload: BusinessPayload) => string;
 }
@@ -180,9 +177,6 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       workspace: options.workspace,
       command: options.command,
       ...(options.args === undefined ? {} : { args: options.args }),
-      ...(options.env === undefined ? {} : { env: options.env }),
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
       timeoutMs,
       sessionIdFor: (runtimeId) => `ha-${runtimeId}-${instance.executionEpoch}`,
     });
@@ -231,8 +225,6 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
           workspace: options.workspace,
           command: options.command,
           ...(options.args === undefined ? {} : { args: options.args }),
-          ...(options.env === undefined ? {} : { env: options.env }),
-          ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
           timeoutMs,
         });
         instance.sessionId = loaded.sessionId;
@@ -303,13 +295,17 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       // channel that feeds downstream roles, so an empty completed turn is a
       // protocol failure. Other stop reasons are outcomes in their own right.
       if (text.length === 0 && result.stopReason === 'end_turn') {
-        throw new AcpAdapterError({
+        // Record the rejection before throwing. `settle` reads this state, so a
+        // turn this driver refused must never settle as succeeded.
+        const rejection = new AcpAdapterError({
           code: 'protocol-error',
           message: `ACP runtime ${runtime.runtime} returned an empty turn answer`,
           ownerId: OWNER,
           nextAction: nextActionFor(OWNER, 'empty-turn-answer'),
           evidenceRefs: [],
         });
+        instance.lastFailure = rejection;
+        throw rejection;
       }
       // The turn answer travels as ordered chunk summaries, which is how every
       // consumer of `observe` reads provider output. Keeping the answer out of
@@ -434,11 +430,13 @@ export function createAcpClientDriver(options: AcpClientDriverOptions): AgentDri
       }
       if (closeResult.closed) {
         // The closure must agree with the terminal state the turn already
-        // reported. A truncated or refused turn is not a success.
-        const terminalState = instance.lastStopReason === undefined
-          ? 'succeeded'
-          : terminalStateFor(instance.lastStopReason);
-        return { state: terminalState === 'succeeded' ? 'succeeded' : terminalState, evidenceRefs: closeEvidence };
+        // reported. A truncated or refused turn is not a success, and a session
+        // that never ran a turn has no outcome to report: inventing `succeeded`
+        // there is exactly the fabricated success this seam forbids.
+        if (instance.lastStopReason === undefined) {
+          return { state: 'unknown', evidenceRefs: closeEvidence };
+        }
+        return { state: terminalStateFor(instance.lastStopReason), evidenceRefs: closeEvidence };
       }
       return { state: 'unknown', evidenceRefs: closeEvidence };
     },

@@ -145,9 +145,7 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
 
   return {
     runtime: 'antigravity',
-    kind: 'shim',
     version: options.version ?? VERSION,
-    evidenceRef: `${OWNER}/cliprompt`,
     capabilities: [...capabilities],
 
     async open(input: AcpRuntimeOpenInput): Promise<AcpRuntimeOpenResult> {
@@ -173,17 +171,7 @@ export function createAntigravityRuntime(options: AntigravityRuntimeOptions = {}
         args: input.args ?? options.args ?? [],
       };
       sessions.set(sessionId, state);
-      return {
-        sessionId,
-        initialize: {
-          protocolVersion: 1,
-          agentInfo: { name: 'antigravity', version: VERSION },
-        },
-        implementation: { name: 'antigravity', version: VERSION },
-        capabilities: {},
-        protocol: 'shim',
-        backendRef: `${OWNER}/humanagent/acp-shim/${sessionId}`,
-      };
+      return { sessionId };
     },
 
     async load(_input: AcpRuntimeLoadInput): Promise<AcpRuntimeSession> {
