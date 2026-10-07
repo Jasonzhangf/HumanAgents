@@ -7,6 +7,15 @@
     <title>HumanAgent · Task Input</title>
     <link rel="stylesheet" href="./runtime.css" />
     <link rel="stylesheet" href="./interaction-work-card.css" />
+    <style>
+      /* runtime.css styles every `label` with `display: grid`, which outranks the
+         user-agent `[hidden] { display: none }` rule. Without this rule the
+         entry form's hidden scheduling fields keep rendering, so the default
+         单次 form would expose timezone/start/end/recurrence controls. */
+      #entry-form [hidden] {
+        display: none;
+      }
+    </style>
   </head>
   <body>
     <main id="main-content" class="page">
