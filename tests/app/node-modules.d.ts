@@ -33,13 +33,19 @@ declare module 'node:child_process' {
   interface ReadableLike extends EventEmitter {
     setEncoding(encoding: string): void;
   }
+  // The backend attaches an `error` listener to stdin, so the writable side must
+  // model the event surface the other two ambient models already declare.
+  interface WritableLike extends EventEmitter {
+    write(chunk: string): boolean;
+    end(): void;
+  }
   interface ChildProcessLike extends EventEmitter {
     readonly pid?: number;
     readonly exitCode: number | null;
     readonly signalCode: string | null;
     readonly stdout: ReadableLike;
     readonly stderr: ReadableLike;
-    readonly stdin: { write(chunk: string): boolean; end(): void };
+    readonly stdin: WritableLike;
     kill(signal?: string): boolean;
   }
   export function spawn(command: string, args?: readonly string[], options?: { readonly cwd?: string; readonly env?: Record<string, string | undefined>; readonly stdio?: readonly string[] }): ChildProcessLike;
