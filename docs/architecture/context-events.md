@@ -424,7 +424,7 @@ export interface ProviderEventLike {
 
 `scope` 派生规则：`EventRecordLike` 自带 `scope`，直接使用；`AgentEventLike` 从 `taskId` + `context.scope` 合成；`AgentSemanticEventLike` 和 `ProviderEventLike` 无 scope 字段，**必须**从 `context.scope` 提供，缺失时抛 `ContextEventError`。
 
-`createContextEvent`（§9.3）不走派生：`sourceId` / `occurredAt` / `scope` 全部由调用方显式提供，缺失即抛 `ContextEventError`。它是这些派生规则的唯一实现者，四个适配器只负责把各自输入折算成 `ContextEventInput` 后调用它。
+`createContextEvent`（§9.3）不走派生：`sourceId` / `occurredAt` / `scope` 全部由调用方显式提供，缺失即抛 `ContextEventError`（`scope` 的精确行为见下段）。它是这些派生规则的唯一实现者，四个适配器只负责把各自输入折算成 `ContextEventInput` 后调用它。
 
 **该承诺的精确边界**：`sourceId`、`occurredAt` 缺失或非法时由 §11 校验抛出 `ContextEventError`。`scope` / `evidenceRefs` / `cost` 的错误则分两类。**判据**（不是形状清单）：摘要规范化若要**解引用一个 `null` / `undefined`（或非对象）**，或把一个**非数组当数组**，就抛原生 `TypeError`；否则由 §11 校验抛 `ContextEventError`。原因是 §9.5 要求重建嵌套对象，摘要必然读取 `scope.organId`、`evidenceRef.evidenceId`、`evidenceRef.scope` 与 `cost` 的键，而摘要计算在校验运行**之前**（`normalize.ts` 的摘要早于其后的 `validateCanonicalContextEvent`）。
 
@@ -439,7 +439,9 @@ export interface ProviderEventLike {
 1. **`cost === null`**：`validation.ts` 的 `cost` 检查只放过 `undefined`，随后读取 `cost.tokensInput`，故它也抛原生 `TypeError`。这是唯一一个**该入口**也抛 `TypeError` 的形状。
 2. **元素的嵌套 scope 槽位**：`evidenceRefs[].scope.taskId` / `cycleId` / `operationId` 为 `null`（或 `""` / `0` / `false`）时，构造入口抛 `TypeError`，而 `validateCanonicalContextEvent` **不拦**——contracts 的 `assertEvidenceRef` 对这些槽位用真值判断，会放过它们。
 
-**这与「§11 入口未受影响」并不矛盾**：本变更未改动 `validation.ts`，上述两个缺口在本变更**之前就存在**，属既有行为。它们只影响违反 `ContextEventInput` 类型的输入，类型正确的调用方无法构造。需要强调的是：`validateCanonicalContextEvent` 不是类型外输入的可靠兜底，跨字段完整性由构造入口与 `assertConstructionInvariants` 负责。
+**本变更未改动 `validation.ts`，上述两个缺口在本变更之前就存在，属既有行为。** 它们只影响违反 `ContextEventInput` 类型的输入，类型正确的调用方无法构造。
+
+**`validateCanonicalContextEvent` 不是类型外输入的可靠兜底**：它对第一类的多数形状会抛 `ContextEventError`，但有上述两个缺口。构造入口的自检 `assertConstructionInvariants` 也不覆盖这些形状——它只判 `pairing === undefined` 与 `eventId` / `payloadRef` 的派生一致。因此类型外输入的错误类型由**摘要规范化与 §11 校验中的先到者**决定，这正是本段要精确说明的边界。
 
 另需注意 `cost` 传非对象（如 `5`）**不抛错**——这在两个 SHA 上相同，属既有行为；但它的摘要表示由 `"cost":5` 变为 `{}`，**这一项是本变更新引入的**（本变更把 `cost` 改为按固定字段序重建），不是既有行为。
 
