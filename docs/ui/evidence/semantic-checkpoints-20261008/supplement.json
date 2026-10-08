@@ -1,0 +1,95 @@
+{
+  "status": "PASS",
+  "artifactSha256": "3a85040bfe69200af5d37c31a420c594d6ddac8f182bb8e815b8ad4f010da505",
+  "assertions": [
+    {
+      "name": "honest getItem failure",
+      "pass": true,
+      "detail": "偏好不可用 · storage read: injected getItem failure"
+    },
+    {
+      "name": "storage fault isolates display and business getItem",
+      "pass": true
+    },
+    {
+      "name": "honest setItem failure",
+      "pass": true,
+      "detail": "未保存 · storage write: injected setItem failure"
+    },
+    {
+      "name": "storage fault isolates display and business setItem",
+      "pass": true
+    },
+    {
+      "name": "honest removeItem failure",
+      "pass": true,
+      "detail": "重置失败 · storage remove: injected removeItem failure"
+    },
+    {
+      "name": "storage fault isolates display and business removeItem",
+      "pass": true
+    },
+    {
+      "name": "malformed or unsupported preference visibly rejected",
+      "pass": true,
+      "detail": "偏好不可用 · storage read: Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+    },
+    {
+      "name": "invalid preference does not affect business",
+      "pass": true
+    },
+    {
+      "name": "malformed or unsupported preference visibly rejected",
+      "pass": true,
+      "detail": "偏好不可用 · storage read: 不支持的偏好格式或版本"
+    },
+    {
+      "name": "invalid preference does not affect business",
+      "pass": true
+    },
+    {
+      "name": "native browser back views history without saving preference",
+      "pass": true
+    },
+    {
+      "name": "browser forward preserves business state",
+      "pass": true
+    },
+    {
+      "name": "two public consumers receive exact shared projection reference",
+      "pass": true
+    },
+    {
+      "name": "one consumer unsubscribe preserves other subscription",
+      "pass": true
+    },
+    {
+      "name": "raw link real pointer target visible",
+      "pass": true,
+      "detail": {
+        "x": 675.9140625,
+        "y": 499.90625,
+        "height": 1000,
+        "hit": true
+      }
+    },
+    {
+      "name": "native pointer opens exact error raw record",
+      "pass": true,
+      "detail": "#scope=task&task=task-runtime-refactor&perspective=raw&action=task-runtime-refactor%3Aaction%3Aerror&record=task-runtime-refactor%3Arecord%3Aerror"
+    },
+    {
+      "name": "reduced motion input active",
+      "pass": true
+    },
+    {
+      "name": "reduced motion suppresses ongoing animations",
+      "pass": true
+    },
+    {
+      "name": "static file has no HTTP runtime/provider request",
+      "pass": true
+    }
+  ],
+  "errors": []
+}

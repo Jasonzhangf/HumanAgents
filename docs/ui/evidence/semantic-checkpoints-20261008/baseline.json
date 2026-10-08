@@ -1,0 +1,310 @@
+{
+  "status": "PASS",
+  "file": "/Volumes/Intel/playground/humanagent/semantic-checkpoints-ui-20261008/docs/ui/semantic-observation-tour.html",
+  "baseSHA": "56995b3e742b3a400efa45bb42508dd3185284fb",
+  "hash": "3a85040bfe69200af5d37c31a420c594d6ddac8f182bb8e815b8ad4f010da505",
+  "space": 8,
+  "page": "p1",
+  "assertions": [
+    {
+      "name": "station2 declared typed groups",
+      "pass": true,
+      "detail": [
+        {
+          "kind": "single",
+          "text": "单次任务 · 0\n声明类型分类 · 生命周期筛选=all\n\n此类型在当前生命周期筛选下没有任务。"
+        },
+        {
+          "kind": "inspection",
+          "text": "定时巡检任务 · 1\n声明类型分类 · 生命周期筛选=all\n链路巡检\nHumanAgent 平台 · 巡检模板 · 按轮次检查连通性、DNS 与出口一致性，保留每轮历史。\n最新事实：第 2 轮发现 1 项延迟偏高\nlive\nv1\n需关注"
+        },
+        {
+          "kind": "long-horizon",
+          "text": "长程任务 · 3\n声明类型分类 · 生命周期筛选=all\n运行时编排重构\nHumanAgent 平台 · 长程模板 · 把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n最新事实：模板扩展核心已确认\nlive\nv3\n文档收口（等待人类）\nHumanAgent 平台 · 长程模板 · 等待人类确认收口口径后再继续。\n最新事实：资料整理已确认\n等待\nv1\n需关注\nProvider 流式推理（未映射）\nHumanAgent 平台 · 长程模板 · 接收 Provider 流式事件；当前存在未映射事件类型。\n最新事实：未映射事件已记录\n未知\nv1\n需关注"
+        }
+      ]
+    },
+    {
+      "name": "cold default current",
+      "pass": true,
+      "detail": "current"
+    },
+    {
+      "name": "CP3 current; CP4 uncommitted",
+      "pass": true,
+      "detail": "task-runtime-refactor:cp:3"
+    },
+    {
+      "name": "latest global plan v3",
+      "pass": true
+    },
+    {
+      "name": "simple one actual graph plus collapsed template skeleton",
+      "pass": true,
+      "detail": 2
+    },
+    {
+      "name": "historical projection deep frozen",
+      "pass": true
+    },
+    {
+      "name": "CP2 retained actual failed snapshot",
+      "pass": true
+    },
+    {
+      "name": "correction excludes only effective wrong ref",
+      "pass": true
+    },
+    {
+      "name": "independent work and unresolved attention retained",
+      "pass": true
+    },
+    {
+      "name": "complete semantic v1 v2 v3 evolution",
+      "pass": true,
+      "detail": 3
+    },
+    {
+      "name": "semantic reasons changes before after graph labels",
+      "pass": true
+    },
+    {
+      "name": "perspective navigation does not append actions",
+      "pass": true
+    },
+    {
+      "name": "history view distinct from current cursor",
+      "pass": true
+    },
+    {
+      "name": "historical CP2 graph from retained snapshot",
+      "pass": true
+    },
+    {
+      "name": "error action queryable",
+      "pass": true
+    },
+    {
+      "name": "action to exact raw record link",
+      "pass": true,
+      "detail": 1
+    },
+    {
+      "name": "raw reciprocal action link",
+      "pass": true
+    },
+    {
+      "name": "scoped multiple raw records",
+      "pass": true,
+      "detail": 6
+    },
+    {
+      "name": "Mock rewind CP1 appends action",
+      "pass": true
+    },
+    {
+      "name": "Mock advance returns CP3 before CP4",
+      "pass": true
+    },
+    {
+      "name": "Mock advance commits CP4",
+      "pass": true
+    },
+    {
+      "name": "three commands append three actions and raw records",
+      "pass": true
+    },
+    {
+      "name": "append-only action raw prefixes",
+      "pass": true
+    },
+    {
+      "name": "immutable previous checkpoints retained",
+      "pass": true
+    },
+    {
+      "name": "rewind advance do not rewrite revision facts or undo side effects",
+      "pass": true
+    },
+    {
+      "name": "public subscriptions shared refs and retained old snapshots",
+      "pass": true,
+      "detail": {
+        "updates": 3,
+        "changed": true,
+        "cpShared": true,
+        "oldReadable": true
+      }
+    },
+    {
+      "name": "unsubscribe stops updates",
+      "pass": true
+    },
+    {
+      "name": "draft does not override explicit route",
+      "pass": true
+    },
+    {
+      "name": "Save persisted actions preference",
+      "pass": true
+    },
+    {
+      "name": "Save future default does not override explicit current",
+      "pass": true
+    },
+    {
+      "name": "reload explicit current wins saved actions",
+      "pass": true
+    },
+    {
+      "name": "nonexplicit entry resolves saved default",
+      "pass": true
+    },
+    {
+      "name": "successful manual perspective updates follow-last",
+      "pass": true
+    },
+    {
+      "name": "Tour hash does not persist perspective",
+      "pass": true
+    },
+    {
+      "name": "Reset own preference to cold current",
+      "pass": true
+    },
+    {
+      "name": "explicit old revision mismatch visible in simple view",
+      "pass": true
+    },
+    {
+      "name": "uncommitted CP4 error visible",
+      "pass": true
+    },
+    {
+      "name": "invalid perspective error visible",
+      "pass": true
+    },
+    {
+      "name": "cross-task record error visible",
+      "pass": true
+    },
+    {
+      "name": "inspection same definition comparison",
+      "pass": true
+    },
+    {
+      "name": "single four stages one result",
+      "pass": true
+    },
+    {
+      "name": "node evidence drawer opens",
+      "pass": true
+    },
+    {
+      "name": "native Esc closes and restores node focus",
+      "pass": true
+    },
+    {
+      "name": "active prerequisites done invariant",
+      "pass": true
+    },
+    {
+      "name": "bound Agent reuses four-mode checkpoint controls",
+      "pass": true
+    },
+    {
+      "name": "Agent crosslinks retain bound scope",
+      "pass": true
+    },
+    {
+      "name": "incompatible Agent task rejected",
+      "pass": true
+    },
+    {
+      "name": "fixed default reload current",
+      "pass": true
+    },
+    {
+      "name": "fixed default reload semantic",
+      "pass": true
+    },
+    {
+      "name": "fixed default reload actions",
+      "pass": true
+    },
+    {
+      "name": "fixed default reload raw",
+      "pass": true
+    },
+    {
+      "name": "follow-last manual current",
+      "pass": true
+    },
+    {
+      "name": "follow-last manual semantic",
+      "pass": true
+    },
+    {
+      "name": "follow-last manual actions",
+      "pass": true
+    },
+    {
+      "name": "follow-last manual raw",
+      "pass": true
+    },
+    {
+      "name": "single dynamic revisions through shared graph",
+      "pass": true
+    },
+    {
+      "name": "single review precedes one result",
+      "pass": true
+    },
+    {
+      "name": "inspection dynamic revisions through shared graph",
+      "pass": true
+    },
+    {
+      "name": "all task active prerequisites done invariant",
+      "pass": true
+    },
+    {
+      "name": "native Mock failure blocks dependent branches",
+      "pass": true
+    },
+    {
+      "name": "actual execution failure appended to action ledger",
+      "pass": true
+    },
+    {
+      "name": "execution failure preserves prior checkpoint snapshots",
+      "pass": true
+    },
+    {
+      "name": "incompatible action record association error",
+      "pass": true
+    },
+    {
+      "name": "old station27 does not claim final completion",
+      "pass": true
+    },
+    {
+      "name": "generated final completion count35",
+      "pass": true
+    }
+  ],
+  "errors": [],
+  "screenshot": "UNVERIFIED",
+  "selectors": [
+    "[data-action=\"perspective\"][data-perspective=\"current|semantic|actions|raw\"]",
+    "[data-action=\"checkpoint-rewind|correct|advance\"]",
+    "[data-control=\"checkpoint-list\"]",
+    "[data-action=\"preference-draft|save|reset\"]",
+    "[data-control=\"semantic-evolution\"]",
+    "[data-control=\"action-history\"]",
+    "[data-control=\"raw-ledger\"]",
+    "[data-control=\"orchestration-viewer\"]"
+  ],
+  "lastStationSnapshot": "[p1 \"HumanAgent · 静态语义观测 Tour\" | space \"HumanAgent semantic checkpoint revision 20261008\"(8): 1 managed, 0 untracked — p1* \"HumanAgent · 静态语义观测 Tour\"]\nroot\n  container\n    container\n      text \"HA\"\n      container\n        text \"HumanAgent\"\n        text \"语义观测交互设计\"\n    container\n      text \"系统概要\"\n      text \"交互设计 · Mock 数据\"\n    container\n      button [ref=1712]\n        svg_root\n        text \"演示控制\"\n      button [ref=1713]\n        svg_root\n        text \"导览\"\n  container\n    container \"观测导航\"\n      container\n        paragraph\n          text \"视角\"\n        unordered_list\n          list_item\n            button [ref=1776]\n              svg_root\n              text \"系统概要\"\n          list_item\n            button [ref=1777]\n              svg_root\n              text \"项目\"\n          list_item\n            button [ref=1778]\n              svg_root\n              text \"任务\"\n          list_item\n            button [ref=1779]\n              svg_root\n              text \"功能 / Agent\"\n      container\n        paragraph\n          text \"当前范围\"\n        unordered_list\n          list_item\n            text \"全部项目与任务\"\n      container\n        text \"只读观测面\"\n        text \"这里只读显示语义投影。推进、修订与重试只存在于底部独立的 Mock 控制面。\"\n    container [ref=1689]\n      container \"当前位置\"\n        text \"系统概要\"\n      container\n        container\n          container\n            heading\n              text \"系统概要\"\n            text \"全部项目的只读语义投影\"\n            container\n              button [ref=1780]\n                text \"打开一个 live 任务\"\n              button [ref=1781]\n                text \"打开一个完成复盘\"\n          container \"系统状态汇总\"\n            container\n              text \"3\"\n              text \"项目\"\n            container\n              text \"8\"\n              text \"任务总数\"\n            container\n              text \"4\"\n              text \"live\"\n            container\n              text \"1\"\n              text \"等待\"\n            container\n              text \"1\"\n              text \"失败\"\n            container\n              text \"1\"\n              text \"已完成\"\n            container\n              text \"1\"\n              text \"未映射\"\n        container\n          container\n            heading\n              text \"待人处理\"\n            text \"需要关注的语义事实\"\n          container\n            container\n              container\n                text \"运行时编排重构\"\n                text \"HumanAgent 平台 · 模板扩展接线 失败\"\n              container\n                text \"live\"\n                button [ref=1782]\n                  text \"查看\"\n            container\n              container\n                text \"链路巡检\"\n                text \"HumanAgent 平台 · 第 2 轮发现 1 项延迟偏高\"\n              container\n                text \"live\"\n                button [ref=1783]\n                  text \"查看\"\n            container\n              container\n                text \"文档收口（等待人类）\"\n                text \"HumanAgent 平台 · 资料整理已确认\"\n              container\n                text \"等待\"\n                button [ref=1784]\n                  text \"查看\"\n            container\n              container\n                text \"迁移演练（失败）\"\n                text \"Orbit 调度服务 · 数据校验失败\"\n              container\n                text \"失败\"\n                button [ref=1785]\n                  text \"查看\"\n            container\n              container\n                text \"Provider 流式推理（未映射）\"\n                text \"HumanAgent 平台 · 未映射事件已记录\"\n              container\n                text \"未知\"\n                button [ref=1786]\n                  text \"查看\"\n        container\n          container\n            heading\n              text \"项目列表\"\n            text \"点击进入项目视角\"\n          container\n            button [ref=1787]\n              container\n                text \"HumanAgent 平台\"\n                text \"长程器官式 Harness 的实现与观测。 · 归属 core 团队\"\n              container\n                text \"live\"\n                text \"任务 4\"\n            button [ref=1788]\n              container\n                text \"Orbit 调度服务\"\n                text \"调度与恢复能力的实现、巡检与演练。 · 归属 runtime 团队\"\n              container\n                text \"live\"\n                text \"任务 4\"\n            button [ref=1789]\n              container\n                text \"Signal 观测网关\"\n                text \"新建项目，尚未创建任务。 · 归属 未分配\"\n              container\n                text \"空\"\n                text \"任务 0\"\n  container \"静态语义观测导览\"\n    container\n      container\n        heading\n          text \"静态语义观测导览\"\n        paragraph\n          text \"用 Mock 控件走完整界面，不连接真实 Runtime。\"\n      button \"退出导览\" [ref=1705, loc=css:button[aria-label=\"退出导览\"]]\n        svg_root\n    container\n      text \"第 35 / 35 站\"\n      text \"导览完成\"\n    container\n      container\n        text \"全部站点结束\"\n        text \"第 35 / 35 站\"\n      paragraph\n        text \"仅说明导览到达最后一站，不代表生产功能交付。\"\n      container\n        text \"真实末站完成\"\n        text \"不宣称生产验收\"\n      text \"#scope=system&tour=35\"\n      container\n        svg_root\n        container\n          text \"导览完成\"\n          text \"这只表示 35 站导览结束，不代表功能验收通过。\"\n    container\n      button [ref=1790]\n        text \"上一站\"\n      button [ref=1791]\n        text \"下一站\"\n      button [ref=1792]\n        text \"目录\"\n      button [ref=1793]\n        text \"重来\"\n      button [ref=1794]\n        text \"退出\"\n  container \"Mock 演示控制面\"\n    button [ref=1711]\n      container\n        svg_root\n        container\n          text \"Mock 演示控制面\"\n          text \"不连接 Runtime · 只改变本地演示状态\"\n      text \"已连接\"\n",
+  "finalStation": 35
+}

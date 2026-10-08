@@ -1,0 +1,26 @@
+{
+  "status": "FAIL",
+  "artifactSha256": "e5effd63a9250be8f4b08ea1c4ac802b03dc01f5a91bab6e75a84c2c986cb3ea",
+  "space": 8,
+  "result": {
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=2&perspective=semantic&tour=10",
+    "tour": "第 10 / 35 站",
+    "current": 3,
+    "view": "2",
+    "revisionButtons": [
+      {
+        "text": "v1",
+        "disabled": true
+      },
+      {
+        "text": "v2",
+        "disabled": true
+      },
+      {
+        "text": "v3",
+        "disabled": true
+      }
+    ],
+    "checkpointGraph": "CP3 保留的实际投影 · v3\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n观察\n已完成无前置依赖\n第 2 层\n计划\n已完成依赖 stage-task-runtime-refactor-observe\n第 3 层\n投影契约\n已完成依赖 stage-task-runtime-refactor-plan\n第 4 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 5 层\n模板扩展核心\n已完成依赖 n-identity\n第 6 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 7 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 8 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\n第 9 层\nreview\n等待依赖 n-projection, n-template, n-identity, n-template-extension-core, n-template-extension-wire, n-revision, n-history, n-instance-verify, n-review\n第 10 层\nreview → 全程重编排 · 小循环 1\n等待依赖 stage-task-runtime-refactor-review\n第 11 层\n观察 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c1-global-replan\n第 12 层\n小计划 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c2-observe\n第 13 层\n执行 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c2-plan\n第 14 层\nrevi"
+  }
+}

@@ -1544,7 +1544,7 @@
       </header>
       <div class="tour-progress-wrap">
         <div class="tour-progress-meta">
-          <span id="tourProgressLabel">第 1 / 27 站</span>
+          <span id="tourProgressLabel">加载导览站点…</span>
           <span id="tourProgressHint">上一站 / 下一站</span>
         </div>
         <div class="tour-progress" role="presentation"><span id="tourProgressBar" style="width: 4%"></span></div>
@@ -1950,6 +1950,18 @@
                       waitingReason: '等待修订历史、历史回放与实例核验三条分支汇合。',
                     }),
                   ]),
+                  revision(4, '待发布：历史回放后增加 checkpoint 引用核验；整体复核须等待引用核验，不提前宣称完成。', null, [
+                    node('n-projection', '投影契约', 'done', []),
+                    node('n-template', '模板落地', 'done', ['n-projection']),
+                    node('n-identity', '身份绑定', 'done', ['n-projection']),
+                    node('n-template-extension-core', '模板扩展核心', 'done', ['n-identity']),
+                    node('n-template-extension-wire', '模板扩展接线', 'active', ['n-template-extension-core'], { evidenceId: 'ev-wire', detail: '正在把扩展核心接入运行时装配。' }),
+                    node('n-revision', '修订历史', 'waiting', ['n-template-extension-wire']),
+                    node('n-history', '历史回放', 'waiting', ['n-template-extension-wire']),
+                    node('n-instance-verify', '实例核验', 'waiting', ['n-template-extension-wire']),
+                    node('n-checkpoint-verify', 'checkpoint 引用核验', 'waiting', ['n-history'], { detail: '核对历史 checkpoint 与不可变投影引用；尚未执行。' }),
+                    node('n-review', '整体复核', 'waiting', ['n-revision', 'n-checkpoint-verify', 'n-instance-verify']),
+                  ]),
                 ],
                 facts: [
                   fact('f-rt-1', 1, 'success', '投影契约已确认', 'contracts 投影类型与负向测试通过。', {
@@ -2043,9 +2055,9 @@
                   }),
                 ],
                 occurrences: [
-                  { id: 'occ-1', index: 1, label: '第 1 轮', state: 'done', result: '连通性正常' },
-                  { id: 'occ-2', index: 2, label: '第 2 轮', state: 'done', result: '发现 1 项延迟偏高' },
-                  { id: 'occ-3', index: 3, label: '第 3 轮', state: 'active', result: '比对进行中' },
+                  { id: 'occ-1', index: 1, label: '第 1 轮', state: 'done', result: '连通性正常', definitionId: 'pipeline-health', definitionVersion: 1, results: { latency: '120ms', integrity: '完整' }, evidenceId: 'ev-projection' },
+                  { id: 'occ-2', index: 2, label: '第 2 轮', state: 'done', result: '发现 1 项延迟偏高', definitionId: 'pipeline-health', definitionVersion: 1, results: { latency: '180ms', integrity: '完整' }, evidenceId: 'ev-projection' },
+                  { id: 'occ-3', index: 3, label: '第 3 轮', state: 'active', result: '比对进行中', definitionId: 'pipeline-health', definitionVersion: 1, results: null },
                 ],
                 milestones: [],
                 result: null,
@@ -2272,8 +2284,8 @@
                   }),
                 ],
                 occurrences: [
-                  { id: 'occ-t1', index: 1, label: '第 1 轮', state: 'done', result: '遥测正常' },
-                  { id: 'occ-t2', index: 2, label: '第 2 轮', state: 'active', result: '采集中' },
+                  { id: 'occ-t1', index: 1, label: '第 1 轮', state: 'done', result: '遥测正常', definitionId: 'pipeline-health', definitionVersion: 1, results: { latency: '100ms', integrity: '完整' }, evidenceId: 'ev-probe' },
+                  { id: 'occ-t2', index: 2, label: '第 2 轮', state: 'active', result: '采集中', definitionId: 'pipeline-health', definitionVersion: 1, results: null },
                 ],
                 milestones: [],
                 result: null,
@@ -2337,7 +2349,7 @@
             };
           }
 
-          return { createState: createState };
+          return { createState: createState, nodeForTemplate: node };
         })();
 
         /* ------------------------------------------------------------- MockDriver
@@ -2347,22 +2359,71 @@
           inspection: {
             key: 'inspection',
             label: '巡检模板',
-            sections: ['本轮 occurrence', '探针 / 检查', '发现与归类', '收拢与下一轮'],
+            sections: ['观察', '计划', '执行相同检查', 'review', '轮次结果比较'],
+            stages: ['observe', 'plan', 'execute', 'review'],
+            skeleton: [[], ['observe'], ['plan'], ['execute']],
+            layout: 'dependency-depth', loops: 'occurrence',
             terminal: '每轮收拢；下一轮不是本轮的重试',
           },
           'long-horizon': {
             key: 'long-horizon',
             label: '长程模板',
-            sections: ['里程碑', '分解', '并行 / 串行执行', '验证', '阶段收拢'],
+            sections: ['观察', '小计划', '执行', 'review', '全程重编排'],
+            stages: ['observe', 'plan', 'execute', 'review'],
+            skeleton: [[], ['observe'], ['plan'], ['execute']],
+            layout: 'dependency-depth', loops: 'bounded-cycle',
             terminal: '阶段收拢；同一任务按新事实重编排',
           },
           single: {
             key: 'single',
             label: '单次模板',
-            sections: ['明确输入', '执行', '验证', '一次结果与终态'],
+            sections: ['观察', '计划', '执行', 'review', '一次结果与终态'],
+            stages: ['observe', 'plan', 'execute', 'review'],
+            skeleton: [[], ['observe'], ['plan'], ['execute']],
+            layout: 'dependency-depth', loops: 'none',
             terminal: '一次结果与终态；完成后进入复盘',
           },
         };
+        PayloadRefs.freezeValue(TEMPLATES);
+
+        /* Browser Mock display preference only. No domain state is persisted. */
+        var DisplayPreference = (function () {
+          var key = 'humanagent.mock.display-preference.v1';
+          var modes = ['current', 'semantic', 'actions', 'raw'];
+          var saved = { version: 1, mode: 'current', lastManual: null };
+          var draft = 'current';
+          var status = '未保存 · 冷启动默认简洁展示';
+          function valid(value) {
+            return value && value.version === 1 && Object.keys(value).every(function (k) { return ['version', 'mode', 'lastManual'].indexOf(k) >= 0; }) &&
+              (modes.indexOf(value.mode) >= 0 || value.mode === 'follow-last') &&
+              (value.lastManual === null || modes.indexOf(value.lastManual) >= 0);
+          }
+          function notify() { UiEvents.emit('DisplayPreferenceChanged', snapshot()); }
+          function snapshot() { return PayloadRefs.freezeValue({ saved: saved, draft: draft, status: status, key: key }); }
+          function persist(next) {
+            try { localStorage.setItem(key, JSON.stringify(next)); saved = PayloadRefs.freezeValue(next); status = '已保存 · 仅影响未来无显式视角的打开'; }
+            catch (error) { status = '未保存 · storage write: ' + error.message; }
+            notify();
+          }
+          function init() {
+            try { var text = localStorage.getItem(key); if (text) { var value = JSON.parse(text); if (!valid(value)) throw new Error('不支持的偏好格式或版本'); saved = PayloadRefs.freezeValue(value); draft = saved.mode; status = '已读取浏览器 Mock 偏好'; } }
+            catch (error) { status = '偏好不可用 · storage read: ' + error.message; }
+            UiEvents.subscribe('DisplayPreferenceDraftRequested', function (env) { if (modes.indexOf(env.mode) >= 0 || env.mode === 'follow-last') { draft = env.mode; status = '草稿未保存'; notify(); } });
+            UiEvents.subscribe('DisplayPreferenceSaveRequested', function () { persist({ version: 1, mode: draft, lastManual: saved.lastManual }); });
+            UiEvents.subscribe('DisplayPreferenceResetRequested', function () {
+              try { localStorage.removeItem(key); saved = PayloadRefs.freezeValue({ version: 1, mode: 'current', lastManual: null }); draft = 'current'; status = '已重置此 Mock 偏好键'; }
+              catch (error) { status = '重置失败 · storage remove: ' + error.message; }
+              notify();
+            });
+            UiEvents.subscribe('DisplayPerspectiveManuallySelected', function (env) {
+              var result = Navigation.normalize(env.route);
+              if (result.error) { UiEvents.emit('NavigationRequested', { route: env.route, source: 'manual-perspective' }); return; }
+              UiEvents.emit('NavigationRequested', { route: result.route, source: 'manual-perspective' });
+              if (saved.mode === 'follow-last') persist({ version: 1, mode: saved.mode, lastManual: result.route.perspective });
+            });
+          }
+          return { init: init, snapshot: snapshot, resolve: function () { return saved.mode === 'follow-last' ? saved.lastManual || 'current' : saved.mode; } };
+        })();
 
         var MockDriver = (function () {
           var state = null;
@@ -2372,7 +2433,43 @@
           function init() {
             state = SemanticFixtures.createState();
             state.tasks = state.tasks.map(function (task) {
-              return Object.assign({}, task, { nodeStates: Object.freeze({}) });
+              var revisions = task.revisions.map(function (rev) {
+                var nodes = rev.nodes;
+                var prefix = 'stage-' + task.id + '-';
+                var observe = SemanticFixtures.nodeForTemplate(prefix + 'observe', '观察', 'done', [], { stage: 'observe', cycleId: 'cycle-1' });
+                var plan = SemanticFixtures.nodeForTemplate(prefix + 'plan', '计划', 'done', [observe.id], { stage: 'plan', cycleId: 'cycle-1' });
+                var actual = nodes.map(function (node) { return Object.assign({}, node, { stage: task.kind === 'single' && node.id === 'n-result' ? 'result' : 'execute', cycleId: 'cycle-1', deps: task.kind === 'single' && node.id === 'n-result' ? [prefix + 'review'] : node.deps.length ? node.deps : [plan.id] }); });
+                var reviewInputs = actual.filter(function (n) { return task.kind !== 'single' || (n.id !== 'n-result' && n.id !== 'n-publish'); }).map(function (n) { return n.id; });
+                var review = SemanticFixtures.nodeForTemplate(prefix + 'review', 'review', task.state === 'completed' ? 'done' : 'waiting', reviewInputs, { stage: 'review', cycleId: 'cycle-1' });
+                var instantiated = [observe, plan].concat(actual, [review]);
+                if (TEMPLATES[task.kind].loops === 'bounded-cycle') {
+                  var firstReplan = SemanticFixtures.nodeForTemplate(prefix + 'c1-global-replan', 'review → 全程重编排 · 小循环 1', 'waiting', [review.id], { stage: 'replan', cycleId: 'cycle-1' });
+                  var cycle2 = TEMPLATES[task.kind].stages.map(function (stage, i) { return SemanticFixtures.nodeForTemplate(prefix + 'c2-' + stage, TEMPLATES[task.kind].sections[i] + ' · 小循环 2', 'waiting', [i ? prefix + 'c2-' + TEMPLATES[task.kind].stages[i - 1] : firstReplan.id], { stage: stage, cycleId: 'cycle-2', detail: '有界目标：核验剩余接线；review 后更新全程编排。' }); });
+                  instantiated = instantiated.concat([firstReplan], cycle2, [SemanticFixtures.nodeForTemplate(prefix + 'global-replan', 'review → 全程重编排 · 小循环 2', 'waiting', [cycle2[3].id], { stage: 'replan', cycleId: 'cycle-2' })]);
+                }
+                return PayloadRefs.freezeValue(Object.assign({}, rev, { nodes: instantiated }));
+              });
+              var currentRevision = task.id === 'task-runtime-refactor' ? 3 : task.currentRevision;
+              var rawRecords = task.facts.map(function (fact, i) { return PayloadRefs.freezeValue({ id: task.id + ':record:' + (i + 1), number: i + 1, actionId: task.id + ':action:' + (i + 1), checkpointId: task.id + ':cp:1', evidenceId: fact.evidenceId || null, kind: fact.kind, value: { factId: fact.id, outcome: fact.kind, detail: fact.detail } }); });
+              var actions = task.facts.map(function (fact, i) { return PayloadRefs.freezeValue({ id: task.id + ':action:' + (i + 1), number: i + 1, title: fact.title, outcome: fact.kind, revision: fact.revision, checkpointId: task.id + ':cp:1', recordId: rawRecords[i].id, evidenceId: fact.evidenceId || null }); });
+              var snapshots = revisions.filter(function (r) { return r.version <= currentRevision; });
+              function cp(number, summary, version, context) {
+                var projection = snapshots.filter(function (r) { return r.version === version; })[0];
+                if (number === 2) projection = PayloadRefs.freezeValue(Object.assign({}, projection, { nodes: projection.nodes.concat([SemanticFixtures.nodeForTemplate(task.id + ':wrong-node', '错误执行 · 当时真实失败', 'failed', [], { stage: 'execute', evidenceId: 'ev-wire' })]) }));
+                var refs = rawRecords.filter(function (r) { return number !== 1 || r.id !== task.id + ':record:error'; }).map(function (r) { return r.id; });
+                return PayloadRefs.freezeValue({ id: task.id + ':cp:' + number, number: number, summary: summary, valid: number !== 2, planRevision: version, cycleId: 'cycle-1', occurrenceId: task.occurrences[0] ? task.occurrences[0].id : null, context: context, projection: projection, semanticRefs: context, rawResultRefs: refs });
+              }
+              var wrong = task.id + ':wrong-result';
+              var corrected = task.id + ':correct-result';
+              var errorRecord = PayloadRefs.freezeValue({ id: task.id + ':record:error', number: rawRecords.length + 1, actionId: task.id + ':action:error', checkpointId: task.id + ':cp:2', evidenceId: 'ev-wire', kind: 'failure', value: { resultRef: wrong, error: '错误接线结果；待接受修正' } });
+              rawRecords.push(errorRecord);
+              actions.push(PayloadRefs.freezeValue({ id: errorRecord.actionId, number: actions.length + 1, title: '错误执行', outcome: 'failure', revision: 1, checkpointId: errorRecord.checkpointId, recordId: errorRecord.id, evidenceId: errorRecord.evidenceId }));
+              var cps = [cp(1, '已确认输入与初始观察', 1, ['confirmed-input', 'independent-work', 'unresolved-attention']), cp(2, '错误执行 · 保留当时实际快照', 1, ['confirmed-input', wrong, 'independent-work', 'unresolved-attention']), cp(3, '已接受修正 · 正确路径', currentRevision, ['confirmed-input', corrected, 'independent-work', 'unresolved-attention'])];
+              var repairRecord = PayloadRefs.freezeValue({ id: task.id + ':record:repair', number: rawRecords.length + 1, actionId: task.id + ':action:repair', checkpointId: cps[2].id, kind: 'correction', evidenceId: 'ev-projection', value: { excludedRef: wrong, acceptedRef: corrected } });
+              rawRecords.push(repairRecord);
+              cps[2] = PayloadRefs.freezeValue(Object.assign({}, cps[2], { rawResultRefs: cps[2].rawResultRefs.concat([repairRecord.id]) }));
+              actions.push(PayloadRefs.freezeValue({ id: repairRecord.actionId, number: actions.length + 1, title: '接受修正 · 仅排除 ' + wrong, outcome: 'success', revision: currentRevision, checkpointId: cps[2].id, recordId: repairRecord.id, evidenceId: repairRecord.evidenceId }));
+              return Object.assign({}, task, { revisions: revisions, currentRevision: currentRevision, nodeStates: Object.freeze({}), checkpoints: PayloadRefs.freezeValue(cps), currentCheckpointId: cps[2].id, excludedRefs: PayloadRefs.freezeValue([wrong]), actions: PayloadRefs.freezeValue(actions), rawRecords: PayloadRefs.freezeValue(rawRecords), checkDefinition: PayloadRefs.freezeValue({ id: 'pipeline-health', version: 1, items: ['latency', 'integrity'] }) });
             });
             state.evidence = PayloadRefs.freezeValue(state.evidence);
             dirty = Object.create(null);
@@ -2422,6 +2519,7 @@
           function effectiveNodes(task, version) {
             var rev = revisionOf(task, version);
             if (!rev) return [];
+            if (version !== task.currentRevision) return rev.nodes;
             return rev.nodes.map(function (node) {
               var overlay = taskState(task)[node.id];
               return overlay && overlay !== node.state ? Object.assign({}, node, { state: overlay }) : node;
@@ -2653,6 +2751,7 @@
             if (!revisionOf(task, version)) return false;
             if (task.currentRevision >= version) return false;
             task = reconcile(withTask(task, { currentRevision: version }));
+            task = appendHistory(task, '全程重编排 v' + version, 'replan', { version: version, reason: revisionOf(task, version).reason });
             replaceTask(task);
             markTask(task);
             flush();
@@ -2695,6 +2794,7 @@
             if (outcome === 'failure' && opts.requiresAttention !== false) changes.attention = true;
             task = withTask(task, changes);
             task = appendFact(task, fact);
+            task = appendHistory(task, fact.title, fact.kind, { factId: fact.id, nodeId: nodeId, outcome: outcome }, fact.evidenceId);
             task = reconcile(task);
             replaceTask(task);
             markTask(task);
@@ -2772,7 +2872,43 @@
             reset();
           }
 
+          function appendHistory(task, title, kind, value, evidenceId) {
+            var number = task.actions.length + 1;
+            var recordId = task.id + ':record:event:' + number;
+            var actionId = task.id + ':action:event:' + number;
+            return withTask(task, {
+              actions: PayloadRefs.freezeValue(task.actions.concat([PayloadRefs.freezeValue({ id: actionId, number: number, title: title, outcome: kind, revision: task.currentRevision, checkpointId: task.currentCheckpointId, recordId: recordId, evidenceId: evidenceId || null })])),
+              rawRecords: PayloadRefs.freezeValue(task.rawRecords.concat([PayloadRefs.freezeValue({ id: recordId, number: task.rawRecords.length + 1, actionId: actionId, checkpointId: task.currentCheckpointId, kind: kind, value: value, evidenceId: evidenceId || null })])),
+            });
+          }
+
+          function checkpointCommand(env) {
+            var task = taskById(env.taskId);
+            if (!task) { UiEvents.emit('MockCheckpointStatus', { error: '未知任务：' + env.taskId }); return; }
+            var currentNumber = Number(task.currentCheckpointId.split(':').pop());
+            var target = env.command === 'rewind' ? 1 : currentNumber === 1 ? 3 : 4;
+            if (env.command === 'correct') target = 3;
+            if (env.command !== 'rewind' && env.command !== 'advance' && env.command !== 'correct') { UiEvents.emit('MockCheckpointStatus', { error: '未知 Mock 命令' }); return; }
+            if (target === currentNumber) { UiEvents.emit('MockCheckpointStatus', { status: '游标未变；不重复追加记录' }); return; }
+            var checkpoints = task.checkpoints;
+            var id = task.id + ':cp:' + target;
+            var number = task.actions.length + 1;
+            var actionId = task.id + ':action:mock:' + number;
+            var recordId = task.id + ':record:mock:' + number;
+            if (target === 4 && !checkpoints.some(function (cp) { return cp.id === id; })) {
+              var prior = checkpoints[2];
+              var snapshot = PayloadRefs.freezeValue(Object.assign({}, revisionOf(task, task.currentRevision), { nodes: effectiveNodes(task, task.currentRevision) }));
+              checkpoints = PayloadRefs.freezeValue(checkpoints.concat([PayloadRefs.freezeValue({ id: id, number: 4, summary: 'Mock 推进提交 · 正确路径后继上下文', valid: true, planRevision: task.currentRevision, cycleId: 'cycle-2', occurrenceId: null, context: prior.context, projection: snapshot, semanticRefs: prior.semanticRefs, rawResultRefs: task.rawRecords.map(function (r) { return r.id; }).concat([recordId]) })]));
+            }
+            var action = PayloadRefs.freezeValue({ id: actionId, number: number, title: env.command === 'rewind' ? 'Mock 回退 CP1 · 不撤销副作用' : env.command === 'correct' ? 'Mock 接受修正 CP3' : 'Mock 前进 CP' + target, outcome: 'success', revision: task.currentRevision, checkpointId: id, recordId: recordId, evidenceId: null });
+            var record = PayloadRefs.freezeValue({ id: recordId, number: task.rawRecords.length + 1, actionId: actionId, checkpointId: id, kind: env.command, evidenceId: null, value: { command: env.command, from: task.currentCheckpointId, to: id, sideEffectsUndone: false } });
+            var next = withTask(task, { checkpoints: checkpoints, currentCheckpointId: id, actions: PayloadRefs.freezeValue(task.actions.concat([action])), rawRecords: PayloadRefs.freezeValue(task.rawRecords.concat([record])) });
+            replaceTask(next); markTask(next); flush();
+            UiEvents.emit('MockCheckpointStatus', { status: action.title });
+          }
+
           function subscribe() {
+            UiEvents.subscribe('MockCheckpointRequested', checkpointCommand);
             UiEvents.subscribe('ActivityAdvanceRequested', handleAdvance);
             UiEvents.subscribe('ReplanRequested', handleReplan);
             UiEvents.subscribe('ConnectionChangedRequested', handleConnection);
@@ -2807,7 +2943,7 @@
         var Navigation = (function () {
           var SCOPES = ['system', 'project', 'task', 'agent'];
           var FILTERS = ['all', 'stable', 'live'];
-          var KEYS = ['scope', 'project', 'task', 'instance', 'ver', 'node', 'filter', 'evidence', 'raw', 'tour'];
+          var KEYS = ['scope', 'project', 'task', 'instance', 'ver', 'node', 'filter', 'evidence', 'raw', 'tour', 'perspective', 'checkpoint', 'action', 'record'];
           var current = null;
 
           function parseHash(hash) {
@@ -2857,7 +2993,7 @@
               delete input.raw;
             }
             if (scope === 'task') delete input.instance;
-            if (scope === 'agent') {
+            if (scope === 'agent' && !input.task) {
               delete input.ver;
               delete input.node;
             }
@@ -2896,6 +3032,24 @@
             }
             var taskId = route.task || null;
             if (taskId) {
+              var task = MockDriver.taskById(taskId);
+              var mode = input.perspective || ((input.checkpoint || (input.ver && Number(input.ver) < task.currentRevision)) ? 'semantic' : DisplayPreference.resolve());
+              if (['current', 'semantic', 'actions', 'raw'].indexOf(mode) < 0) return { error: '未知展示方式：' + mode };
+              route.perspective = mode;
+              if (input.checkpoint) {
+                var cp = task.checkpoints.filter(function (item) { return item.id === input.checkpoint; })[0];
+                if (!cp) return { error: '未知、跨任务或未提交 checkpoint：' + input.checkpoint };
+                route.checkpoint = cp.id;
+              }
+              if (input.action) {
+                if (!task.actions.some(function (item) { return item.id === input.action; })) return { error: '未知或跨任务 action：' + input.action };
+                route.action = input.action;
+              }
+              if (input.record) {
+                if (!task.rawRecords.some(function (item) { return item.id === input.record; })) return { error: '未知或跨任务 record：' + input.record };
+                route.record = input.record;
+              }
+              if (route.action && route.record && !task.actions.some(function (item) { return item.id === route.action && item.recordId === route.record; })) return { error: 'action 与 record 关联不兼容' };
               var versions = MockDriver.revisionVersions(taskId);
               if (route.ver !== undefined) {
                 var version = Number(route.ver);
@@ -2903,14 +3057,18 @@
                   return { error: '未知版本：' + route.ver };
                 }
                 route.ver = version;
+                if (version > task.currentRevision) return { error: '修订尚未发布：v' + version };
+                if (route.checkpoint && cp.planRevision !== version) return { error: 'checkpoint 与版本关联不兼容：' + cp.id + ' 属于 v' + cp.planRevision + '，请求 v' + version };
               }
               if (route.node) {
                 var checkVersion = route.ver || MockDriver.currentRevisionOf(taskId);
-                if (!MockDriver.hasNode(taskId, checkVersion, route.node)) {
+                var viewedCP = route.checkpoint ? task.checkpoints.filter(function (item) { return item.id === route.checkpoint; })[0] : null;
+                var knownNode = viewedCP ? viewedCP.projection.nodes.some(function (item) { return item.id === route.node; }) : MockDriver.hasNode(taskId, checkVersion, route.node);
+                if (!knownNode) {
                   return { error: '版本 ' + checkVersion + ' 中不存在节点：' + route.node };
                 }
               }
-            } else if (route.ver !== undefined || route.node) {
+            } else if (route.ver !== undefined || route.node || input.checkpoint || input.action || input.record || input.perspective) {
               return { error: '版本或节点参数需要同时给出 task' };
             }
             if (route.evidence && !MockDriver.hasEvidence(route.evidence)) {
@@ -2924,7 +3082,7 @@
 
           function toHash(route) {
             var parts = ['scope=' + encodeURIComponent(route.scope)];
-            ['project', 'task', 'instance', 'ver', 'node', 'filter', 'evidence'].forEach(function (key) {
+            ['project', 'task', 'instance', 'ver', 'node', 'filter', 'evidence', 'perspective', 'checkpoint', 'action', 'record'].forEach(function (key) {
               if (route[key] !== undefined && route[key] !== null && route[key] !== '') {
                 parts.push(key + '=' + encodeURIComponent(route[key]));
               }
@@ -2991,6 +3149,7 @@
             init: init,
             request: request,
             parseHash: parseHash,
+            normalize: normalize,
             toHash: toHash,
             sameRoute: sameRoute,
             currentRoute: currentRoute,
@@ -3389,7 +3548,20 @@
               : (MockDriver.taskById(task.id).revisions.filter(function (rev) { return rev.version === version; })[0] || { nodes: [] }).nodes;
 
             var slots = [];
+            var skeletonNodes = template.stages.map(function (stage, i) { return { id: 'skeleton-' + stage, name: template.sections[i], state: 'unknown', stage: stage, deps: template.skeleton[i].map(function (dep) { return 'skeleton-' + dep; }) }; });
+            slots.push(el('details', { 'data-control': 'template-skeleton' }, [
+              el('summary', { text: '模板骨架 · 非实际执行；布局 ' + template.layout + '；循环 ' + template.loops }),
+              orchestrationViewer(context, projection, { nodes: skeletonNodes, skeleton: true }),
+            ]));
             if (template.key === 'inspection') {
+              slots.push(el('div', { 'data-control': 'inspection-comparison', class: 'stack' }, [
+                el('p', { text: '相同检查定义 pipeline-health v1 · 对应项可比较；定义不兼容时禁止比较' }),
+                task.occurrences.map(function (occ) {
+                  var compatible = occ.definitionId === task.checkDefinition.id && occ.definitionVersion === task.checkDefinition.version;
+                  var values = occ.results ? task.checkDefinition.items.map(function (id) { return id + '=' + (occ.results[id] || '无结果'); }).join(' · ') : '本轮未收拢；无已确认检查结果';
+                  return el('div', { class: 'occurrence', 'data-definition': occ.definitionId + ':' + occ.definitionVersion, 'data-occurrence': occ.id }, [el('span', { text: occ.label + ' · ' + (compatible ? '同定义可比较' : '定义不兼容，不能比较') + ' · ' + values + ' · ' + occ.result }), occ.evidenceId ? evidenceButton(occ.evidenceId, '检查证据') : null]);
+                }),
+              ]));
               slots.push(el('div', { class: 'stack' }, [
                 el('p', { class: 'card-sub', text: '本轮 occurrence 与历史轮次（历史 occurrence 不被修订改写）' }),
                 el(
@@ -3407,6 +3579,9 @@
               ]));
             }
             if (template.key === 'long-horizon') {
+              slots.push(el('div', { class: 'stack', 'data-control': 'cycle-groups' }, ['cycle-1', 'cycle-2'].map(function (cycleId) {
+                return el('div', { class: 'occurrence', 'data-cycle': cycleId }, [el('strong', { text: cycleId + ' · 有界小计划' }), el('span', { text: template.sections.slice(0, 4).join(' → ') + ' → 全程重编排；实际状态见依赖图' })]);
+              })));
               slots.push(el('div', { class: 'stack' }, [
                 el('p', { class: 'card-sub', text: '里程碑与阶段（长程模板按新事实重编排，已确认事实保留）' }),
                 el(
@@ -3464,6 +3639,9 @@
                 'data-state': node.state,
                 'data-deps': node.deps.join(','),
                 'data-label': node.name,
+                'data-stage': node.stage || 'unassigned',
+                'data-cycle': node.cycleId || 'unassigned',
+                disabled: extra && extra.skeleton ? true : null,
                 'aria-current': extra && extra.selected ? 'true' : null,
                 onclick: function () {
                   navRoute(Object.assign({}, extra && extra.route || {}, { node: node.id, ver: version }));
@@ -3486,7 +3664,7 @@
             var rev = task.revisions.filter(function (item) { return item.version === version; })[0];
             var nodes = opts.nodes || (version === projection.currentRevision ? projection.currentNodes : (rev ? rev.nodes : []));
             var selected = context.route.node || null;
-            var versionChip = version === projection.currentRevision
+            var versionChip = opts.skeleton ? chip('模板骨架 · 非执行版本', 'plain') : opts.retained ? chip('查看 v' + version + ' / 当时快照 · 当前权威 v' + projection.currentRevision, 'stale') : version === projection.currentRevision
               ? chip('当前执行版本 v' + version, 'info')
               : version < projection.currentRevision
                 ? chip('历史版本 v' + version, 'stale')
@@ -3515,7 +3693,7 @@
                   laneMap[key].map(function (node) {
                     return nodeButton(node, version, {
                       selected: node.id === selected,
-                      route: Object.assign({}, opts.route || {}, { task: task.id, project: task.projectId }),
+                      route: Object.assign({}, opts.route || {}, { task: task.id, project: task.projectId }), skeleton: opts.skeleton,
                     });
                   }),
                 ])
@@ -3531,6 +3709,38 @@
             ]);
           }
 
+          function drawGraphEdges() {
+            var canvases = document.querySelectorAll('[data-control="orchestration-viewer"]');
+            Array.prototype.forEach.call(canvases, function (canvas) {
+              var svg = canvas.querySelector('.graph-svg');
+              if (!svg) return;
+              svg.replaceChildren();
+              var canvasRect = canvas.getBoundingClientRect();
+              var nodeMap = Object.create(null);
+              Array.prototype.forEach.call(canvas.querySelectorAll('[data-node-id]'), function (node) {
+                nodeMap[node.getAttribute('data-node-id')] = node;
+              });
+              Array.prototype.forEach.call(canvas.querySelectorAll('[data-node-id]'), function (node) {
+                var deps = String(node.getAttribute('data-deps') || '').split(',').filter(Boolean);
+                deps.forEach(function (depId) {
+                  var dep = nodeMap[depId];
+                  if (!dep) return;
+                  var from = dep.getBoundingClientRect();
+                  var to = node.getBoundingClientRect();
+                  var x1 = from.left - canvasRect.left + from.width / 2;
+                  var y1 = from.bottom - canvasRect.top;
+                  var x2 = to.left - canvasRect.left + to.width / 2;
+                  var y2 = to.top - canvasRect.top;
+                  var mid = Math.max(12, (y2 - y1) / 2);
+                  svg.appendChild(svgEl('path', {
+                    class: 'graph-edge graph-edge--' + (node.getAttribute('data-state') || 'waiting'),
+                    d: 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + mid) + ', ' + x2 + ' ' + (y2 - mid) + ', ' + x2 + ' ' + y2,
+                  }));
+                });
+              });
+            });
+          }
+
           function depthOf(node, nodes, guard) {
             if (guard > 12) return 0;
             if (!node.deps.length) return 0;
@@ -3541,6 +3751,80 @@
               max = Math.max(max, depthOf(dep, nodes, guard + 1) + 1);
             });
             return max;
+          }
+
+          function displaySettings() {
+            var pref = DisplayPreference.snapshot();
+            var labels = { current: '简洁展示', semantic: '语义展示', actions: '历史动作轨迹', raw: 'Raw流水账', 'follow-last': '跟随最后一次手动选择' };
+            return card('展示偏好 · 浏览器 Mock', '生产 typed config 边界未实现；只保存版本、模式和手动选择', null, [
+              el('label', { text: '未来默认展示 ', class: 'row' }, [el('select', { 'aria-label': '默认展示草稿', 'data-action': 'preference-draft', onchange: function (event) { UiEvents.emit('DisplayPreferenceDraftRequested', { mode: event.target.value }); } }, Object.keys(labels).map(function (key) { return el('option', { value: key, selected: pref.draft === key }, [labels[key]]); }))]),
+              el('div', { class: 'row' }, [el('button', { type: 'button', class: 'btn btn--small', 'data-action': 'preference-save', text: '保存默认展示', onclick: function () { UiEvents.emit('DisplayPreferenceSaveRequested', {}); } }), el('button', { type: 'button', class: 'btn btn--small', 'data-action': 'preference-reset', text: '重置此偏好', onclick: function () { UiEvents.emit('DisplayPreferenceResetRequested', {}); } })]),
+              el('p', { role: 'status', 'data-control': 'preference-status', text: pref.status + ' · 已保存=' + labels[pref.saved.mode] + ' · 有效默认=' + labels[DisplayPreference.resolve()] }),
+            ]);
+          }
+
+          function perspectives(context, projection) {
+            var route = context.route;
+            var task = projection.task;
+            var mode = route.perspective || DisplayPreference.resolve();
+            var cp = task.checkpoints.filter(function (item) { return item.id === (route.checkpoint || task.currentCheckpointId); })[0];
+            var labels = { current: '简洁展示', semantic: '语义展示', actions: '历史动作轨迹', raw: 'Raw流水账' };
+            function link(extra, label) { return el('button', { type: 'button', class: 'btn btn--small', text: label, onclick: function () { navRoute(Object.assign({}, route, extra)); } }); }
+            var body = [];
+            body.push(el('div', { class: 'seg', role: 'group', 'aria-label': '四种展示方式' }, Object.keys(labels).map(function (key) {
+              return el('button', { type: 'button', class: 'seg-btn', 'data-action': 'perspective', 'data-perspective': key, 'aria-pressed': mode === key ? 'true' : 'false', text: labels[key], onclick: function () { UiEvents.emit('DisplayPerspectiveManuallySelected', { route: Object.assign({}, route, { perspective: key }) }); } });
+            })));
+            body.push(el('div', { class: 'stack', 'data-control': 'checkpoint-list', 'data-current-checkpoint': task.currentCheckpointId, 'data-view-checkpoint': cp.id }, [
+              el('p', { text: '当前游标 ' + task.currentCheckpointId + ' · 正在查看 ' + cp.id + ' · 计划 v' + task.currentRevision + ' · ' + cp.cycleId + (cp.occurrenceId ? ' · ' + cp.occurrenceId : '') }),
+              task.checkpoints.map(function (item) { return el('div', { class: 'occurrence', 'data-checkpoint': item.id }, [el('strong', { text: 'CP #' + item.number + ' · ' + item.summary }), chip(item.valid ? '正确路径' : '错误历史', item.valid ? 'success' : 'failure'), link({ checkpoint: item.id, perspective: 'semantic', ver: undefined, node: undefined, action: undefined, record: undefined }, '查看 CP' + item.number), link({ checkpoint: item.id, perspective: 'raw', ver: undefined, node: undefined, action: undefined, record: undefined }, 'CP' + item.number + ' 原始结果')]); }),
+              !task.checkpoints.some(function (item) { return item.number === 4; }) ? el('p', { text: 'CP #4 尚未提交；仅 Mock 前进可以提交' }) : null,
+            ]));
+            body.push(el('p', { 'data-control': 'effective-context', text: '查看上下文：' + cp.context.join(' · ') + '；有效路径仅排除：' + task.excludedRefs.join(', ') + '；独立工作及未解决 Attention 保留。' }));
+            body.push(el('div', { class: 'row', 'data-control': 'checkpoint-mock' }, ['rewind', 'correct', 'advance'].map(function (command) {
+              return el('button', { type: 'button', class: 'btn btn--small', 'data-action': 'checkpoint-' + command, text: { rewind: 'Mock 回退 CP1', correct: 'Mock 接受修正 CP3', advance: 'Mock 前进 / 提交 CP4' }[command], onclick: function () { UiEvents.emit('MockCheckpointRequested', { taskId: task.id, command: command }); } });
+            })));
+            if (mode === 'current') {
+              if ((route.ver && route.ver !== task.currentRevision) || (route.checkpoint && route.checkpoint !== task.currentCheckpointId)) body.push(notice('attention', '当前编排与历史选择不一致', '简洁展示始终显示最新编排；使用语义展示查看旧快照。', [link({ perspective: 'semantic' }, '查看语义历史')]));
+              body.push(orchestrationViewer({ route: Object.assign({}, route, { ver: undefined }) }, projection, { version: task.currentRevision, route: Object.assign({}, route, { ver: undefined }) }));
+              body.push(semanticActivity(context, projection, { mode: 'live', showAdvance: false, hideLive: task.state === 'completed' }));
+            } else if (mode === 'semantic') {
+              var selectedRevision = task.revisions.filter(function (rev) { return rev.version === (route.ver || task.currentRevision); })[0];
+              var viewedVersion = route.checkpoint || !route.ver ? cp.planRevision : selectedRevision.version;
+              var viewedNodes = route.checkpoint || !route.ver ? cp.projection.nodes : selectedRevision.nodes;
+              body.push(el('section', { class: 'stack', 'data-control': route.checkpoint || !route.ver ? 'checkpoint-snapshot' : 'revision-snapshot', 'data-view-revision': viewedVersion }, [el('h3', { text: route.checkpoint || !route.ver ? 'CP' + cp.number + ' 保留的实际投影 · v' + cp.planRevision : '查看 v' + viewedVersion + ' / 当时快照 · 当前权威 v' + task.currentRevision }), orchestrationViewer(context, projection, { version: viewedVersion, nodes: viewedNodes, retained: true, route: Object.assign({}, route, { ver: viewedVersion, checkpoint: route.checkpoint }) })]));
+              var revisions = task.revisions.filter(function (rev) { return rev.version <= task.currentRevision; });
+              body.push(el('div', { class: 'stack', 'data-control': 'semantic-evolution' }, revisions.map(function (rev, i) {
+                var before = i ? revisions[i - 1] : null;
+                var added = rev.nodes.filter(function (n) { return !before || !before.nodes.some(function (old) { return old.id === n.id; }); }).map(function (n) { return n.id; });
+                var removed = before ? before.nodes.filter(function (n) { return !rev.nodes.some(function (next) { return next.id === n.id; }); }).map(function (n) { return n.id; }) : [];
+                var changed = before ? rev.nodes.filter(function (n) { var old = before.nodes.filter(function (x) { return x.id === n.id; })[0]; return old && JSON.stringify([old.deps, old.stage, old.state]) !== JSON.stringify([n.deps, n.stage, n.state]); }).map(function (n) { return n.id; }) : [];
+                function edges(nodes) { return nodes.reduce(function (out, n) { return out.concat(n.deps.map(function (dep) { return dep + ' → ' + n.id; })); }, []); }
+                var oldEdges = before ? edges(before.nodes) : [];
+                var nextEdges = edges(rev.nodes);
+                var entry = card('v' + rev.version + (before ? ' · v' + before.version + ' → v' + rev.version : ' · 初始发布') + (rev.version === viewedVersion ? ' · 正在查看' : ''), 'why: ' + rev.reason, null, [
+                  el('p', { text: 'what: 新增节点 ' + (added.join(', ') || '无') + '；删除 ' + (removed.join(', ') || '无') + '；修改阶段/状态/依赖 ' + (changed.join(', ') || '无') }),
+                  el('p', { text: '边新增：' + (nextEdges.filter(function (edge) { return oldEdges.indexOf(edge) < 0; }).join(', ') || '无') + '；边删除：' + (oldEdges.filter(function (edge) { return nextEdges.indexOf(edge) < 0; }).join(', ') || '无') }),
+                  before ? el('details', {}, [el('summary', { text: 'Before · v' + before.version }), orchestrationViewer(context, projection, { version: before.version, nodes: before.nodes, retained: true, route: Object.assign({}, route, { ver: before.version, checkpoint: undefined, node: undefined }) })]) : el('p', { text: 'Before：无；首次发布' }),
+                  el('p', { text: 'After · v' + rev.version }), orchestrationViewer(context, projection, { version: rev.version, nodes: rev.nodes, retained: true, route: Object.assign({}, route, { ver: rev.version, checkpoint: undefined, node: undefined }) }),
+                  task.checkpoints.filter(function (item) { return item.planRevision === rev.version; }).map(function (item) { return link({ checkpoint: item.id, perspective: 'semantic', ver: undefined, node: undefined, action: undefined, record: undefined }, '关联 CP' + item.number); }),
+                  evidenceButton('ev-projection', '修订证据'), link({ perspective: 'actions' }, '关联实际动作'),
+                ]);
+                entry.setAttribute('data-revision', rev.version);
+                entry.setAttribute('data-selected-revision', rev.version === viewedVersion ? 'true' : 'false');
+                return entry;
+              })));
+            } else if (mode === 'actions') {
+              body.push(el('div', { class: 'stack', 'data-control': 'action-history' }, task.actions.filter(function (item) { return !route.action || item.id === route.action; }).map(function (item) {
+                return el('article', { class: 'occurrence', 'data-action-id': item.id }, [el('strong', { text: '#' + item.number + ' ' + item.title }), el('span', { text: item.outcome + ' · v' + item.revision + ' · ' + item.checkpointId }), link({ perspective: 'raw', record: item.recordId, action: item.id, ver: undefined, node: undefined }, '原始记录'), link({ perspective: 'semantic', checkpoint: item.checkpointId, record: item.recordId, ver: undefined, node: undefined }, '语义 / CP'), item.evidenceId ? evidenceButton(item.evidenceId, '动作证据') : el('span', { text: '外部证据未提供；此项为浏览器 Mock 命令' })]);
+              })));
+              body.push(link({ action: undefined, record: undefined }, '全部实际动作'));
+            } else {
+              body.push(el('label', { text: 'Raw 记录筛选 ', class: 'row' }, [el('select', { 'aria-label': 'Raw记录筛选', onchange: function (event) { navRoute(Object.assign({}, route, { record: event.target.value || undefined })); } }, [el('option', { value: '', text: '全部原始记录', selected: !route.record })].concat(task.rawRecords.map(function (item) { return el('option', { value: item.id, selected: route.record === item.id, text: item.id }); })))]));
+              body.push(el('div', { class: 'stack', 'data-control': 'raw-ledger' }, task.rawRecords.filter(function (item) { return (!route.record || item.id === route.record) && (route.record || !route.checkpoint || cp.rawResultRefs.indexOf(item.id) >= 0); }).map(function (item) {
+                return el('article', { class: 'stack', 'data-record-id': item.id }, [el('strong', { text: '#' + item.number + ' ' + item.id + ' · ' + item.kind }), el('pre', { class: 'raw-block', text: JSON.stringify(item.value, null, 2), style: { maxWidth: '100%', overflow: 'auto' } }), link({ perspective: 'actions', action: item.actionId, checkpoint: undefined, ver: undefined, node: undefined }, '返回实际动作'), link({ perspective: 'semantic', checkpoint: item.checkpointId, ver: undefined, node: undefined }, '返回语义 CP'), item.evidenceId ? evidenceButton(item.evidenceId, '完整证据 Raw', { raw: true }) : null]);
+              })));
+            }
+            return [card(labels[mode], '只读视角切换不推进执行；Mock 控制单独标识', null, body), displaySettings()];
           }
 
           function semanticActivity(context, projection, options) {
@@ -3773,7 +4057,10 @@
             card: card,
             detailList: detailList,
             templateSections: templateSections,
+            perspectives: perspectives,
+            displaySettings: displaySettings,
             orchestrationViewer: orchestrationViewer,
+            drawGraphEdges: drawGraphEdges,
             semanticActivity: semanticActivity,
             versionHistory: versionHistory,
             agentScopePicker: agentScopePicker,
@@ -3787,14 +4074,7 @@
         var Views = (function () {
           function routeFor(route, extra) {
             return Object.assign(
-              {
-                scope: route.scope,
-                project: route.project,
-                task: route.task,
-                instance: route.instance,
-                ver: route.ver,
-                filter: route.filter,
-              },
+              {}, route,
               extra || {}
             );
           }
@@ -3889,7 +4169,11 @@
             return [
               el('h1', { class: 'page-title', text: projection.project.name }),
               el('p', { class: 'page-sub', text: projection.project.summary + ' · 归属 ' + projection.project.owner }),
-              Controls.card('项目状态', '同一语义事实与真实 scope', [
+              el('div', { class: 'stack', 'data-control': 'typed-task-groups' }, ['single', 'inspection', 'long-horizon'].map(function (kind) {
+                var typed = visible.filter(function (task) { return task.kind === kind; });
+                return el('section', { 'data-task-kind': kind }, [Controls.card({ single: '单次任务', inspection: '定时巡检任务', 'long-horizon': '长程任务' }[kind] + ' · ' + typed.length, '声明类型分类 · 生命周期筛选=' + filter, null, [Controls.taskCollection(typed, { action: 'button', emptyText: '此类型在当前生命周期筛选下没有任务。' })])]);
+              })),
+              Controls.card('生命周期筛选与项目状态', '次级筛选 · 三类任务分别保留', [
                 el('div', { class: 'seg', role: 'group', 'aria-label': '任务筛选' }, [
                   segButton('all', '全部', route, filter),
                   segButton('live', 'live', route, filter),
@@ -3903,12 +4187,6 @@
                   { label: '失败', value: projection.counts.failed, tone: 'failed' },
                   { label: '已完成', value: projection.counts.completed },
                 ], '项目状态汇总'),
-              ]),
-              Controls.card('任务列表', '筛选：' + filter, null, [
-                Controls.taskCollection(visible, {
-                  action: 'button',
-                  emptyText: filter === 'live' ? '该项目当前没有 live 任务。' : filter === 'stable' ? '该项目还没有已收拢任务。' : '该项目还没有任务。',
-                }),
               ]),
             ];
           }
@@ -3989,37 +4267,20 @@
               ])
             );
 
-            var replayMode = route.filter === 'stable' || task.state === 'completed';
             nodes.push(
-              Controls.card(replayMode ? '完成复盘' : '当前执行', 'stable 已确认内容与 live 当前活动分开', null, [
-                Controls.semanticActivity(context, projection, {
-                  mode: replayMode ? 'replay' : 'live',
-                  filter: route.filter,
-                  showAdvance: !replayMode,
-                  hideLive: task.state === 'completed',
-                  stableEmptyText: '该任务还没有稳定事实。',
-                  liveEmptyText: task.state === 'completed' ? '任务已完成，没有 live 活动。' : '当前没有未收拢活动。',
-                }),
-              ])
-            );
-
-            nodes.push(
-              Controls.card('任务编排', '当前视图版本 v' + viewingVersion, [
+              Controls.card('Mock 编排控制', '最新权威计划 v' + projection.currentRevision + '；观察路由不更新计划', [
                 el('button', {
                   class: 'btn btn--small',
                   type: 'button',
                   'data-action': 'replan',
-                  disabled: isHistory ? true : null,
+                  disabled: isHistory || !task.revisions.some(function (rev) { return rev.version > projection.currentRevision; }) ? true : null,
                   onclick: function () {
                     UiEvents.emit('ReplanRequested', { taskId: task.id });
                   },
                 }, [el('span', { text: '应用下一次修订' })]),
-              ], [
-                Controls.orchestrationViewer(context, projection, { route: routeFor(route) }),
-              ])
+              ], [])
             );
-
-            nodes.push(Controls.versionHistory(context, projection));
+            nodes = nodes.concat(Controls.perspectives(context, projection));
             return nodes;
           }
 
@@ -4086,20 +4347,9 @@
                       { label: '当前活动', value: binding.activities.length + ' 项' },
                       { label: '稳定事实', value: binding.facts.length + ' 条' },
                     ]),
-                    Controls.orchestrationViewer(
-                      { route: routeFor(route, { task: binding.task.id }) },
-                      {
-                        task: binding.task,
-                        currentRevision: binding.currentRevision,
-                        currentNodes: binding.currentNodes,
-                        template: binding.template,
-                      },
-                      { route: routeFor(route, { task: binding.task.id }) }
-                    ),
-                    Controls.semanticActivity(
+                    Controls.perspectives(
                       { route: Object.assign({}, route, { task: binding.task.id, scope: 'agent' }) },
-                      { task: binding.task, currentRevision: binding.currentRevision, activities: binding.activities, facts: binding.facts },
-                      { mode: binding.task.state === 'completed' ? 'replay' : 'live', hideLive: binding.task.state === 'completed' }
+                      PayloadRefs.get('task:' + binding.task.id).value
                     ),
                   ]
                 )
@@ -4209,11 +4459,16 @@
             }
             if (route.node) {
               var projection = context.projection;
+              if (route.scope === 'agent' && route.task) projection = PayloadRefs.get('task:' + route.task).value;
               if (!projection || projection.kind !== 'task') return null;
               var version = route.ver || projection.currentRevision;
               var rev = projection.task.revisions.filter(function (item) { return item.version === version; })[0];
               if (!rev) return null;
               var nodes = version === projection.currentRevision ? projection.currentNodes : rev.nodes;
+              if (route.checkpoint) {
+                var cp = projection.task.checkpoints.filter(function (item) { return item.id === route.checkpoint; })[0];
+                if (cp) { nodes = cp.projection.nodes; version = cp.planRevision; }
+              }
               var node = nodes.filter(function (item) { return item.id === route.node; })[0];
               if (!node) return null;
               return {
@@ -4375,7 +4630,8 @@
               return;
             }
             if (!dialog.open) {
-              var trigger = document.activeElement;
+              var descriptor = context.route.node ? { type: 'node', nodeId: context.route.node } : context.route.evidence ? { type: 'evidence', evidenceId: context.route.evidence } : null;
+              var trigger = descriptor ? findFocusTarget(descriptor) : document.activeElement;
               if (!trigger || trigger === document.body || !document.contains(trigger)) {
                 trigger = document.getElementById('tourToggle');
               }
@@ -4635,11 +4891,19 @@
             {
               id: 'finish',
               title: '返回 / 结束',
-              goal: '返回系统概要。这里只表示导览完成，不表示功能验收通过。',
+              goal: '返回系统概要。原有段落结束；继续新增 checkpoint 与偏好站点。',
               route: { scope: 'system' },
               setup: function () { setConnected(true); },
-              checks: ['返回系统概要', '显示导览完成提示', '不声称功能验收通过'],
+              checks: ['返回系统概要', '不提前显示全部导览完成', '继续新增站点'],
             },
+            { id: 'checkpoint-current', title: 'Checkpoint 当前与查看', goal: '分别观察执行游标和历史选择。', route: { scope: 'task', task: 'task-runtime-refactor', perspective: 'current' }, checks: ['当前 CP3', 'CP4 尚未提交', '最新计划 v3'] },
+            { id: 'checkpoint-error', title: '保留错误快照', goal: 'CP2 历史不会由当前 overlay 重建。', route: { scope: 'task', task: 'task-runtime-refactor', checkpoint: 'task-runtime-refactor:cp:2', perspective: 'semantic' }, checks: ['错误上下文可查询', '当前游标不变', '实际历史快照'] },
+            { id: 'checkpoint-corrected', title: '接受修正后的有效上下文', goal: '仅排除错误引用；历史和独立工作保留。', route: { scope: 'task', task: 'task-runtime-refactor', checkpoint: 'task-runtime-refactor:cp:3', perspective: 'current' }, checks: ['正确结果引用', '未解决 Attention', '错误动作仍可查询'] },
+            { id: 'four-perspectives', title: '四种共享展示', goal: '比较当前编排、完整语义修订、实际动作与原始记录。', route: { scope: 'task', task: 'task-runtime-refactor', perspective: 'semantic' }, checks: ['v1 → v2 → v3', 'why / what 与边变化', 'before / after 同一图控件'] },
+            { id: 'checkpoint-mock', title: 'Mock 回退与前进', goal: '手动使用独立 Mock 按钮；Tour 本身不执行 checkpoint 命令。', route: { scope: 'task', task: 'task-runtime-refactor', perspective: 'actions' }, checks: ['回退 CP1', '前进 CP3', '下一次前进提交 CP4；追加记录'] },
+            { id: 'raw-ledger', title: 'Raw 多记录流水账', goal: '原始记录只供主动读取；用互链返回动作与语义。', route: { scope: 'task', task: 'task-runtime-refactor', perspective: 'raw' }, checks: ['多记录', '筛选', '双向链接'] },
+            { id: 'display-preference', title: '展示偏好', goal: '浏览器 Mock 窄偏好；显式链接优先，Tour 不保存。', route: { scope: 'task', task: 'task-runtime-refactor', perspective: 'current' }, checks: ['草稿 / 保存 / 重置', '未来打开生效', '生产 config 尚未实现'] },
+            { id: 'final-completion', title: '全部站点结束', goal: '仅说明导览到达最后一站，不代表生产功能交付。', route: { scope: 'system' }, checks: ['真实末站完成', '不宣称生产验收'] },
           ];
 
           var index = 0;
@@ -4679,7 +4943,7 @@
           function enter(nextIndex, options) {
             var opts = options || {};
             index = Math.max(0, Math.min(STATIONS.length - 1, Number(nextIndex) || 0));
-            complete = STATIONS[index].id === 'finish';
+            complete = index === STATIONS.length - 1;
             if (STATIONS[index].id !== 'stale') setConnected(true);
             if (STATIONS[index].setup) STATIONS[index].setup();
             if (opts.navigate !== false) {
@@ -4724,7 +4988,7 @@
           function syncFromRoute(route) {
             if (route && Number.isInteger(route.tour) && route.tour >= 1 && route.tour <= STATIONS.length) {
               index = route.tour - 1;
-              complete = STATIONS[index].id === 'finish';
+              complete = index === STATIONS.length - 1;
             }
             render();
           }
@@ -4764,7 +5028,7 @@
                   icon('i-check', 'icon--sm'),
                   el('div', { class: 'stack stack--tight' }, [
                     el('strong', { text: '导览完成' }),
-                    el('span', { text: '这只表示 27 站导览结束，不代表功能验收通过。' }),
+                    el('span', { text: '这只表示 ' + STATIONS.length + ' 站导览结束，不代表功能验收通过。' }),
                   ]),
                 ])
               );
@@ -4894,39 +5158,7 @@
             if (graphFrame) window.cancelAnimationFrame(graphFrame);
             graphFrame = window.requestAnimationFrame(function () {
               graphFrame = 0;
-              drawGraphEdges();
-            });
-          }
-
-          function drawGraphEdges() {
-            var canvases = document.querySelectorAll('[data-control="orchestration-viewer"]');
-            Array.prototype.forEach.call(canvases, function (canvas) {
-              var svg = canvas.querySelector('.graph-svg');
-              if (!svg) return;
-              svg.replaceChildren();
-              var canvasRect = canvas.getBoundingClientRect();
-              var nodeMap = Object.create(null);
-              Array.prototype.forEach.call(canvas.querySelectorAll('[data-node-id]'), function (node) {
-                nodeMap[node.getAttribute('data-node-id')] = node;
-              });
-              Array.prototype.forEach.call(canvas.querySelectorAll('[data-node-id]'), function (node) {
-                var deps = String(node.getAttribute('data-deps') || '').split(',').filter(Boolean);
-                deps.forEach(function (depId) {
-                  var dep = nodeMap[depId];
-                  if (!dep) return;
-                  var from = dep.getBoundingClientRect();
-                  var to = node.getBoundingClientRect();
-                  var x1 = from.left - canvasRect.left + from.width / 2;
-                  var y1 = from.bottom - canvasRect.top;
-                  var x2 = to.left - canvasRect.left + to.width / 2;
-                  var y2 = to.top - canvasRect.top;
-                  var mid = Math.max(12, (y2 - y1) / 2);
-                  svg.appendChild(svgEl('path', {
-                    class: 'graph-edge graph-edge--' + (node.getAttribute('data-state') || 'waiting'),
-                    d: 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + mid) + ', ' + x2 + ' ' + (y2 - mid) + ', ' + x2 + ' ' + y2,
-                  }));
-                });
-              });
+              Controls.drawGraphEdges();
             });
           }
 
@@ -5141,6 +5373,9 @@
             UiEvents.subscribe('ProjectionUpdated', onProjection);
             UiEvents.subscribe('ScopeSelected', onScopeSelected);
             UiEvents.subscribe('ConnectionChanged', onConnection);
+            UiEvents.subscribe('DisplayPreferenceChanged', function () { render(); });
+            UiEvents.subscribe('MockCheckpointStatus', function (env) { liveRegion.textContent = env.error || env.status; });
+            DisplayPreference.init();
             MockDriver.subscribe();
             MockDriver.init();
             context.connection = MockDriver.connection();
@@ -5158,6 +5393,11 @@
           subscribe: function (type, handler) {
             return UiEvents.subscribe(String(type || ''), handler);
           },
+          getCheckpoint: function (taskId, id) {
+            var ref = PayloadRefs.get('task:' + taskId);
+            return ref ? ref.value.task.checkpoints.filter(function (cp) { return cp.id === id; })[0] || null : null;
+          },
+          getDisplayPreference: function () { return DisplayPreference.snapshot(); },
         };
 
         App.init();

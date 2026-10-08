@@ -1,0 +1,98 @@
+{
+  "status": "PASS",
+  "artifactSha256": "3a85040bfe69200af5d37c31a420c594d6ddac8f182bb8e815b8ad4f010da505",
+  "space": 8,
+  "page": "p1",
+  "assertions": [
+    {
+      "name": "native Tour10 ver2",
+      "pass": true,
+      "detail": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=2&perspective=semantic&tour=10"
+    },
+    {
+      "name": "ver2 graph selected independently of default CP3",
+      "pass": true,
+      "detail": "查看 v2 / 当时快照 · 当前权威 v3\n节点与依赖（点击节点查看输入、输出和证据）\n查看 v2 / 当时快照 · 当前权威 v3\n第 1 层\n观察\n已完成无前置依赖\n第 2 层\n计划\n已完成依赖 stage-task-runtime-refactor-observe\n第 3 层\n投影契约\n已完成依赖 stage-task-runtime-refactor-plan\n第 4 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 5 层\n模板扩展核心\n已完成依赖 n-identity\n第 6 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 7 层\n整体复核\n等待依赖 n-template-extension-wire\n第 8 层\nreview\n等待依赖 n-projection, n-template, n-identity, n-template-extension-core, n-template-extension-wire, n-review\n第 9 层\nreview → 全程重编排 · 小循环 1\n等待依赖 stage-task-runtime-refactor-review\n第 10 层\n观察 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c1-global-replan\n第 11 层\n小计划 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c2-observe\n第 12 层\n执行 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c2-plan\n第 13 层\nreview · 小循环 2\n等待依赖 stage-task-runtime-refactor-c2-execute\n第 14 层\nreview → 全程重编排 · 小循环 2\n等待依赖 stage-task-runtime-refactor-c2-review"
+    },
+    {
+      "name": "meaningful retained revision2 nodes",
+      "pass": true
+    },
+    {
+      "name": "full published history with selected v2",
+      "pass": true
+    },
+    {
+      "name": "incompatible explicit checkpoint/revision rejected",
+      "pass": true
+    },
+    {
+      "name": "cross-task checkpoint rejected",
+      "pass": true
+    },
+    {
+      "name": "pending v4 not navigable as published history",
+      "pass": true
+    },
+    {
+      "name": "explicit CP2 retained failed snapshot",
+      "pass": true
+    },
+    {
+      "name": "current mode old revision mismatch",
+      "pass": true
+    },
+    {
+      "name": "default authority remains v3",
+      "pass": true
+    },
+    {
+      "name": "VISIBLE native publication makes current v4 graph",
+      "pass": true
+    },
+    {
+      "name": "publication appends exactly one action/raw",
+      "pass": true
+    },
+    {
+      "name": "original action/raw prefix retained",
+      "pass": true
+    },
+    {
+      "name": "old checkpoints and revision graphs immutable",
+      "pass": true
+    },
+    {
+      "name": "plan publication does not move CP cursor",
+      "pass": true
+    },
+    {
+      "name": "actual active dependencies done",
+      "pass": true
+    },
+    {
+      "name": "old refs/deepfreeze/other task isolation/public update",
+      "pass": true,
+      "detail": {
+        "oldReadable": true,
+        "oldFrozen": true,
+        "cpShared": true,
+        "otherSame": true,
+        "updates": 1
+      }
+    },
+    {
+      "name": "published semantic ordered v1..4 and meaningful delta",
+      "pass": true
+    },
+    {
+      "name": "bound agent same retained revision selector",
+      "pass": true
+    },
+    {
+      "name": "history navigation leaves action history unchanged",
+      "pass": true
+    }
+  ],
+  "errors": []
+}
