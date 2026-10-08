@@ -632,6 +632,16 @@ async function schedulerPlans(auth) {
   return scheduler.plans ?? [];
 }
 
+/**
+ * One cheap read of the task identities the runtime currently reports. Used to
+ * observe whether an execution has started without paying a per-row dashboard
+ * read, which matters because the deferral window is only about two seconds.
+ */
+async function taskIdsOf(auth) {
+  const rows = taskRowsOf(await auth.json('/api/tasks'));
+  return new Set(rows.map((row) => row.taskId?.value).filter((value) => value !== undefined));
+}
+
 async function waitForSchedulerPlan(auth, predicate, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -689,19 +699,6 @@ async function waitForScheduledOccurrence(auth, subscriptionId, timeoutMs = 30_0
     }
     await sleep(100);
   }
-}
-
-/**
- * The production grace-window rule (`scheduler.ts`: `Date.parse(occurrence.dueAt)
- * > now`): a claim whose slot is still ahead of the clock sits inside the window
- * and has to wait for the slot instead of executing early. The positive scenario
- * and the negative control both evaluate this one expression against the
- * occurrence the runtime really produced, so the two results together show the
- * rule discriminates instead of being a constant.
- */
-function claimInsideGraceWindow(occurrence, atMs) {
-  if (occurrence?.dueAt === undefined) return undefined;
-  return Date.parse(occurrence.dueAt) > atMs;
 }
 
 /**
@@ -1096,6 +1093,19 @@ async function sectionReal(browser, artifactDir, root) {
     let graceStartAt = undefined;
     let graceOccurrence = undefined;
     let claimedBeforeDue = false;
+    // The production guard defers consumption of a claim while its slot is still
+    // ahead (`scheduler.ts`: a claimed-but-unsettled occurrence is skipped when
+    // `Date.parse(occurrence.dueAt) > now`). This scenario observes that deferral
+    // through the public API instead of recomputing the predicate: after the claim
+    // is taken and before the slot arrives, it reads the task identities the runtime
+    // reports, and requires that the task the plan later executes was not among
+    // them. Removing the guard makes dispatch happen at claim time, so that task
+    // exists in the pre-slot read and the check fails. The same check fails if the
+    // guard never released, because then the plan has no task at all.
+    let taskIdsAtClaim = undefined;
+    let preSlotReadAtMs = -1;
+    let claimedAtMs = -1;
+    let graceDueAtMs = -1;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const leadTicks = graceWindowLeadTicks(confirmationRoundTripMs, attempt);
       const tick = await waitForFreshTick(auth);
@@ -1104,11 +1114,33 @@ async function sectionReal(browser, artifactDir, root) {
       grace = await confirmScheduledPlan(auth, 'report the current date', async () => attemptStartAt);
       let settled = false;
       let error;
+      taskIdsAtClaim = undefined;
+      preSlotReadAtMs = -1;
+      claimedAtMs = -1;
+      graceDueAtMs = -1;
       try {
         const claimedPlan = await waitForClaimedOccurrence(auth, grace.subscriptionId, 30_000);
         graceOccurrence = (claimedPlan.occurrences ?? []).find((occurrence) => occurrence.state === 'claimed');
         settled = (claimedPlan.settlements ?? []).length > 0;
-        claimedBeforeDue = Date.now() < Date.parse(attemptStartAt) && graceOccurrence !== undefined;
+        claimedAtMs = Date.now();
+        graceDueAtMs = Date.parse(attemptStartAt);
+        claimedBeforeDue = claimedAtMs < graceDueAtMs && graceOccurrence !== undefined;
+        if (claimedBeforeDue) {
+          // Read once, inside the claim-to-slot window and late enough in it that a
+          // guard which had been removed would already have created the plan's task.
+          // A deferring guard keeps that window empty, because it does not dispatch
+          // until the slot arrives. This is the discriminating observation, so the
+          // read timestamp is recorded and required to be before the slot.
+          const readAtMs = claimedAtMs + Math.floor((graceDueAtMs - claimedAtMs) * 0.6);
+          const waitMs = readAtMs - Date.now();
+          if (waitMs > 0) await sleep(waitMs);
+          const readResult = await taskIdsOf(auth);
+          // Stamped after the response arrives: if the read itself ran past the
+          // slot, the observation is not admissible and the check has to fail
+          // rather than pass on a late read.
+          preSlotReadAtMs = Date.now();
+          taskIdsAtClaim = [...readResult];
+        }
       } catch (caught) {
         error = caught instanceof Error ? caught.message : String(caught);
       }
@@ -1123,6 +1155,8 @@ async function sectionReal(browser, artifactDir, root) {
         confirmedAt: new Date().toISOString(),
         claimedBeforeDue,
         settled,
+        taskIdsAtClaim,
+        readBeforeDueByMs: graceDueAtMs < 0 || preSlotReadAtMs < 0 ? undefined : graceDueAtMs - preSlotReadAtMs,
         error,
       });
       if (claimedBeforeDue) {
@@ -1201,48 +1235,60 @@ async function sectionReal(browser, artifactDir, root) {
         && graceSettled.settlements[0].occurrenceId === graceOccurrence?.occurrenceId,
       graceSettled);
 
-    // A deliberate negative control proves the window guard is not always true.
-    // It confirms a real plan whose slot is already an hour past, waits for the
-    // runtime to materialise that slot, and evaluates the SAME production rule
-    // the positive scenario evaluates, against the occurrence the runtime really
-    // produced. A past slot is not inside the window, so the rule has to come out
-    // false on real runtime data. The control runs after the grace plan has
-    // settled so its own execution cannot slow the settlement being measured.
+    // Two-sided, observable-only proof of the deferral. Side one: while the claim's
+    // slot was still ahead, the runtime reported no task for this plan. Side two: a
+    // real plan whose slot is already an hour past must start promptly, so the same
+    // observation has to come out the other way. A guard that never deferred fails
+    // side one; a guard that always deferred, or never released, fails side two.
+    // Neither side recomputes the predicate. This control runs after the grace plan
+    // has settled so its own execution cannot slow the settlement being measured.
     const negativeStartAt = new Date(Date.now() - 60 * 60_000).toISOString();
     const negative = await confirmScheduledPlan(auth, 'report the current date', negativeStartAt);
     const negativePlan = await waitForScheduledOccurrence(auth, negative.subscriptionId, 30_000);
     const negativeOccurrences = negativePlan.occurrences ?? [];
-    const negativeOccurrence = negativeOccurrences[0];
-    const negativeObservedAtMs = Date.now();
-    const negativeDueIsPast = negativeOccurrence?.dueAt !== undefined
-      && Date.parse(negativeOccurrence.dueAt) <= negativeObservedAtMs;
-    const negativeInsideWindow = claimInsideGraceWindow(negativeOccurrence, negativeObservedAtMs);
-    // The positive side, evaluated through the same expression on its own
-    // occurrence: the claim was committed while the slot was still ahead.
-    const positiveInsideWindow = claimInsideGraceWindow(graceOccurrence, Date.parse(graceAnchor.confirmedAt));
-    observe('grace-window negative control', {
-      startAt: negativeStartAt,
-      subscriptionId: negative.subscriptionId,
-      observedAt: new Date(negativeObservedAtMs).toISOString(),
-      dueAt: negativeOccurrence?.dueAt,
-      dueIsPast: negativeDueIsPast,
-      insideWindow: negativeInsideWindow,
-      positiveInsideWindow,
-      occurrenceStates: negativeOccurrences.map((occurrence) => occurrence.state),
-      occurrence: negativeOccurrence,
-    });
-    record('a slot already past due is not inside the claim grace window',
-      negativeOccurrences.length > 0
-        && negativeDueIsPast === true
-        && negativeInsideWindow === false
-        && positiveInsideWindow === true,
-      {
-        dueAt: negativeOccurrence?.dueAt,
-        dueIsPast: negativeDueIsPast,
-        insideWindow: negativeInsideWindow,
-        positiveInsideWindow,
-        occurrenceStates: negativeOccurrences.map((occurrence) => occurrence.state),
+    // Side one is only evidence if the read really happened before the slot, so the
+    // margin is asserted rather than assumed.
+    const readWasBeforeDue = preSlotReadAtMs >= 0 && graceDueAtMs > 0 && preSlotReadAtMs < graceDueAtMs;
+    const taskIdsAtClaimSet = new Set(taskIdsAtClaim ?? []);
+    const graceTaskWasAbsentBeforeDue = graceTask === undefined
+      ? undefined
+      : taskIdsAtClaim !== undefined && !taskIdsAtClaimSet.has(graceTask.taskId);
+    const negativeTaskStarted = await findPlanLinkedTaskOrUndefined(auth, negative.subscriptionId, 90_000);
+    observe('grace-window deferral, both sides', {
+      positive: {
+        startAt: graceStartAt,
+        dueAt: graceDueAtMs > 0 ? new Date(graceDueAtMs).toISOString() : undefined,
+        readAt: preSlotReadAtMs > 0 ? new Date(preSlotReadAtMs).toISOString() : undefined,
+        readBeforeDueByMs: graceDueAtMs > 0 && preSlotReadAtMs > 0 ? graceDueAtMs - preSlotReadAtMs : undefined,
+        readWasBeforeDue,
+        taskIdsAtClaim,
+        linkedTask: graceTask,
+        linkedTaskAbsentBeforeDue: graceTaskWasAbsentBeforeDue,
+      },
+      negative: {
         startAt: negativeStartAt,
+        dueAt: negativePlan.occurrences?.[0]?.dueAt,
+        occurrenceStates: negativeOccurrences.map((occurrence) => occurrence.state),
+        linkedTask: negativeTaskStarted,
+        executionStarted: negativeTaskStarted !== undefined,
+      },
+    });
+    record('the runtime defers execution while the slot is ahead, and starts it once the slot is past',
+      graceAnchor.claimedBeforeDue === true
+        && readWasBeforeDue === true
+        && graceTask !== undefined
+        && graceTaskWasAbsentBeforeDue === true
+        && negativeOccurrences.length > 0
+        && negativeTaskStarted !== undefined,
+      {
+        claimedBeforeDue: graceAnchor.claimedBeforeDue,
+        readBeforeDueByMs: graceDueAtMs - preSlotReadAtMs,
+        taskIdsAtClaim,
+        linkedTask: graceTask,
+        linkedTaskAbsentBeforeDue: graceTaskWasAbsentBeforeDue,
+        negativeStartAt,
+        negativeTaskStarted,
+        occurrenceStates: negativeOccurrences.map((occurrence) => occurrence.state),
       });
 
     // The served plan list reports the same durable fact the control produced.
