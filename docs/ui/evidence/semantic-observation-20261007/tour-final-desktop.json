@@ -1,0 +1,2783 @@
+[
+  {
+    "station": 1,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=system&tour=1",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "系统概要",
+      "待人处理",
+      "项目列表",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n系统概要\n全部项目的只读语义投影\n打开一个 live 任务\n打开一个完成复盘\n3\n项目\n8\n任务总数\n4\nlive\n1\n等待\n1\n失败\n1\n已完成\n1\n未映射\n待人处理\n需要关注的语义事实\n链路巡检\nHumanAgent 平台 · 第 2 轮发现 1 项延迟偏高\nlive\n查看\n文档收口（等待人类）\nHumanAgent 平台 · 资料整理已确认\n等待\n查看\n迁移演练（失败）\nOrbit 调度服务 · 数据校验失败\n失败\n查看\nProvider 流式推理（未映射）\nHumanAgent 平台 · 未映射事件已记录\n未知\n查看\n项目列表\n点击进入项目视角\nHumanAgent 平台\n长程器官式 Harness 的实现与观测。 · 归属 core 团队\nlive\n任务 4\nOrbit 调度服务\n调度与恢复能力的实现、巡检与演练。 · 归属 runtime 团队\nlive\n任务 4\nSignal 观测网关\n新建项目，尚未创建任务。 · 归属 未分配\n空\n任务 0",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [],
+    "facts": [],
+    "nodes": [],
+    "taskIds": [
+      "task-pipeline-audit",
+      "task-waiting",
+      "task-failed",
+      "task-unknown"
+    ],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 73,
+    "dependencyErrors": []
+  },
+  {
+    "station": 2,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=project&project=proj-humanagent&tour=2",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "HumanAgent 平台",
+      "项目状态",
+      "任务列表",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\nHumanAgent 平台\n\n长程器官式 Harness 的实现与观测。 · 归属 core 团队\n\n项目状态\n同一语义事实与真实 scope\n全部\nlive\n已收拢\n4\n任务总数\n2\nlive\n1\n等待\n0\n失败\n0\n已完成\n任务列表\n筛选：all\n运行时编排重构\nHumanAgent 平台 · 长程模板 · 把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n最新事实：模板扩展核心已确认\nlive\nv1\n链路巡检\nHumanAgent 平台 · 巡检模板 · 按轮次检查连通性、DNS 与出口一致性，保留每轮历史。\n最新事实：第 2 轮发现 1 项延迟偏高\nlive\nv1\n需关注\n文档收口（等待人类）\nHumanAgent 平台 · 长程模板 · 等待人类确认收口口径后再继续。\n最新事实：资料整理已确认\n等待\nv1\n需关注\nProvider 流式推理（未映射）\nHumanAgent 平台 · 长程模板 · 接收 Provider 流式事件；当前存在未映射事件类型。\n最新事实：未映射事件已记录\n未知\nv1\n需关注",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [],
+    "facts": [],
+    "nodes": [],
+    "taskIds": [
+      "task-runtime-refactor",
+      "task-pipeline-audit",
+      "task-waiting",
+      "task-unknown"
+    ],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 73,
+    "dependencyErrors": []
+  },
+  {
+    "station": 3,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&tour=3",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv1\n查看版本\nv1\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n1 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 4 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n整体复核\n\n等待模板与身份两条前置完成后进入复核。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n整体复核\n等待依赖 n-template, n-identity\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看当前版本\nv2\n候选修订 · 尚未发布\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看候选修订\nv3\n候选修订 · 尚未发布\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看候选修订",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待模板与身份两条前置完成后进入复核。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-template,n-identity",
+        "text": "整体复核\n等待依赖 n-template, n-identity"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 76,
+    "dependencyErrors": []
+  },
+  {
+    "station": 4,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&tour=4",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv1\n查看版本\nv1\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n1 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 4 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n整体复核\n\n等待模板与身份两条前置完成后进入复核。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n整体复核\n等待依赖 n-template, n-identity\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看当前版本\nv2\n候选修订 · 尚未发布\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看候选修订\nv3\n候选修订 · 尚未发布\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看候选修订",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待模板与身份两条前置完成后进入复核。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-template,n-identity",
+        "text": "整体复核\n等待依赖 n-template, n-identity"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 76,
+    "dependencyErrors": []
+  },
+  {
+    "station": 5,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-pipeline-audit&tour=5",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "链路巡检live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n链路巡检\n链路巡检\nlive\n\n按轮次检查连通性、DNS 与出口一致性，保留每轮历史。\n\n任务概览\n巡检模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n巡检模板\n触发方式\n可定时/周期触发，也可手动执行一轮\n当前版本\nv1\n查看版本\nv1\n任务状态\nlive\n稳定事实\n2 条\n进行中活动\n1 项\n模板阶段与终点\n巡检模板\n巡检模板\n必要阶段：本轮 occurrence → 探针 / 检查 → 发现与归类 → 收拢与下一轮\n触发方式（独立选项）：可定时/周期触发，也可手动执行一轮\n终点：每轮收拢；下一轮不是本轮的重试\n当前版本 v1，共 4 个节点\n\n本轮 occurrence 与历史轮次（历史 occurrence 不被修订改写）\n\n第 1 轮\n已完成\n连通性正常\n第 2 轮\n已完成\n发现 1 项延迟偏高\n第 3 轮\n进行中\n比对进行中\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n2 条\n\n第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe\n\n第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n本轮收拢\n\n等待第 3 轮发现归类完成后收拢本轮。\n\n等待\nn-settle\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n本轮 occurrence\n已完成无前置依赖\n第 2 层\n探针检查\n已完成依赖 n-occurrence\n第 3 层\n发现归类\n已完成依赖 n-probe\n第 4 层\n本轮收拢\n等待依赖 n-finding\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始巡检流程：occurrence → 探针 → 发现 → 收拢。\n2026-10-05 09:00\n新增 4 / 删除 0 节点\n查看当前版本\nv2\n候选修订 · 尚未发布\n增加 DNS 与出口比对分支，历史轮次不改写。\n2026-10-07 07:40\n新增 2 / 删除 0 节点\n查看候选修订\nv3\n候选修订 · 尚未发布\n增加下一轮规划分支，历史 occurrence 继续保留。\n2026-10-07 09:20\n新增 1 / 删除 0 节点\n查看候选修订",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-pa-1",
+        "state": "success",
+        "nodeId": "n-probe",
+        "text": "第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe"
+      },
+      {
+        "id": "f-pa-2",
+        "state": "success",
+        "nodeId": "n-finding",
+        "text": "第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-settle",
+        "state": "waiting",
+        "nodeId": "n-settle",
+        "text": "本轮收拢\n\n等待第 3 轮发现归类完成后收拢本轮。\n\n等待\nn-settle"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-occurrence",
+        "state": "done",
+        "deps": "",
+        "text": "本轮 occurrence\n已完成无前置依赖"
+      },
+      {
+        "id": "n-probe",
+        "state": "done",
+        "deps": "n-occurrence",
+        "text": "探针检查\n已完成依赖 n-occurrence"
+      },
+      {
+        "id": "n-finding",
+        "state": "done",
+        "deps": "n-probe",
+        "text": "发现归类\n已完成依赖 n-probe"
+      },
+      {
+        "id": "n-settle",
+        "state": "waiting",
+        "deps": "n-finding",
+        "text": "本轮收拢\n等待依赖 n-finding"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 74,
+    "dependencyErrors": []
+  },
+  {
+    "station": 6,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-orbit&task=task-single-live&tour=6",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "调度窗口校验（进行中）live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nOrbit 调度服务\n/\n调度窗口校验（进行中）\n调度窗口校验（进行中）\nlive\n\n对一次调度窗口执行输入校验、执行与验证，产出一次结果。\n\n任务概览\n单次模板\n当前执行\n完成复盘\n项目\nOrbit 调度服务\n模板\n单次模板\n触发方式\n立即或预约执行一次\n当前版本\nv1\n查看版本\nv1\n任务状态\nlive\n稳定事实\n1 条\n进行中活动\n3 项\n模板阶段与终点\n单次模板\n单次模板\n必要阶段：明确输入 → 执行 → 验证 → 一次结果与终态\n触发方式（独立选项）：立即或预约执行一次\n终点：一次结果与终态；完成后进入复盘\n当前版本 v1，共 4 个节点\n\n一次结果与终态\n\n一次结果\n尚未收拢；任务仍在执行，不冒充完成。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n1 条\n\n输入校验已确认\n\n窗口参数与前置条件校验通过。\n\n成功\nv1\n2026-10-07 09:10\nn-input\n\nlive · 当前活动\n未收拢内容不冒充完成\n3 项\n\n执行\n\n正在执行调度窗口校验。\n\n进行中\nn-execute\n推进为成功\n标记失败\n\n验证\n\n等待执行完成后验证结果。\n\n等待\nn-verify\n\n一次结果\n\n等待验证完成后产出一次结果。\n\n等待\nn-result\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n输入校验\n已完成无前置依赖\n第 2 层\n执行\n进行中依赖 n-input\n第 3 层\n验证\n等待依赖 n-execute\n第 4 层\n一次结果\n等待依赖 n-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始单次流程：输入 → 执行 → 验证 → 结果。\n2026-10-07 09:00\n新增 4 / 删除 0 节点\n查看当前版本\nv2\n候选修订 · 尚未发布\n修订后续执行与验证分支，输入校验事实保留。\n2026-10-07 09:30\n新增 1 / 删除 0 节点\n查看候选修订\nv3\n候选修订 · 尚未发布\n增加结果发布分支，验证事实保留。\n2026-10-07 09:50\n新增 1 / 删除 0 节点\n查看候选修订",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-sl-1",
+        "state": "success",
+        "nodeId": "n-input",
+        "text": "输入校验已确认\n\n窗口参数与前置条件校验通过。\n\n成功\nv1\n2026-10-07 09:10\nn-input"
+      },
+      {
+        "id": "live:act:task-single-live:n-execute",
+        "state": "active",
+        "nodeId": "n-execute",
+        "text": "执行\n\n正在执行调度窗口校验。\n\n进行中\nn-execute\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-single-live:n-verify",
+        "state": "waiting",
+        "nodeId": "n-verify",
+        "text": "验证\n\n等待执行完成后验证结果。\n\n等待\nn-verify"
+      },
+      {
+        "id": "live:act:task-single-live:n-result",
+        "state": "waiting",
+        "nodeId": "n-result",
+        "text": "一次结果\n\n等待验证完成后产出一次结果。\n\n等待\nn-result"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-input",
+        "state": "done",
+        "deps": "",
+        "text": "输入校验\n已完成无前置依赖"
+      },
+      {
+        "id": "n-execute",
+        "state": "active",
+        "deps": "n-input",
+        "text": "执行\n进行中依赖 n-input"
+      },
+      {
+        "id": "n-verify",
+        "state": "waiting",
+        "deps": "n-execute",
+        "text": "验证\n等待依赖 n-execute"
+      },
+      {
+        "id": "n-result",
+        "state": "waiting",
+        "deps": "n-verify",
+        "text": "一次结果\n等待依赖 n-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 74,
+    "dependencyErrors": []
+  },
+  {
+    "station": 7,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&tour=7",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv1\n查看版本\nv1\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n1 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 4 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n整体复核\n\n等待模板与身份两条前置完成后进入复核。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n整体复核\n等待依赖 n-template, n-identity\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看当前版本\nv2\n候选修订 · 尚未发布\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看候选修订\nv3\n候选修订 · 尚未发布\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看候选修订",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待模板与身份两条前置完成后进入复核。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-template,n-identity",
+        "text": "整体复核\n等待依赖 n-template, n-identity"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 76,
+    "dependencyErrors": []
+  },
+  {
+    "station": 8,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-orbit&task=task-telemetry&tour=8",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "遥测汇总（可断连）live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nOrbit 调度服务\n/\n遥测汇总（可断连）\n遥测汇总（可断连）\nlive\n\n周期汇总遥测；读取失败时保留上次内容并标记过期。\n\n任务概览\n巡检模板\n当前执行\n完成复盘\n项目\nOrbit 调度服务\n模板\n巡检模板\n触发方式\n可定时/周期触发，也可手动执行一轮\n当前版本\nv1\n查看版本\nv1\n任务状态\nlive\n稳定事实\n2 条\n进行中活动\n1 项\n模板阶段与终点\n巡检模板\n巡检模板\n必要阶段：本轮 occurrence → 探针 / 检查 → 发现与归类 → 收拢与下一轮\n触发方式（独立选项）：可定时/周期触发，也可手动执行一轮\n终点：每轮收拢；下一轮不是本轮的重试\n当前版本 v1，共 3 个节点\n\n本轮 occurrence 与历史轮次（历史 occurrence 不被修订改写）\n\n第 1 轮\n已完成\n遥测正常\n第 2 轮\n进行中\n采集中\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n2 条\n\n第 1 轮遥测正常\n\n样本 24/24 采集成功。\n\n成功\nv1\n2026-10-07 06:10\nn-occurrence\n查看证据\n\n遥测探针已收拢为稳定事实\n\nTour 模拟成功：探针样本已确认，后续收拢仍按依赖推进。\n\n成功\nv1\n2026-10-07 10:02\nn-probe\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n本轮收拢\n\n等待探针检查完成后收拢。\n\n进行中\nn-settle\n推进为成功\n标记失败\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n本轮 occurrence\n已完成无前置依赖\n第 2 层\n探针检查\n已完成依赖 n-occurrence\n第 3 层\n本轮收拢\n进行中依赖 n-probe\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始巡检流程。\n2026-10-07 06:00\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-t-1",
+        "state": "success",
+        "nodeId": "n-occurrence",
+        "text": "第 1 轮遥测正常\n\n样本 24/24 采集成功。\n\n成功\nv1\n2026-10-07 06:10\nn-occurrence\n查看证据"
+      },
+      {
+        "id": "tour-fact-telemetry-probe-success",
+        "state": "success",
+        "nodeId": "n-probe",
+        "text": "遥测探针已收拢为稳定事实\n\nTour 模拟成功：探针样本已确认，后续收拢仍按依赖推进。\n\n成功\nv1\n2026-10-07 10:02\nn-probe"
+      },
+      {
+        "id": "live:act:task-telemetry:n-settle",
+        "state": "active",
+        "nodeId": "n-settle",
+        "text": "本轮收拢\n\n等待探针检查完成后收拢。\n\n进行中\nn-settle\n推进为成功\n标记失败"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-occurrence",
+        "state": "done",
+        "deps": "",
+        "text": "本轮 occurrence\n已完成无前置依赖"
+      },
+      {
+        "id": "n-probe",
+        "state": "done",
+        "deps": "n-occurrence",
+        "text": "探针检查\n已完成依赖 n-occurrence"
+      },
+      {
+        "id": "n-settle",
+        "state": "active",
+        "deps": "n-probe",
+        "text": "本轮收拢\n进行中依赖 n-probe"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 76,
+    "dependencyErrors": []
+  },
+  {
+    "station": 9,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-pipeline-audit&tour=9",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "链路巡检live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n链路巡检\n链路巡检\nlive\n\n按轮次检查连通性、DNS 与出口一致性，保留每轮历史。\n\n任务概览\n巡检模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n巡检模板\n触发方式\n可定时/周期触发，也可手动执行一轮\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n3 条\n进行中活动\n3 项\n模板阶段与终点\n巡检模板\n巡检模板\n必要阶段：本轮 occurrence → 探针 / 检查 → 发现与归类 → 收拢与下一轮\n触发方式（独立选项）：可定时/周期触发，也可手动执行一轮\n终点：每轮收拢；下一轮不是本轮的重试\n当前版本 v3，共 7 个节点\n\n本轮 occurrence 与历史轮次（历史 occurrence 不被修订改写）\n\n第 1 轮\n已完成\n连通性正常\n第 2 轮\n已完成\n发现 1 项延迟偏高\n第 3 轮\n进行中\n比对进行中\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n3 条\n\n第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe\n\n第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding\n\nDNS 比对失败\n\nTour 模拟失败：DNS 比对未完成，保留原因与证据。\n\n下一步：检查上游 DNS 数据后由人类决定是否重新发起。\n\n失败\nv3\n2026-10-07 10:02\nn-dns-compare\n查看证据\n\nlive · 当前活动\n未收拢内容不冒充完成\n3 项\n\n出口比对\n\n等待 DNS 比对完成后比对出口地址。\n\n阻塞\nn-egress-compare\n\n下一轮规划\n\n等待比对结果后规划下一轮。\n\n阻塞\nn-round-plan\n\n本轮收拢\n\n等待下一轮规划后收拢本轮。\n\n阻塞\nn-settle\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n本轮 occurrence\n已完成无前置依赖\n第 2 层\n探针检查\n已完成依赖 n-occurrence\n第 3 层\n发现归类\n已完成依赖 n-probe\nDNS 比对\n失败依赖 n-probe\n第 4 层\n出口比对\n阻塞依赖 n-dns-compare\n第 5 层\n下一轮规划\n阻塞依赖 n-egress-compare\n第 6 层\n本轮收拢\n阻塞依赖 n-round-plan\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始巡检流程：occurrence → 探针 → 发现 → 收拢。\n2026-10-05 09:00\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n增加 DNS 与出口比对分支，历史轮次不改写。\n2026-10-07 07:40\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加下一轮规划分支，历史 occurrence 继续保留。\n2026-10-07 09:20\n新增 1 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-pa-1",
+        "state": "success",
+        "nodeId": "n-probe",
+        "text": "第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe"
+      },
+      {
+        "id": "f-pa-2",
+        "state": "success",
+        "nodeId": "n-finding",
+        "text": "第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding"
+      },
+      {
+        "id": "tour-fact-pipeline-dns-failure",
+        "state": "failure",
+        "nodeId": "n-dns-compare",
+        "text": "DNS 比对失败\n\nTour 模拟失败：DNS 比对未完成，保留原因与证据。\n\n下一步：检查上游 DNS 数据后由人类决定是否重新发起。\n\n失败\nv3\n2026-10-07 10:02\nn-dns-compare\n查看证据"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-egress-compare",
+        "state": "blocked",
+        "nodeId": "n-egress-compare",
+        "text": "出口比对\n\n等待 DNS 比对完成后比对出口地址。\n\n阻塞\nn-egress-compare"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-round-plan",
+        "state": "blocked",
+        "nodeId": "n-round-plan",
+        "text": "下一轮规划\n\n等待比对结果后规划下一轮。\n\n阻塞\nn-round-plan"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-settle",
+        "state": "blocked",
+        "nodeId": "n-settle",
+        "text": "本轮收拢\n\n等待下一轮规划后收拢本轮。\n\n阻塞\nn-settle"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-occurrence",
+        "state": "done",
+        "deps": "",
+        "text": "本轮 occurrence\n已完成无前置依赖"
+      },
+      {
+        "id": "n-probe",
+        "state": "done",
+        "deps": "n-occurrence",
+        "text": "探针检查\n已完成依赖 n-occurrence"
+      },
+      {
+        "id": "n-finding",
+        "state": "done",
+        "deps": "n-probe",
+        "text": "发现归类\n已完成依赖 n-probe"
+      },
+      {
+        "id": "n-dns-compare",
+        "state": "failed",
+        "deps": "n-probe",
+        "text": "DNS 比对\n失败依赖 n-probe"
+      },
+      {
+        "id": "n-egress-compare",
+        "state": "blocked",
+        "deps": "n-dns-compare",
+        "text": "出口比对\n阻塞依赖 n-dns-compare"
+      },
+      {
+        "id": "n-round-plan",
+        "state": "blocked",
+        "deps": "n-egress-compare",
+        "text": "下一轮规划\n阻塞依赖 n-egress-compare"
+      },
+      {
+        "id": "n-settle",
+        "state": "blocked",
+        "deps": "n-round-plan",
+        "text": "本轮收拢\n阻塞依赖 n-round-plan"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 76,
+    "dependencyErrors": []
+  },
+  {
+    "station": 10,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=2&tour=10",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv2\n查看版本\nv2\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n2 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v2，共 6 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv2 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n2 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败\n\n整体复核\n\n等待模板扩展接线完成后再进入复核。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v2\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v2\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n整体复核\n等待依赖 n-template-extension-wire\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n当前执行版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看当前版本\nv3\n候选修订 · 尚未发布\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看候选修订",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "2",
+        "view": "2"
+      },
+      {
+        "current": "2",
+        "view": "2"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待模板扩展接线完成后再进入复核。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "整体复核\n等待依赖 n-template-extension-wire"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 11,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=3&tour=11",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n5 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v3，共 9 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n5 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败\n\n修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision\n\n历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history\n\n实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify\n\n整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 6 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-revision",
+        "state": "waiting",
+        "nodeId": "n-revision",
+        "text": "修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-history",
+        "state": "waiting",
+        "nodeId": "n-history",
+        "text": "历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-instance-verify",
+        "state": "waiting",
+        "nodeId": "n-instance-verify",
+        "text": "实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-revision",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "修订历史\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-history",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "历史回放\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-instance-verify",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "实例核验\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-revision,n-history,n-instance-verify",
+        "text": "整体复核\n等待依赖 n-revision, n-history, n-instance-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 12,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=1&tour=12",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live查看历史 v1",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n正在查看历史版本 v1\n当前执行版本为 v3，历史版本只读。\n回到当前版本\n运行时编排重构\nlive\n查看历史 v1\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv3\n查看版本\nv1\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n5 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 4 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n5 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败\n\n修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision\n\n历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history\n\n实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify\n\n整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n历史版本 v1\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n整体复核\n等待依赖 n-template, n-identity\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "1"
+      },
+      {
+        "current": "3",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-revision",
+        "state": "waiting",
+        "nodeId": "n-revision",
+        "text": "修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-history",
+        "state": "waiting",
+        "nodeId": "n-history",
+        "text": "历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-instance-verify",
+        "state": "waiting",
+        "nodeId": "n-instance-verify",
+        "text": "实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-template,n-identity",
+        "text": "整体复核\n等待依赖 n-template, n-identity"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 80,
+    "dependencyErrors": []
+  },
+  {
+    "station": 13,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-pipeline-audit&ver=3&tour=13",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "链路巡检live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n链路巡检\n链路巡检\nlive\n\n按轮次检查连通性、DNS 与出口一致性，保留每轮历史。\n\n任务概览\n巡检模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n巡检模板\n触发方式\n可定时/周期触发，也可手动执行一轮\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n3 条\n进行中活动\n3 项\n模板阶段与终点\n巡检模板\n巡检模板\n必要阶段：本轮 occurrence → 探针 / 检查 → 发现与归类 → 收拢与下一轮\n触发方式（独立选项）：可定时/周期触发，也可手动执行一轮\n终点：每轮收拢；下一轮不是本轮的重试\n当前版本 v3，共 7 个节点\n\n本轮 occurrence 与历史轮次（历史 occurrence 不被修订改写）\n\n第 1 轮\n已完成\n连通性正常\n第 2 轮\n已完成\n发现 1 项延迟偏高\n第 3 轮\n进行中\n比对进行中\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n3 条\n\n第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe\n\n第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding\n\nDNS 比对失败\n\nTour 模拟失败：DNS 比对未完成，保留原因与证据。\n\n下一步：检查上游 DNS 数据后由人类决定是否重新发起。\n\n失败\nv3\n2026-10-07 10:02\nn-dns-compare\n查看证据\n\nlive · 当前活动\n未收拢内容不冒充完成\n3 项\n\n出口比对\n\n等待 DNS 比对完成后比对出口地址。\n\n阻塞\nn-egress-compare\n\n下一轮规划\n\n等待比对结果后规划下一轮。\n\n阻塞\nn-round-plan\n\n本轮收拢\n\n等待下一轮规划后收拢本轮。\n\n阻塞\nn-settle\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n本轮 occurrence\n已完成无前置依赖\n第 2 层\n探针检查\n已完成依赖 n-occurrence\n第 3 层\n发现归类\n已完成依赖 n-probe\nDNS 比对\n失败依赖 n-probe\n第 4 层\n出口比对\n阻塞依赖 n-dns-compare\n第 5 层\n下一轮规划\n阻塞依赖 n-egress-compare\n第 6 层\n本轮收拢\n阻塞依赖 n-round-plan\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始巡检流程：occurrence → 探针 → 发现 → 收拢。\n2026-10-05 09:00\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n增加 DNS 与出口比对分支，历史轮次不改写。\n2026-10-07 07:40\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加下一轮规划分支，历史 occurrence 继续保留。\n2026-10-07 09:20\n新增 1 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-pa-1",
+        "state": "success",
+        "nodeId": "n-probe",
+        "text": "第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe"
+      },
+      {
+        "id": "f-pa-2",
+        "state": "success",
+        "nodeId": "n-finding",
+        "text": "第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding"
+      },
+      {
+        "id": "tour-fact-pipeline-dns-failure",
+        "state": "failure",
+        "nodeId": "n-dns-compare",
+        "text": "DNS 比对失败\n\nTour 模拟失败：DNS 比对未完成，保留原因与证据。\n\n下一步：检查上游 DNS 数据后由人类决定是否重新发起。\n\n失败\nv3\n2026-10-07 10:02\nn-dns-compare\n查看证据"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-egress-compare",
+        "state": "blocked",
+        "nodeId": "n-egress-compare",
+        "text": "出口比对\n\n等待 DNS 比对完成后比对出口地址。\n\n阻塞\nn-egress-compare"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-round-plan",
+        "state": "blocked",
+        "nodeId": "n-round-plan",
+        "text": "下一轮规划\n\n等待比对结果后规划下一轮。\n\n阻塞\nn-round-plan"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-settle",
+        "state": "blocked",
+        "nodeId": "n-settle",
+        "text": "本轮收拢\n\n等待下一轮规划后收拢本轮。\n\n阻塞\nn-settle"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-occurrence",
+        "state": "done",
+        "deps": "",
+        "text": "本轮 occurrence\n已完成无前置依赖"
+      },
+      {
+        "id": "n-probe",
+        "state": "done",
+        "deps": "n-occurrence",
+        "text": "探针检查\n已完成依赖 n-occurrence"
+      },
+      {
+        "id": "n-finding",
+        "state": "done",
+        "deps": "n-probe",
+        "text": "发现归类\n已完成依赖 n-probe"
+      },
+      {
+        "id": "n-dns-compare",
+        "state": "failed",
+        "deps": "n-probe",
+        "text": "DNS 比对\n失败依赖 n-probe"
+      },
+      {
+        "id": "n-egress-compare",
+        "state": "blocked",
+        "deps": "n-dns-compare",
+        "text": "出口比对\n阻塞依赖 n-dns-compare"
+      },
+      {
+        "id": "n-round-plan",
+        "state": "blocked",
+        "deps": "n-egress-compare",
+        "text": "下一轮规划\n阻塞依赖 n-egress-compare"
+      },
+      {
+        "id": "n-settle",
+        "state": "blocked",
+        "deps": "n-round-plan",
+        "text": "本轮收拢\n阻塞依赖 n-round-plan"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 76,
+    "dependencyErrors": []
+  },
+  {
+    "station": 14,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-orbit&task=task-single-live&ver=3&tour=14",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "调度窗口校验（进行中）live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览"
+    ],
+    "text": "系统概要\n/\nOrbit 调度服务\n/\n调度窗口校验（进行中）\n调度窗口校验（进行中）\nlive\n\n对一次调度窗口执行输入校验、执行与验证，产出一次结果。\n\n任务概览\n单次模板\n当前执行\n完成复盘\n项目\nOrbit 调度服务\n模板\n单次模板\n触发方式\n立即或预约执行一次\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n1 条\n进行中活动\n4 项\n模板阶段与终点\n单次模板\n单次模板\n必要阶段：明确输入 → 执行 → 验证 → 一次结果与终态\n触发方式（独立选项）：立即或预约执行一次\n终点：一次结果与终态；完成后进入复盘\n当前版本 v3，共 6 个节点\n\n一次结果与终态\n\n一次结果\n尚未收拢；任务仍在执行，不冒充完成。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n1 条\n\n输入校验已确认\n\n窗口参数与前置条件校验通过。\n\n成功\nv1\n2026-10-07 09:10\nn-input\n\nlive · 当前活动\n未收拢内容不冒充完成\n4 项\n\n验证\n\n正在验证执行输出。\n\n进行中\nn-verify\n推进为成功\n标记失败\n\n补充验证\n\n等待主验证完成后补充验证。\n\n等待\nn-verify-extra\n\n一次结果\n\n等待补充验证后产出一次结果。\n\n等待\nn-result\n\n结果发布\n\n等待一次结果确认后发布。\n\n等待\nn-publish\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n输入校验\n已完成无前置依赖\n第 2 层\n执行\n已完成依赖 n-input\n第 3 层\n验证\n进行中依赖 n-execute\n第 4 层\n补充验证\n等待依赖 n-verify\n第 5 层\n一次结果\n等待依赖 n-verify-extra\n第 6 层\n结果发布\n等待依赖 n-result\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始单次流程：输入 → 执行 → 验证 → 结果。\n2026-10-07 09:00\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n修订后续执行与验证分支，输入校验事实保留。\n2026-10-07 09:30\n新增 1 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加结果发布分支，验证事实保留。\n2026-10-07 09:50\n新增 1 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-sl-1",
+        "state": "success",
+        "nodeId": "n-input",
+        "text": "输入校验已确认\n\n窗口参数与前置条件校验通过。\n\n成功\nv1\n2026-10-07 09:10\nn-input"
+      },
+      {
+        "id": "live:act:task-single-live:n-verify",
+        "state": "active",
+        "nodeId": "n-verify",
+        "text": "验证\n\n正在验证执行输出。\n\n进行中\nn-verify\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-single-live:n-verify-extra",
+        "state": "waiting",
+        "nodeId": "n-verify-extra",
+        "text": "补充验证\n\n等待主验证完成后补充验证。\n\n等待\nn-verify-extra"
+      },
+      {
+        "id": "live:act:task-single-live:n-result",
+        "state": "waiting",
+        "nodeId": "n-result",
+        "text": "一次结果\n\n等待补充验证后产出一次结果。\n\n等待\nn-result"
+      },
+      {
+        "id": "live:act:task-single-live:n-publish",
+        "state": "waiting",
+        "nodeId": "n-publish",
+        "text": "结果发布\n\n等待一次结果确认后发布。\n\n等待\nn-publish"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-input",
+        "state": "done",
+        "deps": "",
+        "text": "输入校验\n已完成无前置依赖"
+      },
+      {
+        "id": "n-execute",
+        "state": "done",
+        "deps": "n-input",
+        "text": "执行\n已完成依赖 n-input"
+      },
+      {
+        "id": "n-verify",
+        "state": "active",
+        "deps": "n-execute",
+        "text": "验证\n进行中依赖 n-execute"
+      },
+      {
+        "id": "n-verify-extra",
+        "state": "waiting",
+        "deps": "n-verify",
+        "text": "补充验证\n等待依赖 n-verify"
+      },
+      {
+        "id": "n-result",
+        "state": "waiting",
+        "deps": "n-verify-extra",
+        "text": "一次结果\n等待依赖 n-verify-extra"
+      },
+      {
+        "id": "n-publish",
+        "state": "waiting",
+        "deps": "n-result",
+        "text": "结果发布\n等待依赖 n-result"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 74,
+    "dependencyErrors": []
+  },
+  {
+    "station": 15,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=3&node=n-template-extension-wire&tour=15",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "模板扩展接线",
+      "该节点的输入 / 输出与事实"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n5 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v3，共 9 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n5 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败\n\n修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision\n\n历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history\n\n实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify\n\n整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 6 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-revision",
+        "state": "waiting",
+        "nodeId": "n-revision",
+        "text": "修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-history",
+        "state": "waiting",
+        "nodeId": "n-history",
+        "text": "历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-instance-verify",
+        "state": "waiting",
+        "nodeId": "n-instance-verify",
+        "text": "实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-revision",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "修订历史\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-history",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "历史回放\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-instance-verify",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "实例核验\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-revision,n-history,n-instance-verify",
+        "text": "整体复核\n等待依赖 n-revision, n-history, n-instance-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": true,
+        "text": "模板扩展接线\n\n节点详情 · 运行时编排重构 · v3\n\n节点\n模板扩展接线\n节点 ID\nn-template-extension-wire\n状态\n进行中\n依赖\nn-template-extension-core\n说明\n正在把扩展核心接入运行时装配。\n版本\nv3\n该节点的输入 / 输出与事实\n\n该节点还没有关联的稳定事实。\n\n语义\n原始证据 (Mock raw)\n\n语义视图已归类。原始证据只在主动选择「原始证据」页签后读取，不参与状态判断。"
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BUTTON",
+      "action": "close-dialog",
+      "text": ""
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 80,
+    "dependencyErrors": []
+  },
+  {
+    "station": 16,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&evidence=ev-wire&raw=1&tour=16",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n5 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v3，共 9 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n5 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败\n\n修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision\n\n历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history\n\n实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify\n\n整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 6 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-revision",
+        "state": "waiting",
+        "nodeId": "n-revision",
+        "text": "修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-history",
+        "state": "waiting",
+        "nodeId": "n-history",
+        "text": "历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-instance-verify",
+        "state": "waiting",
+        "nodeId": "n-instance-verify",
+        "text": "实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-revision",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "修订历史\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-history",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "历史回放\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-instance-verify",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "实例核验\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-revision,n-history,n-instance-verify",
+        "text": "整体复核\n等待依赖 n-revision, n-history, n-instance-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": true,
+        "text": "接线执行证据\n\n主动证据查看 · 独立只读 owner\n\n证据\n接线执行证据\n来源\nmock://runtime/assignment/extension-wire\n摘要\nextension-wire 节点的执行输入与输出摘要。\n输入\nassignment=exec-01 · node=extension-wire · attempt=1\n输出\n工具调用 3 次，2 次成功，1 次重试后成功。\n语义\n原始证据 (Mock raw)\n{\n  \"source\": \"mock://runtime/assignment/extension-wire\",\n  \"calls\": [\n    {\n      \"name\": \"read\",\n      \"ok\": true,\n      \"ms\": 41\n    },\n    {\n      \"name\": \"edit\",\n      \"ok\": false,\n      \"ms\": 118,\n      \"error\": \"patch conflict\"\n    },\n    {\n      \"name\": \"edit\",\n      \"ok\": true,\n      \"ms\": 96\n    }\n  ],\n  \"note\": \"Mock raw：原始工具调用流水，仅主动展开时读取。\"\n}"
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BUTTON",
+      "action": "close-dialog",
+      "text": ""
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 80,
+    "dependencyErrors": []
+  },
+  {
+    "station": 17,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&ver=3&filter=stable&tour=17",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "完成复盘",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n5 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v3，共 9 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n完成复盘\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n0 项\n\n当前没有未收拢活动。\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 6 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-revision",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "修订历史\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-history",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "历史回放\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-instance-verify",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "实例核验\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-revision,n-history,n-instance-verify",
+        "text": "整体复核\n等待依赖 n-revision, n-history, n-instance-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 18,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=agent&instance=agent-exec-01&tour=18",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "执行者 · 实例 01agent-exec-01",
+      "实例与任务范围",
+      "运行时编排重构",
+      "发布校验（已完成）",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\n未知项目\n/\n执行者 · 实例 01\n执行者 · 实例 01\nagent-exec-01\n\n功能角色与运行实例分开；任务范围只来自该实例已绑定的任务。\n\n实例与任务范围\n选择只改变只读 scope\n实例\n执行者 · 实例 01（agent-exec-01）\n执行者 · 实例 02（agent-exec-02）\n规划者 · 实例 01（agent-plan-01）\n任务范围\n全部已绑定任务\n运行时编排重构\n发布校验（已完成）\n角色与运行实例分开；只显示该实例已绑定的任务。\n\n已绑定任务：运行时编排重构、发布校验（已完成）\n\n运行时编排重构\n当前 v3 · live\n打开任务\n目标\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n模板\n长程模板\n当前活动\n5 项\n稳定事实\n4 条\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 6 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n5 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n\n修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision\n\n历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history\n\n实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify\n\n整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review\n\n发布校验（已完成）\n当前 v1 · 已完成\n打开任务\n目标\n对一次发布执行类型检查、单测与冒烟检查，产出一次结果。\n模板\n单次模板\n当前活动\n0 项\n稳定事实\n1 条\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n输入校验\n已完成无前置依赖\n第 2 层\n执行\n已完成依赖 n-input\n第 3 层\n验证\n已完成依赖 n-execute\n第 4 层\n一次结果\n已完成依赖 n-verify\nstable · 已确认事实\nv1 计划下已提交\n1 条\n\n发布校验通过\n\ntypecheck / unit(143) / smoke 全部通过。\n\n成功\nv1\n2026-10-06 15:24\nn-result\n查看证据",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-revision",
+        "state": "waiting",
+        "nodeId": "n-revision",
+        "text": "修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-history",
+        "state": "waiting",
+        "nodeId": "n-history",
+        "text": "历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-instance-verify",
+        "state": "waiting",
+        "nodeId": "n-instance-verify",
+        "text": "实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review"
+      },
+      {
+        "id": "f-rc-1",
+        "state": "success",
+        "nodeId": "n-result",
+        "text": "发布校验通过\n\ntypecheck / unit(143) / smoke 全部通过。\n\n成功\nv1\n2026-10-06 15:24\nn-result\n查看证据"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-revision",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "修订历史\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-history",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "历史回放\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-instance-verify",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "实例核验\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-revision,n-history,n-instance-verify",
+        "text": "整体复核\n等待依赖 n-revision, n-history, n-instance-verify"
+      },
+      {
+        "id": "n-input",
+        "state": "done",
+        "deps": "",
+        "text": "输入校验\n已完成无前置依赖"
+      },
+      {
+        "id": "n-execute",
+        "state": "done",
+        "deps": "n-input",
+        "text": "执行\n已完成依赖 n-input"
+      },
+      {
+        "id": "n-verify",
+        "state": "done",
+        "deps": "n-execute",
+        "text": "验证\n已完成依赖 n-execute"
+      },
+      {
+        "id": "n-result",
+        "state": "done",
+        "deps": "n-verify",
+        "text": "一次结果\n已完成依赖 n-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 83,
+    "dependencyErrors": []
+  },
+  {
+    "station": 19,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=agent&task=task-release-check&instance=agent-exec-01&tour=19",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "执行者 · 实例 01agent-exec-01",
+      "实例与任务范围",
+      "发布校验（已完成）",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nOrbit 调度服务\n/\n发布校验（已完成）\n/\n执行者 · 实例 01\n执行者 · 实例 01\nagent-exec-01\n\n功能角色与运行实例分开；任务范围只来自该实例已绑定的任务。\n\n实例与任务范围\n选择只改变只读 scope\n实例\n执行者 · 实例 01（agent-exec-01）\n执行者 · 实例 02（agent-exec-02）\n规划者 · 实例 01（agent-plan-01）\n任务范围\n全部已绑定任务\n运行时编排重构\n发布校验（已完成）\n角色与运行实例分开；只显示该实例已绑定的任务。\n\n已绑定任务：运行时编排重构、发布校验（已完成）\n\n发布校验（已完成）\n当前 v1 · 已完成\n打开任务\n目标\n对一次发布执行类型检查、单测与冒烟检查，产出一次结果。\n模板\n单次模板\n当前活动\n0 项\n稳定事实\n1 条\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n输入校验\n已完成无前置依赖\n第 2 层\n执行\n已完成依赖 n-input\n第 3 层\n验证\n已完成依赖 n-execute\n第 4 层\n一次结果\n已完成依赖 n-verify\nstable · 已确认事实\nv1 计划下已提交\n1 条\n\n发布校验通过\n\ntypecheck / unit(143) / smoke 全部通过。\n\n成功\nv1\n2026-10-06 15:24\nn-result\n查看证据",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rc-1",
+        "state": "success",
+        "nodeId": "n-result",
+        "text": "发布校验通过\n\ntypecheck / unit(143) / smoke 全部通过。\n\n成功\nv1\n2026-10-06 15:24\nn-result\n查看证据"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-input",
+        "state": "done",
+        "deps": "",
+        "text": "输入校验\n已完成无前置依赖"
+      },
+      {
+        "id": "n-execute",
+        "state": "done",
+        "deps": "n-input",
+        "text": "执行\n已完成依赖 n-input"
+      },
+      {
+        "id": "n-verify",
+        "state": "done",
+        "deps": "n-execute",
+        "text": "验证\n已完成依赖 n-execute"
+      },
+      {
+        "id": "n-result",
+        "state": "done",
+        "deps": "n-verify",
+        "text": "一次结果\n已完成依赖 n-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 20,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=agent&task=task-pipeline-audit&instance=agent-exec-02&tour=20",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "执行者 · 实例 02agent-exec-02",
+      "实例与任务范围",
+      "链路巡检",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n链路巡检\n/\n执行者 · 实例 02\n执行者 · 实例 02\nagent-exec-02\n\n功能角色与运行实例分开；任务范围只来自该实例已绑定的任务。\n\n实例与任务范围\n选择只改变只读 scope\n实例\n执行者 · 实例 01（agent-exec-01）\n执行者 · 实例 02（agent-exec-02）\n规划者 · 实例 01（agent-plan-01）\n任务范围\n全部已绑定任务\n链路巡检\n角色与运行实例分开；只显示该实例已绑定的任务。\n\n已绑定任务：链路巡检\n\n链路巡检\n当前 v3 · live\n打开任务\n目标\n按轮次检查连通性、DNS 与出口一致性，保留每轮历史。\n模板\n巡检模板\n当前活动\n3 项\n稳定事实\n3 条\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n本轮 occurrence\n已完成无前置依赖\n第 2 层\n探针检查\n已完成依赖 n-occurrence\n第 3 层\n发现归类\n已完成依赖 n-probe\nDNS 比对\n失败依赖 n-probe\n第 4 层\n出口比对\n阻塞依赖 n-dns-compare\n第 5 层\n下一轮规划\n阻塞依赖 n-egress-compare\n第 6 层\n本轮收拢\n阻塞依赖 n-round-plan\nstable · 已确认事实\nv3 计划下已提交\n3 条\n\n第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe\n\n第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding\n\nDNS 比对失败\n\nTour 模拟失败：DNS 比对未完成，保留原因与证据。\n\n下一步：检查上游 DNS 数据后由人类决定是否重新发起。\n\n失败\nv3\n2026-10-07 10:02\nn-dns-compare\n查看证据\n\nlive · 当前活动\n未收拢内容不冒充完成\n3 项\n\n出口比对\n\n等待 DNS 比对完成后比对出口地址。\n\n阻塞\nn-egress-compare\n\n下一轮规划\n\n等待比对结果后规划下一轮。\n\n阻塞\nn-round-plan\n\n本轮收拢\n\n等待下一轮规划后收拢本轮。\n\n阻塞\nn-settle",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-pa-1",
+        "state": "success",
+        "nodeId": "n-probe",
+        "text": "第 1 轮连通性正常\n\n探针 6/6 通过。\n\n成功\nv1\n2026-10-05 09:20\nn-probe"
+      },
+      {
+        "id": "f-pa-2",
+        "state": "success",
+        "nodeId": "n-finding",
+        "text": "第 2 轮发现 1 项延迟偏高\n\n延迟 180ms，高于阈值 150ms。\n\n成功\nv1\n2026-10-06 09:25\nn-finding"
+      },
+      {
+        "id": "tour-fact-pipeline-dns-failure",
+        "state": "failure",
+        "nodeId": "n-dns-compare",
+        "text": "DNS 比对失败\n\nTour 模拟失败：DNS 比对未完成，保留原因与证据。\n\n下一步：检查上游 DNS 数据后由人类决定是否重新发起。\n\n失败\nv3\n2026-10-07 10:02\nn-dns-compare\n查看证据"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-egress-compare",
+        "state": "blocked",
+        "nodeId": "n-egress-compare",
+        "text": "出口比对\n\n等待 DNS 比对完成后比对出口地址。\n\n阻塞\nn-egress-compare"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-round-plan",
+        "state": "blocked",
+        "nodeId": "n-round-plan",
+        "text": "下一轮规划\n\n等待比对结果后规划下一轮。\n\n阻塞\nn-round-plan"
+      },
+      {
+        "id": "live:act:task-pipeline-audit:n-settle",
+        "state": "blocked",
+        "nodeId": "n-settle",
+        "text": "本轮收拢\n\n等待下一轮规划后收拢本轮。\n\n阻塞\nn-settle"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-occurrence",
+        "state": "done",
+        "deps": "",
+        "text": "本轮 occurrence\n已完成无前置依赖"
+      },
+      {
+        "id": "n-probe",
+        "state": "done",
+        "deps": "n-occurrence",
+        "text": "探针检查\n已完成依赖 n-occurrence"
+      },
+      {
+        "id": "n-finding",
+        "state": "done",
+        "deps": "n-probe",
+        "text": "发现归类\n已完成依赖 n-probe"
+      },
+      {
+        "id": "n-dns-compare",
+        "state": "failed",
+        "deps": "n-probe",
+        "text": "DNS 比对\n失败依赖 n-probe"
+      },
+      {
+        "id": "n-egress-compare",
+        "state": "blocked",
+        "deps": "n-dns-compare",
+        "text": "出口比对\n阻塞依赖 n-dns-compare"
+      },
+      {
+        "id": "n-round-plan",
+        "state": "blocked",
+        "deps": "n-egress-compare",
+        "text": "下一轮规划\n阻塞依赖 n-egress-compare"
+      },
+      {
+        "id": "n-settle",
+        "state": "blocked",
+        "deps": "n-round-plan",
+        "text": "本轮收拢\n阻塞依赖 n-round-plan"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 21,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-orbit&task=task-release-check&filter=stable&tour=21",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "发布校验（已完成）已完成",
+      "任务概览",
+      "模板阶段与终点",
+      "完成复盘",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nOrbit 调度服务\n/\n发布校验（已完成）\n发布校验（已完成）\n已完成\n\n对一次发布执行类型检查、单测与冒烟检查，产出一次结果。\n\n任务概览\n单次模板\n当前执行\n完成复盘\n项目\nOrbit 调度服务\n模板\n单次模板\n触发方式\n立即或预约执行一次\n当前版本\nv1\n查看版本\nv1\n任务状态\n已完成\n稳定事实\n1 条\n进行中活动\n0 项\n完成任务时间\n2026-10-06 15:24\n模板阶段与终点\n单次模板\n单次模板\n必要阶段：明确输入 → 执行 → 验证 → 一次结果与终态\n触发方式（独立选项）：立即或预约执行一次\n终点：一次结果与终态；完成后进入复盘\n当前版本 v1，共 4 个节点\n\n一次结果与终态\n\n一次结果\n3 项检查全部通过，发布完成。\n2026-10-06 15:24\n完成复盘\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n1 条\n\n发布校验通过\n\ntypecheck / unit(143) / smoke 全部通过。\n\n成功\nv1\n2026-10-06 15:24\nn-result\n查看证据\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n输入校验\n已完成无前置依赖\n第 2 层\n执行\n已完成依赖 n-input\n第 3 层\n验证\n已完成依赖 n-execute\n第 4 层\n一次结果\n已完成依赖 n-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n单次发布校验流程。\n2026-10-06 15:00\n新增 4 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rc-1",
+        "state": "success",
+        "nodeId": "n-result",
+        "text": "发布校验通过\n\ntypecheck / unit(143) / smoke 全部通过。\n\n成功\nv1\n2026-10-06 15:24\nn-result\n查看证据"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-input",
+        "state": "done",
+        "deps": "",
+        "text": "输入校验\n已完成无前置依赖"
+      },
+      {
+        "id": "n-execute",
+        "state": "done",
+        "deps": "n-input",
+        "text": "执行\n已完成依赖 n-input"
+      },
+      {
+        "id": "n-verify",
+        "state": "done",
+        "deps": "n-execute",
+        "text": "验证\n已完成依赖 n-execute"
+      },
+      {
+        "id": "n-result",
+        "state": "done",
+        "deps": "n-verify",
+        "text": "一次结果\n已完成依赖 n-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 22,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-waiting&tour=22",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "文档收口（等待人类）等待",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n文档收口（等待人类）\n等待人类处理\n收口口径需要人类确认，任务暂停在等待状态。\n文档收口（等待人类）\n等待\n\n等待人类确认收口口径后再继续。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv1\n查看版本\nv1\n任务状态\n等待\n稳定事实\n1 条\n进行中活动\n1 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 2 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n该任务尚未声明里程碑。\n\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n1 条\n\n资料整理已确认\n\n三份专项审计资料整理完成。\n\n成功\nv1\n2026-10-07 08:30\nn-prep\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n等待人类确认\n\n收口口径需要人类确认，任务暂停在等待状态。\n\n等待\nn-confirm\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n资料整理\n已完成无前置依赖\n第 2 层\n等待人类确认\n等待依赖 n-prep\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始编排。\n2026-10-07 08:00\n新增 2 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-w-1",
+        "state": "success",
+        "nodeId": "n-prep",
+        "text": "资料整理已确认\n\n三份专项审计资料整理完成。\n\n成功\nv1\n2026-10-07 08:30\nn-prep"
+      },
+      {
+        "id": "live:act:task-waiting:n-confirm",
+        "state": "waiting",
+        "nodeId": "n-confirm",
+        "text": "等待人类确认\n\n收口口径需要人类确认，任务暂停在等待状态。\n\n等待\nn-confirm"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-prep",
+        "state": "done",
+        "deps": "",
+        "text": "资料整理\n已完成无前置依赖"
+      },
+      {
+        "id": "n-confirm",
+        "state": "waiting",
+        "deps": "n-prep",
+        "text": "等待人类确认\n等待依赖 n-prep"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 23,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-orbit&task=task-failed&tour=23",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "迁移演练（失败）失败",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nOrbit 调度服务\n/\n迁移演练（失败）\n迁移演练（失败）\n失败\n\n演练迁移流程；本次在数据校验节点失败。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nOrbit 调度服务\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv1\n查看版本\nv1\n任务状态\n失败\n稳定事实\n2 条\n进行中活动\n0 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 3 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n该任务尚未声明里程碑。\n\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n2 条\n\n环境准备已确认\n\n目标环境与权限校验通过。\n\n成功\nv1\n2026-10-07 07:20\nn-prep\n\n数据校验失败\n\njournal.segment.missing：上游分段缺失，不可重试。\n\n下一步：补齐上游 journal 分段后，由人类决定是否重新发起本次迁移。\n\n失败\nv1\n2026-10-07 07:52\nn-migrate\n查看证据\n\nlive · 当前活动\n未收拢内容不冒充完成\n0 项\n\n当前没有未收拢活动。\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n环境准备\n已完成无前置依赖\n第 2 层\n数据校验\n失败依赖 n-prep\n第 3 层\n结果验证\n阻塞依赖 n-migrate\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始编排。\n2026-10-07 07:00\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-f-1",
+        "state": "success",
+        "nodeId": "n-prep",
+        "text": "环境准备已确认\n\n目标环境与权限校验通过。\n\n成功\nv1\n2026-10-07 07:20\nn-prep"
+      },
+      {
+        "id": "f-f-2",
+        "state": "failure",
+        "nodeId": "n-migrate",
+        "text": "数据校验失败\n\njournal.segment.missing：上游分段缺失，不可重试。\n\n下一步：补齐上游 journal 分段后，由人类决定是否重新发起本次迁移。\n\n失败\nv1\n2026-10-07 07:52\nn-migrate\n查看证据"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-prep",
+        "state": "done",
+        "deps": "",
+        "text": "环境准备\n已完成无前置依赖"
+      },
+      {
+        "id": "n-migrate",
+        "state": "failed",
+        "deps": "n-prep",
+        "text": "数据校验\n失败依赖 n-prep"
+      },
+      {
+        "id": "n-verify",
+        "state": "blocked",
+        "deps": "n-migrate",
+        "text": "结果验证\n阻塞依赖 n-migrate"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 78,
+    "dependencyErrors": []
+  },
+  {
+    "station": 24,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-unknown&tour=24",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "Provider 流式推理（未映射）未知",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\nProvider 流式推理（未映射）\n存在未映射语义\n任务包含未注册事件类型，保持 unknown，不显示成功。\nProvider 流式推理（未映射）\n未知\n\n接收 Provider 流式事件；当前存在未映射事件类型。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv1\n查看版本\nv1\n任务状态\n未知\n稳定事实\n1 条\n进行中活动\n1 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v1，共 2 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n该任务尚未声明里程碑。\n\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv1 计划下已提交\n1 条\n\n未映射事件已记录\n\n类型 provider.stream.delta.v3 未注册，保持 unknown。\n\n未知\nv1\n2026-10-07 09:58\nn-classify\nmock://context-events/unmapped#provider.stream.delta.v3\n查看证据\n\nlive · 当前活动\n未收拢内容不冒充完成\n1 项\n\n语义归类\n\n事件类型 provider.stream.delta.v3 未在语义模块注册。\n\n未知\nn-classify\n证据\n\n任务编排\n当前视图版本 v1\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v1\n第 1 层\n事件接入\n已完成无前置依赖\n第 2 层\n语义归类\n未知依赖 n-ingest\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n当前执行版本\n初始编排。\n2026-10-07 09:40\n新增 2 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "1",
+        "view": "1"
+      },
+      {
+        "current": "1",
+        "view": "1"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-u-1",
+        "state": "unknown",
+        "nodeId": "n-classify",
+        "text": "未映射事件已记录\n\n类型 provider.stream.delta.v3 未注册，保持 unknown。\n\n未知\nv1\n2026-10-07 09:58\nn-classify\nmock://context-events/unmapped#provider.stream.delta.v3\n查看证据"
+      },
+      {
+        "id": "live:act:task-unknown:n-classify",
+        "state": "unknown",
+        "nodeId": "n-classify",
+        "text": "语义归类\n\n事件类型 provider.stream.delta.v3 未在语义模块注册。\n\n未知\nn-classify\n证据"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-ingest",
+        "state": "done",
+        "deps": "",
+        "text": "事件接入\n已完成无前置依赖"
+      },
+      {
+        "id": "n-classify",
+        "state": "unknown",
+        "deps": "n-ingest",
+        "text": "语义归类\n未知依赖 n-ingest"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 82,
+    "dependencyErrors": []
+  },
+  {
+    "station": 25,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&tour=25",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "运行时编排重构live",
+      "任务概览",
+      "模板阶段与终点",
+      "当前执行",
+      "任务编排",
+      "修订记录",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nHumanAgent 平台\n/\n运行时编排重构\n连接已断开 · 显示上次内容\n最后同步：2026-10-07 10:02。断开不改变任务终态。\n运行时编排重构\nlive\n\n把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。\n\n任务概览\n长程模板\n当前执行\n完成复盘\n项目\nHumanAgent 平台\n模板\n长程模板\n触发方式\n一次启动后持续运行\n当前版本\nv3\n查看版本\nv3\n任务状态\nlive\n稳定事实\n4 条\n进行中活动\n5 项\n模板阶段与终点\n长程模板\n长程模板\n必要阶段：里程碑 → 分解 → 并行 / 串行执行 → 验证 → 阶段收拢\n触发方式（独立选项）：一次启动后持续运行\n终点：阶段收拢；同一任务按新事实重编排\n当前版本 v3，共 9 个节点\n\n里程碑与阶段（长程模板按新事实重编排，已确认事实保留）\n\n里程碑一 · 契约与身份\n已完成\n投影、模板、身份三项完成。\n里程碑二 · 模板扩展接线\n进行中\n扩展核心完成，接线进行中。\n里程碑三 · 修订与核验\n等待\n等待接线完成后并行展开。\n当前执行\nstable 已确认内容与 live 当前活动分开\nstable · 已确认事实\nv3 计划下已提交\n4 条\n\n投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据\n\n模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template\n\n身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity\n\n模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core\n\nlive · 当前活动\n未收拢内容不冒充完成\n5 项\n\n模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败\n\n修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision\n\n历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history\n\n实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify\n\n整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review\n\n任务编排\n当前视图版本 v3\n应用下一次修订\n节点与依赖（点击节点查看输入、输出和证据）\n当前执行版本 v3\n第 1 层\n投影契约\n已完成无前置依赖\n第 2 层\n模板落地\n已完成依赖 n-projection\n身份绑定\n已完成依赖 n-projection\n第 3 层\n模板扩展核心\n已完成依赖 n-identity\n第 4 层\n模板扩展接线\n进行中依赖 n-template-extension-core\n第 5 层\n修订历史\n等待依赖 n-template-extension-wire\n历史回放\n等待依赖 n-template-extension-wire\n实例核验\n等待依赖 n-template-extension-wire\n第 6 层\n整体复核\n等待依赖 n-revision, n-history, n-instance-verify\n修订记录\n已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本\nv1\n历史版本\n初始编排：先固定投影契约，再落地模板与身份。\n2026-10-06 10:05\n新增 4 / 删除 0 节点\n查看此版本\nv2\n历史版本\n补充模板能力与后续验收需求，extension-wire 进入执行。\n2026-10-07 08:30\n新增 2 / 删除 0 节点\n查看此版本\nv3\n当前执行版本\n增加修订历史与实例核验后续分支，复核等待分支汇合。\n2026-10-07 09:35\n新增 3 / 删除 0 节点\n查看当前版本",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [
+      {
+        "current": "3",
+        "view": "3"
+      },
+      {
+        "current": "3",
+        "view": "3"
+      }
+    ],
+    "facts": [
+      {
+        "id": "f-rt-1",
+        "state": "success",
+        "nodeId": "n-projection",
+        "text": "投影契约已确认\n\ncontracts 投影类型与负向测试通过。\n\n成功\nv1\n2026-10-06 10:40\nn-projection\n查看证据"
+      },
+      {
+        "id": "f-rt-2",
+        "state": "success",
+        "nodeId": "n-template",
+        "text": "模板落地已确认\n\n巡检/长程/单次三类模板绑定完成。\n\n成功\nv1\n2026-10-06 14:20\nn-template"
+      },
+      {
+        "id": "f-rt-3",
+        "state": "success",
+        "nodeId": "n-identity",
+        "text": "身份绑定已确认\n\n执行实例与角色身份绑定完成。\n\n成功\nv1\n2026-10-06 16:05\nn-identity"
+      },
+      {
+        "id": "f-rt-4",
+        "state": "success",
+        "nodeId": "n-template-extension-core",
+        "text": "模板扩展核心已确认\n\n扩展核心通过契约测试并提交。\n\n成功\nv2\n2026-10-07 09:05\nn-template-extension-core"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-template-extension-wire",
+        "state": "active",
+        "nodeId": "n-template-extension-wire",
+        "text": "模板扩展接线\n\n正在把扩展核心接入运行时装配。\n\n进行中\nn-template-extension-wire\n证据\n推进为成功\n标记失败"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-revision",
+        "state": "waiting",
+        "nodeId": "n-revision",
+        "text": "修订历史\n\n等待模板扩展接线完成后开始记录修订历史。\n\n等待\nn-revision"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-history",
+        "state": "waiting",
+        "nodeId": "n-history",
+        "text": "历史回放\n\n等待模板扩展接线完成后开始历史回放。\n\n等待\nn-history"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-instance-verify",
+        "state": "waiting",
+        "nodeId": "n-instance-verify",
+        "text": "实例核验\n\n等待模板扩展接线完成后开始实例核验。\n\n等待\nn-instance-verify"
+      },
+      {
+        "id": "live:act:task-runtime-refactor:n-review",
+        "state": "waiting",
+        "nodeId": "n-review",
+        "text": "整体复核\n\n等待修订历史、历史回放与实例核验三条分支汇合。\n\n等待\nn-review"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "n-projection",
+        "state": "done",
+        "deps": "",
+        "text": "投影契约\n已完成无前置依赖"
+      },
+      {
+        "id": "n-template",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "模板落地\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-identity",
+        "state": "done",
+        "deps": "n-projection",
+        "text": "身份绑定\n已完成依赖 n-projection"
+      },
+      {
+        "id": "n-template-extension-core",
+        "state": "done",
+        "deps": "n-identity",
+        "text": "模板扩展核心\n已完成依赖 n-identity"
+      },
+      {
+        "id": "n-template-extension-wire",
+        "state": "active",
+        "deps": "n-template-extension-core",
+        "text": "模板扩展接线\n进行中依赖 n-template-extension-core"
+      },
+      {
+        "id": "n-revision",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "修订历史\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-history",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "历史回放\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-instance-verify",
+        "state": "waiting",
+        "deps": "n-template-extension-wire",
+        "text": "实例核验\n等待依赖 n-template-extension-wire"
+      },
+      {
+        "id": "n-review",
+        "state": "waiting",
+        "deps": "n-revision,n-history,n-instance-verify",
+        "text": "整体复核\n等待依赖 n-revision, n-history, n-instance-verify"
+      }
+    ],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 82,
+    "dependencyErrors": []
+  },
+  {
+    "station": 26,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=project&project=proj-signal&tour=26",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "Signal 观测网关",
+      "项目状态",
+      "任务列表",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n/\nSignal 观测网关\nSignal 观测网关\n\n新建项目，尚未创建任务。 · 归属 未分配\n\n项目状态\n同一语义事实与真实 scope\n全部\nlive\n已收拢\n0\n任务总数\n0\nlive\n0\n等待\n0\n失败\n0\n已完成\n任务列表\n筛选：all\n\n该项目还没有任务。",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [],
+    "facts": [],
+    "nodes": [],
+    "taskIds": [],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 75,
+    "dependencyErrors": []
+  },
+  {
+    "station": 27,
+    "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+    "hash": "#scope=system&tour=27",
+    "title": "HumanAgent · 静态语义观测 Tour",
+    "heading": [
+      "系统概要",
+      "待人处理",
+      "项目列表",
+      "静态语义观测导览",
+      "接线执行证据"
+    ],
+    "text": "系统概要\n系统概要\n全部项目的只读语义投影\n打开一个 live 任务\n打开一个完成复盘\n3\n项目\n8\n任务总数\n4\nlive\n1\n等待\n1\n失败\n1\n已完成\n1\n未映射\n待人处理\n需要关注的语义事实\n链路巡检\nHumanAgent 平台 · DNS 比对失败\nlive\n查看\n文档收口（等待人类）\nHumanAgent 平台 · 资料整理已确认\n等待\n查看\n迁移演练（失败）\nOrbit 调度服务 · 数据校验失败\n失败\n查看\nProvider 流式推理（未映射）\nHumanAgent 平台 · 未映射事件已记录\n未知\n查看\n项目列表\n点击进入项目视角\nHumanAgent 平台\n长程器官式 Harness 的实现与观测。 · 归属 core 团队\nlive\n任务 4\nOrbit 调度服务\n调度与恢复能力的实现、巡检与演练。 · 归属 runtime 团队\nlive\n任务 4\nSignal 观测网关\n新建项目，尚未创建任务。 · 归属 未分配\n空\n任务 0",
+    "invalidDomText": false,
+    "width": 1440,
+    "bodyWidth": 1440,
+    "documentWidth": 1440,
+    "revisions": [],
+    "facts": [],
+    "nodes": [],
+    "taskIds": [
+      "task-pipeline-audit",
+      "task-waiting",
+      "task-failed",
+      "task-unknown"
+    ],
+    "dialog": [
+      {
+        "open": false,
+        "text": ""
+      }
+    ],
+    "resources": [],
+    "focused": {
+      "tag": "BODY"
+    },
+    "svgNamespaceValid": true,
+    "svgElementCount": 77,
+    "dependencyErrors": []
+  }
+]

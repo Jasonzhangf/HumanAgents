@@ -17,11 +17,15 @@
       "ownerPath": "packages/app/src/ui-runtime/service.ts",
       "ownerRel": "packages/app/src/ui-runtime/service.ts"
     },
-    "correlate_tool_lifecycle": {
-      "ownerPath": "packages/app/src/ui-runtime/service.ts",
-      "ownerRel": "packages/app/src/ui-runtime/service.ts"
+    "normalize_context_events": {
+      "ownerPath": "packages/context-events/src/normalize.ts",
+      "ownerRel": "packages/context-events/src/normalize.ts"
     },
-    "project_conversation_and_trace": {
+    "pair_context_events": {
+      "ownerPath": "packages/context-events/src/pairing.ts",
+      "ownerRel": "packages/context-events/src/pairing.ts"
+    },
+    "project_semantic_views": {
       "ownerPath": "packages/ui/projection/runtime.ts",
       "ownerRel": "packages/ui/projection/runtime.ts"
     },

@@ -1,16 +1,19 @@
 {
   "id": "humanagent-observation-read",
-  "version": "2",
+  "version": "3",
   "meta": {
-    "title": "浏览器只读观测从请求到真实轨迹、状态与合法动作",
-    "baseline": "0020ab4f4442ea59bf4b9fc02416a8a77c6c68ed",
+    "title": "按授权范围读取事实，经统一语义归类与配对渲染多视角观测",
+    "baseline": "9d1f39c53f09e31a4636fa75f97042c18e8bb114",
     "designStatus": "candidate",
     "capabilityStatus": "pending",
+    "prototypeBoundary": "docs/ui/semantic-observation-tour.html is a standalone semantic Mock design; it does not consume or prove this production chain",
+    "browserDesignContract": "Shared semantic controls compose all views; declared events connect modules; immutable payload references are shared along data arcs; unknown/stale/empty and evidence remain explicit",
+    "payloadReferenceStatus": "candidate browser shared-reference contract; native Arc type and production wiring remain pending",
     "terminalContract": {
       "success": "rendered_view",
-      "failure": "explicit stale/disconnected projection; no fake live state",
+      "failure": "explicit stale/disconnected/unmapped projection; no raw inference or fake live state",
       "cancel": "last durable projection remains readable",
-      "blocked": "scope or data unavailable is explicit",
+      "blocked": "scope, semantic coverage, project or agent identity unavailable is explicit",
       "cleanup": "read-only projection closes with no runtime mutation"
     }
   },
@@ -67,14 +70,14 @@
       "iterator": "Whole"
     },
     {
-      "id": "correlate_tool_lifecycle",
-      "operator": "humanagent-observation-tool-lifecycle",
+      "id": "normalize_context_events",
+      "operator": "humanagent-observation-context-normalize",
       "operator_version": "1",
       "inputs": [
         "event_history"
       ],
       "output": {
-        "id": "tool_lifecycle",
+        "id": "canonical_groups",
         "schema": "Object"
       },
       "input_selector": { "include": [], "exclude": [], "predicate": null },
@@ -82,11 +85,26 @@
       "iterator": "Whole"
     },
     {
-      "id": "project_conversation_and_trace",
-      "operator": "humanagent-observation-conversation-trace",
+      "id": "pair_context_events",
+      "operator": "humanagent-observation-context-pairing",
       "operator_version": "1",
       "inputs": [
-        "tool_lifecycle"
+        "canonical_groups"
+      ],
+      "output": {
+        "id": "paired_semantics",
+        "schema": "Object"
+      },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_semantic_views",
+      "operator": "humanagent-observation-semantic-views",
+      "operator_version": "1",
+      "inputs": [
+        "paired_semantics"
       ],
       "output": {
         "id": "read_model",
@@ -140,16 +158,21 @@
     },
     {
       "from": "load_event_history",
-      "to": "correlate_tool_lifecycle",
+      "to": "normalize_context_events",
       "arc_id": "event_history"
     },
     {
-      "from": "correlate_tool_lifecycle",
-      "to": "project_conversation_and_trace",
-      "arc_id": "tool_lifecycle"
+      "from": "normalize_context_events",
+      "to": "pair_context_events",
+      "arc_id": "canonical_groups"
     },
     {
-      "from": "project_conversation_and_trace",
+      "from": "pair_context_events",
+      "to": "project_semantic_views",
+      "arc_id": "paired_semantics"
+    },
+    {
+      "from": "project_semantic_views",
       "to": "project_status_and_actions",
       "arc_id": "read_model"
     },

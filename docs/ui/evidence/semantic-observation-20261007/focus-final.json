@@ -1,0 +1,16 @@
+{
+  "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+  "before": {
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor&evidence=ev-projection",
+    "open": true
+  },
+  "after": {
+    "hash": "#scope=task&project=proj-humanagent&task=task-runtime-refactor",
+    "open": false,
+    "focus": {
+      "a": "open-evidence",
+      "e": "ev-projection",
+      "text": "查看证据"
+    }
+  }
+}

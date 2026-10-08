@@ -2,11 +2,12 @@
   "graph": "humanagent-observation-read",
   "labels": {
     "http_api": "处理浏览器只读请求",
-    "load_task_truth": "读取任务真实状态",
-    "load_event_history": "读取完整事件历史",
-    "correlate_tool_lifecycle": "按调用身份关联工具结果",
-    "project_conversation_and_trace": "投影人类对话与完整轨迹",
+    "load_task_truth": "读取授权范围内的任务真实状态",
+    "load_event_history": "读取执行事实及真实关联身份",
+    "normalize_context_events": "统一归类发生事件并标出语义缺口",
+    "pair_context_events": "在同一执行范围内配对活动与结果",
+    "project_semantic_views": "投影已发生事实 当前活动与多视角概要",
     "project_status_and_actions": "投影状态新鲜度与合法动作",
-    "browser_view": "渲染浏览器只读视图"
+    "browser_view": "共享语义控件按事件与模块数据边渲染观测 并按需展开证据"
   }
 }

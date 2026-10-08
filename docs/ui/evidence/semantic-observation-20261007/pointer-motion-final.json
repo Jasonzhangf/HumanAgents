@@ -1,0 +1,17 @@
+{
+  "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+  "target": {
+    "x": 635.6875,
+    "y": 426.40625,
+    "hit": true,
+    "width": 1440,
+    "dpr": 2
+  },
+  "opened": true,
+  "reduced": {
+    "matches": true,
+    "animated": [],
+    "network": []
+  },
+  "selectorClick": "Earlier SDK interception remains unverified; native coordinates used after DOM hit validation."
+}

@@ -1,0 +1,5167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="HumanAgent 静态语义观测交互设计 Tour" />
+    <title>HumanAgent · 静态语义观测 Tour</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17201d;
+        --muted: #61706a;
+        --muted-strong: #485650;
+        --line: #d9e0dd;
+        --line-strong: #bcc8c3;
+        --surface: #ffffff;
+        --surface-soft: #f3f6f5;
+        --surface-raised: #f8faf9;
+        --accent: #0b7567;
+        --accent-strong: #075b50;
+        --accent-soft: #dff3ee;
+        --accent-ink: #06483f;
+        --warning: #8a4b00;
+        --warning-soft: #fff0d6;
+        --danger: #a52b27;
+        --danger-soft: #fde9e7;
+        --success: #28623f;
+        --success-soft: #e1f2e7;
+        --info: #245a86;
+        --info-soft: #e9f2fb;
+        --unknown: #67508a;
+        --unknown-soft: #f0ecf8;
+        --focus: #005fcc;
+        --shadow-soft: 0 8px 24px rgb(23 32 29 / 8%);
+        --shadow-float: 0 14px 36px rgb(23 32 29 / 16%);
+        --radius: 8px;
+        --radius-small: 6px;
+        --sidebar-width: 252px;
+        --tour-width: 364px;
+        --header-height: 60px;
+        --dock-height: 46px;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        font-synthesis: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        max-width: 100%;
+        overflow-x: hidden;
+        background: var(--surface-soft);
+      }
+
+      body {
+        margin: 0;
+        max-width: 100%;
+        min-height: 100vh;
+        padding-bottom: var(--dock-height);
+        overflow-x: hidden;
+        color: var(--ink);
+        background: var(--surface-soft);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4 {
+        margin: 0;
+        line-height: 1.3;
+        font-weight: 650;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      ul,
+      ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      a {
+        color: var(--accent-ink);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: 12px;
+        top: -48px;
+        z-index: 200;
+        padding: 8px 14px;
+        border-radius: var(--radius-small);
+        background: var(--accent);
+        color: #fff;
+        text-decoration: none;
+        transition: top 120ms ease;
+      }
+
+      .skip-link:focus {
+        top: 12px;
+      }
+
+      .sprite {
+        position: absolute;
+        width: 0;
+        height: 0;
+        overflow: hidden;
+      }
+
+      .icon {
+        width: 16px;
+        height: 16px;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .icon--sm {
+        width: 13px;
+        height: 13px;
+      }
+
+      /* ---------------------------------------------------------------- header */
+      .app-header {
+        position: sticky;
+        top: 0;
+        z-index: 60;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        height: var(--header-height);
+        padding: 0 18px;
+        border-bottom: 1px solid var(--line);
+        background: rgb(255 255 255 / 92%);
+        backdrop-filter: blur(8px);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 32px;
+        height: 32px;
+        flex: none;
+        border-radius: 8px;
+        background: linear-gradient(140deg, var(--accent) 0%, var(--accent-strong) 100%);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+      }
+
+      .brand-copy {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+
+      .brand-copy strong {
+        font-size: 14px;
+      }
+
+      .brand-copy small {
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      .header-context {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        margin-left: auto;
+      }
+
+      .header-scope {
+        overflow: hidden;
+        max-width: 34vw;
+        padding: 4px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-raised);
+        color: var(--muted-strong);
+        font-size: 12px;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+
+      .mock-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border: 1px solid #e6cfa6;
+        border-radius: 999px;
+        background: var(--warning-soft);
+        color: var(--warning);
+        font-size: 11.5px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .mock-badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--warning);
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* ---------------------------------------------------------------- buttons */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 7px 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-small);
+        background: var(--surface);
+        color: var(--ink);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease;
+      }
+
+      .btn:hover {
+        background: var(--surface-raised);
+        border-color: var(--muted);
+      }
+
+      .btn[disabled] {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
+      .btn--primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .btn--primary:hover {
+        background: var(--accent-strong);
+        border-color: var(--accent-strong);
+      }
+
+      .btn--small {
+        padding: 5px 9px;
+        font-size: 12px;
+      }
+
+      .btn--ghost {
+        border-color: transparent;
+        background: transparent;
+      }
+
+      .btn--ghost:hover {
+        background: var(--surface-soft);
+        border-color: var(--line);
+      }
+
+      .icon-btn {
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: var(--radius-small);
+        background: transparent;
+        color: var(--muted-strong);
+        cursor: pointer;
+      }
+
+      .icon-btn:hover {
+        background: var(--surface-soft);
+        border-color: var(--line);
+        color: var(--ink);
+      }
+
+      /* ---------------------------------------------------------------- shell */
+      .app-shell {
+        display: grid;
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        align-items: start;
+        transition: padding-right 160ms ease;
+      }
+
+      body.tour-open .app-shell {
+        padding-right: var(--tour-width);
+      }
+
+      .side-nav {
+        position: sticky;
+        top: var(--header-height);
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        max-height: calc(100vh - var(--header-height) - var(--dock-height));
+        padding: 18px 14px 24px;
+        overflow-y: auto;
+        border-right: 1px solid var(--line);
+        background: var(--surface);
+      }
+
+      .side-label {
+        margin-bottom: 8px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .nav-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        padding: 7px 9px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-small);
+        background: transparent;
+        color: var(--muted-strong);
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .nav-item:hover {
+        background: var(--surface-soft);
+      }
+
+      .nav-item[aria-current="true"] {
+        border-color: var(--accent-soft);
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-weight: 600;
+      }
+
+      .nav-item .nav-meta {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .read-only-note {
+        padding: 10px 11px;
+        border: 1px dashed var(--line-strong);
+        border-radius: var(--radius-small);
+        background: var(--surface-raised);
+        color: var(--muted);
+        font-size: 11.5px;
+        line-height: 1.5;
+      }
+
+      .main-content {
+        min-width: 0;
+        padding: 18px 20px 40px;
+      }
+
+      .content-inner {
+        max-width: 1120px;
+        margin: 0 auto;
+      }
+
+      /* ---------------------------------------------------------------- crumbs */
+      .breadcrumbs {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        margin-bottom: 12px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      .crumb {
+        padding: 3px 7px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-small);
+        background: transparent;
+        color: var(--muted-strong);
+        font: inherit;
+        font-size: 12.5px;
+        cursor: pointer;
+      }
+
+      .crumb:hover {
+        background: var(--surface-soft);
+        border-color: var(--line);
+      }
+
+      .crumb[aria-current="page"] {
+        color: var(--ink);
+        font-weight: 600;
+        cursor: default;
+      }
+
+      .crumb-sep {
+        color: var(--line-strong);
+      }
+
+      /* ---------------------------------------------------------------- notice */
+      .notice {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        margin-bottom: 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-left-width: 3px;
+        border-radius: var(--radius-small);
+        background: var(--surface);
+        font-size: 12.5px;
+      }
+
+      .notice strong {
+        font-weight: 650;
+      }
+
+      .notice--info {
+        border-left-color: var(--info);
+        background: var(--info-soft);
+        color: var(--info);
+      }
+
+      .notice--stale {
+        border-left-color: var(--warning);
+        background: var(--warning-soft);
+        color: var(--warning);
+      }
+
+      .notice--error {
+        border-left-color: var(--danger);
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+
+      .notice--unknown {
+        border-left-color: var(--unknown);
+        background: var(--unknown-soft);
+        color: var(--unknown);
+      }
+
+      .notice--empty {
+        border-left-color: var(--line-strong);
+        background: var(--surface-raised);
+        color: var(--muted-strong);
+      }
+
+      /* ---------------------------------------------------------------- cards */
+      .card {
+        margin-bottom: 16px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        box-shadow: var(--shadow-soft);
+      }
+
+      .card-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .card-head h2,
+      .card-head h3 {
+        font-size: 14.5px;
+      }
+
+      .card-sub {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .card-head-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+      }
+
+      .card-body {
+        padding: 14px;
+      }
+
+      .card-body > * + * {
+        margin-top: 12px;
+      }
+
+      .page-title {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 4px;
+        font-size: 19px;
+      }
+
+      .page-sub {
+        margin-bottom: 16px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .stack--tight {
+        gap: 7px;
+      }
+
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .spacer {
+        margin-left: auto;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .small {
+        font-size: 12px;
+      }
+
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+
+      /* ---------------------------------------------------------------- chips */
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-raised);
+        color: var(--muted-strong);
+        font-size: 11.5px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .chip--plain {
+        background: transparent;
+        font-weight: 500;
+      }
+
+      .chip--done,
+      .chip--success {
+        border-color: #b9dcc6;
+        background: var(--success-soft);
+        color: var(--success);
+      }
+
+      .chip--active,
+      .chip--live,
+      .chip--info {
+        border-color: #bcd6ee;
+        background: var(--info-soft);
+        color: var(--info);
+      }
+
+      .chip--waiting {
+        border-color: #ecd3a6;
+        background: var(--warning-soft);
+        color: var(--warning);
+      }
+
+      .chip--failed,
+      .chip--failure {
+        border-color: #eec3c0;
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+
+      .chip--unknown {
+        border-color: #d6cbeb;
+        background: var(--unknown-soft);
+        color: var(--unknown);
+      }
+
+      .chip--blocked {
+        border-color: var(--line-strong);
+        background: var(--surface-soft);
+        color: var(--muted-strong);
+      }
+
+      .chip--completed {
+        border-color: #b9dcc6;
+        background: var(--success-soft);
+        color: var(--success);
+      }
+
+      .chip--stale {
+        border-color: #ecd3a6;
+        background: var(--warning-soft);
+        color: var(--warning);
+      }
+
+      .chip--mock {
+        border-color: #e6cfa6;
+        background: var(--warning-soft);
+        color: var(--warning);
+      }
+
+      /* ---------------------------------------------------------------- stats */
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+        gap: 10px;
+      }
+
+      .stat {
+        padding: 11px 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: var(--surface-raised);
+      }
+
+      .stat-value {
+        font-size: 21px;
+        font-weight: 680;
+        line-height: 1.15;
+      }
+
+      .stat-label {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      .stat--attention .stat-value {
+        color: var(--warning);
+      }
+
+      .stat--failed .stat-value {
+        color: var(--danger);
+      }
+
+      /* ---------------------------------------------------------------- lists */
+      .list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .list-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: var(--surface);
+        text-align: left;
+      }
+
+      .list-row--button {
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .list-row--button:hover {
+        border-color: var(--accent);
+        background: var(--surface-raised);
+      }
+
+      .list-row-main {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+        flex: 1 1 220px;
+      }
+
+      .list-row-title {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      .list-row-meta {
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .list-row-tags {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .empty-box {
+        padding: 26px 16px;
+        border: 1px dashed var(--line-strong);
+        border-radius: var(--radius-small);
+        background: var(--surface-raised);
+        color: var(--muted-strong);
+        text-align: center;
+      }
+
+      /* ---------------------------------------------------------------- zones */
+      .zone-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 12px;
+      }
+
+      .zone {
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .zone-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--line);
+        font-size: 12.5px;
+        font-weight: 650;
+      }
+
+      .zone--stable .zone-head {
+        background: var(--success-soft);
+        color: var(--success);
+      }
+
+      .zone--live .zone-head {
+        background: var(--info-soft);
+        color: var(--info);
+      }
+
+      .zone-body {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 11px 12px;
+      }
+
+      /* ---------------------------------------------------------------- facts */
+      .fact {
+        display: flex;
+        gap: 10px;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-left-width: 3px;
+        border-radius: var(--radius-small);
+        background: var(--surface);
+      }
+
+      .fact--success {
+        border-left-color: var(--success);
+      }
+
+      .fact--failure {
+        border-left-color: var(--danger);
+      }
+
+      .fact--info {
+        border-left-color: var(--info);
+      }
+
+      .fact--unknown {
+        border-left-color: var(--unknown);
+      }
+
+      .fact-main {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .fact-title {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      .fact-detail {
+        color: var(--muted-strong);
+        font-size: 12.5px;
+        overflow-wrap: anywhere;
+      }
+
+      .fact-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      /* ---------------------------------------------------------------- graph */
+      .graph {
+        position: relative;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: linear-gradient(180deg, var(--surface-raised), var(--surface));
+        overflow: auto;
+      }
+
+      .graph-canvas {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-width: 0;
+      }
+
+      .graph-svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        overflow: visible;
+      }
+
+      .graph-edge {
+        fill: none;
+        stroke: var(--line-strong);
+        stroke-width: 1.6;
+      }
+
+      .graph-edge--done {
+        stroke: #7fb495;
+      }
+
+      .graph-edge--active {
+        stroke: #7ba7d6;
+      }
+
+      .graph-edge--failed {
+        stroke: #dda6a3;
+        stroke-dasharray: 5 4;
+      }
+
+      .graph-lane {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .graph-lane-label {
+        width: 100%;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .node {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 176px;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-top-width: 3px;
+        border-radius: var(--radius-small);
+        background: var(--surface);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .node:hover {
+        border-color: var(--accent);
+      }
+
+      .node-name {
+        font-size: 12.5px;
+        font-weight: 620;
+        overflow-wrap: anywhere;
+      }
+
+      .node-meta {
+        color: var(--muted);
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+
+      .node--done {
+        border-top-color: var(--success);
+      }
+
+      .node--active {
+        border-top-color: var(--info);
+        box-shadow: 0 0 0 2px var(--info-soft);
+      }
+
+      .node--waiting {
+        border-top-color: var(--warning);
+      }
+
+      .node--failed {
+        border-top-color: var(--danger);
+        background: #fffafa;
+      }
+
+      .node--blocked {
+        border-top-color: var(--line-strong);
+        background: var(--surface-soft);
+      }
+
+      .node--unknown {
+        border-top-color: var(--unknown);
+        background: #fbfaff;
+      }
+
+      .node[aria-current="true"] {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent-soft);
+      }
+
+      .revision-note {
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: var(--surface-raised);
+        color: var(--muted-strong);
+        font-size: 12.5px;
+      }
+
+      .seg {
+        display: inline-flex;
+        padding: 2px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-soft);
+      }
+
+      .seg-btn {
+        padding: 4px 11px;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted-strong);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .seg-btn[aria-pressed="true"] {
+        background: var(--surface);
+        color: var(--accent-ink);
+        font-weight: 650;
+        box-shadow: 0 1px 2px rgb(23 32 29 / 12%);
+      }
+
+      .occurrence {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: var(--surface);
+      }
+
+      .occurrence--current {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+
+      /* ---------------------------------------------------------------- dialog */
+      .dialog {
+        width: min(680px, calc(100vw - 32px));
+        max-height: min(82vh, 760px);
+        padding: 0;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: var(--shadow-float);
+      }
+
+      .dialog::backdrop {
+        background: rgb(23 32 29 / 38%);
+      }
+
+      .dialog-head {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .dialog-head h2 {
+        font-size: 15.5px;
+      }
+
+      .dialog-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 16px;
+        overflow-y: auto;
+        max-height: calc(82vh - 130px);
+      }
+
+      .tabs {
+        display: flex;
+        gap: 4px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .tab {
+        padding: 7px 11px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--muted-strong);
+        font: inherit;
+        font-size: 12.5px;
+        cursor: pointer;
+      }
+
+      .tab[aria-selected="true"] {
+        border-bottom-color: var(--accent);
+        color: var(--accent-ink);
+        font-weight: 650;
+      }
+
+      .raw-block {
+        margin: 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: #1d2422;
+        color: #dbe6e1;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .def-list {
+        display: grid;
+        grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
+        gap: 6px 14px;
+        font-size: 12.5px;
+      }
+
+      .def-list dt {
+        color: var(--muted);
+      }
+
+      .def-list dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      /* ---------------------------------------------------------------- tour */
+      .tour-panel {
+        position: fixed;
+        top: var(--header-height);
+        right: 0;
+        bottom: 0;
+        z-index: 55;
+        display: flex;
+        flex-direction: column;
+        width: var(--tour-width);
+        border-left: 1px solid var(--line);
+        background: var(--surface);
+        box-shadow: var(--shadow-float);
+        transform: translateX(100%);
+        transition: transform 180ms ease;
+      }
+
+      body.tour-open .tour-panel {
+        transform: translateX(0);
+      }
+
+      .tour-head {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 13px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .tour-head h2 {
+        font-size: 14.5px;
+      }
+
+      .tour-head p {
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      .tour-progress-wrap {
+        padding: 10px 14px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .tour-progress-meta {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      .tour-progress {
+        height: 5px;
+        margin-top: 7px;
+        border-radius: 999px;
+        background: var(--surface-soft);
+        overflow: hidden;
+      }
+
+      .tour-progress > span {
+        display: block;
+        height: 100%;
+        border-radius: 999px;
+        background: var(--accent);
+        transition: width 160ms ease;
+      }
+
+      .tour-body {
+        flex: 1 1 auto;
+        padding: 14px;
+        overflow-y: auto;
+      }
+
+      .tour-station-title {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        font-size: 15px;
+      }
+
+      .tour-goal {
+        margin-top: 8px;
+        color: var(--muted-strong);
+        font-size: 12.5px;
+      }
+
+      .tour-checks {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .tour-check {
+        display: flex;
+        gap: 8px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-small);
+        background: var(--surface-raised);
+        font-size: 12px;
+      }
+
+      .tour-check::before {
+        content: "";
+        flex: none;
+        width: 6px;
+        height: 6px;
+        margin-top: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+
+      .tour-route {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border: 1px dashed var(--line-strong);
+        border-radius: var(--radius-small);
+        background: var(--surface-raised);
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+
+      .tour-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 11px 14px;
+        border-top: 1px solid var(--line);
+        background: var(--surface-raised);
+      }
+
+      .tour-catalog {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-top: 10px;
+      }
+
+      .tour-catalog-item {
+        display: flex;
+        gap: 8px;
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-small);
+        background: transparent;
+        color: var(--muted-strong);
+        font: inherit;
+        font-size: 12px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .tour-catalog-item:hover {
+        background: var(--surface-soft);
+      }
+
+      .tour-catalog-item[aria-current="true"] {
+        border-color: var(--accent-soft);
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-weight: 600;
+      }
+
+      .tour-catalog-index {
+        min-width: 20px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      /* ---------------------------------------------------------------- dock */
+      .mock-dock {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 50;
+        border-top: 1px solid var(--line-strong);
+        background: var(--surface);
+        box-shadow: 0 -6px 18px rgb(23 32 29 / 8%);
+        transition: right 160ms ease;
+      }
+
+      body.tour-open .mock-dock {
+        right: var(--tour-width);
+      }
+
+      .dock-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        height: var(--dock-height);
+        padding: 0 16px;
+        border: 0;
+        background: transparent;
+        color: var(--ink);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .dock-head:hover {
+        background: var(--surface-raised);
+      }
+
+      .dock-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .dock-title strong {
+        font-size: 13px;
+      }
+
+      .dock-title small {
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      .dock-body {
+        display: none;
+        gap: 16px;
+        padding: 14px 16px 18px;
+        border-top: 1px solid var(--line);
+        background: var(--surface-raised);
+      }
+
+      .mock-dock[data-open="true"] .dock-body {
+        display: flex;
+        flex-wrap: wrap;
+        max-height: min(52vh, 460px);
+        overflow-y: auto;
+      }
+
+      .dock-group {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 232px;
+        flex: 1 1 240px;
+      }
+
+      .dock-group > h4 {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .field > span {
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+
+      select {
+        padding: 6px 9px;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-small);
+        background: var(--surface);
+        color: var(--ink);
+        font: inherit;
+        font-size: 12.5px;
+        max-width: 100%;
+      }
+
+      /* ---------------------------------------------------------------- responsive */
+      @media (max-width: 1080px) {
+        body.tour-open .app-shell {
+          padding-right: 0;
+        }
+
+        body.tour-open .mock-dock {
+          right: 0;
+        }
+
+        .tour-panel {
+          width: min(92vw, var(--tour-width));
+        }
+      }
+
+      @media (max-width: 860px) {
+        .app-shell {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .side-nav {
+          position: static;
+          max-height: none;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .nav-list {
+          flex-direction: row;
+          overflow-x: auto;
+          padding-bottom: 2px;
+        }
+
+        .nav-item {
+          width: auto;
+          white-space: nowrap;
+        }
+
+        .main-content {
+          padding: 14px 14px 40px;
+        }
+
+        .header-scope {
+          display: none;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .brand-copy small,
+        .dock-title small {
+          display: none;
+        }
+
+        .node {
+          width: 100%;
+        }
+
+        .graph-lane {
+          flex-direction: column;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.001ms !important;
+          transition-duration: 0.001ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body class="tour-open">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+      <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10.5 9-7.5 9 7.5" /><path d="M5 9.5V21h14V9.5" /><path d="M9 21v-7h6v7" /></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5h7l2 2h9v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 8.5h18" /></symbol>
+      <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13" /><path d="M8 12h13" /><path d="M8 18h13" /><path d="M3 6h.01" /><path d="M3 12h.01" /><path d="M3 18h.01" /></symbol>
+      <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3" /><path d="M12 3v4" /><path d="M8 12h.01" /><path d="M16 12h.01" /><path d="M9 16h6" /><path d="M2 12h2" /><path d="M20 12h2" /></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /><circle cx="9" cy="6" r="2" /><circle cx="15" cy="12" r="2" /><circle cx="8" cy="18" r="2" /></symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /><path d="M18 9h1" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" /></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19z" /><path d="M12 10v4" /><path d="M12 17h.01" /></symbol>
+      <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="10" r="2.4" /><path d="M6 8.4v7.2" /><path d="M8.4 6h3.6a3 3 0 0 1 3 3v1" /></symbol>
+      <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /><path d="M9 12h6" /><path d="M9 16h6" /></symbol>
+    </svg>
+
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">HA</span>
+        <div class="brand-copy">
+          <strong>HumanAgent</strong>
+          <small>语义观测交互设计</small>
+        </div>
+      </div>
+      <div class="header-context">
+        <span class="header-scope" id="headerScope">系统概要</span>
+        <span class="mock-badge">交互设计 · Mock 数据</span>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn--small" type="button" id="dockToggle" data-action="toggle-dock" aria-controls="mockDockBody" aria-expanded="false">
+          <svg class="icon icon--sm" aria-hidden="true"><use href="#i-sliders" /></svg>
+          <span>演示控制</span>
+        </button>
+        <button class="btn btn--small" type="button" id="tourToggle" data-action="toggle-tour" aria-controls="tourPanel" aria-expanded="true">
+          <svg class="icon icon--sm" aria-hidden="true"><use href="#i-panel" /></svg>
+          <span>导览</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="side-nav" id="scopeNav" aria-label="观测导航"></aside>
+      <main class="main-content" id="main-content" tabindex="-1">
+        <div class="content-inner">
+          <nav class="breadcrumbs" id="breadcrumbs" aria-label="当前位置"></nav>
+          <div id="stateNotice" role="status" aria-live="polite"></div>
+          <div id="viewRoot"></div>
+        </div>
+      </main>
+    </div>
+
+    <aside class="tour-panel" id="tourPanel" aria-label="静态语义观测导览">
+      <header class="tour-head">
+        <div>
+          <h2>静态语义观测导览</h2>
+          <p>用 Mock 控件走完整界面，不连接真实 Runtime。</p>
+        </div>
+        <button class="icon-btn spacer" type="button" data-action="tour-exit" aria-label="退出导览">
+          <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
+        </button>
+      </header>
+      <div class="tour-progress-wrap">
+        <div class="tour-progress-meta">
+          <span id="tourProgressLabel">第 1 / 27 站</span>
+          <span id="tourProgressHint">上一站 / 下一站</span>
+        </div>
+        <div class="tour-progress" role="presentation"><span id="tourProgressBar" style="width: 4%"></span></div>
+      </div>
+      <div class="tour-body" id="tourBody"></div>
+      <div class="tour-actions" id="tourActions"></div>
+    </aside>
+
+    <section class="mock-dock" id="mockDock" data-open="false" aria-label="Mock 演示控制面">
+      <button class="dock-head" type="button" data-action="toggle-dock" aria-controls="mockDockBody" aria-expanded="false">
+        <span class="dock-title">
+          <svg class="icon" aria-hidden="true"><use href="#i-sliders" /></svg>
+          <span>
+            <strong>Mock 演示控制面</strong>
+            <small>不连接 Runtime · 只改变本地演示状态</small>
+          </span>
+        </span>
+        <span class="spacer row" id="dockStatus"></span>
+      </button>
+      <div class="dock-body" id="mockDockBody"></div>
+    </section>
+
+    <dialog class="dialog" id="detailDialog" aria-labelledby="dialogTitle">
+      <div id="dialogContent"></div>
+    </dialog>
+
+    <div class="sr-only" id="liveRegion" role="status" aria-live="polite"></div>
+
+    <script>
+      /* ==========================================================================
+         HumanAgent · 静态语义观测交互设计 Tour（单文件 / file:// 自包含）
+
+         模块闭包（唯一 owner）：
+           SemanticFixtures 只读初始事实工厂
+           PayloadRefs      不可变引用 {id, scopeKey, revision, value}
+           UiEvents         同步事件分发与退订
+           Navigation       hash 编解码、scope 校验、历史查看版本
+           MockDriver       模拟事实更新的唯一 owner
+           Views            视角布局组合
+           Controls         共享控件
+           Evidence         唯一 drawer / raw 展开 / 焦点生命周期
+           Tour             站点表与导览控制
+           App              唯一初始化与生命周期
+
+         只读观测面与 Mock 控制面分离；不请求网络，不连接 Runtime。
+         ========================================================================== */
+      (function () {
+        'use strict';
+
+        var SVG_NS = 'http://www.w3.org/2000/svg';
+
+        /* ---------------------------------------------------------- DOM helpers */
+        function el(tag, props, children) {
+          var node = document.createElement(tag);
+          applyProps(node, props);
+          appendChildren(node, children);
+          return node;
+        }
+
+        function svgEl(tag, props, children) {
+          var node = document.createElementNS(SVG_NS, tag);
+          if (props) {
+            Object.keys(props).forEach(function (key) {
+              if (key === 'text') {
+                node.textContent = String(props[key]);
+              } else {
+                node.setAttribute(key, String(props[key]));
+              }
+            });
+          }
+          appendChildren(node, children);
+          return node;
+        }
+
+        function applyProps(node, props) {
+          if (!props) return;
+          Object.keys(props).forEach(function (key) {
+            var value = props[key];
+            if (value === null || value === undefined || value === false) return;
+            if (key === 'class') {
+              node.className = String(value);
+            } else if (key === 'text') {
+              node.textContent = String(value);
+            } else if (key === 'dataset') {
+              Object.keys(value).forEach(function (dataKey) {
+                node.dataset[dataKey] = String(value[dataKey]);
+              });
+            } else if (key === 'style') {
+              Object.keys(value).forEach(function (styleKey) {
+                node.style[styleKey] = value[styleKey];
+              });
+            } else if (key.indexOf('on') === 0 && typeof value === 'function') {
+              node.addEventListener(key.slice(2).toLowerCase(), value);
+            } else if (key === 'ref') {
+              value(node);
+            } else {
+              node.setAttribute(key, value === true ? '' : String(value));
+            }
+          });
+        }
+
+        function appendChildren(node, children) {
+          if (children === null || children === undefined || children === false) return;
+          if (Array.isArray(children)) {
+            children.forEach(function (child) {
+              appendChildren(node, child);
+            });
+            return;
+          }
+          node.appendChild(children instanceof Node ? children : document.createTextNode(String(children)));
+        }
+
+        function icon(name, extraClass) {
+          return svgEl('svg', { class: 'icon' + (extraClass ? ' ' + extraClass : ''), 'aria-hidden': 'true' }, [
+            svgEl('use', { href: '#' + name }),
+          ]);
+        }
+
+        function chip(label, kind, extra) {
+          return el('span', { class: 'chip chip--' + kind + (extra ? ' ' + extra : ''), text: label });
+        }
+
+        function stateChip(state) {
+          return chip(STATE_LABEL[state] || state, state);
+        }
+
+        var STATE_LABEL = {
+          done: '已完成',
+          active: '进行中',
+          waiting: '等待',
+          blocked: '阻塞',
+          failed: '失败',
+          unknown: '未知',
+          live: 'live',
+          completed: '已完成',
+          stale: '过期',
+          success: '成功',
+          failure: '失败',
+          info: '信息',
+          empty: '空',
+        };
+
+        /* ------------------------------------------------------------- UiEvents */
+        var UiEvents = (function () {
+          var handlers = Object.create(null);
+          var failures = [];
+
+          function subscribe(type, handler) {
+            if (!handlers[type]) handlers[type] = [];
+            handlers[type].push(handler);
+            return function unsubscribe() {
+              var list = handlers[type];
+              if (!list) return;
+              var index = list.indexOf(handler);
+              if (index >= 0) list.splice(index, 1);
+            };
+          }
+
+          function emit(type, envelope) {
+            var list = handlers[type];
+            if (!list || !list.length) return;
+            list.slice().forEach(function (handler) {
+              try {
+                handler(envelope);
+              } catch (error) {
+                failures.push({ type: type, message: String((error && error.message) || error) });
+                if (window.console && window.console.error) {
+                  window.console.error('[UiEvents] handler failed for "' + type + '"', error);
+                }
+              }
+            });
+          }
+
+          function takeFailures() {
+            var out = failures.slice();
+            failures.length = 0;
+            return out;
+          }
+
+          return { subscribe: subscribe, emit: emit, takeFailures: takeFailures };
+        })();
+
+        /* ----------------------------------------------------------- PayloadRefs */
+        var PayloadRefs = (function () {
+          var refs = Object.create(null);
+          var counter = 0;
+
+          function freezeValue(value, seen) {
+            if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+            var visited = seen || [];
+            if (visited.indexOf(value) >= 0) return value;
+            visited.push(value);
+            Object.keys(value).forEach(function (key) {
+              freezeValue(value[key], visited);
+            });
+            return Object.freeze(value);
+          }
+
+          function publish(scopeKey, value) {
+            counter += 1;
+            var previous = refs[scopeKey];
+            var ref = {
+              id: 'ref:' + scopeKey + ':' + counter,
+              scopeKey: scopeKey,
+              revision: previous ? previous.revision + 1 : 1,
+              value: freezeValue(value),
+            };
+            refs[scopeKey] = Object.freeze(ref);
+            return refs[scopeKey];
+          }
+
+          function get(scopeKey) {
+            return refs[scopeKey] || null;
+          }
+
+          function keys() {
+            return Object.keys(refs);
+          }
+
+          return { publish: publish, get: get, keys: keys, freezeValue: freezeValue };
+        })();
+
+        /* ------------------------------------------------------ SemanticFixtures */
+        var SemanticFixtures = (function () {
+          function node(id, name, state, deps, extra) {
+            var base = { id: id, name: name, state: state, deps: deps || [] };
+            return Object.assign(base, extra || {});
+          }
+
+          function revision(version, reason, at, nodes) {
+            return { version: version, reason: reason, at: at, nodes: nodes };
+          }
+
+          function fact(id, revisionVersion, kind, title, detail, extra) {
+            var base = { id: id, revision: revisionVersion, kind: kind, title: title, detail: detail };
+            return Object.assign(base, extra || {});
+          }
+
+          function activity(id, nodeId, name, state, detail) {
+            return { id: id, nodeId: nodeId, name: name, state: state, detail: detail };
+          }
+
+          function evidence(id, title, summary, input, output, raw) {
+            return { id: id, title: title, summary: summary, input: input, output: output, raw: raw };
+          }
+
+          function createState() {
+            var evidenceMap = {
+              'ev-projection': evidence(
+                'ev-projection',
+                '投影契约证据',
+                'contracts 中的投影类型与负向测试记录。',
+                'packages/contracts/src/projection.ts（Mock 摘录）',
+                'ProjectionSnapshot 类型校验通过。',
+                {
+                  source: 'mock://contracts/projection',
+                  kind: 'contract-check',
+                  recordedAt: '2026-10-07T09:12:00-07:00',
+                  note: 'Mock raw：仅用于演示主动证据查看，不参与语义判断。',
+                }
+              ),
+              'ev-wire': evidence(
+                'ev-wire',
+                '接线执行证据',
+                'extension-wire 节点的执行输入与输出摘要。',
+                'assignment=exec-01 · node=extension-wire · attempt=1',
+                '工具调用 3 次，2 次成功，1 次重试后成功。',
+                {
+                  source: 'mock://runtime/assignment/extension-wire',
+                  calls: [
+                    { name: 'read', ok: true, ms: 41 },
+                    { name: 'edit', ok: false, ms: 118, error: 'patch conflict' },
+                    { name: 'edit', ok: true, ms: 96 },
+                  ],
+                  note: 'Mock raw：原始工具调用流水，仅主动展开时读取。',
+                }
+              ),
+              'ev-failure': evidence(
+                'ev-failure',
+                '失败证据',
+                'history 分支失败的原始错误与上次成功内容。',
+                'assignment=exec-01 · node=history · attempt=1',
+                '错误：upstream journal segment missing（未映射类型）。',
+                {
+                  source: 'mock://runtime/assignment/history',
+                  error: { code: 'journal.segment.missing', retriable: false },
+                  lastGood: { segments: 12, at: '2026-10-07T09:40:00-07:00' },
+                  note: 'Mock raw：失败原因保留，任务不自动继续。',
+                }
+              ),
+              'ev-unknown': evidence(
+                'ev-unknown',
+                '未映射语义证据',
+                '来源事件类型未在语义模块注册。',
+                'kind=provider.stream.delta.v3（未注册）',
+                '未归类，保持 unknown，不显示成功。',
+                {
+                  source: 'mock://context-events/unmapped',
+                  kind: 'provider.stream.delta.v3',
+                  receivedAt: '2026-10-07T09:58:12-07:00',
+                  note: 'Mock raw：unknown 来源引用，不参与任务终态判断。',
+                }
+              ),
+              'ev-release': evidence(
+                'ev-release',
+                '发布校验证据',
+                '单次发布校验的输入与结果。',
+                'target=origin/main · checks=[typecheck,unit,smoke]',
+                '3 项检查全部通过，发布完成。',
+                {
+                  source: 'mock://release/check',
+                  checks: [
+                    { name: 'typecheck', ok: true },
+                    { name: 'unit', ok: true, passed: 143 },
+                    { name: 'smoke', ok: true },
+                  ],
+                  note: 'Mock raw：单次任务的一次结果证据。',
+                }
+              ),
+              'ev-dns': evidence(
+                'ev-dns',
+                '巡检比对证据',
+                'DNS 与出口比对的分支输入。',
+                'occurrence=3 · probes=[dns, egress]',
+                'DNS 解析一致；出口地址与上一轮不同。',
+                {
+                  source: 'mock://inspection/round-3',
+                  dns: { a: '10.0.0.4', matched: true },
+                  egress: { previous: '203.0.113.7', current: '203.0.113.9' },
+                  note: 'Mock raw：巡检轮次证据，occurrence 历史不改写。',
+                }
+              ),
+              'ev-probe': evidence(
+                'ev-probe',
+                '遥测探针证据',
+                '遥测探针采集的原始样本与阈值比对。',
+                'task=task-telemetry · probe=telemetry · samples=24',
+                '样本 24/24 采集成功；延迟 132ms，低于阈值 150ms。',
+                {
+                  source: 'mock://inspection/telemetry/samples',
+                  samples: 24,
+                  failed: 0,
+                  latencyMs: 132,
+                  thresholdMs: 150,
+                  note: 'Mock raw：探针原始样本，仅主动展开时读取。',
+                }
+              ),
+            };
+
+            var tasks = [
+              {
+                id: 'task-runtime-refactor',
+                projectId: 'proj-humanagent',
+                title: '运行时编排重构',
+                kind: 'long-horizon',
+                template: '长程模板',
+                trigger: '一次启动后持续运行',
+                goal: '把已提交计划与执行事实分开，使同一任务能按新事实重编排并保留旧事实。',
+                state: 'live',
+                attention: false,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始编排：先固定投影契约，再落地模板与身份。', '2026-10-06T10:05:00-07:00', [
+                    node('n-projection', '投影契约', 'done', []),
+                    node('n-template', '模板落地', 'done', ['n-projection']),
+                    node('n-identity', '身份绑定', 'done', ['n-projection']),
+                    node('n-review', '整体复核', 'waiting', ['n-template', 'n-identity'], {
+                      waitingReason: '等待模板与身份两条前置完成后进入复核。',
+                    }),
+                  ]),
+                  revision(2, '补充模板能力与后续验收需求，extension-wire 进入执行。', '2026-10-07T08:30:00-07:00', [
+                    node('n-projection', '投影契约', 'done', []),
+                    node('n-template', '模板落地', 'done', ['n-projection']),
+                    node('n-identity', '身份绑定', 'done', ['n-projection']),
+                    node('n-template-extension-core', '模板扩展核心', 'done', ['n-identity']),
+                    node('n-template-extension-wire', '模板扩展接线', 'active', ['n-template-extension-core'], {
+                      evidenceId: 'ev-wire',
+                      detail: '正在把扩展核心接入运行时装配。',
+                    }),
+                    node('n-review', '整体复核', 'waiting', ['n-template-extension-wire'], {
+                      waitingReason: '等待模板扩展接线完成后再进入复核。',
+                    }),
+                  ]),
+                  revision(3, '增加修订历史与实例核验后续分支，复核等待分支汇合。', '2026-10-07T09:35:00-07:00', [
+                    node('n-projection', '投影契约', 'done', []),
+                    node('n-template', '模板落地', 'done', ['n-projection']),
+                    node('n-identity', '身份绑定', 'done', ['n-projection']),
+                    node('n-template-extension-core', '模板扩展核心', 'done', ['n-identity']),
+                    node('n-template-extension-wire', '模板扩展接线', 'active', ['n-template-extension-core'], {
+                      evidenceId: 'ev-wire',
+                      detail: '正在把扩展核心接入运行时装配。',
+                    }),
+                    node('n-revision', '修订历史', 'waiting', ['n-template-extension-wire'], {
+                      waitingReason: '等待模板扩展接线完成后开始记录修订历史。',
+                    }),
+                    node('n-history', '历史回放', 'waiting', ['n-template-extension-wire'], {
+                      waitingReason: '等待模板扩展接线完成后开始历史回放。',
+                    }),
+                    node('n-instance-verify', '实例核验', 'waiting', ['n-template-extension-wire'], {
+                      waitingReason: '等待模板扩展接线完成后开始实例核验。',
+                    }),
+                    node('n-review', '整体复核', 'waiting', ['n-revision', 'n-history', 'n-instance-verify'], {
+                      waitingReason: '等待修订历史、历史回放与实例核验三条分支汇合。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-rt-1', 1, 'success', '投影契约已确认', 'contracts 投影类型与负向测试通过。', {
+                    at: '2026-10-06T10:40:00-07:00',
+                    nodeId: 'n-projection',
+                    evidenceId: 'ev-projection',
+                  }),
+                  fact('f-rt-2', 1, 'success', '模板落地已确认', '巡检/长程/单次三类模板绑定完成。', {
+                    at: '2026-10-06T14:20:00-07:00',
+                    nodeId: 'n-template',
+                  }),
+                  fact('f-rt-3', 1, 'success', '身份绑定已确认', '执行实例与角色身份绑定完成。', {
+                    at: '2026-10-06T16:05:00-07:00',
+                    nodeId: 'n-identity',
+                  }),
+                  fact('f-rt-4', 2, 'success', '模板扩展核心已确认', '扩展核心通过契约测试并提交。', {
+                    at: '2026-10-07T09:05:00-07:00',
+                    nodeId: 'n-template-extension-core',
+                  }),
+                ],
+                occurrences: [],
+                milestones: [
+                  { id: 'm-1', label: '里程碑一 · 契约与身份', state: 'done', detail: '投影、模板、身份三项完成。' },
+                  { id: 'm-2', label: '里程碑二 · 模板扩展接线', state: 'active', detail: '扩展核心完成，接线进行中。' },
+                  { id: 'm-3', label: '里程碑三 · 修订与核验', state: 'waiting', detail: '等待接线完成后并行展开。' },
+                ],
+                result: null,
+              },
+              {
+                id: 'task-pipeline-audit',
+                projectId: 'proj-humanagent',
+                title: '链路巡检',
+                kind: 'inspection',
+                template: '巡检模板',
+                trigger: '可定时/周期触发，也可手动执行一轮',
+                goal: '按轮次检查连通性、DNS 与出口一致性，保留每轮历史。',
+                state: 'live',
+                attention: true,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始巡检流程：occurrence → 探针 → 发现 → 收拢。', '2026-10-05T09:00:00-07:00', [
+                    node('n-occurrence', '本轮 occurrence', 'done', []),
+                    node('n-probe', '探针检查', 'done', ['n-occurrence']),
+                    node('n-finding', '发现归类', 'done', ['n-probe']),
+                    node('n-settle', '本轮收拢', 'waiting', ['n-finding'], {
+                      waitingReason: '等待第 3 轮发现归类完成后收拢本轮。',
+                    }),
+                  ]),
+                  revision(2, '增加 DNS 与出口比对分支，历史轮次不改写。', '2026-10-07T07:40:00-07:00', [
+                    node('n-occurrence', '本轮 occurrence', 'done', []),
+                    node('n-probe', '探针检查', 'done', ['n-occurrence']),
+                    node('n-finding', '发现归类', 'done', ['n-probe']),
+                    node('n-dns-compare', 'DNS 比对', 'active', ['n-probe'], {
+                      evidenceId: 'ev-dns',
+                      detail: '比对本轮与上一轮的 DNS 解析结果。',
+                    }),
+                    node('n-egress-compare', '出口比对', 'waiting', ['n-dns-compare'], {
+                      waitingReason: '等待 DNS 比对完成后比对出口地址。',
+                    }),
+                    node('n-settle', '本轮收拢', 'waiting', ['n-egress-compare'], {
+                      waitingReason: '等待比对分支汇合后收拢本轮。',
+                    }),
+                  ]),
+                  revision(3, '增加下一轮规划分支，历史 occurrence 继续保留。', '2026-10-07T09:20:00-07:00', [
+                    node('n-occurrence', '本轮 occurrence', 'done', []),
+                    node('n-probe', '探针检查', 'done', ['n-occurrence']),
+                    node('n-finding', '发现归类', 'done', ['n-probe']),
+                    node('n-dns-compare', 'DNS 比对', 'active', ['n-probe'], {
+                      evidenceId: 'ev-dns',
+                      detail: '比对本轮与上一轮的 DNS 解析结果。',
+                    }),
+                    node('n-egress-compare', '出口比对', 'waiting', ['n-dns-compare'], {
+                      waitingReason: '等待 DNS 比对完成后比对出口地址。',
+                    }),
+                    node('n-round-plan', '下一轮规划', 'waiting', ['n-egress-compare'], {
+                      waitingReason: '等待比对结果后规划下一轮。',
+                    }),
+                    node('n-settle', '本轮收拢', 'waiting', ['n-round-plan'], {
+                      waitingReason: '等待下一轮规划后收拢本轮。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-pa-1', 1, 'success', '第 1 轮连通性正常', '探针 6/6 通过。', {
+                    at: '2026-10-05T09:20:00-07:00',
+                    nodeId: 'n-probe',
+                  }),
+                  fact('f-pa-2', 1, 'success', '第 2 轮发现 1 项延迟偏高', '延迟 180ms，高于阈值 150ms。', {
+                    at: '2026-10-06T09:25:00-07:00',
+                    nodeId: 'n-finding',
+                  }),
+                ],
+                occurrences: [
+                  { id: 'occ-1', index: 1, label: '第 1 轮', state: 'done', result: '连通性正常' },
+                  { id: 'occ-2', index: 2, label: '第 2 轮', state: 'done', result: '发现 1 项延迟偏高' },
+                  { id: 'occ-3', index: 3, label: '第 3 轮', state: 'active', result: '比对进行中' },
+                ],
+                milestones: [],
+                result: null,
+              },
+              {
+                id: 'task-single-live',
+                projectId: 'proj-orbit',
+                title: '调度窗口校验（进行中）',
+                kind: 'single',
+                template: '单次模板',
+                trigger: '立即或预约执行一次',
+                goal: '对一次调度窗口执行输入校验、执行与验证，产出一次结果。',
+                state: 'live',
+                attention: false,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始单次流程：输入 → 执行 → 验证 → 结果。', '2026-10-07T09:00:00-07:00', [
+                    node('n-input', '输入校验', 'done', []),
+                    node('n-execute', '执行', 'active', ['n-input'], { detail: '正在执行调度窗口校验。' }),
+                    node('n-verify', '验证', 'waiting', ['n-execute'], {
+                      waitingReason: '等待执行完成后验证结果。',
+                    }),
+                    node('n-result', '一次结果', 'waiting', ['n-verify'], {
+                      waitingReason: '等待验证完成后产出一次结果。',
+                    }),
+                  ]),
+                  revision(2, '修订后续执行与验证分支，输入校验事实保留。', '2026-10-07T09:30:00-07:00', [
+                    node('n-input', '输入校验', 'done', []),
+                    node('n-execute', '执行', 'done', ['n-input']),
+                    node('n-verify', '验证', 'active', ['n-execute'], { detail: '正在验证执行输出。' }),
+                    node('n-verify-extra', '补充验证', 'waiting', ['n-verify'], {
+                      waitingReason: '等待主验证完成后补充验证。',
+                    }),
+                    node('n-result', '一次结果', 'waiting', ['n-verify-extra'], {
+                      waitingReason: '等待补充验证后产出一次结果。',
+                    }),
+                  ]),
+                  revision(3, '增加结果发布分支，验证事实保留。', '2026-10-07T09:50:00-07:00', [
+                    node('n-input', '输入校验', 'done', []),
+                    node('n-execute', '执行', 'done', ['n-input']),
+                    node('n-verify', '验证', 'active', ['n-execute'], { detail: '正在验证执行输出。' }),
+                    node('n-verify-extra', '补充验证', 'waiting', ['n-verify'], {
+                      waitingReason: '等待主验证完成后补充验证。',
+                    }),
+                    node('n-result', '一次结果', 'waiting', ['n-verify-extra'], {
+                      waitingReason: '等待补充验证后产出一次结果。',
+                    }),
+                    node('n-publish', '结果发布', 'waiting', ['n-result'], {
+                      waitingReason: '等待一次结果确认后发布。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-sl-1', 1, 'success', '输入校验已确认', '窗口参数与前置条件校验通过。', {
+                    at: '2026-10-07T09:10:00-07:00',
+                    nodeId: 'n-input',
+                  }),
+                ],
+                occurrences: [],
+                milestones: [],
+                result: null,
+              },
+              {
+                id: 'task-release-check',
+                projectId: 'proj-orbit',
+                title: '发布校验（已完成）',
+                kind: 'single',
+                template: '单次模板',
+                trigger: '立即或预约执行一次',
+                goal: '对一次发布执行类型检查、单测与冒烟检查，产出一次结果。',
+                state: 'completed',
+                attention: false,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '单次发布校验流程。', '2026-10-06T15:00:00-07:00', [
+                    node('n-input', '输入校验', 'done', []),
+                    node('n-execute', '执行', 'done', ['n-input']),
+                    node('n-verify', '验证', 'done', ['n-execute']),
+                    node('n-result', '一次结果', 'done', ['n-verify']),
+                  ]),
+                ],
+                facts: [
+                  fact('f-rc-1', 1, 'success', '发布校验通过', 'typecheck / unit(143) / smoke 全部通过。', {
+                    at: '2026-10-06T15:24:00-07:00',
+                    nodeId: 'n-result',
+                    evidenceId: 'ev-release',
+                  }),
+                ],
+                occurrences: [],
+                milestones: [],
+                result: {
+                  label: '一次结果',
+                  value: '3 项检查全部通过，发布完成。',
+                  at: '2026-10-06T15:24:00-07:00',
+                },
+                completedAt: '2026-10-06T15:24:00-07:00',
+              },
+              {
+                id: 'task-waiting',
+                projectId: 'proj-humanagent',
+                title: '文档收口（等待人类）',
+                kind: 'long-horizon',
+                template: '长程模板',
+                trigger: '一次启动后持续运行',
+                goal: '等待人类确认收口口径后再继续。',
+                state: 'waiting',
+                attention: true,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始编排。', '2026-10-07T08:00:00-07:00', [
+                    node('n-prep', '资料整理', 'done', []),
+                    node('n-confirm', '等待人类确认', 'waiting', ['n-prep'], {
+                      waitingReason: '收口口径需要人类确认，任务暂停在等待状态。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-w-1', 1, 'success', '资料整理已确认', '三份专项审计资料整理完成。', {
+                    at: '2026-10-07T08:30:00-07:00',
+                    nodeId: 'n-prep',
+                  }),
+                ],
+                occurrences: [],
+                milestones: [],
+                result: null,
+                waitingReason: '收口口径需要人类确认，任务暂停在等待状态。',
+              },
+              {
+                id: 'task-failed',
+                projectId: 'proj-orbit',
+                title: '迁移演练（失败）',
+                kind: 'long-horizon',
+                template: '长程模板',
+                trigger: '一次启动后持续运行',
+                goal: '演练迁移流程；本次在数据校验节点失败。',
+                state: 'failed',
+                attention: true,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始编排。', '2026-10-07T07:00:00-07:00', [
+                    node('n-prep', '环境准备', 'done', []),
+                    node('n-migrate', '数据校验', 'failed', ['n-prep'], {
+                      evidenceId: 'ev-failure',
+                      failureReason: '上游 journal 分段缺失（journal.segment.missing），不可重试。',
+                    }),
+                    node('n-verify', '结果验证', 'blocked', ['n-migrate'], {
+                      waitingReason: '前置数据校验失败，验证保持阻塞，不自动继续。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-f-1', 1, 'success', '环境准备已确认', '目标环境与权限校验通过。', {
+                    at: '2026-10-07T07:20:00-07:00',
+                    nodeId: 'n-prep',
+                  }),
+                  fact('f-f-2', 1, 'failure', '数据校验失败', 'journal.segment.missing：上游分段缺失，不可重试。', {
+                    at: '2026-10-07T07:52:00-07:00',
+                    nodeId: 'n-migrate',
+                    evidenceId: 'ev-failure',
+                    nextStep: '补齐上游 journal 分段后，由人类决定是否重新发起本次迁移。',
+                  }),
+                ],
+                occurrences: [],
+                milestones: [],
+                result: null,
+              },
+              {
+                id: 'task-unknown',
+                projectId: 'proj-humanagent',
+                title: 'Provider 流式推理（未映射）',
+                kind: 'long-horizon',
+                template: '长程模板',
+                trigger: '一次启动后持续运行',
+                goal: '接收 Provider 流式事件；当前存在未映射事件类型。',
+                state: 'unknown',
+                attention: true,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始编排。', '2026-10-07T09:40:00-07:00', [
+                    node('n-ingest', '事件接入', 'done', []),
+                    node('n-classify', '语义归类', 'unknown', ['n-ingest'], {
+                      evidenceId: 'ev-unknown',
+                      detail: '事件类型 provider.stream.delta.v3 未在语义模块注册。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-u-1', 1, 'unknown', '未映射事件已记录', '类型 provider.stream.delta.v3 未注册，保持 unknown。', {
+                    at: '2026-10-07T09:58:12-07:00',
+                    nodeId: 'n-classify',
+                    evidenceId: 'ev-unknown',
+                    sourceRef: 'mock://context-events/unmapped#provider.stream.delta.v3',
+                  }),
+                ],
+                occurrences: [],
+                milestones: [],
+                result: null,
+              },
+              {
+                id: 'task-telemetry',
+                projectId: 'proj-orbit',
+                title: '遥测汇总（可断连）',
+                kind: 'inspection',
+                template: '巡检模板',
+                trigger: '可定时/周期触发，也可手动执行一轮',
+                goal: '周期汇总遥测；读取失败时保留上次内容并标记过期。',
+                state: 'live',
+                attention: false,
+                currentRevision: 1,
+                revisions: [
+                  revision(1, '初始巡检流程。', '2026-10-07T06:00:00-07:00', [
+                    node('n-occurrence', '本轮 occurrence', 'done', []),
+                    node('n-probe', '探针检查', 'active', ['n-occurrence'], { detail: '正在采集遥测样本。' }),
+                    node('n-settle', '本轮收拢', 'waiting', ['n-probe'], {
+                      waitingReason: '等待探针检查完成后收拢。',
+                    }),
+                  ]),
+                ],
+                facts: [
+                  fact('f-t-1', 1, 'success', '第 1 轮遥测正常', '样本 24/24 采集成功。', {
+                    at: '2026-10-07T06:10:00-07:00',
+                    nodeId: 'n-occurrence',
+                    evidenceId: 'ev-probe',
+                  }),
+                ],
+                occurrences: [
+                  { id: 'occ-t1', index: 1, label: '第 1 轮', state: 'done', result: '遥测正常' },
+                  { id: 'occ-t2', index: 2, label: '第 2 轮', state: 'active', result: '采集中' },
+                ],
+                milestones: [],
+                result: null,
+              },
+            ];
+
+            var projects = [
+              {
+                id: 'proj-humanagent',
+                name: 'HumanAgent 平台',
+                summary: '长程器官式 Harness 的实现与观测。',
+                owner: 'core 团队',
+                status: 'live',
+              },
+              {
+                id: 'proj-orbit',
+                name: 'Orbit 调度服务',
+                summary: '调度与恢复能力的实现、巡检与演练。',
+                owner: 'runtime 团队',
+                status: 'live',
+              },
+              {
+                id: 'proj-signal',
+                name: 'Signal 观测网关',
+                summary: '新建项目，尚未创建任务。',
+                owner: '未分配',
+                status: 'empty',
+              },
+            ];
+
+            var agents = [
+              {
+                id: 'agent-exec-01',
+                role: '执行者',
+                instance: '实例 01',
+                kind: 'executor',
+                taskIds: ['task-runtime-refactor', 'task-release-check'],
+              },
+              {
+                id: 'agent-exec-02',
+                role: '执行者',
+                instance: '实例 02',
+                kind: 'executor',
+                taskIds: ['task-pipeline-audit'],
+              },
+              {
+                id: 'agent-plan-01',
+                role: '规划者',
+                instance: '实例 01',
+                kind: 'planner',
+                taskIds: ['task-single-live'],
+              },
+            ];
+
+            return {
+              projects: projects,
+              tasks: tasks,
+              agents: agents,
+              evidence: evidenceMap,
+              connection: { connected: true, lastSyncAt: '2026-10-07T10:02:00-07:00', source: 'mock://runtime/stream' },
+            };
+          }
+
+          return { createState: createState };
+        })();
+
+        /* ------------------------------------------------------------- MockDriver
+           模拟事实更新的唯一 owner。只订阅 Mock 控制事件；不读取 DOM，不写视图。
+           不可变纪律：已发布的数组/对象不被原地修改，变更通过替换产生新对象。 */
+        var TEMPLATES = {
+          inspection: {
+            key: 'inspection',
+            label: '巡检模板',
+            sections: ['本轮 occurrence', '探针 / 检查', '发现与归类', '收拢与下一轮'],
+            terminal: '每轮收拢；下一轮不是本轮的重试',
+          },
+          'long-horizon': {
+            key: 'long-horizon',
+            label: '长程模板',
+            sections: ['里程碑', '分解', '并行 / 串行执行', '验证', '阶段收拢'],
+            terminal: '阶段收拢；同一任务按新事实重编排',
+          },
+          single: {
+            key: 'single',
+            label: '单次模板',
+            sections: ['明确输入', '执行', '验证', '一次结果与终态'],
+            terminal: '一次结果与终态；完成后进入复盘',
+          },
+        };
+
+        var MockDriver = (function () {
+          var state = null;
+          var dirty = Object.create(null);
+          var factSeq = 0;
+
+          function init() {
+            state = SemanticFixtures.createState();
+            state.tasks = state.tasks.map(function (task) {
+              return Object.assign({}, task, { nodeStates: Object.freeze({}) });
+            });
+            state.evidence = PayloadRefs.freezeValue(state.evidence);
+            dirty = Object.create(null);
+            factSeq = 0;
+            publishAll(true);
+          }
+
+          function taskById(id) {
+            return state.tasks.filter(function (task) { return task.id === id; })[0] || null;
+          }
+
+          function projectById(id) {
+            return state.projects.filter(function (project) { return project.id === id; })[0] || null;
+          }
+
+          function agentById(id) {
+            return state.agents.filter(function (agent) { return agent.id === id; })[0] || null;
+          }
+
+          function evidenceById(id) {
+            return state.evidence[id] || null;
+          }
+
+          function replaceTask(nextTask) {
+            state.tasks = state.tasks.map(function (task) {
+              return task.id === nextTask.id ? nextTask : task;
+            });
+          }
+
+          function withTask(task, changes) {
+            return Object.assign({}, task, changes || {});
+          }
+
+          function revisionOf(task, version) {
+            return task.revisions.filter(function (rev) { return rev.version === version; })[0] || null;
+          }
+
+          function taskState(task) {
+            return task.nodeStates || Object.freeze({});
+          }
+
+          function effectiveState(task, node) {
+            var overlay = taskState(task)[node.id];
+            return overlay || node.state;
+          }
+
+          function effectiveNodes(task, version) {
+            var rev = revisionOf(task, version);
+            if (!rev) return [];
+            return rev.nodes.map(function (node) {
+              var overlay = taskState(task)[node.id];
+              return overlay && overlay !== node.state ? Object.assign({}, node, { state: overlay }) : node;
+            });
+          }
+
+          function activitiesOf(task) {
+            if (task.state === 'completed' || task.state === 'failed') return [];
+            var nodes = effectiveNodes(task, task.currentRevision);
+            return nodes
+              .filter(function (node) {
+                return node.state === 'active' || node.state === 'waiting' || node.state === 'blocked' || node.state === 'unknown';
+              })
+              .map(function (node) {
+                return {
+                  id: 'act:' + task.id + ':' + node.id,
+                  nodeId: node.id,
+                  name: node.name,
+                  state: node.state,
+                  detail: node.detail || node.failureReason || '',
+                  waitingReason: node.waitingReason || '',
+                  evidenceId: node.evidenceId || '',
+                };
+              });
+          }
+
+          function lastFactOf(task) {
+            return task.facts.length ? task.facts[task.facts.length - 1] : null;
+          }
+
+          function tasksInProject(projectId) {
+            return state.tasks.filter(function (task) { return task.projectId === projectId; });
+          }
+
+          function attentionItems(tasks) {
+            return tasks
+              .filter(function (task) {
+                return task.attention || task.state === 'failed' || task.state === 'unknown' || task.state === 'waiting';
+              })
+              .map(function (task) {
+                return { task: task, fact: lastFactOf(task), project: projectById(task.projectId) };
+              });
+          }
+
+          function countsOf(tasks) {
+            var counts = { total: tasks.length, live: 0, waiting: 0, failed: 0, completed: 0, unknown: 0 };
+            tasks.forEach(function (task) {
+              if (task.state === 'live') counts.live += 1;
+              else if (task.state === 'waiting') counts.waiting += 1;
+              else if (task.state === 'failed') counts.failed += 1;
+              else if (task.state === 'completed') counts.completed += 1;
+              else if (task.state === 'unknown') counts.unknown += 1;
+            });
+            return counts;
+          }
+
+          function systemProjection() {
+            return {
+              scopeKey: 'system',
+              kind: 'system',
+              connection: state.connection,
+              totals: countsOf(state.tasks),
+              projectCount: state.projects.length,
+              projects: state.projects.map(function (project) {
+                var tasks = tasksInProject(project.id);
+                return { project: project, tasks: tasks, counts: countsOf(tasks) };
+              }),
+              attention: attentionItems(state.tasks),
+            };
+          }
+
+          function projectProjection(projectId) {
+            var project = projectById(projectId);
+            if (!project) return null;
+            var tasks = tasksInProject(projectId);
+            return {
+              scopeKey: 'project:' + projectId,
+              kind: 'project',
+              project: project,
+              tasks: tasks,
+              counts: countsOf(tasks),
+              attention: attentionItems(tasks),
+              connection: state.connection,
+            };
+          }
+
+          function taskProjection(taskId) {
+            var task = taskById(taskId);
+            if (!task) return null;
+            var currentNodes = effectiveNodes(task, task.currentRevision);
+            var revisions = task.revisions.map(function (rev) {
+              return {
+                version: rev.version,
+                reason: rev.reason,
+                at: rev.at,
+                published: rev.version <= task.currentRevision,
+                nodes: rev.version === task.currentRevision ? currentNodes : rev.nodes,
+              };
+            });
+            return {
+              scopeKey: 'task:' + taskId,
+              kind: 'task',
+              task: task,
+              project: projectById(task.projectId),
+              template: TEMPLATES[task.kind],
+              revisions: revisions,
+              currentRevision: task.currentRevision,
+              currentNodes: currentNodes,
+              nodesFor: null,
+              facts: task.facts,
+              activities: activitiesOf(task),
+              occurrences: task.occurrences,
+              milestones: task.milestones,
+              result: task.result,
+              connection: state.connection,
+            };
+          }
+
+          function agentProjection(agentId) {
+            var agent = agentById(agentId);
+            if (!agent) return null;
+            return {
+              scopeKey: 'agent:' + agentId,
+              kind: 'agent',
+              agent: agent,
+              connection: state.connection,
+              bindings: agent.taskIds.map(function (id) {
+                var task = taskById(id);
+                return {
+                  task: task,
+                  project: projectById(task.projectId),
+                  template: TEMPLATES[task.kind],
+                  currentNodes: effectiveNodes(task, task.currentRevision),
+                  currentRevision: task.currentRevision,
+                  activities: activitiesOf(task),
+                  facts: task.facts,
+                };
+              }),
+            };
+          }
+
+          function projectionFor(scopeKey) {
+            if (scopeKey === 'system') return systemProjection();
+            var parts = scopeKey.split(':');
+            if (parts[0] === 'project') return projectProjection(parts.slice(1).join(':'));
+            if (parts[0] === 'task') return taskProjection(parts.slice(1).join(':'));
+            if (parts[0] === 'agent') return agentProjection(parts.slice(1).join(':'));
+            return null;
+          }
+
+          function publish(scopeKey, initial) {
+            var value = projectionFor(scopeKey);
+            if (!value) return null;
+            var ref = PayloadRefs.publish(scopeKey, value);
+            UiEvents.emit(initial ? 'ProjectionAvailable' : 'ProjectionUpdated', { scopeKey: scopeKey, ref: ref });
+            return ref;
+          }
+
+          function publishAll(initial) {
+            publish('system', initial);
+            state.projects.forEach(function (project) { publish('project:' + project.id, initial); });
+            state.tasks.forEach(function (task) { publish('task:' + task.id, initial); });
+            state.agents.forEach(function (agent) { publish('agent:' + agent.id, initial); });
+          }
+
+          function mark(scopeKey) {
+            dirty[scopeKey] = true;
+          }
+
+          function markTask(task) {
+            mark('task:' + task.id);
+            mark('project:' + task.projectId);
+            mark('system');
+            state.agents.forEach(function (agent) {
+              if (agent.taskIds.indexOf(task.id) >= 0) mark('agent:' + agent.id);
+            });
+          }
+
+          function flush() {
+            var keys = Object.keys(dirty);
+            dirty = Object.create(null);
+            keys.forEach(function (scopeKey) { publish(scopeKey, false); });
+            return keys;
+          }
+
+          function reconcile(task) {
+            var rev = revisionOf(task, task.currentRevision);
+            if (!rev) return task;
+            var states = Object.create(null);
+            rev.nodes.forEach(function (node) { states[node.id] = effectiveState(task, node); });
+            var changed = true;
+            var guard = 0;
+            while (changed && guard < 8) {
+              changed = false;
+              guard += 1;
+              rev.nodes.forEach(function (node) {
+                var current = states[node.id];
+                if (current === 'done' || current === 'failed' || current === 'unknown') return;
+                if (!node.deps.length) return;
+                var deps = node.deps.map(function (dep) { return states[dep] || 'unknown'; });
+                var allDone = deps.every(function (dep) { return dep === 'done'; });
+                var anyBad = deps.some(function (dep) { return dep === 'failed' || dep === 'blocked'; });
+                var next = allDone ? 'active' : (anyBad ? 'blocked' : 'waiting');
+                if (next !== current) {
+                  states[node.id] = next;
+                  task = withTask(task, {
+                    nodeStates: Object.assign({}, taskState(task), { [node.id]: next }),
+                  });
+                  changed = true;
+                }
+              });
+            }
+            return task;
+          }
+
+          function appendFact(task, fact) {
+            factSeq += 1;
+            return withTask(task, { facts: task.facts.concat([fact]) });
+          }
+
+          function hasFact(taskId, factId) {
+            var task = taskById(taskId);
+            return Boolean(task && factId && task.facts.some(function (fact) { return fact.id === factId; }));
+          }
+
+          function replanTo(taskId, version) {
+            var task = taskById(taskId);
+            if (!task) return false;
+            if (!revisionOf(task, version)) return false;
+            if (task.currentRevision >= version) return false;
+            task = reconcile(withTask(task, { currentRevision: version }));
+            replaceTask(task);
+            markTask(task);
+            flush();
+            return true;
+          }
+
+          function replan(taskId) {
+            var task = taskById(taskId);
+            if (!task) return false;
+            return replanTo(taskId, task.currentRevision + 1);
+          }
+
+          function advance(taskId, nodeId, outcome, options) {
+            var task = taskById(taskId);
+            if (!task) return false;
+            var rev = revisionOf(task, task.currentRevision);
+            if (!rev) return false;
+            var node = rev.nodes.filter(function (item) { return item.id === nodeId; })[0];
+            if (!node) return false;
+            if (effectiveState(task, node) !== 'active') return false;
+            var opts = options || {};
+            if (opts.factId && hasFact(taskId, opts.factId)) return true;
+            var nextState = outcome === 'failure' ? 'failed' : 'done';
+            var fact = {
+              id: opts.factId || 'f-' + task.id + '-' + factSeq,
+              revision: task.currentRevision,
+              kind: outcome === 'failure' ? 'failure' : 'success',
+              title: opts.title || (outcome === 'failure' ? node.name + ' 失败' : node.name + ' 已确认'),
+              detail: opts.detail || (outcome === 'failure' ? (node.failureReason || '执行失败，保留原因与证据。') : (node.detail || '该活动已收拢为稳定事实。')),
+              at: opts.at || state.connection.lastSyncAt,
+              nodeId: nodeId,
+              evidenceId: opts.evidenceId || node.evidenceId || '',
+            };
+            if (outcome === 'failure') {
+              fact.nextStep = opts.nextStep || '依赖保持阻塞，等待人类决定是否重新发起。';
+            }
+            var changes = {
+              nodeStates: Object.assign({}, taskState(task), { [nodeId]: nextState }),
+            };
+            if (outcome === 'failure' && opts.requiresAttention !== false) changes.attention = true;
+            task = withTask(task, changes);
+            task = appendFact(task, fact);
+            task = reconcile(task);
+            replaceTask(task);
+            markTask(task);
+            flush();
+            return true;
+          }
+
+          function setConnection(connected) {
+            state.connection = {
+              connected: Boolean(connected),
+              lastSyncAt: state.connection.lastSyncAt,
+              source: state.connection.source,
+            };
+            mark('system');
+            flush();
+            UiEvents.emit('ConnectionChanged', { connection: state.connection });
+          }
+
+          function reset() {
+            init();
+            UiEvents.emit('ConnectionChanged', { connection: state.connection });
+          }
+
+          function hasProject(id) { return Boolean(projectById(id)); }
+          function hasTask(id) { return Boolean(taskById(id)); }
+          function hasAgent(id) { return Boolean(agentById(id)); }
+          function hasEvidence(id) { return Boolean(evidenceById(id)); }
+
+          function revisionVersions(taskId) {
+            var task = taskById(taskId);
+            return task ? task.revisions.map(function (rev) { return rev.version; }) : [];
+          }
+
+          function hasNode(taskId, version, nodeId) {
+            var task = taskById(taskId);
+            if (!task) return false;
+            var checkVersion = version || task.currentRevision;
+            var rev = revisionOf(task, checkVersion);
+            if (!rev) return false;
+            return effectiveNodes(task, checkVersion).some(function (node) { return node.id === nodeId; });
+          }
+
+          function isBound(agentId, taskId) {
+            var agent = agentById(agentId);
+            return Boolean(agent && agent.taskIds.indexOf(taskId) >= 0);
+          }
+
+          function currentRevisionOf(taskId) {
+            var task = taskById(taskId);
+            return task ? task.currentRevision : null;
+          }
+
+          function connection() { return state.connection; }
+
+          function taskList() { return state.tasks; }
+          function agentList() { return state.agents; }
+
+          function handleAdvance(env) {
+            if (!env) return;
+            advance(env.taskId, env.nodeId, env.outcome, env.options);
+          }
+
+          function handleReplan(env) {
+            if (!env) return;
+            if (typeof env.version === 'number') replanTo(env.taskId, env.version);
+            else replan(env.taskId);
+          }
+
+          function handleConnection(env) {
+            if (!env) return;
+            setConnection(env.connected);
+          }
+
+          function handleReset() {
+            reset();
+          }
+
+          function subscribe() {
+            UiEvents.subscribe('ActivityAdvanceRequested', handleAdvance);
+            UiEvents.subscribe('ReplanRequested', handleReplan);
+            UiEvents.subscribe('ConnectionChangedRequested', handleConnection);
+            UiEvents.subscribe('MockResetRequested', handleReset);
+          }
+
+          return {
+            init: init,
+            subscribe: subscribe,
+            projectionFor: projectionFor,
+            hasProject: hasProject,
+            hasTask: hasTask,
+            hasAgent: hasAgent,
+            hasEvidence: hasEvidence,
+            hasFact: hasFact,
+            hasNode: hasNode,
+            isBound: isBound,
+            revisionVersions: revisionVersions,
+            currentRevisionOf: currentRevisionOf,
+            connection: connection,
+            taskList: taskList,
+            agentList: agentList,
+            taskById: taskById,
+            projectById: projectById,
+            agentById: agentById,
+            evidenceById: evidenceById,
+          };
+        })();
+
+        /* ------------------------------------------------------------- Navigation
+           唯一 hash/scope 入口。只选择 scope 与历史查看版本，不写任何业务状态。 */
+        var Navigation = (function () {
+          var SCOPES = ['system', 'project', 'task', 'agent'];
+          var FILTERS = ['all', 'stable', 'live'];
+          var KEYS = ['scope', 'project', 'task', 'instance', 'ver', 'node', 'filter', 'evidence', 'raw', 'tour'];
+          var current = null;
+
+          function parseHash(hash) {
+            var text = String(hash || '').replace(/^#/, '');
+            if (!text) return normalize({ scope: 'system' });
+            var input = {};
+            var parts = text.split('&');
+            for (var i = 0; i < parts.length; i += 1) {
+              var part = parts[i];
+              if (!part) continue;
+              var eq = part.indexOf('=');
+              var key = eq < 0 ? part : part.slice(0, eq);
+              var rawValue = eq < 0 ? '' : part.slice(eq + 1);
+              if (KEYS.indexOf(key) < 0) return { error: '未知 hash 参数：' + key };
+              var value;
+              try {
+                value = decodeURIComponent(rawValue.replace(/\+/g, ' '));
+              } catch (error) {
+                return { error: 'hash 参数无法解码：' + key };
+              }
+              input[key] = value;
+            }
+            return normalize(input);
+          }
+
+          function normalize(input) {
+            var route = { scope: 'system' };
+            var scope = input.scope || 'system';
+            if (SCOPES.indexOf(scope) < 0) return { error: '未知视角：' + scope };
+            route.scope = scope;
+            if (scope !== 'project' && scope !== 'task' && scope !== 'agent') {
+              delete input.project;
+              delete input.task;
+              delete input.instance;
+              delete input.node;
+              delete input.ver;
+              delete input.filter;
+              delete input.evidence;
+              delete input.raw;
+            }
+            if (scope === 'project') {
+              delete input.task;
+              delete input.instance;
+              delete input.node;
+              delete input.ver;
+              delete input.evidence;
+              delete input.raw;
+            }
+            if (scope === 'task') delete input.instance;
+            if (scope === 'agent') {
+              delete input.ver;
+              delete input.node;
+            }
+            if (input.project) route.project = String(input.project);
+            if (input.task) route.task = String(input.task);
+            if (input.instance) route.instance = String(input.instance);
+            if (input.node) route.node = String(input.node);
+            if (input.ver !== undefined && input.ver !== null && input.ver !== '') route.ver = String(input.ver);
+            if (input.evidence) route.evidence = String(input.evidence);
+            if (input.filter) {
+              if (FILTERS.indexOf(input.filter) < 0) return { error: '未知筛选：' + input.filter };
+              route.filter = input.filter;
+            }
+            if (input.raw === '1' || input.raw === 'true' || input.raw === true) route.raw = true;
+            if (typeof Tour !== 'undefined' && input.tour !== undefined && input.tour !== '' && input.tour !== null) {
+              var station = Number(input.tour);
+              if (!Number.isInteger(station) || station < 1 || station > Tour.count()) {
+                return { error: '未知导览站点：' + input.tour };
+              }
+              route.tour = station;
+            }
+            if (scope === 'project') {
+              if (!route.project) return { error: '项目视角缺少 project 参数' };
+              if (!MockDriver.hasProject(route.project)) return { error: '未知项目：' + route.project };
+            }
+            if (scope === 'task') {
+              if (!route.task) return { error: '任务视角缺少 task 参数' };
+              if (!MockDriver.hasTask(route.task)) return { error: '未知任务：' + route.task };
+            }
+            if (scope === 'agent') {
+              if (!route.instance) return { error: '功能视角缺少 instance 参数' };
+              if (!MockDriver.hasAgent(route.instance)) return { error: '未知实例：' + route.instance };
+              if (route.task && !MockDriver.isBound(route.instance, route.task)) {
+                return { error: '实例 ' + route.instance + ' 未绑定任务 ' + route.task };
+              }
+            }
+            var taskId = route.task || null;
+            if (taskId) {
+              var versions = MockDriver.revisionVersions(taskId);
+              if (route.ver !== undefined) {
+                var version = Number(route.ver);
+                if (!Number.isInteger(version) || versions.indexOf(version) < 0) {
+                  return { error: '未知版本：' + route.ver };
+                }
+                route.ver = version;
+              }
+              if (route.node) {
+                var checkVersion = route.ver || MockDriver.currentRevisionOf(taskId);
+                if (!MockDriver.hasNode(taskId, checkVersion, route.node)) {
+                  return { error: '版本 ' + checkVersion + ' 中不存在节点：' + route.node };
+                }
+              }
+            } else if (route.ver !== undefined || route.node) {
+              return { error: '版本或节点参数需要同时给出 task' };
+            }
+            if (route.evidence && !MockDriver.hasEvidence(route.evidence)) {
+              return { error: '未知证据：' + route.evidence };
+            }
+            if (route.raw && !route.evidence && !route.node) {
+              return { error: 'raw 参数需要 evidence 或 node' };
+            }
+            return { route: route };
+          }
+
+          function toHash(route) {
+            var parts = ['scope=' + encodeURIComponent(route.scope)];
+            ['project', 'task', 'instance', 'ver', 'node', 'filter', 'evidence'].forEach(function (key) {
+              if (route[key] !== undefined && route[key] !== null && route[key] !== '') {
+                parts.push(key + '=' + encodeURIComponent(route[key]));
+              }
+            });
+            if (route.raw) parts.push('raw=1');
+            if (route.tour) parts.push('tour=' + route.tour);
+            return '#' + parts.join('&');
+          }
+
+          function sameRoute(a, b) {
+            if (!a || !b) return false;
+            return toHash(a) === toHash(b);
+          }
+
+          function apply(route, source) {
+            current = route;
+            UiEvents.emit('ScopeSelected', { route: route, source: source });
+          }
+
+          function applyError(message, raw) {
+            current = { scope: 'error', error: message, raw: raw };
+            UiEvents.emit('ScopeSelected', { route: current, source: 'error' });
+          }
+
+          function request(input, source) {
+            var result = normalize(input || {});
+            if (result.error) {
+              applyError(result.error, toHash(input || {}));
+              return false;
+            }
+            var route = result.route;
+            var hash = toHash(route);
+            if (location.hash === hash) {
+              apply(route, source || 'request');
+            } else {
+              location.hash = hash;
+            }
+            return true;
+          }
+
+          function onHashChange() {
+            var result = parseHash(location.hash);
+            if (result.error) {
+              applyError(result.error, location.hash);
+              return;
+            }
+            apply(result.route, 'hash');
+          }
+
+          function init() {
+            UiEvents.subscribe('NavigationRequested', function (env) {
+              if (!env) return;
+              request(env.route, env.source || 'control');
+            });
+            window.addEventListener('hashchange', onHashChange);
+            if (location.hash) onHashChange();
+            else request({ scope: 'system', tour: 1 }, 'boot');
+          }
+
+          function currentRoute() { return current; }
+          function href(route) { return toHash(normalize(route).route || route); }
+
+          return {
+            init: init,
+            request: request,
+            parseHash: parseHash,
+            toHash: toHash,
+            sameRoute: sameRoute,
+            currentRoute: currentRoute,
+            href: href,
+          };
+        })();
+
+        /* ------------------------------------------------------------- Controls
+           共享控件：只接收已分类语义与 scope，只发声明事件；不写其他模块状态。 */
+        var Controls = (function () {
+          function navRoute(route) {
+            UiEvents.emit('NavigationRequested', { route: route, source: 'control' });
+          }
+
+          function openTask(taskId) {
+            var task = MockDriver.taskById(taskId);
+            if (!task) return;
+            navRoute({ scope: 'task', task: taskId, project: task.projectId });
+          }
+
+          function scopeNavigator(route) {
+            var sections = [];
+
+            var viewItems = [
+              { key: 'system', label: '系统概要', iconName: 'i-home', route: { scope: 'system' } },
+            ];
+            var currentProject = route.project || (MockDriver.taskById(route.task) || {}).projectId || 'proj-humanagent';
+            viewItems.push({
+              key: 'project',
+              label: '项目',
+              iconName: 'i-folder',
+              route: { scope: 'project', project: currentProject },
+            });
+            var currentTask = route.task || 'task-runtime-refactor';
+            viewItems.push({
+              key: 'task',
+              label: '任务',
+              iconName: 'i-list',
+              route: { scope: 'task', task: currentTask, project: (MockDriver.taskById(currentTask) || {}).projectId || null },
+            });
+            var currentAgent = route.instance || 'agent-exec-01';
+            viewItems.push({
+              key: 'agent',
+              label: '功能 / Agent',
+              iconName: 'i-bot',
+              route: { scope: 'agent', instance: currentAgent },
+            });
+
+            sections.push(
+              el('section', { class: 'side-section' }, [
+                el('p', { class: 'side-label', text: '视角' }),
+                el(
+                  'ul',
+                  { class: 'nav-list' },
+                  viewItems.map(function (item) {
+                    return el('li', null, [
+                      el(
+                        'button',
+                        {
+                          class: 'nav-item',
+                          type: 'button',
+                          'aria-current': route.scope === item.key ? 'true' : null,
+                          'data-action': 'nav-view',
+                          'data-view': item.key,
+                          onclick: function () { navRoute(item.route); },
+                        },
+                        [
+                          svgEl('svg', { class: 'icon icon--sm', 'aria-hidden': 'true' }, [svgEl('use', { href: '#' + item.iconName })]),
+                          el('span', { text: item.label }),
+                        ]
+                      ),
+                    ]);
+                  })
+                ),
+              ])
+            );
+
+            var contextRows = [];
+            if (route.scope === 'system') {
+              contextRows.push(el('li', { class: 'muted small', text: '全部项目与任务' }));
+            }
+            if (route.scope === 'project' || route.project) {
+              var project = MockDriver.projectById(route.project || currentProject);
+              if (project) {
+                contextRows.push(el('li', null, [el('span', { class: 'small muted', text: '项目' }), el('div', { class: 'small', text: project.name })]));
+              }
+            }
+            if (route.task) {
+              var task = MockDriver.taskById(route.task);
+              if (task) {
+                contextRows.push(el('li', null, [el('span', { class: 'small muted', text: '任务' }), el('div', { class: 'small', text: task.title })]));
+              }
+            }
+            if (route.instance) {
+              var agent = MockDriver.agentById(route.instance);
+              if (agent) {
+                contextRows.push(
+                  el('li', null, [
+                    el('span', { class: 'small muted', text: '实例' }),
+                    el('div', { class: 'small', text: agent.role + ' · ' + agent.instance }),
+                  ])
+                );
+              }
+            }
+            if (route.ver) {
+              contextRows.push(el('li', null, [el('span', { class: 'small muted', text: '查看版本' }), el('div', { class: 'small', text: 'v' + route.ver })]));
+            }
+            if (route.filter && route.filter !== 'all') {
+              contextRows.push(el('li', null, [el('span', { class: 'small muted', text: '筛选' }), el('div', { class: 'small', text: route.filter })]));
+            }
+
+            sections.push(
+              el('section', { class: 'side-section' }, [
+                el('p', { class: 'side-label', text: '当前范围' }),
+                el('ul', { class: 'context-list stack stack--tight' }, contextRows.length ? contextRows : [el('li', { class: 'muted small', text: '未选择具体范围' })]),
+              ])
+            );
+
+            sections.push(
+              el('div', { class: 'read-only-note' }, [
+                el('strong', { text: '只读观测面' }),
+                el('br'),
+                '这里只读显示语义投影。推进、修订与重试只存在于底部独立的 Mock 控制面。',
+              ])
+            );
+
+            return el('div', { class: 'stack', 'data-control': 'scope-navigator' }, sections);
+          }
+
+          function breadcrumbs(route) {
+            var nodes = [];
+            function crumb(label, target, isCurrent) {
+              if (isCurrent) {
+                nodes.push(el('span', { class: 'crumb', 'aria-current': 'page', text: label }));
+                return;
+              }
+              nodes.push(
+                el('button', {
+                  class: 'crumb',
+                  type: 'button',
+                  text: label,
+                  'data-action': 'nav-crumb',
+                  onclick: function () { navRoute(target); },
+                })
+              );
+            }
+            function sep() {
+              nodes.push(el('span', { class: 'crumb-sep', 'aria-hidden': 'true', text: '/' }));
+            }
+
+            var project = null;
+            var task = null;
+            if (route.task) task = MockDriver.taskById(route.task);
+            if (route.project) project = MockDriver.projectById(route.project);
+            if (!project && task) project = MockDriver.projectById(task.projectId);
+
+            if (route.scope === 'system') {
+              crumb('系统概要', { scope: 'system' }, true);
+              return el('div', { class: 'row', 'data-control': 'breadcrumbs' }, nodes);
+            }
+
+            crumb('系统概要', { scope: 'system' }, false);
+            sep();
+            if (project) {
+              crumb(project.name, { scope: 'project', project: project.id }, !task && route.scope === 'project');
+            } else {
+              crumb('未知项目', { scope: 'system' }, true);
+            }
+            if (task) {
+              sep();
+              crumb(task.title, { scope: 'task', task: task.id, project: task.projectId }, route.scope === 'task' && !route.instance);
+            }
+            if (route.instance) {
+              var agent = MockDriver.agentById(route.instance);
+              sep();
+              crumb(
+                agent ? agent.role + ' · ' + agent.instance : '未知实例',
+                { scope: 'agent', instance: route.instance, task: route.task || undefined },
+                route.scope === 'agent'
+              );
+            }
+            return el('div', { class: 'row', 'data-control': 'breadcrumbs' }, nodes);
+          }
+
+          function notice(kind, title, detail, actions) {
+            return el('div', { class: 'notice notice--' + kind, 'data-notice-kind': kind }, [
+              icon(kind === 'error' ? 'i-alert' : kind === 'stale' ? 'i-clock' : 'i-doc', 'icon--sm'),
+              el('div', { class: 'stack stack--tight', style: { flex: '1 1 auto' } }, [
+                el('strong', { text: title }),
+                detail ? el('span', { text: detail }) : null,
+                actions && actions.length ? el('div', { class: 'row' }, actions) : null,
+              ]),
+            ]);
+          }
+
+          function stateNotice(context) {
+            var route = context.route;
+            if (context.error) {
+              return notice('error', '无法打开该范围', context.error, [
+                el('button', {
+                  class: 'btn btn--small',
+                  type: 'button',
+                  text: '返回系统概要',
+                  onclick: function () { navRoute({ scope: 'system' }); },
+                }),
+              ]);
+            }
+            var connection = context.connection;
+            var nodes = [];
+            if (connection && !connection.connected) {
+              nodes.push(
+                notice('stale', '连接已断开 · 显示上次内容', '最后同步：' + formatTime(connection.lastSyncAt) + '。断开不改变任务终态。')
+              );
+            }
+            if (context.projection && context.projection.kind === 'task' && context.projection.task.state === 'unknown') {
+              nodes.push(
+                notice('unknown', '存在未映射语义', '任务包含未注册事件类型，保持 unknown，不显示成功。')
+              );
+            }
+            if (context.projection && context.projection.kind === 'task' && context.projection.task.state === 'waiting') {
+              nodes.push(
+                notice('info', '等待人类处理', context.projection.task.waitingReason || '任务暂停，等待人类确认。')
+              );
+            }
+            if (route.ver && context.projection && context.projection.kind === 'task' && Number(route.ver) < context.projection.currentRevision) {
+              nodes.push(
+                notice('info', '正在查看历史版本 v' + route.ver, '当前执行版本为 v' + context.projection.currentRevision + '，历史版本只读。', [
+                  el('button', {
+                    class: 'btn btn--small',
+                    type: 'button',
+                    text: '回到当前版本',
+                    onclick: function () { navRoute({ scope: route.scope, task: route.task, instance: route.instance, project: route.project }); },
+                  }),
+                ])
+              );
+            }
+            if (route.ver && context.projection && context.projection.kind === 'task' && Number(route.ver) > context.projection.currentRevision) {
+              nodes.push(
+                notice('info', '正在查看候选修订 v' + route.ver, '该修订尚未发布，当前执行版本仍为 v' + context.projection.currentRevision + '。', [
+                  el('button', {
+                    class: 'btn btn--small',
+                    type: 'button',
+                    text: '回到当前版本',
+                    onclick: function () { navRoute({ scope: route.scope, task: route.task, instance: route.instance, project: route.project }); },
+                  }),
+                ])
+              );
+            }
+            if (!nodes.length) return el('div', { hidden: true, 'data-control': 'state-notice' });
+            return el('div', { class: 'stack stack--tight', 'data-control': 'state-notice' }, nodes);
+          }
+
+          function statusSummary(rows, label) {
+            return el(
+              'div',
+              { class: 'stat-grid', 'data-control': 'status-summary', 'aria-label': label || '状态汇总' },
+              rows.map(function (row) {
+                return el('div', { class: 'stat stat--' + (row.tone || 'plain') }, [
+                  el('div', { class: 'stat-value', text: String(row.value) }),
+                  el('div', { class: 'stat-label', text: row.label }),
+                ]);
+              })
+            );
+          }
+
+          function scopeBadge(value) {
+            return el('span', { class: 'chip chip--plain', text: value });
+          }
+
+          function evidenceButton(evidenceId, label, extra) {
+            if (!evidenceId) return null;
+            return el('button', {
+              class: 'btn btn--small btn--ghost',
+              type: 'button',
+              'data-action': 'open-evidence',
+              'data-evidence-id': evidenceId,
+              onclick: function (event) {
+                var route = Object.assign({}, extra || {}, { evidence: evidenceId, raw: undefined });
+                UiEvents.emit('EvidenceRequested', { context: { route: route }, raw: false, trigger: event.currentTarget });
+                navRoute(route);
+              },
+            }, [icon('i-doc', 'icon--sm'), el('span', { text: label || '证据' })]);
+          }
+
+          function factItem(fact, options) {
+            var opts = options || {};
+            return el(
+              'article',
+              {
+                class: 'fact fact--' + fact.kind,
+                'data-fact-id': fact.id,
+                'data-state': fact.kind,
+                'data-node-id': fact.nodeId || null,
+              },
+              [
+                el('div', { class: 'fact-main' }, [
+                  el('p', { class: 'fact-title', text: fact.title }),
+                  fact.detail ? el('p', { class: 'fact-detail', text: fact.detail }) : null,
+                  fact.nextStep ? el('p', { class: 'fact-detail', text: '下一步：' + fact.nextStep }) : null,
+                  el('p', { class: 'fact-meta' }, [
+                    chip(STATE_LABEL[fact.kind] || fact.kind, fact.kind),
+                    el('span', { text: 'v' + fact.revision }),
+                    fact.at ? el('span', { text: formatTime(fact.at) }) : null,
+                    fact.nodeId ? el('span', { class: 'mono', text: fact.nodeId }) : null,
+                    fact.sourceRef ? el('span', { class: 'mono', title: '来源引用', text: fact.sourceRef }) : null,
+                    fact.evidenceId && !opts.hideEvidence ? evidenceButton(fact.evidenceId, '查看证据', opts.routeFor) : null,
+                  ]),
+                ]),
+              ]
+            );
+          }
+
+          function taskSummary(task, options) {
+            var opts = options || {};
+            var project = MockDriver.projectById(task.projectId);
+            var lastFact = task.facts.length ? task.facts[task.facts.length - 1] : null;
+            var body = [
+              el('span', { class: 'list-row-main' }, [
+                el('span', { class: 'list-row-title', text: task.title }),
+                el('span', {
+                  class: 'list-row-meta',
+                  text: (project ? project.name : '未知项目') + ' · ' + task.template + ' · ' + task.goal,
+                }),
+                lastFact ? el('span', { class: 'list-row-meta', text: '最新事实：' + lastFact.title }) : null,
+              ]),
+              el('span', { class: 'list-row-tags' }, [
+                stateChip(task.state),
+                chip('v' + task.currentRevision, 'plain'),
+                task.attention ? chip('需关注', 'waiting') : null,
+              ]),
+            ];
+            if (opts.action === 'button') {
+              return el(
+                'button',
+                {
+                  class: 'list-row list-row--button',
+                  type: 'button',
+                  'data-task-id': task.id,
+                  'data-state': task.state,
+                  'data-action': 'open-task',
+                  onclick: function () { openTask(task.id); },
+                },
+                body
+              );
+            }
+            return el('div', { class: 'list-row', 'data-task-id': task.id, 'data-state': task.state }, body);
+          }
+
+          function taskCollection(tasks, options) {
+            var opts = options || {};
+            if (!tasks.length) return emptyBox(opts.emptyText || '当前范围没有任务。');
+            return el(
+              'div',
+              { class: 'list', 'data-control': 'task-collection' },
+              tasks.map(function (task) {
+                return taskSummary(task, { action: opts.action || 'button' });
+              })
+            );
+          }
+
+          function emptyBox(text, actions) {
+            return el('div', { class: 'empty-box', 'data-control': 'empty' }, [
+              el('p', { text: text }),
+              actions && actions.length ? el('div', { class: 'row', style: { justifyContent: 'center', marginTop: '10px' } }, actions) : null,
+            ]);
+          }
+
+          function card(title, subtitle, actions, body) {
+            return el('section', { class: 'card' }, [
+              el('header', { class: 'card-head' }, [
+                el('h2', { text: title }),
+                subtitle ? el('span', { class: 'card-sub', text: subtitle }) : null,
+                actions && actions.length ? el('div', { class: 'card-head-actions' }, actions) : null,
+              ]),
+              el('div', { class: 'card-body' }, body),
+            ]);
+          }
+
+          function detailList(entries) {
+            var children = [];
+            entries.forEach(function (entry) {
+              if (!entry || entry.value === null || entry.value === undefined || entry.value === '') return;
+              children.push(el('dt', { text: entry.label }));
+              children.push(el('dd', { text: String(entry.value) }));
+            });
+            if (!children.length) children.push(el('dd', { text: '—' }));
+            return el('dl', { class: 'def-list' }, children);
+          }
+
+          function templateSections(context, projection) {
+            var task = projection.task;
+            var template = projection.template;
+            var version = context.route.ver || projection.currentRevision;
+            var nodes = version === projection.currentRevision
+              ? projection.currentNodes
+              : (MockDriver.taskById(task.id).revisions.filter(function (rev) { return rev.version === version; })[0] || { nodes: [] }).nodes;
+
+            var slots = [];
+            if (template.key === 'inspection') {
+              slots.push(el('div', { class: 'stack' }, [
+                el('p', { class: 'card-sub', text: '本轮 occurrence 与历史轮次（历史 occurrence 不被修订改写）' }),
+                el(
+                  'div',
+                  { class: 'stack stack--tight', 'data-control': 'occurrence-list' },
+                  task.occurrences.map(function (occ) {
+                    var isCurrent = occ.state === 'active';
+                    return el('div', { class: 'occurrence' + (isCurrent ? ' occurrence--current' : ''), 'data-occ-id': occ.id, 'data-state': occ.state }, [
+                      el('span', { class: 'mono', text: occ.label }),
+                      stateChip(occ.state),
+                      el('span', { class: 'small', text: occ.result }),
+                    ]);
+                  })
+                ),
+              ]));
+            }
+            if (template.key === 'long-horizon') {
+              slots.push(el('div', { class: 'stack' }, [
+                el('p', { class: 'card-sub', text: '里程碑与阶段（长程模板按新事实重编排，已确认事实保留）' }),
+                el(
+                  'div',
+                  { class: 'stack stack--tight', 'data-control': 'milestone-list' },
+                  task.milestones.length
+                    ? task.milestones.map(function (mile) {
+                        return el('div', { class: 'occurrence', 'data-milestone-id': mile.id, 'data-state': mile.state }, [
+                          el('span', { class: 'mono', text: mile.label }),
+                          stateChip(mile.state),
+                          el('span', { class: 'small', text: mile.detail }),
+                        ]);
+                      })
+                    : [emptyBox('该任务尚未声明里程碑。')]
+                ),
+              ]));
+            }
+            if (template.key === 'single') {
+              slots.push(el('div', { class: 'stack' }, [
+                el('p', { class: 'card-sub', text: '一次结果与终态' }),
+                task.result
+                  ? el('div', { class: 'occurrence', 'data-result': 'settled', 'data-state': 'done' }, [
+                      chip('一次结果', 'success'),
+                      el('span', { class: 'small', text: task.result.value }),
+                      el('span', { class: 'small muted', text: formatTime(task.result.at) }),
+                    ])
+                  : el('div', { class: 'occurrence', 'data-result': 'pending', 'data-state': 'active' }, [
+                      chip('一次结果', 'info'),
+                      el('span', { class: 'small', text: '尚未收拢；任务仍在执行，不冒充完成。' }),
+                    ]),
+              ]));
+            }
+
+            return el('div', { class: 'stack', 'data-control': 'template-sections', 'data-template': template.key }, [
+              el('div', { class: 'row' }, [
+                chip(template.label, 'plain'),
+                el('span', { class: 'small muted', text: '必要阶段：' + template.sections.join(' → ') }),
+                el('span', { class: 'spacer small muted', text: '触发方式（独立选项）：' + task.trigger }),
+              ]),
+              el('div', { class: 'row' }, [
+                el('span', { class: 'small muted', text: '终点：' + template.terminal }),
+                el('span', { class: 'small muted', text: '当前版本 v' + version + '，共 ' + nodes.length + ' 个节点' }),
+              ]),
+              slots,
+            ]);
+          }
+
+          function nodeButton(node, version, extra) {
+            return el(
+              'button',
+              {
+                class: 'node node--' + node.state,
+                type: 'button',
+                'data-node-id': node.id,
+                'data-state': node.state,
+                'data-deps': node.deps.join(','),
+                'data-label': node.name,
+                'aria-current': extra && extra.selected ? 'true' : null,
+                onclick: function () {
+                  navRoute(Object.assign({}, extra && extra.route || {}, { node: node.id, ver: version }));
+                },
+              },
+              [
+                el('span', { class: 'node-name', text: node.name }),
+                el('span', { class: 'node-meta' }, [
+                  stateChip(node.state),
+                  el('span', { text: node.deps.length ? '依赖 ' + node.deps.join(', ') : '无前置依赖' }),
+                ]),
+              ]
+            );
+          }
+
+          function orchestrationViewer(context, projection, options) {
+            var opts = options || {};
+            var version = opts.version || context.route.ver || projection.currentRevision;
+            var task = projection.task;
+            var rev = task.revisions.filter(function (item) { return item.version === version; })[0];
+            var nodes = opts.nodes || (version === projection.currentRevision ? projection.currentNodes : (rev ? rev.nodes : []));
+            var selected = context.route.node || null;
+            var versionChip = version === projection.currentRevision
+              ? chip('当前执行版本 v' + version, 'info')
+              : version < projection.currentRevision
+                ? chip('历史版本 v' + version, 'stale')
+                : chip('候选修订 v' + version + ' · 尚未发布', 'waiting');
+
+            var laneMap = Object.create(null);
+            var order = [];
+            nodes.forEach(function (node) {
+              var depth = depthOf(node, nodes, 0);
+              var key = 'L' + depth;
+              if (!laneMap[key]) {
+                laneMap[key] = [];
+                order.push(key);
+              }
+              laneMap[key].push(node);
+            });
+            order.sort(function (a, b) { return Number(a.slice(1)) - Number(b.slice(1)); });
+
+            var canvas = el('div', { class: 'graph-canvas', 'data-control': 'orchestration-viewer' }, [
+              svgEl('svg', { class: 'graph-svg', 'aria-hidden': 'true' }),
+            ]);
+            order.forEach(function (key) {
+              canvas.appendChild(
+                el('div', { class: 'graph-lane' }, [
+                  el('span', { class: 'graph-lane-label', text: '第 ' + (Number(key.slice(1)) + 1) + ' 层' }),
+                  laneMap[key].map(function (node) {
+                    return nodeButton(node, version, {
+                      selected: node.id === selected,
+                      route: Object.assign({}, opts.route || {}, { task: task.id, project: task.projectId }),
+                    });
+                  }),
+                ])
+              );
+            });
+
+            return el('div', { class: 'stack', 'data-current-revision': projection.currentRevision, 'data-view-revision': version }, [
+              el('div', { class: 'row' }, [
+                el('span', { class: 'small muted', text: '节点与依赖（点击节点查看输入、输出和证据）' }),
+                versionChip,
+              ]),
+              el('div', { class: 'graph' }, [canvas]),
+            ]);
+          }
+
+          function depthOf(node, nodes, guard) {
+            if (guard > 12) return 0;
+            if (!node.deps.length) return 0;
+            var max = 0;
+            node.deps.forEach(function (depId) {
+              var dep = nodes.filter(function (item) { return item.id === depId; })[0];
+              if (!dep) return;
+              max = Math.max(max, depthOf(dep, nodes, guard + 1) + 1);
+            });
+            return max;
+          }
+
+          function semanticActivity(context, projection, options) {
+            var opts = options || {};
+            var task = projection.task;
+            var filter = opts.filter || context.route.filter || 'all';
+            var facts = task.facts;
+            if (filter === 'live') facts = [];
+            var stable = facts;
+            var liveItems = opts.mode === 'replay' ? [] : projection.activities;
+
+            var stableZone = el('section', { class: 'zone zone--stable', 'data-zone': 'stable', 'data-control': 'semantic-activity' }, [
+              el('header', { class: 'zone-head' }, [
+                chip('stable · 已确认事实', 'success'),
+                el('span', { class: 'small muted', text: 'v' + projection.currentRevision + ' 计划下已提交' }),
+                el('span', { class: 'spacer small muted', text: facts.length + ' 条' }),
+              ]),
+              el('div', { class: 'zone-body' }, [
+                stable.length
+                  ? el(
+                      'div',
+                      { class: 'stack stack--tight' },
+                      stable.map(function (fact) {
+                        return factItem(fact, { routeFor: { scope: context.route.scope, task: task.id, instance: context.route.instance, project: task.projectId, ver: context.route.ver } });
+                      })
+                    )
+                  : emptyBox(opts.stableEmptyText || '还没有稳定事实。'),
+                filter === 'live' ? el('p', { class: 'small muted', text: '当前筛选只显示 live。' }) : null,
+              ]),
+            ]);
+            if (filter === 'live') stableZone = el('div', { hidden: true });
+
+            var liveZone = el('section', { class: 'zone zone--live', 'data-zone': 'live', 'data-control': 'semantic-activity' }, [
+              el('header', { class: 'zone-head' }, [
+                chip('live · 当前活动', 'info'),
+                el('span', { class: 'small muted', text: '未收拢内容不冒充完成' }),
+                el('span', { class: 'spacer small muted', text: liveItems.length + ' 项' }),
+              ]),
+              el('div', { class: 'zone-body' }, [
+                liveItems.length
+                  ? el(
+                      'div',
+                      { class: 'stack stack--tight' },
+                      liveItems.map(function (activity) {
+                        var decidable = activity.state === 'active';
+                        return el('article', { class: 'fact fact--' + (activity.state === 'unknown' ? 'unknown' : 'info'), 'data-fact-id': 'live:' + activity.id, 'data-state': activity.state, 'data-node-id': activity.nodeId }, [
+                          el('div', { class: 'fact-main' }, [
+                            el('p', { class: 'fact-title', text: activity.name }),
+                            (activity.detail || activity.waitingReason) ? el('p', { class: 'fact-detail', text: activity.detail || activity.waitingReason }) : null,
+                            el('p', { class: 'fact-meta' }, [
+                              stateChip(activity.state),
+                              el('span', { class: 'mono', text: activity.nodeId }),
+                              evidenceButton(activity.evidenceId, '证据', {
+                                scope: context.route.scope,
+                                task: task.id,
+                                instance: context.route.instance,
+                                project: task.projectId,
+                                ver: context.route.ver,
+                              }),
+                              opts.showAdvance && decidable
+                                ? el('button', {
+                                    class: 'btn btn--small',
+                                    type: 'button',
+                                    'data-action': 'advance',
+                                    onclick: function () {
+                                      UiEvents.emit('ActivityAdvanceRequested', {
+                                        taskId: task.id,
+                                        nodeId: activity.nodeId,
+                                        outcome: 'success',
+                                      });
+                                    },
+                                  }, [el('span', { text: '推进为成功' })])
+                                : null,
+                              opts.showAdvance && decidable
+                                ? el('button', {
+                                    class: 'btn btn--small',
+                                    type: 'button',
+                                    'data-action': 'fail',
+                                    onclick: function () {
+                                      UiEvents.emit('ActivityAdvanceRequested', {
+                                        taskId: task.id,
+                                        nodeId: activity.nodeId,
+                                        outcome: 'failure',
+                                      });
+                                    },
+                                  }, [el('span', { text: '标记失败' })])
+                                : null,
+                            ]),
+                          ]),
+                        ]);
+                      })
+                    )
+                  : emptyBox(opts.liveEmptyText || '当前没有未收拢活动。'),
+              ]),
+            ]);
+            if (opts.hideLive) liveZone = el('div', { hidden: true });
+
+            return el('div', { class: 'zone-grid', 'data-control': 'stable-live' }, [stableZone, liveZone]);
+          }
+
+          function versionHistory(context, projection) {
+            var task = projection.task;
+            var current = projection.currentRevision;
+            var viewing = context.route.ver || current;
+            var revisions = projection.revisions || task.revisions;
+            var rows = revisions.map(function (rev) {
+              var published = rev.published !== undefined ? rev.published : rev.version <= current;
+              var currentRow = rev.version === current;
+              var prev = revisions.filter(function (item) { return item.version === rev.version - 1; })[0];
+              var added = prev
+                ? rev.nodes.filter(function (node) {
+                    return !prev.nodes.some(function (old) { return old.id === node.id; });
+                  })
+                : rev.nodes;
+              var removed = prev
+                ? prev.nodes.filter(function (old) {
+                    return !rev.nodes.some(function (node) { return node.id === old.id; });
+                  })
+                : [];
+              return el(
+                'article',
+                {
+                  class: 'occurrence' + (rev.version === viewing ? ' occurrence--current' : ''),
+                  'data-revision': rev.version,
+                  'data-state': currentRow ? 'current' : (published ? 'history' : 'candidate'),
+                },
+                [
+                  el('span', { class: 'mono', text: 'v' + rev.version }),
+                  currentRow ? chip('当前执行版本', 'info') : (published ? chip('历史版本', 'stale') : chip('候选修订 · 尚未发布', 'waiting')),
+                  el('span', { class: 'small', text: rev.reason }),
+                  el('span', { class: 'small muted', text: formatTime(rev.at) }),
+                  el('span', { class: 'spacer small muted', text: '新增 ' + added.length + ' / 删除 ' + removed.length + ' 节点' }),
+                  el('button', {
+                    class: 'btn btn--small',
+                    type: 'button',
+                    'data-action': 'view-revision',
+                    'data-revision': rev.version,
+                    onclick: function () {
+                      navRoute({
+                        scope: context.route.scope,
+                        task: task.id,
+                        project: task.projectId,
+                        instance: context.route.instance,
+                        ver: currentRow ? undefined : rev.version,
+                      });
+                    },
+                  }, [el('span', { text: currentRow ? '查看当前版本' : (published ? '查看此版本' : '查看候选修订') })]),
+                ]
+              );
+            });
+
+            return el(
+              'section',
+              { class: 'card', 'data-control': 'version-history', 'data-current-revision': current, 'data-view-revision': viewing },
+              [
+                el('header', { class: 'card-head' }, [
+                  el('h2', { text: '修订记录' }),
+                  el('span', { class: 'card-sub', text: '已发布修订标为历史；未发布候选单列，查看版本不改变当前执行版本' }),
+                ]),
+                el('div', { class: 'card-body stack stack--tight' }, rows),
+              ]
+            );
+          }
+
+          function agentScopePicker(context, projection) {
+            var agent = projection.agent;
+            var route = context.route;
+            var instanceSelect = el(
+              'select',
+              {
+                'aria-label': '选择实例',
+                'data-action': 'pick-instance',
+                onchange: function (event) {
+                  navRoute({ scope: 'agent', instance: event.target.value, task: undefined });
+                },
+              },
+              MockDriver.agentList().map(function (item) {
+                var option = el('option', { value: item.id, text: item.role + ' · ' + item.instance + '（' + item.id + '）' });
+                if (item.id === agent.id) option.setAttribute('selected', '');
+                return option;
+              })
+            );
+
+            var taskSelect = el(
+              'select',
+              {
+                'aria-label': '选择任务范围',
+                'data-action': 'pick-agent-task',
+                onchange: function (event) {
+                  var value = event.target.value;
+                  navRoute({ scope: 'agent', instance: agent.id, task: value || undefined });
+                },
+              },
+              [el('option', { value: '', text: '全部已绑定任务' })].concat(
+                agent.taskIds.map(function (id) {
+                  var task = MockDriver.taskById(id);
+                  var option = el('option', { value: id, text: task ? task.title : id });
+                  if (route.task === id) option.setAttribute('selected', '');
+                  return option;
+                })
+              )
+            );
+
+            return el('div', { class: 'row', 'data-control': 'agent-scope-picker' }, [
+              el('label', { class: 'field' }, [el('span', { text: '实例' }), instanceSelect]),
+              el('label', { class: 'field' }, [el('span', { text: '任务范围' }), taskSelect]),
+              el('span', { class: 'small muted', text: '角色与运行实例分开；只显示该实例已绑定的任务。' }),
+            ]);
+          }
+
+          function formatTime(value) {
+            if (!value) return '';
+            var text = String(value);
+            var match = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+            if (!match) return text;
+            return match[1] + '-' + match[2] + '-' + match[3] + ' ' + match[4] + ':' + match[5];
+          }
+
+          return {
+            scopeNavigator: scopeNavigator,
+            breadcrumbs: breadcrumbs,
+            stateNotice: stateNotice,
+            notice: notice,
+            statusSummary: statusSummary,
+            scopeBadge: scopeBadge,
+            factItem: factItem,
+            taskSummary: taskSummary,
+            taskCollection: taskCollection,
+            emptyBox: emptyBox,
+            card: card,
+            detailList: detailList,
+            templateSections: templateSections,
+            orchestrationViewer: orchestrationViewer,
+            semanticActivity: semanticActivity,
+            versionHistory: versionHistory,
+            agentScopePicker: agentScopePicker,
+            evidenceButton: evidenceButton,
+            formatTime: formatTime,
+          };
+        })();
+
+        /* ----------------------------------------------------------------- Views
+           视角只决定 scope 与布局，传入同一语义投影；不重建投影，不改其他模块状态。 */
+        var Views = (function () {
+          function routeFor(route, extra) {
+            return Object.assign(
+              {
+                scope: route.scope,
+                project: route.project,
+                task: route.task,
+                instance: route.instance,
+                ver: route.ver,
+                filter: route.filter,
+              },
+              extra || {}
+            );
+          }
+
+          function systemView(context, projection) {
+            var nodes = [];
+            nodes.push(
+              Controls.card('系统概要', '全部项目的只读语义投影', [
+                el('button', {
+                  class: 'btn btn--small',
+                  type: 'button',
+                  'data-action': 'open-live',
+                  onclick: function () { Controls.openTask('task-runtime-refactor'); },
+                }, [el('span', { text: '打开一个 live 任务' })]),
+                el('button', {
+                  class: 'btn btn--small',
+                  type: 'button',
+                  'data-action': 'open-replay',
+                  onclick: function () { Controls.openTask('task-release-check'); },
+                }, [el('span', { text: '打开一个完成复盘' })]),
+              ], [
+                Controls.statusSummary([
+                  { label: '项目', value: projection.projectCount },
+                  { label: '任务总数', value: projection.totals.total },
+                  { label: 'live', value: projection.totals.live },
+                  { label: '等待', value: projection.totals.waiting, tone: 'attention' },
+                  { label: '失败', value: projection.totals.failed, tone: 'failed' },
+                  { label: '已完成', value: projection.totals.completed },
+                  { label: '未映射', value: projection.totals.unknown, tone: 'attention' },
+                ], '系统状态汇总'),
+              ])
+            );
+
+            nodes.push(
+              Controls.card('待人处理', '需要关注的语义事实', null, [
+                projection.attention.length
+                  ? el('div', { class: 'list' }, projection.attention.map(function (item) {
+                      return el('div', { class: 'list-row', 'data-task-id': item.task.id, 'data-state': item.task.state }, [
+                        el('span', { class: 'list-row-main' }, [
+                          el('span', { class: 'list-row-title', text: item.task.title }),
+                          el('span', { class: 'list-row-meta', text: (item.project ? item.project.name + ' · ' : '') + (item.fact ? item.fact.title : '无最新事实') }),
+                        ]),
+                        el('span', { class: 'list-row-tags' }, [
+                          stateChipFor(item.task.state),
+                          el('button', {
+                            class: 'btn btn--small',
+                            type: 'button',
+                            'data-action': 'open-task',
+                            onclick: function () { Controls.openTask(item.task.id); },
+                          }, [el('span', { text: '查看' })]),
+                        ]),
+                      ]);
+                    }))
+                  : Controls.emptyBox('当前没有需要处理的关注项。'),
+              ])
+            );
+
+            nodes.push(
+              Controls.card('项目列表', '点击进入项目视角', null, [
+                el('div', { class: 'list' }, projection.projects.map(function (entry) {
+                  return el('button', {
+                    class: 'list-row list-row--button',
+                    type: 'button',
+                    'data-project-id': entry.project.id,
+                    onclick: function () {
+                      UiEvents.emit('NavigationRequested', { route: { scope: 'project', project: entry.project.id }, source: 'control' });
+                    },
+                  }, [
+                    el('span', { class: 'list-row-main' }, [
+                      el('span', { class: 'list-row-title', text: entry.project.name }),
+                      el('span', { class: 'list-row-meta', text: entry.project.summary + ' · 归属 ' + entry.project.owner }),
+                    ]),
+                    el('span', { class: 'list-row-tags' }, [
+                      stateChipFor(entry.project.status),
+                      el('span', { class: 'small muted', text: '任务 ' + entry.counts.total }),
+                    ]),
+                  ]);
+                })),
+              ])
+            );
+            return nodes;
+          }
+
+          function projectView(context, projection) {
+            var route = context.route;
+            var tasks = projection.tasks;
+            var filter = route.filter || 'all';
+            var liveTasks = tasks.filter(function (task) { return task.state === 'live' || task.state === 'waiting' || task.state === 'unknown'; });
+            var historyTasks = tasks.filter(function (task) { return task.state === 'completed' || task.state === 'failed'; });
+            var visible = filter === 'live' ? liveTasks : filter === 'stable' ? historyTasks : tasks;
+
+            return [
+              el('h1', { class: 'page-title', text: projection.project.name }),
+              el('p', { class: 'page-sub', text: projection.project.summary + ' · 归属 ' + projection.project.owner }),
+              Controls.card('项目状态', '同一语义事实与真实 scope', [
+                el('div', { class: 'seg', role: 'group', 'aria-label': '任务筛选' }, [
+                  segButton('all', '全部', route, filter),
+                  segButton('live', 'live', route, filter),
+                  segButton('stable', '已收拢', route, filter),
+                ]),
+              ], [
+                Controls.statusSummary([
+                  { label: '任务总数', value: projection.counts.total },
+                  { label: 'live', value: projection.counts.live },
+                  { label: '等待', value: projection.counts.waiting, tone: 'attention' },
+                  { label: '失败', value: projection.counts.failed, tone: 'failed' },
+                  { label: '已完成', value: projection.counts.completed },
+                ], '项目状态汇总'),
+              ]),
+              Controls.card('任务列表', '筛选：' + filter, null, [
+                Controls.taskCollection(visible, {
+                  action: 'button',
+                  emptyText: filter === 'live' ? '该项目当前没有 live 任务。' : filter === 'stable' ? '该项目还没有已收拢任务。' : '该项目还没有任务。',
+                }),
+              ]),
+            ];
+          }
+
+          function segButton(key, label, route, filter) {
+            return el('button', {
+              class: 'seg-btn',
+              type: 'button',
+              'data-action': 'filter',
+              'data-filter': key,
+              'aria-pressed': filter === key ? 'true' : 'false',
+              onclick: function () {
+                UiEvents.emit('NavigationRequested', {
+                  route: { scope: 'project', project: route.project, filter: key === 'all' ? undefined : key },
+                  source: 'control',
+                });
+              },
+            }, [el('span', { text: label })]);
+          }
+
+          function taskView(context, projection) {
+            var route = context.route;
+            var task = projection.task;
+            var viewingVersion = route.ver || projection.currentRevision;
+            var isHistory = viewingVersion < projection.currentRevision;
+            var isCandidate = viewingVersion > projection.currentRevision;
+            var nodes = [];
+
+            nodes.push(el('h1', { class: 'page-title' }, [
+              el('span', { text: task.title }),
+              stateChipFor(task.state),
+              isHistory ? chip('查看历史 v' + viewingVersion, 'stale') : isCandidate ? chip('候选修订 v' + viewingVersion, 'waiting') : null,
+            ]));
+            nodes.push(el('p', { class: 'page-sub', text: task.goal }));
+
+            nodes.push(
+              Controls.card('任务概览', projection.template.label, [
+                el('div', { class: 'seg', role: 'group', 'aria-label': '视图模式' }, [
+                  el('button', {
+                    class: 'seg-btn',
+                    type: 'button',
+                    'data-action': 'view-mode',
+                    'data-mode': 'live',
+                    'aria-pressed': route.filter !== 'stable' ? 'true' : 'false',
+                    onclick: function () {
+                      UiEvents.emit('NavigationRequested', { route: routeFor(route, { filter: undefined, ver: undefined }), source: 'control' });
+                    },
+                  }, [el('span', { text: '当前执行' })]),
+                  el('button', {
+                    class: 'seg-btn',
+                    type: 'button',
+                    'data-action': 'view-mode',
+                    'data-mode': 'stable',
+                    'aria-pressed': route.filter === 'stable' ? 'true' : 'false',
+                    onclick: function () {
+                      UiEvents.emit('NavigationRequested', { route: routeFor(route, { filter: 'stable', ver: undefined }), source: 'control' });
+                    },
+                  }, [el('span', { text: '完成复盘' })]),
+                ]),
+              ], [
+                Controls.detailList([
+                  { label: '项目', value: projection.project ? projection.project.name : '' },
+                  { label: '模板', value: projection.template.label },
+                  { label: '触发方式', value: task.trigger },
+                  { label: '当前版本', value: 'v' + projection.currentRevision },
+                  { label: '查看版本', value: 'v' + viewingVersion },
+                  { label: '任务状态', value: STATE_LABEL[task.state] || task.state },
+                  { label: '稳定事实', value: task.facts.length + ' 条' },
+                  { label: '进行中活动', value: projection.activities.length + ' 项' },
+                  { label: '完成任务时间', value: task.completedAt ? Controls.formatTime(task.completedAt) : '' },
+                ]),
+              ])
+            );
+
+            nodes.push(
+              Controls.card('模板阶段与终点', projection.template.label, null, [
+                Controls.templateSections(context, projection),
+              ])
+            );
+
+            var replayMode = route.filter === 'stable' || task.state === 'completed';
+            nodes.push(
+              Controls.card(replayMode ? '完成复盘' : '当前执行', 'stable 已确认内容与 live 当前活动分开', null, [
+                Controls.semanticActivity(context, projection, {
+                  mode: replayMode ? 'replay' : 'live',
+                  filter: route.filter,
+                  showAdvance: !replayMode,
+                  hideLive: task.state === 'completed',
+                  stableEmptyText: '该任务还没有稳定事实。',
+                  liveEmptyText: task.state === 'completed' ? '任务已完成，没有 live 活动。' : '当前没有未收拢活动。',
+                }),
+              ])
+            );
+
+            nodes.push(
+              Controls.card('任务编排', '当前视图版本 v' + viewingVersion, [
+                el('button', {
+                  class: 'btn btn--small',
+                  type: 'button',
+                  'data-action': 'replan',
+                  disabled: isHistory ? true : null,
+                  onclick: function () {
+                    UiEvents.emit('ReplanRequested', { taskId: task.id });
+                  },
+                }, [el('span', { text: '应用下一次修订' })]),
+              ], [
+                Controls.orchestrationViewer(context, projection, { route: routeFor(route) }),
+              ])
+            );
+
+            nodes.push(Controls.versionHistory(context, projection));
+            return nodes;
+          }
+
+          function agentView(context, projection) {
+            var route = context.route;
+            var agent = projection.agent;
+            var bindings = projection.bindings;
+            var scoped = route.task
+              ? bindings.filter(function (binding) { return binding.task.id === route.task; })
+              : bindings;
+            var nodes = [];
+
+            nodes.push(el('h1', { class: 'page-title' }, [
+              el('span', { text: agent.role + ' · ' + agent.instance }),
+              chip(agent.id, 'plain'),
+            ]));
+            nodes.push(el('p', { class: 'page-sub', text: '功能角色与运行实例分开；任务范围只来自该实例已绑定的任务。' }));
+
+            nodes.push(
+              Controls.card('实例与任务范围', '选择只改变只读 scope', null, [
+                Controls.agentScopePicker(context, projection),
+                el('p', { class: 'small muted', text: '已绑定任务：' + agent.taskIds.map(function (id) {
+                  var bound = MockDriver.taskById(id);
+                  return bound ? bound.title : id;
+                }).join('、') }),
+              ])
+            );
+
+            if (!scoped.length) {
+              nodes.push(
+                Controls.card('任务轨迹', route.task ? '所选任务不在该实例的绑定范围' : '没有绑定任务', null, [
+                  Controls.emptyBox('该实例与所选任务没有绑定关系，不显示其他实例内容。', [
+                    el('button', {
+                      class: 'btn btn--small',
+                      type: 'button',
+                      text: '查看该实例全部绑定任务',
+                      onclick: function () {
+                        UiEvents.emit('NavigationRequested', { route: { scope: 'agent', instance: agent.id }, source: 'control' });
+                      },
+                    }),
+                  ]),
+                ])
+              );
+              return nodes;
+            }
+
+            scoped.forEach(function (binding) {
+              nodes.push(
+                Controls.card(
+                  binding.task.title,
+                  '当前 v' + binding.currentRevision + ' · ' + (binding.task.state === 'completed' ? '已完成' : 'live'),
+                  [
+                    el('button', {
+                      class: 'btn btn--small',
+                      type: 'button',
+                      'data-action': 'open-task',
+                      onclick: function () { Controls.openTask(binding.task.id); },
+                    }, [el('span', { text: '打开任务' })]),
+                  ],
+                  [
+                    Controls.detailList([
+                      { label: '目标', value: binding.task.goal },
+                      { label: '模板', value: binding.template.label },
+                      { label: '当前活动', value: binding.activities.length + ' 项' },
+                      { label: '稳定事实', value: binding.facts.length + ' 条' },
+                    ]),
+                    Controls.orchestrationViewer(
+                      { route: routeFor(route, { task: binding.task.id }) },
+                      {
+                        task: binding.task,
+                        currentRevision: binding.currentRevision,
+                        currentNodes: binding.currentNodes,
+                        template: binding.template,
+                      },
+                      { route: routeFor(route, { task: binding.task.id }) }
+                    ),
+                    Controls.semanticActivity(
+                      { route: Object.assign({}, route, { task: binding.task.id, scope: 'agent' }) },
+                      { task: binding.task, currentRevision: binding.currentRevision, activities: binding.activities, facts: binding.facts },
+                      { mode: binding.task.state === 'completed' ? 'replay' : 'live', hideLive: binding.task.state === 'completed' }
+                    ),
+                  ]
+                )
+              );
+            });
+            return nodes;
+          }
+
+          function errorView(context) {
+            return [
+              el('h1', { class: 'page-title', text: '无法打开该范围' }),
+              el('p', { class: 'page-sub', text: context.error }),
+              Controls.card('可恢复入口', '错误显式显示，不静默回退到第一项', null, [
+                el('div', { class: 'row' }, [
+                  el('button', {
+                    class: 'btn',
+                    type: 'button',
+                    'data-action': 'back-system',
+                    onclick: function () { UiEvents.emit('NavigationRequested', { route: { scope: 'system' }, source: 'control' }); },
+                  }, [el('span', { text: '返回系统概要' })]),
+                  el('button', {
+                    class: 'btn',
+                    type: 'button',
+                    'data-action': 'retry-hash',
+                    onclick: function () { Navigation.request(context.lastGoodRoute || { scope: 'system' }, 'control'); },
+                  }, [el('span', { text: '返回上一个可用范围' })]),
+                ]),
+                el('p', { class: 'small muted mono', text: '原始 hash：' + (context.errorRaw || '(空)') }),
+                Controls.emptyBox('未知 project / task / instance / revision / node 不会自动选中第一项。'),
+              ]),
+            ];
+          }
+
+          function stateChipFor(state) {
+            return chip(STATE_LABEL[state] || state, state);
+          }
+
+          function render(context) {
+            if (context.error) return errorView(context);
+            var projection = context.projection;
+            if (!projection) {
+              return [Controls.card('暂无数据', '当前 scope 没有可用投影', null, [Controls.emptyBox('请从左侧选择一个视角。')])];
+            }
+            if (projection.kind === 'system') return systemView(context, projection);
+            if (projection.kind === 'project') return projectView(context, projection);
+            if (projection.kind === 'task') return taskView(context, projection);
+            if (projection.kind === 'agent') return agentView(context, projection);
+            return [Controls.emptyBox('该 scope 尚未声明视图。')];
+          }
+
+          return { render: render };
+        })();
+
+        /* --------------------------------------------------------------- Evidence
+           唯一 drawer / raw 展开 / 焦点生命周期 owner。 */
+        var Evidence = (function () {
+          var dialog = null;
+          var content = null;
+          var contextProvider = null;
+          var returnFocus = null;
+          var pendingFocus = null;
+          var currentTab = 'semantic';
+          var openKey = null;
+          var dismissedKey = null;
+
+          function focusDescriptor(node) {
+            if (!node || !node.getAttribute) return null;
+            if (node.getAttribute('data-action') === 'open-evidence') {
+              var evidenceId = node.getAttribute('data-evidence-id');
+              if (evidenceId) return { type: 'evidence', evidenceId: evidenceId };
+            }
+            var nodeId = node.getAttribute('data-node-id');
+            if (nodeId) return { type: 'node', nodeId: nodeId };
+            return null;
+          }
+
+          function findFocusTarget(descriptor) {
+            var nodes;
+            var i;
+            if (descriptor && descriptor.type === 'evidence') {
+              nodes = document.querySelectorAll('[data-action="open-evidence"]');
+              for (i = 0; i < nodes.length; i += 1) {
+                if (nodes[i].getAttribute('data-evidence-id') === descriptor.evidenceId) return nodes[i];
+              }
+            } else if (descriptor && descriptor.type === 'node') {
+              nodes = document.querySelectorAll('[data-node-id]');
+              for (i = 0; i < nodes.length; i += 1) {
+                if (nodes[i].getAttribute('data-node-id') === descriptor.nodeId) return nodes[i];
+              }
+            }
+            return document.getElementById('tourToggle');
+          }
+
+          function restoreFocus() {
+            if (!pendingFocus) return;
+            var target = findFocusTarget(pendingFocus);
+            pendingFocus = null;
+            if (target && typeof target.focus === 'function') target.focus();
+          }
+
+          function resolve(context) {
+            var route = context.route;
+            if (!route) return null;
+            if (route.evidence) {
+              var item = MockDriver.evidenceById(route.evidence);
+              return item ? { type: 'evidence', evidence: item, scopeKey: 'evidence:' + route.evidence } : null;
+            }
+            if (route.node) {
+              var projection = context.projection;
+              if (!projection || projection.kind !== 'task') return null;
+              var version = route.ver || projection.currentRevision;
+              var rev = projection.task.revisions.filter(function (item) { return item.version === version; })[0];
+              if (!rev) return null;
+              var nodes = version === projection.currentRevision ? projection.currentNodes : rev.nodes;
+              var node = nodes.filter(function (item) { return item.id === route.node; })[0];
+              if (!node) return null;
+              return {
+                type: 'node',
+                node: node,
+                task: projection.task,
+                version: version,
+                scopeKey: 'node:' + projection.task.id + ':' + version + ':' + node.id,
+              };
+            }
+            return null;
+          }
+
+          function open(context, options) {
+            var target = resolve(context);
+            if (!target) return;
+            var opts = options || {};
+            var key = target.scopeKey + '|' + (opts.raw ? 'raw' : 'semantic');
+            returnFocus = focusDescriptor(opts.trigger || document.activeElement);
+            currentTab = opts.raw ? 'raw' : 'semantic';
+            openKey = key;
+            dismissedKey = null;
+            render(target);
+            if (!dialog.open) dialog.showModal();
+          }
+
+          function render(target) {
+            content.replaceChildren();
+            var head = el('header', { class: 'dialog-head' }, [
+              el('div', { class: 'stack stack--tight', style: { flex: '1 1 auto' } }, [
+                el('h2', { id: 'dialogTitle', text: target.type === 'evidence' ? target.evidence.title : target.node.name }),
+                el('p', { class: 'small muted', text: target.type === 'evidence' ? '主动证据查看 · 独立只读 owner' : '节点详情 · ' + target.task.title + ' · v' + target.version }),
+              ]),
+              el('button', {
+                class: 'icon-btn',
+                type: 'button',
+                'data-action': 'close-dialog',
+                'aria-label': '关闭',
+                onclick: close,
+              }, [icon('i-x')]),
+            ]);
+
+            var body = el('div', { class: 'dialog-body' });
+
+            if (target.type === 'node') {
+              body.append(
+                Controls.detailList([
+                  { label: '节点', value: target.node.name },
+                  { label: '节点 ID', value: target.node.id },
+                  { label: '状态', value: STATE_LABEL[target.node.state] || target.node.state },
+                  { label: '依赖', value: target.node.deps.length ? target.node.deps.join(', ') : '无' },
+                  { label: '说明', value: target.node.detail || '' },
+                  { label: '等待原因', value: target.node.waitingReason || '' },
+                  { label: '失败原因', value: target.node.failureReason || '' },
+                  { label: '版本', value: 'v' + target.version },
+                ])
+              );
+              var facts = target.task.facts.filter(function (fact) { return fact.nodeId === target.node.id; });
+              body.append(
+                el('div', { class: 'stack stack--tight' }, [
+                  el('h3', { class: 'small muted', text: '该节点的输入 / 输出与事实' }),
+                  facts.length
+                    ? el('div', { class: 'stack stack--tight' }, facts.map(function (fact) { return Controls.factItem(fact); }))
+                    : Controls.emptyBox('该节点还没有关联的稳定事实。'),
+                ])
+              );
+            } else {
+              body.append(
+                Controls.detailList([
+                  { label: '证据', value: target.evidence.title },
+                  { label: '来源', value: target.evidence.raw.source },
+                  { label: '摘要', value: target.evidence.summary },
+                  { label: '输入', value: target.evidence.input },
+                  { label: '输出', value: target.evidence.output },
+                ])
+              );
+            }
+
+            var tabs = el('div', { class: 'tabs', role: 'tablist' }, [
+              tabButton('semantic', '语义', target),
+              tabButton('raw', '原始证据 (Mock raw)', target),
+            ]);
+            var panel = el('div', { role: 'tabpanel', 'data-tab': currentTab, 'data-evidence-id': target.type === 'evidence' ? target.evidence.id : null }, [
+              currentTab === 'raw'
+                ? el('pre', { class: 'raw-block', 'data-raw': 'true', text: target.type === 'evidence' ? safeStringify(target.evidence.raw) : safeStringify(target.node) })
+                : el('p', { class: 'small muted', text: '语义视图已归类。原始证据只在主动选择「原始证据」页签后读取，不参与状态判断。' }),
+            ]);
+
+            body.append(tabs, panel);
+            content.append(head, body);
+          }
+
+          function tabButton(key, label, target) {
+            return el('button', {
+              class: 'tab',
+              type: 'button',
+              role: 'tab',
+              'aria-selected': currentTab === key ? 'true' : 'false',
+              'data-tab': key,
+              onclick: function () {
+                currentTab = key;
+                render(target);
+              },
+            }, [el('span', { text: label })]);
+          }
+
+          function safeStringify(value) {
+            return JSON.stringify(value, null, 2);
+          }
+
+          function close() {
+            var context = contextProvider ? contextProvider() : null;
+            var route = context && context.route;
+            var nextRoute = route ? Object.assign({}, route) : null;
+            var changed = false;
+            if (nextRoute && (nextRoute.evidence || nextRoute.node || nextRoute.raw)) {
+              delete nextRoute.evidence;
+              delete nextRoute.node;
+              delete nextRoute.raw;
+              changed = true;
+            }
+            pendingFocus = returnFocus || { type: 'toggle' };
+            returnFocus = null;
+            if (dialog.open) dialog.close();
+            dismissedKey = openKey;
+            openKey = null;
+            if (changed) {
+              UiEvents.emit('NavigationRequested', { route: nextRoute, source: 'evidence-close' });
+            } else {
+              restoreFocus();
+            }
+            UiEvents.emit('EvidenceClosed', {});
+          }
+
+          function init(provider) {
+            contextProvider = provider;
+            dialog = document.getElementById('detailDialog');
+            content = document.getElementById('dialogContent');
+            dialog.addEventListener('cancel', function (event) {
+              event.preventDefault();
+              close();
+            });
+            dialog.addEventListener('click', function (event) {
+              if (event.target === dialog) close();
+            });
+            UiEvents.subscribe('EvidenceRequested', function (env) {
+              if (!env) return;
+              open(env.context || contextProvider(), { raw: env.raw, trigger: env.trigger });
+            });
+            UiEvents.subscribe('EvidenceClosedRequested', function () { close(); });
+            UiEvents.subscribe('ViewRendered', restoreFocus);
+          }
+
+          function sync(context) {
+            if (!dialog) return;
+            var target = resolve(context);
+            if (!target) {
+              if (dialog.open) close();
+              return;
+            }
+            if (!dialog.open) {
+              var trigger = document.activeElement;
+              if (!trigger || trigger === document.body || !document.contains(trigger)) {
+                trigger = document.getElementById('tourToggle');
+              }
+              open(context, { raw: Boolean(context.route && context.route.raw), trigger: trigger });
+              return;
+            }
+            var desiredTab = context.route && context.route.raw ? 'raw' : 'semantic';
+            var key = target.scopeKey + '|' + (currentTab === 'raw' ? 'raw' : 'semantic');
+            if (key === dismissedKey && !dialog.open) return;
+            if (currentTab !== desiredTab) {
+              currentTab = desiredTab;
+              render(target);
+            }
+            key = target.scopeKey + '|' + (currentTab === 'raw' ? 'raw' : 'semantic');
+            if (key !== openKey) {
+              openKey = key;
+              render(target);
+            }
+          }
+
+          function isOpen() { return Boolean(dialog && dialog.open); }
+          function currentEvidenceId() { return openKey; }
+          function clearDismissed() { dismissedKey = null; }
+
+          return {
+            init: init,
+            open: open,
+            close: close,
+            sync: sync,
+            isOpen: isOpen,
+            currentEvidenceId: currentEvidenceId,
+            clearDismissed: clearDismissed,
+          };
+        })();
+
+        /* ----------------------------------------------------------------- Tour
+           站点表只声明路线、说明和可重复动作；所有动作走声明事件。 */
+        var Tour = (function () {
+          var STATIONS = [
+            {
+              id: 'system',
+              title: '系统起点',
+              goal: '从系统概要确认项目、任务汇总和待人处理项。',
+              route: { scope: 'system' },
+              checks: ['项目列表可见', '状态汇总可见', '待人处理项可见'],
+            },
+            {
+              id: 'project',
+              title: '项目下钻',
+              goal: '进入 HumanAgent 平台，查看项目身份与任务列表。',
+              route: { scope: 'project', project: 'proj-humanagent' },
+              checks: ['项目名称与归属可见', 'live / 已收拢筛选可见', '任务列表可打开'],
+            },
+            {
+              id: 'live-task',
+              title: 'Live 任务',
+              goal: '查看正在执行的任务详情、目标和模板。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor' },
+              checks: ['任务标题与目标可见', '模板标签可见', '当前活动与 stable 分区可见'],
+            },
+            {
+              id: 'long-horizon',
+              title: '长程模板',
+              goal: '观察长程模板的里程碑、阶段、终点和重编排能力。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor' },
+              checks: ['里程碑可见', '阶段与终点可见', '编排图可见'],
+            },
+            {
+              id: 'inspection',
+              title: '巡检模板',
+              goal: '观察巡检模板的当前 occurrence、历史轮次和收拢终点。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-pipeline-audit' },
+              checks: ['当前 occurrence 可见', '历史轮次可见', '探针与收拢阶段可见'],
+            },
+            {
+              id: 'single',
+              title: '单次模板',
+              goal: '观察单次模板的输入、执行、验证和一次结果。',
+              route: { scope: 'task', project: 'proj-orbit', task: 'task-single-live' },
+              checks: ['进行中单次任务可见', '一次结果插槽可见', '完成后的复盘入口可见'],
+            },
+            {
+              id: 'stable-live',
+              title: 'Stable / live',
+              goal: '同一任务内分开已确认事实与当前活动。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor' },
+              checks: ['stable 区可见', 'live 区可见', '未收拢活动不显示为完成'],
+            },
+            {
+              id: 'success',
+              title: '模拟成功',
+              goal: '把巡检任务的一个 active 活动推进为稳定成功事实。',
+              route: { scope: 'task', project: 'proj-orbit', task: 'task-telemetry' },
+              setup: function () {
+                UiEvents.emit('ActivityAdvanceRequested', {
+                  taskId: 'task-telemetry',
+                  nodeId: 'n-probe',
+                  outcome: 'success',
+                  options: {
+                    factId: 'tour-fact-telemetry-probe-success',
+                    title: '遥测探针已收拢为稳定事实',
+                    detail: 'Tour 模拟成功：探针样本已确认，后续收拢仍按依赖推进。',
+                  },
+                });
+              },
+              checks: ['指定活动结束', '成功事实追加一次', '重访不重复追加'],
+            },
+            {
+              id: 'failure',
+              title: '模拟失败',
+              goal: '只收拢指定的巡检活动，并保留其他 live 任务。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-pipeline-audit' },
+              setup: function () {
+                ensureRevision('task-pipeline-audit', 3);
+                UiEvents.emit('ActivityAdvanceRequested', {
+                  taskId: 'task-pipeline-audit',
+                  nodeId: 'n-dns-compare',
+                  outcome: 'failure',
+                  options: {
+                    factId: 'tour-fact-pipeline-dns-failure',
+                    title: 'DNS 比对失败',
+                    detail: 'Tour 模拟失败：DNS 比对未完成，保留原因与证据。',
+                    nextStep: '检查上游 DNS 数据后由人类决定是否重新发起。',
+                  },
+                });
+              },
+              checks: ['失败事实可见', '原因与下一步可见', '其他 live 任务不变'],
+            },
+            {
+              id: 'long-v2',
+              title: '长程 v2',
+              goal: '查看长程任务第二次修订的节点和依赖。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor', ver: 2 },
+              setup: function () { ensureRevision('task-runtime-refactor', 2); },
+              checks: ['v2 节点可见', 'done 事实保留', 'active 依赖已完成'],
+            },
+            {
+              id: 'long-v3',
+              title: '长程 v3',
+              goal: '查看长程任务第三次修订的差异与原因。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor', ver: 3 },
+              setup: function () { ensureRevision('task-runtime-refactor', 3); },
+              checks: ['v3 节点可见', '修订原因可见', 'waiting 依赖 active 节点'],
+            },
+            {
+              id: 'history',
+              title: '历史版本',
+              goal: '查看历史版本，同时保持当前执行版本不变。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor', ver: 1 },
+              setup: function () { ensureRevision('task-runtime-refactor', 3); },
+              checks: ['历史标记可见', '当前版本仍为 v3', '旧事实仍可读'],
+            },
+            {
+              id: 'inspection-revision',
+              title: '巡检修订',
+              goal: '同一巡检任务从 v1 修订到 v3，历史 occurrence 不改写。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-pipeline-audit', ver: 3 },
+              setup: function () { ensureRevision('task-pipeline-audit', 3); },
+              checks: ['v1/v2/v3 历史可见', 'occurrence 历史保留', '修订原因可见'],
+            },
+            {
+              id: 'single-revision',
+              title: '单次修订',
+              goal: '同一进行中单次任务从 v1 修订到 v3。',
+              route: { scope: 'task', project: 'proj-orbit', task: 'task-single-live', ver: 3 },
+              setup: function () { ensureRevision('task-single-live', 3); },
+              checks: ['v1/v2/v3 历史可见', '输入事实保留', '后续验证节点可见'],
+            },
+            {
+              id: 'node-dialog',
+              title: '节点详情',
+              goal: '打开节点 drawer，查看输入、输出、依赖和证据入口。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor', ver: 3, node: 'n-template-extension-wire' },
+              setup: function () { ensureRevision('task-runtime-refactor', 3); },
+              checks: ['dialog 自动打开', '依赖与状态可见', '证据入口可见'],
+            },
+            {
+              id: 'raw',
+              title: '主动 raw',
+              goal: '只在主动打开证据时查看 Mock raw，不让 raw 参与语义判断。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor', evidence: 'ev-wire', raw: true },
+              checks: ['raw 页签打开', 'raw 只属于 Evidence owner', '主界面不展示 raw 流水'],
+            },
+            {
+              id: 'fact-retention',
+              title: '事实保留',
+              goal: '确认修订后的任务仍保留已发生事实。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor', ver: 3, filter: 'stable' },
+              setup: function () { ensureRevision('task-runtime-refactor', 3); },
+              checks: ['v1 事实可见', 'stable 事实不被改写', '历史版本可回到当前'],
+            },
+            {
+              id: 'agent',
+              title: 'Agent 功能',
+              goal: '从功能角色和运行实例观察任务范围。',
+              route: { scope: 'agent', instance: 'agent-exec-01' },
+              checks: ['角色与实例分开', '已绑定任务可见', '任务范围可切换'],
+            },
+            {
+              id: 'agent-release',
+              title: '同实例另一 task',
+              goal: '同一实例只显示它已绑定的 release 任务轨迹。',
+              route: { scope: 'agent', instance: 'agent-exec-01', task: 'task-release-check' },
+              checks: ['release 轨迹可见', '不显示未绑定任务', '完成态无 live'],
+            },
+            {
+              id: 'agent-exec-02',
+              title: '同角色另一实例',
+              goal: 'exec-02 显示自己的任务轨迹，不串 exec-01 内容。',
+              route: { scope: 'agent', instance: 'agent-exec-02', task: 'task-pipeline-audit' },
+              checks: ['exec-02 身份可见', '巡检轨迹可见', '不串 exec-01 内容'],
+            },
+            {
+              id: 'completed-replay',
+              title: '完成复盘',
+              goal: '打开已完成任务，查看时间线、结果和空 live 区。',
+              route: { scope: 'task', project: 'proj-orbit', task: 'task-release-check', filter: 'stable' },
+              checks: ['完成状态可见', '结果与证据可见', 'live 区为空'],
+            },
+            {
+              id: 'waiting',
+              title: '等待',
+              goal: '查看等待人类确认的任务和等待原因。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-waiting' },
+              checks: ['等待状态可见', '等待原因可见', '不自动继续'],
+            },
+            {
+              id: 'failed',
+              title: '失败',
+              goal: '查看失败原因、失败证据和下一步。',
+              route: { scope: 'task', project: 'proj-orbit', task: 'task-failed' },
+              checks: ['失败状态可见', '失败原因可见', '下一步可见'],
+            },
+            {
+              id: 'unknown',
+              title: '未知',
+              goal: '查看未映射语义、来源引用和不显示成功的边界。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-unknown' },
+              checks: ['unknown 标记可见', '来源引用可见', '不显示成功'],
+            },
+            {
+              id: 'stale',
+              title: 'Stale',
+              goal: '断开连接时保留上次内容，并只改变 freshness。',
+              route: { scope: 'task', project: 'proj-humanagent', task: 'task-runtime-refactor' },
+              setup: function () { setConnected(false); },
+              checks: ['断连提示可见', '最后同步时间可见', '任务终态不被改变'],
+            },
+            {
+              id: 'empty',
+              title: 'Empty',
+              goal: '查看没有任务的项目，并保留返回入口。',
+              route: { scope: 'project', project: 'proj-signal' },
+              setup: function () { setConnected(true); },
+              checks: ['空结果可见', '不静默跳首页', '返回系统入口可见'],
+            },
+            {
+              id: 'finish',
+              title: '返回 / 结束',
+              goal: '返回系统概要。这里只表示导览完成，不表示功能验收通过。',
+              route: { scope: 'system' },
+              setup: function () { setConnected(true); },
+              checks: ['返回系统概要', '显示导览完成提示', '不声称功能验收通过'],
+            },
+          ];
+
+          var index = 0;
+          var complete = false;
+          var catalogOpen = false;
+          var panel = null;
+          var body = null;
+          var actions = null;
+          var progressLabel = null;
+          var progressHint = null;
+          var progressBar = null;
+          var toggleButton = null;
+
+          function count() { return STATIONS.length; }
+
+          function ensureRevision(taskId, version) {
+            if (MockDriver.currentRevisionOf(taskId) < version) {
+              UiEvents.emit('ReplanRequested', { taskId: taskId, version: version });
+            }
+          }
+
+          function setConnected(connected) {
+            UiEvents.emit('ConnectionChangedRequested', { connected: connected });
+          }
+
+          function routeFor(nextIndex) {
+            var station = STATIONS[nextIndex];
+            return Object.assign({}, station.route, { tour: nextIndex + 1 });
+          }
+
+          function isTypingTarget(target) {
+            if (!target) return false;
+            var tag = String(target.tagName || '').toLowerCase();
+            return tag === 'input' || tag === 'select' || tag === 'textarea' || target.isContentEditable;
+          }
+
+          function enter(nextIndex, options) {
+            var opts = options || {};
+            index = Math.max(0, Math.min(STATIONS.length - 1, Number(nextIndex) || 0));
+            complete = STATIONS[index].id === 'finish';
+            if (STATIONS[index].id !== 'stale') setConnected(true);
+            if (STATIONS[index].setup) STATIONS[index].setup();
+            if (opts.navigate !== false) {
+              UiEvents.emit('NavigationRequested', { route: routeFor(index), source: 'tour' });
+            }
+            render();
+          }
+
+          function next() {
+            if (index >= STATIONS.length - 1) {
+              complete = true;
+              render();
+              return;
+            }
+            enter(index + 1);
+          }
+
+          function previous() {
+            if (index <= 0) return;
+            enter(index - 1);
+          }
+
+          function restart() {
+            complete = false;
+            catalogOpen = false;
+            enter(0);
+          }
+
+          function exit() {
+            document.body.classList.remove('tour-open');
+            if (toggleButton) toggleButton.setAttribute('aria-expanded', 'false');
+            if (toggleButton && typeof toggleButton.focus === 'function') toggleButton.focus();
+          }
+
+          function toggle() {
+            var open = !document.body.classList.contains('tour-open');
+            document.body.classList.toggle('tour-open', open);
+            if (toggleButton) toggleButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (open && toggleButton && typeof toggleButton.focus === 'function') toggleButton.focus();
+          }
+
+          function syncFromRoute(route) {
+            if (route && Number.isInteger(route.tour) && route.tour >= 1 && route.tour <= STATIONS.length) {
+              index = route.tour - 1;
+              complete = STATIONS[index].id === 'finish';
+            }
+            render();
+          }
+
+          function hydrateCurrent() {
+            var station = STATIONS[index];
+            if (station && station.setup) station.setup();
+            render();
+          }
+
+          function actionButton(label, disabled, handler) {
+            return el('button', {
+              class: 'btn btn--small',
+              type: 'button',
+              disabled: disabled ? true : null,
+              onclick: handler,
+            }, [el('span', { text: label })]);
+          }
+
+          function render() {
+            if (!body) return;
+            var station = STATIONS[index];
+            var nodes = [
+              el('div', { class: 'tour-station-title' }, [
+                el('strong', { text: station.title }),
+                chip('第 ' + (index + 1) + ' / ' + STATIONS.length + ' 站', 'plain'),
+              ]),
+              el('p', { class: 'tour-goal', text: station.goal }),
+              el('div', { class: 'tour-checks' }, station.checks.map(function (check) {
+                return el('div', { class: 'tour-check', text: check });
+              })),
+              el('div', { class: 'tour-route', text: Navigation.toHash(routeFor(index)) }),
+            ];
+            if (complete) {
+              nodes.push(
+                el('div', { class: 'notice notice--info', 'data-tour-complete': 'true' }, [
+                  icon('i-check', 'icon--sm'),
+                  el('div', { class: 'stack stack--tight' }, [
+                    el('strong', { text: '导览完成' }),
+                    el('span', { text: '这只表示 27 站导览结束，不代表功能验收通过。' }),
+                  ]),
+                ])
+              );
+            }
+            if (catalogOpen) {
+              nodes.push(
+                el('div', { class: 'tour-catalog', 'data-control': 'tour-catalog' }, STATIONS.map(function (item, itemIndex) {
+                  return el('button', {
+                    class: 'tour-catalog-item',
+                    type: 'button',
+                    'aria-current': itemIndex === index ? 'true' : 'false',
+                    onclick: function () {
+                      catalogOpen = false;
+                      enter(itemIndex);
+                    },
+                  }, [
+                    el('span', { class: 'tour-catalog-index', text: String(itemIndex + 1).padStart(2, '0') }),
+                    el('span', { text: item.title }),
+                  ]);
+                }))
+              );
+            }
+            body.replaceChildren.apply(body, nodes);
+            actions.replaceChildren(
+              actionButton('上一站', index === 0, previous),
+              actionButton('下一站', index === STATIONS.length - 1, next),
+              actionButton(catalogOpen ? '收起目录' : '目录', false, function () {
+                catalogOpen = !catalogOpen;
+                render();
+              }),
+              actionButton('重来', false, restart),
+              actionButton('退出', false, exit)
+            );
+            progressLabel.textContent = '第 ' + (index + 1) + ' / ' + STATIONS.length + ' 站';
+            progressHint.textContent = complete ? '导览完成' : '上一站 / 下一站';
+            progressBar.style.width = String(((index + 1) / STATIONS.length) * 100) + '%';
+          }
+
+          function init() {
+            panel = document.getElementById('tourPanel');
+            body = document.getElementById('tourBody');
+            actions = document.getElementById('tourActions');
+            progressLabel = document.getElementById('tourProgressLabel');
+            progressHint = document.getElementById('tourProgressHint');
+            progressBar = document.getElementById('tourProgressBar');
+            toggleButton = document.getElementById('tourToggle');
+            if (toggleButton) toggleButton.addEventListener('click', toggle);
+            var exitButton = document.querySelector('[data-action="tour-exit"]');
+            if (exitButton) exitButton.addEventListener('click', exit);
+            document.addEventListener('keydown', function (event) {
+              if (isTypingTarget(event.target) || event.defaultPrevented) return;
+              if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                previous();
+              } else if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                next();
+              }
+            });
+            render();
+          }
+
+          return {
+            init: init,
+            count: count,
+            enter: enter,
+            next: next,
+            previous: previous,
+            restart: restart,
+            exit: exit,
+            syncFromRoute: syncFromRoute,
+            hydrateCurrent: hydrateCurrent,
+          };
+        })();
+
+        /* ------------------------------------------------------------------ App
+           唯一初始化、订阅、渲染和生命周期收口。 */
+        var App = (function () {
+          var context = {
+            route: null,
+            projection: null,
+            connection: null,
+            error: '',
+            errorRaw: '',
+            lastGoodRoute: { scope: 'system' },
+          };
+          var scopeNav = null;
+          var breadcrumbs = null;
+          var stateNotice = null;
+          var viewRoot = null;
+          var headerScope = null;
+          var liveRegion = null;
+          var dock = null;
+          var dockBody = null;
+          var dockStatus = null;
+          var graphFrame = 0;
+
+          function scopeKeyForRoute(route) {
+            if (!route) return 'system';
+            if (route.scope === 'project' && route.project) return 'project:' + route.project;
+            if (route.scope === 'task' && route.task) return 'task:' + route.task;
+            if (route.scope === 'agent' && route.instance) return 'agent:' + route.instance;
+            return 'system';
+          }
+
+          function projectionForRoute(route) {
+            var ref = PayloadRefs.get(scopeKeyForRoute(route));
+            if (ref) return ref.value;
+            return MockDriver.projectionFor(scopeKeyForRoute(route));
+          }
+
+          function scopeLabel(route, projection) {
+            if (!route || route.scope === 'error') return '错误';
+            if (route.scope === 'project') return projection && projection.project ? projection.project.name : '项目';
+            if (route.scope === 'task') return projection && projection.task ? projection.task.title : '任务';
+            if (route.scope === 'agent') return projection && projection.agent ? projection.agent.role + ' · ' + projection.agent.instance : 'Agent';
+            return '系统概要';
+          }
+
+          function announce(message) {
+            if (!liveRegion) return;
+            liveRegion.textContent = '';
+            window.setTimeout(function () { liveRegion.textContent = message; }, 0);
+          }
+
+          function scheduleGraphDraw() {
+            if (graphFrame) window.cancelAnimationFrame(graphFrame);
+            graphFrame = window.requestAnimationFrame(function () {
+              graphFrame = 0;
+              drawGraphEdges();
+            });
+          }
+
+          function drawGraphEdges() {
+            var canvases = document.querySelectorAll('[data-control="orchestration-viewer"]');
+            Array.prototype.forEach.call(canvases, function (canvas) {
+              var svg = canvas.querySelector('.graph-svg');
+              if (!svg) return;
+              svg.replaceChildren();
+              var canvasRect = canvas.getBoundingClientRect();
+              var nodeMap = Object.create(null);
+              Array.prototype.forEach.call(canvas.querySelectorAll('[data-node-id]'), function (node) {
+                nodeMap[node.getAttribute('data-node-id')] = node;
+              });
+              Array.prototype.forEach.call(canvas.querySelectorAll('[data-node-id]'), function (node) {
+                var deps = String(node.getAttribute('data-deps') || '').split(',').filter(Boolean);
+                deps.forEach(function (depId) {
+                  var dep = nodeMap[depId];
+                  if (!dep) return;
+                  var from = dep.getBoundingClientRect();
+                  var to = node.getBoundingClientRect();
+                  var x1 = from.left - canvasRect.left + from.width / 2;
+                  var y1 = from.bottom - canvasRect.top;
+                  var x2 = to.left - canvasRect.left + to.width / 2;
+                  var y2 = to.top - canvasRect.top;
+                  var mid = Math.max(12, (y2 - y1) / 2);
+                  svg.appendChild(svgEl('path', {
+                    class: 'graph-edge graph-edge--' + (node.getAttribute('data-state') || 'waiting'),
+                    d: 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + mid) + ', ' + x2 + ' ' + (y2 - mid) + ', ' + x2 + ' ' + y2,
+                  }));
+                });
+              });
+            });
+          }
+
+          function renderDock() {
+            if (!dockBody) return;
+            var route = context.route || {};
+            var selectedTask = route.task ? MockDriver.taskById(route.task) : null;
+            var tasks = MockDriver.taskList();
+            var taskSelect = el('select', {
+              'aria-label': '选择 Mock 任务',
+              'data-action': 'mock-pick-task',
+              onchange: function (event) {
+                var task = MockDriver.taskById(event.target.value);
+                if (!task) return;
+                UiEvents.emit('NavigationRequested', {
+                  route: { scope: 'task', project: task.projectId, task: task.id },
+                  source: 'mock',
+                });
+              },
+            }, tasks.map(function (task) {
+              var option = el('option', { value: task.id, text: task.title + ' · v' + task.currentRevision });
+              if (selectedTask && selectedTask.id === task.id) option.setAttribute('selected', '');
+              return option;
+            }));
+
+            var activityButtons = [];
+            if (selectedTask) {
+              var projection = projectionForRoute({ scope: 'task', task: selectedTask.id });
+              (projection ? projection.activities : []).forEach(function (activity) {
+                var disabled = activity.state !== 'active';
+                activityButtons.push(
+                  el('div', { class: 'row' }, [
+                    el('span', { class: 'small muted', text: activity.name + ' · ' + (STATE_LABEL[activity.state] || activity.state) }),
+                    el('button', {
+                      class: 'btn btn--small',
+                      type: 'button',
+                      disabled: disabled ? true : null,
+                      'data-action': 'mock-advance',
+                      onclick: function () {
+                        UiEvents.emit('ActivityAdvanceRequested', {
+                          taskId: selectedTask.id,
+                          nodeId: activity.nodeId,
+                          outcome: 'success',
+                        });
+                      },
+                    }, [el('span', { text: '成功' })]),
+                    el('button', {
+                      class: 'btn btn--small',
+                      type: 'button',
+                      disabled: disabled ? true : null,
+                      'data-action': 'mock-fail',
+                      onclick: function () {
+                        UiEvents.emit('ActivityAdvanceRequested', {
+                          taskId: selectedTask.id,
+                          nodeId: activity.nodeId,
+                          outcome: 'failure',
+                        });
+                      },
+                    }, [el('span', { text: '失败' })]),
+                  ])
+                );
+              });
+            }
+
+            var versionButtons = [];
+            if (selectedTask) {
+              MockDriver.revisionVersions(selectedTask.id).forEach(function (version) {
+                versionButtons.push(
+                  el('button', {
+                    class: 'btn btn--small',
+                    type: 'button',
+                    disabled: version <= selectedTask.currentRevision ? true : null,
+                    'data-action': 'mock-replan',
+                    onclick: function () {
+                      UiEvents.emit('ReplanRequested', { taskId: selectedTask.id, version: version });
+                    },
+                  }, [el('span', { text: 'v' + version })]),
+                );
+              });
+            }
+
+            var connection = MockDriver.connection();
+            dockBody.replaceChildren(
+              el('section', { class: 'dock-group' }, [
+                el('h4', { text: 'Mock 任务' }),
+                el('label', { class: 'field' }, [el('span', { text: '任务' }), taskSelect]),
+                el('p', { class: 'small muted', text: '只改变本地演示状态，不连接 Runtime。' }),
+              ]),
+              el('section', { class: 'dock-group' }, [
+                el('h4', { text: '推进活动' }),
+                activityButtons.length ? el('div', { class: 'stack stack--tight' }, activityButtons) : el('p', { class: 'small muted', text: '当前任务没有可推进的 active 活动。' }),
+              ]),
+              el('section', { class: 'dock-group' }, [
+                el('h4', { text: '应用修订' }),
+                versionButtons.length ? el('div', { class: 'row' }, versionButtons) : el('p', { class: 'small muted', text: '当前任务没有可用修订。' }),
+                el('p', { class: 'small muted', text: '修订只改变后续计划；已发生事实保持只读。' }),
+              ]),
+              el('section', { class: 'dock-group' }, [
+                el('h4', { text: '连接与重置' }),
+                el('button', {
+                  class: 'btn btn--small',
+                  type: 'button',
+                  'data-action': 'mock-connection',
+                  onclick: function () {
+                    UiEvents.emit('ConnectionChangedRequested', { connected: !connection.connected });
+                  },
+                }, [el('span', { text: connection.connected ? '模拟断连' : '恢复连接' })]),
+                el('button', {
+                  class: 'btn btn--small',
+                  type: 'button',
+                  'data-action': 'mock-reset',
+                  onclick: function () { UiEvents.emit('MockResetRequested', {}); },
+                }, [el('span', { text: '重置 Mock' })]),
+                el('p', { class: 'small muted', text: connection.connected ? 'freshness：已连接' : 'freshness：断连，保留上次内容' }),
+              ])
+            );
+            if (dockStatus) {
+              dockStatus.textContent = connection.connected ? '已连接' : '断连 · stale';
+            }
+          }
+
+          function render() {
+            if (!context.route) return;
+            var navRoute = context.error ? { scope: 'system' } : context.route;
+            scopeNav.replaceChildren(Controls.scopeNavigator(navRoute));
+            breadcrumbs.replaceChildren(Controls.breadcrumbs(navRoute));
+            stateNotice.replaceChildren(Controls.stateNotice(context));
+            viewRoot.replaceChildren.apply(viewRoot, Views.render(context));
+            headerScope.textContent = scopeLabel(context.route, context.projection);
+            renderDock();
+            scheduleGraphDraw();
+            Evidence.sync(context);
+            UiEvents.emit('ViewRendered', { route: context.route });
+          }
+
+          function onScopeSelected(envelope) {
+            if (!envelope || !envelope.route) return;
+            Evidence.clearDismissed();
+            context.route = envelope.route;
+            context.error = envelope.route.scope === 'error' ? String(envelope.route.error || '无法打开该范围') : '';
+            context.errorRaw = envelope.route.raw || '';
+            if (context.error) {
+              context.projection = null;
+            } else {
+              context.lastGoodRoute = Object.assign({}, envelope.route);
+              context.projection = projectionForRoute(envelope.route);
+            }
+            Tour.syncFromRoute(envelope.route);
+            render();
+            if (!context.error) announce('已切换到 ' + scopeLabel(context.route, context.projection));
+          }
+
+          function onProjection(envelope) {
+            if (!envelope || !envelope.ref) return;
+            if (envelope.scopeKey !== scopeKeyForRoute(context.route)) return;
+            context.projection = envelope.ref.value;
+            render();
+          }
+
+          function onConnection(envelope) {
+            if (!envelope) return;
+            context.connection = envelope.connection;
+            render();
+          }
+
+          function toggleDock() {
+            if (!dock) return;
+            var open = dock.getAttribute('data-open') !== 'true';
+            dock.setAttribute('data-open', open ? 'true' : 'false');
+            var head = dock.querySelector('.dock-head');
+            if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
+            var headerToggle = document.getElementById('dockToggle');
+            if (headerToggle) headerToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+          }
+
+          function bindShell() {
+            var headerToggle = document.getElementById('dockToggle');
+            if (headerToggle) headerToggle.addEventListener('click', toggleDock);
+            var dockHead = dock ? dock.querySelector('.dock-head') : null;
+            if (dockHead) dockHead.addEventListener('click', toggleDock);
+            document.addEventListener('keydown', function (event) {
+              if (event.key !== 'Escape') return;
+              if (Evidence.isOpen()) {
+                event.preventDefault();
+                Evidence.close();
+                return;
+              }
+              if (document.body.classList.contains('tour-open')) {
+                event.preventDefault();
+                Tour.exit();
+              }
+            });
+            window.addEventListener('resize', scheduleGraphDraw);
+          }
+
+          function init() {
+            scopeNav = document.getElementById('scopeNav');
+            breadcrumbs = document.getElementById('breadcrumbs');
+            stateNotice = document.getElementById('stateNotice');
+            viewRoot = document.getElementById('viewRoot');
+            headerScope = document.getElementById('headerScope');
+            liveRegion = document.getElementById('liveRegion');
+            dock = document.getElementById('mockDock');
+            dockBody = document.getElementById('mockDockBody');
+            dockStatus = document.getElementById('dockStatus');
+
+            Evidence.init(function () { return context; });
+            Tour.init();
+            bindShell();
+
+            UiEvents.subscribe('ProjectionAvailable', onProjection);
+            UiEvents.subscribe('ProjectionUpdated', onProjection);
+            UiEvents.subscribe('ScopeSelected', onScopeSelected);
+            UiEvents.subscribe('ConnectionChanged', onConnection);
+            MockDriver.subscribe();
+            MockDriver.init();
+            context.connection = MockDriver.connection();
+            if (!location.hash) Tour.hydrateCurrent();
+            Navigation.init();
+          }
+
+          return { init: init };
+        })();
+
+        window.TourPrototype = {
+          getProjectionRef: function (scopeKey) {
+            return PayloadRefs.get(String(scopeKey || ''));
+          },
+          subscribe: function (type, handler) {
+            return UiEvents.subscribe(String(type || ''), handler);
+          },
+        };
+
+        App.init();
+      })();
+    </script>
+  </body>
+</html>

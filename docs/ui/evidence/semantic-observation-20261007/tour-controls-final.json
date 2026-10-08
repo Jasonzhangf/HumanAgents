@@ -1,0 +1,12 @@
+{
+  "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+  "first": 2,
+  "second": 2,
+  "restarted": {
+    "hash": "#scope=system&tour=1",
+    "facts": 2,
+    "complete": false
+  },
+  "exited": true,
+  "reopened": true
+}

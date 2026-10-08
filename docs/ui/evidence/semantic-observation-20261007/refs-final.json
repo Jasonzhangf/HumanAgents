@@ -1,0 +1,92 @@
+{
+  "artifactSha256": "558fd1f961f54ecc6787e85cf045c896a798e8b65c44715f58655d619078f91a",
+  "success": {
+    "newRef": true,
+    "oldUnchanged": true,
+    "factReused": true,
+    "subSame": true,
+    "frozen": true,
+    "otherSame": true,
+    "matchedEnded": true
+  },
+  "unsubscribe": {
+    "before": [
+      1,
+      1
+    ],
+    "after": [
+      1,
+      1
+    ]
+  },
+  "beforeFailure": {
+    "states": {
+      "n-projection": "done",
+      "n-template": "done",
+      "n-identity": "done",
+      "n-template-extension-core": "done",
+      "n-template-extension-wire": "done",
+      "n-revision": "active",
+      "n-history": "active",
+      "n-instance-verify": "active",
+      "n-review": "waiting"
+    },
+    "current": 3
+  },
+  "failure": {
+    "attention": true,
+    "liveTask": "live",
+    "activities": [
+      {
+        "nodeId": "n-history",
+        "state": "active"
+      },
+      {
+        "nodeId": "n-instance-verify",
+        "state": "active"
+      },
+      {
+        "nodeId": "n-review",
+        "state": "blocked"
+      }
+    ],
+    "states": {
+      "n-projection": "done",
+      "n-template": "done",
+      "n-identity": "done",
+      "n-template-extension-core": "done",
+      "n-template-extension-wire": "done",
+      "n-revision": "failed",
+      "n-history": "active",
+      "n-instance-verify": "active",
+      "n-review": "blocked"
+    },
+    "stableFailure": true,
+    "otherSame": true,
+    "systemAttention": [
+      {
+        "taskId": "task-runtime-refactor",
+        "factId": "f-task-runtime-refactor-1"
+      },
+      {
+        "taskId": "task-pipeline-audit",
+        "factId": "f-pa-2"
+      },
+      {
+        "taskId": "task-waiting",
+        "factId": "f-w-1"
+      },
+      {
+        "taskId": "task-failed",
+        "factId": "f-f-2"
+      },
+      {
+        "taskId": "task-unknown",
+        "factId": "f-u-1"
+      }
+    ],
+    "projectShared": true,
+    "agentShared": true,
+    "oldUnchanged": true
+  }
+}
