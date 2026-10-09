@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   id,
+  validateProviderEvent,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type ProviderBinding,
@@ -419,6 +420,239 @@ test('provider agent driver executes a complete Responses tool call once and con
     ['provider.output', 'Checklist from REAL_FILE_CONTENT', undefined],
     ['provider.terminal', undefined, 'succeeded'],
   ]);
+});
+
+test('provider driver attaches executor-supplied facts to their request, call, binding, route, and report', async () => {
+  let round = 0;
+  const observedRequestIds: string[] = [];
+  const continuations: ProviderSubmitInput[] = [];
+  const executedCallIds: string[] = [];
+  const makeCall = (callId: string, continuationRef: string): ProviderEvent => ({
+    ...identity,
+    eventId: `event-${callId}`,
+    kind: 'tool',
+    summary: 'file.search',
+    outputRefs: [`artifact://${callId}`],
+    evidenceRefs: [evidence],
+    ownerId: 'humanagent.provider-adapter',
+    nextAction: { kind: 'continue' },
+    toolCall: {
+      callId,
+      toolId: 'file.search',
+      arguments: { path: 'src', query: 'ProviderToolResult', queryKind: 'literal' },
+      continuationRef,
+    },
+  });
+  const runtimePort = port({
+    observe: async function* (input): AsyncIterable<ProviderEvent> {
+      if (typeof input.requestId === 'string') observedRequestIds.push(input.requestId);
+      if (round === 0) {
+        yield makeCall('call-search-a', 'response-round-1');
+        yield makeCall('call-search-a2', 'response-round-1');
+        yield makeCall('call-search-no-route', 'response-round-1');
+        yield makeCall('call-search-no-descriptor', 'response-round-1');
+        yield makeCall('call-search-invalid-route', 'response-round-1');
+        yield {
+          ...identity,
+          eventId: 'event-search-waiting-1',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+      } else if (round === 1) {
+        yield makeCall('call-search-b', 'response-round-2');
+        yield {
+          ...identity,
+          eventId: 'event-search-waiting-2',
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          ownerId: 'humanagent.provider-adapter',
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+      } else {
+        yield { ...identity, eventId: 'event-search-output', kind: 'output', summary: 'search continuation complete', outputRefs: ['output-final'], evidenceRefs: [evidence] };
+        yield { ...identity, eventId: 'event-search-terminal', kind: 'terminal', terminalState: 'succeeded', evidenceRefs: [evidence], ownerId: 'humanagent.provider-adapter', nextAction: { kind: 'continue' } };
+      }
+      round += 1;
+    },
+    submit: async (input): Promise<ProviderSubmitResult> => {
+      continuations.push(input);
+      return { ...identity, status: 'accepted', outputRefs: [], evidenceRefs: [evidence] };
+    },
+  });
+  const instance = new ProviderAgentDriver({
+    port: runtimePort,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: 1,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.search', description: 'search files', inputSchema: { type: 'object' } }],
+    executeTool: {
+      async execute({ call }) {
+        executedCallIds.push(call.callId);
+        const outputRef = `report://tool-output/${call.callId}`;
+        const outputDigest = `sha256:${'a'.repeat(63)}${String(executedCallIds.length)}`;
+        const descriptor = { output: `raw output for ${call.callId}`, outputRef, outputDigest, outputRefs: [outputRef], evidenceRefs: [evidence] };
+        if (call.callId === 'call-search-no-route') return descriptor;
+        if (call.callId === 'call-search-no-descriptor') return { ...descriptor, executorRoute: 'app.file-search.local', outputRef: undefined, outputDigest: undefined, outputRefs: [] };
+        if (call.callId === 'call-search-invalid-route') return { ...descriptor, executorRoute: '   ' };
+        return { ...descriptor, executorRoute: 'app.file-search.local' };
+      },
+    },
+  });
+  await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+  await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'search the source' } });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of instance.observe({ runtimeId: identity.runtimeId })) events.push(event);
+
+  const results = events.flatMap((event) => event.providerEvent.toolResult === undefined ? [] : [event.providerEvent.toolResult]);
+  assert.deepEqual(executedCallIds, ['call-search-a', 'call-search-a2', 'call-search-no-route', 'call-search-no-descriptor', 'call-search-invalid-route', 'call-search-b']);
+  assert.equal(results.length, 6);
+  const [first, sameRequestSecond, noRoute, noDescriptor, invalidRoute, secondRequestResult] = results;
+  assert.ok(first?.executionFact);
+  assert.ok(sameRequestSecond?.executionFact);
+  assert.equal(noRoute?.executionFact, undefined);
+  assert.equal(noDescriptor?.executionFact, undefined);
+  assert.equal(invalidRoute?.executionFact, undefined);
+  assert.ok(secondRequestResult?.executionFact);
+
+  const expectedIdentity = { surface: 'responses', toolId: 'file.search', bindingRef: binding.bindingId, route: 'app.file-search.local' };
+  const firstFact = first?.executionFact;
+  const sameRequestSecondFact = sameRequestSecond?.executionFact;
+  const secondRequestFact = secondRequestResult?.executionFact;
+  assert.deepEqual(firstFact?.identity, expectedIdentity);
+  assert.deepEqual(sameRequestSecondFact?.identity, expectedIdentity);
+  assert.deepEqual(secondRequestFact?.identity, expectedIdentity);
+  assert.equal(firstFact?.requestRef, observedRequestIds[0]);
+  assert.equal(sameRequestSecondFact?.requestRef, observedRequestIds[0]);
+  assert.equal(noRoute?.callId, 'call-search-no-route');
+  assert.equal(noDescriptor?.callId, 'call-search-no-descriptor');
+  assert.equal(invalidRoute?.callId, 'call-search-invalid-route');
+  assert.equal(firstFact?.callRef, 'call-search-a');
+  assert.equal(sameRequestSecondFact?.callRef, 'call-search-a2');
+  assert.equal(secondRequestFact?.callRef, 'call-search-b');
+  assert.equal(firstFact?.operationRef, operationId.value);
+  assert.equal(sameRequestSecondFact?.operationRef, operationId.value);
+  assert.equal(secondRequestFact?.operationRef, operationId.value);
+  assert.equal(firstFact?.state, 'succeeded');
+  assert.equal(sameRequestSecondFact?.state, 'succeeded');
+  assert.equal(secondRequestFact?.state, 'succeeded');
+  assert.equal(firstFact?.resultRef, first?.outputRef);
+  assert.equal(firstFact?.resultDigest, first?.outputDigest);
+  assert.equal(firstFact?.rawEvidenceRefs[0], first?.outputRef);
+  assert.equal(sameRequestSecondFact?.resultRef, sameRequestSecond?.outputRef);
+  assert.equal(sameRequestSecondFact?.resultDigest, sameRequestSecond?.outputDigest);
+  assert.notEqual(sameRequestSecondFact?.resultRef, firstFact?.resultRef);
+  assert.equal(secondRequestFact?.requestRef, observedRequestIds[1]);
+  assert.notEqual(secondRequestFact?.requestRef, firstFact?.requestRef);
+  assert.equal(secondRequestFact?.resultRef, secondRequestResult?.outputRef);
+  assert.equal(secondRequestFact?.resultDigest, secondRequestResult?.outputDigest);
+  for (const result of [first, sameRequestSecond, secondRequestResult]) {
+    const event = events.find((candidate) => candidate.providerEvent.toolResult?.callId === result?.callId)?.providerEvent;
+    assert.ok(event);
+    validateProviderEvent(event, result?.executionFact?.identity);
+  }
+  assert.equal(continuations.length, 2);
+  assert.deepEqual(continuations[0]?.toolContinuations?.map((item) => item.callId), ['call-search-a', 'call-search-a2', 'call-search-no-route', 'call-search-no-descriptor', 'call-search-invalid-route']);
+  assert.equal(continuations[0]?.toolContinuations?.[0]?.output, 'raw output for call-search-a');
+});
+
+test('provider driver preserves explicit non-success executor states without emitting success facts', async () => {
+  const statuses = ['failed', 'blocked', 'unknown'] as const;
+  const observed: Array<{ status: string | undefined; errorCode: string | undefined; errorMessage: string | undefined; fact: unknown; summary: string | undefined }> = [];
+
+  for (const status of statuses) {
+    const callId = `call-search-${status}`;
+    const outputRef = `report://tool-output/${callId}`;
+    const outputDigest = `sha256:${'b'.repeat(64)}`;
+    const runtimePort = port({
+      submit: async (): Promise<ProviderSubmitResult> => ({
+        ...identity,
+        status: 'accepted',
+        outputRefs: [],
+        evidenceRefs: [evidence],
+      }),
+      observe: async function* (): AsyncIterable<ProviderEvent> {
+        yield {
+          ...identity,
+          eventId: `event-${callId}`,
+          kind: 'tool',
+          summary: 'file.search',
+          outputRefs: [outputRef],
+          evidenceRefs: [evidence],
+          toolCall: { callId, toolId: 'file.search', arguments: { query: 'source' }, continuationRef: `response-${status}` },
+        };
+        yield {
+          ...identity,
+          eventId: `event-waiting-${callId}`,
+          kind: 'terminal',
+          terminalState: 'waiting',
+          evidenceRefs: [evidence],
+          nextAction: { kind: 'continue', ref: 'responses-tool-call' },
+        };
+      },
+    });
+    const instance = new ProviderAgentDriver({
+      port: runtimePort,
+      binding,
+      runtimeId: identity.runtimeId,
+      taskId,
+      operationId,
+      executionEpoch: 1,
+      assignmentId: 'assignment-a',
+      scope,
+      inputRefs: ['input-1'],
+      tools: [{ toolId: 'file.search', description: 'search files', inputSchema: { type: 'object' } }],
+      executeTool: {
+        async execute() {
+          return {
+            output: `executor reported ${status}`,
+            outputRefs: [outputRef],
+            evidenceRefs: [evidence],
+            outputRef,
+            outputDigest,
+            executorRoute: 'app.file-search.local',
+            status,
+          };
+        },
+      },
+    });
+    await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+    await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'search the source' } });
+
+    const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).value?.kind, 'provider.tool');
+    const resultEvent = (await iterator.next()).value;
+    assert.equal(resultEvent?.kind, 'provider.tool-result');
+    assert.ok(resultEvent?.providerEvent);
+    validateProviderEvent(resultEvent.providerEvent);
+    const toolResult = resultEvent?.providerEvent.toolResult;
+    observed.push({
+      status: toolResult?.status,
+      errorCode: toolResult?.error?.code,
+      errorMessage: toolResult?.error?.message,
+      fact: toolResult?.executionFact,
+      summary: resultEvent?.summary,
+    });
+    await assert.rejects(
+      () => iterator.next(),
+      (error: unknown) => error instanceof ProviderAdapterError
+        && error.providerError.message.includes(status),
+    );
+  }
+
+  assert.deepEqual(observed.map((result) => result.status), [...statuses]);
+  assert.deepEqual(observed.map((result) => result.errorCode), statuses.map(() => 'tool.result.failed'));
+  assert.equal(observed.every((result, index) => result.errorMessage?.includes(statuses[index]!)), true);
+  assert.deepEqual(observed.map((result) => result.summary), statuses.map((status) => `file.search ${status}`));
+  assert.deepEqual(observed.map((result) => result.fact), statuses.map(() => undefined));
 });
 
 test('preserves prior results and stops a Responses tool batch at the first owned-tool failure', async () => {

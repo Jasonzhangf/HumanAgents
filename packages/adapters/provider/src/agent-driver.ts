@@ -1,5 +1,6 @@
 import {
   id,
+  validateProviderToolResult,
   validateProviderRequestLifecycleEvent,
   type AgentCapabilities,
   type AgentClosure,
@@ -30,6 +31,8 @@ import {
   type ScopeRef,
   type StopRequestReceipt,
   type TaskId,
+  type ToolExecutionFact,
+  type ToolIdentity,
 } from '../../../contracts/src/index.js';
 import { randomUUID } from 'node:crypto';
 import { ProviderAdapterError } from './errors.js';
@@ -60,6 +63,8 @@ export interface ProviderToolExecutionResult {
   readonly error?: ProviderError;
   readonly outputRef?: string;
   readonly outputDigest?: string;
+  /** Route reported by the executor's actual branch; the driver never infers it from toolId. */
+  readonly executorRoute?: string;
 }
 
 export interface ProviderToolExecutionPort {
@@ -298,7 +303,7 @@ export class ProviderAgentDriver implements AgentDriver {
           ? result.status === 'cancelled' ? 'cancelled' : 'failed'
           : result.status === 'cancelled'
             ? 'cancelled'
-            : 'succeeded';
+            : result.status ?? 'succeeded';
         const toolResult: ProviderToolResult = this.toolResult(call, result, status);
         if (status !== 'succeeded') {
           yield* this.toolResultEvents(call, toolResult, `${call.toolId} ${status}`);
@@ -543,7 +548,6 @@ export class ProviderAgentDriver implements AgentDriver {
       outputRefs: result.outputRefs,
       summary,
       evidenceRefs: result.evidenceRefs,
-      ...(result.error === undefined ? {} : { error: result.error }),
       ownerId: this.options.ownerId ?? 'humanagent.provider-agent-driver',
       nextAction: { kind: 'continue', ref: call.continuationRef },
       toolResult: result,
@@ -559,7 +563,10 @@ export class ProviderAgentDriver implements AgentDriver {
   }
 
   private toolResult(call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult {
-    return {
+    const error = result.error ?? (status === 'succeeded'
+      ? undefined
+      : this.error('tool.result.failed', `${call.toolId} executor reported ${status} without an error`, 'observe').providerError);
+    const toolResult: ProviderToolResult = {
       ...identity(this.options),
       toolId: call.toolId,
       callId: call.callId,
@@ -568,8 +575,43 @@ export class ProviderAgentDriver implements AgentDriver {
       evidenceRefs: result.evidenceRefs,
       ...(result.outputRef === undefined ? {} : { outputRef: result.outputRef }),
       ...(result.outputDigest === undefined ? {} : { outputDigest: result.outputDigest }),
-      ...(result.error === undefined ? {} : { error: result.error }),
+      ...(error === undefined ? {} : { error }),
     };
+    const requestRef = this.activeRequest?.requestId;
+    const outputRef = result.outputRef;
+    const outputDigest = result.outputDigest;
+    const executorRoute = result.executorRoute;
+    if (status !== 'succeeded'
+      || this.options.binding.protocol !== 'responses'
+      || typeof executorRoute !== 'string'
+      || executorRoute.trim() === ''
+      || requestRef === undefined
+      || typeof outputRef !== 'string'
+      || outputRef.trim() === ''
+      || typeof outputDigest !== 'string'
+      || !/^sha256:[0-9a-f]{64}$/.test(outputDigest)) {
+      return toolResult;
+    }
+
+    const expectedToolIdentity: ToolIdentity = {
+      surface: 'responses',
+      toolId: call.toolId,
+      bindingRef: this.options.binding.bindingId,
+      route: executorRoute,
+    };
+    const executionFact: ToolExecutionFact = {
+      identity: expectedToolIdentity,
+      requestRef,
+      callRef: call.callId,
+      operationRef: this.options.operationId.value,
+      state: 'succeeded',
+      rawEvidenceRefs: [outputRef],
+      resultRef: outputRef,
+      resultDigest: outputDigest,
+    };
+    const attachedResult = { ...toolResult, executionFact };
+    validateProviderToolResult(attachedResult, expectedToolIdentity, requestRef);
+    return attachedResult;
   }
 
   /**
