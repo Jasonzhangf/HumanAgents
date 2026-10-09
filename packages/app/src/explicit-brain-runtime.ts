@@ -382,15 +382,20 @@ function createWorkspacePort(options: ExplicitBrainRuntimeOptions): ExplicitBrai
       authorizeScope(input);
       const files = await functions.findFiles({ workspaceRef, path: '.', maxFiles: 100 });
       const matches: Array<{ readonly path: string; readonly lines: readonly number[] }> = [];
-      for (const path of files.paths) {
+      let exhaustedCandidates = true;
+      for (let index = 0; index < files.paths.length; index += 1) {
+        const path = files.paths[index];
         const content = await functions.readFile({ workspaceRef, path });
         const lines = content.content.split('\n')
           .map((line, index) => line.includes(input.query) ? index + 1 : undefined)
           .filter((line): line is number => line !== undefined);
         if (lines.length > 0) matches.push({ path, lines });
-        if (matches.length >= input.limit) break;
+        if (matches.length >= input.limit) {
+          exhaustedCandidates = index === files.paths.length - 1;
+          break;
+        }
       }
-      return { query: input.query, matches, complete: files.complete };
+      return { query: input.query, matches, complete: files.complete && exhaustedCandidates };
     },
   };
 }

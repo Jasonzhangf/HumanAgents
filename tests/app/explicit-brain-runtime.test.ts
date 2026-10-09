@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -16,6 +16,84 @@ function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
   return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
 }
+
+async function runWorkspaceSearch(root: string, query: string, limit: number, scopeRef = 'scope:workspace:project-a') {
+  const runtime = createExplicitBrainRuntime({
+    workspaceRoot: await realpath(root),
+    projectKey: 'project-a',
+    traces: new DecisionTraceStore(),
+  });
+  const args = { scopeRef, query, limit };
+  const [result] = await runtime.execute({
+    decisionId: `decision:search-${query}-${limit}`,
+    interactionId: `interaction:search-${query}-${limit}`,
+    kind: 'intent',
+    selectedAction: 'answer',
+    summary: 'search the bound workspace',
+    evidenceRefs: [],
+    toolIntents: [{
+      toolIntentId: `intent:search-${query}-${limit}`,
+      toolRef: 'file.search',
+      arguments: args,
+      argumentsDigest: digest(args),
+      reasonRefs: [],
+      selectedBecause: 'workspace evidence is required',
+    }],
+  });
+  return result as { readonly query: string; readonly matches: readonly { readonly path: string; readonly lines: readonly number[] }[]; readonly complete: boolean };
+}
+
+test('application explicit brain runtime reports whether file.search exhausted discovered candidates', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-search-'));
+  try {
+    await writeFile(join(root, 'a-hit.txt'), 'needle\n', 'utf8');
+    await writeFile(join(root, 'b-unscanned.txt'), 'other\n', 'utf8');
+    const limited = await runWorkspaceSearch(root, 'needle', 1);
+    assert.deepEqual(limited.matches, [{ path: 'a-hit.txt', lines: [1] }]);
+    assert.equal(limited.complete, false);
+
+    const fullScan = await runWorkspaceSearch(root, 'absent', 2);
+    assert.deepEqual(fullScan.matches, []);
+    assert.equal(fullScan.complete, true);
+
+    await writeFile(join(root, 'c-last-hit.txt'), 'last-hit\n', 'utf8');
+    const lastCandidate = await runWorkspaceSearch(root, 'last-hit', 1);
+    assert.deepEqual(lastCandidate.matches, [{ path: 'c-last-hit.txt', lines: [1] }]);
+    assert.equal(lastCandidate.complete, true);
+
+    await assert.rejects(
+      () => runWorkspaceSearch(root, 'needle', 1, 'scope:workspace:other-project'),
+      /workspace scope is not registered/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('application explicit brain runtime does not call an incomplete discovery complete', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-search-incomplete-'));
+  try {
+    await Promise.all(Array.from({ length: 101 }, (_, index) => writeFile(join(root, `${index.toString().padStart(3, '0')}.txt`), 'absent\n', 'utf8')));
+    const result = await runWorkspaceSearch(root, 'needle', 1);
+    assert.deepEqual(result.matches, []);
+    assert.equal(result.complete, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('application explicit brain runtime preserves file.search read failures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-search-read-failure-'));
+  const unreadableFile = join(root, 'unreadable.txt');
+  try {
+    await writeFile(unreadableFile, 'needle\n', 'utf8');
+    await chmod(unreadableFile, 0o000);
+    await assert.rejects(() => runWorkspaceSearch(root, 'needle', 1), /read-failed|permission denied|EACCES/i);
+  } finally {
+    await chmod(unreadableFile, 0o600).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('application explicit brain runtime dispatches a read-only workspace tool through its real owner', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-explicit-brain-runtime-'));
