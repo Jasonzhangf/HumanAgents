@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,5 +68,75 @@ test('recover rejects ENOENT when the asset store root is missing', async () => 
     await assert.rejects(() => store.recover(), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('asset publication failure is visible and retry preserves committed assets', async () => {
+  const fixtureParent = '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-i1/';
+  await mkdir(fixtureParent, { recursive: true });
+  const fixture = await mkdtemp(join(fixtureParent, 'asset-publication-'));
+  const assetRoot = join(fixture, 'assets');
+  const keepId = 'keep-asset';
+  const blockedId = 'blocked-asset';
+  const keepBytes = new TextEncoder().encode('previously committed asset');
+  const blockedBytes = new TextEncoder().encode('retry this asset after unblocking');
+  const sentinelBytes = new TextEncoder().encode('preserve publication blocker');
+  const digestOf = (bytes: Uint8Array) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  let cleanupResult = 'pending';
+  try {
+    const initialStore = new ImmutableAssetStore(assetRoot);
+    const keepReference = await initialStore.write(keepId, keepBytes);
+    const keepDigest = keepReference.digest;
+    assert.equal(keepDigest, digestOf(keepBytes));
+
+    const blockedLocator = join(assetRoot, blockedId);
+    const sentinelPath = join(blockedLocator, 'sentinel.txt');
+    await mkdir(blockedLocator, { recursive: true });
+    await writeFile(sentinelPath, sentinelBytes);
+
+    let returnedReference: Awaited<ReturnType<ImmutableAssetStore['write']>> | undefined;
+    await assert.rejects(
+      async () => { returnedReference = await initialStore.write(blockedId, blockedBytes); },
+      (error: unknown) => (error as { code?: string }).code === 'EISDIR',
+      'blocked publication must reject visibly with EISDIR',
+    );
+    assert.equal(returnedReference, undefined, 'failed write must not return an AssetReference');
+    assert.deepEqual((await readdir(blockedLocator, { withFileTypes: true })).map((entry) => entry.name), ['sentinel.txt']);
+    assert.deepEqual(Uint8Array.from(await readFile(sentinelPath)), sentinelBytes);
+    assert.deepEqual(await initialStore.read(keepReference), keepBytes);
+    assert.equal(keepReference.digest, keepDigest);
+    assert.equal(digestOf(await initialStore.read(keepReference)), keepDigest);
+    assert.deepEqual(await readdir(join(assetRoot, '.tmp'), { withFileTypes: true }), []);
+
+    await new ImmutableAssetStore(assetRoot).recover();
+    assert.deepEqual((await readdir(blockedLocator, { withFileTypes: true })).map((entry) => entry.name), ['sentinel.txt']);
+    assert.deepEqual(Uint8Array.from(await readFile(sentinelPath)), sentinelBytes);
+    assert.deepEqual(await new ImmutableAssetStore(assetRoot).read(keepReference), keepBytes);
+    assert.equal(digestOf(await new ImmutableAssetStore(assetRoot).read(keepReference)), keepDigest);
+    assert.deepEqual(await readdir(join(assetRoot, '.tmp'), { withFileTypes: true }), []);
+
+    await rm(blockedLocator, { recursive: true });
+    const retryStore = new ImmutableAssetStore(assetRoot);
+    const retryReference = await retryStore.write(blockedId, blockedBytes);
+    const retryDigest = digestOf(blockedBytes);
+    assert.deepEqual(retryReference, {
+      assetId: blockedId,
+      digest: retryDigest,
+      locator: blockedLocator,
+      size: blockedBytes.length,
+    });
+    assert.deepEqual(await retryStore.read(retryReference), blockedBytes);
+    const evidence = evidenceReference(retryReference, scope, 'tool');
+    assert.equal(evidence.digest, retryDigest);
+    assert.deepEqual(await retryStore.readEvidence(evidence), blockedBytes);
+    assert.deepEqual(await retryStore.write(blockedId, blockedBytes), retryReference);
+    assert.deepEqual(await retryStore.read(retryReference), blockedBytes);
+    assert.deepEqual(await retryStore.read(keepReference), keepBytes);
+    assert.deepEqual(await readdir(join(assetRoot, '.tmp'), { withFileTypes: true }), []);
+    console.log(JSON.stringify({ fixture, failure: 'EISDIR', returnedReference: false, blockerPreserved: true, keepAssetDigest: keepDigest, recoveryPreserved: true, retryDigest, readAndEvidenceMatch: true, repeatedWriteStable: true, temporaryEntries: [] }));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+    cleanupResult = 'removed';
+    console.log(JSON.stringify({ fixture, cleanup: cleanupResult }));
   }
 });
