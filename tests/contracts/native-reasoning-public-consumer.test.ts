@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CODE_SEARCH_CONTRACT_VERSION,
+  CODE_SEARCH_SERVICE_ID,
   ContractError,
   id,
   validateAdmittedTurn,
   validateCheckpointBoundaryOutcome,
+  validateCodeSearchReport,
   validateDurableCheckpointReceipt,
   validateNativeTurnBoundary,
   validateProviderEvent,
@@ -18,6 +21,7 @@ import {
   type AdmittedTurnIdentity,
   type Checkpoint,
   type CheckpointBoundaryOutcome,
+  type CodeSearchReport,
   type DurableCheckpointReceipt,
   type DurablePhaseOutcome,
   type EvidenceRef,
@@ -635,6 +639,227 @@ test('stopped requires committed checkpoint and closure receipts with no unresol
 
   const unresolvedOperation = { ...stoppedOutcome, unresolvedOperationRefs: ['operation-still-open'] };
   expectContractError(() => validateNativeTurnBoundary(stoppedBoundary(unresolvedOperation)));
+});
+
+const completeCodeSearchReport: CodeSearchReport = {
+  serviceId: CODE_SEARCH_SERVICE_ID,
+  contractVersion: CODE_SEARCH_CONTRACT_VERSION,
+  status: 'succeeded',
+  workspaceRef: 'workspace://fixture',
+  path: 'src',
+  query: 'needle',
+  queryKind: 'literal',
+  matches: [{ path: 'src/a.ts', line: 2, column: 1, text: 'needle here', contextBefore: ['before'], contextAfter: ['after'] }],
+  filesDiscovered: 2,
+  filesSearched: 2,
+  matchesFound: 1,
+  resultsTruncated: false,
+  searchComplete: true,
+  unresolvedPaths: [],
+  summary: 'searched 2 file(s), found 1 match(es)',
+};
+
+function codeSearchReportWithoutPathTree(): CodeSearchReport {
+  return { ...completeCodeSearchReport, matches: [], matchesFound: 0, summary: 'searched 2 file(s), found 0 match(es)' };
+}
+
+function partialCodeSearchReport(): CodeSearchReport {
+  return {
+    ...completeCodeSearchReport,
+    filesDiscovered: 2,
+    filesSearched: 1,
+    matchesFound: 1,
+    searchComplete: false,
+    unresolvedPaths: ['src/broken.ts'],
+    summary: 'partial search: inspected 1 file(s), found 1 match(es)',
+  };
+}
+
+function truncatedCodeSearchReport(): CodeSearchReport {
+  return {
+    ...completeCodeSearchReport,
+    matchesFound: 3,
+    resultsTruncated: true,
+    summary: 'searched 2 file(s), found 3 match(es)',
+  };
+}
+
+function failedCodeSearchReport(): CodeSearchReport {
+  return {
+    ...completeCodeSearchReport,
+    status: 'failed',
+    matches: [],
+    filesDiscovered: 0,
+    filesSearched: 0,
+    matchesFound: 0,
+    searchComplete: false,
+    path: '../outside',
+    summary: 'search path must stay inside the workspace',
+    failure: { code: 'invalid-request', message: 'search path must stay inside the workspace' },
+  };
+}
+
+function scopeTooLargeCodeSearchReport(): CodeSearchReport {
+  return {
+    ...completeCodeSearchReport,
+    status: 'failed',
+    matches: [],
+    filesDiscovered: 3,
+    filesSearched: 0,
+    matchesFound: 0,
+    searchComplete: false,
+    summary: 'search scope contains at least 3 files; maximum is 2',
+    pathTree: { path: '.', kind: 'directory', fileCount: 3, children: [], truncated: false },
+    failure: { code: 'scope-too-large', message: 'search scope is too large; narrow the requested path' },
+  };
+}
+
+function expectCodeSearchReportError(action: () => unknown, message: string): void {
+  try {
+    action();
+  } catch (error) {
+    if (!(error instanceof ContractError)) throw error;
+    assert.equal(error.message, message);
+    return;
+  }
+  throw new Error(`expected ContractError: ${message}`);
+}
+
+test('public package root validates every successful CodeSearchReport shape without mutation', () => {
+  const valid = [completeCodeSearchReport, codeSearchReportWithoutPathTree(), partialCodeSearchReport(), truncatedCodeSearchReport()];
+  for (const report of valid) {
+    const before = structuredClone(report);
+    const unknownReport: unknown = report;
+    validateCodeSearchReport(unknownReport);
+    assert.deepEqual(unknownReport, before);
+    const typed: CodeSearchReport = unknownReport;
+    assert.equal(typed.contractVersion, CODE_SEARCH_CONTRACT_VERSION);
+  }
+});
+
+test('public package root preserves empty and whitespace-only matched source lines', () => {
+  for (const text of ['', '   ', '\t']) {
+    const report: CodeSearchReport = {
+      ...completeCodeSearchReport,
+      matches: [{ ...completeCodeSearchReport.matches[0]!, text }],
+    };
+    const before = structuredClone(report);
+    const unknownReport: unknown = report;
+    validateCodeSearchReport(unknownReport);
+    assert.deepEqual(unknownReport, before);
+    assert.equal((unknownReport as CodeSearchReport).matches[0]?.text, text);
+  }
+});
+
+test('public package root preserves a well-formed failed business search report', () => {
+  const failed = failedCodeSearchReport();
+  const before = structuredClone(failed);
+  assert.doesNotThrow(() => validateCodeSearchReport(failed));
+  assert.deepEqual(failed, before);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.failure?.code, 'invalid-request');
+  assert.equal(failed.path, '../outside');
+});
+
+test('public package root preserves invalid-request echo strings without normalization', () => {
+  const echoes = [
+    { workspaceRef: '', path: 'src', query: 'needle' },
+    { workspaceRef: 'workspace://fixture', path: '', query: 'needle' },
+    { workspaceRef: 'workspace://fixture', path: 'src', query: '   ' },
+    { workspaceRef: '  ', path: '\t', query: '' },
+  ];
+  for (const echo of echoes) {
+    const report: CodeSearchReport = {
+      ...failedCodeSearchReport(),
+      ...echo,
+      failure: { code: 'invalid-request', message: 'invalid code search request' },
+    };
+    const before = structuredClone(report);
+    const unknownReport: unknown = report;
+    validateCodeSearchReport(unknownReport);
+    assert.deepEqual(unknownReport, before);
+    assert.equal((unknownReport as CodeSearchReport).workspaceRef, echo.workspaceRef);
+    assert.equal((unknownReport as CodeSearchReport).path, echo.path);
+    assert.equal((unknownReport as CodeSearchReport).query, echo.query);
+  }
+});
+
+test('public package root rejects empty report location strings outside the invalid-request echo branch', () => {
+  expectCodeSearchReportError(
+    () => validateCodeSearchReport({ ...completeCodeSearchReport, workspaceRef: '' }),
+    'code search report workspaceRef must be a non-empty string',
+  );
+  expectCodeSearchReportError(
+    () => validateCodeSearchReport({ ...failedCodeSearchReport(), path: '', failure: { code: 'read-failed', message: 'read failed' } }),
+    'code search report path must be a non-empty string',
+  );
+});
+
+test('public package root validates a scope-too-large report with a bounded pathTree', () => {
+  const report = scopeTooLargeCodeSearchReport();
+  const before = structuredClone(report);
+  assert.doesNotThrow(() => validateCodeSearchReport(report));
+  assert.deepEqual(report, before);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.failure?.code, 'scope-too-large');
+  assert.equal(report.pathTree?.fileCount, 3);
+});
+
+test('public CodeSearchReport validation rejects sparse match arrays before assigning the public type', () => {
+  const sparseMatches = new Array(1);
+  const report = { ...completeCodeSearchReport, matches: sparseMatches };
+  assert.equal(sparseMatches.length, 1);
+  assert.equal(Object.hasOwn(sparseMatches, 0), false);
+  expectCodeSearchReportError(() => validateCodeSearchReport(report), 'code search report matches[0] must be an object');
+});
+
+test('public CodeSearchReport validation rejects absent and wrong versions', () => {
+  const { contractVersion: _contractVersion, ...withoutVersion } = completeCodeSearchReport;
+  expectCodeSearchReportError(() => validateCodeSearchReport(withoutVersion), 'code search report is missing contractVersion');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, contractVersion: '2.0.0' }), 'unsupported code search report contract version');
+});
+
+test('public CodeSearchReport validation rejects malformed matches and counters', () => {
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, matches: [{ ...completeCodeSearchReport.matches[0], line: 0 }] }), 'code search report matches[0].line must be at least 1');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, matches: [{ ...completeCodeSearchReport.matches[0], column: Number.MAX_SAFE_INTEGER + 1 }] }), 'code search report matches[0].column must be a safe integer');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, matches: [{ ...completeCodeSearchReport.matches[0], contextBefore: 'before' }] }), 'code search report matches[0].contextBefore must be an array');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, filesDiscovered: -1 }), 'code search report filesDiscovered must be non-negative');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, matchesFound: Number.MAX_SAFE_INTEGER + 1 }), 'code search report matchesFound must be a safe integer');
+});
+
+test('public CodeSearchReport validation rejects malformed flags, unresolved paths, and pathTree nodes', () => {
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, searchComplete: 'yes' }), 'code search report searchComplete must be a boolean');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, resultsTruncated: 0 }), 'code search report resultsTruncated must be a boolean');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, unresolvedPaths: [''] }), 'code search report unresolvedPaths entry must be a non-empty string');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...scopeTooLargeCodeSearchReport(), pathTree: { ...scopeTooLargeCodeSearchReport().pathTree, kind: 'link' } }), 'code search report pathTree.kind is invalid');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...scopeTooLargeCodeSearchReport(), pathTree: { ...scopeTooLargeCodeSearchReport().pathTree, fileCount: 0 } }), 'code search report pathTree.fileCount must be at least 1');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...scopeTooLargeCodeSearchReport(), pathTree: { ...scopeTooLargeCodeSearchReport().pathTree, children: [{ path: 'src/a.ts' }] } }), 'code search report pathTree.children entry is missing kind');
+});
+
+test('public CodeSearchReport validation rejects malformed failure shapes and contradictions', () => {
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...failedCodeSearchReport(), failure: { code: 'unknown', message: 'x' } }), 'code search report failure.code is invalid');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...failedCodeSearchReport(), failure: { code: 'read-failed', message: '' } }), 'code search report failure.message must be a non-empty string');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...failedCodeSearchReport(), failure: { code: 'read-failed', message: 'x', path: '' } }), 'code search report failure.path must be a non-empty string');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, filesSearched: 3 }), 'code search report filesSearched exceeds filesDiscovered');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, matchesFound: 0 }), 'code search report matchesFound is smaller than returned matches');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, resultsTruncated: true }), 'code search report truncation state is inconsistent');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, searchComplete: true, unresolvedPaths: ['src/broken.ts'] }), 'code search report completeness is inconsistent with unresolved paths');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...failedCodeSearchReport(), failure: undefined }), 'failed code search report requires failure');
+  expectCodeSearchReportError(() => validateCodeSearchReport({ ...completeCodeSearchReport, failure: { code: 'read-failed', message: 'x' } }), 'succeeded code search report cannot carry failure');
+});
+
+test('public CodeSearchReport validation is fail-closed and leaves optional fields absent', () => {
+  const minimal = codeSearchReportWithoutPathTree() as unknown as Record<string, unknown>;
+  assert.doesNotThrow(() => validateCodeSearchReport(minimal));
+  assert.equal(Object.hasOwn(minimal, 'pathTree'), false);
+  assert.equal(Object.hasOwn(minimal, 'failure'), false);
+  const before = structuredClone(minimal);
+  assert.doesNotThrow(() => validateCodeSearchReport(minimal));
+  assert.deepEqual(minimal, before);
+  for (const value of [undefined, null, [], 'report']) {
+    expectCodeSearchReportError(() => validateCodeSearchReport(value), 'code search report must be an object');
+  }
+  expectCodeSearchReportError(() => validateCodeSearchReport({}), 'code search report is missing serviceId');
 });
 
 function compileTimeNegativeFixtures(): void {
