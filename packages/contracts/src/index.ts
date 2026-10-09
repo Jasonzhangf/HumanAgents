@@ -738,6 +738,7 @@ export interface WorkResult {
 }
 
 import { ContractError } from './errors.js';
+import { validateToolExecutionFact, type ToolExecutionFact, type ToolIdentity } from './native-reasoning.js';
 export { ContractError } from './errors.js';
 const ID_SCOPES: readonly ScopeKind[] = ['organ', 'task', 'cycle', 'operation', 'checkpoint', 'evidence'];
 const CONTROL_KEYS = new Set([
@@ -1083,6 +1084,7 @@ export interface ProviderToolResult extends ProviderExecutionIdentityRef {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly outputRef?: string;
   readonly outputDigest?: string;
+  readonly executionFact?: ToolExecutionFact;
   readonly error?: ProviderError;
   readonly ownerId?: string;
   readonly nextAction?: NextAction;
@@ -1426,7 +1428,7 @@ export function validateProviderSubmitResult(input: ProviderSubmitResult): void 
   }
   assertOptionalProviderOwner(input);
 }
-export function validateProviderEvent(input: ProviderEvent): void {
+export function validateProviderEvent(input: ProviderEvent, expectedToolIdentity?: ToolIdentity): void {
   assertProviderExecutionIdentity(input);
   assertNonEmptyReference(input.eventId, 'provider eventId');
   assertOptionalProviderRequestIdentity(input, 'provider event');
@@ -1464,7 +1466,14 @@ export function validateProviderEvent(input: ProviderEvent): void {
   if (input.toolResult !== undefined) {
     if (input.kind !== 'tool' || input.toolPhase !== 'result') throw new ContractError('provider tool result payload requires a tool result event');
     if (input.toolCall !== undefined) throw new ContractError('provider tool result event cannot carry a tool call');
-    validateProviderToolResult(input.toolResult);
+    if (input.toolResult.executionFact !== undefined) {
+      assertProviderExecutionIdentityMatch(input.toolResult, input);
+      if (input.turnId === undefined || input.requestId === undefined) {
+        throw new ContractError('provider tool result event requires turnId and requestId');
+      }
+      assertOptionalProviderRequestIdentity(input, 'provider tool result event');
+    }
+    validateProviderToolResult(input.toolResult, expectedToolIdentity, input.requestId);
   }
   assertOptionalProviderOwner(input);
 }
@@ -1490,7 +1499,11 @@ export function assertProviderEventEpoch(event: ProviderEvent, expectedExecution
   const decision = checkProviderEventEpoch(event, expectedExecutionEpoch);
   if (!decision.accepted) throw new ContractError(`provider event epoch is ${decision.reason}`);
 }
-export function validateProviderToolResult(input: ProviderToolResult): void {
+export function validateProviderToolResult(
+  input: ProviderToolResult,
+  expectedToolIdentity?: ToolIdentity,
+  expectedRequestRef?: string,
+): void {
   assertProviderExecutionIdentity(input);
   assertNonEmptyReference(input.toolId, 'provider toolId');
   assertNonEmptyReference(input.callId, 'provider tool callId');
@@ -1503,11 +1516,45 @@ export function validateProviderToolResult(input: ProviderToolResult): void {
       throw new ContractError('provider tool outputDigest must be sha256:<64 lowercase hex>');
     }
   }
+  assertProviderToolExecutionFactBinding(input, expectedToolIdentity, expectedRequestRef);
   if (input.error) validateProviderError(input.error);
   if (input.status !== 'succeeded' && !input.error) throw new ContractError('provider non-success tool result requires error');
   if (input.status !== 'succeeded' && input.evidenceRefs.length === 0) throw new ContractError('provider non-success tool result requires evidence refs');
   if (input.status === 'succeeded' && input.error) throw new ContractError('provider succeeded tool result cannot carry an error');
   assertOptionalProviderOwner(input);
+}
+
+/** Validate the relation between a provider result envelope and its optional native fact. */
+export function assertProviderToolExecutionFactBinding(
+  result: ProviderToolResult,
+  expectedToolIdentity?: ToolIdentity,
+  expectedRequestRef?: string,
+): void {
+  const fact = result.executionFact;
+  if (fact === undefined) return;
+  if (expectedToolIdentity === undefined) {
+    throw new ContractError('provider tool fact requires trusted expected tool identity');
+  }
+  if (expectedRequestRef === undefined) {
+    throw new ContractError('provider tool fact requires expected requestRef');
+  }
+  validateToolExecutionFact(fact, expectedToolIdentity);
+  if (fact.identity.toolId !== result.toolId) throw new ContractError('provider tool fact toolId mismatch');
+  if (fact.callRef !== result.callId) throw new ContractError('provider tool fact callId mismatch');
+  if (fact.operationRef !== result.operationId.value) throw new ContractError('provider tool fact operationRef mismatch');
+  if (fact.state !== result.status) throw new ContractError('provider tool fact state mismatch');
+  if (fact.requestRef !== expectedRequestRef) {
+    throw new ContractError('provider tool fact requestRef mismatch');
+  }
+  if (fact.resultRef === undefined || fact.resultDigest === undefined) {
+    throw new ContractError('provider tool fact requires result ref and digest');
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(fact.resultDigest)) {
+    throw new ContractError('provider tool fact resultDigest must be sha256:<64 lowercase hex>');
+  }
+  if (result.outputRef !== fact.resultRef || result.outputDigest !== fact.resultDigest) {
+    throw new ContractError('provider tool result descriptor mismatch');
+  }
 }
 export function validateProviderStopRequest(input: ProviderStopRequest): void {
   assertProviderExecutionIdentity(input);

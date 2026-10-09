@@ -7,6 +7,8 @@ import {
   validateCheckpointBoundaryOutcome,
   validateDurableCheckpointReceipt,
   validateNativeTurnBoundary,
+  validateProviderEvent,
+  validateProviderToolResult,
   validateSemanticClosureCandidate,
   validateStageResult,
   validateToolExecutionFact,
@@ -27,6 +29,9 @@ import {
   type StageResult,
   type SuccessPathProjection,
   type ToolExecutionFact,
+  type ToolIdentity,
+  type ProviderEvent,
+  type ProviderToolResult,
   type TurnDisposition,
   type TurnExecutionFacts,
 } from '@humanagent/contracts';
@@ -81,6 +86,46 @@ const toolExecution: ToolExecutionFact = {
   rawEvidenceRefs: ['raw-tool-a'],
   resultRef: 'result-a',
   resultDigest: 'sha256:result-a',
+};
+
+const providerToolIdentity: ToolIdentity = {
+  surface: 'native-tools',
+  toolId: 'file.read',
+  bindingRef: 'tool-binding-a',
+  route: 'direct-executor',
+};
+const providerExecutionFact: ToolExecutionFact = {
+  ...toolExecution,
+  resultDigest: `sha256:${'a'.repeat(64)}`,
+};
+const providerToolResult: ProviderToolResult = {
+  runtimeId: 'runtime-a',
+  taskId,
+  operationId: id('operation', 'operation-a'),
+  executionEpoch: admittedTurn.executionEpoch,
+  toolId: 'file.read',
+  callId: 'call-a',
+  status: 'succeeded',
+  outputRefs: ['result-a'],
+  evidenceRefs: [evidenceRef],
+  outputRef: 'result-a',
+  outputDigest: `sha256:${'a'.repeat(64)}`,
+  executionFact: providerExecutionFact,
+};
+const providerToolResultEvent: ProviderEvent = {
+  runtimeId: providerToolResult.runtimeId,
+  taskId: providerToolResult.taskId,
+  operationId: providerToolResult.operationId,
+  executionEpoch: providerToolResult.executionEpoch,
+  eventId: 'event-a',
+  kind: 'tool',
+  turnId: 'turn-a',
+  requestId: 'request-a',
+  toolPhase: 'result',
+  evidenceRefs: [evidenceRef],
+  ownerId: 'runtime',
+  nextAction: { kind: 'continue' },
+  toolResult: providerToolResult,
 };
 
 const turnFacts: TurnExecutionFacts = {
@@ -239,6 +284,67 @@ test('public package root accepts empty tool facts and known-failed or unknown t
   assert.doesNotThrow(() => validateToolExecutionFact({ ...toolExecution, state: 'failed', errorRef: 'tool-error-a' }));
   const { resultRef: _resultRef, resultDigest: _resultDigest, ...unresolvedToolExecution } = toolExecution;
   assert.doesNotThrow(() => validateToolExecutionFact({ ...unresolvedToolExecution, state: 'unknown' }));
+});
+
+test('public provider result can carry a bound native tool fact while preserving legacy results', () => {
+  const { executionFact: _executionFact, ...legacyResult } = providerToolResult;
+  assert.doesNotThrow(() => validateProviderToolResult(legacyResult));
+  assert.doesNotThrow(() => validateProviderToolResult(providerToolResult, providerToolIdentity, 'request-a'));
+  assert.doesNotThrow(() => validateProviderEvent(providerToolResultEvent, providerToolIdentity));
+  const before = structuredClone(providerToolResultEvent);
+  validateProviderEvent(providerToolResultEvent, providerToolIdentity);
+  assert.deepEqual(providerToolResultEvent, before);
+});
+
+test('attached provider fact rejects when trusted expected tool identity is omitted', () => {
+  assert.throws(() => validateProviderToolResult(providerToolResult), ContractError);
+});
+
+test('direct attached provider result rejects when expected request reference is omitted', () => {
+  assert.throws(() => validateProviderToolResult(providerToolResult, providerToolIdentity), ContractError);
+});
+
+test('attached provider event requires complete outer request identity', () => {
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, turnId: undefined, requestId: undefined }, providerToolIdentity), ContractError);
+});
+
+test('provider attachment rejects mismatched trusted identity and request binding', () => {
+  assert.throws(() => validateProviderToolResult({
+    ...providerToolResult,
+    executionFact: { ...providerExecutionFact, identity: { ...providerToolIdentity, bindingRef: 'other-binding' } },
+  }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({
+    ...providerToolResult,
+    executionFact: { ...providerExecutionFact, identity: { ...providerToolIdentity, route: 'other-route' } },
+  }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, requestId: 'request-b' }, providerToolIdentity), ContractError);
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, requestId: undefined }, providerToolIdentity), ContractError);
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, turnId: undefined }, providerToolIdentity), ContractError);
+});
+
+test('provider attachment rejects mismatched tool, call, operation, and result envelope fields', () => {
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, toolId: 'file.write' }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, callId: 'call-b' }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, operationId: id('operation', 'operation-b') }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, status: 'failed' }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, outputRef: undefined }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, outputDigest: `sha256:${'b'.repeat(64)}` }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, executionFact: { ...providerExecutionFact, resultDigest: undefined } }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, executionFact: { ...providerExecutionFact, resultRef: 'other-result' } }, providerToolIdentity, 'request-a'), ContractError);
+  assert.throws(() => validateProviderToolResult({ ...providerToolResult, executionFact: { ...providerExecutionFact, resultDigest: 'sha256:bad' } }, providerToolIdentity, 'request-a'), ContractError);
+});
+
+test('provider event result must share parent execution identity with its child result', () => {
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, runtimeId: 'runtime-b' }, providerToolIdentity), ContractError);
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, taskId: id('task', 'task-b') }, providerToolIdentity), ContractError);
+  assert.throws(() => validateProviderEvent({ ...providerToolResultEvent, executionEpoch: 4 }, providerToolIdentity), ContractError);
+});
+
+test('provider execution facts reject control fields', () => {
+  assert.throws(() => validateProviderToolResult({
+    ...providerToolResult,
+    executionFact: { ...providerExecutionFact, executionEpoch: 7 } as ToolExecutionFact,
+  }, providerToolIdentity, 'request-a'), ContractError);
 });
 
 test('public package root preserves each semantic certainty and its source/rule version', () => {
