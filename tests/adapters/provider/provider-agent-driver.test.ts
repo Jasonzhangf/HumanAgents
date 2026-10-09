@@ -8,6 +8,7 @@ import {
   type ProviderCapabilities,
   type ProviderCloseResult,
   type ProviderEvent,
+  type ProviderError,
   type ProviderRequestLifecycleEvent,
   type ProviderReadiness,
   type ProviderRecoveryResult,
@@ -418,6 +419,172 @@ test('provider agent driver executes a complete Responses tool call once and con
     ['provider.output', 'Checklist from REAL_FILE_CONTENT', undefined],
     ['provider.terminal', undefined, 'succeeded'],
   ]);
+});
+
+test('preserves prior results and stops a Responses tool batch at the first owned-tool failure', async () => {
+  const evidenceA: EvidenceRef = {
+    ...evidence,
+    evidenceId: id('evidence', 'batch-tool-a'),
+    locator: 'provider-tool/call-a',
+  };
+  const evidenceB: EvidenceRef = {
+    ...evidence,
+    evidenceId: id('evidence', 'batch-tool-b'),
+    locator: 'provider-tool/call-b',
+  };
+  const failure: ProviderError = {
+    errorId: 'provider.tool.batch-b.failed',
+    code: 'tool.batch-b.failed',
+    category: 'provider',
+    phase: 'tool',
+    message: 'tool B failed with a typed provider error',
+    ownerId: 'humanagent.provider-agent-driver',
+    retryable: 'manual',
+    attention: 'foreground',
+    evidenceRefs: [evidenceB],
+    nextAction: { kind: 'recover', ref: 'provider.tool.batch-b' },
+  };
+  const wireCalls = [
+    { callId: 'call-a', toolName: 'file_read', arguments: { path: 'README.md' } },
+    { callId: 'call-b', toolName: 'file_write', arguments: { file_path: 'result.txt' } },
+    { callId: 'call-c', toolName: 'web_search', arguments: { query: 'must not execute' } },
+  ];
+  const wireEvents = [
+    { type: 'response.created', response: { id: 'response-partial-batch' } },
+    ...wireCalls.flatMap((call, output_index) => [
+      {
+        type: 'response.output_item.added',
+        output_index,
+        item: { type: 'function_call', call_id: call.callId, name: call.toolName, arguments: '' },
+      },
+      {
+        type: 'response.output_item.done',
+        output_index,
+        item: { type: 'function_call', call_id: call.callId, name: call.toolName, arguments: JSON.stringify(call.arguments) },
+      },
+    ]),
+    { type: 'response.completed', response: { id: 'response-partial-batch' } },
+  ];
+  const requests: Array<{ readonly url: string; readonly init: V3ProviderFetchInit }> = [];
+  const fetch: V3ProviderFetch = async (url, init) => {
+    requests.push({ url, init });
+    return delayedResponse(chunks(wireEvents.map((event) => `data: ${JSON.stringify(event)}\n\n`)));
+  };
+  const executions: Array<{ callId: string; toolId: string; arguments: unknown; continuationRef: string }> = [];
+  const instance = new ProviderAgentDriver({
+    port: realProviderAdapter(fetch),
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-a',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [
+      { toolId: 'file.read', description: 'read a file', inputSchema: { type: 'object' } },
+      { toolId: 'file.write', description: 'write a file', inputSchema: { type: 'object' } },
+      { toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } },
+    ],
+    executeTool: {
+      async execute({ call }) {
+        executions.push({ callId: call.callId, toolId: call.toolId, arguments: call.arguments, continuationRef: call.continuationRef });
+        if (call.callId === 'call-a') {
+          return { output: 'A completed', outputRefs: ['asset://provider-tool/a'], evidenceRefs: [evidenceA] };
+        }
+        if (call.callId === 'call-b') {
+          return {
+            output: 'B failed',
+            outputRefs: ['asset://provider-tool/b-error'],
+            evidenceRefs: [evidenceB],
+            status: 'failed',
+            error: failure,
+          };
+        }
+        throw new Error(`tool C executed unexpectedly: ${call.callId}`);
+      },
+    },
+  });
+
+  const observed: ProviderAgentEvent[] = [];
+  let observationFailure: unknown;
+  let started = false;
+  let stopReceipt: Awaited<ReturnType<typeof instance.requestStop>> | undefined;
+  let closure: Awaited<ReturnType<typeof instance.settle>> | undefined;
+  let closeResult: ProviderCloseResult | undefined;
+  try {
+    await instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: 1 });
+    started = true;
+    await instance.submit({ taskId, executionEpoch: 1, assignmentId: 'assignment-a', payload: { prompt: 'run tools A, B, and C' } });
+    const iterator = instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+    try {
+      while (true) {
+        const next = await iterator.next();
+        if (next.done) break;
+        observed.push(next.value);
+      }
+    } catch (error) {
+      observationFailure = error;
+    } finally {
+      await iterator.return?.();
+    }
+  } finally {
+    if (started) {
+      try {
+        stopReceipt = await instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: 1, operationId });
+      } finally {
+        try {
+          closure = await instance.settle({ runtimeId: identity.runtimeId, executionEpoch: 1 });
+        } finally {
+          closeResult = await instance.close();
+        }
+      }
+    } else {
+      closeResult = await instance.close();
+    }
+  }
+
+  const calls = observed.flatMap((event) => event.providerEvent.toolCall === undefined ? [] : [event.providerEvent.toolCall]);
+  assert.deepEqual(calls.map((call) => [call.callId, call.toolId]), [
+    ['call-a', 'file.read'],
+    ['call-b', 'file.write'],
+    ['call-c', 'web.search'],
+  ]);
+  assert.deepEqual(executions, [
+    { callId: 'call-a', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'response-partial-batch' },
+    { callId: 'call-b', toolId: 'file.write', arguments: { file_path: 'result.txt' }, continuationRef: 'response-partial-batch' },
+  ]);
+  const results = observed.filter((event) => event.kind === 'provider.tool-result');
+  assert.deepEqual(results.map((event) => event.providerEvent.toolResult?.callId), ['call-a', 'call-b']);
+  const resultA = results[0]?.providerEvent.toolResult;
+  assert.equal(resultA?.toolId, 'file.read');
+  assert.equal(resultA?.status, 'succeeded');
+  assert.deepEqual(resultA?.outputRefs, ['asset://provider-tool/a']);
+  assert.deepEqual(resultA?.evidenceRefs, [evidenceA]);
+  const resultB = results[1]?.providerEvent.toolResult;
+  assert.equal(resultB?.toolId, 'file.write');
+  assert.equal(resultB?.status, 'failed');
+  assert.deepEqual(resultB?.outputRefs, ['asset://provider-tool/b-error']);
+  assert.deepEqual(resultB?.evidenceRefs, [evidenceB]);
+  assert.deepEqual(resultB?.error, failure);
+  assert.ok(observed.indexOf(results[0]!) < observed.indexOf(results[1]!));
+  assert.equal(observed.some((event) => event.kind === 'provider.terminal' && event.terminalState === 'succeeded'), false);
+  assert.ok(observationFailure instanceof ProviderAdapterError);
+  assert.equal(observationFailure.providerError.code, failure.code);
+  assert.equal(observationFailure.providerError.category, failure.category);
+  assert.equal(observationFailure.providerError.message, failure.message);
+  assert.equal(observationFailure.providerError.retryable, failure.retryable);
+  assert.deepEqual(observationFailure.providerError.nextAction, failure.nextAction);
+  assert.deepEqual(observationFailure.providerError.evidenceRefs, failure.evidenceRefs);
+
+  assert.equal(requests.length, 1, 'a partial tool continuation request was sent after B failed');
+  assert.equal(requests[0]?.init.method, 'POST');
+  assert.equal(stopReceipt?.requested, true);
+  assert.equal('state' in (stopReceipt ?? {}), false, 'stop receipt must not claim settlement');
+  assert.equal(closure?.state, 'stopped');
+  assert.equal(instance.settlement()?.state, 'stopped');
+  assert.equal(instance.settlement()?.resourceRelease.state, 'released');
+  assert.equal(closeResult?.state, 'closed');
 });
 
 test('provider agent driver reports an unowned tool call as an observation instead of stranding the execution', async () => {
