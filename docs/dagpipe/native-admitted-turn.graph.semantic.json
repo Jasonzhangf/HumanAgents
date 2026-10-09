@@ -1,0 +1,35 @@
+{
+  "graph": "humanagent-native-admitted-turn",
+  "labels": {
+    "assemble_turn_context": "装配固定规则、checkpoint 语义历史与当前 turn 内容",
+    "execute_one_child_turn": "执行已准入的单个 native child turn",
+    "collect_turn_facts": "计划收集本 turn 工具、子任务、operation 与验收事实；当前 ProviderToolResult.executionFact 尚未接通",
+    "derive_semantic_candidate": "仅从已验证事实和原始来源按规则整理带不确定度的语义候选；原始报告本身不是语义结论",
+    "save_checkpoint_boundary": "调用唯一 checkpoint 保存边界并保留未完成责任",
+    "project_success_disposition": "仅当完整 durable receipt 且无未决责任时投影成功候选",
+    "recovery_hold": "汇总首错、后续错误、raw、未决操作、阶段与恢复责任",
+    "assess_turn_disposition": "汇合成功候选与恢复保持并返回唯一处置"
+  },
+  "design": {
+    "status": "DESIGN-PLANNED",
+    "singleTurn": true,
+    "doesNotDispatchNextTurn": true,
+    "doesNotExpandProviderModelToolLoop": true,
+    "failurePropagation": "Expected failures are typed envelope values, not Operator transport failures. A failed or ineligible prerequisite gates every later side-effect stage; it returns not-executed carrying original cause and recovery responsibility. The pure success projection and pure recovery_hold projection both run and join at the unique Z node; exactly one is active by envelope state. No conditional edge is claimed.",
+    "recoveryHoldFields": ["firstErrorRef", "laterReconcileAndSaveErrorRefs", "rawTurnRefs", "unresolvedOperationRefs", "stageAndDurablePhaseFacts", "recoveryResponsibilityRef"],
+    "routingEvidence": "DAGpipe 0.1.1 installed SDK edge schema contains only from/to/arc_id and scheduler schedules every node in each topological wave. This graph is a target topology and contract, not runtime conditional-routing evidence.",
+    "checkpointSubgraph": "native-turn-checkpoint",
+    "rawRetention": "Keep current-turn raw evidence until a complete durable turn receipt exists. Keep immutable journal and evidence references after raw leaves active context.",
+    "publicationBoundary": "Publishing semantic history alone does not close the turn or grant next-turn eligibility.",
+    "f1HTypedFactBoundary": "ProviderToolResult.executionFact attachment is the intended validated fact boundary. This is a target contract; no runtime behavior is established by this graph update.",
+    "factCollectionEdge": {
+      "edge": "execute_one_child_turn -> collect_turn_facts",
+      "status": "planned-not-implemented",
+      "note": "The edge remains unchanged in topology. The intended input includes the validated ProviderToolResult.executionFact attachment; its producer and Runtime consumer still require separate contract and implementation gates."
+    },
+    "limitedNextProof": "The next limited proof covers one Responses file.search source/report receipt only. The report is the raw evidence source; it does not by itself assert semantic completeness or constitute a semantic claim.",
+    "rawReportBoundary": "The original file.search report remains raw evidence and must retain its original status, completeness, truncation, failure, and result fields. Semantic content requires a separately validated mapper and evidence-based claim.",
+    "projectionAuthority": "UI projection journal replay can demonstrate observation readback only; it is not Organ Journal authority and does not prove authoritative recovery state.",
+    "checkpointAndRawReleaseEligibility": "This graph semantic update grants no checkpoint eligibility, durable turn receipt, closure, next-turn eligibility, or raw-release eligibility. Raw remains retained until the independently implemented complete durable turn receipt boundary is proven."
+  }
+}

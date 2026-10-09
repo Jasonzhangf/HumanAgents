@@ -1,0 +1,107 @@
+{
+  "id": "humanagent-native-admitted-turn",
+  "version": "1",
+  "meta": {
+    "title": "一个已准入 native child 的单 turn 收拢",
+    "baseline": "f410f134aba33e73c1c783a843389d7fdc8f9d37",
+    "status": "DESIGN-PLANNED",
+    "scope": "一个已接受 WorkAssignment、一个 native child、一个 turn；不派发下一 turn，不展开 turn 内模型/工具循环或全局多 child DAG",
+    "routingContract": "Edges are unconditional ARC dependencies; this installed DAGpipe grammar has no conditional-edge field. The fork is logical target topology: success projection and recovery-hold projection both run as pure envelope projections, exactly one is active, and the unique Z node joins both. No runtime conditional-routing evidence is claimed."
+  },
+  "inputs": [
+    { "id": "admitted_turn", "schema": "Object" }
+  ],
+  "nodes": [
+    {
+      "id": "assemble_turn_context",
+      "operator": "humanagent-native-turn-context",
+      "operator_version": "1",
+      "inputs": ["admitted_turn"],
+      "output": { "id": "context_assembly_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "execute_one_child_turn",
+      "operator": "humanagent-native-turn-dispatch",
+      "operator_version": "1",
+      "inputs": ["context_assembly_result"],
+      "output": { "id": "child_turn_execution_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "collect_turn_facts",
+      "operator": "humanagent-native-turn-results",
+      "operator_version": "1",
+      "inputs": ["child_turn_execution_result"],
+      "output": { "id": "turn_facts_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "derive_semantic_candidate",
+      "operator": "humanagent-native-turn-semantics",
+      "operator_version": "1",
+      "inputs": ["turn_facts_result"],
+      "output": { "id": "semantic_candidate_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "save_checkpoint_boundary",
+      "operator": "humanagent-native-turn-checkpoint",
+      "operator_version": "1",
+      "inputs": ["semantic_candidate_result"],
+      "output": { "id": "checkpoint_boundary_result", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_success_disposition",
+      "operator": "humanagent-native-turn-success-projection",
+      "operator_version": "1",
+      "inputs": ["checkpoint_boundary_result"],
+      "output": { "id": "success_path_disposition", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "recovery_hold",
+      "operator": "humanagent-native-turn-recovery-hold",
+      "operator_version": "1",
+      "inputs": ["checkpoint_boundary_result"],
+      "output": { "id": "recovery_hold_disposition", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    },
+    {
+      "id": "assess_turn_disposition",
+      "operator": "humanagent-native-turn-disposition",
+      "operator_version": "1",
+      "inputs": ["success_path_disposition", "recovery_hold_disposition"],
+      "output": { "id": "turn_disposition", "schema": "Object" },
+      "input_selector": { "include": [], "exclude": [], "predicate": null },
+      "output_selector": { "include": [], "exclude": [], "predicate": null },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    { "from": "assemble_turn_context", "to": "execute_one_child_turn", "arc_id": "context_assembly_result" },
+    { "from": "execute_one_child_turn", "to": "collect_turn_facts", "arc_id": "child_turn_execution_result" },
+    { "from": "collect_turn_facts", "to": "derive_semantic_candidate", "arc_id": "turn_facts_result" },
+    { "from": "derive_semantic_candidate", "to": "save_checkpoint_boundary", "arc_id": "semantic_candidate_result" },
+    { "from": "save_checkpoint_boundary", "to": "project_success_disposition", "arc_id": "checkpoint_boundary_result" },
+    { "from": "save_checkpoint_boundary", "to": "recovery_hold", "arc_id": "checkpoint_boundary_result" },
+    { "from": "project_success_disposition", "to": "assess_turn_disposition", "arc_id": "success_path_disposition" },
+    { "from": "recovery_hold", "to": "assess_turn_disposition", "arc_id": "recovery_hold_disposition" }
+  ],
+  "outputs": ["turn_disposition"]
+}

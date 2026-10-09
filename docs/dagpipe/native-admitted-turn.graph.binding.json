@@ -1,0 +1,57 @@
+{
+  "graph": "humanagent-native-admitted-turn",
+  "operator": {
+    "operator": "humanagent-native-admitted-turn",
+    "operator_version": "1"
+  },
+  "status": "DESIGN-PLANNED",
+  "nodes": {
+    "assemble_turn_context": {
+      "ownerPath": "packages/runtime/src/context/index.ts",
+      "ownerRel": "packages/runtime/src/context/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "execute_one_child_turn": {
+      "ownerPath": "packages/runtime/src/admission/implicit-orchestrator.ts",
+      "ownerRel": "packages/runtime/src/admission/implicit-orchestrator.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "The limited follow-on proof is one Responses file.search source/report receipt; this owner binding does not claim the tool or receipt path is implemented."
+    },
+    "collect_turn_facts": {
+      "ownerPath": "packages/runtime/src/orchestration/manager.ts",
+      "ownerRel": "packages/runtime/src/orchestration/manager.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "Planned boundary: receive validated ProviderToolResult.executionFact. The graph edge is a design dependency only; collector attachment and Runtime propagation are not implemented by this artifact."
+    },
+    "derive_semantic_candidate": {
+      "ownerPath": "packages/runtime/src/context/index.ts",
+      "ownerRel": "packages/runtime/src/context/index.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "The original report remains raw evidence, not a semantic claim. Semantic mapping is a separate planned step and is not established by report readback."
+    },
+    "save_checkpoint_boundary": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "reusesGraph": "humanagent-native-turn-checkpoint",
+      "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
+      "designNote": "No checkpoint, closure, durable turn receipt, next-turn, or raw-release eligibility follows from this graph binding."
+    },
+    "project_success_disposition": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "recovery_hold": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation"
+    },
+    "assess_turn_disposition": {
+      "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
+      "ownerRel": "packages/runtime/src/checkpoints/submission.ts",
+      "implementationStatus": "pending-contract-and-runtime-validation",
+      "designNote": "UI projection replay is observation evidence only and is not authoritative Organ Journal state or recovery proof."
+    }
+  }
+}
