@@ -36,6 +36,24 @@ const childCode = [
   "await new JsonlOrganJournal(file).append({ commitId, kind: 'event', scope, payload });",
 ].join('\n');
 
+const transactionLockHolderCode = [
+  "const [url, file] = process.argv.slice(1);",
+  "const { JsonlOrganJournal } = await import(url);",
+  "const journal = new JsonlOrganJournal(file);",
+  "await journal.transaction(({ records }) => {",
+  "  process.stdout.write(JSON.stringify({ state: 'ready', pid: process.pid, priorCount: records.length }) + '\\n');",
+  "  setInterval(() => {}, 1_000);",
+  "  return new Promise(() => {});",
+  "}, async () => { throw new Error('transaction apply must not run'); });",
+].join('\n');
+
+const transactionLockContenderCode = [
+  "const [url, file, inputJson] = process.argv.slice(1);",
+  "const { JsonlOrganJournal } = await import(url);",
+  "const record = await new JsonlOrganJournal(file).append(JSON.parse(inputJson));",
+  "process.stdout.write(JSON.stringify({ state: 'appended', record }) + '\\n');",
+].join('\n');
+
 function appendInChild(url: string, file: string, commitId: string): Promise<void> {
   const scope = { organId: organ, taskId: task };
   return new Promise((resolve, reject) => {
@@ -340,6 +358,110 @@ test('rejects malformed checkpoint evidence before appending to the journal', as
 test('rejects recovery state references outside the checkpoint scope before append and verify', async () => { const { journal, file } = await fixture(); const otherTask = id('task', 'task-b'); const invalid = { ...checkpoint(1, null), recoveryStateRef: { ...checkpoint(1, null).recoveryStateRef, scope: { organId: organ, taskId: otherTask } } }; await assert.rejects(() => journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: invalid }), JournalIntegrityError); const valid = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); const raw = JSON.parse(await readFile(file, 'utf8')) as { checkpoint: Checkpoint; recordDigest: string }; const tampered = { ...raw, checkpoint: invalid }; const digest = (await import('node:crypto')).createHash('sha256').update(JSON.stringify({ ...tampered, recordDigest: undefined })).digest('hex'); await writeFile(file, `${JSON.stringify({ ...tampered, recordDigest: `sha256:${digest}` })}\n`, 'utf8'); const result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /scope mismatch/); assert.equal(valid.checkpoint!.scope.taskId!.value, task.value); });
 test('append rejects an incomplete trailing line without truncating and recover repairs it explicitly', async () => { const { journal, file } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); const committed = await readFile(file, 'utf8'); await appendFile(file, committed.slice(0, -1), 'utf8'); const incomplete = await readFile(file, 'utf8'); let result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /trailing/); await assert.rejects(() => journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { ignored: true } }), JournalIntegrityError); assert.equal(await readFile(file, 'utf8'), incomplete); const recovered = await journal.recover(); assert.equal(recovered.valid, true); assert.equal(recovered.records.length, 1); assert.equal(await readFile(file, 'utf8'), committed); assert.equal((await journal.latest())!.seq, first.seq); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { ignored: true } }); assert.equal((await journal.latest())!.seq, 2); });
 test('does not evict a live owner lock during a long critical section', async () => { const { journal, file } = await fixture(); const lockPath = `${file}.lock`; await writeFile(lockPath, JSON.stringify({ pid: process.pid, startedAt: new Date(Date.now() - 60_000).toISOString(), token: 'live-owner' }), 'utf8'); let settled = false; const append = journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { liveOwner: true } }).finally(() => { settled = true; }); await new Promise((resolve) => setTimeout(resolve, 100)); assert.equal(settled, false); await rm(lockPath, { force: true }); const record = await append; assert.equal(record.seq, 1); });
+test('releases a real transaction lock after owner termination and recovers one contender append', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-journal-lock-termination-'));
+  const file = join(root, 'organ.jsonl');
+  const journal = new JsonlOrganJournal(file);
+  const moduleUrl = new URL('../../../packages/adapters/jsonl/src/index.js', import.meta.url).href;
+  const scope = { organId: organ, taskId: task };
+  const input = { commitId: 'lock-termination-contender', kind: 'event' as const, scope, payload: { contender: true } };
+  const predecessor = await journal.append({ kind: 'event', scope, payload: { predecessor: true } });
+  const owner = spawn(process.execPath, ['--input-type=module', '-e', transactionLockHolderCode, moduleUrl, file], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let ownerStdout = '';
+  let ownerStderr = '';
+  let contender: ReturnType<typeof spawn> | null = null;
+  let contenderStdout = '';
+  let contenderStderr = '';
+  let ownerClosed = false;
+  const ownerExit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+    owner.once('close', (code, signal) => { ownerClosed = true; resolve({ code, signal }); });
+  });
+  let contenderExit: Promise<{ code: number | null; signal: string | null }> | null = null;
+  try {
+    owner.stdout!.setEncoding('utf8');
+    owner.stderr!.setEncoding('utf8');
+    owner.stdout!.on('data', (chunk: string) => { ownerStdout += chunk; });
+    owner.stderr!.on('data', (chunk: string) => { ownerStderr += chunk; });
+    const ready = await new Promise<{ state: string; pid: number; priorCount: number }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`transaction owner did not report ready; stdout=${ownerStdout}; stderr=${ownerStderr}`)), 5_000);
+      const inspect = () => {
+        const line = ownerStdout.split('\n').find((candidate) => candidate.length > 0);
+        if (!line) return;
+        clearTimeout(timer);
+        try { resolve(JSON.parse(line) as { state: string; pid: number; priorCount: number }); }
+        catch (error) { reject(error); }
+      };
+      owner.stdout!.on('data', inspect);
+      owner.once('error', (error) => { clearTimeout(timer); reject(error); });
+      inspect();
+    });
+    assert.equal(typeof owner.pid, 'number', 'owner child has no pid');
+    assert.equal(ready.state, 'ready', 'transaction callback did not report lock ownership');
+    assert.equal(ready.pid, owner.pid, 'ready message did not come from the spawned lock owner');
+    assert.equal(ready.priorCount, 1, 'transaction read did not observe the predecessor');
+    assert.equal(ownerClosed, false, 'lock owner exited immediately after reporting readiness');
+    assert.equal(owner.exitCode, null, 'lock owner had already exited after reporting readiness');
+    assert.equal(owner.signalCode, null, 'lock owner had already been signaled after reporting readiness');
+
+    contender = spawn(process.execPath, ['--input-type=module', '-e', transactionLockContenderCode, moduleUrl, file, JSON.stringify(input)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    contender.stdout!.setEncoding('utf8');
+    contender.stderr!.setEncoding('utf8');
+    contender.stdout!.on('data', (chunk: string) => { contenderStdout += chunk; });
+    contender.stderr!.on('data', (chunk: string) => { contenderStderr += chunk; });
+    contenderExit = new Promise((resolve) => contender!.once('close', (code, signal) => resolve({ code, signal })));
+    const beforeOwnerExit = await Promise.race([
+      contenderExit.then((exit) => ({ completed: true as const, exit })),
+      new Promise<{ completed: false }>((resolve) => setTimeout(() => resolve({ completed: false }), 250)),
+    ]);
+    assert.equal(beforeOwnerExit.completed, false, `contender completed while transaction callback held the lock: ${contenderStdout} ${contenderStderr}`);
+    assert.equal(ownerClosed, false, 'transaction lock owner exited during contender pending interval');
+    assert.equal(owner.exitCode, null, 'lock owner exited before termination was requested');
+    assert.equal(owner.signalCode, null, 'lock owner was signaled before termination was requested');
+
+    assert.equal(owner.kill('SIGKILL'), true, 'failed to signal the confirmed lock owner');
+    const ownerResult = await ownerExit;
+    assert.equal(ownerResult.signal, 'SIGKILL', `lock owner exit was not confirmed as SIGKILL: ${ownerStderr}`);
+    const contenderResult = await contenderExit;
+    assert.equal(contenderResult.signal, null, `contender was signaled: ${contenderStderr}`);
+    assert.equal(contenderResult.code, 0, `contender append failed: ${contenderStderr}`);
+    const appended = JSON.parse(contenderStdout.trim()) as { state: string; record: { commitId?: string; seq: number; previousRecordDigest: string | null; recordDigest: string; payload?: unknown } };
+    assert.equal(appended.state, 'appended');
+    assert.equal(appended.record.commitId, input.commitId);
+    assert.equal(appended.record.seq, 2);
+    assert.equal(appended.record.previousRecordDigest, predecessor.recordDigest);
+    assert.deepEqual(appended.record.payload, input.payload);
+
+    const recovered = await journal.recover();
+    assert.equal(recovered.valid, true);
+    assert.deepEqual(recovered.records.map((record) => record.seq), [1, 2]);
+    assert.equal(recovered.records[1]!.recordDigest, appended.record.recordDigest);
+    const replayed = await journal.replay();
+    assert.equal(replayed.length, 2, 'replay contains duplicate contender records');
+    assert.deepEqual(replayed.map((record) => record.seq), [1, 2]);
+    assert.equal(replayed[0]!.recordDigest, predecessor.recordDigest);
+    assert.equal(replayed[1]!.commitId, input.commitId);
+    assert.equal(replayed[1]!.previousRecordDigest, replayed[0]!.recordDigest);
+    const committedBytes = await readFile(file, 'utf8');
+    const retried = await journal.append(input);
+    assert.deepEqual(retried, replayed[1]);
+    assert.equal(await readFile(file, 'utf8'), committedBytes, 'idempotent retry wrote a duplicate record');
+    const repeatedRecovery = await journal.recover();
+    assert.equal(repeatedRecovery.valid, true);
+    assert.equal((await journal.replay()).length, 2, 'repeated recovery duplicated an append');
+    assert.equal(await readFile(file, 'utf8'), committedBytes, 'recovery changed a complete journal');
+    console.log(JSON.stringify({ ownerPid: ready.pid, ownerReady: true, contenderPendingWhileOwnerAlive: true, ownerExit: ownerResult, contenderExit: contenderResult, appendSeq: appended.record.seq, recoveredSeqs: recovered.records.map((record) => record.seq), replayCount: replayed.length, retryIdempotent: true, recoveryIdempotent: true }));
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null && typeof owner.pid === 'number') {
+      owner.kill('SIGKILL');
+      await ownerExit;
+    }
+    if (contender && contender.exitCode === null && contender.signalCode === null) {
+      contender.kill('SIGKILL');
+      if (contenderExit) await contenderExit;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test('appends and verifies an operation-scoped stopped checkpoint after a business predecessor', async () => {
   const { journal } = await fixture();
   const businessScope = { organId: organ, taskId: task, cycleId: cycle };
