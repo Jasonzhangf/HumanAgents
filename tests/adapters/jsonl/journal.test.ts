@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, appendFile, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -582,6 +583,174 @@ test('recovery appends a root checkpoint for a new operation chain after another
   assert.equal(verified.valid, true);
   assert.equal(recovered.checkpoint!.seq, 1);
   assert.equal(recovered.checkpoint!.previousCheckpointId, null);
+});
+
+test('recover rejects complete journal corruption without rewriting evidence', async () => {
+  const fixtureParent = '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-r1/';
+  await mkdir(fixtureParent, { recursive: true });
+  const fixture = await mkdtemp(join(fixtureParent, 'journal-corruption-'));
+  const scope = { organId: organ, taskId: task };
+  const digestBytes = (bytes: Uint8Array) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const bytesToHex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const sameBytes = (left: Uint8Array, right: Uint8Array) => left.length === right.length && left.every((byte, index) => byte === right[index]);
+  try {
+    const assertCorruptionRejected = async (
+      scenario: 'A' | 'B',
+      file: string,
+      expectedError: RegExp,
+      appendAfterCorruption: { commitId: string; kind: 'event'; scope: typeof scope; payload: Record<string, unknown> },
+      expectedValidPrefix: number,
+      expectedTrailingLine?: string,
+    ) => {
+      const corruptedBytes = await readFile(file);
+      const verification = await new JsonlOrganJournal(file).verify();
+      assert.equal(verification.valid, false, `scenario ${scenario}: verify accepted corruption`);
+      assert.match(verification.error ?? '', expectedError, `scenario ${scenario}: wrong verify error category`);
+      assert.equal(verification.records.length, expectedValidPrefix);
+      assert.equal(verification.trailingLine, expectedTrailingLine);
+      assert.deepEqual(await readFile(file), corruptedBytes, `scenario ${scenario}: verify changed journal bytes`);
+
+      const recoveryFailures: Array<{ error: string; bytesUnchanged: boolean }> = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let rejected = false;
+        let errorText = '';
+        let returnedReceipt: unknown;
+        try {
+          returnedReceipt = await new JsonlOrganJournal(file).recover();
+        } catch (error) {
+          rejected = true;
+          errorText = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        }
+        const afterBytes = await readFile(file);
+        console.log(JSON.stringify({
+          scenario,
+          operation: 'recover',
+          attempt: attempt + 1,
+          rejected,
+          error: errorText,
+          returnedReceipt: rejected ? null : returnedReceipt,
+          beforeBytesHex: bytesToHex(corruptedBytes),
+          afterBytesHex: bytesToHex(afterBytes),
+        }));
+        assert.equal(rejected, true, `scenario ${scenario}: recover returned success`);
+        assert.ok(errorText.startsWith('JournalIntegrityError:'), `scenario ${scenario}: recover error was not JournalIntegrityError: ${errorText}`);
+        assert.deepEqual(afterBytes, corruptedBytes, `scenario ${scenario}: recover modified corrupt bytes`);
+        recoveryFailures.push({ error: errorText, bytesUnchanged: sameBytes(afterBytes, corruptedBytes) });
+      }
+
+      let appendRejected = false;
+      let appendError = '';
+      let appendReceipt: unknown;
+      try {
+        appendReceipt = await new JsonlOrganJournal(file).append(appendAfterCorruption);
+      } catch (error) {
+        appendRejected = true;
+        appendError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      }
+      const afterAppendBytes = await readFile(file);
+      console.log(JSON.stringify({
+        scenario,
+        operation: 'append-corrupt-history',
+        rejected: appendRejected,
+        error: appendError,
+        returnedReceipt: appendRejected ? null : appendReceipt,
+        beforeBytesHex: bytesToHex(corruptedBytes),
+        afterBytesHex: bytesToHex(afterAppendBytes),
+      }));
+      assert.equal(appendRejected, true, `scenario ${scenario}: append accepted corrupt history`);
+      assert.ok(appendError.startsWith('JournalIntegrityError:'), `scenario ${scenario}: append error was not JournalIntegrityError: ${appendError}`);
+      assert.deepEqual(afterAppendBytes, corruptedBytes, `scenario ${scenario}: append modified corrupt bytes`);
+
+      return {
+        scenario,
+        verifyError: verification.error,
+        validPrefixRecords: verification.records.length,
+        trailingLine: verification.trailingLine ?? null,
+        corruptedBytesDigest: digestBytes(corruptedBytes),
+        recoverAttempts: recoveryFailures,
+        appendRejected,
+        appendError,
+        bytesUnchangedAfterAppend: sameBytes(afterAppendBytes, corruptedBytes),
+      };
+    };
+
+    const restoreAndContinue = async (
+      scenario: 'A' | 'B',
+      file: string,
+      committedBytes: Uint8Array,
+      expectedSeqs: number[],
+      nextInput: { commitId: string; kind: 'event'; scope: typeof scope; payload: Record<string, unknown> },
+    ) => {
+      await writeFile(file, committedBytes); // Revert only corruption injected by this test.
+      const consumer = new JsonlOrganJournal(file);
+      const recovered = await consumer.recover();
+      assert.equal(recovered.valid, true, `scenario ${scenario}: restored fixture did not recover`);
+      assert.deepEqual(recovered.records.map((record) => record.seq), expectedSeqs);
+      assert.deepEqual(await readFile(file), committedBytes, `scenario ${scenario}: recover changed restored fixture`);
+      const replay = await consumer.replay();
+      assert.deepEqual(replay.map((record) => record.seq), expectedSeqs);
+      const previous = replay.at(-1)!;
+      const appended = await consumer.append(nextInput);
+      assert.equal(appended.seq, previous.seq + 1);
+      assert.equal(appended.previousRecordDigest, previous.recordDigest);
+      const committedAfterAppend = await readFile(file);
+      const retry = await new JsonlOrganJournal(file).append(nextInput);
+      assert.equal(retry.seq, appended.seq, `scenario ${scenario}: same-input retry changed sequence`);
+      assert.equal(retry.commitId, appended.commitId, `scenario ${scenario}: same-input retry changed commit identity`);
+      assert.equal(retry.recordDigest, appended.recordDigest, `scenario ${scenario}: same-input retry changed record digest`);
+      assert.deepEqual(await readFile(file), committedAfterAppend, `scenario ${scenario}: same-input retry wrote twice`);
+      const finalReplay = await consumer.replay();
+      assert.deepEqual(finalReplay.map((record) => record.seq), [...expectedSeqs, appended.seq]);
+      return {
+        restoredBaselineDigest: digestBytes(committedBytes),
+        recoveredSequences: recovered.records.map((record) => record.seq),
+        replaySequences: replay.map((record) => record.seq),
+        appendedSequence: appended.seq,
+        predecessorDigest: previous.recordDigest,
+        appendPreviousDigest: appended.previousRecordDigest,
+        retryIdempotent: retry.recordDigest === appended.recordDigest,
+        finalReplaySequences: finalReplay.map((record) => record.seq),
+      };
+    };
+
+    const fileA = join(fixture, 'scenario-a.jsonl');
+    const journalA = new JsonlOrganJournal(fileA);
+    const seedA = await journalA.append({ commitId: 'corrupt-a-seed', kind: 'event', scope, payload: { seed: 'A' } });
+    const validABytes = await readFile(fileA);
+    await appendFile(fileA, 'this is not valid JSON\n', 'utf8');
+    const nextA = { commitId: 'corrupt-a-next', kind: 'event' as const, scope, payload: { after: 'A' } };
+    const failedA = await assertCorruptionRejected('A', fileA, /JSON|Unexpected token|position/i, nextA, 1);
+    const continuedA = await restoreAndContinue('A', fileA, validABytes, [seedA.seq], nextA);
+    console.log(JSON.stringify({ corruption: 'newline-terminated malformed JSON line', ...failedA, ...continuedA }));
+
+    const fileB = join(fixture, 'scenario-b.jsonl');
+    const journalB = new JsonlOrganJournal(fileB);
+    const seedBP = await journalB.append({ commitId: 'corrupt-b-p', kind: 'event', scope, payload: { seed: 'P' } });
+    const seedBQ = await journalB.append({ commitId: 'corrupt-b-q', kind: 'event', scope, payload: { seed: 'Q' } });
+    const validBBytes = await readFile(fileB);
+    const validLines = new TextDecoder().decode(validBBytes).split('\n');
+    assert.equal(validLines.at(-1), '', 'scenario B seed records should end in newline');
+    const originalQ = JSON.parse(validLines[1]!) as { payload: unknown; recordDigest: string; [key: string]: unknown };
+    const mutatedQ = { ...originalQ, payload: { corrupted: 'payload only' } };
+    assert.equal(JSON.stringify(mutatedQ.payload) === JSON.stringify(originalQ.payload), false);
+    assert.equal(mutatedQ.recordDigest, originalQ.recordDigest, 'scenario B must retain Q original digest');
+    const incompleteFragment = '{"uncommitted":';
+    await writeFile(fileB, `${validLines[0]}\n${JSON.stringify(mutatedQ)}\n`, 'utf8');
+    await appendFile(fileB, incompleteFragment, 'utf8');
+    const corruptedBText = await readFile(fileB, 'utf8');
+    assert.equal(corruptedBText.endsWith(incompleteFragment), true);
+    assert.equal(corruptedBText.charAt(corruptedBText.length - incompleteFragment.length - 1), '\n', 'scenario B Q record must be newline terminated before the fragment');
+    const completeMutatedQ = JSON.parse(corruptedBText.split('\n')[1]!) as { payload: unknown; recordDigest: string };
+    assert.deepEqual(completeMutatedQ.payload, mutatedQ.payload);
+    assert.equal(completeMutatedQ.recordDigest, seedBQ.recordDigest);
+    const nextB = { commitId: 'corrupt-b-next', kind: 'event' as const, scope, payload: { after: 'B' } };
+    const failedB = await assertCorruptionRejected('B', fileB, /journal record digest mismatch/i, nextB, 1, incompleteFragment);
+    const continuedB = await restoreAndContinue('B', fileB, validBBytes, [seedBP.seq, seedBQ.seq], nextB);
+    console.log(JSON.stringify({ corruption: 'complete Q digest corruption plus incomplete no-newline fragment', ...failedB, ...continuedB }));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+    console.log(JSON.stringify({ fixture, cleanup: 'removed' }));
+  }
 });
 
 test('operation event publication commits before notification and survives restart replay', async () => {
