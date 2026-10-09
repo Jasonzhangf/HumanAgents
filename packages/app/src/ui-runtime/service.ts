@@ -146,6 +146,7 @@ import type { ExplicitBrainAgentTarget, ExplicitBrainInputInterpreter } from '..
 import type { MemoryReviewState } from '../memory-runtime.js';
 import { DeterministicMemoryBackend } from '../../../adapters/memory/src/index.js';
 import type { AgentHookRegistry } from '../../../runtime/src/hooks/index.js';
+import { validatePersistedToolExecutionFact } from './tool-fact-validation.js';
 import {
   ProviderAgentDriver,
   ProviderAdapterError,
@@ -1336,6 +1337,19 @@ export class UiRuntimeService {
         'the event is not a succeeded tool result with an immutable output descriptor',
         'select a succeeded file.search result event',
         409,
+      );
+    }
+    try {
+      validatePersistedToolExecutionFact(event, { taskId, operationId, executionEpoch });
+    } catch (error) {
+      throw new UiRuntimeApiError(
+        'tool-output.fact-integrity',
+        RUNTIME_OWNER,
+        error instanceof Error ? error.message : 'the persisted tool execution fact is not related to the selected event',
+        'repair or discard the UI runtime journal before restarting',
+        409,
+        undefined,
+        error,
       );
     }
     if (this.options.toolOutputStore === undefined) {

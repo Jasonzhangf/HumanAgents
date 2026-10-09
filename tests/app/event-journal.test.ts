@@ -14,6 +14,7 @@ import {
 } from '../../packages/runtime/src/events/index.js';
 import { createJsonlEventJournal } from '../../packages/app/src/event-journal.js';
 import { id, type EvidenceRef, type ScopeRef } from '../../packages/contracts/src/index.js';
+import { UiRuntimeJournal } from '../../packages/app/src/ui-runtime/journal.js';
 
 const occurredAt = '2026-09-17T00:00:00.000Z';
 const scope: ScopeRef = {
@@ -496,6 +497,76 @@ test('jsonl event journal rejects corrupt memory agent state history', async () 
     await assert.rejects(
       () => journal.readMemoryAgentState(),
       (error: unknown) => (error as { readonly code?: string }).code === 'event-journal-corrupt',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('UI runtime journal replay fails closed for a malformed present execution fact', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-runtime-fact-integrity-'));
+  try {
+    const taskId = id('task', 'task-fact-integrity');
+    const operationId = id('operation', 'operation-fact-integrity');
+    const cycleId = id('cycle', 'cycle-fact-integrity');
+    const filePath = join(root, 'ui-runtime-journal.jsonl');
+    const evidenceRef = {
+      evidenceId: id('evidence', 'evidence-fact-integrity'),
+      kind: 'operation',
+      source: 'test',
+      locator: 'journal://fact-integrity',
+      scope: { organId: id('organ', 'organ-fact-integrity'), taskId },
+    };
+    await appendFile(filePath, `${[
+      JSON.stringify({
+        kind: 'operation.started',
+        operationId,
+        taskId,
+        cycleId,
+        scope: { organId: id('organ', 'organ-fact-integrity'), taskId, cycleId, operationId },
+        executionEpoch: 1,
+        operationCounter: 1,
+        cycleCounter: 1,
+        startedAt: occurredAt,
+        input: 'fact integrity',
+      }),
+      JSON.stringify({
+        kind: 'operation.event',
+        operationId,
+        event: {
+          eventId: 'event-fact-integrity',
+          seq: 1,
+          occurredAt,
+          taskId,
+          operationId: operationId.value,
+          executionEpoch: 1,
+          kind: 'provider.tool-result',
+          state: 'tool',
+          summary: 'file.search succeeded',
+          evidenceRefs: [evidenceRef],
+          requestId: 'request-fact-integrity',
+          callId: 'call-fact-integrity',
+          toolId: 'file.search',
+          status: 'succeeded',
+          outputRef: 'asset://provider-tool/output/fact-integrity',
+          outputDigest: `sha256:${'a'.repeat(64)}`,
+          executionFact: {
+            identity: { surface: 'responses', toolId: 'file.search', bindingRef: 'binding-fact-integrity', route: 'app.file-search.local' },
+            requestRef: 'request-fact-integrity',
+            callRef: 'call-fact-integrity',
+            operationRef: operationId.value,
+            state: 'succeeded',
+            rawEvidenceRefs: 'not-array',
+            resultRef: 'asset://provider-tool/output/fact-integrity',
+            resultDigest: `sha256:${'a'.repeat(64)}`,
+          },
+        },
+      }),
+    ].join('\n')}\n`, 'utf8');
+
+    assert.throws(
+      () => new UiRuntimeJournal(filePath).replay(),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === 'tool.execution-fact.integrity',
     );
   } finally {
     await rm(root, { recursive: true, force: true });

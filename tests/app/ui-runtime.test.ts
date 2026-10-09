@@ -90,6 +90,7 @@ import {
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { AppLifecycleError } from '../../packages/app/src/errors.js';
 import { projectRuntimeTaskHistory } from '../../packages/app/src/ui-runtime/turn-history.js';
+import { validatePersistedToolExecutionFact } from '../../packages/app/src/ui-runtime/tool-fact-validation.js';
 import { AccessControlError, AccessControlService } from '../../packages/app/src/ui-runtime/access-control.js';
 import { readProducedArtifacts, RESPONSES_FILE_READ_TOOL, RESPONSES_FILE_SEARCH_TOOL, RESPONSES_FILE_WRITE_TOOL } from '../../packages/app/src/provider-tool-execution.js';
 import { DeterministicMemoryBackend } from '../../packages/adapters/memory/src/index.js';
@@ -8254,6 +8255,162 @@ test('runtime history states real tool pairing and keeps a succeeded result veri
     () => validateInteractionTraceEntry({ ...result, evidenceRefs: [] }),
     (error: unknown) => error instanceof ContractError,
   );
+});
+
+test('public tool readback fails closed for a mismatched persisted fact and preserves legacy no-fact readback', async () => {
+  const taskId = id('task', 'fact-readback-task');
+  const operationId = id('operation', 'fact-readback-operation');
+  const event = (executionFact?: RuntimeTaskEvent['executionFact']): RuntimeTaskEvent => ({
+    eventId: 'event-fact-readback',
+    seq: 1,
+    occurredAt: '2026-10-06T08:00:00.000Z',
+    taskId,
+    operationId: operationId.value,
+    executionEpoch: 1,
+    kind: 'provider.tool-result',
+    state: 'tool',
+    summary: 'file.search succeeded',
+    evidenceRefs: [evidence('fact-readback', { organId, taskId })],
+    requestId: 'request-fact-readback',
+    callId: 'call-fact-readback',
+    toolId: 'file.search',
+    status: 'succeeded',
+    outputRef: 'asset://provider-tool/output/fact-readback',
+    outputDigest: `sha256:${'a'.repeat(64)}`,
+    ...(executionFact === undefined ? {} : { executionFact }),
+  });
+  const records = (runtimeEvent: RuntimeTaskEvent): RuntimeTaskJournalRecord[] => [{
+    kind: 'task.created',
+    taskId,
+    title: 'fact readback',
+    directive: 'fact readback',
+    directiveRevision: 1,
+    createdAt: '2026-10-06T08:00:00.000Z',
+    taskCounter: 1,
+  }, {
+    kind: 'operation.started',
+    operationId,
+    taskId,
+    cycleId: id('cycle', 'fact-readback-cycle'),
+    scope: {
+      organId,
+      taskId,
+      cycleId: id('cycle', 'fact-readback-cycle'),
+      operationId,
+    },
+    executionEpoch: 1,
+    operationCounter: 1,
+    cycleCounter: 1,
+    startedAt: '2026-10-06T08:00:00.000Z',
+    input: 'fact readback',
+  }, {
+    kind: 'operation.event',
+    operationId,
+    event: runtimeEvent,
+  }];
+  function buildReadbackService(root: string, readReport: () => Promise<unknown>): UiRuntimeService {
+    return buildReadbackServiceWithJournal(root, new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl')), readReport);
+  }
+  function buildReadbackServiceWithJournal(
+    root: string,
+    journal: UiRuntimeJournal,
+    readReport: () => Promise<unknown>,
+  ): UiRuntimeService {
+    const service = new UiRuntimeService({
+      mode: 'fake',
+      organId,
+      binding,
+      port: new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 1 }),
+      checkpointStoreFor: (task, cycle) => new FileCheckpointStore(join(root, `task-${task.value}-cycle-${cycle.value}.jsonl`)),
+      attentionPort: attentionPort(),
+      providerState: 'ready',
+      journal,
+      closurePort: journal,
+      memory: testMemory('project-ui-test'),
+      explicitBrainInterpreter: unusedExplicitBrainInterpreter,
+      toolOutputStore: {
+        store: new ImmutableAssetStore(join(root, 'tool-output-assets')),
+        async writeReport() {
+          throw new Error('writeReport is not used by readback tests');
+        },
+        readReport,
+      },
+    });
+    return service;
+  }
+
+  class PreparedReplayJournal extends UiRuntimeJournal {
+    constructor(
+      private readonly preparedRecords: readonly RuntimeTaskJournalRecord[],
+      filePath: string,
+    ) {
+      super(filePath);
+    }
+
+    override replay(): readonly RuntimeTaskJournalRecord[] {
+      return this.preparedRecords;
+    }
+  }
+
+  async function serviceForReadback(root: string, runtimeEvent: RuntimeTaskEvent, readReport: () => Promise<unknown>): Promise<UiRuntimeService> {
+    await writeFile(join(root, 'ui-runtime-journal.jsonl'), `${records(runtimeEvent).map((record) => JSON.stringify(record)).join('\n')}\n`, 'utf8');
+    const service = buildReadbackService(root, readReport);
+    await service.hydrate();
+    return service;
+  }
+
+  const mismatchRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-fact-readback-mismatch-'));
+  try {
+    let mismatchReads = 0;
+    const mismatchedFact: NonNullable<RuntimeTaskEvent['executionFact']> = {
+      identity: { surface: 'responses', toolId: 'file.search', bindingRef: binding.bindingId, route: 'app.file-search.local' },
+      requestRef: 'request-fact-readback',
+      callRef: 'call-fact-readback',
+      operationRef: operationId.value,
+      state: 'succeeded',
+      rawEvidenceRefs: ['asset://provider-tool/output/fact-readback'],
+      resultRef: 'asset://provider-tool/output/other',
+      resultDigest: `sha256:${'a'.repeat(64)}`,
+    };
+    // Bypass real replay for this service-only boundary test. The real disk
+    // replay mismatch is covered separately in event-journal and consumer tests.
+    const service = buildReadbackServiceWithJournal(
+      mismatchRoot,
+      new PreparedReplayJournal(
+        records(event(mismatchedFact)),
+        join(mismatchRoot, 'ui-runtime-journal.jsonl'),
+      ),
+      async () => {
+        mismatchReads += 1;
+        throw new Error('mismatched fact must fail before reading the report');
+      },
+    );
+    await assert.rejects(
+      () => service.toolOutput(taskId, operationId, 1, 1),
+      (error: unknown) => (
+        error instanceof UiRuntimeApiError
+        && error.code === 'tool-output.fact-integrity'
+        && error.causeBody?.code === 'tool.execution-fact.integrity'
+      ),
+    );
+    assert.equal(mismatchReads, 0);
+  } finally {
+    await rm(mismatchRoot, { recursive: true, force: true });
+  }
+
+  const legacyRoot = await mkdtemp(join(tmpdir(), 'humanagent-ui-fact-readback-legacy-'));
+  try {
+    const report = { status: 'succeeded', matches: [] };
+    let legacyReads = 0;
+    const service = await serviceForReadback(legacyRoot, event(undefined), async () => {
+      legacyReads += 1;
+      return report;
+    });
+    assert.deepEqual(await service.toolOutput(taskId, operationId, 1, 1), report);
+    assert.equal(legacyReads, 1);
+  } finally {
+    await rm(legacyRoot, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

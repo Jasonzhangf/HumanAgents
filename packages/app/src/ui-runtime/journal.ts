@@ -17,6 +17,11 @@ import type { CheckpointCommitPort } from '../../../runtime/src/control/steering
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
+import {
+  toolExecutionFactIntegrityError,
+  validatePersistedToolExecutionFact,
+  type ToolExecutionFactOuterIdentity,
+} from './tool-fact-validation.js';
 
 // App-owned UI runtime journal. This is not the Organ Journal or the runtime
 // lifecycle state; it only stores enough typed projection state for the UI
@@ -126,7 +131,12 @@ function validateRuntimeEvent(value: unknown, filePath: string, line: number): v
   validateEvidenceRefs(event.evidenceRefs, filePath, line);
 }
 
-function validateJournalRecord(value: unknown, filePath: string, line: number): UiRuntimeJournalRecord {
+function validateJournalRecord(
+  value: unknown,
+  filePath: string,
+  line: number,
+  operationIdentities: Map<string, ToolExecutionFactOuterIdentity>,
+): UiRuntimeJournalRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: record must be an object`);
   }
@@ -171,11 +181,30 @@ function validateJournalRecord(value: unknown, filePath: string, line: number): 
     if (record.orchestrated !== undefined && typeof record.orchestrated !== 'boolean') {
       throw new Error(`corrupt UI runtime journal ${filePath}:${line}: orchestrated must be a boolean`);
     }
+    const operationId = requireRecordObject(record, 'operationId', filePath, line) as ToolExecutionFactOuterIdentity['operationId'];
+    const taskId = record.taskId as ToolExecutionFactOuterIdentity['taskId'];
+    operationIdentities.set(operationId.value, {
+      taskId,
+      operationId,
+      executionEpoch: record.executionEpoch as number,
+    });
     return record as unknown as UiRuntimeJournalRecord;
   }
   if (kind === 'operation.event') {
     requireScopedId(record, 'operationId', 'operation', filePath, line);
     validateRuntimeEvent(record.event, filePath, line);
+    const eventRecord = record as Extract<UiRuntimeJournalRecord, { readonly kind: 'operation.event' }>;
+    const operationIdentity = operationIdentities.get(eventRecord.operationId.value);
+    if (operationIdentity === undefined) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.event references unknown operation ${eventRecord.operationId.value}`);
+    }
+    try {
+      validatePersistedToolExecutionFact(eventRecord.event, operationIdentity);
+    } catch (error) {
+      throw toolExecutionFactIntegrityError(
+        `corrupt UI runtime journal ${filePath}:${line}: ${error instanceof Error ? error.message : 'tool execution fact is invalid'}`,
+      );
+    }
     if (record.taskOutput !== undefined && typeof record.taskOutput !== 'string') {
       throw new Error(`corrupt UI runtime journal ${filePath}:${line}: taskOutput must be a string`);
     }
@@ -251,13 +280,14 @@ export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosu
   replay(): readonly UiRuntimeJournalRecord[] {
     if (!existsSync(this.filePath)) return [];
     const records: UiRuntimeJournalRecord[] = [];
+    const operationIdentities = new Map<string, ToolExecutionFactOuterIdentity>();
     const lines = readFileSync(this.filePath, 'utf8').split('\n');
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index]!;
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        records.push(validateJournalRecord(JSON.parse(trimmed), this.filePath, index + 1));
+        records.push(validateJournalRecord(JSON.parse(trimmed), this.filePath, index + 1, operationIdentities));
       } catch (error) {
         if (error instanceof SyntaxError) {
           throw new Error(`corrupt UI runtime journal ${this.filePath}:${index + 1}: invalid JSON`);

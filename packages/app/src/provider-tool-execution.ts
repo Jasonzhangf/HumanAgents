@@ -757,6 +757,7 @@ async function executeFileSearch(
     outputRefs: [descriptor.outputRef],
     outputRef: descriptor.outputRef,
     outputDigest: descriptor.outputDigest,
+    executorRoute: 'app.file-search.local',
     evidenceRefs: [evidence(scope, 'file-search')],
   };
 }
