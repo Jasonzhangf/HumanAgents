@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, appendFile, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, appendFile, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -51,9 +51,161 @@ function appendInChild(url: string, file: string, commitId: string): Promise<voi
   });
 }
 
+const receiptLossWriterCode = [
+  "const [url, file, inputJson] = process.argv.slice(1);",
+  "try {",
+  "  const { JsonlOrganJournal } = await import(url);",
+  "  await new JsonlOrganJournal(file).append(JSON.parse(inputJson));",
+  "  process.kill(process.pid, 'SIGKILL');",
+  "} catch (error) {",
+  "  process.stderr.write(String(error?.stack ?? error));",
+  "  process.exitCode = 1;",
+  "}",
+].join('\n');
+
+const receiptLossConsumerCode = [
+  "import assert from 'node:assert/strict';",
+  "const [url, file, expectedJson] = process.argv.slice(1);",
+  "const expected = JSON.parse(expectedJson);",
+  "const { JsonlOrganJournal, JournalCommitConflictError } = await import(url);",
+  "const journal = new JsonlOrganJournal(file);",
+  "const recovered = await journal.recover();",
+  "assert.equal(recovered.valid, true);",
+  "assert.deepEqual(recovered.records.map((record) => record.seq), [1, 2]);",
+  "assert.deepEqual(JSON.parse(JSON.stringify(recovered.records[0])), expected.predecessor);",
+  "assert.equal(recovered.records[0].recordDigest, expected.predecessorDigest);",
+  "const committed = recovered.records[1];",
+  "assert.equal(committed.commitId, expected.commitId);",
+  "assert.deepEqual(committed.scope, expected.input.scope);",
+  "assert.deepEqual(committed.payload, expected.input.payload);",
+  "assert.equal(committed.previousRecordDigest, expected.predecessorDigest);",
+  "assert.deepEqual(await journal.findByCommitId(expected.commitId), committed);",
+  "const committedBytes = await (await import('node:fs/promises')).readFile(file, 'utf8');",
+  "const retry = await journal.append(expected.input);",
+  "assert.deepEqual(retry, committed);",
+  "assert.equal(await (await import('node:fs/promises')).readFile(file, 'utf8'), committedBytes);",
+  "await assert.rejects(() => journal.append({ ...expected.input, payload: { ...expected.input.payload, corrected: true } }), JournalCommitConflictError);",
+  "assert.equal(await (await import('node:fs/promises')).readFile(file, 'utf8'), committedBytes);",
+  "const nextInput = { commitId: expected.nextCommitId, kind: 'event', scope: expected.input.scope, payload: expected.nextPayload };",
+  "const next = await journal.append(nextInput);",
+  "assert.equal(next.seq, 3);",
+  "assert.equal(next.previousRecordDigest, committed.recordDigest);",
+  "const replay = await journal.replay();",
+  "assert.deepEqual(replay.map((record) => record.commitId ?? null), [null, expected.commitId, expected.nextCommitId]);",
+  "assert.deepEqual(replay.map((record) => record.seq), [1, 2, 3]);",
+  "const repeatedRecovery = await journal.recover();",
+  "assert.equal(repeatedRecovery.valid, true);",
+  "assert.deepEqual(repeatedRecovery.records, replay);",
+  "process.stdout.write(JSON.stringify({ recoveredValid: recovered.valid, recoveredSequences: recovered.records.map((record) => record.seq), predecessorRecord: recovered.records[0], commitId: committed.commitId, scope: committed.scope, payload: committed.payload, predecessorDigest: committed.previousRecordDigest, committedDigest: committed.recordDigest, foundByCommitId: true, identicalRetry: true, idempotentBytesUnchanged: true, conflictName: 'JournalCommitConflictError', conflictBytesUnchanged: true, nextSequence: next.seq, nextPreviousDigest: next.previousRecordDigest, replayCommitIds: replay.map((record) => record.commitId ?? null), repeatedRecoveryValid: repeatedRecovery.valid, replayCount: repeatedRecovery.records.length }));",
+].join('\n');
+
+interface ChildResult {
+  pid: number | undefined;
+  code: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  spawnError?: Error;
+}
+
+function runBoundedChild(code: string, args: string[]): Promise<ChildResult> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const result: ChildResult = { pid: child.pid, code: null, signal: null, stdout: '', stderr: '', timedOut: false };
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => { result.stdout += chunk; });
+    child.stderr!.setEncoding('utf8');
+    child.stderr!.on('data', (chunk: string) => { result.stderr += chunk; });
+    child.on('error', (error) => { result.spawnError = error; });
+    let settled = false;
+    const timer = setTimeout(() => {
+      result.timedOut = true;
+      child.kill('SIGKILL');
+    }, 10_000);
+    child.on('close', (codeValue, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      result.code = codeValue;
+      result.signal = signal;
+      resolve(result);
+    });
+  });
+}
+
 test('append, latest, replay and verify checkpoint chain across events', async () => { const { journal } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const second = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(2, first.checkpoint!.id) }); assert.equal((await journal.latest())!.seq, 3); assert.equal((await journal.replay()).length, 3); assert.equal((await journal.verify()).valid, true); assert.equal(second.checkpoint!.previousCheckpointId!.value, 'cp-1'); });
 test('rejects duplicate and broken sequence records', async () => { const { journal, file } = await fixture(); const first = await journal.append({ kind: 'checkpoint', scope: { organId: organ, taskId: task }, checkpoint: checkpoint(1, null) }); await journal.append({ kind: 'event', scope: { organId: organ, taskId: task }, payload: { observed: true } }); const raw = await readFile(file, 'utf8'); const [a, b] = raw.trim().split('\n').map((line) => JSON.parse(line) as { seq: number; previousRecordDigest: string | null }); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, seq: a.seq })}\n`, 'utf8'); let result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /duplicate/); await writeFile(file, `${JSON.stringify(a)}\n${JSON.stringify({ ...b, previousRecordDigest: 'sha256:wrong' })}\n`, 'utf8'); result = await journal.verify(); assert.equal(result.valid, false); assert.match(result.error!, /predecessor/); });
 test('commitId is idempotent for the same facts and conflicts for different facts', async () => { const { journal, file } = await fixture(); const scope = { organId: organ, taskId: task }; const first = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); const replay = await journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 1 } }); assert.equal(replay.seq, first.seq); assert.equal(replay.commitId, 'job-1'); assert.equal((await readFile(file, 'utf8')).trim().split('\n').length, 1); await assert.rejects(() => journal.append({ commitId: 'job-1', kind: 'event', scope, payload: { step: 2 } }), JournalCommitConflictError); const second = await journal.append({ commitId: 'job-2', kind: 'event', scope, payload: { step: 2 } }); assert.equal(second.seq, 2); assert.equal((await journal.findByCommitId('job-1'))!.seq, 1); assert.equal((await journal.findByCommitId('job-2'))!.seq, 2); });
+test('recovers a committed journal fact after writer termination without an outer receipt', async () => {
+  const fixtureRoot = '/Users/fanzhang/.humanagent/test-fixtures/native-reasoning-f1-j-a2';
+  await mkdir(fixtureRoot, { recursive: true });
+  const fixturePath = await mkdtemp(join(fixtureRoot, 'receipt-loss-'));
+  const file = join(fixturePath, 'organ.jsonl');
+  const moduleUrl = new URL('../../../packages/adapters/jsonl/src/index.js', import.meta.url).href;
+  const scope = { organId: organ, taskId: task };
+  const input = { commitId: 'f1-j-a2-committed-c', kind: 'event' as const, scope, payload: { observation: 'committed-before-writer-termination' } };
+  const nextCommitId = 'f1-j-a2-next-d';
+  const nextPayload = { observation: 'appended-by-fresh-consumer' };
+  let writer: ChildResult | null = null;
+  let consumer: ChildResult | null = null;
+  try {
+    const journal = new JsonlOrganJournal(file);
+    const predecessor = await journal.append({ kind: 'event', scope, payload: { predecessor: true } });
+    const predecessorBytes = await readFile(file);
+    const expected = { input, commitId: input.commitId, nextCommitId, nextPayload, predecessorDigest: predecessor.recordDigest, predecessor };
+
+    writer = await runBoundedChild(receiptLossWriterCode, [moduleUrl, file, JSON.stringify(input)]);
+    assert.equal(writer.timedOut, false, `writer timed out (pid ${writer.pid ?? 'unknown'}): ${writer.stderr}`);
+    assert.equal(writer.spawnError, undefined, `writer setup failed: ${writer.spawnError?.message}`);
+    assert.equal(writer.signal, 'SIGKILL', `writer did not terminate itself with SIGKILL: ${writer.stderr}`);
+    assert.equal(writer.code, null);
+    assert.equal(writer.stdout, '', 'writer sent an application-level receipt');
+    assert.equal(writer.stderr, '', `writer setup/append error: ${writer.stderr}`);
+    const afterWriterBytes = await readFile(file);
+    assert.equal(predecessorBytes.every((byte, index) => afterWriterBytes[index] === byte), true, 'writer changed predecessor bytes');
+
+    consumer = await runBoundedChild(receiptLossConsumerCode, [moduleUrl, file, JSON.stringify(expected)]);
+    assert.equal(consumer.timedOut, false, `consumer timed out (pid ${consumer.pid ?? 'unknown'}): ${consumer.stderr}`);
+    assert.equal(consumer.spawnError, undefined, `consumer setup failed: ${consumer.spawnError?.message}`);
+    assert.equal(consumer.signal, null, `consumer was signaled: ${consumer.signal}`);
+    assert.equal(consumer.code, 0, `consumer assertions failed: ${consumer.stderr}`);
+    const report = JSON.parse(consumer.stdout) as {
+      recoveredValid: boolean; recoveredSequences: number[]; commitId: string; scope: ScopeRef;
+      predecessorRecord: unknown; payload: { observation: string }; predecessorDigest: string; committedDigest: string; foundByCommitId: boolean; identicalRetry: boolean;
+      idempotentBytesUnchanged: boolean; conflictName: string; conflictBytesUnchanged: boolean;
+      nextSequence: number; nextPreviousDigest: string; replayCommitIds: (string | null)[];
+      repeatedRecoveryValid: boolean; replayCount: number;
+    };
+    assert.equal(report.recoveredValid, true);
+    assert.deepEqual(report.recoveredSequences, [1, 2]);
+    assert.deepEqual(report.predecessorRecord, JSON.parse(JSON.stringify(predecessor)));
+    assert.equal(report.commitId, input.commitId);
+    assert.deepEqual(report.scope, scope);
+    assert.deepEqual(report.payload, input.payload);
+    assert.equal(report.predecessorDigest, predecessor.recordDigest);
+    assert.ok(report.committedDigest.length > 0);
+    assert.equal(report.foundByCommitId, true);
+    assert.equal(report.identicalRetry, true);
+    assert.equal(report.idempotentBytesUnchanged, true);
+    assert.equal(report.conflictName, 'JournalCommitConflictError');
+    assert.equal(report.conflictBytesUnchanged, true);
+    assert.equal(report.nextSequence, 3);
+    assert.equal(report.nextPreviousDigest, report.committedDigest);
+    assert.deepEqual(report.replayCommitIds, [null, input.commitId, nextCommitId]);
+    assert.equal(report.repeatedRecoveryValid, true);
+    assert.equal(report.replayCount, 3);
+    console.log(JSON.stringify({ fixturePath, writer: { pid: writer.pid, code: writer.code, signal: writer.signal, stdout: writer.stdout, stderr: writer.stderr }, consumer: { pid: consumer.pid, code: consumer.code, signal: consumer.signal }, result: report }));
+  } finally {
+    try {
+      assert.ok(writer, 'writer child was never started');
+      assert.equal(writer.signal === 'SIGKILL' || (writer.signal === null && writer.code !== null), true, 'writer child exit was not confirmed');
+      if (consumer) assert.equal(consumer.signal === null && consumer.code !== null, true, 'consumer child exit was not confirmed');
+    } finally {
+      await rm(fixturePath, { recursive: true, force: true });
+    }
+  }
+});
 test('legacy v1 commit facts remain replayable after memory envelope support', async () => {
   const { journal, file } = await fixture();
   const scope = { organId: organ, taskId: task };
