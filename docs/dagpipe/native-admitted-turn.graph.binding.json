@@ -21,13 +21,13 @@
       "ownerPath": "packages/runtime/src/orchestration/manager.ts",
       "ownerRel": "packages/runtime/src/orchestration/manager.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "Planned boundary: receive validated ProviderToolResult.executionFact. The graph edge is a design dependency only; collector attachment and Runtime propagation are not implemented by this artifact."
+      "designNote": "G-Q1 planned boundary: collect only a ToolExecutionFact whose trusted outer identity and replay-event/request/call/tool/operation/status/state/result-ref/digest relations passed public validation. H-A2 P1 remains unimplemented and unpassed. The graph edge is a design dependency only."
     },
     "derive_semantic_candidate": {
       "ownerPath": "packages/runtime/src/context/index.ts",
       "ownerRel": "packages/runtime/src/context/index.ts",
       "implementationStatus": "pending-contract-and-runtime-validation",
-      "designNote": "The original report remains raw evidence, not a semantic claim. Semantic mapping is a separate planned step and is not established by report readback."
+      "designNote": "G-Q1 planned boundary: derive only from an original report whose ref/descriptor/digest match trusted request scope and qualified fact/event selection, whose digest-checked readback succeeded, and which passed validateCodeSearchReport(unknown) or an owner-approved equivalent public versioned validator. Failed/partial/truncated/unresolved outcomes stay distinct; event success does not imply business search success or completeness. Validator, retention path and mapper remain unimplemented. Report bytes and mapper output grant no checkpoint, recovery, closure, reentry or raw-release eligibility."
     },
     "save_checkpoint_boundary": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",
@@ -35,7 +35,7 @@
       "implementationStatus": "pending-contract-and-runtime-validation",
       "reusesGraph": "humanagent-native-turn-checkpoint",
       "journalWriterOwnerPath": "packages/adapters/jsonl/src/index.ts",
-      "designNote": "No checkpoint, closure, durable turn receipt, next-turn, or raw-release eligibility follows from this graph binding."
+      "designNote": "No checkpoint, closure, durable turn receipt, next-turn, reentry or raw-release eligibility follows from this graph binding, report bytes, replay or a mapper result. A local checkpointAndClosureCommitted fact is not full five-phase readiness; the five-phase coordinator decides separately."
     },
     "project_success_disposition": {
       "ownerPath": "packages/runtime/src/checkpoints/submission.ts",

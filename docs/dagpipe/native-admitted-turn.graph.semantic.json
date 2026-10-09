@@ -27,9 +27,28 @@
       "status": "planned-not-implemented",
       "note": "The edge remains unchanged in topology. The intended input includes the validated ProviderToolResult.executionFact attachment; its producer and Runtime consumer still require separate contract and implementation gates."
     },
+    "qualifiedFactBoundary": {
+      "node": "collect_turn_facts",
+      "status": "planned-not-implemented",
+      "trustedIdentity": "The fact identity must be derived from trusted outer execution context, not from the fact body, report prose, Provider session identity, or a bare call reference.",
+      "requiredRelationValidation": "Public relation validation must bind the replay event, request, call, tool, operation, status, state, result ref and result digest to the trusted expected ToolIdentity and request before a ToolExecutionFact is admitted.",
+      "pendingFinding": "H-A2 P1 remains unimplemented and has not passed independent review; this graph records the required boundary only."
+    },
     "limitedNextProof": "The next limited proof covers one Responses file.search source/report receipt only. The report is the raw evidence source; it does not by itself assert semantic completeness or constitute a semantic claim.",
     "rawReportBoundary": "The original file.search report remains raw evidence and must retain its original status, completeness, truncation, failure, and result fields. Semantic content requires a separately validated mapper and evidence-based claim.",
+    "qualifiedReportBoundary": {
+      "node": "derive_semantic_candidate",
+      "status": "blocked-public-qualification-seam",
+      "validator": "Only validateCodeSearchReport(unknown), or an owner-approved equivalent public versioned report validator, may qualify the raw report for semantic derivation.",
+      "preconditions": [
+        "The report ref, descriptor and digest equal the trusted event and qualified fact result selection.",
+        "Readback is digest checked and the original report bytes are preserved.",
+        "The descriptor scope and identity agree with the trusted request context."
+      ],
+      "outputLimit": "A qualified report can yield only a bounded semantic candidate. Failed, partial, truncated and unresolved outcomes remain distinct; execution event success does not imply business search success or completeness.",
+      "implementationStatus": "The public report validator, original report retention path and semantic mapper are not implemented by this graph update."
+    },
     "projectionAuthority": "UI projection journal replay can demonstrate observation readback only; it is not Organ Journal authority and does not prove authoritative recovery state.",
-    "checkpointAndRawReleaseEligibility": "This graph semantic update grants no checkpoint eligibility, durable turn receipt, closure, next-turn eligibility, or raw-release eligibility. Raw remains retained until the independently implemented complete durable turn receipt boundary is proven."
+    "checkpointAndRawReleaseEligibility": "Report bytes, UI projection replay and mapper output are observation or candidate evidence only; none is checkpoint, recovery, closure, next-turn, reentry or raw-release authority. A local checkpointAndClosureCommitted fact is not full five-phase readiness. The five-phase coordinator decides separately. Raw remains retained until the independently implemented complete durable turn receipt boundary is proven."
   }
 }
