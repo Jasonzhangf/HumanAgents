@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { link, mkdir, open, readdir, readFile, rm } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { id, type EvidenceRef, type ScopeRef } from '@humanagent/contracts';
 
@@ -97,8 +97,18 @@ export class ImmutableAssetStore {
     let entries;
     try {
       entries = await readdir(join(this.root, '.tmp'), { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+        let rootInfo;
+        try {
+          rootInfo = await stat(this.root);
+        } catch (rootError) {
+          if (typeof rootError === 'object' && rootError !== null && 'code' in rootError && rootError.code === 'ENOENT') throw error;
+          throw rootError;
+        }
+        if ((rootInfo as unknown as { isDirectory(): boolean }).isDirectory()) return;
+      }
+      throw error;
     }
     await Promise.all(entries
       .filter((entry) => entry.isFile())

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -28,4 +28,44 @@ test('recover does not delete the temp file of an active concurrent write', asyn
   assert.equal((await readdir(join(dir, '.tmp'), { withFileTypes: true })).some((entry) => entry.name === tempName), true);
   const reference = await writing;
   assert.deepEqual(await store.read(reference), payload);
+});
+
+test('recover rejects ENOTDIR when .tmp is a file and leaves it unchanged', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'humanagent-assets-recover-enotdir-'));
+  const store = new ImmutableAssetStore(dir);
+  const tmpPath = join(dir, '.tmp');
+  const original = new TextEncoder().encode('preserve this non-directory entry');
+  try {
+    await writeFile(tmpPath, original);
+    await assert.rejects(() => store.recover(), (error: unknown) => (error as { code?: string }).code === 'ENOTDIR');
+    assert.deepEqual(Uint8Array.from(await readFile(tmpPath)), original);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('recover accepts a missing .tmp directory without recreating it or changing existing assets', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'humanagent-assets-recover-missing-tmp-'));
+  const store = new ImmutableAssetStore(dir);
+  const bytes = new TextEncoder().encode('existing asset stays intact');
+  try {
+    const reference = await store.write('existing-asset', bytes);
+    await rm(join(dir, '.tmp'), { recursive: true, force: true });
+    await store.recover();
+    assert.deepEqual(await store.read(reference), bytes);
+    await assert.rejects(() => readdir(join(dir, '.tmp'), { withFileTypes: true }), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('recover rejects ENOENT when the asset store root is missing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'humanagent-assets-recover-missing-root-'));
+  const store = new ImmutableAssetStore(dir);
+  try {
+    await rm(dir, { recursive: true, force: true });
+    await assert.rejects(() => store.recover(), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
