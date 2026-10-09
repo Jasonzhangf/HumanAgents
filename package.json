@@ -29,7 +29,7 @@
     "build": "node scripts/run-build.mjs",
     "build:release": "node scripts/release-build.mjs",
     "build:release:gate": "node scripts/build-release.mjs",
-    "test:contracts": "pnpm build:contracts && node --test dist/tests/tests/contracts/contracts.test.js dist/tests/tests/contracts/interaction-contracts-public-consumer.test.js",
+    "test:contracts": "pnpm build:contracts && node --test dist/tests/tests/contracts/contracts.test.js dist/tests/tests/contracts/interaction-contracts-public-consumer.test.js dist/tests/tests/contracts/native-reasoning-public-consumer.test.js",
     "test:agent-templates": "pnpm exec tsc -p tests/agent-templates/tsconfig.json && node --test dist/tests/tests/agent-templates/template.test.js",
     "test:config": "pnpm build:config && tsc -p tests/config/tsconfig.json && node --test dist/tests/tests/config/config.test.js",
     "test:core": "pnpm build:contracts && tsc -p tests/core/tsconfig.json && node --test dist/tests/tests/core/core.test.js dist/tests/tests/core/occurrence-authority-public-consumer.test.js",
