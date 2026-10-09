@@ -19,12 +19,14 @@ import {
   type ProviderEvent,
   type ProviderRequestLifecycleEvent,
   type ProviderToolCall,
+  type ToolExecutionFact,
   type ScopeRef,
   type Task,
   type TaskId,
   type RequirementEnvelope,
   type WorkAssignment,
   type WorkResult,
+  validateProviderEvent,
 } from '../../../contracts/src/index.js';
 import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator.js';
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
@@ -126,6 +128,7 @@ export interface RuntimeTaskEvent {
   readonly error?: RuntimeTaskError;
   readonly outputRef?: string;
   readonly outputDigest?: string;
+  readonly executionFact?: ToolExecutionFact;
 }
 
 /**
@@ -2410,6 +2413,31 @@ export class RuntimeTaskCoordinator {
   }
 
   private recordProviderEvent(record: TaskRecord, operation: OperationRecord, event: ProviderEvent): void {
+    const executionFact = event.toolResult?.executionFact;
+    if (executionFact !== undefined) {
+      const result = event.toolResult!;
+      const invocation = operation.events.find((candidate) => (
+        candidate.kind === 'provider.tool' && candidate.callId === result.callId
+      ));
+      if (event.taskId.value !== record.taskId.value
+        || event.operationId.value !== operation.operationId.value
+        || event.executionEpoch !== operation.executionEpoch
+        || result.taskId.value !== record.taskId.value
+        || result.operationId.value !== operation.operationId.value
+        || result.executionEpoch !== operation.executionEpoch) {
+        throw new Error('provider tool execution fact does not match the current operation identity');
+      }
+      if (invocation === undefined
+        || invocation.toolId !== result.toolId
+        || invocation.requestId === undefined
+        || event.requestId !== invocation.requestId) {
+        throw new Error('provider tool execution fact does not match its operation-owned request and call');
+      }
+      // Provider owns binding and route provenance; the invocation event owns
+      // the request/call context. Validate the attached public shape and its
+      // result envelope before adding the fact to this runtime projection.
+      validateProviderEvent(event, executionFact.identity);
+    }
     const kind = runtimeProviderEventKind(event);
     const state = event.terminalState ?? (event.error ? 'failed' : event.kind);
     const summary = providerEventSummary(event);
@@ -2435,6 +2463,7 @@ export class RuntimeTaskCoordinator {
           status: event.toolResult.status,
           ...(event.toolResult.outputRef === undefined ? {} : { outputRef: event.toolResult.outputRef }),
           ...(event.toolResult.outputDigest === undefined ? {} : { outputDigest: event.toolResult.outputDigest }),
+          ...(executionFact === undefined ? {} : { executionFact }),
           ...(event.toolResult.error === undefined ? {} : { error: providerErrorProjection(event.toolResult.error) }),
         }
         : undefined;
@@ -2700,6 +2729,7 @@ export class RuntimeTaskCoordinator {
         readonly error?: RuntimeTaskError;
         readonly outputRef?: string;
         readonly outputDigest?: string;
+        readonly executionFact?: ToolExecutionFact;
       };
     },
     terminalPhase?: 'provider' | 'final',
@@ -2732,6 +2762,7 @@ export class RuntimeTaskCoordinator {
         ...(details.tool.error === undefined ? {} : { error: details.tool.error }),
         ...(details.tool.outputRef === undefined ? {} : { outputRef: details.tool.outputRef }),
         ...(details.tool.outputDigest === undefined ? {} : { outputDigest: details.tool.outputDigest }),
+        ...(details.tool.executionFact === undefined ? {} : { executionFact: details.tool.executionFact }),
       }),
     };
     operation.events.push(event);
