@@ -45,7 +45,7 @@ HumanAgent 是独立的长程器官式 Harness。它拥有器官、任务、指�
 - 已批准 MVP 实现代码在 `packages/`、`tests/`；当前阶段已经进入 runtime 实现。
 - 未获批准的 DSH adapter、SQLite、vector/RAG、daemon 和生产部署能力不得作为 MVP 放行结果声称。
 - DSH 源码只作为外部依赖证据读取；不得把本项目代码写入 `/Volumes/extension/code/dsh`。
-- 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行；本轮 review-fix 从 clean worktree HEAD `4ec6313cfad75c00363bbbedd6234928234121dd` 开始。
+- 后续实现必须在 `playground/<task>` 下的独立 clean worktree 中进行。
 
 ## Git 交付流程
 
