@@ -21,8 +21,10 @@ import {
   openTaskDashboard,
   pageBackDashboardHistory,
   probeDashboardLiveSse,
+  readDashboardProbe,
   readObservationDom,
   readTaskListDom,
+  sleep,
   submitDirectiveAndConfirmDraft,
   waitForTerminal,
 } from '../lib/browser.mjs';
@@ -30,9 +32,11 @@ import {
   countTurnEvidenceFor,
   journalPathFor,
   manifestsIdentical,
+  resolveExecutionIdentity,
   readToolOutputReports,
   workspaceManifest,
 } from '../lib/journal.mjs';
+import { stopTaskAndSettle } from '../lib/cleanup.mjs';
 
 export const SCENARIO = 'local-file-search';
 
@@ -40,6 +44,17 @@ const CLARIFY_ANSWER =
   'Do not clarify. Search the workspace directly with the file tools available and finish with your answer.';
 
 export async function runLocalFileSearchScenario(binding) {
+  if (binding.serviceMode === 'installed-attach') {
+    return observeInstalledAttachedTask(binding);
+  }
+  // The runner supports three real outcomes through the same scenario. The
+  // success path below keeps its full assertion set; failure/cancel drive the
+  // real product control/input entrances and record whatever terminal the task
+  // actually reaches. A mismatch is left for the runner's settlement proof to
+  // report as INCOMPLETE, never rewritten into success.
+  if ((binding.outcome ?? 'success') !== 'success') {
+    return runRequestedNonSuccess(binding);
+  }
   const evidence = { screenshots: [] };
   const marker = `humanagent-e2e-marker-${binding.attemptId}`;
   const fixtureDir = 'e2e-fixture';
@@ -336,6 +351,224 @@ export async function runLocalFileSearchScenario(binding) {
   return evidence;
 }
 
+/**
+ * Installed-attach is an observation of an explicit existing task. It never
+ * creates a fixture, submits a requirement, confirms a draft, or stops the
+ * formal owner. The authoritative Journal supplies the execution identity; the
+ * formal Dashboard is read only to verify that it exposes the same operation
+ * and epoch.
+ */
+async function observeInstalledAttachedTask(binding) {
+  const explicitTaskId = binding.taskId ?? binding.scope?.taskId ?? null;
+  if (!explicitTaskId) {
+    throw new Error('installed-attach observation requires an explicit existing task id');
+  }
+  if (!binding.attachTaskProbe) {
+    throw new Error('installed-attach observation requires the verified attachment task probe');
+  }
+
+  await journalPathFor(binding);
+  const resolved = await resolveExecutionIdentity(binding);
+  if (!resolved.ok) {
+    throw new Error(`installed-attach observation could not resolve execution identity: ${resolved.reason}`);
+  }
+  const identity = resolved.identity;
+  if (!sameId(identity.taskId, explicitTaskId)) {
+    throw new Error(
+      `installed-attach journal task ${JSON.stringify(idValue(identity.taskId))} `
+      + `does not match explicit task ${JSON.stringify(idValue(explicitTaskId))}`,
+    );
+  }
+  if (!identity.operationId || !Number.isSafeInteger(identity.executionEpoch) || identity.executionEpoch <= 0) {
+    throw new Error('installed-attach observation requires a complete operationId and positive executionEpoch');
+  }
+
+  await openTaskDashboard(binding, { waitNonterminal: false });
+  const dashboard = await readDashboardProbe(binding);
+  if (dashboard.taskId !== undefined && !sameId(dashboard.taskId, explicitTaskId)) {
+    throw new Error(
+      `installed-attach Dashboard task ${JSON.stringify(idValue(dashboard.taskId))} `
+      + `does not match explicit task ${JSON.stringify(idValue(explicitTaskId))}`,
+    );
+  }
+  if (!sameId(dashboard.operationId, identity.operationId)) {
+    throw new Error(
+      `installed-attach Dashboard operation ${JSON.stringify(idValue(dashboard.operationId))} `
+      + `does not match journal operation ${JSON.stringify(idValue(identity.operationId))}`,
+    );
+  }
+  if (dashboard.executionEpoch !== identity.executionEpoch) {
+    throw new Error(
+      `installed-attach Dashboard epoch ${JSON.stringify(dashboard.executionEpoch)} `
+      + `does not match journal epoch ${identity.executionEpoch}`,
+    );
+  }
+
+  const screenshot = await captureScreenshot(binding, '01-installed-attach-observation');
+  const turnEvidence = await countTurnEvidenceFor(binding).catch(() => null);
+  const events = turnEvidence?.allEvents ?? [];
+  const reports = await readToolOutputReports(binding, dashboard, events);
+  const evidence = {
+    screenshots: [screenshot],
+    terminalState: dashboard.state ?? null,
+    dashboardState: dashboard.state ?? null,
+    toolRounds: turnEvidence?.toolRounds ?? 0,
+    requestStartTurns: turnEvidence?.requestStartTurns ?? 0,
+    checkpointCommitted: turnEvidence?.checkpointCommitted ?? 0,
+    terminalRecord: turnEvidence?.terminalRecords?.slice(-1)[0] ?? null,
+    evidenceRefs: events
+      .flatMap((event) => (Array.isArray(event.evidenceRefs) ? event.evidenceRefs : []))
+      .slice(0, 40),
+    scenarioEvidence: {
+      attachedObservation: true,
+      taskId: explicitTaskId,
+      operationId: identity.operationId,
+      cycleId: identity.cycleId,
+      executionEpoch: identity.executionEpoch,
+      dashboardState: dashboard.state ?? null,
+      dashboardProbe: {
+        state: dashboard.state ?? null,
+        operationId: dashboard.operationId ?? null,
+        executionEpoch: dashboard.executionEpoch ?? null,
+      },
+      toolOutputReports: reports.map(pickReport),
+      entryLayout: binding.entryLayout ?? null,
+    },
+    // This is an observation, not a new browser task submission. It must not
+    // close the original business-task acceptance threshold.
+    missingEvidence: ['installed-attach observation is not a new business-task submission'],
+  };
+  return evidence;
+}
+
+/**
+ * Drive the real non-success outcome for this scenario. `cancel` submits a real
+ * task and then requests the product task-scoped stop; `failure` submits a real
+ * directive that exercises a failing tool path and records the observed
+ * terminal. Neither path fabricates a terminal.
+ */
+async function runRequestedNonSuccess(binding) {
+  const outcome = binding.outcome;
+  const evidence = { screenshots: [] };
+  const fixtureDir = 'e2e-fixture';
+  const missingRel = join(fixtureDir, 'e2e-missing-file.txt');
+  const marker = `humanagent-e2e-marker-${binding.attemptId}`;
+  await mkdir(join(binding.workspace, fixtureDir), { recursive: true });
+  await writeFile(join(binding.workspace, fixtureDir, 'hello-agent.txt'), `${marker}\n`, 'utf8');
+
+  const successDirective = [
+    `Find the workspace file that contains the string ${marker}.`,
+    `Use the file.search tool to search the workspace for ${marker}.`,
+    'Report the exact file path in your final answer. Do not create, modify, move or delete any file.',
+  ].join(' ');
+  const failureDirective = [
+    `Use the file.read tool to read the workspace path ${missingRel}.`,
+    'That path intentionally does not exist. Do not create it.',
+    'Report the exact tool error you received. Do not substitute a different file.',
+  ].join(' ');
+  const directive = outcome === 'cancel' ? successDirective : failureDirective;
+
+  await submitDirectiveAndConfirmDraft(binding, directive, { clarificationAnswer: CLARIFY_ANSWER });
+  await captureScreenshot(binding, '01-input-submitted');
+  evidence.screenshots.push(`${binding.screenshotsDir}/01-input-submitted.png`);
+
+  await openTaskDashboard(binding, { waitNonterminal: outcome === 'cancel' });
+  let stopResponse = null;
+  if (outcome === 'cancel') {
+    // Learn the real execution identity from the verified public journal before
+    // issuing any stop. The harness never guesses cycle/epoch and never sends a
+    // stop while the identity is unknown.
+    const identity = await waitForExecutionIdentity(binding);
+    binding.operationId = identity.operationId;
+    binding.cycleId = identity.cycleId;
+    binding.executionEpoch = identity.executionEpoch;
+    binding.scope = identity.scope ?? {
+      taskId: identity.taskId,
+      cycleId: identity.cycleId,
+      operationId: identity.operationId,
+    };
+    // Drive the cancel through the single task-scoped stop/settle owner. The
+    // owner records the stop attempt separately from the settlement assessment,
+    // so the runner can reassess read-only once the final journal is complete
+    // without ever issuing a second stop.
+    const stopSettle = await stopTaskAndSettle(binding, binding.taskId, { expectedOutcome: 'cancel' });
+    binding.attemptControl = { ...(binding.attemptControl ?? {}), stopSettle };
+    stopResponse = stopSettle.stopResponse ?? { status: null, body: stopSettle.reason ?? null };
+  }
+
+  const dashboard = await waitForTerminal(binding, { timeoutMs: Number(process.env.E2E_TERMINAL_TIMEOUT_MS ?? 600_000) });
+  await captureScreenshot(binding, '02-outcome');
+  evidence.screenshots.push(`${binding.screenshotsDir}/02-outcome.png`);
+
+  await journalPathFor(binding);
+  const turnEvidence = await countTurnEvidenceFor(binding).catch(() => null);
+  const terminalIds = {
+    taskId: binding.taskId,
+    operationId: dashboard.operationId ?? null,
+    executionEpoch: dashboard.executionEpoch ?? null,
+  };
+  evidence.scenarioEvidence = {
+    directive,
+    requestedOutcome: outcome,
+    marker,
+    missingRel,
+    taskId: binding.taskId,
+    terminalState: dashboard.state,
+    operationId: dashboard.operationId ?? null,
+    cycleId: binding.cycleId ?? null,
+    executionEpoch: dashboard.executionEpoch ?? null,
+    stopResponse,
+    terminalIds,
+    outputPreview: String(dashboard.output ?? '').slice(0, 1600),
+    toolRounds: turnEvidence?.toolRounds ?? 0,
+    requestStartTurns: turnEvidence?.requestStartTurns ?? 0,
+    terminalRecords: turnEvidence?.terminalRecords ?? null,
+    errorEvents: (turnEvidence?.allEvents ?? []).filter((event) => event.error || event.status === 'failed'),
+  };
+  evidence.terminalState = dashboard.state;
+  evidence.dashboardState = dashboard.state;
+  evidence.toolRounds = turnEvidence?.toolRounds ?? 0;
+  evidence.requestStartTurns = turnEvidence?.requestStartTurns ?? 0;
+  evidence.checkpointCommitted = turnEvidence?.checkpointCommitted ?? 0;
+  evidence.terminalRecord = turnEvidence?.terminalRecords.slice(-1)[0] ?? null;
+  // Do not populate missingEvidence from a non-success terminal: the runner
+  // classifies the real outcome and its settlement proof decides acceptance.
+  return evidence;
+}
+
+/**
+ * Resolve the current execution identity from the verified public Journal,
+ * cross-checking the dashboard projection when it exposes the same fields.
+ * The stop is never issued before this succeeds.
+ */
+async function waitForExecutionIdentity(binding, timeoutMs = Number(process.env.E2E_IDENTITY_TIMEOUT_MS ?? 120_000)) {
+  const deadline = Date.now() + timeoutMs;
+  let last = 'identity not resolved';
+  for (;;) {
+    try {
+      await journalPathFor(binding);
+      const resolved = await resolveExecutionIdentity(binding);
+      if (resolved.ok) {
+        const probe = await readDashboardProbe(binding).catch(() => null);
+        if (probe?.operationId && probe.operationId !== resolved.identity.operationId?.value) {
+          throw new Error(`dashboard operationId ${probe.operationId} does not match verified journal operation ${resolved.identity.operationId?.value}`);
+        }
+        if (Number.isSafeInteger(probe?.executionEpoch) && probe.executionEpoch !== resolved.identity.executionEpoch) {
+          throw new Error(`dashboard executionEpoch ${probe.executionEpoch} does not match verified journal epoch ${resolved.identity.executionEpoch}`);
+        }
+        return resolved.identity;
+      }
+      last = resolved.reason;
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error);
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`execution identity was not available before stop: ${last}`);
+    }
+    await sleep(250);
+  }
+}
+
 function pickEvent(event) {
   return {
     seq: event.seq,
@@ -371,4 +604,15 @@ function readPathFromEvent(event) {
     if (typeof args[key] === 'string' && args[key].trim()) return args[key];
   }
   return null;
+}
+
+function idValue(value) {
+  if (value === undefined || value === null) return null;
+  return typeof value === 'object' && value !== null ? value.value : String(value);
+}
+
+function sameId(left, right) {
+  const a = idValue(left);
+  const b = idValue(right);
+  return a !== null && b !== null && a === b;
 }

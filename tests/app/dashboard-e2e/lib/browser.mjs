@@ -19,8 +19,9 @@ import { mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createAttemptAuth } from './auth.mjs';
+import { taskIdValue } from './binding.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_PATH = resolve(__dirname, '..', '..', '..', '..');
@@ -32,6 +33,17 @@ const PLAYWRIGHT_CANDIDATES = [
 ].filter(Boolean);
 
 const TERMINAL_TIMEOUT_MS = Number(process.env.E2E_TERMINAL_TIMEOUT_MS ?? 600_000);
+
+function idValue(value) {
+  if (value === undefined || value === null) return null;
+  return typeof value === 'object' && value !== null ? value.value : String(value);
+}
+
+function sameId(left, right) {
+  const a = idValue(left);
+  const b = idValue(right);
+  return a !== null && b !== null && a === b;
+}
 
 function cliPath(repoPath = DEFAULT_REPO_PATH) {
   const candidate = join(repoPath, 'dist/app/app/src/cli.js');
@@ -129,7 +141,7 @@ export async function describeDraftStage(binding) {
   const [tasks, dashboard] = await Promise.all([
     probe('/api/tasks'),
     binding.taskId
-      ? probe(`/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`)
+      ? probe(`/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`)
       : Promise.resolve(null),
   ]);
   return {
@@ -144,6 +156,9 @@ export async function startServeForAttempt(binding, options = {}) {
   const cli = cliPath(repoPath);
   if (!cli) {
     throw new Error(`built CLI is missing at ${join(repoPath, 'dist/app/app/src/cli.js')}; run \`pnpm build:app\` in the worktree first`);
+  }
+  if (binding.serviceMode === 'installed-attach') {
+    throw new Error('installed-attach never starts a candidate serve; use attachToInstalledService()');
   }
   const workspace = binding.workspace;
   const controlRoot = binding.controlRoot;
@@ -180,6 +195,7 @@ export async function startServeForAttempt(binding, options = {}) {
   ], { cwd: repoPath, env, stdio: ['ignore', 'pipe', 'pipe'] });
   binding.servePid = child.pid;
   binding.serveChild = child;
+  binding.serviceMode = 'candidate';
 
   let stdout = '';
   let stderr = '';
@@ -253,6 +269,123 @@ export async function probeProvider(binding) {
   }
 }
 
+/**
+ * Installed-attach: attach to the operator's already-running canonical serve
+ * owner instead of starting a new one. The runner never starts, replaces or
+ * stops this owner. It verifies the live lease (owner identity, pid, port), the
+ * served entry/artifact, readiness, and the optional required task scope, then
+ * authenticates through the existing `humanagent pair` <-> `/api/auth/pair`
+ * mechanism. No credential is written to the binding or receipt.
+ */
+export async function attachToInstalledService(binding, options = {}) {
+  const repoPath = binding.repoPath ?? DEFAULT_REPO_PATH;
+  const expectedOwner = options.expectedOwner ?? 'humanagent.app.serve';
+  const paths = binding.formalPaths;
+  if (!paths) {
+    throw new Error('installed-attach requires resolveFormalAttachPaths() to have derived the formal project paths');
+  }
+  const baseUrl = options.baseUrl ?? process.env.HUMANAGENT_ATTACH_BASE_URL
+    ?? (process.env.HUMANAGENT_ATTACH_PORT ? `http://127.0.0.1:${process.env.HUMANAGENT_ATTACH_PORT}` : null);
+  if (!baseUrl) {
+    throw new Error('installed-attach requires an explicit owner endpoint: set HUMANAGENT_ATTACH_BASE_URL (or HUMANAGENT_ATTACH_PORT)');
+  }
+  const requiredTaskId = options.requiredTaskId ?? process.env.HUMANAGENT_ATTACH_TASK ?? null;
+  const boundTaskId = binding.scope?.taskId ?? binding.taskId ?? null;
+  if (requiredTaskId !== null && boundTaskId !== null && !sameId(requiredTaskId, boundTaskId)) {
+    throw new Error(
+      `installed-attach task identity conflict: scope/task ${JSON.stringify(idValue(boundTaskId))} `
+      + `does not match HUMANAGENT_ATTACH_TASK ${JSON.stringify(idValue(requiredTaskId))}`,
+    );
+  }
+  const explicitTaskId = requiredTaskId ?? boundTaskId;
+  const explicitTaskIdentity = boundTaskId ?? requiredTaskId;
+  if (!explicitTaskId) {
+    throw new Error(
+      'installed-attach requires an explicit existing task via options.scope.taskId or HUMANAGENT_ATTACH_TASK',
+    );
+  }
+
+  const supervisorModule = join(repoPath, 'dist', 'app', 'app', 'src', 'supervisor', 'index.js');
+  if (!existsSync(supervisorModule)) {
+    throw new Error(`supervisor module is not built at ${supervisorModule}; run \`pnpm build:app\` first`);
+  }
+  const { readDaemonLease } = await import(pathToFileURL(supervisorModule).href);
+  const lease = await (options.readLease ?? readDaemonLease)(paths);
+  if (!lease) {
+    throw new Error(`installed-attach found no daemon lease under ${paths.projectRoot}; the formal service must be running`);
+  }
+  if (lease.ownerId !== expectedOwner) {
+    throw new Error(`installed-attach refused owner ${JSON.stringify(lease.ownerId)}; expected ${expectedOwner}`);
+  }
+  if (lease.controlEndpoint === undefined) {
+    throw new Error('installed-attach: the live owner has not published a supervisor control endpoint');
+  }
+  const url = new URL(baseUrl);
+  const urlPort = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+  if (urlPort !== lease.controlEndpoint.port) {
+    throw new Error(`installed-attach endpoint port ${urlPort} does not match the live lease port ${lease.controlEndpoint.port}`);
+  }
+  let alive = true;
+  try {
+    process.kill(lease.pid, 0);
+  } catch {
+    alive = false;
+  }
+  if (!alive) {
+    throw new Error(`installed-attach: lease pid ${lease.pid} is not running; refuse to attach to a stale owner`);
+  }
+
+  binding.serviceMode = 'installed-attach';
+  binding.serveBaseUrl = baseUrl.replace(/\/$/, '');
+  binding.servePort = urlPort;
+  // The service is not this attempt's to stop; keep the pid only as the
+  // retained-identity proof, never as a signal target.
+  binding.attachedOwner = { ownerId: lease.ownerId, pid: lease.pid, port: lease.controlEndpoint.port, leaseId: lease.leaseId, generation: lease.generation };
+  binding.attachedLeaseProjectRoot = paths.projectRoot;
+  binding.attachedLeasePath = join(paths.projectRoot, 'daemon', 'lease.json');
+  binding.servePid = null;
+
+  // Pairing is scoped to the formal installed owner, not to the ephemeral
+  // attempt workspace. The auth helper uses binding.workspace/controlRoot to
+  // create the pairing challenge and derives the cookie origin from baseUrl.
+  const authBinding = {
+    ...binding,
+    workspace: binding.formalWorkspace ?? paths.workspaceCwd ?? binding.workspace,
+    controlRoot: paths.controlRoot,
+    runtimePaths: paths,
+    serveBaseUrl: baseUrl.replace(/\/$/, ''),
+  };
+  const auth = options.auth ?? createAttemptAuth(authBinding);
+  binding.auth = auth;
+  if (typeof auth.pair === 'function') await auth.pair();
+  const liveness = await requestJsonWithStatus(`${binding.serveBaseUrl}/api/liveness`, {}, auth);
+  if (liveness.status !== 200 || liveness.body?.status !== 'alive') {
+    throw new Error(`installed-attach readiness failed: ${JSON.stringify(liveness).slice(0, 600)}`);
+  }
+  // Artifact provenance: the served entry must be the real Dashboard UI, not a
+  // placeholder; verify the identity endpoint reports this exact live owner.
+  const entryResponse = await (auth.fetch ?? fetch)(`${binding.serveBaseUrl}/dashboard.html`, { headers: { accept: 'text/html' } });
+  if (!entryResponse.ok) {
+    throw new Error(`installed-attach served entry did not load: status=${entryResponse.status}`);
+  }
+
+  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(explicitTaskId))}/dashboard`, {}, auth)
+    .catch((error) => ({ error: error.message }));
+  if (!probe || probe.error) {
+    throw new Error(`installed-attach task scope check failed for ${idValue(explicitTaskId)}: ${probe?.error ?? 'no dashboard'}`);
+  }
+  if (probe.taskId !== undefined && !sameId(probe.taskId, explicitTaskId)) {
+    throw new Error(
+      `installed-attach task scope check returned task ${JSON.stringify(idValue(probe.taskId))} `
+      + `instead of ${JSON.stringify(idValue(explicitTaskId))}`,
+    );
+  }
+  binding.taskId = explicitTaskIdentity;
+  binding.attachTaskProbe = probe;
+  binding.readiness = { status: liveness.status, body: liveness.body, mode: 'installed-attach' };
+  return binding;
+}
+
 export async function launchBrowserSession(binding) {
   const playwright = await loadPlaywright();
   const browser = await playwright.chromium.launch({ headless: true });
@@ -285,12 +418,32 @@ export async function captureScreenshot(binding, name) {
   return path;
 }
 
+/**
+ * Open the real served entry the attempt selected. The homepage (`/`, served as
+ * `index.html`/`entry.js`) submits once and authorizes the new task in the same
+ * handling; the dashboard page (`dashboard.html`/`dashboard.js`) is the preview
+ * entry. Both are the real served pages, not API substitutes.
+ */
 async function openEntryPage(binding) {
   const { page } = binding.browser;
-  const entryUrl = `${binding.serveBaseUrl}/dashboard.html`;
+  const entry = binding.entry ?? 'dashboard';
+  if (entry !== 'dashboard' && entry !== 'homepage') {
+    throw new Error(`unknown entry ${JSON.stringify(entry)}; expected homepage or dashboard`);
+  }
+  const entryUrl = entry === 'homepage' ? `${binding.serveBaseUrl}/` : `${binding.serveBaseUrl}/dashboard.html`;
   const response = await page.goto(entryUrl, { waitUntil: 'domcontentloaded' });
   if (!response || !response.ok()) {
     throw new Error(`served UI entry did not load: ${entryUrl} status=${response?.status()}`);
+  }
+  binding.entryUrl = entryUrl;
+  if (entry === 'homepage') {
+    await page.waitForSelector('#entry-form textarea[name="rawInput"]', { timeout: 15_000 });
+    const directiveBox = await page.locator('#entry-form textarea[name="rawInput"]').boundingBox();
+    if (!directiveBox || directiveBox.width <= 0 || directiveBox.height <= 0) {
+      throw new Error(`real homepage input was not laid out with a positive bbox: ${JSON.stringify(directiveBox)}`);
+    }
+    binding.entryLayout = { directive: directiveBox };
+    return entryUrl;
   }
   await page.waitForSelector('.quick-create-form textarea[name="directive"]', { timeout: 15_000 });
   // The rendered entry controls are only proven by their real layout: the
@@ -311,10 +464,75 @@ async function openEntryPage(binding) {
   return entryUrl;
 }
 
+function taskScopedNavigation(value, baseUrl) {
+  let candidate;
+  try {
+    candidate = value instanceof URL ? value : new URL(String(value), baseUrl);
+  } catch {
+    return null;
+  }
+  let expected;
+  try {
+    expected = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  if (candidate.origin !== expected.origin) return null;
+  if (candidate.pathname !== '/observation.html' && candidate.pathname !== '/task-dashboard.html') return null;
+  const taskId = candidate.searchParams.get('task');
+  if (!taskId || taskId.trim() === '') return null;
+  return {
+    taskId,
+    href: candidate.href,
+    pathname: candidate.pathname,
+    origin: candidate.origin,
+  };
+}
+
+async function waitForTaskScopedNavigation(binding, timeoutMs) {
+  const page = binding.browser.page;
+  if (typeof page.waitForURL === 'function') {
+    try {
+      // `page.waitForURL` returns `Promise<void>`: it synchronizes on the
+      // navigation/load state and resolves `undefined`. Await it for
+      // synchronization only, then read the settled URL from `page.url()` and
+      // validate it with the same-origin/task-scoped rules.
+      await page.waitForURL(
+        (url) => taskScopedNavigation(url, binding.serveBaseUrl) !== null,
+        { timeout: timeoutMs, waitUntil: 'domcontentloaded' },
+      );
+    } catch (error) {
+      throw new Error(
+        `homepage submission did not navigate to a same-origin task-scoped observation: ${error.message}`,
+      );
+    }
+    const navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
+    if (!navigation) {
+      throw new Error('homepage submission settled on an invalid task-scoped navigation');
+    }
+    return navigation;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const navigation = taskScopedNavigation(page.url(), binding.serveBaseUrl);
+    if (navigation) return navigation;
+    if (Date.now() > deadline) {
+      throw new Error('homepage submission did not navigate to a same-origin task-scoped observation before timeout');
+    }
+    await sleep(50);
+  }
+}
+
 /**
- * Drive 输入任务 -> 显式草稿 -> 用户确认 through the real served page and return
- * the dispatched task id. The UI asks clarifying questions; each one is answered
- * in-page rather than retried, up to a bounded number of attempts.
+ * Drive the real task input on the selected entry and return the dispatched task.
+ *
+ * Dashboard entry: 输入 -> 显式草稿 -> 用户点击确认 (the preview flow). Clarifying
+ * questions are answered in-page, up to a bounded number of attempts.
+ *
+ * Homepage entry: a single submit authorizes the new task; the explicit brain
+ * organizes and FIFO-enqueues the requirement in the same handling, so there is
+ * no second visible confirmation.
  */
 export async function submitDirectiveAndConfirmDraft(binding, directive, options = {}) {
   const { page } = binding.browser;
@@ -323,6 +541,32 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
   const clarificationAnswer = options.clarificationAnswer ?? 'Do not clarify. Proceed directly with the tools available in the workspace and finish.';
 
   await openEntryPage(binding);
+  if ((binding.entry ?? 'dashboard') === 'homepage') {
+    await page.fill('#entry-form textarea[name="rawInput"]', directive);
+    binding.formalEntryStarted = true;
+    // Register the wait before the click so a fast submission cannot race past
+    // the observation. The selected identity comes only from this navigation.
+    const navigationPromise = waitForTaskScopedNavigation(
+      binding,
+      Number(options.confirmTimeoutMs ?? 90_000),
+    );
+    try {
+      await page.click('#entry-form button[type="submit"]');
+    } catch (error) {
+      await navigationPromise.catch(() => {});
+      throw error;
+    }
+    const navigation = await navigationPromise;
+    binding.taskId = navigation.taskId;
+    binding.submissionNavigation = navigation;
+    // The homepage renders its read-only organization feedback on the same page;
+    // capture the intent it reports without requiring a second confirmation.
+    binding.draft = { intent: 'create', proposal: '', metaRows: [], entry: 'homepage', submittedOnce: true };
+    binding.confirmStatus = 'single-submit';
+    binding.draftRowsBeforeConfirm = 0;
+    return binding;
+  }
+
   await page.fill('.quick-create-form textarea[name="directive"]', directive);
   binding.formalEntryStarted = true;
   await page.click('form button[type="submit"]');
@@ -408,13 +652,13 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
 /** Open the per-task dashboard and wait for the task to be nonterminal-running. */
 export async function openTaskDashboard(binding, options = {}) {
   const { page } = binding.browser;
-  const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?task=${encodeURIComponent(binding.taskId)}`;
+  const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
   if (page.url() !== dashboardUrl) {
     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
   }
   if (options.waitNonterminal !== false) {
     await waitForDom(page, 'nonterminal task dashboard', async () => {
-      const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
+      const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
       if (probe.state && !['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
       if (probe.state === 'failed') return 'failed';
       return null;
@@ -427,12 +671,12 @@ export async function openTaskDashboard(binding, options = {}) {
 export async function waitForTerminal(binding, options = {}) {
   const { page } = binding.browser;
   const state = await waitForDom(page, 'task runtime terminal', async () => {
-    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
+    const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
     if (['succeeded', 'failed', 'stopped'].includes(probe.state)) return probe.state;
     return null;
   }, Number(options.timeoutMs ?? TERMINAL_TIMEOUT_MS));
   await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
+  const probe = await jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
   binding.terminalState = state;
   binding.dashboardProbe = probe;
   return probe;
@@ -440,21 +684,21 @@ export async function waitForTerminal(binding, options = {}) {
 
 /** Read the newest execution terminal record from the authoritative journal. */
 export async function readDashboardProbe(binding) {
-  return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/dashboard`, {}, binding.auth);
+  return jsonRequest(`${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/dashboard`, {}, binding.auth);
 }
 
 export async function captureDashboardEvidence(binding) {
   const dashboardProbe = await readDashboardProbe(binding).catch((error) => ({ error: error.message }));
   const observation = await jsonRequest(
-    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/observation`,
+    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/observation`,
     {},
     binding.auth,
   ).catch((error) => ({ error: error.message }));
-  const rootScopeRef = observation?.scope?.scopeRef ?? `task://${binding.taskId}/observation`;
+  const rootScopeRef = observation?.scope?.scopeRef ?? `task://${taskIdValue(binding.taskId)}/observation`;
   // `pipeline.execute` is a registry node on the root scope; the child scope only
   // holds provider sub-event nodes, so select it without the child scope ref.
   const executeNode = await jsonRequest(
-    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(binding.taskId)}/observation?node=pipeline.execute`,
+    `${binding.serveBaseUrl}/api/tasks/${encodeURIComponent(taskIdValue(binding.taskId))}/observation?node=pipeline.execute`,
     {},
     binding.auth,
   ).catch((error) => ({ error: error.message }));
@@ -478,7 +722,7 @@ export async function captureDashboardEvidence(binding) {
 export async function readTaskDashboardDom(binding, options = {}) {
   const { page } = binding.browser;
   if (options.navigate !== false) {
-    const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?task=${encodeURIComponent(binding.taskId)}`;
+    const dashboardUrl = `${binding.serveBaseUrl}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.status-layers .detail-cell', { timeout: 30_000 });
   }
@@ -521,7 +765,7 @@ export async function readTaskDashboardDom(binding, options = {}) {
  */
 export async function readObservationDom(binding) {
   const { page } = binding.browser;
-  await page.goto(`${binding.serveBaseUrl}/observation.html?task=${encodeURIComponent(binding.taskId)}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${binding.serveBaseUrl}/observation.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.flow-node', { timeout: 30_000 });
   return page.evaluate(() => ({
     nodeIds: [...document.querySelectorAll('.flow-node')].map((card) => card.dataset.nodeId ?? ''),
@@ -662,7 +906,7 @@ export async function readSseEvents(binding, timeoutMs = 15_000) {
 export async function probeDashboardLiveSse(binding, options = {}) {
   const { page, context } = binding.browser;
   const base = binding.serveBaseUrl;
-  const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(binding.taskId)}`;
+  const dashboardUrl = `${base}/task-dashboard.html?task=${encodeURIComponent(taskIdValue(binding.taskId))}`;
   await page.addInitScript(() => {
     const recorded = window.__humanagentSseRecorded ??= [];
     const original = EventSource.prototype.addEventListener;

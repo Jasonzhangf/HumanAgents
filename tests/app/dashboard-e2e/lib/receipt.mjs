@@ -21,6 +21,9 @@ export function buildReceipt(binding, evidence = {}) {
     schema: 'humanagent.dashboard-e2e.receipt.v1',
     result,
     scenario: binding.scenario,
+    entry: binding.entry ?? 'dashboard',
+    requestedOutcome: binding.outcome ?? 'success',
+    serviceMode: binding.serviceMode ?? 'candidate',
     attemptId: binding.attemptId,
     startedAt: binding.startedAt,
     finishedAt: evidence.finishedAt ?? new Date().toISOString(),
@@ -37,6 +40,8 @@ export function buildReceipt(binding, evidence = {}) {
       servePort: binding.servePort ?? null,
       serveBaseUrl: binding.serveBaseUrl ?? null,
       controlRoot: binding.serveControlRoot ?? binding.controlRoot,
+      runNotesRoot: binding.runNotesRoot ?? null,
+      projectRoot: binding.projectRoot ?? null,
       workspace: binding.workspace,
       rccBaseUrl: process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444',
       model: process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5',
@@ -46,6 +51,9 @@ export function buildReceipt(binding, evidence = {}) {
       terminalState: evidence.terminalState ?? binding.terminalState ?? null,
       dashboardState: evidence.dashboardState ?? null,
     },
+    settlement: evidence.settlement ?? null,
+    resources: evidence.resources ?? null,
+    recoveryOwner: evidence.recoveryOwner ?? binding.recoveryOwner ?? null,
     evidence: {
       toolRounds: evidence.toolRounds ?? 0,
       requestStartTurns: evidence.requestStartTurns ?? 0,
@@ -76,6 +84,9 @@ function renderReceiptMarkdown(receipt) {
   lines.push(`- Result: **${receipt.result}**`);
   lines.push(`- Attempt: \`${receipt.attemptId}\``);
   lines.push(`- Scenario: \`${receipt.scenario}\``);
+  lines.push(`- Entry: \`${receipt.entry}\``);
+  lines.push(`- Requested outcome: \`${receipt.requestedOutcome}\``);
+  lines.push(`- Service mode: \`${receipt.serviceMode}\``);
   lines.push(`- Started: ${receipt.startedAt}`);
   lines.push(`- Finished: ${receipt.finishedAt}`);
   lines.push('');
@@ -92,12 +103,21 @@ function renderReceiptMarkdown(receipt) {
   lines.push(`- RCC: \`${receipt.runtime.rccBaseUrl}\` (model \`${receipt.runtime.model}\`)`);
   lines.push(`- Serve: \`${receipt.runtime.serveBaseUrl ?? 'n/a'}\` (pid \`${receipt.runtime.servePid ?? 'n/a'}\`, port \`${receipt.runtime.servePort ?? 'n/a'}\`)`);
   lines.push(`- Control root: \`${receipt.runtime.controlRoot}\``);
+  lines.push(`- Run notes root: \`${receipt.runtime.runNotesRoot ?? 'n/a'}\``);
+  lines.push(`- Project root: \`${receipt.runtime.projectRoot ?? 'n/a'}\``);
   lines.push(`- Workspace: \`${receipt.runtime.workspace}\``);
   lines.push('');
   lines.push('## Task');
   lines.push('');
   lines.push(`- Task id: \`${receipt.task.taskId ?? 'n/a'}\``);
   lines.push(`- Runtime terminal state: \`${receipt.task.terminalState ?? 'n/a'}\``);
+  if (receipt.settlement) {
+    lines.push(`- Settled: \`${String(receipt.settlement.settled)}\``);
+    lines.push(`- Settlement reason: ${String(receipt.settlement.reason ?? 'n/a')}`);
+  }
+  if (receipt.recoveryOwner) {
+    lines.push(`- Recovery owner: \`${typeof receipt.recoveryOwner === 'string' ? receipt.recoveryOwner : JSON.stringify(receipt.recoveryOwner)}\``);
+  }
   lines.push('');
   lines.push('## Evidence');
   lines.push('');
@@ -157,6 +177,22 @@ function renderReceiptMarkdown(receipt) {
     lines.push('- not recorded');
   }
   lines.push('');
+  if (receipt.resources) {
+    lines.push('## Resources');
+    lines.push('');
+    const section = (label, value) => {
+      if (!Array.isArray(value) || value.length === 0) return;
+      lines.push(`- ${label}:`);
+      for (const entry of value) {
+        lines.push(`  - ${typeof entry === 'string' ? entry : JSON.stringify(entry)}`);
+      }
+    };
+    section('Released', receipt.resources.released);
+    section('Persistent retained', receipt.resources.persistentRetained);
+    section('Recovery retained', receipt.resources.recoveryRetained);
+    section('Not applicable', receipt.resources.notApplicable);
+    lines.push('');
+  }
   if (receipt.deviation || receipt.missingEvidence) {
     lines.push('## Deviation');
     lines.push('');
