@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  CODE_SEARCH_CONTRACT_VERSION,
+  CODE_SEARCH_SERVICE_ID,
   id,
+  validateCodeSearchReport,
+  type InteractionHistoryResult,
+  type InteractionTraceEntry,
+  type OperationId,
   type ProviderBinding,
   type TaskId,
 } from '../../packages/contracts/src/index.js';
@@ -34,6 +41,8 @@ import { UiRuntimeApiError } from '../../packages/app/src/ui-runtime/errors.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
 
 const organId = id('organ', 'native-file-search-organ');
+const taskRuntimeRoot = '/Users/fanzhang/.humanagent/s-r2-typed-history-verification-20261009';
+const fileSearchCallId = 'call-file-search';
 const binding: ProviderBinding = {
   bindingId: 'native-file-search-binding',
   providerId: 'scripted-responses-provider',
@@ -113,16 +122,20 @@ function persistedFact(): Record<string, unknown> {
   };
 }
 
-function operationStartedRecord(operationIdValue = persistedEvent.operationId): unknown {
+function operationStartedRecord(
+  operationIdValue = persistedEvent.operationId,
+  taskIdValue = persistedEvent.taskId.value,
+): unknown {
   const operationId = id('operation', operationIdValue);
+  const taskId = id('task', taskIdValue);
   return {
     kind: 'operation.started',
     operationId,
-    taskId: persistedEvent.taskId,
+    taskId,
     cycleId: id('cycle', 'cycle-persisted-tool-result'),
     scope: {
       organId,
-      taskId: persistedEvent.taskId,
+      taskId,
       cycleId: id('cycle', 'cycle-persisted-tool-result'),
       operationId,
     },
@@ -171,12 +184,12 @@ function providerAdapter(root: string, failSearch = false): ProviderAdapter {
         { protocol: 'responses', type: 'response.created', response: { id: 'response-search-call' } },
         {
           protocol: 'responses', type: 'response.output_item.added', output_index: 0,
-          item: { type: 'function_call', call_id: 'call-file-search', name: 'file_search', arguments: '' },
+          item: { type: 'function_call', call_id: fileSearchCallId, name: 'file_search', arguments: '' },
         },
         {
           protocol: 'responses', type: 'response.output_item.done', output_index: 0,
           item: {
-            type: 'function_call', call_id: 'call-file-search', name: 'file_search',
+            type: 'function_call', call_id: fileSearchCallId, name: 'file_search',
             arguments: JSON.stringify(failSearch
               ? { path: '', query: 'semantic-needle', queryKind: 'literal' }
               : { path: '.', query: 'semantic-needle', queryKind: 'literal' }),
@@ -248,6 +261,136 @@ async function waitForTerminal(runtime: UiRuntimeService, taskId: TaskId): Promi
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`runtime did not finish; state=${runtime.taskDashboard(taskId).state}`);
+}
+
+function reportAssetPath(artifactRoot: string, outputRef: string, outputDigest: string): string {
+  const outputId = decodeURIComponent(outputRef.slice('asset://provider-tool/output/'.length));
+  const safeOutputId = outputId.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 96);
+  return join(artifactRoot, 'tool-output', `provider-tool-output-${safeOutputId}-${outputDigest.slice(-12)}`);
+}
+
+function sha256Digest(content: string): string {
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
+}
+
+function sha256Bytes(content: Uint8Array): string {
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
+}
+
+function selectToolResult(
+  runtime: UiRuntimeService,
+  taskId: TaskId,
+  input: {
+    readonly operationId: OperationId;
+    readonly executionEpoch: number;
+    readonly callId: string;
+    readonly outputRef: string;
+    readonly outputDigest: string;
+  },
+): InteractionTraceEntry {
+  const history: InteractionHistoryResult = runtime.history(taskId, {
+    filter: {
+      taskId,
+      operationId: input.operationId,
+      executionEpoch: input.executionEpoch,
+      kinds: ['tool-result'],
+      callId: input.callId,
+    },
+    limit: 50,
+  });
+  assert.equal(history.ok, true, JSON.stringify(history));
+  if (!history.ok) throw new Error(`typed history did not return a page: ${JSON.stringify(history)}`);
+  assert.equal(history.page.hasMore, false, JSON.stringify(history.page));
+  assert.equal(history.page.cursor, undefined, JSON.stringify(history.page));
+  assert.equal(history.page.items.length, 1, JSON.stringify(history.page));
+  const entry = history.page.items[0]!;
+  assert.deepEqual(entry.taskId, taskId);
+  assert.deepEqual(entry.operationId, input.operationId);
+  assert.equal(entry.executionEpoch, input.executionEpoch);
+  assert.equal(entry.kind, 'tool-result');
+  assert.equal(entry.tool?.callId, input.callId);
+  assert.equal(entry.tool?.toolId, 'file.search');
+  assert.equal(entry.tool?.status, 'succeeded');
+  assert.equal(entry.tool?.paired, true);
+  assert.equal(entry.tool?.outputRef, input.outputRef);
+  assert.equal(entry.tool?.outputDigest, input.outputDigest);
+  assert.equal(Number.isSafeInteger(entry.seq) && entry.seq > 0, true);
+  return entry;
+}
+
+async function assertToolOutputBytes(
+  runtime: UiRuntimeService,
+  entry: InteractionTraceEntry,
+  expectedBytes: string,
+  expectedDigest: string,
+): Promise<Record<string, unknown>> {
+  const report = await runtime.toolOutput(
+    entry.taskId,
+    entry.operationId,
+    entry.executionEpoch,
+    entry.seq,
+  ) as Record<string, unknown>;
+  assert.equal(JSON.stringify(report), expectedBytes);
+  assert.equal(sha256Digest(JSON.stringify(report)), expectedDigest);
+  validateCodeSearchReport(report);
+  assert.deepEqual(report, JSON.parse(expectedBytes));
+  return report;
+}
+
+async function writeQualifiedReportAsset(
+  artifactRoot: string,
+  outputId: string,
+  report: unknown,
+): Promise<{ readonly outputRef: string; readonly outputDigest: string }> {
+  const content = JSON.stringify(report);
+  const outputDigest = sha256Digest(content);
+  const digestSuffix = outputDigest.slice(-12);
+  await new ImmutableAssetStore(join(artifactRoot, 'tool-output')).write(
+    `provider-tool-output-${outputId}-${digestSuffix}`,
+    new TextEncoder().encode(content),
+  );
+  return {
+    outputRef: `asset://provider-tool/output/${encodeURIComponent(outputId)}`,
+    outputDigest,
+  };
+}
+
+async function executeAndReadSearchReport(input: {
+  readonly root: string;
+  readonly projectKey: string;
+  readonly callId: string;
+  readonly arguments: { readonly path: string; readonly query: string; readonly queryKind: 'literal'; readonly contextLines?: number; readonly maxResults?: number };
+  readonly taskId: string;
+  readonly operationId: string;
+}): Promise<Record<string, unknown>> {
+  const workspaceRoot = join(input.root, 'workspace');
+  const artifactRoot = join(input.root, 'evidence');
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey: input.projectKey, artifactRoot });
+  const result = await executor.executor.execute({
+    execution: {
+      runtimeId: `runtime-${input.callId}`,
+      taskId: id('task', input.taskId),
+      operationId: id('operation', input.operationId),
+      executionEpoch: 1,
+    },
+    scope: {
+      organId,
+      taskId: id('task', input.taskId),
+      cycleId: id('cycle', `cycle-${input.operationId}`),
+      operationId: id('operation', input.operationId),
+    },
+    call: {
+      callId: input.callId,
+      toolId: 'file.search',
+      arguments: input.arguments,
+      continuationRef: `response-${input.callId}`,
+    },
+    signal: new AbortController().signal,
+  });
+  if (result.outputRef === undefined || result.outputDigest === undefined) throw new Error('file.search report descriptor is missing');
+  const persisted = JSON.parse(await readFile(reportAssetPath(artifactRoot, result.outputRef, result.outputDigest), 'utf8')) as Record<string, unknown>;
+  assert.equal(persisted.contractVersion, CODE_SEARCH_CONTRACT_VERSION);
+  return persisted;
 }
 
 test('persisted execution facts fail closed on every outer relation mismatch', () => {
@@ -352,10 +495,99 @@ test('legacy provider tool results without an execution fact keep replay and dir
   }
 });
 
+test('public readback rejects correctly digested malformed and unversioned file.search reports', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-native-file-search-unqualified-');
+  const workspaceRoot = join(root, 'workspace');
+  const artifactRoot = join(root, 'evidence');
+  const projectKey = 'native-file-search-unqualified-project';
+  await mkdir(workspaceRoot, { recursive: true });
+  const validReport = {
+    serviceId: CODE_SEARCH_SERVICE_ID,
+    contractVersion: CODE_SEARCH_CONTRACT_VERSION,
+    status: 'succeeded',
+    workspaceRef: `workspace:${projectKey}`,
+    path: '.',
+    query: 'semantic-needle',
+    queryKind: 'literal',
+    matches: [{
+      path: 'source.txt',
+      line: 1,
+      column: 1,
+      text: 'semantic-needle',
+      contextBefore: [],
+      contextAfter: [],
+    }],
+    filesDiscovered: 1,
+    filesSearched: 1,
+    matchesFound: 1,
+    resultsTruncated: false,
+    searchComplete: true,
+    unresolvedPaths: [],
+    summary: 'searched 1 file(s), found 1 match(es)',
+  };
+  const cases: readonly [string, unknown][] = [
+    ['malformed-json-object', { ...validReport, matches: 'not-array' }],
+    ['unversioned', { ...validReport, contractVersion: undefined }],
+    ['failed-without-failure', { ...validReport, status: 'failed' }],
+    ['truncated-inconsistent', { ...validReport, resultsTruncated: true }],
+    ['complete-with-unresolved', { ...validReport, searchComplete: true, unresolvedPaths: ['source.txt'] }],
+  ];
+  try {
+    for (const [label, report] of cases) {
+      const outputId = `unqualified-${label}`;
+      const taskId = `task-${label}`;
+      const descriptor = await writeQualifiedReportAsset(artifactRoot, outputId, report);
+      const journalPath = await writeJournalRecords(join(root, label), [
+        {
+          kind: 'task.created',
+          taskId: id('task', taskId),
+          title: `task-${label}`,
+          directive: `task-${label}`,
+          directiveRevision: 1,
+          createdAt: persistedEvent.occurredAt,
+          taskCounter: 1,
+        },
+        operationStartedRecord(`operation-${label}`, taskId),
+        persistedEventRecord({
+          ...persistedEvent,
+          eventId: `event-${label}`,
+          operationId: `operation-${label}`,
+          taskId: id('task', taskId),
+          outputRef: descriptor.outputRef,
+          outputDigest: descriptor.outputDigest,
+          executionFact: {
+            ...persistedFact(),
+            operationRef: `operation-${label}`,
+            resultRef: descriptor.outputRef,
+            resultDigest: descriptor.outputDigest,
+          },
+        }, `operation-${label}`),
+      ]);
+      const journal = new UiRuntimeJournal(journalPath);
+      const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot });
+      const runtime = service({
+        root,
+        adapter: providerAdapter(root),
+        journal,
+        executor: executor.executor,
+        toolOutputs: executor.toolOutputs,
+        workspaceRoot,
+        projectKey,
+      });
+      await runtime.hydrate();
+      await assert.rejects(
+        () => runtime.toolOutput(id('task', taskId), id('operation', `operation-${label}`), persistedEvent.executionEpoch, persistedEvent.seq),
+        (error: unknown) => error instanceof UiRuntimeApiError && error.code === 'tool-output.report-unqualified',
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('local Responses file.search fact and report survive disk projection reconstruction', async () => {
-  const taskDataRoot = '/private/tmp/humanagent-native-file-search-runs';
-  await mkdir(taskDataRoot, { recursive: true });
-  const root = await mkdtemp(join(taskDataRoot, 'native-file-search-'));
+  await mkdir(taskRuntimeRoot, { recursive: true });
+  const root = await mkdtemp(join(taskRuntimeRoot, 'native-file-search-'));
   const workspaceRoot = join(root, 'workspace');
   await mkdir(workspaceRoot, { recursive: true });
   await writeFile(join(workspaceRoot, 'source.txt'), 'before semantic-needle after\n', 'utf8');
@@ -376,80 +608,180 @@ test('local Responses file.search fact and report survive disk projection recons
     const started = firstService.startExecution(task.taskId, { prompt: 'search for semantic-needle' });
     await waitForTerminal(firstService, task.taskId);
     assert.equal(firstService.taskDashboard(task.taskId).state, 'succeeded');
-    const toolEventRecord = firstJournal.replay().find((record) => record.kind === 'operation.event' && record.operationId.value === started.operationId.value && record.event.kind === 'provider.tool-result');
-    if (!toolEventRecord || toolEventRecord.kind !== 'operation.event') throw new Error('real local app file.search should yield a journaled runtime tool result');
-    const toolEvent = toolEventRecord.event;
-    assert.equal(toolEvent.toolId, 'file.search');
-    const executionFact = toolEvent.executionFact;
+    const toolEvent = firstJournal.replay().find((record) => (
+      record.kind === 'operation.event'
+      && record.operationId.value === started.operationId.value
+      && record.event.kind === 'provider.tool-result'
+      && record.event.toolId === 'file.search'
+      && record.event.executionFact !== undefined
+      && record.event.status === 'succeeded'
+      && record.event.outputRef !== undefined
+    ));
+    if (!toolEvent || toolEvent.kind !== 'operation.event') throw new Error('real local app file.search should yield a journaled runtime tool result');
+    const toolResult = toolEvent.event;
+    assert.equal(toolResult.toolId, 'file.search');
+    assert.equal(toolResult.status, 'succeeded', JSON.stringify(toolResult));
+    const executionFact = toolResult.executionFact;
     if (!executionFact) throw new Error('real local app file.search should produce a typed execution fact');
     assert.equal(executionFact.identity.surface, 'responses');
     assert.equal(executionFact.identity.toolId, 'file.search');
     assert.equal(executionFact.identity.bindingRef, binding.bindingId);
     assert.equal(executionFact.identity.route, 'app.file-search.local');
     assert.equal(executionFact.state, 'succeeded');
-    assert.equal(executionFact.requestRef, toolEvent.requestId);
-    assert.equal(executionFact.callRef, toolEvent.callId);
+    assert.equal(executionFact.requestRef, toolResult.requestId);
+    assert.equal(executionFact.callRef, toolResult.callId);
+    assert.equal(toolResult.callId, fileSearchCallId);
     assert.equal(executionFact.operationRef, started.operationId.value);
-    assert.equal(executionFact.resultRef, toolEvent.outputRef);
-    assert.equal(executionFact.resultDigest, toolEvent.outputDigest);
-    const eventIdentity = { taskId: task.taskId, operationId: started.operationId, executionEpoch: toolEvent.executionEpoch, seq: toolEvent.seq };
-    assert.ok(toolEvent.outputRef);
-    assert.ok(toolEvent.outputDigest);
-    const report = await firstService.toolOutput(eventIdentity.taskId, eventIdentity.operationId, eventIdentity.executionEpoch, eventIdentity.seq) as Record<string, unknown>;
-    assert.equal(report.status, 'succeeded', JSON.stringify(report));
-    assert.equal(report.searchComplete, true);
-    assert.equal(report.resultsTruncated, false);
-    assert.deepEqual(report.unresolvedPaths, []);
-    assert.equal(Array.isArray(report.matches), true);
+    assert.equal(executionFact.resultRef, toolResult.outputRef);
+    assert.equal(executionFact.resultDigest, toolResult.outputDigest);
+    const outputRef = toolResult.outputRef;
+    const outputDigest = toolResult.outputDigest;
+    if (outputRef === undefined || outputDigest === undefined) throw new Error('file.search report descriptor is missing');
+    const persistedBytes = await readFile(reportAssetPath(evidenceRoot, outputRef, outputDigest), 'utf8');
+    const persistedArtifact = new TextEncoder().encode(persistedBytes);
+    assert.equal(persistedArtifact.byteLength, new TextEncoder().encode(persistedBytes).byteLength);
+    assert.equal(sha256Bytes(persistedArtifact), outputDigest);
+    assert.equal(sha256Digest(persistedBytes), outputDigest);
+    const startReceipt = {
+      taskId: task.taskId.value,
+      operationId: started.operationId.value,
+      executionEpoch: started.executionEpoch,
+      callId: fileSearchCallId,
+      outputRef,
+      outputDigest,
+      assetByteLength: persistedArtifact.byteLength,
+    };
+    diagnostics.startReceipt = startReceipt;
+
+    const liveEntry = selectToolResult(firstService, task.taskId, {
+      operationId: started.operationId,
+      executionEpoch: started.executionEpoch,
+      callId: fileSearchCallId,
+      outputRef,
+      outputDigest,
+    });
+    diagnostics.liveEntry = liveEntry;
+    const liveReport = await assertToolOutputBytes(firstService, liveEntry, persistedBytes, outputDigest);
+    diagnostics.liveReportDigest = sha256Digest(JSON.stringify(liveReport));
 
     await firstService.quiesceImplicitConsumption();
+    const postQuiesceLiveEntry = selectToolResult(firstService, task.taskId, {
+      operationId: started.operationId,
+      executionEpoch: started.executionEpoch,
+      callId: fileSearchCallId,
+      outputRef,
+      outputDigest,
+    });
+    diagnostics.postQuiesceLiveEntry = postQuiesceLiveEntry;
+    assert.deepEqual(postQuiesceLiveEntry, liveEntry);
+    assert.equal(JSON.stringify(await assertToolOutputBytes(firstService, postQuiesceLiveEntry, persistedBytes, outputDigest)), persistedBytes);
+
     const secondJournal = new UiRuntimeJournal(journalPath);
     const secondExecutor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot: evidenceRoot });
     const secondService = service({ root, adapter, journal: secondJournal, executor: secondExecutor.executor, toolOutputs: secondExecutor.toolOutputs, workspaceRoot, projectKey });
     await secondService.hydrate();
-    const restoredEventRecord = secondJournal.replay().find((record) => record.kind === 'operation.event' && record.operationId.value === started.operationId.value && record.event.kind === 'provider.tool-result');
-    if (!restoredEventRecord || restoredEventRecord.kind !== 'operation.event') throw new Error('reconstructed journal should contain the runtime tool result');
-    const restoredEvent = restoredEventRecord.event;
-    assert.deepEqual(restoredEvent?.executionFact, toolEvent.executionFact);
-    assert.equal(restoredEvent?.outputRef, toolEvent.outputRef);
-    assert.equal(restoredEvent?.outputDigest, toolEvent.outputDigest);
-    assert.deepEqual(await secondService.toolOutput(task.taskId, started.operationId, toolEvent.executionEpoch, toolEvent.seq), report);
+    const hydratedEntry = selectToolResult(secondService, task.taskId, {
+      operationId: started.operationId,
+      executionEpoch: started.executionEpoch,
+      callId: fileSearchCallId,
+      outputRef,
+      outputDigest,
+    });
+    diagnostics.hydratedEntry = hydratedEntry;
+    const report = await assertToolOutputBytes(secondService, hydratedEntry, persistedBytes, outputDigest);
+    assert.deepEqual(report, liveReport);
+    assert.equal(report.serviceId, CODE_SEARCH_SERVICE_ID);
+    assert.equal(report.contractVersion, CODE_SEARCH_CONTRACT_VERSION);
+    assert.equal(report.status, 'succeeded', JSON.stringify(report));
+    assert.equal(report.workspaceRef, `workspace:${projectKey}`);
+    assert.equal(report.path, '.');
+    assert.equal(report.query, 'semantic-needle');
+    assert.equal(report.queryKind, 'literal');
+    assert.equal(report.searchComplete, true);
+    assert.equal(report.resultsTruncated, false);
+    assert.deepEqual(report.unresolvedPaths, []);
+    assert.equal(Array.isArray(report.matches), true);
+    assert.match(String(report.summary), /^searched 1 file\(s\), found 1 match\(es\)$/);
     const secondAccessControl = await FileAccessControlService.open({ credentialPath, create: false });
-    await (async () => {
-      let secondServer: Awaited<ReturnType<typeof startUiRuntimeServer>> | undefined;
-      try {
-        secondServer = await startUiRuntimeServer({ service: secondService, accessControl: secondAccessControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
-      } catch (error) {
-        if (!(error instanceof Error && 'code' in error && error.code === 'EPERM' && /listen EPERM/.test(error.message))) throw error;
-        diagnostics.httpReadback = 'SKIPPED-loopback-listen-EPERM';
-      }
-      if (secondServer === undefined) return;
-      try {
-        const response = await fetch(`${secondServer.url}/api/tasks/${task.taskId.value}/operations/${started.operationId.value}/executions/${toolEvent.executionEpoch}/events/${toolEvent.seq}/tool-output`, {
-          headers: { cookie },
-        });
-        assert.equal(response.status, 200);
-        assert.deepEqual(await response.json(), report);
-        diagnostics.httpReadback = 'PASS';
-      } finally {
-        await secondServer.close();
-      }
-    })();
+    const secondServer = await startUiRuntimeServer({ service: secondService, accessControl: secondAccessControl, uiRoot: join(process.cwd(), 'docs', 'ui'), port: 0 });
+    try {
+      const httpUrl = `${secondServer.url}/api/tasks/${task.taskId.value}/operations/${started.operationId.value}/executions/${hydratedEntry.executionEpoch}/events/${hydratedEntry.seq}/tool-output`;
+      const response = await fetch(httpUrl, { headers: { cookie } });
+      const body = await response.text();
+      diagnostics.httpReadback = {
+        url: httpUrl,
+        status: response.status,
+        bodyDigest: sha256Digest(body),
+      };
+      assert.equal(response.status, 200);
+      assert.equal(body, persistedBytes);
+      assert.deepEqual(JSON.parse(body), report);
+    } finally {
+      await secondServer.close();
+    }
 
     const expectApiCode = (code: string) => (error: unknown) => error instanceof UiRuntimeApiError && error.code === code;
-    await assert.rejects(() => secondService.toolOutput(task.taskId, started.operationId, toolEvent.executionEpoch + 1, toolEvent.seq), expectApiCode('tool-output.event-not-found'));
-    await assert.rejects(() => secondService.toolOutput(id('task', 'wrong-task'), started.operationId, toolEvent.executionEpoch, toolEvent.seq), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'task.not.found');
-    await assert.rejects(() => secondService.toolOutput(task.taskId, id('operation', 'wrong-operation'), toolEvent.executionEpoch, toolEvent.seq), expectApiCode('tool-output.event-not-found'));
+    await assert.rejects(() => secondService.toolOutput(task.taskId, started.operationId, hydratedEntry.executionEpoch + 1, hydratedEntry.seq), expectApiCode('tool-output.event-not-found'));
+    await assert.rejects(() => secondService.toolOutput(id('task', 'wrong-task'), started.operationId, hydratedEntry.executionEpoch, hydratedEntry.seq), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'task.not.found');
+    await assert.rejects(() => secondService.toolOutput(task.taskId, id('operation', 'wrong-operation'), hydratedEntry.executionEpoch, hydratedEntry.seq), expectApiCode('tool-output.event-not-found'));
+    const wrongEpochHistory = secondService.history(task.taskId, {
+      filter: {
+        taskId: task.taskId,
+        operationId: started.operationId,
+        executionEpoch: hydratedEntry.executionEpoch + 1,
+        kinds: ['tool-result'],
+        callId: fileSearchCallId,
+      },
+      limit: 50,
+    });
+    assert.equal(wrongEpochHistory.ok, true);
+    if (!wrongEpochHistory.ok) throw new Error(JSON.stringify(wrongEpochHistory));
+    assert.equal(wrongEpochHistory.page.items.length, 0);
 
-    const outputId = decodeURIComponent(toolEvent.outputRef!.slice('asset://provider-tool/output/'.length));
-    const artifactId = `provider-tool-output-${outputId}-${toolEvent.outputDigest!.slice(-12)}`;
+    const outputId = decodeURIComponent(outputRef.slice('asset://provider-tool/output/'.length));
+    const artifactId = `provider-tool-output-${outputId}-${outputDigest.slice(-12)}`;
     const artifactPath = join(evidenceRoot, 'tool-output', artifactId);
     const originalArtifact = await readFile(artifactPath);
     await rm(artifactPath);
-    await assert.rejects(() => secondService.toolOutput(task.taskId, started.operationId, toolEvent.executionEpoch, toolEvent.seq), expectApiCode('tool-output.report-missing-or-changed'));
+    await assert.rejects(() => secondService.toolOutput(task.taskId, started.operationId, hydratedEntry.executionEpoch, hydratedEntry.seq), expectApiCode('tool-output.report-missing-or-changed'));
     await writeFile(artifactPath, 'tampered report bytes', 'utf8');
-    await assert.rejects(() => secondService.toolOutput(task.taskId, started.operationId, toolEvent.executionEpoch, toolEvent.seq), expectApiCode('tool-output.report-missing-or-changed'));
+    await assert.rejects(() => secondService.toolOutput(task.taskId, started.operationId, hydratedEntry.executionEpoch, hydratedEntry.seq), expectApiCode('tool-output.report-missing-or-changed'));
     await writeFile(artifactPath, new TextDecoder().decode(originalArtifact), 'utf8');
+
+    const readOutputId = 'other-tool-read-output';
+    const otherReport = { path: 'source.txt', content: 'semantic-needle' };
+    const otherDescriptor = await writeQualifiedReportAsset(evidenceRoot, readOutputId, otherReport);
+    const otherSeq = secondJournal.replay().reduce((maxSeq, record) => (
+      record.kind === 'operation.event'
+      && record.event.taskId.scope === task.taskId.scope
+      && record.event.taskId.value === task.taskId.value
+      && record.event.operationId === started.operationId.value
+      && record.event.executionEpoch === hydratedEntry.executionEpoch
+        ? Math.max(maxSeq, record.event.seq)
+        : maxSeq
+    ), hydratedEntry.seq) + 1;
+    secondJournal.append(persistedEventRecord({
+      ...toolResult,
+      eventId: 'event-other-tool-result',
+      seq: otherSeq,
+      toolId: 'file.read',
+      status: 'succeeded',
+      outputRef: otherDescriptor.outputRef,
+      outputDigest: otherDescriptor.outputDigest,
+      executionFact: {
+        ...executionFact,
+        identity: { ...executionFact.identity, toolId: 'file.read' },
+        rawEvidenceRefs: [otherDescriptor.outputRef],
+        resultRef: otherDescriptor.outputRef,
+        resultDigest: otherDescriptor.outputDigest,
+      },
+    }, started.operationId.value) as Parameters<UiRuntimeJournal['append']>[0]);
+    const otherService = service({ root, adapter, journal: secondJournal, executor: secondExecutor.executor, toolOutputs: secondExecutor.toolOutputs, workspaceRoot, projectKey });
+    await otherService.hydrate();
+    assert.deepEqual(
+      await otherService.toolOutput(task.taskId, started.operationId, hydratedEntry.executionEpoch, otherSeq),
+      otherReport,
+    );
   } finally {
     await firstService.quiesceImplicitConsumption().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
@@ -481,6 +813,121 @@ test('a real local file.search tool failure does not create a succeeded executio
     assert.equal(result.event.executionFact, undefined);
   } finally {
     await runtime.quiesceImplicitConsumption().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a failed service report is persisted unchanged with its original failure fields', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-native-file-search-failed-report-');
+  const workspaceRoot = join(root, 'workspace');
+  const artifactRoot = join(root, 'evidence');
+  const projectKey = 'native-file-search-failed-report-project';
+  await mkdir(workspaceRoot, { recursive: true });
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot });
+  try {
+    const result = await executor.executor.execute({
+      execution: {
+        runtimeId: 'runtime-failed-search-report',
+        taskId: id('task', 'task-failed-search-report'),
+        operationId: id('operation', 'operation-failed-search-report'),
+        executionEpoch: 1,
+      },
+      scope: {
+        organId,
+        taskId: id('task', 'task-failed-search-report'),
+        cycleId: id('cycle', 'cycle-failed-search-report'),
+        operationId: id('operation', 'operation-failed-search-report'),
+      },
+      call: {
+        callId: 'call-failed-search-report',
+        toolId: 'file.search',
+        arguments: { path: 'missing-file.txt', query: 'semantic-needle', queryKind: 'literal' },
+        continuationRef: 'response-failed-search-report',
+      },
+      signal: new AbortController().signal,
+    });
+    if (result.outputRef === undefined || result.outputDigest === undefined) {
+      throw new Error('failed file.search report must still carry its immutable descriptor');
+    }
+    const persisted = await executor.toolOutputs.readReport({
+      outputRef: result.outputRef,
+      outputDigest: result.outputDigest,
+    }) as Record<string, unknown>;
+    assert.equal(persisted.status, 'failed');
+    assert.equal((persisted.failure as Record<string, unknown>).code, 'path-not-found');
+    assert.equal(persisted.summary, (persisted.failure as Record<string, unknown>).message);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an incomplete search keeps its partial scope and failure fields after persistence', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-native-file-search-incomplete-');
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'readable.txt'), 'semantic-needle\n', 'utf8');
+  const artifactRoot = join(root, 'evidence');
+  const projectKey = 'native-file-search-incomplete-project';
+  const executor = createResponsesFileToolExecutor({ workspaceRoot, projectKey, artifactRoot });
+  try {
+    const result = await executor.executor.execute({
+      execution: {
+        runtimeId: 'runtime-incomplete-search',
+        taskId: id('task', 'task-incomplete-search'),
+        operationId: id('operation', 'operation-incomplete-search'),
+        executionEpoch: 1,
+      },
+      scope: {
+        organId,
+        taskId: id('task', 'task-incomplete-search'),
+        cycleId: id('cycle', 'cycle-incomplete-search'),
+        operationId: id('operation', 'operation-incomplete-search'),
+      },
+      call: {
+        callId: 'call-incomplete-search',
+        toolId: 'file.search',
+        arguments: { path: 'missing-file.txt', query: 'semantic-needle', queryKind: 'literal', requireComplete: true },
+        continuationRef: 'response-incomplete-search',
+      },
+      signal: new AbortController().signal,
+    });
+    if (result.outputRef === undefined || result.outputDigest === undefined) throw new Error('incomplete file.search report descriptor is missing');
+    const persisted = await executor.toolOutputs.readReport({
+      outputRef: result.outputRef,
+      outputDigest: result.outputDigest,
+    }) as Record<string, unknown>;
+    assert.equal(persisted.status, 'failed');
+    assert.equal(persisted.searchComplete, false);
+    assert.equal(persisted.resultsTruncated, false);
+    assert.deepEqual(persisted.unresolvedPaths, ['missing-file.txt']);
+    assert.equal((persisted.failure as Record<string, unknown>).code, 'path-not-found');
+    assert.equal(persisted.summary, (persisted.failure as Record<string, unknown>).message);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('truncated successful search reports remain distinct after persistence', async () => {
+  const root = await mkdtemp('/private/tmp/humanagent-native-file-search-partial-truncated-');
+  const workspaceRoot = join(root, 'workspace');
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(join(workspaceRoot, 'readable.txt'), 'semantic-needle\nsemantic-needle\nsemantic-needle\n', 'utf8');
+  try {
+    const truncated = await executeAndReadSearchReport({
+      root,
+      projectKey: 'native-file-search-truncated-project',
+      callId: 'call-truncated-search',
+      arguments: { path: '.', query: 'semantic-needle', queryKind: 'literal', maxResults: 1 },
+      taskId: 'task-truncated-search',
+      operationId: 'operation-truncated-search',
+    });
+    assert.equal(truncated.status, 'succeeded');
+    assert.equal(truncated.searchComplete, true);
+    assert.equal(truncated.resultsTruncated, true);
+    assert.equal(truncated.matchesFound, 3);
+    assert.equal((truncated.matches as readonly unknown[]).length, 1);
+    assert.equal(truncated.summary, 'searched 1 file(s), found 3 match(es)');
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

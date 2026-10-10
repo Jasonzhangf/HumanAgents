@@ -7,6 +7,7 @@ import {
   CODE_SEARCH_CONTRACT_VERSION,
   CODE_SEARCH_SERVICE_ID,
   id,
+  validateCodeSearchReport,
   type EvidenceRef,
   type OperationEvent,
   type OperationId,
@@ -713,36 +714,7 @@ async function executeFileSearch(
     maxResults: typeof args.maxResults === 'number' ? args.maxResults : 50,
   };
   const report = await params.service.execute(searchRequest, { signal: request.signal });
-  const reportRecord = report as unknown as Record<string, unknown>;
-  const rawMatches = Array.isArray(reportRecord.matches) ? (reportRecord.matches as readonly unknown[]) : [];
-  const matched = rawMatches.map((match) => {
-    const m = match as { path?: string; line?: number; column?: number; text?: string; contextBefore?: readonly string[]; contextAfter?: readonly string[] };
-    return {
-      path: m.path ?? '',
-      line: m.line ?? 0,
-      column: m.column ?? 0,
-      text: m.text ?? '',
-      contextBefore: m.contextBefore ?? [],
-      contextAfter: m.contextAfter ?? [],
-    };
-  });
-  const output = {
-    serviceId: searchRequest.serviceId,
-    status: reportRecord.status,
-    workspaceRef: searchRequest.workspaceRef,
-    path: searchRequest.path,
-    query: searchRequest.query,
-    queryKind: searchRequest.queryKind,
-    filesDiscovered: reportRecord.filesDiscovered,
-    filesSearched: reportRecord.filesSearched,
-    matchesFound: reportRecord.matchesFound,
-    resultsTruncated: reportRecord.resultsTruncated,
-    searchComplete: reportRecord.searchComplete,
-    unresolvedPaths: reportRecord.unresolvedPaths ?? [],
-    matches: matched,
-    summary: `found ${reportRecord.matchesFound ?? 0} matches across ${reportRecord.filesSearched ?? 0} files`,
-    ...(reportRecord.failure === undefined ? {} : { failure: reportRecord.failure }),
-  };
+  validateCodeSearchReport(report);
   const cycleId = request.scope.cycleId ?? id('cycle', safeId(`provider-tool-${request.execution.taskId.value}`));
   const operationId = id('operation', safeId(`provider-tool-${request.execution.operationId.value}-${request.call.callId}`));
   const scope: Scope = {
@@ -751,9 +723,9 @@ async function executeFileSearch(
     cycleId,
     operationId,
   };
-  const descriptor = await params.assets.writeReport({ outputId: operationId.value, report: output });
+  const descriptor = await params.assets.writeReport({ outputId: operationId.value, report });
   return {
-    output: JSON.stringify(output),
+    output: JSON.stringify(report),
     outputRefs: [descriptor.outputRef],
     outputRef: descriptor.outputRef,
     outputDigest: descriptor.outputDigest,

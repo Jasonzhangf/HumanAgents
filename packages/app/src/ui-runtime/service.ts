@@ -22,6 +22,7 @@ import {
   type CycleId,
   type ExecutionRuntimePort,
   type EvidenceRef,
+  validateCodeSearchReport,
   type Checkpoint,
   type Occurrence,
   type OccurrenceTaskBinding,
@@ -186,7 +187,7 @@ import type { RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js
 import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/nodes/node-registry.js';
 import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
-import { readProducedArtifacts } from '../provider-tool-execution.js';
+import { readProducedArtifacts, RESPONSES_FILE_SEARCH_TOOL } from '../provider-tool-execution.js';
 import type { UiRuntimeJournal } from './journal.js';
 import { digestOf, type ExecutionAgentPort, type RetryCycleConfigSet } from '../../../runtime/src/orchestration/index.js';
 import { createJsonlRetryCycleJournalPort, retryCycleJournalFilePath } from '../retry-cycle-journal.js';
@@ -1361,8 +1362,9 @@ export class UiRuntimeService {
         501,
       );
     }
+    let report: unknown;
     try {
-      return await this.options.toolOutputStore.readReport({
+      report = await this.options.toolOutputStore.readReport({
         outputRef: event.outputRef,
         outputDigest: event.outputDigest,
       });
@@ -1375,6 +1377,22 @@ export class UiRuntimeService {
         409,
       );
     }
+    if (event.toolId === RESPONSES_FILE_SEARCH_TOOL.toolId && event.executionFact !== undefined) {
+      try {
+        validateCodeSearchReport(report);
+      } catch (error) {
+        throw new UiRuntimeApiError(
+          'tool-output.report-unqualified',
+          RUNTIME_OWNER,
+          error instanceof Error ? error.message : 'the file.search report is not qualified',
+          'inspect the persisted file.search report contract',
+          409,
+          undefined,
+          error,
+        );
+      }
+    }
+    return report;
   }
 
   private now(): Date {
