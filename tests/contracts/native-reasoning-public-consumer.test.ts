@@ -4,9 +4,15 @@ import {
   CODE_SEARCH_CONTRACT_VERSION,
   CODE_SEARCH_SERVICE_ID,
   ContractError,
+  checkpointCommitIdentityV2,
+  checkpointIntentDigestV1,
+  checkpointRefV2,
   id,
+  scopeDigest,
   validateAdmittedTurn,
   validateCheckpointBoundaryOutcome,
+  validateCheckpointCommitEnvelopeV1,
+  validateCheckpointReceiptRelationship,
   validateCodeSearchReport,
   validateDurableCheckpointReceipt,
   validateNativeTurnBoundary,
@@ -19,8 +25,13 @@ import {
   validateTurnExecutionFacts,
   type AdmittedTurn,
   type AdmittedTurnIdentity,
+  type CanonicalUtcInstant,
+  type CheckpointCommitEnvelopeV1,
+  type CheckpointCommitIdentityV2,
+  type CheckpointTimeAuthority,
   type Checkpoint,
   type CheckpointBoundaryOutcome,
+  type CheckpointReceiptRelationshipV1,
   type CodeSearchReport,
   type DurableCheckpointReceipt,
   type DurablePhaseOutcome,
@@ -220,6 +231,60 @@ const readyDisposition: TurnDisposition = {
   nextActionRef: 'next-turn-admission',
 };
 
+const checkpointV2: Checkpoint = {
+  id: id('checkpoint', 'checkpoint-v2'),
+  scope: scopeRef,
+  cycleId,
+  seq: 4,
+  previousCheckpointId: id('checkpoint', 'checkpoint-previous'),
+  directiveRevision: 2,
+  executionEpoch: 3,
+  outcome: 'waiting',
+  summary: 'Waiting for external confirmation.',
+  recoveryStateRef: evidenceRef,
+  evidenceRefs: [evidenceRef],
+  next: { kind: 'wait', ref: 'confirmation-a' },
+};
+const checkpointIdentityV2: CheckpointCommitIdentityV2 = await checkpointCommitIdentityV2({ checkpoint: checkpointV2 });
+const checkpointAuthority = {
+  source: 'harness' as const,
+  owner: 'runtime-checkpoint-control-owner' as const,
+  authorityRef: 'checkpoint-authority-v2',
+};
+const checkpointTimeAuthority: CheckpointTimeAuthority = {
+  ...checkpointAuthority,
+  sampleCommittedAt: async () => '2026-10-09T16:22:10.123Z',
+};
+const committedAt: CanonicalUtcInstant = '2026-10-09T16:22:10.123Z';
+const checkpointIntentV2 = await checkpointIntentDigestV1({
+  checkpoint: checkpointV2,
+  timeAuthority: checkpointAuthority,
+});
+const checkpointEnvelopeV2: CheckpointCommitEnvelopeV1 = {
+  version: 1,
+  identity: checkpointIdentityV2,
+  committedAt,
+  timeAuthority: checkpointAuthority,
+  intentDigest: checkpointIntentV2,
+};
+const checkpointScopeDigest = await scopeDigest(scopeRef);
+const checkpointRecordDigest = `sha256:${'c'.repeat(64)}` as const;
+const checkpointReceiptV2: DurableCheckpointReceipt = {
+  commitIdentity: checkpointIdentityV2,
+  checkpointRef: checkpointRefV2(checkpointIdentityV2),
+  journalReceiptRef: `humanagent://journal-record/v1/${checkpointScopeDigest}/9/${checkpointRecordDigest.slice('sha256:'.length)}`,
+  committedAt,
+  timeAuthority: checkpointAuthority,
+};
+const checkpointRelationshipV2: CheckpointReceiptRelationshipV1 = {
+  checkpoint: checkpointV2,
+  envelope: checkpointEnvelopeV2,
+  receipt: checkpointReceiptV2,
+  checkpointSeq: checkpointV2.seq,
+  journalSeq: 9,
+  recordDigest: checkpointRecordDigest,
+};
+
 const partialOutcome: CheckpointBoundaryOutcome = {
   commitIdentity: 'commit-partial',
   stages: [
@@ -275,6 +340,23 @@ const incompleteDisposition: TurnDisposition = {
 
 function expectContractError(action: () => unknown): void {
   assert.throws(action, ContractError);
+}
+
+async function expectContractRejection(action: () => Promise<unknown>, message?: string): Promise<void> {
+  let pending: Promise<unknown>;
+  try {
+    pending = action();
+  } catch (error) {
+    if (error instanceof ContractError && (message === undefined || error.message.includes(message))) return;
+    throw error;
+  }
+  try {
+    await pending;
+  } catch (error) {
+    if (error instanceof ContractError && (message === undefined || error.message.includes(message))) return;
+    throw error;
+  }
+  throw new Error('expected a ContractError rejection');
 }
 
 test('public package root accepts an admitted turn, execution facts, and semantic candidate', () => {
@@ -393,6 +475,185 @@ test('legacy Checkpoint remains valid without native time fields and receipt val
   assert.equal('committedAt' in legacyCheckpoint, false);
   assert.doesNotThrow(() => validateDurableCheckpointReceipt(receipt, { commitIdentity: 'commit-a', checkpointRef: 'checkpoint-a' }));
   assert.deepEqual(receipt, before);
+});
+
+test('public package root accepts the v2 checkpoint identity, envelope, and receipt relationship without mutation', async () => {
+  const relationship = structuredClone(checkpointRelationshipV2);
+  const before = structuredClone(relationship);
+  await validateCheckpointReceiptRelationship(relationship);
+  await validateCheckpointCommitEnvelopeV1(checkpointEnvelopeV2, {
+    checkpoint: checkpointV2,
+    identity: checkpointIdentityV2,
+  });
+  assert.doesNotThrow(() => validateDurableCheckpointReceipt(checkpointReceiptV2, {
+    commitIdentity: checkpointIdentityV2,
+    checkpointRef: checkpointReceiptV2.checkpointRef,
+  }));
+  assert.equal(checkpointIdentityV2.startsWith('checkpoint:v2:'), true);
+  assert.equal(checkpointReceiptV2.checkpointRef.startsWith('humanagent://checkpoint/v2/'), true);
+  assert.equal(await checkpointTimeAuthority.sampleCommittedAt(), committedAt);
+  assert.equal(checkpointRelationshipV2.checkpointSeq, checkpointV2.seq);
+  assert.equal(checkpointRelationshipV2.journalSeq, 9);
+  assert.deepEqual(relationship, before);
+});
+
+test('public package root accepts semantically equal receipt authority with a different property order', async () => {
+  const reorderedAuthority = {
+    authorityRef: checkpointAuthority.authorityRef,
+    owner: checkpointAuthority.owner,
+    source: checkpointAuthority.source,
+  };
+  assert.notEqual(JSON.stringify(reorderedAuthority), JSON.stringify(checkpointAuthority));
+  await validateCheckpointReceiptRelationship({
+    ...checkpointRelationshipV2,
+    receipt: {
+      ...checkpointReceiptV2,
+      timeAuthority: reorderedAuthority,
+    },
+  });
+});
+
+test('checkpoint intent canonical bytes bind facts, evidence order, and authority while excluding committedAt', async () => {
+  const golden = 'sha256:a9d8c67f22fafb52a32e7a1f7532c67caf22107711644c211a648a4460cfc6f6';
+  assert.equal(golden, checkpointIntentV2);
+  assert.match(golden, /^sha256:[0-9a-f]{64}$/);
+
+  const reordered = {
+    timeAuthority: checkpointAuthority,
+    checkpoint: {
+      next: { ref: 'confirmation-a', kind: 'wait' as const },
+      evidenceRefs: [...checkpointV2.evidenceRefs],
+      recoveryStateRef: checkpointV2.recoveryStateRef,
+      summary: checkpointV2.summary,
+      outcome: checkpointV2.outcome,
+      executionEpoch: checkpointV2.executionEpoch,
+      directiveRevision: checkpointV2.directiveRevision,
+      previousCheckpointId: checkpointV2.previousCheckpointId,
+      seq: checkpointV2.seq,
+      cycleId: checkpointV2.cycleId,
+      scope: { cycleId, taskId, organId },
+      id: checkpointV2.id,
+    },
+  };
+  assert.equal(await checkpointIntentDigestV1(reordered), golden);
+
+  const laterRelationship = {
+    ...checkpointRelationshipV2,
+    envelope: { ...checkpointEnvelopeV2, committedAt: '2026-10-09T16:22:11.123Z' },
+    receipt: { ...checkpointReceiptV2, committedAt: '2026-10-09T16:22:11.123Z' },
+  };
+  await validateCheckpointReceiptRelationship(laterRelationship);
+});
+
+test('v2 relationship rejects a structurally valid but stale intent for summary and authority changes', async () => {
+  await expectContractRejection(
+    () => validateCheckpointReceiptRelationship({
+      ...checkpointRelationshipV2,
+      checkpoint: { ...checkpointV2, summary: 'Changed summary with a stale intent.' },
+    }),
+    'checkpoint intent mismatch',
+  );
+
+  const changedAuthority = { ...checkpointAuthority, authorityRef: 'checkpoint-authority-v2-other' };
+  await expectContractRejection(
+    () => validateCheckpointReceiptRelationship({
+      ...checkpointRelationshipV2,
+      envelope: { ...checkpointEnvelopeV2, timeAuthority: changedAuthority },
+      receipt: { ...checkpointReceiptV2, timeAuthority: changedAuthority },
+    }),
+    'checkpoint intent mismatch',
+  );
+});
+
+test('v2 relationship rejects stale intents for facts, recovery evidence, evidence content, and evidence order', async () => {
+  const secondEvidence: EvidenceRef = {
+    evidenceId: id('evidence', 'evidence-b'),
+    kind: 'tool',
+    source: 'native-contract-test',
+    locator: 'tool://call-b',
+    digest: 'sha256:tool-b',
+    scope: scopeRef,
+  };
+  for (const checkpoint of [
+    { ...checkpointV2, seq: 5, previousCheckpointId: id('checkpoint', 'checkpoint-v2') },
+    { ...checkpointV2, directiveRevision: 3 },
+    { ...checkpointV2, executionEpoch: 4 },
+    { ...checkpointV2, outcome: 'blocked' as const },
+    { ...checkpointV2, next: { kind: 'recover' as const, ref: 'recovery-a' } },
+    { ...checkpointV2, previousCheckpointId: null },
+    { ...checkpointV2, recoveryStateRef: { ...evidenceRef, locator: 'turn://turn-b' } },
+    { ...checkpointV2, recoveryStateRef: { ...evidenceRef, digest: 'sha256:recovery-a' } },
+    { ...checkpointV2, evidenceRefs: [{ ...evidenceRef, locator: 'turn://turn-b' }] },
+    { ...checkpointV2, evidenceRefs: [secondEvidence, evidenceRef] },
+  ]) {
+    await expectContractRejection(
+      () => validateCheckpointReceiptRelationship({ ...checkpointRelationshipV2, checkpoint }),
+      'checkpoint intent mismatch',
+    );
+  }
+});
+
+test('scope and journal URI segments use bare lowercase hex and reject prefixed or malformed segments', async () => {
+  assert.match(await scopeDigest(scopeRef), /^[0-9a-f]{64}$/);
+  await validateCheckpointReceiptRelationship(checkpointRelationshipV2);
+
+  for (const journalReceiptRef of [
+    checkpointReceiptV2.journalReceiptRef.replace('/v1/', '/v1/sha256:'),
+    checkpointReceiptV2.journalReceiptRef.toUpperCase(),
+    checkpointReceiptV2.journalReceiptRef.replace(`/${checkpointScopeDigest}/`, `/${'0'.repeat(64)}/`),
+    checkpointReceiptV2.journalReceiptRef.replace('/9/', '/10/'),
+    checkpointReceiptV2.journalReceiptRef.replace(`/${'c'.repeat(64)}`, `/${'d'.repeat(64)}`),
+  ]) {
+    await expectContractRejection(
+      () => validateCheckpointReceiptRelationship({
+        ...checkpointRelationshipV2,
+        receipt: { ...checkpointReceiptV2, journalReceiptRef },
+      }),
+    );
+  }
+});
+
+test('v2 relationship rejects identity, envelope, authority, time, and receipt mismatches', async () => {
+  for (const value of [
+    { ...checkpointRelationshipV2, checkpoint: { ...checkpointV2, id: id('checkpoint', 'other-checkpoint') } },
+    { ...checkpointRelationshipV2, envelope: { ...checkpointEnvelopeV2, version: 2 } },
+    { ...checkpointRelationshipV2, envelope: { ...checkpointEnvelopeV2, identity: `checkpoint:v2:${'0'.repeat(64)}` } },
+    { ...checkpointRelationshipV2, envelope: { ...checkpointEnvelopeV2, committedAt: '2026-10-09T16:22:10+00:00' } },
+    { ...checkpointRelationshipV2, envelope: { ...checkpointEnvelopeV2, timeAuthority: { ...checkpointAuthority, source: 'model' } } },
+    { ...checkpointRelationshipV2, envelope: { ...checkpointEnvelopeV2, intentDigest: `sha256:${'B'.repeat(64)}` } },
+    { ...checkpointRelationshipV2, receipt: { ...checkpointReceiptV2, checkpointRef: 'humanagent://checkpoint/v2/other' } },
+    { ...checkpointRelationshipV2, receipt: { ...checkpointReceiptV2, journalReceiptRef: checkpointReceiptV2.journalReceiptRef.replace('/9/', '/10/') } },
+    { ...checkpointRelationshipV2, receipt: { ...checkpointReceiptV2, committedAt: '2026-10-09T16:22:11.123Z' } },
+    { ...checkpointRelationshipV2, checkpointSeq: 5 },
+    { ...checkpointRelationshipV2, journalSeq: 0 },
+    { ...checkpointRelationshipV2, recordDigest: `sha256:${'C'.repeat(64)}` },
+  ]) {
+    await expectContractRejection(() => validateCheckpointReceiptRelationship(value));
+  }
+});
+
+test('v2 envelope and receipt validators reject malformed structural fields and control pollution', async () => {
+  await expectContractRejection(async () => validateCheckpointCommitEnvelopeV1({ ...checkpointEnvelopeV2, identity: 'checkpoint:v1:bad' }));
+  await expectContractRejection(async () => validateCheckpointCommitEnvelopeV1({ ...checkpointEnvelopeV2, committedAt: '2026-10-09' }));
+  await expectContractRejection(async () => validateCheckpointCommitEnvelopeV1({ ...checkpointEnvelopeV2, timeAuthority: { ...checkpointAuthority, owner: 'provider' } }));
+  await expectContractRejection(async () => validateCheckpointCommitEnvelopeV1({ ...checkpointEnvelopeV2, intentDigest: 'sha256:short' }));
+  await expectContractRejection(async () => validateCheckpointCommitEnvelopeV1({ ...checkpointEnvelopeV2, readyNext: true }));
+  assert.throws(() => validateDurableCheckpointReceipt({ ...checkpointReceiptV2, commitIdentity: 'checkpoint:v2:bad' }, {
+    commitIdentity: checkpointIdentityV2,
+    checkpointRef: checkpointReceiptV2.checkpointRef,
+  }), ContractError);
+  assert.throws(() => validateDurableCheckpointReceipt({ ...checkpointReceiptV2, journalReceiptRef: '' }, {
+    commitIdentity: checkpointIdentityV2,
+    checkpointRef: checkpointReceiptV2.checkpointRef,
+  }), ContractError);
+  assert.throws(() => validateDurableCheckpointReceipt(checkpointReceiptV2, {
+    commitIdentity: `checkpoint:v2:${'0'.repeat(64)}`,
+    checkpointRef: checkpointReceiptV2.checkpointRef,
+  }), ContractError);
+  assert.throws(() => validateDurableCheckpointReceipt(checkpointReceiptV2, {
+    commitIdentity: checkpointIdentityV2,
+    checkpointRef: 'humanagent://checkpoint/v2/other',
+  }), ContractError);
 });
 
 test('rejects mismatched task scope, cycle identity, and invalid tool identity', () => {
@@ -873,6 +1134,14 @@ function compileTimeNegativeFixtures(): void {
   const wrongTimeSource: DurableCheckpointReceipt['timeAuthority']['source'] = 'model';
   // @ts-expect-error only the checkpoint owner may assign the time authority
   const wrongTimeOwner: DurableCheckpointReceipt['timeAuthority']['owner'] = 'provider';
+  // @ts-expect-error v2 identity requires the checkpoint version prefix
+  const wrongV2Identity: CheckpointCommitIdentityV2 = `checkpoint:v1:${'a'.repeat(64)}`;
+  // @ts-expect-error envelope version is the literal one
+  const wrongEnvelopeVersion: CheckpointCommitEnvelopeV1['version'] = 2;
+  // @ts-expect-error relationship sequence is a number, not an interchangeable string
+  const wrongCheckpointSeq: CheckpointReceiptRelationshipV1['checkpointSeq'] = '4';
+  // @ts-expect-error relationship record digest must use the sha256 literal family
+  const missingDigestPrefix: CheckpointReceiptRelationshipV1['recordDigest'] = 'a'.repeat(64);
   // @ts-expect-error authorityRef is required
   const missingAuthority: DurableCheckpointReceipt['timeAuthority'] = { source: 'harness', owner: 'runtime-checkpoint-control-owner' };
   // @ts-expect-error succeeded stage needs value and cannot carry error
@@ -887,7 +1156,7 @@ function compileTimeNegativeFixtures(): void {
   const missingCheckpointReceipt: TurnDisposition = { state: 'ready-next', durableTurnReceiptRef: 'turn', historyReceiptRef: 'history', nextActionRef: 'next' };
   // @ts-expect-error a ready-next disposition cannot be mixed with recovery-only fields
   const mixedReadyRecovery: TurnDisposition = { ...readyDisposition, recoveryRef: 'recovery' };
-  void [wrongTaskId, providerSessionTurn, timedProposal, wrongTimeSource, wrongTimeOwner, missingAuthority, mixedSucceeded, mixedFailed, mixedInactive, missingRecoveryFacts, missingCheckpointReceipt, mixedReadyRecovery];
+  void [wrongTaskId, providerSessionTurn, timedProposal, wrongTimeSource, wrongTimeOwner, wrongV2Identity, wrongEnvelopeVersion, wrongCheckpointSeq, missingDigestPrefix, missingAuthority, mixedSucceeded, mixedFailed, mixedInactive, missingRecoveryFacts, missingCheckpointReceipt, mixedReadyRecovery];
 }
 
 void compileTimeNegativeFixtures;

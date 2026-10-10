@@ -1,6 +1,11 @@
-import type { CycleId, ScopeRef, TaskId } from './index.js';
+import { assertEvidenceRef, assertSameScope, type Checkpoint, type CycleId, type EvidenceRef, type ScopeRef, type TaskId } from './index.js';
 import { ContractError } from './errors.js';
 import { isCanonicalInstant } from './time.js';
+
+export type CanonicalUtcInstant = string;
+export type CheckpointCommitIdentityV2 = `checkpoint:v2:${string}`;
+type ScopeDigest = string;
+type Sha256Digest = `sha256:${string}`;
 
 export type EffectState =
   | 'not-started' | 'accepted' | 'running' | 'succeeded' | 'failed'
@@ -98,17 +103,41 @@ export type DurablePhaseOutcome =
   | { readonly phase: DurablePhase; readonly state: 'failed' | 'unknown'; readonly receiptRef?: string }
   | { readonly phase: DurablePhase; readonly state: 'not-executed' };
 
+export interface CheckpointTimeAuthorityMetadata {
+  readonly source: 'harness';
+  readonly owner: 'runtime-checkpoint-control-owner';
+  readonly authorityRef: string;
+}
+
+export interface CheckpointTimeAuthority extends CheckpointTimeAuthorityMetadata {
+  /** Runtime-owned capability. Journal calls this only while committing a new identity. */
+  sampleCommittedAt(): Promise<CanonicalUtcInstant> | CanonicalUtcInstant;
+}
+
+export interface CheckpointCommitEnvelopeV1 {
+  readonly version: 1;
+  readonly identity: CheckpointCommitIdentityV2;
+  readonly committedAt: CanonicalUtcInstant;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+  readonly intentDigest: Sha256Digest;
+}
+
 export interface DurableCheckpointReceipt {
   readonly commitIdentity: string;
   readonly checkpointRef: string;
   readonly journalReceiptRef: string;
   /** Canonical UTC instant assigned by the Harness checkpoint owner on first durable commit. */
-  readonly committedAt: string;
-  readonly timeAuthority: {
-    readonly source: 'harness';
-    readonly owner: 'runtime-checkpoint-control-owner';
-    readonly authorityRef: string;
-  };
+  readonly committedAt: CanonicalUtcInstant;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+}
+
+export interface CheckpointReceiptRelationshipV1 {
+  readonly checkpoint: Checkpoint;
+  readonly envelope: CheckpointCommitEnvelopeV1;
+  readonly receipt: DurableCheckpointReceipt;
+  readonly checkpointSeq: number;
+  readonly journalSeq: number;
+  readonly recordDigest: Sha256Digest;
 }
 
 export type DurableCheckpointReceiptIdentity = Pick<DurableCheckpointReceipt, 'commitIdentity' | 'checkpointRef'>;
@@ -195,6 +224,12 @@ function safePositive(value: unknown, label: string): asserts value is number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) throw new ContractError(`${label} must be a positive safe integer`);
 }
 
+function sha256Digest(value: unknown, label: string): asserts value is Sha256Digest {
+  if (typeof value !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw new ContractError(`${label} must be a lowercase sha256 digest`);
+  }
+}
+
 function stringArray(value: unknown, label: string, minimum = 0): asserts value is readonly string[] {
   if (!Array.isArray(value) || value.length < minimum) throw new ContractError(`${label} must be an array with at least ${minimum} entries`);
   for (const entry of value) nonEmpty(entry, label);
@@ -218,6 +253,44 @@ function scopedId(value: unknown, kind: 'organ' | 'task' | 'cycle' | 'operation'
   }
 }
 
+function scopeTuple(scope: ScopeRef): readonly (string | null)[] {
+  return [
+    scope.organId.value,
+    scope.taskId?.value ?? null,
+    scope.cycleId?.value ?? null,
+    scope.operationId?.value ?? null,
+  ];
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export async function scopeDigest(scope: ScopeRef): Promise<ScopeDigest> {
+  validateScope(scope, 'scopeDigest scope');
+  return await sha256Hex(JSON.stringify(scopeTuple(scope)));
+}
+
+export async function checkpointCommitIdentityV2(input: { readonly checkpoint: Pick<Checkpoint, 'id' | 'scope'> }): Promise<CheckpointCommitIdentityV2> {
+  const checkpointInput = record(input, 'checkpoint commit identity input');
+  exactKeys(checkpointInput, ['checkpoint'], [], 'checkpoint commit identity input');
+  const expected = record(checkpointInput.checkpoint, 'checkpoint commit identity checkpoint');
+  const checkpointId = record(expected.id, 'checkpoint commit identity id');
+  scopedId(checkpointId, 'checkpoint', 'checkpoint commit identity id');
+  validateScope(expected.scope, 'checkpoint commit identity scope');
+  const identity = `checkpoint:v2:${await sha256Hex(JSON.stringify([...scopeTuple(expected.scope as ScopeRef), checkpointId.value as string]))}`;
+  return identity as CheckpointCommitIdentityV2;
+}
+
+export function checkpointRefV2(identity: CheckpointCommitIdentityV2): string {
+  if (typeof identity !== 'string' || !/^checkpoint:v2:[0-9a-f]{64}$/.test(identity)) {
+    throw new ContractError('checkpoint identity must use the checkpoint v2 grammar');
+  }
+  return `humanagent://checkpoint/v2/${identity.slice('checkpoint:v2:'.length)}`;
+}
+
 function validateScope(value: unknown, label: string): asserts value is ScopeRef {
   const input = record(value, label);
   exactKeys(input, ['organId'], ['taskId', 'cycleId', 'operationId'], label);
@@ -225,6 +298,17 @@ function validateScope(value: unknown, label: string): asserts value is ScopeRef
   if (Object.hasOwn(input, 'taskId')) scopedId(input.taskId, 'task', `${label}.taskId`);
   if (Object.hasOwn(input, 'cycleId')) scopedId(input.cycleId, 'cycle', `${label}.cycleId`);
   if (Object.hasOwn(input, 'operationId')) scopedId(input.operationId, 'operation', `${label}.operationId`);
+}
+
+function validateCheckpointIdentityV2(value: unknown): asserts value is CheckpointCommitIdentityV2 {
+  if (typeof value !== 'string' || !/^checkpoint:v2:[0-9a-f]{64}$/.test(value)) {
+    throw new ContractError('checkpoint identity must use the checkpoint v2 grammar');
+  }
+}
+
+function validateJournalReceiptRef(value: unknown, input: CheckpointReceiptRelationshipV1, scopeHash: string): asserts value is string {
+  const expected = `humanagent://journal-record/v1/${scopeHash}/${input.journalSeq}/${input.recordDigest.slice('sha256:'.length)}`;
+  if (typeof value !== 'string' || value !== expected) throw new ContractError('journalReceiptRef must match scope, sequence, and record digest');
 }
 
 function sameScopedId(left: unknown, right: unknown): boolean {
@@ -464,6 +548,142 @@ export function validateDurableCheckpointReceipt(value: unknown, expectedIdentit
   if (input.commitIdentity !== expected.commitIdentity || input.checkpointRef !== expected.checkpointRef) {
     throw new ContractError('checkpoint receipt identity mismatch');
   }
+}
+
+function validateCheckpointStructure(value: unknown): asserts value is Checkpoint {
+  const checkpoint = record(value, 'relationship checkpoint');
+  exactKeys(checkpoint, ['id', 'scope', 'cycleId', 'seq', 'previousCheckpointId', 'directiveRevision', 'executionEpoch', 'outcome', 'summary', 'recoveryStateRef', 'evidenceRefs', 'next'], [], 'relationship checkpoint');
+  scopedId(checkpoint.id, 'checkpoint', 'relationship checkpoint id');
+  validateScope(checkpoint.scope, 'relationship checkpoint scope');
+  scopedId(checkpoint.cycleId, 'cycle', 'relationship checkpoint cycleId');
+  const scope = checkpoint.scope as ScopeRef;
+  if (!scope.taskId || !scope.cycleId || !sameScopedId(scope.cycleId, checkpoint.cycleId)) {
+    throw new ContractError('relationship checkpoint scope and cycleId must match');
+  }
+  const previous = checkpoint.previousCheckpointId;
+  if (previous !== null) scopedId(previous, 'checkpoint', 'relationship checkpoint previousCheckpointId');
+  safePositive(checkpoint.seq, 'relationship checkpoint seq');
+  safePositive(checkpoint.directiveRevision, 'relationship checkpoint directiveRevision');
+  safePositive(checkpoint.executionEpoch, 'relationship checkpoint executionEpoch');
+  nonEmpty(checkpoint.summary, 'relationship checkpoint summary');
+  member(checkpoint.outcome, OUTCOMES, 'relationship checkpoint outcome');
+  assertEvidenceRef(checkpoint.recoveryStateRef as EvidenceRef);
+  assertSameScope(scope, (checkpoint.recoveryStateRef as EvidenceRef).scope);
+  const next = record(checkpoint.next, 'relationship checkpoint next');
+  exactKeys(next, ['kind'], ['ref'], 'relationship checkpoint next');
+  member(next.kind, ['continue', 'wait', 'stop', 'recover'] as const, 'relationship checkpoint next kind');
+  if (Object.hasOwn(next, 'ref')) nonEmpty(next.ref, 'relationship checkpoint next ref');
+  if (!Array.isArray(checkpoint.evidenceRefs)) throw new ContractError('relationship checkpoint evidenceRefs must be an array');
+  for (const evidenceRef of checkpoint.evidenceRefs as readonly EvidenceRef[]) {
+    assertEvidenceRef(evidenceRef);
+    assertSameScope(scope, evidenceRef.scope);
+  }
+}
+
+/**
+ * Canonical intent digest of the complete checkpoint facts and time authority.
+ * This is structural only: it does not resolve authority or prove Journal durability.
+ */
+export async function checkpointIntentDigestV1(input: {
+  readonly checkpoint: Checkpoint;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+}): Promise<`sha256:${string}`> {
+  const inputObject = record(input, 'checkpoint intent input');
+  exactKeys(inputObject, ['checkpoint', 'timeAuthority'], [], 'checkpoint intent input');
+  validateCheckpointStructure(inputObject.checkpoint);
+  const checkpoint = inputObject.checkpoint as Checkpoint;
+  const timeAuthority = inputObject.timeAuthority as CheckpointTimeAuthorityMetadata;
+  validateTimeAuthority(timeAuthority);
+
+  const scope = checkpoint.scope;
+  const evidenceTuple = (evidence: EvidenceRef): readonly unknown[] => [
+    evidence.evidenceId.value,
+    evidence.kind,
+    evidence.source,
+    evidence.locator,
+    evidence.digest ?? null,
+    scopeTuple(evidence.scope),
+  ];
+  const identityTuple = [
+    scope.organId.value,
+    scope.taskId?.value ?? null,
+    scope.cycleId?.value ?? null,
+    scope.operationId?.value ?? null,
+    checkpoint.id.value,
+  ];
+  const checkpointFactsTuple = [
+    checkpoint.id.value,
+    scopeTuple(scope),
+    checkpoint.cycleId.value,
+    checkpoint.seq,
+    checkpoint.previousCheckpointId === null ? null : checkpoint.previousCheckpointId.value,
+    checkpoint.directiveRevision,
+    checkpoint.executionEpoch,
+    checkpoint.outcome,
+    checkpoint.summary,
+    [checkpoint.next.kind, checkpoint.next.ref ?? null],
+    evidenceTuple(checkpoint.recoveryStateRef),
+    checkpoint.evidenceRefs.map(evidenceTuple),
+  ];
+  const authorityTuple = [timeAuthority.source, timeAuthority.owner, timeAuthority.authorityRef];
+  const canonical = JSON.stringify([
+    'humanagent.checkpoint-intent.v1',
+    identityTuple,
+    checkpointFactsTuple,
+    authorityTuple,
+  ]);
+  return `sha256:${await sha256Hex(canonical)}`;
+}
+
+export async function validateCheckpointCommitEnvelopeV1(
+  value: unknown,
+  expected?: { readonly checkpoint: Pick<Checkpoint, 'id' | 'scope'>; readonly identity: CheckpointCommitIdentityV2 },
+): Promise<void> {
+  const input = record(value, 'checkpoint commit envelope v1');
+  exactKeys(input, ['version', 'identity', 'committedAt', 'timeAuthority', 'intentDigest'], [], 'checkpoint commit envelope v1');
+  if (input.version !== 1) throw new ContractError('checkpoint commit envelope version must be 1');
+  validateCheckpointIdentityV2(input.identity);
+  if (!isCanonicalInstant(input.committedAt)) throw new ContractError('committedAt must be a canonical UTC instant');
+  validateTimeAuthority(input.timeAuthority);
+  sha256Digest(input.intentDigest, 'intentDigest');
+  if (expected !== undefined) {
+    const expectedCheckpoint = await checkpointCommitIdentityV2({ checkpoint: expected.checkpoint });
+    if (input.identity !== expected.identity) {
+      throw new ContractError('checkpoint commit envelope identity does not match the expected identity');
+    }
+    if (input.identity !== expectedCheckpoint) {
+      throw new ContractError('checkpoint commit envelope identity does not match the expected checkpoint');
+    }
+  }
+}
+
+export async function validateCheckpointReceiptRelationship(value: unknown): Promise<void> {
+  const input = record(value, 'checkpoint receipt relationship v1');
+  exactKeys(input, ['checkpoint', 'envelope', 'receipt', 'checkpointSeq', 'journalSeq', 'recordDigest'], [], 'checkpoint receipt relationship v1');
+  validateCheckpointStructure(input.checkpoint);
+  const checkpoint = input.checkpoint as Checkpoint;
+  safePositive(input.checkpointSeq, 'checkpointSeq');
+  safePositive(input.journalSeq, 'journalSeq');
+  sha256Digest(input.recordDigest, 'recordDigest');
+  const identity = await checkpointCommitIdentityV2({ checkpoint });
+  await validateCheckpointCommitEnvelopeV1(input.envelope, { checkpoint, identity });
+  const envelope = input.envelope as CheckpointCommitEnvelopeV1;
+  const computedIntent = await checkpointIntentDigestV1({ checkpoint, timeAuthority: envelope.timeAuthority });
+  if (envelope.intentDigest !== computedIntent) {
+    throw new ContractError('checkpoint intent mismatch');
+  }
+  const receiptRef = checkpointRefV2(identity);
+  validateDurableCheckpointReceipt(input.receipt, { commitIdentity: identity, checkpointRef: receiptRef });
+  const inputReceipt = input.receipt as DurableCheckpointReceipt;
+  validateCheckpointIdentityV2(inputReceipt.commitIdentity);
+  if (inputReceipt.committedAt !== envelope.committedAt) throw new ContractError('receipt committedAt must match the commit envelope');
+  if (inputReceipt.timeAuthority.source !== envelope.timeAuthority.source
+    || inputReceipt.timeAuthority.owner !== envelope.timeAuthority.owner
+    || inputReceipt.timeAuthority.authorityRef !== envelope.timeAuthority.authorityRef) {
+    throw new ContractError('receipt timeAuthority must match the commit envelope');
+  }
+  if (checkpoint.seq !== input.checkpointSeq) throw new ContractError('checkpointSeq must match checkpoint seq');
+  validateJournalReceiptRef(inputReceipt.journalReceiptRef, input as unknown as CheckpointReceiptRelationshipV1, await scopeDigest(checkpoint.scope));
 }
 
 function validateDurablePhases(value: unknown): asserts value is readonly DurablePhaseOutcome[] {
