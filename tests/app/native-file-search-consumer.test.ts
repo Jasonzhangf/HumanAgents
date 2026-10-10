@@ -8,11 +8,13 @@ import {
   CODE_SEARCH_SERVICE_ID,
   id,
   validateCodeSearchReport,
+  type CodeSearchReport,
   type InteractionHistoryResult,
   type InteractionTraceEntry,
   type OperationId,
   type ProviderBinding,
   type TaskId,
+  type ToolExecutionFact,
 } from '../../packages/contracts/src/index.js';
 import {
   ProviderAdapter,
@@ -39,6 +41,10 @@ import { AccessControlService as FileAccessControlService } from '../../packages
 import { startUiRuntimeServer } from '../../packages/app/src/ui-runtime/server.js';
 import { UiRuntimeApiError } from '../../packages/app/src/ui-runtime/errors.js';
 import { MemoryCoordinator } from '../../packages/runtime/src/index.js';
+import {
+  deriveFileSearchObservation,
+  type FileSearchSemanticInput,
+} from '../../packages/runtime/src/context/index.js';
 
 const organId = id('organ', 'native-file-search-organ');
 const taskRuntimeRoot = '/Users/fanzhang/.humanagent/s-r2-typed-history-verification-20261009';
@@ -323,18 +329,77 @@ async function assertToolOutputBytes(
   entry: InteractionTraceEntry,
   expectedBytes: string,
   expectedDigest: string,
-): Promise<Record<string, unknown>> {
-  const report = await runtime.toolOutput(
+): Promise<CodeSearchReport> {
+  const report: unknown = await runtime.toolOutput(
     entry.taskId,
     entry.operationId,
     entry.executionEpoch,
     entry.seq,
-  ) as Record<string, unknown>;
+  );
   assert.equal(JSON.stringify(report), expectedBytes);
   assert.equal(sha256Digest(JSON.stringify(report)), expectedDigest);
   validateCodeSearchReport(report);
   assert.deepEqual(report, JSON.parse(expectedBytes));
   return report;
+}
+
+function findPersistedFileSearchEvent(
+  journal: UiRuntimeJournal,
+  operationId: OperationId,
+  kind: 'provider.tool' | 'provider.tool-result',
+) {
+  const record = journal.replay().find((candidate) => (
+    candidate.kind === 'operation.event'
+    && candidate.operationId.value === operationId.value
+    && candidate.event.kind === kind
+    && candidate.event.callId === fileSearchCallId
+  ));
+  if (!record || record.kind !== 'operation.event') {
+    throw new Error(`persisted ${kind} event is missing for ${operationId.value}`);
+  }
+  return record.event;
+}
+
+function fileSearchSemanticInput(input: {
+  readonly entry: InteractionTraceEntry;
+  readonly fact: ToolExecutionFact;
+  readonly report: CodeSearchReport;
+  readonly workspaceRef: string;
+  readonly arguments: unknown;
+}): FileSearchSemanticInput {
+  const result = input.entry.tool;
+  if (result === undefined) throw new Error('history entry has no tool result descriptor');
+  if (input.arguments === null || typeof input.arguments !== 'object' || Array.isArray(input.arguments)) {
+    throw new Error('persisted file.search arguments are not an object');
+  }
+  const args = input.arguments as Record<string, unknown>;
+  const { path, query, queryKind } = args;
+  if (
+    typeof path !== 'string'
+    || typeof query !== 'string'
+    || (queryKind !== 'literal' && queryKind !== 'regex' && queryKind !== 'symbol')
+  ) {
+    throw new Error('persisted file.search arguments are incomplete');
+  }
+  return {
+    invocation: {
+      trace: input.entry,
+      expectedToolIdentity: input.fact.identity,
+      request: {
+        workspaceRef: input.workspaceRef,
+        path,
+        query,
+        queryKind,
+      },
+    },
+    result,
+    fact: input.fact,
+    report: {
+      report: input.report,
+      outputRef: result.outputRef!,
+      outputDigest: result.outputDigest!,
+    },
+  };
 }
 
 async function writeQualifiedReportAsset(
@@ -637,6 +702,7 @@ test('local Responses file.search fact and report survive disk projection recons
     const outputRef = toolResult.outputRef;
     const outputDigest = toolResult.outputDigest;
     if (outputRef === undefined || outputDigest === undefined) throw new Error('file.search report descriptor is missing');
+    const toolCallEvent = findPersistedFileSearchEvent(firstJournal, started.operationId, 'provider.tool');
     const persistedBytes = await readFile(reportAssetPath(evidenceRoot, outputRef, outputDigest), 'utf8');
     const persistedArtifact = new TextEncoder().encode(persistedBytes);
     assert.equal(persistedArtifact.byteLength, new TextEncoder().encode(persistedBytes).byteLength);
@@ -663,6 +729,23 @@ test('local Responses file.search fact and report survive disk projection recons
     diagnostics.liveEntry = liveEntry;
     const liveReport = await assertToolOutputBytes(firstService, liveEntry, persistedBytes, outputDigest);
     diagnostics.liveReportDigest = sha256Digest(JSON.stringify(liveReport));
+    const liveObservation = deriveFileSearchObservation(fileSearchSemanticInput({
+      entry: liveEntry,
+      fact: executionFact,
+      report: liveReport,
+      workspaceRef: `workspace:${projectKey}`,
+      arguments: toolCallEvent.arguments,
+    }));
+    diagnostics.liveObservation = liveObservation;
+    assert.equal(liveObservation.state, 'resolved');
+    assert.equal(liveObservation.executorState, 'succeeded');
+    assert.equal(liveObservation.reportStatus, 'succeeded');
+    assert.equal(liveObservation.invocation?.seq, liveEntry.seq);
+    assert.equal(liveObservation.invocation?.requestRef, liveEntry.requestId);
+    assert.equal(liveObservation.invocation?.callRef, fileSearchCallId);
+    assert.equal(liveObservation.reportEvidence?.outputDigest, outputDigest);
+    assert.equal(JSON.stringify(liveObservation).includes('before semantic-needle after'), false);
+    assert.equal(JSON.stringify(liveObservation).includes(String(liveReport.summary)), false);
 
     await firstService.quiesceImplicitConsumption();
     const postQuiesceLiveEntry = selectToolResult(firstService, task.taskId, {
@@ -688,8 +771,21 @@ test('local Responses file.search fact and report survive disk projection recons
       outputDigest,
     });
     diagnostics.hydratedEntry = hydratedEntry;
+    const hydratedToolCallEvent = findPersistedFileSearchEvent(secondJournal, started.operationId, 'provider.tool');
+    const hydratedToolResultEvent = findPersistedFileSearchEvent(secondJournal, started.operationId, 'provider.tool-result');
+    const hydratedFact = hydratedToolResultEvent.executionFact;
+    if (hydratedFact === undefined) throw new Error('hydrated file.search execution fact is missing');
     const report = await assertToolOutputBytes(secondService, hydratedEntry, persistedBytes, outputDigest);
     assert.deepEqual(report, liveReport);
+    const replayedObservation = deriveFileSearchObservation(fileSearchSemanticInput({
+      entry: hydratedEntry,
+      fact: hydratedFact,
+      report,
+      workspaceRef: `workspace:${projectKey}`,
+      arguments: hydratedToolCallEvent.arguments,
+    }));
+    diagnostics.replayedObservation = replayedObservation;
+    assert.deepEqual(replayedObservation, liveObservation);
     assert.equal(report.serviceId, CODE_SEARCH_SERVICE_ID);
     assert.equal(report.contractVersion, CODE_SEARCH_CONTRACT_VERSION);
     assert.equal(report.status, 'succeeded', JSON.stringify(report));

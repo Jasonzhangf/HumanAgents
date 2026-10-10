@@ -272,6 +272,8 @@ export function mapToolResult<B, C = unknown>(
   };
 }
 
+export * from './tool-semantics.js';
+
 export class ContextCommitterError extends Error {
   constructor(message: string) {
     super(message);

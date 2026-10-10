@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CODE_SEARCH_CONTRACT_VERSION,
+  CODE_SEARCH_SERVICE_ID,
+  id,
+  type CodeSearchReport,
+  type InteractionTraceEntry,
+  type ToolExecutionFact,
+  type ToolIdentity,
+  type ToolTraceDescriptor,
+} from '../../../packages/contracts/src/index.js';
+import {
   buildContext,
   ContextCache,
   ContextCacheError,
@@ -10,9 +20,11 @@ import {
   ContextIndexError,
   ContextPrepareError,
   ContextPublishError,
+  deriveFileSearchObservation,
   groupToolMessages,
   mapToolResult,
   pruneEffectivePath,
+  type FileSearchSemanticInput,
 } from '../../../packages/runtime/src/context/index.js';
 
 test('ContextIndex bounds entries and refreshes recently used keys', () => {
@@ -336,4 +348,329 @@ test('ContextCommitter keeps a prepared/commit-intent state when the durable jou
 
   assert.equal(await committer.commit(prepared), committed);
   assert.equal(durableAttempts, 2);
+});
+
+const semanticOrganId = id('organ', 'semantic-organ');
+const semanticTaskId = id('task', 'semantic-task');
+const semanticOperationId = id('operation', 'semantic-operation');
+const semanticEvidenceRef: InteractionTraceEntry['evidenceRefs'][number] = {
+  evidenceId: id('evidence', 'semantic-evidence'),
+  kind: 'tool',
+  source: 'semantic-test',
+  locator: 'evidence://semantic-execution',
+  scope: {
+    organId: semanticOrganId,
+    taskId: semanticTaskId,
+    operationId: semanticOperationId,
+  },
+};
+
+function semanticReport(overrides: Partial<CodeSearchReport> = {}): CodeSearchReport {
+  return {
+    serviceId: CODE_SEARCH_SERVICE_ID,
+    contractVersion: CODE_SEARCH_CONTRACT_VERSION,
+    status: 'succeeded',
+    workspaceRef: 'workspace://semantic',
+    path: 'src',
+    query: 'needle',
+    queryKind: 'literal',
+    matches: [{
+      path: 'src/a.ts',
+      line: 1,
+      column: 1,
+      text: 'RAW_MATCH_SENTINEL',
+      contextBefore: ['RAW_CONTEXT_SENTINEL'],
+      contextAfter: ['RAW_CONTEXT_SENTINEL_AFTER'],
+    }],
+    filesDiscovered: 2,
+    filesSearched: 2,
+    matchesFound: 1,
+    resultsTruncated: false,
+    searchComplete: true,
+    unresolvedPaths: [],
+    summary: 'RAW_SUMMARY_SENTINEL',
+    ...overrides,
+  };
+}
+
+function semanticInput(report: CodeSearchReport = semanticReport()): FileSearchSemanticInput {
+  const outputRef = 'asset://semantic-report';
+  const outputDigest = `sha256:${'a'.repeat(64)}`;
+  const toolIdentity: ToolIdentity = {
+    surface: 'responses',
+    toolId: 'file.search',
+    bindingRef: 'binding-semantic',
+    route: 'app.file-search.local',
+  };
+  const result: ToolTraceDescriptor = {
+    callId: 'call-semantic',
+    toolId: 'file.search',
+    status: 'succeeded',
+    paired: true,
+    outputRef,
+    outputDigest,
+  };
+  const fact: ToolExecutionFact = {
+    identity: toolIdentity,
+    requestRef: 'request-semantic',
+    callRef: 'call-semantic',
+    operationRef: 'semantic-operation',
+    state: 'succeeded',
+    rawEvidenceRefs: ['evidence://execution-semantic'],
+    resultRef: outputRef,
+    resultDigest: outputDigest,
+  };
+  const trace: InteractionTraceEntry = {
+    turnId: 'turn-semantic',
+    requestId: 'request-semantic',
+    seq: 7,
+    occurredAt: '2026-10-10T00:00:00.000Z',
+    kind: 'tool-result',
+    taskId: semanticTaskId,
+    operationId: semanticOperationId,
+    executionEpoch: 1,
+    tool: result,
+    evidenceRefs: [semanticEvidenceRef],
+    state: 'succeeded',
+  };
+  return {
+    invocation: {
+      trace,
+      expectedToolIdentity: toolIdentity,
+      request: {
+        workspaceRef: 'workspace://semantic',
+        path: 'src',
+        query: 'needle',
+        queryKind: 'literal',
+      },
+    },
+    result,
+    fact,
+    report: {
+      report,
+      outputRef,
+      outputDigest,
+    },
+  };
+}
+
+test('file.search semantic mapper derives a bounded complete-hit observation', () => {
+  const output = deriveFileSearchObservation(semanticInput());
+
+  assert.equal(output.state, 'resolved');
+  assert.equal(output.code, 'file-search.complete');
+  assert.equal(output.executorState, 'succeeded');
+  assert.equal(output.reportStatus, 'succeeded');
+  assert.deepEqual(output.query, { value: 'needle', kind: 'literal' });
+  assert.deepEqual(output.scope, { workspaceRef: 'workspace://semantic', path: 'src' });
+  assert.deepEqual(output.counts, {
+    filesDiscovered: 2,
+    filesSearched: 2,
+    matchesFound: 1,
+    returnedMatches: 1,
+    resultsTruncated: false,
+    searchComplete: true,
+  });
+  assert.deepEqual(output.unresolvedPaths, []);
+  assert.deepEqual(output.reportEvidence, {
+    outputRef: 'asset://semantic-report',
+    outputDigest: `sha256:${'a'.repeat(64)}`,
+    serviceId: CODE_SEARCH_SERVICE_ID,
+    contractVersion: CODE_SEARCH_CONTRACT_VERSION,
+  });
+  assert.equal(output.claim?.certainty, 'confirmed');
+  assert.equal(/records 1 match\(es\)/.test(output.claim?.fact ?? ''), true);
+  assert.deepEqual(output.sourceRefs, ['asset://semantic-report', 'evidence://execution-semantic']);
+  const serialized = JSON.stringify(output);
+  assert.equal(serialized.includes('RAW_MATCH_SENTINEL'), false);
+  assert.equal(serialized.includes('RAW_CONTEXT_SENTINEL'), false);
+  assert.equal(serialized.includes('RAW_SUMMARY_SENTINEL'), false);
+});
+
+test('file.search semantic mapper distinguishes complete zero-hit, partial scan, and truncation', () => {
+  const zeroHit = deriveFileSearchObservation(semanticInput(semanticReport({
+    matches: [],
+    matchesFound: 0,
+    summary: 'RAW_SUMMARY_SENTINEL',
+  })));
+  assert.equal(zeroHit.state, 'resolved');
+  assert.equal(/records zero matches/.test(zeroHit.claim?.fact ?? ''), true);
+  assert.equal((zeroHit.claim?.fact ?? '').includes('does not exist'), false);
+
+  const partial = deriveFileSearchObservation(semanticInput(semanticReport({
+    filesSearched: 1,
+    searchComplete: false,
+    unresolvedPaths: ['src/broken.ts'],
+  })));
+  assert.equal(partial.state, 'partial');
+  assert.equal(partial.claim?.certainty, 'partial');
+  assert.deepEqual(partial.unresolvedPaths, ['src/broken.ts']);
+  assert.equal(/unresolvedPaths/.test(partial.claim?.fact ?? ''), true);
+
+  const truncated = deriveFileSearchObservation(semanticInput(semanticReport({
+    matchesFound: 3,
+    resultsTruncated: true,
+  })));
+  assert.equal(truncated.state, 'partial');
+  assert.equal(truncated.counts?.resultsTruncated, true);
+  assert.equal(truncated.counts?.returnedMatches, 1);
+  assert.equal(/returnedMatches=1/.test(truncated.claim?.fact ?? ''), true);
+});
+
+test('file.search semantic mapper preserves business failure without copying failure text', () => {
+  const output = deriveFileSearchObservation(semanticInput(semanticReport({
+    status: 'failed',
+    matches: [],
+    filesDiscovered: 0,
+    filesSearched: 0,
+    matchesFound: 0,
+    searchComplete: false,
+    failure: {
+      code: 'path-not-found',
+      message: 'RAW_FAILURE_SENTINEL',
+      path: 'src/missing.ts',
+    },
+    summary: 'RAW_FAILURE_SENTINEL',
+  })));
+
+  assert.equal(output.state, 'unresolved');
+  assert.equal(output.code, 'file-search.business-failed');
+  assert.equal(output.executorState, 'succeeded');
+  assert.equal(output.reportStatus, 'failed');
+  assert.deepEqual(output.failure, { code: 'path-not-found', path: 'src/missing.ts' });
+  assert.equal(output.claim, undefined);
+  assert.equal(JSON.stringify(output).includes('RAW_FAILURE_SENTINEL'), false);
+});
+
+test('file.search semantic mapper returns explicit unresolved outcomes for missing evidence', () => {
+  assert.equal(deriveFileSearchObservation({}).code, 'file-search.invocation-missing');
+
+  const withoutResult: FileSearchSemanticInput = { ...semanticInput(), result: undefined };
+  assert.equal(deriveFileSearchObservation(withoutResult).code, 'file-search.result-missing');
+
+  const withoutFact: FileSearchSemanticInput = { ...semanticInput(), fact: undefined };
+  assert.equal(deriveFileSearchObservation(withoutFact).code, 'file-search.fact-missing');
+
+  const withoutReport: FileSearchSemanticInput = { ...semanticInput(), report: undefined };
+  assert.equal(deriveFileSearchObservation(withoutReport).code, 'file-search.report-missing');
+
+  const base = semanticInput();
+  const withoutIdentity = {
+    ...base,
+    invocation: { ...base.invocation!, request: undefined },
+  } as unknown as FileSearchSemanticInput;
+  assert.equal(deriveFileSearchObservation(withoutIdentity).code, 'file-search.request-missing');
+});
+
+test('file.search semantic mapper refuses identity, descriptor, version, malformed, and contradictory input', () => {
+  const base = semanticInput();
+  const wrongSurface = {
+    ...base,
+    invocation: {
+      ...base.invocation!,
+      expectedToolIdentity: { ...base.invocation!.expectedToolIdentity, surface: 'anthropic' },
+    },
+  } as FileSearchSemanticInput;
+  assert.equal(deriveFileSearchObservation(wrongSurface).state, 'refused');
+
+  const wrongInvocation = {
+    ...base,
+    invocation: {
+      ...base.invocation!,
+      trace: {
+        ...base.invocation!.trace,
+        tool: { ...base.invocation!.trace.tool!, callId: 'other-call' },
+      },
+    },
+  } as FileSearchSemanticInput;
+  assert.equal(deriveFileSearchObservation(wrongInvocation).code, 'file-search.result-mismatch');
+
+  const mismatchedTool = {
+    ...base,
+    result: { ...base.result!, toolId: 'file.read' },
+    invocation: {
+      ...base.invocation!,
+      trace: {
+        ...base.invocation!.trace,
+        tool: { ...base.invocation!.trace.tool!, toolId: 'file.read' },
+      },
+    },
+  } as FileSearchSemanticInput;
+  const mismatchedToolOutput = deriveFileSearchObservation(mismatchedTool);
+  assert.equal(mismatchedToolOutput.state, 'refused');
+  assert.equal(mismatchedToolOutput.code, 'file-search.identity-mismatch');
+  assert.equal(mismatchedToolOutput.claim, undefined);
+
+  const wrongDescriptor = {
+    ...base,
+    report: { ...base.report!, outputDigest: `sha256:${'b'.repeat(64)}` },
+  } as FileSearchSemanticInput;
+  assert.equal(deriveFileSearchObservation(wrongDescriptor).code, 'file-search.descriptor-mismatch');
+
+  const wrongVersion = semanticInput(semanticReport({ contractVersion: '2.0.0' as never }));
+  assert.equal(deriveFileSearchObservation(wrongVersion).code, 'file-search.report-invalid');
+
+  const malformed = semanticInput(semanticReport({ matches: 'not-array' as never }));
+  assert.equal(deriveFileSearchObservation(malformed).code, 'file-search.report-invalid');
+
+  const contradictory = semanticInput(semanticReport({ filesSearched: 1 }));
+  assert.equal(deriveFileSearchObservation(contradictory).code, 'file-search.counts-contradictory');
+});
+
+test('file.search semantic mapper does not promote nonterminal or non-success execution', () => {
+  const executionInput = (
+    executorState: ToolExecutionFact['state'],
+    traceState: ToolTraceDescriptor['status'],
+    seq: number,
+  ): FileSearchSemanticInput => {
+    const base = semanticInput();
+    const requestRef = `request-execution-${seq}`;
+    const callRef = `call-execution-${seq}`;
+    return {
+      ...base,
+      result: { ...base.result!, callId: callRef, status: traceState },
+      fact: { ...base.fact!, state: executorState, requestRef, callRef },
+      invocation: {
+        ...base.invocation!,
+        trace: {
+          ...base.invocation!.trace,
+          requestId: requestRef,
+          seq,
+          tool: { ...base.invocation!.trace.tool!, callId: callRef, status: traceState },
+        },
+      },
+    };
+  };
+
+  for (const [executorState, traceState, seq] of [
+    ['accepted', 'running', 8],
+    ['running', 'running', 9],
+  ] as const) {
+    const output = deriveFileSearchObservation(executionInput(executorState, traceState, seq));
+    assert.equal(output.state, 'unresolved');
+    assert.equal(output.code, 'file-search.execution-nonterminal');
+    assert.equal(output.executorState, executorState);
+    assert.equal(output.invocation?.seq, seq);
+    assert.equal(output.invocation?.requestRef, `request-execution-${seq}`);
+    assert.equal(output.invocation?.callRef, `call-execution-${seq}`);
+    assert.equal(output.invocation?.toolIdentity.toolId, 'file.search');
+    assert.equal(output.claim, undefined);
+  }
+
+  for (const [executorState, traceState, seq] of [
+    ['failed', 'failed', 10],
+    ['cancelled', 'cancelled', 11],
+    ['blocked', 'blocked', 12],
+    ['unknown', 'unknown', 13],
+  ] as const) {
+    const output = deriveFileSearchObservation(executionInput(executorState, traceState, seq));
+    assert.equal(output.state, 'unresolved');
+    assert.equal(output.code, 'file-search.execution-not-succeeded');
+    assert.equal(output.executorState, executorState);
+    assert.equal(output.invocation?.seq, seq);
+    assert.equal(output.invocation?.requestRef, `request-execution-${seq}`);
+    assert.equal(output.invocation?.callRef, `call-execution-${seq}`);
+    assert.equal(output.invocation?.toolIdentity.toolId, 'file.search');
+    assert.equal(output.claim, undefined);
+  }
 });
