@@ -6,5 +6,8 @@
     "outDir": "../../dist/tests",
     "noEmitOnError": true
   },
-  "include": ["**/*.ts"]
+  "include": [
+    "**/*.ts",
+    "../../packages/context-events/src/node-modules.d.ts"
+  ]
 }

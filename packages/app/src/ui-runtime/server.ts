@@ -280,6 +280,25 @@ function optionalInteractionRequestKind(body: Record<string, unknown>): Interact
   return value as InteractionRequestKind;
 }
 
+/**
+ * Parse the exact selected task target for an existing-task-change. The public
+ * boundary only validates the typed shape; the runtime confirmation ledger
+ * remains the owner that rejects a target that does not match the confirmed
+ * draft revision.
+ */
+function optionalTaskRef(body: Record<string, unknown>): TaskId | undefined {
+  const value = body.taskRef;
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field taskRef must be a task scope reference', 'provide taskRef as { scope: "task", value }');
+  }
+  const ref = value as Record<string, unknown>;
+  if (ref.scope !== 'task' || typeof ref.value !== 'string' || !ref.value.trim()) {
+    throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field taskRef must name a non-empty task', 'provide taskRef as { scope: "task", value }');
+  }
+  return id('task', ref.value.trim());
+}
+
 function optionalExecutionPolicy(body: Record<string, unknown>): ExecutionPolicyDefinition | undefined {
   const value = body.executionPolicy;
   if (value === undefined) return undefined;
@@ -946,6 +965,11 @@ async function handleRequest(
       const idempotencyKey = optionalString(body, 'idempotencyKey');
       const draftRevisionVersion = body.draftRevisionVersion === undefined ? undefined : requirePositiveInteger(body, 'draftRevisionVersion');
       const draftRevisionHash = optionalString(body, 'draftRevisionHash');
+      const requestKind = optionalInteractionRequestKind(body);
+      if (requestKind !== undefined && requestKind !== 'new-task-create' && requestKind !== 'existing-task-change') {
+        throw new UiRuntimeApiError('request.invalid-field', APP_OWNER, 'request field requestKind must be new-task-create or existing-task-change', 'provide a final-submit request kind');
+      }
+      const taskRef = optionalTaskRef(body);
       const receipt = await service.confirmExplicitRequirement({
         interactionId: decodeURIComponent(explicitConfirmation[1]!),
         draftId: requireString(body, 'draftId'),
@@ -954,6 +978,8 @@ async function handleRequest(
         confirmedBy: requireString(body, 'confirmedBy'),
         confirmedAt: requireString(body, 'confirmedAt'),
         payloadRef: requireString(body, 'payloadRef'),
+        ...(requestKind === undefined ? {} : { requestKind }),
+        ...(taskRef === undefined ? {} : { taskRef }),
         ...(executionPolicy === undefined ? {} : { executionPolicy }),
         ...(goal === undefined ? {} : { goal }),
         ...(scope === undefined ? {} : { scope }),
@@ -985,6 +1011,19 @@ async function handleRequest(
       const selected = url.searchParams.get('node') ?? undefined;
       const scope = url.searchParams.get('scope') ?? undefined;
       writeJson(response, 200, service.observation(id('task', decodeURIComponent(taskObservation[1]!)), selected, scope));
+      return;
+    }
+    const taskSemantic = /^\/api\/tasks\/([^/]+)\/semantic$/.exec(path);
+    if (taskSemantic && method === 'GET') {
+      writeJson(response, 200, service.semanticObservation(id('task', decodeURIComponent(taskSemantic[1]!))));
+      return;
+    }
+    const taskSemanticStream = /^\/api\/tasks\/([^/]+)\/semantic\/stream$/.exec(path);
+    if (taskSemanticStream && method === 'GET') {
+      const session = await requireSession(accessControl, request);
+      const taskId = id('task', decodeURIComponent(taskSemanticStream[1]!));
+      service.semanticObservation(taskId);
+      streamSemanticObservation(request, response, service, taskId, session, accessControl, sseRegistry);
       return;
     }
     const taskHistory = /^\/api\/tasks\/([^/]+)\/history$/.exec(path);
@@ -1209,6 +1248,111 @@ function streamEvents(
   response.once('close', () => {
     void closeStream('client');
   });
+}
+
+function streamSemanticObservation(
+  request: IncomingMessage,
+  response: ServerResponse,
+  service: UiRuntimeService,
+  taskId: TaskId,
+  session: AccessSession,
+  accessControl: AccessControlService,
+  registry: ReturnType<typeof createSseRegistry>,
+): void {
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let closed = false;
+  let eventWrites = Promise.resolve();
+  let resolveEnded!: () => void;
+  const ended = new Promise<void>((resolve) => { resolveEnded = resolve; });
+  let entry: ActiveSse;
+  const closeStream = (reason: SseCloseReason): Promise<void> => {
+    if (closed) return ended;
+    closed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    if (!response.writableEnded) {
+      if (reason === 'server.shutdown') {
+        response.write('event: server.shutdown\ndata: {"reason":"server.shutdown"}\n\n');
+      } else if (reason === 'auth.invalidated') {
+        response.write('event: auth.invalidated\ndata: {"code":"auth.session.invalid"}\n\n');
+      }
+      response.end(() => resolveEnded());
+    } else {
+      resolveEnded();
+    }
+    registry.delete(entry);
+    return ended;
+  };
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+  });
+  entry = { response, session, close: closeStream };
+  registry.add(entry);
+  const validateStreamSession = async (): Promise<void> => {
+    let currentGeneration: number;
+    try {
+      currentGeneration = await accessControl.readPersistedGeneration();
+    } catch {
+      await closeStream('auth.unavailable');
+      return;
+    }
+    if (session.sessionGeneration !== currentGeneration || accessControl.isExpired(session)) {
+      await closeStream('auth.invalidated');
+    }
+  };
+  registry.scheduleAuthRevalidation(accessControl);
+  try {
+    const writeCurrent = () => {
+      if (closed) return;
+      eventWrites = eventWrites.then(async () => {
+        if (closed) return;
+        try {
+          await validateStreamSession();
+          if (closed) return;
+          const semantic = service.semanticObservation(taskId);
+          const terminal = observedOperationIsTerminal(semantic);
+          response.write(`id: semantic-${semantic.sourceWatermark}\n`);
+          response.write('event: semantic.observation\n');
+          response.write(`data: ${JSON.stringify(semantic)}\n\n`);
+          if (terminal) await closeStream('terminal');
+        } catch {
+          await closeStream('write-failure');
+        }
+      });
+    };
+    writeCurrent();
+    heartbeat = setInterval(writeCurrent, 250);
+  } catch (error) {
+    void closeStream('write-failure');
+    throw error;
+  }
+  response.once('close', () => {
+    void closeStream('client');
+  });
+}
+
+/**
+ * A semantic stream is terminal only for the operation it currently observes.
+ * Retained history can contain earlier closed operations, so the terminal
+ * event and the closed operation group must both name the observed operation.
+ */
+function observedOperationIsTerminal(
+  semantic: ReturnType<UiRuntimeService['semanticObservation']>,
+): boolean {
+  const observedOperationId = semantic.scope.operationId?.value;
+  if (observedOperationId === undefined) return false;
+  const terminalEventIds = new Set(
+    semantic.events
+      .filter((event) => event.scope.operationId?.value === observedOperationId
+        && (event.type === 'operation.completed' || event.type === 'operation.failed'))
+      .map((event) => event.eventId),
+  );
+  if (terminalEventIds.size === 0) return false;
+  return semantic.pairing.some((group) => group.kind === 'operation'
+    && group.scope.operationId?.value === observedOperationId
+    && group.state === 'closed'
+    && group.eventRefs.some((ref) => terminalEventIds.has(ref.eventId)));
 }
 
 export function taskIdFromParam(value: string): TaskId {

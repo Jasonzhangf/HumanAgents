@@ -1,4 +1,5 @@
 import type { EvidenceRef, LifecycleState, TaskId } from '@humanagent/contracts';
+import type { SemanticObservationEnvelope } from '@humanagent/contracts';
 import {
   type RuntimeDashboardProjection,
   type RuntimeMode,
@@ -17,6 +18,8 @@ import {
   type RuntimeTaskListProjection,
   type RuntimeTaskRowProjection,
 } from '../contracts/runtime.js';
+import type { RuntimeSemanticObservationEnvelope } from '../contracts/runtime.js';
+import { RuntimeProjectionError } from '../contracts/runtime.js';
 
 export type {
   RuntimeLivenessInput,
@@ -88,6 +91,13 @@ export interface RuntimeTaskListInput {
   readonly mode: RuntimeMode;
   readonly tasks: readonly RuntimeTaskSnapshotInput[];
 }
+
+export interface RuntimeSemanticObservationInput {
+  readonly taskId: TaskId;
+  readonly semantic: RuntimeSemanticObservationEnvelope;
+}
+
+export type RuntimeSemanticObservationProjection = RuntimeSemanticObservationEnvelope;
 
 function stateLabel(state: LifecycleState): string {
   return STATE_LABELS[state];
@@ -209,6 +219,17 @@ export function projectRuntimeTaskList(input: RuntimeTaskListInput): RuntimeTask
       total: input.tasks.length,
     },
   };
+}
+
+export function projectRuntimeSemanticObservation(
+  input: RuntimeSemanticObservationInput,
+): RuntimeSemanticObservationProjection {
+  if (input.semantic.scope.taskId?.value !== input.taskId.value) {
+    throw new RuntimeProjectionError(
+      `semantic observation scope taskId ${input.semantic.scope.taskId?.value ?? 'missing'} does not match ${input.taskId.value}`,
+    );
+  }
+  return input.semantic;
 }
 
 export function projectRuntimeTaskDashboard(

@@ -167,6 +167,22 @@ function finalSubmitIdentity(input: FinalSubmit | ExistingTaskChangeSubmit): str
     : input.requestKind;
 }
 
+/**
+ * The single authorization rule binding a request kind to the revision intent
+ * it may authorize. Registration and final submission share this predicate so
+ * an explicitly bound registration can never diverge from final authorization.
+ * The domain is the final-submit kind union only: no other
+ * `InteractionRequestKind` may authorize a revision intent.
+ */
+function requestKindAuthorizesIntent(
+  requestKind: FinalSubmit['requestKind'] | ExistingTaskChangeSubmit['requestKind'],
+  intent: RequirementIntent,
+): boolean {
+  return requestKind === 'new-task-create'
+    ? intent === 'create'
+    : intent === 'append' || intent === 'change';
+}
+
 export class ChannelRouter {
   private readonly channels = new Map<string, ChannelBinding>();
   private readonly automaticOccurrences = new Map<string, AutomaticOccurrence>();
@@ -326,6 +342,27 @@ export class ConfirmationLedger {
     if (!input.draftRevisionHash.trim()) {
       throw new ExplicitBrainRouterError('confirmation-stale', 'draft revision hash is required');
     }
+    // An explicitly bound registration must already authorize the revision's
+    // own intent. Rejecting here keeps the same authorization rule as final
+    // submission and stops an incompatible kind from poisoning the ledger
+    // before any registration/confirmation/mirror state changes. The domain is
+    // the final-submit kind union: a broad interaction kind (e.g.
+    // `status-query`) may not register against `append`/`change`. Omitted kinds
+    // stay permissive: the final submit still validates its actual kind.
+    if (input.requestKind !== undefined) {
+      if (input.requestKind !== 'new-task-create' && input.requestKind !== 'existing-task-change') {
+        throw new ExplicitBrainRouterError(
+          'unauthorized-final-submit',
+          `request kind ${input.requestKind} cannot authorize revision intent ${input.intent}`,
+        );
+      }
+      if (!requestKindAuthorizesIntent(input.requestKind, input.intent)) {
+        throw new ExplicitBrainRouterError(
+          'unauthorized-final-submit',
+          `request kind ${input.requestKind} cannot authorize revision intent ${input.intent}`,
+        );
+      }
+    }
     const existing = this.revisions.get(input.draftId);
     if (existing && JSON.stringify(existing) !== JSON.stringify(input)) {
       throw new ExplicitBrainRouterError('confirmation-stale', `draft revision changed: ${input.draftId}`);
@@ -468,10 +505,7 @@ export class ConfirmationLedger {
         `draft revision is bound to ${revision.requestKind}, not ${input.requestKind}`,
       );
     }
-    const intentMatches = input.requestKind === 'new-task-create'
-      ? revision.intent === 'create'
-      : revision.intent === 'append' || revision.intent === 'change';
-    if (!intentMatches) {
+    if (!requestKindAuthorizesIntent(input.requestKind, revision.intent)) {
       throw new ExplicitBrainRouterError(
         'unauthorized-final-submit',
         `final submit ${input.requestKind} cannot authorize revision intent ${revision.intent}`,

@@ -16,9 +16,11 @@ import {
   type ExistingTaskChangeSubmit,
   type ExecutionPolicyDefinition,
   type FinalSubmit,
+  type InteractionRequestKind,
   type MemoryInteractionPort,
   type MemoryOperationRequestedEvent,
   type RequirementEnvelope,
+  type TaskId,
   type ToolIntent,
 } from '../../../packages/contracts/src/index.js';
 import {
@@ -59,6 +61,7 @@ import {
   type GitBugPort,
   type NotificationPort,
   type RequirementSubmitReceipt,
+  type RegisteredDraftRevision,
 } from '../../../packages/runtime/src/explicit-brain/index.js';
 import { reportBug, type BugIntakeLedgerPort } from '../../../packages/runtime/src/explicit-brain/index.js';
 import {
@@ -3206,7 +3209,9 @@ function typedRevisionFixture(overrides: Partial<Parameters<ConfirmationLedger['
   };
 }
 
-function typedConfirmation(revision: ReturnType<typeof typedRevisionFixture>): DraftConfirmation {
+function typedConfirmation(
+  revision: Pick<RegisteredDraftRevision, 'interactionId' | 'draftId' | 'draftRevisionVersion' | 'draftRevisionHash' | 'payloadRef'>,
+): DraftConfirmation {
   return {
     confirmationRef: 'confirm-typed',
     confirmedBy: 'human:operator',
@@ -3346,9 +3351,13 @@ test('final authorization kind must match the confirmed revision intent', async 
 
   const mismatches = [
     {
+      // Registration kind omitted: the revision carries no bound kind, so the
+      // final submit's own kind is the only authorization and new-task-create
+      // cannot authorize a change intent.
       revision: typedRevisionFixture({
         intent: 'change',
         taskRef: targetTask,
+        requestKind: undefined,
       }),
       submit: typedSubmit(typedRevisionFixture({
         intent: 'change',
@@ -3356,11 +3365,13 @@ test('final authorization kind must match the confirmed revision intent', async 
       })),
     },
     {
+      // Registration kind omitted: existing-task-change cannot authorize a
+      // create intent at final submission.
       revision: typedRevisionFixture({
         draftId: 'draft-existing-create-mismatch',
         intent: 'create',
-        requestKind: 'existing-task-change',
         taskRef: targetTask,
+        requestKind: undefined,
       }),
       submit: {
         interactionId: 'interaction-typed',
@@ -3371,6 +3382,26 @@ test('final authorization kind must match the confirmed revision intent', async 
         draftRevisionHash: 'sha256:typed-revision-2',
         confirmationRef: 'confirm-typed',
         idempotencyKey: 'submit-existing-create-mismatch',
+        requestKind: 'existing-task-change',
+      } satisfies ExistingTaskChangeSubmit,
+    },
+    {
+      // Valid explicit registration: a revision bound to new-task-create cannot
+      // be dispatched as existing-task-change (final kind-binding rejection).
+      revision: typedRevisionFixture({
+        draftId: 'draft-bound-create-mismatch',
+        intent: 'create',
+        taskRef: targetTask,
+      }),
+      submit: {
+        interactionId: 'interaction-typed',
+        taskId: targetTask,
+        draftId: 'draft-bound-create-mismatch',
+        inputRevision: 1,
+        draftRevisionVersion: 2,
+        draftRevisionHash: 'sha256:typed-revision-2',
+        confirmationRef: 'confirm-typed',
+        idempotencyKey: 'submit-bound-create-mismatch',
         requestKind: 'existing-task-change',
       } satisfies ExistingTaskChangeSubmit,
     },
@@ -3418,6 +3449,190 @@ test('final authorization kind must match the confirmed revision intent', async 
     assert.equal(fixture.appended.length, 1);
     assert.equal(fixture.appended[0]?.intent, intent);
     assert.equal(fixture.downstreamCalls(), 1);
+  }
+});
+
+test('registration rejects an explicitly incompatible request kind before mutating ledger state and stays retryable', async () => {
+  const targetTask = id('task', 'task-registration-guard');
+
+  const invalidPairs: ReadonlyArray<{
+    readonly label: string;
+    readonly revision: ReturnType<typeof typedRevisionFixture>;
+    readonly correctKind: InteractionRequestKind;
+    readonly correctTaskRef?: TaskId;
+  }> = [
+    {
+      label: 'change + new-task-create',
+      revision: typedRevisionFixture({ draftId: 'draft-guard-change', intent: 'change', taskRef: targetTask }),
+      correctKind: 'existing-task-change',
+      correctTaskRef: targetTask,
+    },
+    {
+      label: 'append + new-task-create',
+      revision: typedRevisionFixture({ draftId: 'draft-guard-append', intent: 'append', taskRef: targetTask }),
+      correctKind: 'existing-task-change',
+      correctTaskRef: targetTask,
+    },
+    {
+      label: 'create + existing-task-change',
+      revision: typedRevisionFixture({
+        draftId: 'draft-guard-create',
+        intent: 'create',
+        requestKind: 'existing-task-change',
+        taskRef: targetTask,
+      }),
+      correctKind: 'new-task-create',
+    },
+  ];
+
+  for (const pair of invalidPairs) {
+    const ledger = new ConfirmationLedger();
+    const before = ledger.exportState();
+    assert.throws(
+      () => ledger.registerRevision(pair.revision),
+      (error: unknown) => error instanceof ExplicitBrainRouterError
+        && error.code === 'unauthorized-final-submit'
+        && error.message === `request kind ${pair.revision.requestKind} cannot authorize revision intent ${pair.revision.intent}`,
+      `${pair.label} must be rejected at registration`,
+    );
+    assert.deepEqual(ledger.exportState(), before, `${pair.label} must not mutate ledger state`);
+    assert.equal(ledger.currentRevision(pair.revision.draftId), undefined);
+
+    // The same revision with the correct kind registers, confirms, submits once
+    // and replays as a duplicate.
+    const corrected: RegisteredDraftRevision = {
+      ...pair.revision,
+      requestKind: pair.correctKind,
+      ...(pair.correctTaskRef === undefined ? {} : { taskRef: pair.correctTaskRef }),
+    };
+    ledger.registerRevision(corrected);
+    const confirmation = typedConfirmation(corrected);
+    ledger.confirmRevision(confirmation);
+    const appended: RequirementEnvelope[] = [];
+    let downstreamCalls = 0;
+    const owner = new RequirementSubmissionOwner(
+      ledger,
+      {
+        get expectedNextFifoSeq() { return appended.length + 1; },
+        markConfirmed() {},
+        find(draftId: string) { return appended.find((envelope) => envelope.draftId === draftId); },
+        async append(envelope: RequirementEnvelope) {
+          appended.push(envelope);
+          return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+        },
+      },
+      {
+        async submit(envelope) {
+          downstreamCalls += 1;
+          return { requirementId: envelope.requirementId };
+        },
+      },
+    );
+    const submit: FinalSubmit | ExistingTaskChangeSubmit = pair.correctKind === 'existing-task-change'
+      ? {
+          interactionId: corrected.interactionId,
+          taskId: pair.correctTaskRef!,
+          draftId: corrected.draftId,
+          inputRevision: corrected.inputRevision,
+          draftRevisionVersion: corrected.draftRevisionVersion,
+          draftRevisionHash: corrected.draftRevisionHash,
+          confirmationRef: confirmation.confirmationRef,
+          idempotencyKey: `submit-${corrected.draftId}`,
+          requestKind: 'existing-task-change',
+        }
+      : {
+          interactionId: corrected.interactionId,
+          draftId: corrected.draftId,
+          inputRevision: corrected.inputRevision,
+          draftRevisionVersion: corrected.draftRevisionVersion,
+          draftRevisionHash: corrected.draftRevisionHash,
+          confirmationRef: confirmation.confirmationRef,
+          idempotencyKey: `submit-${corrected.draftId}`,
+          requestKind: 'new-task-create',
+        };
+    const first = await owner.submitFinal(submit);
+    assert.equal(first.status, 'submitted', `${pair.label} corrected retry must submit`);
+    const duplicate = await owner.submitFinal(submit);
+    assert.equal(duplicate.status, 'duplicate');
+    assert.equal(duplicate.requirement.requirementId, first.requirement.requirementId);
+    assert.equal(appended.length, 1);
+    assert.equal(downstreamCalls, 1);
+  }
+});
+
+test('an incompatible registration attempt cannot replace an existing valid registration', () => {
+  const targetTask = id('task', 'task-existing-registration');
+  const ledger = new ConfirmationLedger();
+  const valid = typedRevisionFixture({
+    draftId: 'draft-guard-existing',
+    intent: 'change',
+    requestKind: 'existing-task-change',
+    taskRef: targetTask,
+  });
+  ledger.registerRevision(valid);
+  const afterValid = ledger.exportState();
+
+  assert.throws(
+    () => ledger.registerRevision({ ...valid, requestKind: 'new-task-create' }),
+    (error: unknown) => error instanceof ExplicitBrainRouterError && error.code === 'unauthorized-final-submit',
+  );
+  assert.deepEqual(ledger.exportState(), afterValid);
+  assert.equal(ledger.currentRevision(valid.draftId)?.requestKind, 'existing-task-change');
+});
+
+test('omitted registration kind stays permissive and validates at final submission', async () => {
+  const ledger = new ConfirmationLedger();
+  const revision = typedRevisionFixture({ draftId: 'draft-omitted-kind', requestKind: undefined });
+  ledger.registerRevision(revision);
+  assert.equal(ledger.currentRevision(revision.draftId)?.requestKind, undefined);
+
+  const confirmation = typedConfirmation(revision);
+  ledger.confirmRevision(confirmation);
+  const appended: RequirementEnvelope[] = [];
+  const owner = new RequirementSubmissionOwner(
+    ledger,
+    {
+      get expectedNextFifoSeq() { return appended.length + 1; },
+      markConfirmed() {},
+      find(draftId: string) { return appended.find((envelope) => envelope.draftId === draftId); },
+      async append(envelope: RequirementEnvelope) {
+        appended.push(envelope);
+        return { requirementId: envelope.requirementId, draftId: envelope.draftId, fifoSeq: envelope.fifoSeq };
+      },
+    },
+    { async submit(envelope) { return { requirementId: envelope.requirementId }; } },
+  );
+
+  const receipt = await owner.submitFinal(typedSubmit(revision));
+  assert.equal(receipt.status, 'submitted');
+  assert.equal(appended.length, 1);
+});
+
+test('registration rejects explicit non-final-submit request kinds before mutating ledger state', () => {
+  const targetTask = id('task', 'task-registration-kind-domain');
+  const nonFinalKinds: readonly InteractionRequestKind[] = ['status-query', 'new-task-preview', 'clarification'];
+
+  for (const requestKind of nonFinalKinds) {
+    for (const intent of ['change', 'append'] as const) {
+      const ledger = new ConfirmationLedger();
+      const before = ledger.exportState();
+      const revision = typedRevisionFixture({
+        draftId: `draft-non-final-${requestKind}-${intent}`,
+        intent,
+        requestKind,
+        taskRef: targetTask,
+      });
+
+      assert.throws(
+        () => ledger.registerRevision(revision),
+        (error: unknown) => error instanceof ExplicitBrainRouterError
+          && error.code === 'unauthorized-final-submit'
+          && error.message === `request kind ${requestKind} cannot authorize revision intent ${intent}`,
+        `${requestKind} + ${intent} must be rejected at registration`,
+      );
+      assert.deepEqual(ledger.exportState(), before, `${requestKind} + ${intent} must not mutate ledger state`);
+      assert.equal(ledger.currentRevision(revision.draftId), undefined);
+    }
   }
 });
 

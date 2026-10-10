@@ -9,8 +9,10 @@
   "include": [
     "**/*.ts",
     "../../packages/app/src/**/*.ts",
+    "../../packages/context-events/src/**/*.ts",
     "../../packages/config/src/**/*.ts",
     "../../packages/core/src/**/*.ts",
+    "../../packages/ui/contracts/**/*.ts",
     "../../packages/runtime/src/subscriptions/**/*.ts",
     "../../packages/contracts/src/**/*.ts"
   ]

@@ -2751,6 +2751,180 @@ test('explicit brain confirmation is the only path from input to FIFO execution'
   assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'dispatched');
 });
 
+test('typed existing-task-change fails closed on a missing or mismatched target and submits only the exact target', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-existing-change-'));
+  const port = new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 });
+  let matchedTaskId = '';
+  const service = serviceFor(root, port, 'fake', 'ready', undefined, undefined, undefined, undefined, {
+    async interpret() {
+      return {
+        kind: 'requirement',
+        normalizedInput: 'change this task',
+        matchedTaskId,
+        knownFacts: [],
+        intent: 'change',
+        proposal: 'change the existing task',
+        decisionRefs: [],
+      };
+    },
+  });
+  const target = service.createTask({ title: 'existing change target' });
+  matchedTaskId = target.taskId.value;
+
+  const interactionId = await service.receiveExplicitInput({
+    sourceRef: 'ui:existing-change',
+    rawInput: 'change this task',
+    channel: 'business',
+    requestKind: 'existing-task-change',
+  });
+  await service.interpretExplicitInput({ interactionId });
+  const proposed = await service.inspectExplicitInteraction(interactionId);
+  assert.ok(proposed.draft);
+  assert.ok(proposed.revision);
+  const draftId = proposed.draft!.draftId;
+  const draftRevisionVersion = proposed.revision!.revisionVersion;
+  const draftRevisionHash = proposed.revision!.revisionHash;
+
+  const tasksBefore = service.listTasks().counts.total;
+  await assert.rejects(
+    () => service.confirmExplicitRequirement({
+      interactionId,
+      draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:existing-change-missing',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-10T00:00:00.000Z',
+      payloadRef: 'asset://requirements/existing-change-missing',
+      requestKind: 'existing-task-change',
+      draftRevisionVersion,
+      draftRevisionHash,
+    }),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.missing-existing-task-target'
+      && error.httpStatus === 400,
+  );
+  await assert.rejects(
+    () => service.confirmExplicitRequirement({
+      interactionId,
+      draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:existing-change-wrong',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-10T00:00:00.000Z',
+      payloadRef: 'asset://requirements/existing-change-wrong',
+      requestKind: 'existing-task-change',
+      taskRef: id('task', 'not-the-selected-task'),
+      draftRevisionVersion,
+      draftRevisionHash,
+    }),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'explicit-brain.task-target-mismatch'
+      && error.httpStatus === 409,
+  );
+  assert.equal(service.listTasks().counts.total, tasksBefore, 'a rejected change must not enqueue a requirement');
+  assert.equal((await service.inspectExplicitInteraction(interactionId)).state, 'awaiting-confirmation');
+
+  // A mismatched kind on the exact revision/target/hash is rejected by the
+  // runtime registration owner before any confirmation or submission mutation,
+  // and the same revision stays usable with the correct kind.
+  const beforeMismatch = await service.inspectExplicitInteraction(interactionId);
+  await assert.rejects(
+    () => service.confirmExplicitRequirement({
+      interactionId,
+      draftId,
+      inputRevision: 1,
+      confirmationRef: 'confirmation:existing-change-kind-mismatch',
+      confirmedBy: 'human:operator',
+      confirmedAt: '2026-10-10T00:00:00.000Z',
+      payloadRef: 'asset://requirements/existing-change-kind-mismatch',
+      requestKind: 'new-task-create',
+      draftRevisionVersion,
+      draftRevisionHash,
+    }),
+    (error: unknown) => error instanceof UiRuntimeApiError
+      && error.code === 'unauthorized-final-submit'
+      && error.httpStatus === 409,
+  );
+  const afterMismatch = await service.inspectExplicitInteraction(interactionId);
+  assert.equal(afterMismatch.state, 'awaiting-confirmation');
+  assert.equal(afterMismatch.revision?.revisionHash, beforeMismatch.revision?.revisionHash);
+  assert.equal(afterMismatch.confirmation, undefined);
+  assert.equal(service.listTasks().counts.total, tasksBefore, 'a mismatched kind must not enqueue a requirement');
+  assert.equal(port.startPayloads.length, 0, 'a mismatched kind must not dispatch');
+
+  const receipt = await service.confirmExplicitRequirement({
+    interactionId,
+    draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:existing-change-exact',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-10T00:00:00.000Z',
+    payloadRef: 'asset://requirements/existing-change-exact',
+    idempotencyKey: 'existing-change-exact-key',
+    requestKind: 'existing-task-change',
+    taskRef: target.taskId,
+    draftRevisionVersion,
+    draftRevisionHash,
+  });
+  assert.equal(receipt.requirement.status, 'submitted');
+  assert.equal(service.listTasks().counts.total, tasksBefore + 1, 'the exact change is queued as one visible draft row');
+  assert.equal(port.startPayloads.length, 0, 'confirmation alone must not dispatch the queued change');
+
+  const replay = await service.confirmExplicitRequirement({
+    interactionId,
+    draftId,
+    inputRevision: 1,
+    confirmationRef: 'confirmation:existing-change-exact',
+    confirmedBy: 'human:operator',
+    confirmedAt: '2026-10-10T00:00:00.000Z',
+    payloadRef: 'asset://requirements/existing-change-exact',
+    idempotencyKey: 'existing-change-exact-key',
+    requestKind: 'existing-task-change',
+    taskRef: target.taskId,
+    draftRevisionVersion,
+    draftRevisionHash,
+  });
+  assert.equal(replay.requirement.status, 'duplicate');
+  assert.equal(service.listTasks().counts.total, tasksBefore + 1, 'replay must not append a second queued requirement');
+  assert.equal(port.startPayloads.length, 0, 'replay must not dispatch the queued change');
+});
+
+test('public semantic observation preserves typed scope and reports unsupported source coverage', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-semantic-observation-'));
+  const service = serviceFor(root, new PayloadCapturingFakeReplayPort({ binding, stepDelayMs: 1 }));
+  const task = service.createTask({ title: 'semantic observation scope' });
+  const started = service.startExecution(task.taskId, { prompt: 'semantic observation scope' });
+  await waitFor(() => assert.equal(service.taskDashboard(task.taskId).state, 'succeeded'));
+
+  const semantic = service.semanticObservation(task.taskId);
+  assert.equal(semantic.scope.taskId?.value, task.taskId.value);
+  assert.equal(semantic.scope.operationId?.value, started.operationId.value);
+  assert.equal(semantic.events.some((event) => event.type === 'operation.started'), true);
+  assert.equal(semantic.events.some((event) => event.type === 'operation.completed'), true);
+  assert.equal(
+    semantic.pairing.some((group) => group.kind === 'operation' && group.state === 'closed' && group.scope.operationId?.value === started.operationId.value),
+    true,
+  );
+  // The fake provider emits coverage-only model/output/settling events and a
+  // tool call without callId. Canonical normalization must surface both
+  // classes instead of presenting the observation as fully covered.
+  assert.deepEqual(
+    semantic.coverageIssues
+      .map((issue) => `${issue.reason}|${issue.sourceRef.locator}`)
+      .sort(),
+    [
+      'correlation-unavailable|fake/tool-2',
+      `correlation-unavailable|runtime source ${started.operationId.value}-4`,
+      `unknown-kind|runtime source ${started.operationId.value}-2`,
+      `unknown-kind|runtime source ${started.operationId.value}-3`,
+      `unknown-kind|runtime source ${started.operationId.value}-5`,
+      `unknown-kind|runtime source ${started.operationId.value}-7`,
+    ],
+  );
+  assert.equal(semantic.coverageIssues.every((issue) => issue.eventRef === undefined), true);
+  assert.equal(semantic.coverageIssues.every((issue) => issue.scope.taskId?.value === task.taskId.value), true);
+});
+
 test('confirmed requirement cannot bypass implicit admission when the provider is unavailable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'humanagent-ui-explicit-admission-'));
   const service = serviceFor(

@@ -130,6 +130,7 @@ import {
 // reports it as the budget it was measured against; it is never restated here.
 import { DEFAULT_AGENT_IO_POLICY } from '../../../runtime/src/agent-io/types.js';
 import { projectRuntimeTaskHistory } from './turn-history.js';
+import { buildSemanticObservation } from '../../../context-events/src/index.js';
 import {
   MemoryCoordinator,
   MemoryCoordinatorError,
@@ -169,6 +170,7 @@ import {
 import {
   projectRuntimeDashboard,
   projectRuntimeStatus,
+  projectRuntimeSemanticObservation,
   projectRuntimeTaskDashboard,
   projectRuntimeTaskList,
 } from '../../../ui/projection/runtime.js';
@@ -184,6 +186,7 @@ import {
 } from '../../../ui/projection/index.js';
 import { UiProjectionError, type PipelineObservationProjection } from '../../../ui/contracts/models.js';
 import type { RuntimeTaskSnapshotInput } from '../../../ui/projection/runtime.js';
+import type { RuntimeSemanticObservationEnvelope } from '../../../ui/contracts/runtime.js';
 import { nodeRegistry, type PipelineNodeDefinition } from '../../../runtime/src/nodes/node-registry.js';
 import type { AgentRoleDisplay, LifecycleState } from '../../../contracts/src/index.js';
 import { UiRuntimeApiError } from './errors.js';
@@ -351,6 +354,8 @@ export interface ExplicitBrainReceipt {
  * execution policy the legacy confirmation path is unchanged.
  */
 export interface ConfirmExplicitRequirementInput extends ConfirmRequirementDraft {
+  readonly requestKind?: 'new-task-create' | 'existing-task-change';
+  readonly taskRef?: TaskId;
   readonly executionPolicy?: ExecutionPolicyDefinition;
   readonly goal?: string;
   readonly scope?: string;
@@ -1208,6 +1213,26 @@ export class UiRuntimeService {
         ...(options.explicitBrainAgentQuery === undefined ? {} : { queryAgent: options.explicitBrainAgentQuery }),
         ...(options.explicitBrainAgentMessage === undefined ? {} : { sendAgentMessage: options.explicitBrainAgentMessage }),
       });
+    }
+  }
+
+  semanticObservation(taskId: TaskId): RuntimeSemanticObservationEnvelope {
+    try {
+      const task = this.coordinatorOrQueuedTaskSnapshot(taskId);
+      const semantic = buildSemanticObservation({
+        scope: {
+          organId: this.options.organId,
+          taskId: task.taskId,
+          ...(task.operationId === undefined || task.executionEpoch === undefined ? {} : { operationId: id('operation', task.operationId) }),
+        },
+        projectionVersion: 'runtime-semantic-v1',
+        sourceWatermark: task.events.length,
+        events: task.events,
+        capabilities: [{ capability: 'runtime-task-events', state: task.events.length > 0 ? 'available' : 'unavailable', ...(task.events.length > 0 ? {} : { reason: 'task has no runtime task events yet' }) }],
+      });
+      return projectRuntimeSemanticObservation({ taskId, semantic });
+    } catch (error) {
+      throw apiError(error);
     }
   }
 
@@ -3032,6 +3057,7 @@ export class UiRuntimeService {
   }
 
   private requiresTypedFinalSubmit(input: ConfirmExplicitRequirementInput): boolean {
+    if (input.requestKind === 'existing-task-change') return true;
     if (input.executionPolicy !== undefined) return true;
     if (input.interactionId === undefined) return false;
     return this.explicitIntake.currentDraftRevision(input.interactionId) !== undefined;
@@ -3061,6 +3087,42 @@ export class UiRuntimeService {
     // this check.
     const arrivalSnapshot = await this.explicitIntake.inspect(interactionId);
     const arrivalDraft = arrivalSnapshot.draft;
+    const requestKind = input.requestKind ?? 'new-task-create';
+    const existingTaskChange = requestKind === 'existing-task-change';
+    if (existingTaskChange && input.taskRef === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.missing-existing-task-target',
+        RUNTIME_OWNER,
+        'existing-task-change requires the explicit selected taskRef',
+        'select and pass the task target before confirming the change',
+        400,
+      );
+    }
+    if (existingTaskChange) {
+      // Validate the exact selected target against the interaction-arrival
+      // draft before any revision mint, registration, confirmation, or
+      // enqueue. A wrong target fails closed with no side effect and leaves
+      // the same draft resubmittable with the exact target.
+      const draftTaskRef = arrivalDraft?.matchedTasks.find((task) => task.relation === 'current')?.taskId;
+      if (draftTaskRef === undefined || draftTaskRef.value !== input.taskRef!.value) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.task-target-mismatch',
+          RUNTIME_OWNER,
+          `existing-task-change target ${input.taskRef!.value} does not match the confirmed draft revision target ${draftTaskRef?.value ?? 'missing'}`,
+          'select the task that owns the confirmed draft revision before submitting the change',
+          409,
+        );
+      }
+      if (input.draftRevisionVersion === undefined || input.draftRevisionHash === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.missing-draft-revision-binding',
+          RUNTIME_OWNER,
+          'existing-task-change requires both draftRevisionVersion and draftRevisionHash',
+          'reload the reviewable revision and pass both its version and hash',
+          400,
+        );
+      }
+    }
     const arrivalMatches = arrivalDraft !== undefined
       && input.draftId === arrivalDraft.draftId
       && input.inputRevision === arrivalDraft.inputRevision;
@@ -3082,7 +3144,29 @@ export class UiRuntimeService {
     }
     // Read the request-arrival typed revision before any policy refinement.
     let revision = this.explicitIntake.currentDraftRevision(interactionId);
-    if (revision === undefined) {
+    if (existingTaskChange && revision === undefined) {
+      throw new UiRuntimeApiError(
+        'explicit-brain.typed-revision-required',
+        'humanagent.runtime.explicit-intake',
+        `interaction has no reviewable typed draft revision to confirm: ${interactionId}`,
+        'generate the reviewable draft before final submission',
+        409,
+      );
+    }
+    if (existingTaskChange
+      && (revision!.revisionVersion !== input.draftRevisionVersion
+        || revision!.revisionHash !== input.draftRevisionHash)) {
+      throw new DraftRevisionError({
+        code: 'confirmation-stale',
+        message: 'confirmation is not bound to the current draft revision',
+        draftId: revision!.draftId,
+        expectedRevisionVersion: input.draftRevisionVersion,
+        expectedRevisionHash: input.draftRevisionHash,
+        actualRevisionVersion: revision!.revisionVersion,
+        actualRevisionHash: revision!.revisionHash,
+      });
+    }
+    if (!existingTaskChange && revision === undefined) {
       revision = await this.ensureTypedDraftRevision(interactionId, {
         executionPolicy: input.executionPolicy,
         goal: input.goal,
@@ -3113,6 +3197,15 @@ export class UiRuntimeService {
       });
     }
     if (input.executionPolicy !== undefined) {
+      if (existingTaskChange && revision.executionPolicy === undefined) {
+        throw new UiRuntimeApiError(
+          'explicit-brain.existing-task-change-revision-immutable',
+          RUNTIME_OWNER,
+          'existing-task-change cannot mint a policy revision after the caller confirmed the exact revision',
+          'refine the reviewable draft before confirmation or omit the execution policy',
+          409,
+        );
+      }
       if (revision.executionPolicy !== undefined
         && canonicalJsonStringify(revision.executionPolicy) !== canonicalJsonStringify(input.executionPolicy)) {
         // The execution type is part of the immutable revision. A revision that
@@ -3136,8 +3229,8 @@ export class UiRuntimeService {
       }
     }
 
-    const draftRevisionVersion = revision.revisionVersion;
-    const draftRevisionHash = revision.revisionHash;
+    const draftRevisionVersion = existingTaskChange ? input.draftRevisionVersion! : revision.revisionVersion;
+    const draftRevisionHash = existingTaskChange ? input.draftRevisionHash! : revision.revisionHash;
     this.confirmationLedger.registerRevision({
       interactionId,
       draftId: revision.draftId,
@@ -3147,7 +3240,8 @@ export class UiRuntimeService {
       normalizedInput: revision.normalizedInput,
       intent: revision.proposedIntent,
       payloadRef: input.payloadRef,
-      requestKind: 'new-task-create',
+      requestKind,
+      ...(input.taskRef === undefined ? {} : { taskRef: input.taskRef }),
     });
     const confirmation = await this.explicitIntake.confirmDraftRevision({
       interactionId,
@@ -3169,16 +3263,29 @@ export class UiRuntimeService {
     // dispatch lock is the single owner of FIFO consumption, so holding it
     // across both writes keeps the requirement out of the immediate path.
     const submitted = await this.withDispatchLock(async () => {
-      const receipt = await this.requirementSubmissions.submitFinal({
-        interactionId,
-        draftId: revision.draftId,
-        inputRevision: revision.inputRevision,
-        draftRevisionVersion,
-        draftRevisionHash,
-        confirmationRef: input.confirmationRef,
-        idempotencyKey: input.idempotencyKey ?? `final-submit:${revision.draftId}:${draftRevisionVersion}:${input.confirmationRef}`,
-        requestKind: 'new-task-create',
-      });
+      const idempotencyKey = input.idempotencyKey ?? `final-submit:${revision.draftId}:${draftRevisionVersion}:${input.confirmationRef}`;
+      const receipt = await this.requirementSubmissions.submitFinal(requestKind === 'existing-task-change'
+        ? {
+            interactionId,
+            taskId: input.taskRef!,
+            draftId: revision.draftId,
+            inputRevision: revision.inputRevision,
+            draftRevisionVersion,
+            draftRevisionHash,
+            confirmationRef: input.confirmationRef,
+            idempotencyKey,
+            requestKind: 'existing-task-change',
+          }
+        : {
+            interactionId,
+            draftId: revision.draftId,
+            inputRevision: revision.inputRevision,
+            draftRevisionVersion,
+            draftRevisionHash,
+            confirmationRef: input.confirmationRef,
+            idempotencyKey,
+            requestKind: 'new-task-create',
+          });
       if (revision.executionPolicy !== undefined) {
         await this.persistAuthorizedExecutionPlan(receipt.requirement, revision.executionPolicy);
       }
