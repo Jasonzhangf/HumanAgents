@@ -1,43 +1,43 @@
 ---
 name: appsdk-migration
-description: >
-  Migrate an existing AppSDK and Collab installation to one reviewed version,
-  preserving business and protected state while safely resetting an explicitly
-  authorized legacy control plane. Use for version upgrades, daemon
-  migrations, identity rebinding, and authorized legacy resets; do not use for
-  ordinary feature development or unapproved deletion.
+description: "AppSDK/Collab 控制面迁移、身份上下文恢复或授权重置; 仅状态、daemon、身份或 reset 实际变化时使用。owner 全程记录证据; worker 只可查候选, 不可删状态/重启/改身份/未授权删除。"
 ---
 
 # AppSDK migration
 
-Use this Skill when an existing AppSDK or its Collab runtime must move to a
-reviewed version, when a daemon or peer identity must be rebound, or when the
-operator has explicitly authorized discarding a named legacy control plane.
+Use this Skill only when an existing AppSDK or its Collab runtime control plane
+must move to a reviewed version, when peer identity or route binding must be
+reconciled after a reviewed migration, or when the operator has explicitly
+authorized discarding a named legacy control plane. SDK-only rule, Skill,
+template, binary, or installer upgrades and ordinary `appsdk init` do not invoke
+this state machine unless control-plane state, daemon, identity, or reset is
+actually changing.
+
 The migration owner runs the whole operation and records its evidence. A
 worker may inspect or prepare a candidate, but may not independently delete
-state, restart the daemon, rebind another peer, or resume admissions.
+state, restart the daemon, change identity, or resume admissions.
 
 This Skill owns the migration state machine:
 
 ```text
 prepare -> inspect -> classify -> snapshot -> freeze
-        -> install/restart -> identity-rebind -> verify -> resume
+        -> install/restart -> identity-context -> verify -> resume
 ```
 
 The installed `collab` Skill owns transport, daemon, route, and identity
 semantics. The AppSDK project-governance Skill owns AppSDK quality gates and
-the canonical `appsdk reset-governance --discard-legacy` operation. Read those
-Skills before acting; do not copy their state machines into this one. For the
-project-level preserve/reset choices, also read
+the canonical `appsdk reset-governance <project> --discard-legacy` operation.
+Read those Skills before acting; do not copy their state machines into this
+one. For the project-level preserve/reset choices, also read
 [`bootstrap-migration.md`](../appsdk-project-governance/references/bootstrap-migration.md).
 
 The two clean-epoch owners are independent. Use `collab migrate` when the
-Collab journal is replayable; use `collab reset --discard-legacy --approval
-"<user text>"` only when the operator authorizes abandoning the old Collab
-epoch. Use `appsdk init <project> --fresh --discard-legacy` or the lower-level
-`appsdk reset-governance <project> --discard-legacy` only for the AppSDK-owned
-project control plane. A reset record proves reset only; it never proves
-delivery, review, install, restart, or live communication.
+Collab journal is replayable; use `collab reset --project --discard-legacy
+--approval "<user text>"` only when the operator authorizes abandoning the
+project Collab epoch. Use `appsdk init <project> --fresh --discard-legacy` or
+the lower-level `appsdk reset-governance <project> --discard-legacy` only for
+the AppSDK-owned project control plane. A reset record proves reset only; it
+never proves delivery, review, install, restart, or live communication.
 
 ## Invariants
 
@@ -49,9 +49,9 @@ delivery, review, install, restart, or live communication.
   not prove a registered identity or route.
 - A durable peer registration and its live runtime route are the identity
   authority. A transcript/session ID is observation metadata and may change
-  after compression, fork, thread replacement, or restart. Rebind the new live
-  runtime through the official registration path; never copy tokens or make a
-  session ID the durable identity.
+  after compression, fork, thread replacement, or restart. Run `collab context`
+  once for the new live runtime; the daemon reconciles the durable peer
+  identity. Never copy tokens or make a session ID the durable identity.
 - User authorization is required before promoting a peer to `master`. A peer
   can register and communicate only through a server-selected App Server route
   that passed its capability self-check. A Desktop runtime must not register a
@@ -88,19 +88,22 @@ Before inspecting mutable state, write a migration record with a unique
 
 For the AppSDK source repository itself, first determine whether the root is a
 managed AppSDK project. The presence of SDK source or `.appsdk-control/` alone
-does not implicitly register it as a governed application. When the user
-explicitly chooses to govern the SDK workspace itself, `appsdk prepare` may be
-confirmed and followed by `appsdk init` in a clean non-`main` owner worktree;
-the owner must then review the generated contract and bind it to the SDK
-source modules. If the user has not made that choice, do not run `appsdk init`
-or reset commands merely to manufacture a contract; perform only the declared
-SDK/runtime migration and record that scope. A fresh reset still requires an
-existing contract plus explicit `--fresh --discard-legacy` authorization.
+does not implicitly register it as a governed application; governing the SDK
+workspace requires explicit opt-in. When the user makes that choice, follow the
+canonical initialization contract in the installed `appsdk-project-governance`
+Skill; this Skill does not maintain a separate initialization location. If the
+user has not made that choice, do not run `appsdk init` or reset commands merely
+to manufacture a contract; perform only the declared SDK/runtime migration and
+record that scope. A fresh reset still requires an existing contract plus
+explicit `--fresh --discard-legacy` authorization.
 
 All code, Skill, or contract changes are made in a clean non-`main` worktree
 created from the latest `origin/main`. Merge and verify the candidate on the
-intended mainline before installing it. Do not develop in a dirty root or in
-the worktree that owns the live daemon.
+intended mainline before installing it when installation changes shared
+production or a daemon runtime. An explicitly authorized SDK-only client
+candidate may be installed for pre-commit acceptance when the exact candidate is
+recorded and no mainline, release, or daemon-migration status is claimed. Do not
+develop in a dirty root or in the worktree that owns the live daemon.
 
 ## Inspect
 
@@ -154,7 +157,7 @@ For the idempotent reset route that discards the named legacy control plane,
 the exact command is:
 
 ```sh
-appsdk reset-governance --discard-legacy
+appsdk reset-governance <project> --discard-legacy
 ```
 
 Run it once, only in the clean non-`main` owner worktree after the named
@@ -186,9 +189,9 @@ The Collab-owned project control plane uses a separate reset owner:
 
 ```sh
 collab down
-collab reset --discard-legacy --approval "<explicit user authorization>"
+collab reset --project --discard-legacy --approval "<explicit user authorization>"
 collab up
-collab init
+collab context
 ```
 
 It archives the exact `.agent-collab/` and `.agent-collab-v2/` bytes, removes
@@ -299,32 +302,40 @@ binary as an implicit fallback.
 
 After the restart, prove one PID and socket, the expected binary hash, and no
 old writer. A restart error or ambiguous process ownership is `unknown`; do
-not rebind peers or send recovery messages until the owner resolves it.
+not run identity reconciliation or send recovery messages until the owner
+resolves it.
 
-## Identity rebind
+## Identity context reconciliation
 
-Rebind only the named live peers after the daemon and socket pass the restart
-gate. The current peer must have a live App Server runtime whose capability
-self-check and server selection passed. Use the official current-peer
-initialization or rebind operation once in that runtime, then inspect:
+After the daemon and socket pass the restart gate, run `collab context` once
+for each named live peer whose runtime must be reconciled. The current peer
+must have a live App Server runtime whose capability self-check and server
+selection passed. The daemon owns identity creation, selection, restoration,
+update, registration, route publication, and lease restoration. If context
+returns `required_fields`, supply only those real facts once:
 
 ```sh
-collab context
+collab context --provide '<JSON>'
 ```
+
+The supplement may contain only requested `session_id`, `thread_id`,
+`endpoint`, or `namespace` facts; it never supplies a worker, approval, token,
+route, or binding.
 
 The evidence must bind the durable peer ID to the live runtime, selected
 App Server target, exact project cwd, role, parent, and capabilities. A screen
 preview, process name, or session ID alone is insufficient.
 
 When an App Server binding is replaced, or a transcript is forked/compressed,
-preserve the durable peer identity only through the supported authenticated
-rebind. Do not reuse a stale endpoint, register a new master, copy identity
-tokens, or replay the old mailbox batch. A user-approved master assignment is
-the only basis for the `master` role; otherwise the peer remains a peer.
+run `collab context` once from the new live runtime. The daemon reconciles the
+durable peer identity from proven anchors. Do not reuse a stale endpoint,
+register a new master, copy identity tokens, or replay the old mailbox batch. A
+user-approved master assignment is the only basis for the `master` role;
+otherwise the peer remains a peer.
 
 If any identity, scope, parent, or capability differs from the snapshot, stop
-before messaging. Record `identity_mismatch` and require an explicit
-operator/master repair decision.
+before messaging. Record `identity_mismatch` and require an explicit migration
+owner or user decision before continuing.
 
 ## Verify
 
@@ -336,7 +347,7 @@ does not imply the next.
 2. **Durability:** journal, mailbox, tasks, workers, leases, and last durable
    IDs are continuous with the snapshot, apart from explicitly recorded
    migration events. Any unexplained count or ID loss fails the gate.
-3. **Identity:** each rebound peer has a confirmed durable identity, exact
+3. **Identity:** each reconciled peer has a confirmed durable identity, exact
    cwd/project scope, role, and live bidirectional App Server route.
 4. **Communication:** send one unique migration marker to an authorized
    registered peer and require separate evidence for durable journal
@@ -380,8 +391,8 @@ Use this contract at every phase:
 | incomplete snapshot or count/hash mismatch | keep current state; repair snapshot inputs or escalate | freeze with incomplete truth or overwrite the snapshot |
 | lease/owner conflict | preserve both owners and task IDs; ask the migration owner to resolve | steal, force-close, or invent an owner |
 | candidate/version/hash mismatch | stop before install; report expected and observed values | install “close enough” or use the old binary silently |
-| restart timeout or ambiguous PID/socket | leave lifecycle state explicit; inspect once through the official command | send/rebind, start a second daemon, or kill by process name |
-| identity/scope mismatch | stop all messaging and goal operations; perform authenticated rebind or escalate | copy tokens, guess a session binding, or promote a peer |
+| restart timeout or ambiguous PID/socket | leave lifecycle state explicit; inspect once through the official command | send, run another identity command, start a second daemon, or kill by process name |
+| identity/scope mismatch | stop all messaging and goal operations; use `collab context` once or escalate to the migration owner | copy tokens, guess a session binding, or promote a peer |
 | partial reset/migration result | preserve transaction ID and files; use the canonical recovery path | manually finish deletion or run a second reset |
 | communication marker missing reply | classify the failing layer and keep the route unverified | treat durable send or notification as peer consumption |
 

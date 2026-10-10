@@ -1,0 +1,20 @@
+{
+  "branch": "codex/appsdk-fresh-reset-humanagent-20261010",
+  "created_at": "2026-10-10T11:38:09.557293+00:00",
+  "mode": "fresh_init",
+  "preserved": [
+    "business_source",
+    "runtime_data",
+    "active",
+    "protected",
+    "user_requirements"
+  ],
+  "removed": [
+    ".appsdk",
+    ".appsdk-control",
+    "generated"
+  ],
+  "reset_id": "fresh-init-27853-1791632289511664000",
+  "schema_version": 1,
+  "transaction_id": "fresh-init-27853-1791632289511664000"
+}

@@ -1,16 +1,6 @@
 {
-  "schema_version": 1,
   "modules": [
     {
-      "module_id": "humanagent-governance",
-      "status": "active",
-      "owner": "humanagent-governance",
-      "owned_paths": [
-        ".appsdk/**",
-        ".appsdk-prepare.json",
-        ".gitignore",
-        "contracts/**"
-      ],
       "forbidden_paths": [
         "AGENTS.md",
         "packages/**",
@@ -18,6 +8,15 @@
         "scripts/**",
         "docs/**"
       ],
+      "module_id": "humanagent-governance",
+      "owned_paths": [
+        ".appsdk/**",
+        ".appsdk-prepare.json",
+        ".gitignore",
+        "contracts/**"
+      ],
+      "owner": "humanagent-governance",
+      "status": "active",
       "verification_gates": [
         "contract_valid",
         "sdk_lock_integrity",
@@ -26,16 +25,16 @@
       ]
     },
     {
-      "module_id": "app",
-      "status": "active",
-      "owner": "app",
-      "owned_paths": [
-        "packages/app/**"
-      ],
       "forbidden_paths": [
         ".appsdk/**",
         "contracts/**"
       ],
+      "module_id": "app",
+      "owned_paths": [
+        "packages/app/**"
+      ],
+      "owner": "app",
+      "status": "active",
       "verification_gates": [
         "contract_valid",
         "module_dependency_freshness",
@@ -43,5 +42,6 @@
         "fix_lifecycle_graph"
       ]
     }
-  ]
+  ],
+  "schema_version": 1
 }

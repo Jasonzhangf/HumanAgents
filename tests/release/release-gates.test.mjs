@@ -52,10 +52,11 @@ test('installed promotion schema requires the canonical collab live closure gate
 
   const schema = JSON.parse(installedBytes);
   assert.equal(typeof schema.properties.collab_live_closure_record_id?.type, 'string');
+  assert.ok(!schema.required?.includes('collab_live_closure_record_id'));
   const closureCondition = schema.allOf?.find((entry) => (
-    entry.if?.properties?.required_gate_results?.contains?.properties?.gate_id?.const === 'collab_live_closure'
+    entry.if?.required?.includes('collaboration_record_id')
   ));
-  assert.ok(closureCondition, 'promotion schema must condition on the collab_live_closure gate');
+  assert.ok(closureCondition, 'promotion schema must condition on collaboration_record_id');
   assert.deepEqual(closureCondition.then?.required, ['collab_live_closure_record_id']);
 
   const resources = await readJson('.appsdk/sdk-resources.json');
@@ -68,24 +69,38 @@ test('installed promotion schema requires the canonical collab live closure gate
   assert.equal(resource.digest, fileDigest(installedBytes));
 });
 
-test('migration target digests bind installed bundle bytes and verifier maps', async () => {
-  const record = await readJson('.appsdk/migrations/0.1.6-to-0.1.7/record.json');
-  const canonicalManifest = await readJson('.appsdk/contracts/migrations/sdk-0.1.6-to-0.1.7.json');
-  const canonicalMaps = new Map(canonicalManifest.maps.map((entry) => [entry.name, entry]));
+test('fresh AppSDK reset preserves current bundle and canonical map integrity', async () => {
+  const resetRecord = await readJson('.appsdk/records/reset-governance-record.json');
+  assert.equal(resetRecord.mode, 'fresh_init');
 
-  for (const entry of record.maps) {
-    const canonical = canonicalMaps.get(entry.name);
-    assert.ok(canonical, `missing canonical migration entry for ${entry.name}`);
-    const installedBundleDigest = fileDigest(await readFile(
-      new URL(`.appsdk/contracts/maps/${entry.name}`, repositoryRoot),
+  const lock = await readJson('.appsdk/sdk.lock');
+  const project = await readJson('.appsdk/project.json');
+  const manifest = await readJson('.appsdk/contracts/sdk-bundle.manifest.json');
+  const resources = await readJson('.appsdk/sdk-resources.json');
+  const currentVersion = lock.version;
+  assert.equal(project.sdk.version, currentVersion);
+  assert.equal(manifest.version, currentVersion);
+  assert.equal(resources.version, currentVersion);
+  assert.equal(lock.bundle_digest, resources.bundle_digest);
+  assert.equal(lock.bundle_manifest_digest, resources.manifest_digest);
+
+  for (const name of [
+    'resource-map.json',
+    'function-map.json',
+    'mainline-call-map.json',
+    'verification-map.json',
+  ]) {
+    const bundleBytes = await readFile(new URL(`.appsdk/contracts/maps/${name}`, repositoryRoot));
+    const installedBytes = await readFile(new URL(`.appsdk/maps/${name}`, repositoryRoot));
+    assert.deepEqual(installedBytes, bundleBytes, `${name} must match the current bundle map`);
+
+    const resource = resources.resources.find((entry) => (
+      entry.class === 'contracts'
+      && entry.source === `contracts/maps/${name}`
     ));
-    const verifierMapDigest = fileDigest(await readFile(
-      new URL(`.appsdk/maps/${entry.name}`, repositoryRoot),
-    ));
-    assert.equal(entry.target_digest, installedBundleDigest);
-    assert.equal(entry.target_digest, verifierMapDigest);
-    assert.equal(entry.canonical_target_digest, canonical.target_digest);
-    assert.equal(entry.canonical_target_digest, entry.target_digest);
+    assert.ok(resource, `missing bundle resource for ${name}`);
+    assert.equal(resource.path, `.appsdk/contracts/maps/${name}`);
+    assert.equal(resource.digest, fileDigest(bundleBytes));
   }
 });
 

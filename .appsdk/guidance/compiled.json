@@ -1,8 +1,8 @@
 {
   "enforcement": "advisory",
   "harness": "appsdk-development-process-control",
-  "manifest_hash": "sha256:c5700d557e90d8f5bdb3cadec2a260446702771b228f1799e7cc11c9fb7ae2b1",
-  "project_contract_digest": "sha256:ce1f2098d96edefc0ad587af581eca334919864e66e5ed4b85a2ae8433174ed7",
+  "manifest_hash": "sha256:98ea19f72c95aaf2f0d3ea6c63c1588d6738699a83ee58b47c7d1f8fc728195f",
+  "project_contract_digest": "sha256:e963dec52631c9f6c4644053fba9ff7abec6874d760a9f32e1f797a9ea36363c",
   "rules": [
     {
       "description": "Read only rule sources declared by the project contract.",
@@ -88,7 +88,7 @@
   "schema_version": 1,
   "sources": [
     {
-      "digest": "sha256:936e1cb60b862663317a1b3781eca2d7b7d3d08f45bd52cb828dc356f4a7e0f0",
+      "digest": "sha256:8bb248c7f844da7570c33302e9c138897594299ca57e06b75f3b6cd02b1341fa",
       "kind": "agents",
       "path": "AGENTS.md",
       "precedence": 100,
@@ -97,9 +97,9 @@
       "source_id": "project-agents"
     },
     {
-      "contract_digest": "sha256:cfb18bf5cee0f67b525114eaad32e52826047c1c47a13b7b80c194b015d591ef",
+      "contract_digest": "sha256:565eb018676581216e97017506401734c10e60244fe3def4d7dc3fe64c9252c3",
       "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
-      "digest": "sha256:3db5406d07c093d42cde78133da17dfcb4aa96ff1e51eaca216b42a83128a460",
+      "digest": "sha256:fea5be938055d2a41a921cff25dfcf154a7df645f747c4470e38e57ab7dce91c",
       "kind": "skill",
       "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
       "precedence": 200,
@@ -694,6 +694,84 @@
         }
       ],
       "objective": "Prove the candidate through its real deployed entrypoint."
+    },
+    {
+      "domain": "communication-recovery",
+      "edges": [
+        {
+          "from": "preserve_error",
+          "to": "inspect_state"
+        },
+        {
+          "from": "inspect_state",
+          "to": "recover_route"
+        },
+        {
+          "from": "recover_route",
+          "to": "verify_route"
+        },
+        {
+          "from": "verify_route",
+          "to": "replay_native"
+        },
+        {
+          "from": "replay_native",
+          "to": "consume_receipt"
+        }
+      ],
+      "entry_node": "preserve_error",
+      "nodes": [
+        {
+          "evidence": [
+            "communication-failure-record"
+          ],
+          "instruction": "Persist the exact error, durable IDs, source commit, installed binary, daemon PID/socket, and current task/bug binding; do not classify ACK, notification acceptance, health, or timeout as delivery.",
+          "node_id": "preserve_error",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "communication-state"
+          ],
+          "instruction": "Run `collab context` once and read the returned identity, route, daemon, task, inbox, and authority state. If the daemon is explicitly down or context returns a runtime error, preserve the exact error and stop; daemon maintenance is human-authorized.",
+          "node_id": "inspect_state",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "recovery-receipt"
+          ],
+          "instruction": "If context returns `required_fields`, supply only those real facts once with `collab context --provide '<JSON>'`. The supplement may contain only requested `session_id`, `thread_id`, `endpoint`, or `namespace` facts; it never supplies a worker, approval, token, route, or binding. The daemon owns identity creation, selection, recovery, registration, route publication, and lease restoration. Do not choose or hunt a worker and do not run a separate recovery command.",
+          "node_id": "recover_route",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "recovered-route"
+          ],
+          "instruction": "Use the snapshot returned by context or its one factual supplement. Continue only when it is registered and the target route is live; otherwise preserve the exact failure and stop.",
+          "node_id": "verify_route",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "native-target-result"
+          ],
+          "instruction": "Replay the same native target through the installed binary and record the target result item; queue acceptance or a daemon health response alone is insufficient.",
+          "node_id": "replay_native",
+          "owner": "project"
+        },
+        {
+          "evidence": [
+            "durable-receipt",
+            "issue-update"
+          ],
+          "instruction": "Consume the durable receipt for the target result through the canonical receive/consume operation; read-only inspection alone does not close. Update the bound bug or feature record and close only when the result and receipt evidence are present.",
+          "node_id": "consume_receipt",
+          "owner": "project"
+        }
+      ],
+      "objective": "Restore communication after an exact route, identity, daemon, or transport failure and prove the original native path again."
     },
     {
       "domain": "integration",

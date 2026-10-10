@@ -1,8 +1,33 @@
 # Review and Delivery
 
 Apply this runtime lifecycle when runtime delivery is in scope. Documentation
-and rule edits use their relevant checks and review; they do not invent a
-runtime deployment, Active artifact or freeze ceremony.
+and rule edits use targeted checks; they do not invent a runtime deployment,
+Active artifact or freeze ceremony.
+
+## Authoritative requirement review packet
+
+Every design or architecture review that consumes project requirements uses
+[authoritative-review-template.md](authoritative-review-template.md). The
+dispatch must provide or clearly reference:
+
+- the project's authoritative requirement source, owner, exact read path, and
+  effective version;
+- the user original text, acceptance criteria, applicable scope, and any
+  explicit user change instruction with its prior version;
+- the exact candidate, base, review stage, allowed/forbidden paths, and current
+  stage evidence; and
+- the existing AppSDK EvidenceRecord and ReviewRecord references and the
+  backend-supplied review output schema.
+
+The executing agent fills only observed project facts and evidence references.
+It must not replace the source with a plan or author summary, edit the template
+for one task, or create an authorization. The independent reviewer reads the
+source and current version, compares the prior version when a change is
+claimed, and records each applicable item-to-design, item-to-implementation,
+and item-to-evidence mapping in the existing backend fields. Missing required
+sources, stale versions, unauthorized requirement changes, reduced acceptance,
+and candidate/scope mismatches block the review. Do not create a second review
+schema or a second requirement store.
 
 ## Candidate to review
 
@@ -50,8 +75,10 @@ they affect changed scope, safety, ownership, evidence truth, or required
 delivery.
 
 Any source, test, build config, environment, artifact, scope, owner, or required
-rule change invalidates affected evidence. Revise plan, rerun affected gates,
-then review again.
+rule change invalidates affected evidence. Refresh only affected evidence;
+revise the plan only when goal, scope, acceptance, key approach, or dependencies
+materially change. Follow the host contract for review triggers and finding
+re-checks; internal progress does not dispatch another review.
 
 ## Review to mainline
 

@@ -13,13 +13,19 @@ requirements + acceptance
 ```
 
 `init` is idempotent. It fills missing governance resources and preserves
-business files. In a live Codex App Server Agent it also invokes official
-`collab init` once; Collab starts/reuses its daemon, evaluates the available
-App Server capability for the current Codex sessionID, registers the current peer
-through the server-selected transport, and arms the default finite
-`direct-message` subscription. Do not run `collab init`, `collab whoami`, or
-any other registration command afterward; read `collab context` once. Use
-`new` only for an empty destination.
+business files. AppSDK project initialization remains its own owner and may
+invoke the daemon context internally when a live Codex App Server sessionID
+binding exists. The agent must not rerun AppSDK initialization or run another
+identity command to repair pending Collab. For agent-facing Collab bootstrap,
+run `collab context` once. `registered: true` ends bootstrap. If the snapshot
+returns `required_fields`, supply only those real facts once with
+`collab context --provide '<JSON>'`. The supplement may contain only requested
+`session_id`, `thread_id`, `endpoint`, or `namespace` facts; it never supplies
+a worker, approval, token, route, or binding. The daemon owns identity
+creation, selection, recovery, registration, route publication, and lease
+restoration. If AppSDK reports Collab pending or context explicitly reports
+daemon DOWN or a runtime error, preserve the exact result and stop; daemon
+maintenance is human-authorized. Use `new` only for an empty destination.
 
 `appsdk prepare` is a hard gate. First invocation writes `.appsdk-prepare.json`
 with `status: "draft"`. `appsdk init` rejects an unconfirmed preparation with
@@ -67,21 +73,22 @@ this ordinary new-project path. Use
 and keep AppSDK and Collab reset/migration in separate transactions.
 
 AppSDK preserves the launching environment and does not pass a project path to
-Collab. `collab init` resolves project scope from the exact process cwd.
-Without a live registered App Server transport, AppSDK initializes governance
-and reports Collab pending because no peer can be registered; it never
-fabricates subscription state.
+Collab. The daemon resolves project scope from the exact process cwd. Without a
+live registered App Server transport, AppSDK initializes governance and
+reports Collab pending because no peer can be registered; it never fabricates
+subscription state.
 
-Collab initialization errors are explicit warnings for AppSDK initialization.
-Automatic multi-worker registration and task/file coordination remain enabled;
-shared operations wait for reliable ownership while independent work continues.
+Collab bootstrap errors from AppSDK's internal context invocation are explicit
+warnings for AppSDK initialization. Automatic multi-worker registration and
+task/file coordination remain enabled; shared operations wait for reliable
+ownership while independent work continues.
 
 ### Master and ordinary peer bootstrap
 
 For a project that will run multiple agents, initialize the AppSDK governance
-root first, then register the current peer and explicitly assign the role.
-Registration and wake bind the current Codex sessionID to the live App Server
-native thread.
+root first, then run one `collab context`. Through that invocation the daemon
+registers/establishes the current peer and its lease; role assignment is
+human-approved and separate.
 
 Master initialization, after user approval for the exact project and peer:
 
@@ -93,6 +100,9 @@ appsdk init .
 appsdk guide status
 appsdk verify
 collab context
+# if required_fields are present, provide only those facts once
+# only when the context snapshot has no live master and the user approved
+# this exact peer:
 collab master promote --approval "<user approval text>"
 collab context
 ```
@@ -108,16 +118,13 @@ Ordinary peer initialization, after the project already has
 ```bash
 cd /abs/path/project
 collab context
-# if the project is unregistered:
-appsdk init .
-collab context
+# if required_fields are present, provide only those facts once
 ```
 
-The peer must observe its own identity, liveness, presence, transport and
-worker role. Do not run a second `collab init`, do not promote itself, do not
-register a long-horizon goal, and do not fabricate a worker role from
-`appsdk init` output. Execution work requires the same `appsdk bug intake`
-contract and returned `issue_id`; read-only conversation does not.
+The peer must observe its own identity, liveness, presence, transport and peer
+role. Do not run a second identity bootstrap, do not promote itself, do
+not register a long-horizon goal, and do not fabricate a worker role from
+AppSDK initialization output.
 
 Long-horizon master scheduling is a separate, master-only step. Create the
 plan file first, then register and verify:
@@ -156,15 +163,17 @@ Protected state.
 
 ```text
 appsdk init
--> appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>
--> Agent reads current AGENTS/Skills/Guidance first
--> Agent reads the versioned standard template reference
--> compare retained rules and useful differences
--> GuidanceSetupProposal
--> explicit user approval
+-> Agent reads effective upstream rules, project AGENTS/Skills, test commands,
+   and CI/hook entrypoints
+-> when Guidance is selected:
+   appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>
+   compare retained rules and useful differences
+   GuidanceSetupProposal
+   reuse existing session authorization; approve only uncovered differences
+-> otherwise: perform the same audit directly
 -> latest origin/main clean owner worktree
--> apply only approved changes
--> appsdk guide compile
+-> apply authorized changes
+-> when Guidance is selected: appsdk guide compile
 -> appsdk verify
 ```
 
@@ -173,6 +182,8 @@ to `.appsdk/project.json#/guidance/rule_sources`, automatically overwrite
 project rules, or reset valid governance merely to adopt a newer template.
 The proposal records retained project rules, recommended changes, and declined
 template items so choosing not to adopt an item is explicit and valid.
+Guidance is optional for this audit. Repeated initialization and unrelated
+version refreshes do not trigger a whole-project rule audit.
 Missing or locally removed reference material does not fail ordinary
 `appsdk verify`; rerun `appsdk init` only when a fresh comparison is wanted.
 
@@ -196,7 +207,7 @@ appsdk init
 -> Agent reads returned AGENTS and local Skill candidates
 -> Agent asks only unresolved questions
 -> Agent presents GuidanceSetupProposal
--> explicit user approval
+-> reuse session authorization; approve only uncovered differences
 -> clean owner worktree updates AGENTS/local Skill/machine contract/source declaration
 -> appsdk guide compile
 -> appsdk verify
@@ -277,11 +288,12 @@ The replacement order is:
    install, restart, or delivery evidence.
 
 If a legacy user-local Collab binary pair is proven by its own version
-response, remove only that verified pair after the canonical pair is
-installed. Never remove `~/.appsdk`, `~/.collab`, project `.agent-collab/`, or
-business source as part of binary cleanup.
+response, removal requires explicit user authorization naming the exact binary
+paths. After the canonical pair is installed, remove only those authorized,
+verified paths. Never remove `~/.appsdk`, `~/.collab`, project
+`.agent-collab/`, or business source as part of binary cleanup.
 
-The lower-level `appsdk reset-governance --discard-legacy` command remains
+The lower-level `appsdk reset-governance <project> --discard-legacy` command remains
 available and uses the same transactional reset owner. Neither command
 authorizes manual deletion or hand-editing of version/hash/ReviewRecord, and
 neither permits two active governance roots. If old Active/Protected artifacts
@@ -371,7 +383,7 @@ collab migrate apply
 # install the reviewed Collab binary, then:
 collab down
 collab up
-collab worker recover
+collab context
 collab migrate verify
 ```
 
@@ -387,9 +399,8 @@ instead of preserving it, use the single offline reset owner:
 
 ```bash
 collab down
-collab reset --discard-legacy --approval "<explicit user authorization>"
+collab reset --project --discard-legacy --approval "<explicit user authorization>"
 collab up
-collab init
 collab context
 ```
 
@@ -412,8 +423,8 @@ start from the current SDK baseline, the preferred single entry is:
 ```bash
 cd /abs/path/project
 git worktree add -b codex/governance-reset-<slug> \
-  playground/governance-reset-<slug> origin/main
-cd playground/governance-reset-<slug>
+  /Volumes/Intel/playground/<project-key>/<task-slug> origin/main
+cd /Volumes/Intel/playground/<project-key>/<task-slug>
 appsdk init "$PWD" --fresh --discard-legacy
 appsdk guide init --task governance-reset --mode bootstrap --module <module-id>
 appsdk guide compile
@@ -421,10 +432,13 @@ appsdk verify
 appsdk compile
 ```
 
+`<project-key>` and `<task-slug>` come from the current project and task. Do not
+reuse another task's worktree path.
+
 `appsdk init --fresh --discard-legacy` requires an existing
 `.appsdk/project.json`, a clean non-`main`/`master` worktree, and the explicit
 discard confirmation. It uses the same transactional reset owner as
-`appsdk reset-governance --discard-legacy`, but combines reset with current
+`appsdk reset-governance <project> --discard-legacy`, but combines reset with current
 contract rebuild. It removes the old AppSDK control plane, `.appsdk-control/`,
 and declared rebuildable generated roots; it preserves business source,
 runtime data, `active/`, and `protected/` by default. It must not remove

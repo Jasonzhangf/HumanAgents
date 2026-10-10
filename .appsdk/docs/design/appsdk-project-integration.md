@@ -191,6 +191,27 @@ custom map must still match its recorded target digest. A repeated pin uses the
 same previous-bundle witness; missing witnesses, malformed digests, altered
 snapshots and changed live maps fail explicitly.
 
+## Optional black-box test governance
+
+AppSDK is the only owner of optional black-box test governance selection,
+scope confirmation, scenario contracts, trusted runner references, effect
+authorization, result evidence binding and final object admission. Missing or
+`mode: "off"` test governance is compatible with the current project schema
+and does not make `compile` or ordinary `verify` depend on a test manifest.
+When `mode` is `selected`, the project contract requires a committed manifest
+path under `contracts/test-governance.schema.json`, and selected scenario
+results live under
+`.appsdk/records/test-scenario-results/<object_id>/<scenario_id>.json`.
+
+`appsdk verify --test-admission` lists selected object status without executing
+tests. `appsdk verify --admission` applies the selected-object test-admission
+gate; ordinary `appsdk verify` reports `not_selected`, `passed`, or `blocked`
+without requiring tests to pass. `compile` intentionally does not load the
+optional test manifest. Governance records and result records never include
+executable shell strings; scenarios are bound only to trusted `runner_ref`
+entries. DAGpipe CLI remains graph-only and is not a substitute for AppSDK test
+evidence or admission. Existing module blackbox gates are unchanged.
+
 ## Runtime boundary
 
 Runtime may consume only the compiled manifest and verified Active artifact. Runtime must not scan `.appsdk-control/`, Playground, Protected source, or arbitrary instruction files to reconstruct capability.
@@ -294,7 +315,7 @@ runtime、`active/`、`protected/` 与人类文档继续保留，随后重建当
 fresh 初始化不会复制旧 migration witness、reset receipt、PASS、hash、review 或
 lifecycle record；新的 `verify`、`guide compile`、`compile` 和下游 candidate evidence
 必须从当前版本重新产生。重复执行仍然是一次新的、明确授权的 reset，普通 `init` 和
-`reset-governance --discard-legacy` 的既有幂等语义不变。
+`reset-governance <project> --discard-legacy` 的既有幂等语义不变。
 
 对已有工作区，confirmed preparation 后必须先进入旧状态迁移预检：
 

@@ -166,16 +166,19 @@
       "stage": "source_implemented"
     },
     {
-      "module_id": "app",
-      "stage": "source_implemented",
-      "owned_paths": [
-        "packages/app/**"
-      ],
-      "source_owner": "app",
       "active_artifact": "active/lib/app/**",
-      "generated_outputs": [
-        "generated/modules/app/**"
+      "artifact_paths": [
+        "index.js",
+        "index.d.ts"
       ],
+      "build": {
+        "args": [
+          "-c",
+          "pnpm run build:app && mkdir -p generated/modules/app/lib && cp dist/app/app/src/index.js dist/app/app/src/index.d.ts generated/modules/app/lib/"
+        ],
+        "program": "sh",
+        "working_directory": "."
+      },
       "contract_paths": [
         "package.json",
         "pnpm-lock.yaml",
@@ -196,27 +199,21 @@
         "scripts/copy-template-assets.mjs"
       ],
       "dependency_modules": [],
-      "build": {
-        "program": "sh",
-        "args": [
-          "-c",
-          "pnpm run build:app && mkdir -p generated/modules/app/lib && cp dist/app/app/src/index.js dist/app/app/src/index.d.ts generated/modules/app/lib/"
-        ],
-        "working_directory": "."
-      },
-      "artifact_paths": [
-        "index.js",
-        "index.d.ts"
+      "generated_outputs": [
+        "generated/modules/app/**"
+      ],
+      "module_id": "app",
+      "owned_paths": [
+        "packages/app/**"
       ],
       "regression": {
-        "required_before_freeze": true,
-        "suite_id": "humanagent-app-regression",
+        "allow_skipped": false,
         "command": {
-          "program": "pnpm",
           "args": [
             "run",
             "test:app"
           ],
+          "program": "pnpm",
           "working_directory": "."
         },
         "input_paths": [
@@ -237,7 +234,6 @@
           "tests/app/**"
         ],
         "minimum_test_count": 1,
-        "allow_skipped": false,
         "ordinary_mode_after_freeze": "disabled",
         "reenable_on": [
           "source_change",
@@ -245,8 +241,12 @@
           "public_api_change",
           "artifact_change",
           "dependency_change"
-        ]
-      }
+        ],
+        "required_before_freeze": true,
+        "suite_id": "humanagent-app-regression"
+      },
+      "source_owner": "app",
+      "stage": "source_implemented"
     }
   ],
   "project_id": "humanagent",
@@ -255,6 +255,6 @@
     "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json",
     "name": "appsdk",
     "resource_record": ".appsdk/sdk-resources.json",
-    "version": "0.1.7"
+    "version": "0.1.0014"
   }
 }
