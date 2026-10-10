@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["**/*.ts", "index.ts"]
+  "include": ["**/*.ts", "index.ts", "../context-events/src/node-modules.d.ts"]
 }

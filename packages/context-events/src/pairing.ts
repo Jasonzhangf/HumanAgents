@@ -16,6 +16,7 @@
  */
 
 import { ContextEventError } from './errors.js';
+import { normalizeRuntimeTaskEvents } from './normalize.js';
 import {
   closedStatusOf,
   isCloserType,
@@ -27,7 +28,209 @@ import type {
   CanonicalContextEvent,
   ContextEventStatus,
   ContextEventType,
+  RuntimeNormalizeContext,
+  RuntimeTaskEventLike,
+  SemanticObservation,
+  SemanticObservationInput,
+  SemanticPairingResult,
 } from './types.js';
+import type { CoverageIssue, PairedExecutionGroup, SemanticEventRef } from '../../contracts/src/semantic-observation.js';
+import type { ScopeRef } from '../../contracts/src/index.js';
+import { validateSemanticObservationEnvelope } from '../../contracts/src/semantic-observation.js';
+import { validateCanonicalContextEvent } from './validation.js';
+
+/** Reduce durable runtime facts into operation/request/invocation views. */
+export function pairRuntimeSemantics(
+  events: readonly CanonicalContextEvent[],
+  sources: readonly RuntimeTaskEventLike[],
+  context?: RuntimeNormalizeContext,
+  priorCoverage: readonly CoverageIssue[] = [],
+  conflictedSourceIds: readonly string[] = [],
+): SemanticPairingResult {
+  if (context === undefined) return { events: applyPairingOutcome(events), pairing: [], coverageIssues: [] };
+  const sourceById = new Map(sources.map((source) => [source.eventId, source]));
+  const conflicts = new Set([
+    ...conflictedSourceIds,
+    ...priorCoverage.filter((issue) => issue.reason === 'duplicate-conflict')
+      .map((issue) => issue.eventRef?.sourceId).filter((id): id is string => id !== undefined),
+  ]);
+  const toolIdsByCall = new Map<string, Set<string>>();
+  for (const source of sources) {
+    if (!isToolSource(source) || !validOperationIdentity(source) || !validIdentity(source.requestId) || !validIdentity(source.callId) || !validIdentity(source.toolId)) continue;
+    const key = JSON.stringify([source.taskId.value, source.operationId, source.executionEpoch, source.requestId, source.callId]);
+    const ids = toolIdsByCall.get(key) ?? new Set<string>();
+    ids.add(source.toolId);
+    toolIdsByCall.set(key, ids);
+  }
+  const toolConflictSources = new Set(sources.filter((source) => {
+    if (!validOperationIdentity(source) || !validIdentity(source.requestId) || !validIdentity(source.callId) || !validIdentity(source.toolId)) return false;
+    const key = JSON.stringify([source.taskId.value, source.operationId, source.executionEpoch, source.requestId, source.callId]);
+    return (toolIdsByCall.get(key)?.size ?? 0) > 1;
+  }).map((source) => source.eventId));
+  const groupBuckets = new Map<string, { kind: PairedExecutionGroup['kind']; scope: ScopeRef; epoch: number; requestId?: string; callId?: string; toolId?: string; members: RuntimeTaskEventLike[] }>();
+  const getBucket = (kind: PairedExecutionGroup['kind'], source: RuntimeTaskEventLike, requestId?: string, callId?: string, toolId?: string) => {
+    const scope = runtimeScopeForPairing(context?.scope, source);
+    const key = JSON.stringify([kind, scope.organId.value, scope.taskId?.value, scope.operationId?.value, source.executionEpoch, requestId, callId, toolId]);
+    let bucket = groupBuckets.get(key);
+    if (bucket === undefined) {
+      bucket = { kind, scope, epoch: source.executionEpoch, ...(requestId === undefined ? {} : { requestId }), ...(callId === undefined ? {} : { callId }), ...(toolId === undefined ? {} : { toolId }), members: [] };
+      groupBuckets.set(key, bucket);
+    }
+    bucket.members.push(source);
+    return bucket;
+  };
+  for (const source of sources) {
+    if (!validOperationIdentity(source)) continue;
+    getBucket('operation', source);
+    if (validIdentity(source.requestId)) getBucket('request', source, source.requestId);
+    if (isToolSource(source)) {
+      if (!validIdentity(source.requestId) || !validIdentity(source.callId) || !validIdentity(source.toolId)) continue;
+      getBucket('invocation', source, source.requestId, source.callId, source.toolId);
+    }
+  }
+  const coverageIssues: CoverageIssue[] = [];
+  const groups: PairedExecutionGroup[] = [];
+  const eligible = (source: RuntimeTaskEventLike, kind: PairedExecutionGroup['kind']) => {
+    if (kind === 'operation') return true;
+    if (kind === 'request') return validIdentity(source.requestId)
+      && (source.kind === 'execution.terminal' ? source.terminalPhase === 'provider' : REQUEST_KINDS.has(source.kind));
+    return isToolSource(source) && validIdentity(source.requestId) && validIdentity(source.callId) && validIdentity(source.toolId);
+  };
+  for (const [key, bucket] of groupBuckets) {
+    const { kind, members } = bucket;
+    const memberConflicted = members.some((source) => conflicts.has(source.eventId)
+      || (kind === 'invocation' && toolConflictSources.has(source.eventId)));
+    const legalStateSources = members.filter((source) => kind === 'operation'
+      ? source.kind === 'execution.terminal' && source.terminalPhase === 'final'
+      : kind === 'request'
+        ? source.kind === 'execution.terminal' && source.terminalPhase === 'provider'
+        : source.kind === 'provider.tool' || source.kind === 'provider.tool-result');
+    const state = memberConflicted ? 'unknown' : reduceState(kind, legalStateSources);
+    const eventRefs: SemanticEventRef[] = [];
+    for (const source of members) {
+      if (!eligible(source, kind)) continue;
+      const event = events.find((candidate) => candidate.sourceId === source.eventId);
+      if (event !== undefined) eventRefs.push({ eventId: event.eventId, sourceId: source.eventId, scope: event.scope });
+    }
+    groups.push({
+      groupId: `${kind}:${key}`,
+      kind,
+      scope: bucket.scope,
+      executionEpoch: bucket.epoch,
+      ...(bucket.requestId === undefined ? {} : { requestId: bucket.requestId }),
+      ...(bucket.callId === undefined ? {} : { callId: bucket.callId }),
+      ...(bucket.toolId === undefined ? {} : { toolId: bucket.toolId }),
+      state,
+      eventRefs,
+    });
+    if (kind === 'invocation' && members.some((source) => toolConflictSources.has(source.eventId))) {
+      const source = members.find((member) => toolConflictSources.has(member.eventId))!;
+      coverageIssues.push(issueFor('duplicate-conflict', bucket.scope, source, events));
+    }
+    if (memberConflicted) continue;
+    if (kind === 'operation' && legalStateSources.length > 1) coverageIssues.push(issueFor('closer-conflict', bucket.scope, members[0], events));
+    if (kind === 'request' && legalStateSources.length > 1) coverageIssues.push(issueFor('closer-conflict', bucket.scope, members[0], events));
+    if (kind === 'invocation') {
+      const openers = legalStateSources.filter((source) => source.kind === 'provider.tool');
+      const results = legalStateSources.filter((source) => source.kind === 'provider.tool-result');
+      if (openers.length > 1) coverageIssues.push(issueFor('multi-opener', bucket.scope, openers[0], events));
+      if (openers.length === 0 && results.length > 0) coverageIssues.push(issueFor('opener-missing', bucket.scope, results[0], events));
+      if (results.length > 1) coverageIssues.push(issueFor('closer-conflict', bucket.scope, results[0], events));
+    }
+  }
+  for (const source of sources) {
+    if (isToolSource(source) && (!validIdentity(source.requestId) || !validIdentity(source.callId) || !validIdentity(source.toolId))) {
+      coverageIssues.push(issueFor('correlation-unavailable', runtimeScopeForPairing(context?.scope, source), source, events));
+    }
+  }
+  const canonicalBuckets = new Map<string, CanonicalContextEvent[]>();
+  for (const event of events) {
+    const source = sourceById.get(event.sourceId);
+    if (source === undefined) continue;
+    const scopeKey = JSON.stringify([event.scope.organId.value, event.scope.taskId?.value, event.scope.operationId?.value, source.executionEpoch]);
+    let key = scopeKey;
+    if (isToolSource(source)) {
+      key = validIdentity(source.requestId) && validIdentity(source.callId) && validIdentity(source.toolId)
+        ? JSON.stringify(['tool', scopeKey, source.requestId, source.callId, source.toolId])
+        : JSON.stringify(['unmatched', source.eventId]);
+    }
+    else if (source.kind === 'execution.terminal' && source.terminalPhase === 'provider') key = JSON.stringify(['provider-terminal', source.eventId]);
+    const bucket = canonicalBuckets.get(key);
+    if (bucket === undefined) canonicalBuckets.set(key, [event]);
+    else bucket.push(event);
+  }
+  const pairedById = new Map<string, CanonicalContextEvent>();
+  for (const bucket of canonicalBuckets.values()) {
+    for (const event of applyPairingOutcome(bucket)) pairedById.set(event.eventId, event);
+  }
+  const pairedEvents = events.map((event) => pairedById.get(event.eventId) ?? event);
+  return { events: pairedEvents, pairing: groups, coverageIssues };
+}
+
+const REQUEST_KINDS = new Set(['provider.tool', 'provider.tool-result', 'provider.error']);
+function validIdentity(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
+function validOperationIdentity(source: RuntimeTaskEventLike): boolean {
+  return validIdentity(source.eventId) && validIdentity(source.taskId?.value) && validIdentity(source.operationId)
+    && Number.isSafeInteger(source.executionEpoch) && source.executionEpoch > 0;
+}
+function isToolSource(source: RuntimeTaskEventLike): boolean { return source.kind === 'provider.tool' || source.kind === 'provider.tool-result'; }
+function runtimeScopeForPairing(root: ScopeRef | undefined, source: RuntimeTaskEventLike): ScopeRef {
+  if (root === undefined) throw new ContextEventError('runtime semantic pairing requires an authoritative organ scope');
+  return { organId: root.organId, taskId: source.taskId, operationId: { scope: 'operation', value: source.operationId } };
+}
+function reduceState(kind: PairedExecutionGroup['kind'], sources: readonly RuntimeTaskEventLike[]): PairedExecutionGroup['state'] {
+  if (kind === 'invocation') {
+    const openers = sources.filter((source) => source.kind === 'provider.tool');
+    const results = sources.filter((source) => source.kind === 'provider.tool-result');
+    if (openers.length !== 1 || results.length > 1) return openers.length === 0 && results.length === 0 ? 'open' : 'unknown';
+    if (results.length === 0) return 'open';
+    return invocationResultState(results[0]);
+  }
+  if (sources.length === 0) return 'open';
+  if (sources.length > 1) return 'unknown';
+  const source = sources[0];
+  return terminalGroupState(source);
+}
+function terminalGroupState(source: RuntimeTaskEventLike): PairedExecutionGroup['state'] {
+  switch (source.state) {
+    case 'succeeded': case 'failed': return 'closed';
+    case 'cancelled': case 'stopped': return 'cancelled';
+    case 'blocked': return 'blocked';
+    case 'waiting': return 'waiting';
+    default: return 'unknown';
+  }
+}
+function invocationResultState(source: RuntimeTaskEventLike): PairedExecutionGroup['state'] {
+  switch (source.status) {
+    case 'succeeded': case 'failed': return 'closed';
+    case 'cancelled': return 'cancelled';
+    case 'blocked': return 'blocked';
+    case 'unknown': return 'unknown';
+    default: return 'unknown';
+  }
+}
+function issueFor(reason: CoverageIssue['reason'], scope: ScopeRef, source: RuntimeTaskEventLike, events: readonly CanonicalContextEvent[]): CoverageIssue {
+  const event = events.find((candidate) => candidate.sourceId === source.eventId);
+  const evidence = source.evidenceRefs[0] ?? { evidenceId: { scope: 'evidence' as const, value: `runtime-${source.eventId.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 100)}` }, kind: 'execution' as const, source: 'context-events:runtime-task-event', locator: source.eventId, scope };
+  return { reason, scope, sourceRef: evidence, ...(event === undefined ? {} : { eventRef: { eventId: event.eventId, sourceId: source.eventId, scope: event.scope } }) };
+}
+
+export function buildSemanticObservation(input: SemanticObservationInput): SemanticObservation {
+  const normalized = normalizeRuntimeTaskEvents(input.events, { scope: input.scope });
+  const paired = pairRuntimeSemantics(normalized.events, normalized.sources, { scope: input.scope }, normalized.coverageIssues, normalized.conflictedSourceIds);
+  const envelope: SemanticObservation = {
+    scope: input.scope,
+    projectionVersion: input.projectionVersion,
+    sourceWatermark: input.sourceWatermark,
+    ...(input.publicCommitWatermark === undefined ? {} : { publicCommitWatermark: input.publicCommitWatermark }),
+    events: paired.events,
+    coverageIssues: [...normalized.coverageIssues, ...paired.coverageIssues],
+    pairing: paired.pairing,
+    capabilities: input.capabilities ?? [],
+  };
+  validateSemanticObservationEnvelope(envelope, validateCanonicalContextEvent);
+  return envelope;
+}
 
 export interface PairingIndex {
   /** 参与配对的打开事件，按 `eventId` 索引（关闭事件的 `relatedEventId` 在这里解析）。 */

@@ -126,6 +126,15 @@ export interface RuntimeTaskEvent {
   readonly arguments?: unknown;
   readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
   readonly error?: RuntimeTaskError;
+  /**
+   * Provider wire identity, when the provider reported one. This is diagnostic
+   * provenance only and never substitutes for the operation identity above.
+   */
+  readonly externalResponseId?: string;
+  /** Provider-reported response model, when the provider reported one. */
+  readonly responseModel?: string;
+  /** All provider-reported output refs, in provider order. */
+  readonly outputRefs?: readonly string[];
   readonly outputRef?: string;
   readonly outputDigest?: string;
   readonly executionFact?: ToolExecutionFact;
@@ -2467,6 +2476,7 @@ export class RuntimeTaskCoordinator {
           ...(event.toolResult.error === undefined ? {} : { error: providerErrorProjection(event.toolResult.error) }),
         }
         : undefined;
+    const outputRefs = event.outputRefs;
     this.pushEvent(
       record,
       operation,
@@ -2489,6 +2499,9 @@ export class RuntimeTaskCoordinator {
           ...(event.occurredAt === undefined ? {} : { occurredAt: event.occurredAt }),
         },
         tool: toolProjection,
+        ...(event.externalResponseId === undefined ? {} : { externalResponseId: event.externalResponseId }),
+        ...(event.responseModel === undefined ? {} : { responseModel: event.responseModel }),
+        ...(outputRefs === undefined ? {} : { outputRefs }),
       },
       event.kind === 'terminal' ? 'provider' : undefined,
     );
@@ -2731,6 +2744,9 @@ export class RuntimeTaskCoordinator {
         readonly outputDigest?: string;
         readonly executionFact?: ToolExecutionFact;
       };
+      readonly externalResponseId?: string;
+      readonly responseModel?: string;
+      readonly outputRefs?: readonly string[];
     },
     terminalPhase?: 'provider' | 'final',
   ): void {
@@ -2764,6 +2780,9 @@ export class RuntimeTaskCoordinator {
         ...(details.tool.outputDigest === undefined ? {} : { outputDigest: details.tool.outputDigest }),
         ...(details.tool.executionFact === undefined ? {} : { executionFact: details.tool.executionFact }),
       }),
+      ...(details?.externalResponseId === undefined ? {} : { externalResponseId: details.externalResponseId }),
+      ...(details?.responseModel === undefined ? {} : { responseModel: details.responseModel }),
+      ...(details?.outputRefs === undefined ? {} : { outputRefs: details.outputRefs }),
     };
     operation.events.push(event);
     record.events.push(event);
@@ -2779,7 +2798,24 @@ export class RuntimeTaskCoordinator {
   }
 
   private replayJournal(): void {
-    for (const record of this.journal?.replay() ?? []) {
+    let records: readonly RuntimeTaskJournalRecord[];
+    try {
+      records = this.journal?.replay() ?? [];
+    } catch (error) {
+      if (
+        error instanceof RuntimeTaskControlError
+        || (error !== null && typeof error === 'object' && 'code' in error)
+      ) {
+        throw error;
+      }
+      throw new RuntimeTaskControlError(
+        'journal.corrupt',
+        RUNTIME_OWNER,
+        error instanceof Error ? error.message : String(error),
+        'repair or discard the UI runtime journal before restarting',
+      );
+    }
+    for (const record of records) {
       switch (record.kind) {
         case 'task.created': {
           this.taskCounter = Math.max(this.taskCounter, record.taskCounter);
@@ -2824,7 +2860,19 @@ export class RuntimeTaskCoordinator {
         case 'operation.started': {
           this.operationCounter = Math.max(this.operationCounter, record.operationCounter);
           this.cycleCounter = Math.max(this.cycleCounter, record.cycleCounter);
-          const operation = this.operations.get(record.operationId.value) ?? {
+          const existing = this.operations.get(record.operationId.value);
+          if (
+            existing
+            && (existing.taskId.value !== record.taskId.value || existing.executionEpoch !== record.executionEpoch)
+          ) {
+            throw new RuntimeTaskControlError(
+              'journal.corrupt',
+              RUNTIME_OWNER,
+              `journal operation ${record.operationId.value} identity does not match its first start`,
+              'repair or discard the UI runtime journal before restarting',
+            );
+          }
+          const operation = existing ?? {
             operationId: record.operationId,
             taskId: record.taskId,
             executionEpoch: record.executionEpoch,
@@ -2847,7 +2895,11 @@ export class RuntimeTaskCoordinator {
               'repair or discard the UI runtime journal before restarting',
             );
           }
-          if (record.event.operationId !== record.operationId.value || record.event.taskId.value !== operation.taskId.value) {
+          if (
+            record.event.operationId !== record.operationId.value
+            || record.event.taskId.value !== operation.taskId.value
+            || record.event.executionEpoch !== operation.executionEpoch
+          ) {
             throw new RuntimeTaskControlError(
               'journal.corrupt',
               RUNTIME_OWNER,

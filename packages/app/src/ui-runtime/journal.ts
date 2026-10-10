@@ -29,6 +29,18 @@ import {
 // after a process restart without making the browser read raw runtime state.
 export type UiRuntimeJournalRecord = RuntimeTaskJournalRecord;
 
+interface JournalValidationContext {
+  readonly operationIdentities: Map<string, ToolExecutionFactOuterIdentity>;
+  readonly eventIdentities: Map<string, UiRuntimeJournalRecord>;
+}
+
+function createJournalValidationContext(): JournalValidationContext {
+  return {
+    operationIdentities: new Map(),
+    eventIdentities: new Map(),
+  };
+}
+
 function requireRecordString(record: Record<string, unknown>, key: string, filePath: string, line: number): string {
   const value = record[key];
   if (typeof value !== 'string' || !value.trim()) {
@@ -66,6 +78,19 @@ function requireOptionalRecordString(record: Record<string, unknown>, key: strin
   if (value === undefined) return;
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must be a non-empty string when present`);
+  }
+}
+
+function requireOptionalRecordStringArray(record: Record<string, unknown>, key: string, filePath: string, line: number): void {
+  const value = record[key];
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must be an array when present`);
+  }
+  for (const candidate of value) {
+    if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: ${key} must contain non-empty strings`);
+    }
   }
 }
 
@@ -128,6 +153,9 @@ function validateRuntimeEvent(value: unknown, filePath: string, line: number): v
   requireOptionalRecordString(event, 'requestId', filePath, line);
   requireOptionalRecordString(event, 'parentRequestId', filePath, line);
   requireOptionalRecordString(event, 'providerOccurredAt', filePath, line);
+  requireOptionalRecordString(event, 'externalResponseId', filePath, line);
+  requireOptionalRecordString(event, 'responseModel', filePath, line);
+  requireOptionalRecordStringArray(event, 'outputRefs', filePath, line);
   validateEvidenceRefs(event.evidenceRefs, filePath, line);
 }
 
@@ -135,8 +163,8 @@ function validateJournalRecord(
   value: unknown,
   filePath: string,
   line: number,
-  operationIdentities: Map<string, ToolExecutionFactOuterIdentity>,
-): UiRuntimeJournalRecord {
+  context: JournalValidationContext,
+): { readonly record: UiRuntimeJournalRecord; readonly duplicate: boolean } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`corrupt UI runtime journal ${filePath}:${line}: record must be an object`);
   }
@@ -149,7 +177,7 @@ function validateJournalRecord(
     requirePositiveInteger(record, 'directiveRevision', filePath, line);
     requireRecordString(record, 'createdAt', filePath, line);
     requirePositiveInteger(record, 'taskCounter', filePath, line);
-    return record as unknown as UiRuntimeJournalRecord;
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'task.updated') {
     requireScopedId(record, 'taskId', 'task', filePath, line);
@@ -157,12 +185,12 @@ function validateJournalRecord(
     requireRecordString(record, 'directive', filePath, line);
     requirePositiveInteger(record, 'directiveRevision', filePath, line);
     requireRecordString(record, 'updatedAt', filePath, line);
-    return record as unknown as UiRuntimeJournalRecord;
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'task.deleted') {
     requireScopedId(record, 'taskId', 'task', filePath, line);
     requireRecordString(record, 'deletedAt', filePath, line);
-    return record as unknown as UiRuntimeJournalRecord;
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'operation.started') {
     requireScopedId(record, 'operationId', 'operation', filePath, line);
@@ -183,20 +211,39 @@ function validateJournalRecord(
     }
     const operationId = requireRecordObject(record, 'operationId', filePath, line) as ToolExecutionFactOuterIdentity['operationId'];
     const taskId = record.taskId as ToolExecutionFactOuterIdentity['taskId'];
-    operationIdentities.set(operationId.value, {
-      taskId,
-      operationId,
-      executionEpoch: record.executionEpoch as number,
-    });
-    return record as unknown as UiRuntimeJournalRecord;
+    const existing = context.operationIdentities.get(operationId.value);
+    if (
+      existing
+      && (existing.taskId.value !== taskId.value || existing.executionEpoch !== record.executionEpoch)
+    ) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.started identity conflict for ${operationId.value}`);
+    }
+    if (!existing) {
+      context.operationIdentities.set(operationId.value, {
+        taskId,
+        operationId,
+        executionEpoch: record.executionEpoch as number,
+      });
+    }
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'operation.event') {
     requireScopedId(record, 'operationId', 'operation', filePath, line);
     validateRuntimeEvent(record.event, filePath, line);
     const eventRecord = record as Extract<UiRuntimeJournalRecord, { readonly kind: 'operation.event' }>;
-    const operationIdentity = operationIdentities.get(eventRecord.operationId.value);
+    const operationIdentity = context.operationIdentities.get(eventRecord.operationId.value);
     if (operationIdentity === undefined) {
       throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.event references unknown operation ${eventRecord.operationId.value}`);
+    }
+    if (
+      eventRecord.event.executionFact === undefined
+      && (
+        eventRecord.event.operationId !== eventRecord.operationId.value
+        || eventRecord.event.taskId.value !== operationIdentity.taskId.value
+        || eventRecord.event.executionEpoch !== operationIdentity.executionEpoch
+      )
+    ) {
+      throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.event identity does not match enclosing operation ${eventRecord.operationId.value}`);
     }
     try {
       validatePersistedToolExecutionFact(eventRecord.event, operationIdentity);
@@ -216,7 +263,16 @@ function validateJournalRecord(
       if (typeof taskError.retryable !== 'boolean') throw new Error(`corrupt UI runtime journal ${filePath}:${line}: error.retryable is invalid`);
       requireRecordString(taskError, 'nextAction', filePath, line);
     }
-    return record as unknown as UiRuntimeJournalRecord;
+    const identityKey = JSON.stringify([eventRecord.operationId.value, eventRecord.event.eventId]);
+    const duplicate = context.eventIdentities.get(identityKey);
+    if (duplicate) {
+      if (JSON.stringify(duplicate) !== JSON.stringify(eventRecord)) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${line}: operation.event identity conflict for ${eventRecord.event.eventId}`);
+      }
+      return { record: duplicate, duplicate: true };
+    }
+    context.eventIdentities.set(identityKey, eventRecord);
+    return { record: eventRecord, duplicate: false };
   }
   if (kind === 'explicit-brain.state') {
     const state = requireRecordObject(record, 'state', filePath, line);
@@ -253,7 +309,7 @@ function validateJournalRecord(
         }
       }
     }
-    return record as unknown as UiRuntimeJournalRecord;
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   if (kind === 'interaction.closure') {
     const closure = requireRecordObject(record, 'closure', filePath, line);
@@ -264,38 +320,51 @@ function validateJournalRecord(
     requireRecordObject(closure, 'scope', filePath, line);
     requireRecordString(closure, 'reason', filePath, line);
     validateEvidenceRefs(closure.evidenceRefs, filePath, line);
-    return record as unknown as UiRuntimeJournalRecord;
+    return { record: record as unknown as UiRuntimeJournalRecord, duplicate: false };
   }
   throw new Error(`corrupt UI runtime journal ${filePath}:${line}: unsupported record kind ${kind}`);
+}
+
+function readJournalRecords(
+  filePath: string,
+  context: JournalValidationContext,
+): { readonly records: readonly UiRuntimeJournalRecord[]; readonly nextLine: number } {
+  if (!existsSync(filePath)) return { records: [], nextLine: 1 };
+  const records: UiRuntimeJournalRecord[] = [];
+  let nextLine = 1;
+  const lines = readFileSync(filePath, 'utf8').split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    nextLine = index + 2;
+    try {
+      const validated = validateJournalRecord(JSON.parse(trimmed), filePath, index + 1, context);
+      if (!validated.duplicate) records.push(validated.record);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(`corrupt UI runtime journal ${filePath}:${index + 1}: invalid JSON`);
+      }
+      throw error;
+    }
+  }
+  return { records, nextLine };
 }
 
 export class UiRuntimeJournal implements RuntimeTaskJournalPort, CheckpointClosurePort {
   constructor(private readonly filePath: string) {}
 
   append(record: UiRuntimeJournalRecord): void {
+    const context = createJournalValidationContext();
+    const { nextLine } = readJournalRecords(this.filePath, context);
+    const validated = validateJournalRecord(record, this.filePath, nextLine, context);
+    if (validated.duplicate) return;
     mkdirSync(dirname(this.filePath), { recursive: true });
     appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');
   }
 
   replay(): readonly UiRuntimeJournalRecord[] {
-    if (!existsSync(this.filePath)) return [];
-    const records: UiRuntimeJournalRecord[] = [];
-    const operationIdentities = new Map<string, ToolExecutionFactOuterIdentity>();
-    const lines = readFileSync(this.filePath, 'utf8').split('\n');
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index]!;
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        records.push(validateJournalRecord(JSON.parse(trimmed), this.filePath, index + 1, operationIdentities));
-      } catch (error) {
-        if (error instanceof SyntaxError) {
-          throw new Error(`corrupt UI runtime journal ${this.filePath}:${index + 1}: invalid JSON`);
-        }
-        throw error;
-      }
-    }
-    return records;
+    return readJournalRecords(this.filePath, createJournalValidationContext()).records;
   }
 
   async commit(input: ClosureRecord): Promise<{ readonly closureId: string; readonly committed: true }> {

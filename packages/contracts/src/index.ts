@@ -1657,6 +1657,7 @@ export * from './explicit-brain.js';
 export * from './agent-loop.js';
 export * from './tool-execution.js';
 export * from './native-reasoning.js';
+export * from './semantic-observation.js';
 
 /**
  * Requirement pipeline node identity. Single source of truth for the thirteen nodes of

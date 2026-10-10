@@ -1,7 +1,17 @@
-import type { EvidenceRef, HealthState, LifecycleState, OrganId, TaskId } from '@humanagent/contracts';
+import type { EvidenceRef, HealthState, LifecycleState, OrganId, SemanticObservationEnvelope, TaskId } from '@humanagent/contracts';
+import type { CanonicalContextEvent } from '../../context-events/src/index.js';
 import type { TaskDetailProjection } from './models.js';
 
 export type { TaskDetailProjection };
+
+/**
+ * I1-C（设计稿 §17.3）：唯一的 canonical concrete specialization。
+ *
+ * UI 通过既有的 context-events public index 以 type-only import 使用 canonical 类型；
+ * `SemanticObservationEnvelope` 来自共享 contracts。依赖方向 `UI -> context-events -> contracts`
+ * 与 `UI -> contracts`，无反向边、无 runtime import、无事件副本或第二 schema。
+ */
+export type RuntimeSemanticObservationEnvelope = SemanticObservationEnvelope<CanonicalContextEvent>;
 
 // UI phase-one runtime surface. The browser consumes these typed projections from
 // the HumanAgent Runtime API; it never reads Journal, DSH session, or RCC frames.

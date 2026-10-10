@@ -3923,7 +3923,10 @@ test('server close releases the single tracked auth expiry timer after active SS
   });
   const session = await accessControl.consumePairingCode(accessControl.createPairingChallenge('lease-timer', 1).code);
   const cookie = accessControl.sessionCookie(session).split(';')[0]!;
-  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 5_000 }));
+  // The Journal is the fixture's own resource: it must outlive the background
+  // execution so a late provider append never finds the operation history gone.
+  const journal = new UiRuntimeJournal(join(root, 'ui-runtime-journal.jsonl'));
+  const service = serviceFor(root, new FakeReplayExecutionRuntimePort({ binding, stepDelayMs: 5_000 }), 'fake', 'ready', journal);
   const server = await startUiRuntimeServer({
     service,
     accessControl,
@@ -3931,9 +3934,17 @@ test('server close releases the single tracked auth expiry timer after active SS
     port: 0,
   });
   const streams: Array<{ controller: AbortController; closed: Promise<void> }> = [];
+  let ownedTaskId: TaskId | undefined;
+  let ownedStart: ReturnType<UiRuntimeService['startExecution']> | undefined;
+  let completionVerified = false;
+  let primaryError: unknown;
+  // Phase 1: the original close assertions. A failure here is preserved, but the
+  // execution is still allowed to complete naturally before cleanup decides.
   try {
     const task = service.createTask({ title: 'auth timer lifecycle' });
+    ownedTaskId = task.taskId;
     const started = service.startExecution(task.taskId, { prompt: 'hold three SSE streams open' });
+    ownedStart = started;
     for (let index = 0; index < 3; index += 1) {
       const controller = new AbortController();
       const stream = await fetch(`${server.url}/api/executions/${encodeURIComponent(started.operationId.value)}/events`, {
@@ -3960,12 +3971,138 @@ test('server close releases the single tracked auth expiry timer after active SS
     assert.equal(receipt.authTimersCleared, 1, 'server close must release the single tracked auth expiry timer');
     for (const entry of streams) entry.controller.abort();
     await Promise.all(streams.map((entry) => entry.closed));
+  } catch (error) {
+    primaryError = error;
   } finally {
     for (const entry of streams) entry.controller.abort();
     await Promise.all(streams.map((entry) => entry.closed.catch(() => undefined)));
     await server.close();
-    await rm(root, { recursive: true, force: true });
   }
+  // Phase 2: bounded natural completion. Server/stream close is not execution
+  // cancellation and does not touch the Journal, so the same task/operation/epoch
+  // must reach a successful final terminal before the fixture may release its
+  // Journal root. The bound covers five 5,000ms replay steps, the observed ~25s
+  // completion and scheduler slack; never replace it with a fixed sleep or quiet
+  // period as completion evidence.
+  try {
+    if (!ownedTaskId || !ownedStart) throw new Error('the fixture must have started an owned execution');
+    const taskId: TaskId = ownedTaskId;
+    const { operationId, executionEpoch } = ownedStart;
+    await waitFor(() => {
+      const events = service.eventsSince(operationId);
+      const final = events.find((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final');
+      assert.ok(final, 'the matching execution must reach a final terminal before cleanup');
+      assert.equal(final!.state, 'succeeded', 'the matching execution must complete successfully');
+    }, 35_000);
+    const events = service.eventsSince(operationId);
+    // Identity and order of the whole operation stream are preserved.
+    assert.deepEqual(events.map((event) => event.kind), [
+      'execution.started',
+      'provider.model',
+      'provider.output',
+      'provider.tool',
+      'provider.output',
+      'execution.terminal',
+      'execution.settling',
+      'checkpoint.committed',
+      'execution.terminal',
+    ]);
+    assert.deepEqual(
+      events.filter((event) => event.kind === 'execution.terminal').map((event) => event.terminalPhase),
+      ['provider', 'final'],
+    );
+    assert.equal(events.every((event) => event.operationId === operationId.value), true);
+    assert.equal(events.every((event) => event.executionEpoch === executionEpoch), true);
+    assert.equal(events.every((event) => event.taskId.value === taskId.value), true);
+    const final = events.at(-1)!;
+    assert.equal(final.terminalPhase, 'final');
+    assert.equal(final.state, 'succeeded');
+    assert.equal(final.summary.includes('provider closed'), true);
+    // Only evidence this fixture actually produced is asserted; the fake
+    // provider is never described as a real RCC closure.
+    assert.equal(final.evidenceRefs.some((ref) => ref.source === 'humanagent.fake-provider' && ref.locator === 'fake/settle-succeeded'), true);
+    assert.equal(final.evidenceRefs.some((ref) => ref.source === 'humanagent.fake-provider' && ref.locator === 'fake/close'), true);
+
+    const dashboard = service.taskDashboard(taskId);
+    assert.equal(dashboard.state, 'succeeded');
+    assert.equal(dashboard.operationId, operationId.value);
+    assert.equal(dashboard.executionEpoch, executionEpoch);
+    assert.equal(dashboard.checkpoint?.outcome, 'succeeded');
+    assert.equal(dashboard.error, undefined);
+
+    // The durable projection must be valid and carry the same operation start
+    // and same-identity successful terminal/checkpoint sequence.
+    const replay = journal.replay();
+    const replayStarted = replay.filter((record) => record.kind === 'operation.started');
+    assert.equal(replayStarted.length, 1);
+    const startRecord = replayStarted[0] as Extract<(typeof replay)[number], { readonly kind: 'operation.started' }>;
+    assert.equal(startRecord.operationId.value, operationId.value);
+    assert.equal(startRecord.taskId.value, taskId.value);
+    assert.equal(startRecord.executionEpoch, executionEpoch);
+    const replayEvents = replay
+      .filter((record) => record.kind === 'operation.event')
+      .map((record) => (record as Extract<(typeof replay)[number], { readonly kind: 'operation.event' }>).event);
+    assert.deepEqual(
+      replayEvents.map((event) => [event.eventId, event.seq, event.kind]),
+      events.map((event) => [event.eventId, event.seq, event.kind]),
+    );
+    assert.equal(replayEvents.every((event) => event.taskId.value === taskId.value
+      && event.operationId === operationId.value
+      && event.executionEpoch === executionEpoch), true);
+    assert.equal(replayEvents.some((event) => event.kind === 'execution.terminal' && event.terminalPhase === 'final' && event.state === 'succeeded'), true);
+    assert.equal(replayEvents.some((event) => event.kind === 'checkpoint.committed' && event.state === 'succeeded'), true);
+    completionVerified = true;
+  } catch (error) {
+    if (primaryError === undefined) primaryError = error;
+  }
+  // Phase 3: cleanup. Root release is authorized only by the same execution's
+  // successful final/checkpoint/closure/replay proof above.
+  if (completionVerified) {
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.error(`journal root cleanup failed for ${root}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\n`);
+      if (primaryError === undefined) primaryError = cleanupError;
+    }
+  } else {
+    // Completion could not be proven. A stop/final alone does not prove the
+    // background provider iterator drained, so use only the bounded existing
+    // stop/retry-stop controls and preserve the Journal root and recovery
+    // identity instead of deleting a root that may still be written to.
+    const owned = ownedTaskId;
+    if (owned) {
+      const bounded = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T | 'timeout'> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            promise,
+            new Promise<'timeout'>((resolve) => {
+              timer = setTimeout(() => resolve('timeout'), timeoutMs);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      };
+      try {
+        if (service.taskDashboard(owned).allowedActions.includes('stop')) {
+          const stopped = await bounded(service.stop(owned), 10_000);
+          if (stopped === 'timeout') {
+            console.error(`stop did not settle within 10000ms for ${owned.value}; journal root retained at ${root}\n`);
+          } else if (stopped.state === 'settling' && service.taskDashboard(owned).allowedActions.includes('retry-stop')) {
+            const retried = await bounded(service.retryStop(owned), 10_000);
+            if (retried === 'timeout') {
+              console.error(`retry-stop did not settle within 10000ms for ${owned.value}; journal root retained at ${root}\n`);
+            }
+          }
+        }
+      } catch (stopError) {
+        console.error(`stop/retry-stop failed for ${owned.value}; journal root retained at ${root}: ${stopError instanceof Error ? stopError.message : String(stopError)}\n`);
+      }
+    }
+    console.error(`execution completion not proven; INCOMPLETE, journal root retained at ${root}\n`);
+  }
+  if (primaryError !== undefined) throw primaryError;
 });
 
 test('shared control-root credential invalidation is observed by every live access-control instance', async () => {

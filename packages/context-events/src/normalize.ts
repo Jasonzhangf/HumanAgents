@@ -34,6 +34,7 @@ import type {
   ScopedId,
   TaskId,
 } from '../../contracts/src/index.js';
+import type { CoverageIssue, SemanticEventRef } from '../../contracts/src/semantic-observation.js';
 import { ContextEventError } from './errors.js';
 import { defaultStatusOf, labelOf } from './taxonomy.js';
 import type {
@@ -41,6 +42,9 @@ import type {
   ContextEventCost,
   ContextEventInput,
   ContextEventType,
+  RuntimeNormalizeContext,
+  RuntimeNormalizeResult,
+  RuntimeTaskEventLike,
 } from './types.js';
 import { validateCanonicalContextEvent } from './validation.js';
 
@@ -196,6 +200,133 @@ export function createContextEvent(input: ContextEventInput): CanonicalContextEv
   validateCanonicalContextEvent(event);
   assertConstructionInvariants(event);
   return event;
+}
+
+/** Normalize durable runtime facts once, retaining the first source for every durable ID. */
+export function normalizeRuntimeTaskEvents(
+  input: readonly RuntimeTaskEventLike[],
+  context: RuntimeNormalizeContext,
+): RuntimeNormalizeResult {
+  const sources: RuntimeTaskEventLike[] = [];
+  const events: CanonicalContextEvent[] = [];
+  const coverageIssues: CoverageIssue[] = [];
+  const eventBySourceId = new Map<string, CanonicalContextEvent>();
+  const firstById = new Map<string, RuntimeTaskEventLike>();
+  const conflictIds = new Set<string>();
+  for (const source of input) {
+    const first = firstById.get(source.eventId);
+    if (first !== undefined) {
+      if (!sameRuntimeSource(first, source) && !conflictIds.has(source.eventId)) {
+        conflictIds.add(source.eventId);
+        const scope = runtimeScope(context.scope, first);
+        coverageIssues.push(runtimeCoverageIssue('duplicate-conflict', scope, first, 'duplicate durable source conflict', eventBySourceId.get(first.eventId)));
+      }
+      continue;
+    }
+    firstById.set(source.eventId, source);
+    sources.push(source);
+    const scope = runtimeScope(context.scope, source);
+    const outcome = mapRuntimeKind(source);
+    const legalExecutionIdentity = validRuntimeIdentity(source.eventId)
+      && validRuntimeIdentity(source.taskId?.value)
+      && validRuntimeIdentity(source.operationId)
+      && Number.isSafeInteger(source.executionEpoch) && source.executionEpoch > 0;
+    let event: CanonicalContextEvent | undefined;
+    if (legalExecutionIdentity && outcome.type !== undefined) {
+      event = createContextEvent({
+        type: outcome.type,
+        sourceId: source.eventId,
+        occurredAt: source.occurredAt,
+        scope,
+        summary: source.summary,
+        evidenceRefs: source.evidenceRefs,
+      });
+      events.push(event);
+      eventBySourceId.set(source.eventId, event);
+    }
+    if (!legalExecutionIdentity) {
+      coverageIssues.push(runtimeCoverageIssue('source-facet-missing', scope, source, `runtime source ${source.eventId} has no legal execution identity`, event));
+    }
+    if (outcome.coverage !== undefined) {
+      coverageIssues.push(runtimeCoverageIssue(outcome.coverage, scope, source, `runtime source ${source.eventId}`, event));
+    }
+  }
+  return { events, coverageIssues, sources, conflictedSourceIds: [...conflictIds] };
+}
+
+function runtimeScope(root: ScopeRef, source: RuntimeTaskEventLike): ScopeRef {
+  const taskId: TaskId = source.taskId;
+  return { organId: root.organId, taskId, operationId: { scope: 'operation', value: source.operationId } };
+}
+
+function sameRuntimeSource(a: RuntimeTaskEventLike, b: RuntimeTaskEventLike): boolean {
+  return JSON.stringify(stableRuntimeValue(a)) === JSON.stringify(stableRuntimeValue(b));
+}
+
+function stableRuntimeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableRuntimeValue);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableRuntimeValue(item)]));
+  }
+  return value;
+}
+
+function runtimeCoverageIssue(
+  reason: CoverageIssue['reason'], scope: ScopeRef, source: RuntimeTaskEventLike, locator: string,
+  event?: CanonicalContextEvent,
+): CoverageIssue {
+  const evidenceId = source.eventId.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 128) || 'runtime-event';
+  const sourceRef: EvidenceRef = {
+    evidenceId: { scope: 'evidence', value: /^[A-Za-z0-9]/.test(evidenceId) ? evidenceId : `runtime-${evidenceId}` },
+    kind: 'execution', source: 'context-events:runtime-task-event', locator, scope,
+  };
+  const eventRef: SemanticEventRef | undefined = event === undefined
+    ? undefined
+    : { eventId: event.eventId, sourceId: event.sourceId, scope: event.scope };
+  return { reason, scope, sourceRef, ...(eventRef === undefined ? {} : { eventRef }) };
+}
+
+function mapRuntimeKind(source: RuntimeTaskEventLike): {
+  readonly type?: ContextEventType;
+  readonly coverage?: CoverageIssue['reason'];
+} {
+  switch (source.kind) {
+    case 'execution.started': return { type: 'operation.started' };
+    case 'provider.tool':
+      return validRuntimeIdentity(source.callId)
+        ? { type: 'operation.started' }
+        : { coverage: 'correlation-unavailable' };
+    case 'provider.tool-result':
+      if (!validRuntimeIdentity(source.callId)) return { coverage: 'correlation-unavailable' };
+      if (!['succeeded', 'failed', 'blocked', 'cancelled', 'unknown'].includes(source.status ?? '')) return { coverage: 'source-facet-missing' };
+      return { type: source.status === 'succeeded' ? 'operation.completed' : 'operation.failed' };
+    case 'provider.error': return { type: 'error.detected' };
+    case 'checkpoint.committed': return { type: 'checkpoint.committed' };
+    case 'execution.terminal':
+      if (source.terminalPhase !== 'provider' && source.terminalPhase !== 'final') return { coverage: 'source-facet-missing' };
+      if (source.state === 'waiting') return { coverage: 'waiting-is-not-terminal' };
+      if (source.terminalPhase === 'provider' && (typeof source.requestId !== 'string' || source.requestId.trim() === '')) return { coverage: 'correlation-unavailable' };
+      return {
+        type: source.state === 'succeeded' ? 'operation.completed' : 'operation.failed',
+        ...(!isProviderTerminalState(source.state) || (source.status !== undefined && source.status !== source.state)
+          ? { coverage: 'source-facet-missing' as const }
+          : {}),
+      };
+    case 'attention.opened': return { type: 'blocker.detected' };
+    case 'attention.resolved': return { type: 'blocker.resolved' };
+    case 'provider.model': case 'provider.output': case 'execution.settling':
+      return { coverage: 'unknown-kind' };
+    default: return { coverage: 'unknown-kind' };
+  }
+}
+
+function isProviderTerminalState(value: string): value is 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'cancelled' | 'stopped' | 'unknown' {
+  return ['succeeded', 'waiting', 'blocked', 'failed', 'cancelled', 'stopped', 'unknown'].includes(value);
+}
+
+function validRuntimeIdentity(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 /**

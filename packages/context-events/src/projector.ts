@@ -20,6 +20,7 @@ import {
   narrativeOf,
   priorityOf,
 } from './taxonomy.js';
+import type { PairedExecutionGroup } from '../../contracts/src/semantic-observation.js';
 import type {
   BlockerDigest,
   CanonicalContextEvent,
@@ -98,14 +99,22 @@ function compareCanonicalEvents(a: CanonicalContextEvent, b: CanonicalContextEve
  *   `failed`，它即使未配对也不给出 `nextAction`。
  * - 输出顺序与输入顺序一致（输入须已按 §12 排序）。
  */
-export function toUserNarrative(events: readonly CanonicalContextEvent[]): UserNarrativeEvent[] {
+export function toUserNarrative(
+  events: readonly CanonicalContextEvent[],
+  pairing: readonly PairedExecutionGroup[] = [],
+): UserNarrativeEvent[] {
   const narrative: UserNarrativeEvent[] = [];
   for (const event of events) {
     if (event.status === 'superseded') continue;
-    const state: NarrativeState =
-      narrativeOf(event.type) === 'attention' && event.status === 'active'
+    const selected = selectExecutionGroup(event, pairing);
+    const state: NarrativeState = narrativeOf(event.type) === 'attention' && event.status === 'active'
+      ? 'needs-user'
+      : selected.ambiguous || selected.group?.state === 'unknown' || selected.group?.state === 'unavailable'
+        || selected.group?.state === 'cancelled' || selected.group?.state === 'blocked'
         ? 'needs-user'
-        : STATE_BY_STATUS[event.status];
+        : selected.group?.state === 'closed' && event.status === 'active'
+          ? 'happened'
+          : STATE_BY_STATUS[event.status];
     const nextAction =
       isOpenerType(event.type) && event.status === 'active'
         ? closeTypeOf(event.type).map(labelOf).join(NEXT_ACTION_SEPARATOR)
@@ -121,6 +130,32 @@ export function toUserNarrative(events: readonly CanonicalContextEvent[]): UserN
     });
   }
   return narrative;
+}
+
+const REFERENCE_TYPES: Readonly<Record<PairedExecutionGroup['kind'], ReadonlySet<CanonicalContextEvent['type']>>> = {
+  operation: new Set(['operation.started', 'operation.completed', 'operation.failed', 'error.detected', 'error.resolved', 'checkpoint.committed', 'blocker.detected', 'blocker.resolved']),
+  request: new Set(['operation.started', 'operation.completed', 'operation.failed', 'error.detected']),
+  invocation: new Set(['operation.started', 'operation.completed', 'operation.failed']),
+};
+
+function sameScope(a: CanonicalContextEvent['scope'], b: CanonicalContextEvent['scope']): boolean {
+  return a.organId.value === b.organId.value && a.taskId?.value === b.taskId?.value
+    && a.cycleId?.value === b.cycleId?.value && a.operationId?.value === b.operationId?.value;
+}
+
+function selectExecutionGroup(
+  event: CanonicalContextEvent,
+  pairing: readonly PairedExecutionGroup[],
+): { readonly group?: PairedExecutionGroup; readonly ambiguous: boolean } {
+  const specificity = { invocation: 3, request: 2, operation: 1 } as const;
+  const matches = pairing.filter((group) => REFERENCE_TYPES[group.kind].has(event.type)
+    && sameScope(group.scope, event.scope)
+    && group.eventRefs.some((ref) => ref.eventId === event.eventId && ref.sourceId === event.sourceId
+      && sameScope(ref.scope, event.scope) && sameScope(ref.scope, group.scope)));
+  if (matches.length === 0) return { ambiguous: false };
+  const best = Math.max(...matches.map((group) => specificity[group.kind]));
+  const selected = matches.filter((group) => specificity[group.kind] === best);
+  return selected.length === 1 ? { group: selected[0], ambiguous: false } : { ambiguous: true };
 }
 
 /** §10.2 Memory Digest 选项。 */

@@ -41,9 +41,12 @@ import {
   type ProviderBinding, type ProviderCapabilities, type ProviderCloseResult, type ProviderError, type ProviderEvent, type ProviderImageContent, type ProviderReadiness,
   type ProviderRecoveryResult, type ProviderResumeInput, type ProviderSettlement, type ProviderStartInput, type ProviderStartReceipt, type ProviderStopReceipt,
   type ProviderStopRequest, type ProviderSubmitInput, type ProviderSubmitResult, type ProviderToolResult, type RecurrenceResult,
-  type DraftRevision, type ExecutionPolicyDefinition,
+  type DraftRevision, type EvidenceRef, type ExecutionPolicyDefinition,
   type OperationIdempotencyRecord, type OperationIntent, type RequirementEnvelope, type ScopeRef, type ToolRegistration,
   type WorkAssignment, type WorkResult,
+  validateSemanticObservationEnvelope, validateCoverageIssue, validatePairedExecutionGroup, validateCapabilityStatus,
+  validateSemanticEventRef, COVERAGE_ISSUE_REASONS, PAIRED_EXECUTION_GROUP_KINDS, PAIRED_EXECUTION_STATES, CAPABILITY_STATES,
+  type CapabilityStatus, type CoverageIssue, type PairedExecutionGroup, type SemanticEventRef, type SemanticObservationEnvelope,
 } from '@humanagent/contracts';
 
 const memoryActor = (overrides: Partial<MemoryActorContext> = {}): MemoryActorContext => ({
@@ -1514,4 +1517,112 @@ test('draft revisions carry only typed execution policies', () => {
     () => validateDraftRevision({ ...base, executionPolicy: { ...recurring, frequency: 'yearly' as never } }),
     ContractError,
   );
+});
+
+/* ------------------------------------------------------------------ *
+ * I1-C：shared semantic observation structural validation
+ * ------------------------------------------------------------------ */
+
+test('shared semantic observation contract keeps closed vocabularies and typed refs', () => {
+  assert.deepEqual([...COVERAGE_ISSUE_REASONS], [
+    'unknown-kind',
+    'waiting-is-not-terminal',
+    'indistinguishable-tool-phase',
+    'correlation-unavailable',
+    'source-facet-missing',
+    'duplicate-conflict',
+    'opener-missing',
+    'multi-opener',
+    'closer-conflict',
+  ]);
+  assert.deepEqual([...PAIRED_EXECUTION_GROUP_KINDS], ['request', 'operation', 'invocation']);
+  assert.deepEqual([...PAIRED_EXECUTION_STATES], [
+    'open', 'closed', 'unknown', 'unavailable', 'cancelled', 'blocked', 'waiting',
+  ]);
+  assert.deepEqual([...CAPABILITY_STATES], ['available', 'unavailable', 'unknown']);
+
+  const scope: ScopeRef = { organId: id('organ', 'organ-a'), taskId: id('task', 'task-a') };
+  const sourceRef: EvidenceRef = {
+    evidenceId: id('evidence', 'evidence-a'),
+    kind: 'execution',
+    source: 'contracts.test.ts',
+    locator: 'i1c',
+    scope,
+  };
+  const eventRef: SemanticEventRef = { eventId: 'context-event:source-a', sourceId: 'source-a', scope };
+
+  assert.doesNotThrow(() => validateSemanticEventRef(eventRef));
+  assert.throws(() => validateSemanticEventRef({ ...eventRef, eventId: '' }), ContractError);
+  assert.throws(() => validateSemanticEventRef({ ...eventRef, scope: { ...scope, organId: { scope: 'task', value: 'x' } } as unknown as ScopeRef }), ContractError);
+
+  for (const reason of COVERAGE_ISSUE_REASONS) {
+    assert.doesNotThrow(() => validateCoverageIssue({ reason, scope, sourceRef, eventRef }));
+  }
+  assert.throws(() => validateCoverageIssue({ reason: 'bad' as never, scope, sourceRef }), ContractError);
+  assert.throws(() => validateCoverageIssue({ reason: 'unknown-kind', scope, sourceRef: { ...sourceRef, locator: '' } }), ContractError);
+});
+
+test('shared semantic observation envelope delegates events and isolates shared structure', () => {
+  const scope: ScopeRef = { organId: id('organ', 'organ-a') };
+  const sourceRef: EvidenceRef = {
+    evidenceId: id('evidence', 'evidence-a'),
+    kind: 'execution',
+    source: 'contracts.test.ts',
+    locator: 'i1c',
+    scope,
+  };
+  interface LocalEvent { readonly eventId: string; }
+  const localEvent: LocalEvent = { eventId: 'local-a' };
+  const events: readonly LocalEvent[] = [localEvent];
+  const coverageIssues: readonly CoverageIssue[] = [{ reason: 'source-facet-missing', scope, sourceRef }];
+  const pairing: readonly PairedExecutionGroup[] = [{
+    groupId: 'group-a',
+    kind: 'invocation',
+    scope,
+    executionEpoch: 1,
+    toolId: 'tool-a',
+    state: 'cancelled',
+    eventRefs: [],
+  }];
+  const capabilities: readonly CapabilityStatus[] = [{ capability: 'revision-history', state: 'unavailable', reason: 'capability-unavailable', sourceRef }];
+  const envelope: SemanticObservationEnvelope<LocalEvent> = {
+    scope,
+    projectionVersion: 'i1c-v1',
+    sourceWatermark: 7,
+    publicCommitWatermark: 3,
+    events,
+    coverageIssues,
+    pairing,
+    capabilities,
+  };
+
+  const seen: LocalEvent[] = [];
+  validateSemanticObservationEnvelope(envelope, (event) => { seen.push(event); });
+  assert.deepEqual(seen, [localEvent]);
+  assert.equal(envelope.events, events);
+  assert.equal(envelope.coverageIssues, coverageIssues);
+  assert.equal(envelope.pairing, pairing);
+  assert.equal(envelope.capabilities, capabilities);
+
+  // The event validator is mandatory: a missing callback cannot silently pass.
+  assert.equal(validateSemanticObservationEnvelope.length, 2);
+
+  // A delegated validator failure stays a failure (never caught into success).
+  const delegated = new Error('canonical-owner-error');
+  let delegatedFailure: unknown;
+  try {
+    validateSemanticObservationEnvelope(envelope, () => { throw delegated; });
+  } catch (error) {
+    delegatedFailure = error;
+  }
+  assert.equal(delegatedFailure, delegated);
+
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, projectionVersion: '' }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, scope: { organId: { scope: 'task', value: 'x' } } as unknown as ScopeRef }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, sourceWatermark: -1 }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, sourceWatermark: 0.5 }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, publicCommitWatermark: -3 }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, coverageIssues: [{ reason: 'bad' as never, scope, sourceRef }] }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, pairing: [{ ...pairing[0], state: 'bad' as never }] }, () => undefined), ContractError);
+  assert.throws(() => validateSemanticObservationEnvelope({ ...envelope, capabilities: [{ capability: '', state: 'available' }] }, () => undefined), ContractError);
 });

@@ -8,7 +8,13 @@
  * 因此所有归一化输入都用结构化 *Like 接口表达（见 normalize.ts），而不是 runtime 类型。
  */
 
-import type { EvidenceRef, ScopeRef } from '../../contracts/src/index.js';
+import type { EvidenceRef, ScopeRef, TaskId } from '../../contracts/src/index.js';
+import type {
+  CapabilityStatus,
+  CoverageIssue,
+  PairedExecutionGroup,
+  SemanticObservationEnvelope,
+} from '../../contracts/src/semantic-observation.js';
 
 /** v1 实际承载 18 个 type 的 4 个类目（见设计稿 §7 类目归属说明）。 */
 export const CONTEXT_EVENT_CATEGORIES = ['task', 'plan', 'error', 'blocker'] as const;
@@ -177,4 +183,61 @@ export interface CompactSnapshot {
   readonly omitted: readonly OmittedReason[];
   readonly budgetBytes: number;
   readonly usedBytes: number;
+}
+
+/** Structured boundary projection of a durable runtime task event. */
+export interface RuntimeTaskEventLike {
+  readonly eventId: string;
+  readonly seq: number;
+  readonly occurredAt: string;
+  readonly taskId: TaskId;
+  readonly operationId: string;
+  readonly executionEpoch: number;
+  readonly kind: string;
+  readonly state: string;
+  readonly summary: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly turnId?: string;
+  readonly requestId?: string;
+  readonly parentRequestId?: string;
+  readonly providerOccurredAt?: string;
+  readonly ownerId?: string;
+  readonly retryable?: boolean;
+  readonly nextAction?: string;
+  readonly callId?: string;
+  readonly toolId?: string;
+  readonly arguments?: unknown;
+  readonly terminalPhase?: 'provider' | 'final';
+  readonly error?: { readonly message: string };
+  readonly status?: 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown';
+  readonly outputRef?: string;
+  readonly outputDigest?: string;
+  readonly executionFact?: unknown;
+}
+
+export interface RuntimeNormalizeContext { readonly scope: ScopeRef }
+
+export interface RuntimeNormalizeResult {
+  readonly events: readonly CanonicalContextEvent[];
+  readonly coverageIssues: readonly CoverageIssue[];
+  readonly sources: readonly RuntimeTaskEventLike[];
+  /** Durable source IDs whose later replay contradicted the first retained source. */
+  readonly conflictedSourceIds: readonly string[];
+}
+
+export interface SemanticObservationInput {
+  readonly scope: ScopeRef;
+  readonly projectionVersion: string;
+  readonly sourceWatermark: number;
+  readonly publicCommitWatermark?: number;
+  readonly events: readonly RuntimeTaskEventLike[];
+  readonly capabilities?: readonly CapabilityStatus[];
+}
+
+export type SemanticObservation = SemanticObservationEnvelope<CanonicalContextEvent>;
+
+export interface SemanticPairingResult {
+  readonly events: readonly CanonicalContextEvent[];
+  readonly pairing: readonly PairedExecutionGroup[];
+  readonly coverageIssues: readonly CoverageIssue[];
 }

@@ -61,7 +61,25 @@ import {
   type TaskObservationProducedResult,
   type TaskVisualObservationReceipt,
   type VisualProducerResult,
+  validateSemanticObservationEnvelope,
+  validateCoverageIssue,
+  validatePairedExecutionGroup,
+  validateCapabilityStatus,
+  COVERAGE_ISSUE_REASONS,
+  PAIRED_EXECUTION_STATES,
+  type CapabilityStatus,
+  type CoverageIssue,
+  type PairedExecutionGroup,
+  type SemanticEventRef,
+  type SemanticObservationEnvelope,
 } from '@humanagent/contracts';
+import {
+  ContextEventError,
+  createContextEvent,
+  validateCanonicalContextEvent,
+  type CanonicalContextEvent,
+} from '../../packages/context-events/src/index.js';
+import type { RuntimeSemanticObservationEnvelope } from '../../packages/ui/contracts/runtime.js';
 
 const task = id('task', 'task-a');
 const operation = id('operation', 'operation-a');
@@ -836,3 +854,289 @@ test('public consumer carries an actual provider response model and rejects a bl
   assert.doesNotThrow(() => validateProviderEvent({ ...event, responseModel: undefined }));
   assert.throws(() => validateProviderEvent({ ...event, responseModel: '   ' }), ContractError);
 });
+
+/* ------------------------------------------------------------------ *
+ * I1-C：shared semantic observation contracts (§17.3–§17.6)
+ * ------------------------------------------------------------------ */
+
+const semanticEvent: CanonicalContextEvent = createContextEvent({
+  type: 'task.created',
+  sourceId: 'source-task-created-a',
+  occurredAt: '2026-11-01T16:00:00Z',
+  scope,
+  evidenceRefs: [evidence],
+});
+
+const semanticEventRef: SemanticEventRef = {
+  eventId: semanticEvent.eventId,
+  sourceId: semanticEvent.sourceId,
+  scope,
+};
+
+const coverageUnknownKind: CoverageIssue = {
+  reason: 'unknown-kind',
+  scope,
+  sourceRef: evidence,
+  eventRef: semanticEventRef,
+};
+
+const pairedOperation: PairedExecutionGroup = {
+  groupId: 'group-operation-a',
+  kind: 'operation',
+  scope,
+  executionEpoch: 1,
+  requestId: 'request-a',
+  callId: 'call-a',
+  toolId: 'tool-a',
+  state: 'closed',
+  eventRefs: [semanticEventRef],
+};
+
+const capabilityAvailable: CapabilityStatus = {
+  capability: 'revision-history',
+  state: 'available',
+  sourceRef: evidence,
+};
+
+function semanticEnvelope(
+  overrides: Partial<SemanticObservationEnvelope<CanonicalContextEvent>> = {},
+): SemanticObservationEnvelope<CanonicalContextEvent> {
+  return {
+    scope,
+    projectionVersion: 'i1c-v1',
+    sourceWatermark: 7,
+    publicCommitWatermark: 3,
+    events: [semanticEvent],
+    coverageIssues: [coverageUnknownKind],
+    pairing: [pairedOperation],
+    capabilities: [capabilityAvailable],
+    ...overrides,
+  };
+}
+
+test('I1-C shared envelope validates canonical events through the canonical owner callback', () => {
+  const events = [semanticEvent];
+  const envelope: SemanticObservationEnvelope<CanonicalContextEvent> = semanticEnvelope({ events });
+  const uiEnvelope: RuntimeSemanticObservationEnvelope = envelope;
+  type UiElement = RuntimeSemanticObservationEnvelope['events'][number];
+  const uiAligned: UiElement = semanticEvent;
+
+  assert.doesNotThrow(() => validateSemanticObservationEnvelope(envelope, validateCanonicalContextEvent));
+  assert.equal(uiEnvelope.events, events);
+  assert.equal(envelope.events[0], semanticEvent);
+  assert.equal(uiAligned, semanticEvent);
+  assert.equal(envelope.coverageIssues[0].eventRef?.eventId, semanticEvent.eventId);
+  assert.equal(envelope.pairing[0].kind, 'operation');
+  assert.equal(envelope.capabilities[0].state, 'available');
+});
+
+test('I1-C keeps source and public watermarks independent and never guesses a relation', () => {
+  const bothPresent = semanticEnvelope({ sourceWatermark: 7, publicCommitWatermark: 3 });
+  assert.equal(bothPresent.sourceWatermark, 7);
+  assert.equal(bothPresent.publicCommitWatermark, 3);
+  assert.doesNotThrow(() => validateSemanticObservationEnvelope(bothPresent, validateCanonicalContextEvent));
+
+  const publicOmitted = semanticEnvelope({ publicCommitWatermark: undefined });
+  assert.equal(publicOmitted.publicCommitWatermark, undefined);
+  assert.notEqual(publicOmitted.publicCommitWatermark, 0);
+  assert.doesNotThrow(() => validateSemanticObservationEnvelope(publicOmitted, validateCanonicalContextEvent));
+
+  const equal = semanticEnvelope({ sourceWatermark: 4, publicCommitWatermark: 4 });
+  assert.doesNotThrow(() => validateSemanticObservationEnvelope(equal, validateCanonicalContextEvent));
+
+  assert.throws(
+    () => validateSemanticObservationEnvelope({ ...bothPresent, sourceWatermark: -1 }, validateCanonicalContextEvent),
+    ContractError,
+  );
+  assert.throws(
+    () => validateSemanticObservationEnvelope({ ...bothPresent, sourceWatermark: 1.5 }, validateCanonicalContextEvent),
+    ContractError,
+  );
+  assert.throws(
+    () => validateSemanticObservationEnvelope({ ...bothPresent, publicCommitWatermark: Number.NaN }, validateCanonicalContextEvent),
+    ContractError,
+  );
+});
+
+test('I1-C rejects unsupported coverage reasons and malformed typed refs', () => {
+  assert.deepEqual([...COVERAGE_ISSUE_REASONS].sort(), [
+    'closer-conflict',
+    'correlation-unavailable',
+    'duplicate-conflict',
+    'indistinguishable-tool-phase',
+    'multi-opener',
+    'opener-missing',
+    'source-facet-missing',
+    'unknown-kind',
+    'waiting-is-not-terminal',
+  ]);
+  for (const reason of COVERAGE_ISSUE_REASONS) {
+    assert.doesNotThrow(() => validateCoverageIssue({ reason, scope, sourceRef: evidence }));
+  }
+  assert.throws(
+    () => validateCoverageIssue({ reason: 'not-a-reason' as never, scope, sourceRef: evidence }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateCoverageIssue({ reason: 'unknown-kind', scope, sourceRef: { ...evidence, source: '' } }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateCoverageIssue({
+      reason: 'unknown-kind',
+      scope,
+      sourceRef: evidence,
+      eventRef: { eventId: '', sourceId: 'source-a', scope },
+    }),
+    ContractError,
+  );
+});
+
+test('I1-C preserves pairing identity kinds and distinct execution states', () => {
+  const states: readonly PairedExecutionGroup['state'][] = [
+    'open', 'closed', 'unknown', 'unavailable', 'cancelled', 'blocked', 'waiting',
+  ];
+  assert.deepEqual([...PAIRED_EXECUTION_STATES], states);
+  for (const kind of ['request', 'operation', 'invocation'] as const) {
+    for (const state of states) {
+      const group: PairedExecutionGroup = {
+        groupId: `group-${kind}-${state}`,
+        kind,
+        scope,
+        executionEpoch: 1,
+        requestId: 'request-a',
+        callId: 'call-a',
+        toolId: 'tool-a',
+        state,
+        eventRefs: [semanticEventRef],
+      };
+      assert.doesNotThrow(() => validatePairedExecutionGroup(group));
+      assert.equal(group.state, state);
+      assert.equal(group.kind, kind);
+    }
+  }
+  assert.throws(
+    () => validatePairedExecutionGroup({ ...pairedOperation, kind: 'not-a-kind' as never }),
+    ContractError,
+  );
+  assert.throws(
+    () => validatePairedExecutionGroup({ ...pairedOperation, state: 'not-a-state' as never }),
+    ContractError,
+  );
+  assert.throws(
+    () => validatePairedExecutionGroup({ ...pairedOperation, executionEpoch: 0 }),
+    ContractError,
+  );
+});
+
+test('I1-C keeps unavailable and unknown capabilities explicit with source and reason', () => {
+  const unavailable: CapabilityStatus = {
+    capability: 'checkpoint-history',
+    state: 'unavailable',
+    reason: 'capability-unavailable',
+    sourceRef: evidence,
+  };
+  const unknown: CapabilityStatus = {
+    capability: 'agent-history',
+    state: 'unknown',
+  };
+  assert.doesNotThrow(() => validateCapabilityStatus(unavailable));
+  assert.doesNotThrow(() => validateCapabilityStatus(unknown));
+  assert.notEqual(unavailable.state, 'available');
+  assert.throws(() => validateCapabilityStatus({ ...unavailable, capability: '' }), ContractError);
+  assert.throws(
+    () => validateCapabilityStatus({ ...unavailable, state: 'not-a-state' as never }),
+    ContractError,
+  );
+  assert.throws(
+    () => validateCapabilityStatus({ ...unavailable, sourceRef: { ...evidence, kind: 'nope' as never } }),
+    ContractError,
+  );
+});
+
+test('I1-C keeps delegated canonical errors as errors and never turns them into success', () => {
+  const envelope = semanticEnvelope();
+  assert.throws(
+    () => validateSemanticObservationEnvelope(envelope, () => { throw new ContextEventError('delegated canonical failure'); }),
+    ContextEventError,
+  );
+
+  const invalidCanonical = { ...semanticEvent, type: 'not.a.type' } as unknown as CanonicalContextEvent;
+  const invalidStatus = { ...semanticEvent, status: 'not-a-status' } as unknown as CanonicalContextEvent;
+  for (const broken of [invalidCanonical, invalidStatus]) {
+    assert.throws(
+      () => validateSemanticObservationEnvelope(semanticEnvelope({ events: [broken] }), validateCanonicalContextEvent),
+      ContextEventError,
+    );
+  }
+});
+
+function i1cCompileTimeGuards(): void {
+  const envelope: SemanticObservationEnvelope<CanonicalContextEvent> = semanticEnvelope();
+  const uiEnvelope: RuntimeSemanticObservationEnvelope = envelope;
+
+  // The generic parameter is mandatory: no default, no erasure to any/unknown.
+  // @ts-expect-error - SemanticObservationEnvelope requires an explicit type argument.
+  type OmittedGeneric = SemanticObservationEnvelope;
+  void (0 as unknown as OmittedGeneric);
+
+  // The concrete UI alias accepts only canonical events, not arbitrary raw shapes.
+  const raw: RuntimeSemanticObservationEnvelope = {
+    ...uiEnvelope,
+    // @ts-expect-error - a raw/arbitrary event is not a CanonicalContextEvent.
+    events: [{ notAnEvent: true }],
+  };
+  void raw;
+
+  // Missing canonical fields and invalid canonical type/status remain compile errors.
+  const missingFields: SemanticObservationEnvelope<CanonicalContextEvent> = {
+    ...envelope,
+    // @ts-expect-error - canonical events require all required fields.
+    events: [{ eventId: 'context-event:incomplete' }],
+  };
+  void missingFields;
+  const badType: SemanticObservationEnvelope<CanonicalContextEvent> = {
+    ...envelope,
+    // @ts-expect-error - canonical type must be a ContextEventType member.
+    events: [{ ...semanticEvent, type: 'not.a.type' }],
+  };
+  void badType;
+  const badStatus: SemanticObservationEnvelope<CanonicalContextEvent> = {
+    ...envelope,
+    // @ts-expect-error - canonical status must stay in the six-value union.
+    events: [{ ...semanticEvent, status: 'not-a-status' }],
+  };
+  void badStatus;
+
+  // Readonly shape is enforced statically.
+  // @ts-expect-error - readonly event arrays cannot be mutated.
+  uiEnvelope.events.push(semanticEvent);
+  // @ts-expect-error - readonly canonical events cannot be mutated.
+  uiEnvelope.events[0].status = 'completed';
+  // @ts-expect-error - readonly arrays cannot be reassigned.
+  uiEnvelope.coverageIssues = [];
+
+  // Missing durable watermark and unsupported coverage reasons remain type errors.
+  // @ts-expect-error - sourceWatermark is a required durable watermark.
+  const missingWatermark: SemanticObservationEnvelope<CanonicalContextEvent> = { scope, projectionVersion: 'i1c-v1', publicCommitWatermark: 3, events: [], coverageIssues: [], pairing: [], capabilities: [] };
+  void missingWatermark;
+  const badCoverage: SemanticObservationEnvelope<CanonicalContextEvent> = {
+    ...envelope,
+    // @ts-expect-error - coverage reason must stay in the closed reason list.
+    coverageIssues: [{ reason: 'not-a-reason', scope, sourceRef: evidence }],
+  };
+  void badCoverage;
+  const badPairingKind: SemanticObservationEnvelope<CanonicalContextEvent> = {
+    ...envelope,
+    // @ts-expect-error - paired execution kind must stay in the closed kind list.
+    pairing: [{ ...pairedOperation, kind: 'not-a-kind' }],
+  };
+  void badPairingKind;
+  const malformedRef: SemanticObservationEnvelope<CanonicalContextEvent> = {
+    ...envelope,
+    // @ts-expect-error - coverage sourceRef must be a complete EvidenceRef.
+    coverageIssues: [{ reason: 'unknown-kind', scope, sourceRef: { source: 'missing-fields' } }],
+  };
+  void malformedRef;
+}
+void i1cCompileTimeGuards;
