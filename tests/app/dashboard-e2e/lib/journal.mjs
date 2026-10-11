@@ -4,14 +4,14 @@
  * Owns graph node: local_search_terminal (per-command graphs) and the evidence
  * step of the failure chain.
  *
- * The serve composes its journals under the attempt's control root:
- *   <controlRoot>/sessions/<projectKey>/checkpoints/<mode>/ui-runtime-journal.jsonl
+ * The serve composes its UI runtime journals under the config-derived project root:
+ *   <projectRoot>/checkpoints/ui-runtime/<mode>/ui-runtime-journal.jsonl
  *     carries every RuntimeTaskEvent — provider request-start, provider.tool,
  *     provider.tool-result and execution.terminal;
- *   <controlRoot>/sessions/<projectKey>/checkpoints/<mode>/task-<id>-cycle-<id>.jsonl
+ *   <projectRoot>/checkpoints/ui-runtime/<mode>/task-<id>-cycle-<id>.jsonl
  *     carries the committed checkpoints.
- * `<controlRoot>/main/sessions` is the memory runtime and is NOT the task
- * journal, so it must never be used as evidence.
+ * Project identity and path derivation come from the config resolver. No
+ * control-root-wide search or newest-file selection is used as task evidence.
  *
  * Counters are read from those journals, never from `dashboard.recentEvents`,
  * which is a 20-event window flooded by reasoning events (it previously reported
@@ -20,7 +20,7 @@
  * contains nothing matching.
  */
 
-import { readdir, stat, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { taskIdValue } from './binding.mjs';
@@ -62,93 +62,58 @@ async function loadAuthoritativeClasses(repoPath = RUNNER_REPO) {
   return authoritativeClasses;
 }
 
-/** Recursively collect regular files under root, newest mtime first. */
-async function walkNewest(root, limit = 400) {
-  const results = [];
-  let entries = [];
-  try {
-    entries = await readdir(root, { recursive: true, withFileTypes: true });
-  } catch {
-    return results;
-  }
-  for (const entry of entries) {
-    // With `recursive: true` each entry's `path` is its PARENT directory and its
-    // `name` is the basename, so the full path is parent + name.
-    const full = entry.path && entry.name
-      ? join(entry.path, entry.name)
-      : join(root, entry.name ?? '');
-    let info;
-    try {
-      info = await stat(full);
-    } catch {
-      continue;
-    }
-    if (!info.isFile()) continue;
-    results.push({ path: full, mtime: info.mtimeMs, size: info.size });
-  }
-  results.sort((a, b) => b.mtime - a.mtime);
-  return results.slice(0, limit);
-}
-
 /** Resolve the authoritative task journal for this attempt. */
 export async function journalPathFor(binding) {
   const attached = binding.serviceMode === 'installed-attach';
-  const controlRoot = binding.serveControlRoot
-    ?? (attached ? (binding.journalControlRoot ?? binding.formalPaths?.controlRoot) : binding.controlRoot);
-  if (!controlRoot) throw new Error('journalPathFor requires a resolved control root');
+  const runtimePaths = attached ? binding.formalPaths : binding.runtimePaths;
+  const projectRoot = runtimePaths?.projectRoot;
   const projectKey = attached
     ? (binding.journalProjectKey ?? binding.formalPaths?.projectKey ?? null)
     : (binding.projectKey ?? binding.runtimePaths?.projectKey ?? null);
   const taskId = binding.taskId ?? binding.scope?.taskId ?? null;
-  if (!projectKey) throw new Error('journalPathFor requires the config-derived projectKey');
+  if (!projectRoot || !projectKey) {
+    throw new Error('journalPathFor requires config-derived projectRoot and projectKey');
+  }
+  if (!taskId) throw new Error('journalPathFor requires the exact taskId; broad journal search is not allowed');
   const mode = binding.journalMode ?? 'rcc';
-  if (taskId) {
-    const exact = join(controlRoot, 'sessions', projectKey, 'checkpoints', mode, 'ui-runtime-journal.jsonl');
-    const checkpointDir = join(controlRoot, 'sessions', projectKey, 'checkpoints', mode);
-    let checkpointFiles = [];
-    try {
-      checkpointFiles = (await readdir(checkpointDir, { withFileTypes: true }))
-        .filter((entry) => entry.isFile() && /^task-[^\s]+-cycle-[^\s]+\.jsonl$/.test(entry.name))
-        .map((entry) => join(checkpointDir, entry.name));
-    } catch {
-      checkpointFiles = [];
-    }
-    try {
-      await readFile(exact, 'utf8');
-      binding.journalPath = exact;
-      binding.journalPaths = [exact, ...checkpointFiles];
-      return exact;
-    } catch (error) {
-      throw new Error(`no same-project ui-runtime-journal.jsonl at ${exact}: ${error.message}`);
-    }
+  const journalRoot = join(projectRoot, 'checkpoints', 'ui-runtime', mode);
+  const exact = join(journalRoot, 'ui-runtime-journal.jsonl');
+  const taskValue = taskIdValue(taskId);
+  const cycleId = binding.cycleId ?? binding.scope?.cycleId ?? null;
+  const checkpointPrefix = `task-${taskValue}-cycle-`;
+  const checkpointName = cycleId ? `${checkpointPrefix}${idValue(cycleId)}.jsonl` : null;
+  let checkpointFiles = [];
+  try {
+    checkpointFiles = (await readdir(journalRoot, { withFileTypes: true }))
+      .filter((entry) => (
+        entry.isFile()
+        && (checkpointName ? entry.name === checkpointName : entry.name.startsWith(checkpointPrefix))
+        && CHECKPOINT_FILE_NAME.test(entry.name)
+      ))
+      .map((entry) => join(journalRoot, entry.name))
+      .sort();
+  } catch {
+    checkpointFiles = [];
   }
-  const journalRoot = join(controlRoot, 'sessions', projectKey, 'checkpoints', mode, 'ui-runtime-journal.jsonl');
-  const newest = await walkNewest(controlRoot, 400);
-  const events = newest.filter((entry) => entry.path === journalRoot);
-  if (events.length === 0) {
-    throw new Error(`no ui-runtime-journal.jsonl for project ${projectKey} under ${controlRoot}`);
+  try {
+    await readFile(exact, 'utf8');
+  } catch (error) {
+    throw new Error(`no same-project ui-runtime-journal.jsonl at ${exact}: ${error.message}`);
   }
-  const checkpointFiles = newest
-    .filter((entry) => (
-      entry.path.startsWith(join(controlRoot, 'sessions', projectKey, 'checkpoints', mode))
-      && /(^|\/)task-[^\s]+-cycle-[^\s]+\.jsonl$/.test(entry.path)
-    ))
-    .map((entry) => entry.path);
-  binding.journalPath = events[0].path;
-  binding.journalPaths = [events[0].path, ...checkpointFiles];
-  return events[0].path;
+  binding.journalPath = exact;
+  binding.journalPaths = [exact, ...checkpointFiles];
+  return exact;
 }
 
 /** The project-scoped journal root the serve writes for one mode. */
 export function journalRootFor(binding, mode = 'rcc') {
   const attached = binding.serviceMode === 'installed-attach';
-  const controlRoot = binding.serveControlRoot
-    ?? (attached ? (binding.journalControlRoot ?? binding.formalPaths?.controlRoot) : binding.controlRoot);
+  const projectRoot = attached ? binding.formalPaths?.projectRoot : binding.runtimePaths?.projectRoot;
   const projectKey = attached
     ? (binding.journalProjectKey ?? binding.formalPaths?.projectKey ?? null)
     : (binding.projectKey ?? binding.runtimePaths?.projectKey ?? null);
-  if (!controlRoot || !projectKey) return null;
-  return join(controlRoot, 'sessions', projectKey, 'checkpoints', mode);
+  if (!projectRoot || !projectKey) return null;
+  return join(projectRoot, 'checkpoints', 'ui-runtime', mode);
 }
 
 /** Parse a JSONL journal into records, keeping file order. */
@@ -849,8 +814,10 @@ export async function workspaceManifest(workspace) {
       let info;
       try {
         info = await stat(path);
-      } catch {
-        continue;
+      } catch (error) {
+        // Never skip an entry silently: a partial manifest would let an empty
+        // or incomplete snapshot pass as a complete workspace-unchanged proof.
+        throw new Error(`workspace manifest could not stat ${relPath}: ${error.message}`);
       }
       if (!info.isFile()) continue;
       const body = await readFile(path);

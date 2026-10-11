@@ -31,7 +31,6 @@
  *   T22C_SKIP_RCC=1         run only section A
  */
 
-import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -54,6 +53,16 @@ const playwrightModule = await import(
   process.env.T22C_PLAYWRIGHT ?? '/opt/homebrew/lib/node_modules/playwright/index.js'
 );
 const playwright = playwrightModule.default ?? playwrightModule;
+
+// Section A serves the real `docs/ui` modules and the scripted public runtime
+// API through Playwright request interception against a synthetic origin. That
+// needs no listening socket, so the deterministic browser proof still runs in a
+// sandbox that denies TCP/UDP bind. Section B (real RCC) still needs real ports.
+const proofOrigin = 'http://humanagent.entry-flow.test';
+const browserArgs = (process.env.T22C_BROWSER_ARGS ?? '--single-process,--no-zygote')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 const checks = [];
 const observations = [];
@@ -294,58 +303,43 @@ async function handleScriptedApi(url, method, body) {
   return { status: 404, body: { error: { code: 'scripted.route.missing', path: url.pathname } } };
 }
 
-async function startScriptedServer() {
-  const server = createServer(async (request, response) => {
-    request.socket.setKeepAlive(false);
+async function installScriptedRoutes(context) {
+  await context.route('**/*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.origin !== proofOrigin) {
+      await route.continue();
+      return;
+    }
+    if (url.pathname.startsWith('/api/')) {
+      const raw = request.postData();
+      let body;
+      if (raw) { try { body = JSON.parse(raw); } catch { body = undefined; } }
+      const result = await handleScriptedApi(url, request.method(), body);
+      await route.fulfill({
+        status: result.status,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(result.body),
+      });
+      return;
+    }
+    const relative = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
+    if (!relative || relative.split('/').includes('..')) {
+      await route.fulfill({ status: 400, body: 'bad path' });
+      return;
+    }
+    const filePath = resolve(uiRoot, relative);
+    if (!filePath.startsWith(`${uiRoot}${sep}`)) {
+      await route.fulfill({ status: 403, body: 'forbidden' });
+      return;
+    }
     try {
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname.startsWith('/api/')) {
-        const chunks = [];
-        for await (const chunk of request) chunks.push(chunk);
-        const raw = Buffer.concat(chunks).toString('utf8');
-        let body;
-        if (raw) { try { body = JSON.parse(raw); } catch { body = undefined; } }
-        const result = await handleScriptedApi(url, request.method ?? 'GET', body);
-        const payload = Buffer.from(JSON.stringify(result.body));
-        response.writeHead(result.status, { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.byteLength });
-        response.end(payload);
-        return;
-      }
-      const relative = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
-      if (!relative || relative.split('/').includes('..')) {
-        response.writeHead(400);
-        response.end('bad path');
-        return;
-      }
-      const filePath = resolve(uiRoot, relative);
-      if (!filePath.startsWith(`${uiRoot}${sep}`)) {
-        response.writeHead(403);
-        response.end('forbidden');
-        return;
-      }
       const file = await readFile(filePath);
-      response.writeHead(200, { 'content-type': mimeType(filePath), 'content-length': file.byteLength });
-      response.end(file);
+      await route.fulfill({ status: 200, contentType: mimeType(filePath), body: file });
     } catch {
-      response.writeHead(404);
-      response.end('not found');
+      await route.fulfill({ status: 404, body: 'not found' });
     }
   });
-  await new Promise((settle, fail) => {
-    server.once('error', fail);
-    server.listen(0, '127.0.0.1', settle);
-  });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('scripted server did not expose a port');
-  server.unref();
-  return { server, url: `http://127.0.0.1:${address.port}` };
-}
-
-async function closeServer(server) {
-  if (!server || !server.listening) return;
-  server.closeAllConnections?.();
-  server.closeIdleConnections?.();
-  await new Promise((settle, fail) => server.close((error) => (error ? fail(error) : settle())));
 }
 
 async function readEditableValues(page) {
@@ -358,7 +352,26 @@ async function readEditableValues(page) {
   });
 }
 
-async function sectionA(browser, base, artifactDir) {
+// Launch one fresh browser+context for a deterministic case. A constrained
+// sandbox restarts Chromium after a context close under `--single-process`, so
+// each case owns and closes its own browser.
+async function withScriptedPage(run, { viewport, reducedMotion } = {}) {
+  const browser = await playwright.chromium.launch({ headless: true, args: browserArgs });
+  const context = await browser.newContext({
+    viewport,
+    ...(reducedMotion === undefined ? {} : { reducedMotion }),
+  });
+  await installScriptedRoutes(context);
+  const page = await context.newPage();
+  try {
+    return await run(page);
+  } finally {
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
+async function sectionA(artifactDir) {
   const runs = [
     { label: 'desktop', viewport: { width: 1440, height: 1000 }, reducedMotion: 'no-preference' },
     { label: 'mobile', viewport: { width: 390, height: 844 }, reducedMotion: 'no-preference' },
@@ -366,12 +379,10 @@ async function sectionA(browser, base, artifactDir) {
   ];
 
   // Defect A: the brain feedback is read-only and never lands in an editable control.
-  {
-    const context = await browser.newContext({ viewport: runs[0].viewport });
-    const page = await context.newPage();
+  await withScriptedPage(async (page) => {
     const pageErrors = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
-    await page.goto(`${base}/interaction.html`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${proofOrigin}/interaction.html`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('form[data-explicit-input] textarea[name="rawInput"]');
     await page.fill('form[data-explicit-input] textarea[name="rawInput"]', '整理这条需求并生成草稿');
     await page.click('form[data-explicit-input] button[type="submit"]');
@@ -400,38 +411,34 @@ async function sectionA(browser, base, artifactDir) {
     record('defectA feedback text never appears in an editable value', editable.values.every((value) => !value.includes('(规范化)')), editable.values);
     record('defectA interaction page has no page errors', pageErrors.length === 0, pageErrors);
     await page.screenshot({ path: join(artifactDir, 'defect-a-feedback-desktop.png') });
-    await context.close();
-  }
+  }, { viewport: runs[0].viewport });
 
   // Defect B: one submit authorizes the task and lands on observation.
   for (const run of runs) {
-    const context = await browser.newContext({ viewport: run.viewport, reducedMotion: run.reducedMotion });
-    const page = await context.newPage();
-    const pageErrors = [];
-    page.on('pageerror', (error) => pageErrors.push(error.message));
-    await page.goto(`${base}/index.html`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#entry-form textarea[name="rawInput"]');
-    const confirmButtonCount = await page.locator('#entry-confirm-button').count();
-    record(`${run.label} no second confirmation button exists`, confirmButtonCount === 0, confirmButtonCount);
-    await page.fill('#entry-form textarea[name="rawInput"]', '读取 README 并汇报');
-    await page.click('#entry-form button[type="submit"]');
-    await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
-    const taskId = new URL(page.url()).searchParams.get('task');
-    await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 10_000 });
-    const pipelineChip = (await page.textContent('.flow-node[data-node-id="pipeline.execute"] .state-chip'))?.trim();
-    const nodeCount = await page.locator('.flow-node').count();
-    record(`${run.label} one submit lands directly on the task observation`, Boolean(taskId), page.url());
-    record(`${run.label} observation renders real pipeline nodes`, nodeCount > 0 && pipelineChip === '已完成', { nodeCount, pipelineChip });
-    record(`${run.label} entry page has no page errors`, pageErrors.length === 0, pageErrors);
-    await page.screenshot({ path: join(artifactDir, `defect-b-observation-${run.label}.png`) });
-    await context.close();
+    await withScriptedPage(async (page) => {
+      const pageErrors = [];
+      page.on('pageerror', (error) => pageErrors.push(error.message));
+      await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#entry-form textarea[name="rawInput"]');
+      const confirmButtonCount = await page.locator('#entry-confirm-button').count();
+      record(`${run.label} no second confirmation button exists`, confirmButtonCount === 0, confirmButtonCount);
+      await page.fill('#entry-form textarea[name="rawInput"]', '读取 README 并汇报');
+      await page.click('#entry-form button[type="submit"]');
+      await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
+      const taskId = new URL(page.url()).searchParams.get('task');
+      await page.waitForSelector('.flow-node[data-node-id="pipeline.execute"]', { timeout: 10_000 });
+      const pipelineChip = (await page.textContent('.flow-node[data-node-id="pipeline.execute"] .state-chip'))?.trim();
+      const nodeCount = await page.locator('.flow-node').count();
+      record(`${run.label} one submit lands directly on the task observation`, Boolean(taskId), page.url());
+      record(`${run.label} observation renders real pipeline nodes`, nodeCount > 0 && pipelineChip === '已完成', { nodeCount, pipelineChip });
+      record(`${run.label} entry page has no page errors`, pageErrors.length === 0, pageErrors);
+      await page.screenshot({ path: join(artifactDir, `defect-b-observation-${run.label}.png`) });
+    }, { viewport: run.viewport, reducedMotion: run.reducedMotion });
   }
 
   // Clarification loop survives.
-  {
-    const context = await browser.newContext({ viewport: runs[0].viewport });
-    const page = await context.newPage();
-    await page.goto(`${base}/index.html`, { waitUntil: 'domcontentloaded' });
+  await withScriptedPage(async (page) => {
+    await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
     await page.fill('#entry-form textarea[name="rawInput"]', 'CLARIFY 处理这份需求');
     await page.click('#entry-form button[type="submit"]');
     await page.waitForSelector('#entry-draft input[name="answer"]', { timeout: 10_000 });
@@ -441,15 +448,12 @@ async function sectionA(browser, base, artifactDir) {
     await page.waitForURL(/observation\.html\?task=/, { timeout: 20_000 });
     record('clarification question is rendered before authorization', question.includes('请补充验收范围'), question.slice(0, 200));
     record('clarification answer continues the same submission', /observation\.html\?task=/.test(page.url()), page.url());
-    await context.close();
-  }
+  }, { viewport: runs[0].viewport });
 
   // Failure keeps the input and shows a readable, original error.
-  {
+  await withScriptedPage(async (page) => {
     scripted.confirmFails = true;
-    const context = await browser.newContext({ viewport: runs[0].viewport });
-    const page = await context.newPage();
-    await page.goto(`${base}/index.html`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
     await page.fill('#entry-form textarea[name="rawInput"]', '这条提交会被运行时拒绝');
     await page.click('#entry-form button[type="submit"]');
     await page.waitForSelector('#entry-error:not([hidden])', { timeout: 10_000 });
@@ -461,17 +465,14 @@ async function sectionA(browser, base, artifactDir) {
     record('failed submit keeps the last readable draft', draftText.includes('规范化输入'), draftText.slice(0, 200));
     await page.screenshot({ path: join(artifactDir, 'failure-retains-input.png') });
     scripted.confirmFails = false;
-    await context.close();
-  }
+  }, { viewport: runs[0].viewport });
 
   // A rapid double click still produces exactly one task.
-  {
+  await withScriptedPage(async (page) => {
     const receiveBefore = scripted.receiveCount;
     const confirmBefore = scripted.confirmationCount;
     const tasksBefore = scripted.tasks.length;
-    const context = await browser.newContext({ viewport: runs[0].viewport });
-    const page = await context.newPage();
-    await page.goto(`${base}/index.html`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${proofOrigin}/index.html`, { waitUntil: 'domcontentloaded' });
     await page.fill('#entry-form textarea[name="rawInput"]', '只允许创建一次的任务');
     await page.evaluate(() => {
       const button = document.querySelector('#entry-form button[type="submit"]');
@@ -486,8 +487,7 @@ async function sectionA(browser, base, artifactDir) {
     record('rapid double click issues exactly one explicit input', receiveDelta === 1, receiveDelta);
     record('rapid double click issues exactly one confirmation', confirmDelta === 1, confirmDelta);
     record('rapid double click creates exactly one task', taskDelta === 1, taskDelta);
-    await context.close();
-  }
+  }, { viewport: runs[0].viewport });
 }
 
 // ---------------------------------------------------------------------------
@@ -814,16 +814,16 @@ async function sectionB(browser, artifactDir, root) {
 
 const artifactDir = join(evidenceRoot, 'artifacts');
 await mkdir(artifactDir, { recursive: true });
-const browser = await playwright.chromium.launch({ headless: true });
-let scriptedServer;
 try {
-  scriptedServer = await startScriptedServer();
-  await sectionA(browser, scriptedServer.url, artifactDir);
-} finally {
-  await closeServer(scriptedServer);
-  if (skipRcc) {
-    observe('rcc', 'skipped via T22C_SKIP_RCC=1');
-  } else {
+  await sectionA(artifactDir);
+} catch (error) {
+  record('deterministic entry-flow section completed', false, error instanceof Error ? error.message : String(error));
+}
+if (skipRcc) {
+  observe('rcc', 'skipped via T22C_SKIP_RCC=1');
+} else {
+  const browser = await playwright.chromium.launch({ headless: true, args: browserArgs });
+  try {
     const root = await mkdtemp(join(tmpdir(), 't22c-entry-flow-'));
     await mkdir(join(root, 'workspace'), { recursive: true });
     await writeFile(join(root, 'workspace', 'marker.txt'), 'T22C_MARKER\n', 'utf8');
@@ -832,8 +832,9 @@ try {
     } catch (error) {
       record('real RCC section completed', false, error instanceof Error ? error.message : String(error));
     }
+  } finally {
+    await browser.close().catch(() => {});
   }
-  await browser.close();
 }
 
 await writeFile(

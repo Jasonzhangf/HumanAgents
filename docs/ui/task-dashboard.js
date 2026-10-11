@@ -4,6 +4,7 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  mountSemanticObservationPanel,
   observationHref,
   renderPageError,
   renderRuntimeStatus,
@@ -20,12 +21,25 @@ import {
 } from './plan-control.js'
 
 const taskId = taskIdFromQuery()
+// Shared with the Task Observation page: one panel, one decoded envelope. The
+// host is re-attached after every dashboard re-render so the live semantic
+// subscription is not re-created on each refresh.
+const semanticHost = element('section', undefined, 'semantic-observation-section')
+semanticHost.setAttribute('aria-label', '语义观测')
+let semanticPanel
+
 const { main, status } = makePageShell(
   'Task List',
   'Task Dashboard',
   '任务看板',
   '当前状态、执行节点、事件、checkpoint 和操作都来自 HumanAgent Runtime API。',
 )
+main.append(semanticHost)
+
+function ensureSemanticPanel() {
+  if (semanticPanel) return
+  semanticPanel = mountSemanticObservationPanel(semanticHost, { taskId })
+}
 
 let dashboard
 let stream
@@ -416,6 +430,9 @@ function renderDashboard() {
   events.append(eventPanel)
   main.append(events)
 
+  ensureSemanticPanel()
+  main.append(semanticHost)
+
   const observationLink = element('a', '打开只读 Observation', 'button')
   observationLink.href = observationHref(taskId)
   main.append(observationLink)
@@ -546,4 +563,5 @@ async function load() {
   }
 }
 
+ensureSemanticPanel()
 void load()

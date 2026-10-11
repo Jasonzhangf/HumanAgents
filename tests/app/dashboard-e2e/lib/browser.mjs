@@ -15,7 +15,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -33,6 +33,164 @@ const PLAYWRIGHT_CANDIDATES = [
 ].filter(Boolean);
 
 const TERMINAL_TIMEOUT_MS = Number(process.env.E2E_TERMINAL_TIMEOUT_MS ?? 600_000);
+const SERVE_READY_TIMEOUT_MS = Number(process.env.E2E_SERVE_READY_TIMEOUT_MS ?? 90_000);
+const SERVE_STARTUP_STOP_TIMEOUT_MS = Number(process.env.E2E_SERVE_STARTUP_STOP_TIMEOUT_MS ?? 10_000);
+const SERVE_STARTUP_LOG_LIMIT_BYTES = 256 * 1024;
+const SERVE_STARTUP_EXCERPT_CHARS = 8_000;
+
+function byteLength(text) {
+  return Buffer.byteLength(text, 'utf8');
+}
+
+function excerpt(text, limit = SERVE_STARTUP_EXCERPT_CHARS) {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}... [truncated: ${text.length - limit} of ${text.length} chars omitted]`;
+}
+
+/**
+ * The startup log is execution-owned evidence: it lives under this attempt's
+ * run-notes receipt directory so it survives the unsettled-retention branch for
+ * the recovery owner, and is never written into the real user root.
+ */
+async function writeStartupLog(binding, suffix, text) {
+  const base = binding.receiptDir ?? binding.attemptRoot ?? binding.workspace ?? tmpdir();
+  const path = join(base, `serve-startup-${binding.attemptId ?? 'attempt'}.${suffix}.log`);
+  const full = String(text ?? '');
+  const stored = full.length > SERVE_STARTUP_LOG_LIMIT_BYTES ? full.slice(0, SERVE_STARTUP_LOG_LIMIT_BYTES) : full;
+  await mkdir(base, { recursive: true });
+  await writeFile(path, stored, 'utf8');
+  return {
+    path,
+    bytes: byteLength(full),
+    storedBytes: byteLength(stored),
+    truncated: stored.length !== full.length,
+    excerpt: excerpt(full),
+  };
+}
+
+/** Persist child stdout/stderr verbatim (stderr may be empty; stdout is kept regardless). */
+async function persistServeStartupLogs(binding, launch) {
+  if (launch.stdoutLog || launch.stderrLog) return launch;
+  launch.evidenceDir = binding.receiptDir ?? binding.attemptRoot ?? binding.workspace ?? tmpdir();
+  const [stdoutLog, stderrLog] = await Promise.all([
+    writeStartupLog(binding, 'stdout', launch.stdout),
+    writeStartupLog(binding, 'stderr', launch.stderr),
+  ]);
+  launch.stdoutLog = stdoutLog;
+  launch.stderrLog = stderrLog;
+  return launch;
+}
+
+function childExitStatus(child) {
+  if (!child) return null;
+  if (child.exitCode === null && child.signalCode === null) return null;
+  return { exitCode: child.exitCode ?? null, signal: child.signalCode ?? null };
+}
+
+function isProcessAlive(pid) {
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+/**
+ * The single readiness verdict. The three real readiness branches are
+ * distinguishable:
+ *  - `readiness_timeout`: the deadline expired with no banner-shaped match;
+ *  - `banner_parse_failed`: a banner-shaped match appeared but never parsed;
+ *  - `early_exit`: the child exited before a banner was parsed;
+ * plus `startup_failed` for a failure after a parsed banner (missing url or a
+ * failed liveness probe) and `ready` once the banner and liveness both pass.
+ * A parse failure is recorded alongside the branch, never swallowed.
+ */
+function finalizeServeReadiness(launch, outcome, detail = {}) {
+  if (launch.readiness !== 'launching') return launch;
+  launch.readiness = outcome;
+  launch.readinessAt = new Date().toISOString();
+  if (outcome === 'readiness_timeout') {
+    launch.failureReason = `serve readiness timed out after ${launch.readyTimeoutMs}ms with no parsed banner`;
+  } else if (outcome === 'banner_parse_failed') {
+    launch.failureReason = `serve readiness timed out after ${launch.readyTimeoutMs}ms; a banner-shaped object matched but did not parse: ${launch.parser.lastParseError}`;
+  } else if (outcome === 'early_exit') {
+    launch.failureReason = `serve exited before reporting a URL (exitCode=${detail.exitCode ?? 'null'} signal=${detail.signal ?? 'null'})`;
+  } else {
+    launch.failureReason = detail.reason ?? null;
+  }
+  return launch;
+}
+
+/** Wait for an already-signalled child to actually exit; report the real result. */
+async function waitForServeExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return { exited: true, ...(childExitStatus(child) ?? { exitCode: null, signal: null }) };
+  }
+  return new Promise((done) => {
+    const timer = setTimeout(() => done({ exited: false, exitCode: null, signal: null, reason: `pid ${child.pid} did not exit within ${timeoutMs}ms` }), timeoutMs);
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      done({ exited: true, exitCode: code ?? null, signal: signal ?? null });
+    });
+  });
+}
+
+/**
+ * Terminate the failed startup child with explicit-PID SIGTERM and verify the
+ * exit. If the child really stays alive it is not claimed as stopped: the real
+ * live PID is recorded on the binding so cleanup hands it to recovery.
+ */
+async function stopFailedServeChild(binding, launch) {
+  const child = launch.child;
+  if (child.exitCode !== null || child.signalCode !== null) {
+    launch.stop = { attempted: false, reason: 'child already exited before any stop signal' };
+    return launch.stop;
+  }
+  try {
+    child.kill('SIGTERM');
+  } catch (error) {
+    launch.stop = { attempted: true, signal: 'SIGTERM', delivered: false, reason: `SIGTERM failed: ${error.message}` };
+    return launch.stop;
+  }
+  const first = await waitForServeExit(child, SERVE_STARTUP_STOP_TIMEOUT_MS);
+  if (first.exited) {
+    launch.stop = { attempted: true, signal: 'SIGTERM', delivered: true, exited: true, escalated: false, exitCode: first.exitCode, signalCode: first.signal };
+    return launch.stop;
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch { /* already gone */ }
+  const second = await waitForServeExit(child, SERVE_STARTUP_STOP_TIMEOUT_MS);
+  launch.stop = second.exited
+    ? { attempted: true, signal: 'SIGTERM', delivered: true, exited: true, escalated: true, exitCode: second.exitCode, signalCode: second.signal }
+    : { attempted: true, signal: 'SIGTERM', delivered: true, exited: false, escalated: true, reason: second.reason ?? `pid ${child.pid} survived SIGTERM and SIGKILL` };
+  return launch.stop;
+}
+
+/**
+ * The real exit status of the attempt's serve child. `checked` is false when
+ * this attempt never spawned a child and no usable PID was registered, so the
+ * caller must not report "exited" or "retained" from a guess.
+ */
+export function serveExitStatus(binding) {
+  const launch = binding.serveLaunch ?? null;
+  const child = launch?.child ?? binding.serveChild ?? null;
+  if (child) {
+    const status = childExitStatus(child);
+    if (status) return { checked: true, exited: true, ...status };
+    if (launch?.spawnError) return { checked: true, exited: true, exitCode: null, signal: null, reason: `spawn failed: ${launch.spawnError}` };
+    return { checked: true, exited: false, exitCode: null, signal: null, pid: child.pid ?? null };
+  }
+  if (launch?.spawnError) return { checked: true, exited: true, exitCode: null, signal: null, reason: `spawn failed: ${launch.spawnError}` };
+  const alive = isProcessAlive(binding.servePid);
+  if (alive === null) return { checked: false, exited: null, exitCode: null, signal: null, reason: 'no serve child or usable serve pid was registered by this attempt' };
+  return alive
+    ? { checked: true, exited: false, exitCode: null, signal: null, pid: binding.servePid }
+    : { checked: true, exited: true, exitCode: null, signal: null, pid: binding.servePid, reason: `pid ${binding.servePid} is not running` };
+}
 
 function idValue(value) {
   if (value === undefined || value === null) return null;
@@ -133,9 +291,15 @@ export async function describeDraftStage(binding) {
     try {
       const response = await (binding.auth?.fetch ?? fetch)(`${binding.serveBaseUrl}${path}`, { headers: { accept: 'application/json' } });
       const text = await response.text();
-      return { status: response.status, body: text.slice(0, 2000) };
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = null;
+      }
+      return { status: response.status, body, raw: text.slice(0, 2000), total: body?.counts?.total ?? null };
     } catch (error) {
-      return { status: null, body: error instanceof Error ? error.message : String(error) };
+      return { status: null, body: null, raw: error instanceof Error ? error.message : String(error), total: null };
     }
   };
   const [tasks, dashboard] = await Promise.all([
@@ -153,7 +317,10 @@ export async function describeDraftStage(binding) {
 
 export async function startServeForAttempt(binding, options = {}) {
   const repoPath = binding.repoPath ?? DEFAULT_REPO_PATH;
-  const cli = cliPath(repoPath);
+  // The candidate CLI is the default and the real path. An explicit override
+  // exists only so deterministic contract tests can drive this exact spawn and
+  // readiness machinery with a controlled child instead of a real service.
+  const cli = options.cliPath ?? cliPath(repoPath);
   if (!cli) {
     throw new Error(`built CLI is missing at ${join(repoPath, 'dist/app/app/src/cli.js')}; run \`pnpm build:app\` in the worktree first`);
   }
@@ -179,6 +346,32 @@ export async function startServeForAttempt(binding, options = {}) {
   }
   const RCC_BASE_URL = (process.env.HUMANAGENT_RCC_BASE_URL ?? 'http://127.0.0.1:4444').replace(/\/$/, '');
   const MODEL = process.env.HUMANAGENT_UI_MODEL ?? 'gpt-5.5';
+  const readyTimeoutMs = Number(options.readyTimeoutMs ?? SERVE_READY_TIMEOUT_MS);
+
+  const startedAt = new Date().toISOString();
+  const launch = {
+    attemptId: binding.attemptId ?? null,
+    pid: null,
+    argv: [process.execPath, cli, 'serve', '--mode', 'rcc', '--protocol', 'responses', '--binding', `ui-dash-e2e-${binding.attemptId}`, '--port', '0'],
+    cwd: repoPath,
+    workspace,
+    controlRoot,
+    readyTimeoutMs,
+    startedAt,
+    spawnedAt: null,
+    spawnError: null,
+    readiness: 'launching',
+    readinessAt: null,
+    failureReason: null,
+    parser: { matched: false, parseFailed: false, matchedBytes: 0, lastParseError: null, attempts: 0 },
+    stdout: '',
+    stderr: '',
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    exit: null,
+    stop: null,
+  };
+  binding.serveLaunch = launch;
 
   const child = spawn(process.execPath, [
     cli,
@@ -193,29 +386,54 @@ export async function startServeForAttempt(binding, options = {}) {
     '--control-root', controlRoot,
     '--port', '0',
   ], { cwd: repoPath, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  launch.pid = child.pid ?? null;
+  launch.child = child;
   binding.servePid = child.pid;
   binding.serveChild = child;
   binding.serviceMode = 'candidate';
 
-  let stdout = '';
-  let stderr = '';
   const ready = new Promise((settle, fail) => {
-    const timer = setTimeout(() => fail(new Error(`serve did not report a URL: ${stderr.slice(-1200)}`)), Number(options.readyTimeoutMs ?? 90_000));
+    const timer = setTimeout(() => {
+      finalizeServeReadiness(launch, launch.parser.parseFailed ? 'banner_parse_failed' : 'readiness_timeout');
+      fail(new Error(`serve did not report a URL within ${readyTimeoutMs}ms: ${launch.failureReason}${launch.parser.parseFailed ? `; last parse error: ${launch.parser.lastParseError}` : ''}; stderr tail: ${launch.stderr.slice(-1200)}`));
+    }, readyTimeoutMs);
     const onData = (chunk) => {
-      stdout += chunk.toString();
-      const match = stdout.match(/\{[\s\S]*?\n\}/);
+      launch.stdoutBytes += chunk.length;
+      launch.stdout += chunk.toString();
+      const match = launch.stdout.match(/\{[\s\S]*?\n\}/);
       if (!match) return;
+      launch.parser.matched = true;
+      launch.parser.matchedBytes = Buffer.byteLength(match[0], 'utf8');
+      launch.parser.attempts += 1;
       try {
         const parsed = JSON.parse(match[0]);
+        launch.parser.parseFailed = false;
         clearTimeout(timer);
         settle(parsed);
-      } catch {
-        // keep buffering until the JSON object is complete
+      } catch (error) {
+        // Keep buffering until the JSON object is complete, but record that a
+        // matched object did not parse so a timeout can name the real reason.
+        launch.parser.parseFailed = true;
+        launch.parser.lastParseError = error.message;
       }
     };
     child.stdout.on('data', onData);
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.once('exit', (code) => fail(new Error(`serve exited early (${String(code)}): ${stderr.slice(-1200)}`)));
+    child.stderr.on('data', (chunk) => {
+      launch.stderrBytes += chunk.length;
+      launch.stderr += chunk.toString();
+    });
+    child.once('spawn', () => { launch.spawnedAt = new Date().toISOString(); });
+    child.once('error', (error) => {
+      launch.spawnError = `${error.code ?? 'error'}: ${error.message}`;
+      launch.errorAt = new Date().toISOString();
+      clearTimeout(timer);
+      fail(new Error(`serve spawn failed: ${launch.spawnError}`));
+    });
+    child.once('exit', (code, signal) => {
+      launch.exit = { code: code ?? null, signal: signal ?? null, at: new Date().toISOString() };
+      if (launch.readiness === 'launching') finalizeServeReadiness(launch, 'early_exit', { exitCode: code ?? null, signal: signal ?? null });
+      fail(new Error(`serve exited early (code=${String(code)} signal=${String(signal)}): ${launch.stderr.slice(-1200)}`));
+    });
   });
 
   try {
@@ -228,12 +446,13 @@ export async function startServeForAttempt(binding, options = {}) {
     binding.serveControlRoot = launched.controlRoot ?? null;
     binding.serveCheckpointRoot = launched.checkpointRoot ?? null;
     binding.serveStderr = '';
+    launch.banner = launched;
     Object.defineProperty(binding, 'serveStderrTail', {
       enumerable: false,
       configurable: true,
-      get: () => stderr.slice(-4000),
+      get: () => launch.stderr.slice(-4000),
     });
-    binding.serveStderrTailFinal = () => stderr.slice(-4000);
+    binding.serveStderrTailFinal = () => launch.stderr.slice(-4000);
     binding.serve = {
       pid: child.pid,
       port,
@@ -245,17 +464,40 @@ export async function startServeForAttempt(binding, options = {}) {
         await exited;
       },
     };
-    const auth = createAttemptAuth(binding);
+    const auth = (options.authFactory ?? createAttemptAuth)(binding);
     await auth.pair();
-    const liveness = await requestJsonWithStatus(`${base}/api/liveness`, {}, auth);
+    const probeLiveness = options.probeLiveness ?? ((target, token) => requestJsonWithStatus(`${target}/api/liveness`, {}, token));
+    const liveness = await probeLiveness(base, auth);
     if (liveness.status !== 200 || liveness.body?.status !== 'alive' || liveness.body?.providerReady !== undefined) {
       throw new Error(`serve liveness readiness failed: ${JSON.stringify(liveness).slice(0, 600)}`);
     }
     binding.readiness = { status: liveness.status, body: liveness.body };
+    launch.readiness = 'ready';
+    launch.readinessAt = new Date().toISOString();
+    // Persist the same raw startup evidence on the ready path: the banner bytes
+    // that were accepted are part of the attempt's record, not only failures.
+    await persistServeStartupLogs(binding, launch).catch((persistError) => {
+      launch.evidenceError = persistError.message;
+    });
     return binding;
   } catch (error) {
-    child.kill('SIGTERM');
-    throw error;
+    // The startup never reached `ready`, so this attempt must not claim a
+    // retained service. Stop the exact child by explicit PID, verify the exit,
+    // and persist the raw stdout/stderr before rethrowing.
+    if (launch.readiness === 'launching') finalizeServeReadiness(launch, 'startup_failed', { reason: error.message });
+    launch.error = { message: error.message, at: new Date().toISOString() };
+    await stopFailedServeChild(binding, launch);
+    if (launch.stop?.exited === true && !launch.exit) {
+      launch.exit = { code: launch.stop.exitCode ?? null, signal: launch.stop.signalCode ?? null, at: new Date().toISOString(), source: 'verified-stop' };
+    }
+    launch.verifiedExit = serveExitStatus(binding);
+    await persistServeStartupLogs(binding, launch).catch((persistError) => {
+      launch.evidenceError = persistError.message;
+    });
+    const detail = launch.verifiedExit?.exited === true
+      ? `child exited (exitCode=${launch.verifiedExit.exitCode ?? 'null'} signal=${launch.verifiedExit.signal ?? 'null'})`
+      : `child pid ${child.pid} is still alive and is handed to recovery, not reported as stopped`;
+    throw new Error(`${error.message}; serve startup branch=${launch.readiness}; ${detail}; stdout=${launch.stdoutBytes}B stderr=${launch.stderrBytes}B`);
   }
 }
 
@@ -446,21 +688,13 @@ async function openEntryPage(binding) {
     return entryUrl;
   }
   await page.waitForSelector('.quick-create-form textarea[name="directive"]', { timeout: 15_000 });
-  // The rendered entry controls are only proven by their real layout: the
-  // directive textarea must occupy space, and the explicit-confirmation
-  // checkbox must stay compact under the shared input style.
+  // The rendered entry control is proven by its real layout. New-task submit
+  // itself authorizes the task, so the Dashboard has no confirmation checkbox.
   const directiveBox = await page.locator('.quick-create-form textarea[name="directive"]').boundingBox();
   if (!directiveBox || directiveBox.width <= 0 || directiveBox.height <= 0) {
     throw new Error(`real browser input was not laid out with a positive bbox: ${JSON.stringify(directiveBox)}`);
   }
-  const autoConfirmBox = await page.locator('.quick-create-policy input[name="autoConfirm"]').boundingBox();
-  if (!autoConfirmBox || autoConfirmBox.width <= 0 || autoConfirmBox.height <= 0) {
-    throw new Error(`dashboard autoConfirm checkbox was not laid out with a positive bbox: ${JSON.stringify(autoConfirmBox)}`);
-  }
-  if (autoConfirmBox.width > 20 || autoConfirmBox.height > 20) {
-    throw new Error(`dashboard autoConfirm checkbox was not compact: ${JSON.stringify(autoConfirmBox)}`);
-  }
-  binding.entryLayout = { directive: directiveBox, autoConfirm: autoConfirmBox };
+  binding.entryLayout = { directive: directiveBox };
   return entryUrl;
 }
 
@@ -525,6 +759,144 @@ async function waitForTaskScopedNavigation(binding, timeoutMs) {
 }
 
 /**
+ * Read the real input stage of the selected entry before it is submitted: the
+ * URL the browser is on, the directive control's real value, visibility, layout
+ * and required/readOnly state, the submit control, and any second-confirmation
+ * control. The caller asserts these preconditions before it screenshots the
+ * stage, so an input-stage screenshot can only exist for a page that really
+ * shows the filled directive.
+ */
+export async function readEntryInputStage(binding, selector) {
+  const { page } = binding.browser;
+  return page.evaluate((inputSelector) => {
+    const textarea = document.querySelector(inputSelector);
+    const form = textarea?.closest('form') ?? null;
+    const submit = form?.querySelector('button[type="submit"]') ?? null;
+    const rect = textarea?.getBoundingClientRect() ?? null;
+    const style = textarea ? getComputedStyle(textarea) : null;
+    const visible = Boolean(
+      textarea
+      && rect
+      && rect.width > 0
+      && rect.height > 0
+      && style
+      && style.visibility !== 'hidden'
+      && style.display !== 'none',
+    );
+    return {
+      url: location.href,
+      pathname: location.pathname,
+      value: textarea?.value ?? null,
+      visible,
+      bbox: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
+      readOnly: textarea?.readOnly ?? null,
+      required: textarea?.required ?? null,
+      submitId: submit?.id ?? null,
+      submitLabel: submit?.textContent?.trim() ?? null,
+      submitEnabled: submit ? !submit.disabled : null,
+      secondConfirmationControls: document.querySelectorAll(
+        '#dashboard-confirm-button, .draft-area, [data-testid="auto-confirm"], input[name="autoConfirm"]',
+      ).length,
+    };
+  }, selector);
+}
+
+function readRequestJson(request) {
+  try {
+    return request.postDataJSON();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The served entry each real input stage lives on. The existing-task change
+ * entry drives its own served page, so its stage is asserted against that exact
+ * path instead of the new-task Dashboard path.
+ */
+const ENTRY_INPUT_PATHS = Object.freeze({
+  homepage: '/',
+  dashboard: '/dashboard.html',
+  interaction: '/interaction.html',
+});
+
+/**
+ * Assert the real input stage of the served entry before its single submit.
+ *
+ * The input-stage screenshot is only meaningful when the page is really on the
+ * served entry with the directive in its form: the URL path, the visible
+ * directive value, its positive layout box, the required attribute, the enabled
+ * submit control and the absence of any second-confirmation control are asserted
+ * first. A failed precondition throws, so the runner records the deviation
+ * instead of a green input stage captured over a blank page.
+ */
+export async function assertEntryInputStage(binding, { entry, inputSelector, directive }) {
+  const dom = await readEntryInputStage(binding, inputSelector);
+  const expectedPath = ENTRY_INPUT_PATHS[entry] ?? ENTRY_INPUT_PATHS.dashboard;
+  const missing = [];
+  if (dom.value !== directive) {
+    missing.push(`directive value=${JSON.stringify(dom.value)} does not match the submitted directive`);
+  }
+  if (dom.visible !== true || !dom.bbox || dom.bbox.width <= 0 || dom.bbox.height <= 0) {
+    missing.push(`directive control is not visible with a positive layout box: ${JSON.stringify(dom.bbox)}`);
+  }
+  if (dom.required !== true) missing.push('directive control is not a required input');
+  if (dom.submitEnabled !== true) missing.push('the single submit control is missing or disabled');
+  if (dom.secondConfirmationControls !== 0) {
+    missing.push(`${dom.secondConfirmationControls} second-confirmation control(s) are rendered on the served entry`);
+  }
+  if (dom.pathname !== expectedPath) {
+    missing.push(`entry URL path=${JSON.stringify(dom.pathname)} (expected ${expectedPath})`);
+  }
+  if (missing.length) {
+    throw new Error(`input-stage preconditions failed before the submit click: ${missing.join('; ')}`);
+  }
+  return dom;
+}
+
+/**
+ * Read the served existing-task change panel: the intake values, the reviewable
+ * revision the runtime returned, the confirmation gate state and the typed error
+ * the page rendered. Every value comes from the real DOM the human sees; none is
+ * derived from an API response the page did not render.
+ */
+export async function readExistingChangeDom(binding) {
+  const { page } = binding.browser;
+  return page.evaluate(() => {
+    const text = (node) => node?.textContent?.trim() ?? null;
+    const controlValue = (rootSelector, name) =>
+      document.querySelector(`${rootSelector} [name="${name}"]`)?.value ?? null;
+    const error = document.querySelector('[data-existing-change-error]');
+    const proposal = document.querySelector('[data-existing-change-proposal]');
+    const save = document.querySelector('[data-action="save-existing-change"]');
+    const confirm = document.querySelector('[data-action="confirm-existing-change"]');
+    return {
+      url: location.href,
+      pathname: location.pathname,
+      panelPresent: document.querySelector('[data-existing-change]') !== null,
+      state: text(document.querySelector('[data-existing-change-state]')),
+      taskRef: controlValue('[data-existing-change-intake]', 'taskRef'),
+      changeInput: controlValue('[data-existing-change-intake]', 'changeInput'),
+      proposalHidden: proposal ? proposal.hidden : null,
+      taskLabel: text(document.querySelector('[data-existing-change-task]')),
+      revisionLabel: text(document.querySelector('[data-existing-change-revision]')),
+      fields: {
+        goal: controlValue('[data-existing-change-edit]', 'goal'),
+        scope: controlValue('[data-existing-change-edit]', 'scope'),
+        proposal: controlValue('[data-existing-change-edit]', 'proposal'),
+      },
+      saveDisabled: save ? save.disabled : null,
+      confirmDisabled: confirm ? confirm.disabled : null,
+      confirmationText: text(document.querySelector('[data-existing-change-confirmation]')),
+      feedback: text(document.querySelector('[data-existing-change-feedback]')),
+      errorHidden: error ? error.hidden : null,
+      errorCode: text(error?.querySelector('strong')),
+      errorText: text(error?.querySelector('p')),
+    };
+  });
+}
+
+/**
  * Drive the real task input on the selected entry and return the dispatched task.
  *
  * Dashboard entry: 输入 -> 显式草稿 -> 用户点击确认 (the preview flow). Clarifying
@@ -543,6 +915,15 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
   await openEntryPage(binding);
   if ((binding.entry ?? 'dashboard') === 'homepage') {
     await page.fill('#entry-form textarea[name="rawInput"]', directive);
+    // The single authorization action is the click below. The caller gets the
+    // filled-but-unsubmitted stage here, so an input-stage screenshot proves the
+    // real directive, URL and control before the submit.
+    await options.onDirectiveFilled?.({
+      entry: 'homepage',
+      url: page.url(),
+      inputSelector: '#entry-form textarea[name="rawInput"]',
+      directive,
+    });
     binding.formalEntryStarted = true;
     // Register the wait before the click so a fast submission cannot race past
     // the observation. The selected identity comes only from this navigation.
@@ -567,86 +948,129 @@ export async function submitDirectiveAndConfirmDraft(binding, directive, options
     return binding;
   }
 
+  const tasksBeforeSubmit = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
+  const taskIdsBeforeSubmit = new Set(taskGroups(tasksBeforeSubmit)
+    .map((task) => task?.taskId?.value)
+    .filter((taskId) => typeof taskId === 'string' && taskId.length > 0));
   await page.fill('.quick-create-form textarea[name="directive"]', directive);
+  // The one user authorization action is the click below. The caller gets the
+  // filled-but-unsubmitted stage here, so the input-stage screenshot proves the
+  // visible directive, the served URL and the single submit control before it is
+  // used. It must never be taken before this page has loaded.
+  await options.onDirectiveFilled?.({
+    entry: 'dashboard',
+    url: page.url(),
+    inputSelector: '.quick-create-form textarea[name="directive"]',
+    directive,
+  });
   binding.formalEntryStarted = true;
-  await page.click('form button[type="submit"]');
+  const confirmationResponsePromise = page.waitForResponse((response) =>
+    response.url().includes('/api/explicit/interactions/')
+    && response.url().endsWith('/confirmation')
+    && response.request().method() === 'POST',
+  { timeout: Number(options.confirmTimeoutMs ?? 90_000) }).catch((error) => ({ waitError: error }));
 
-  let draft;
   const clarificationLog = [];
-  for (let attempt = 0; attempt < maxClarifications; attempt += 1) {
+  let confirmationResponse;
+  for (let attempt = 0; attempt <= maxClarifications; attempt += 1) {
+    if (attempt === 0) {
+      // This is the one user authorization action for a new Dashboard task.
+      await page.click('#dashboard-create-submit');
+    } else {
+      await page.fill('#dashboard-create-clarification input[name="answer"]', clarificationAnswer);
+      await page.click('#dashboard-create-clarification button[type="submit"]');
+    }
     let outcome;
     try {
-      outcome = await waitForDom(page, 'explicit draft or clarification', async () => {
-      const confirm = await page.$('.draft-actions button.button--primary');
-      if (confirm) {
-        const text = (await confirm.textContent())?.trim();
-        if (text === '确认并执行') return { kind: 'draft' };
-      }
-      const submitText = (await page.textContent('.quick-create-form button[type="submit"]'))?.trim() ?? '';
-      const progressText = (await page.textContent('.quick-create-progress .progress-phase'))?.trim() ?? '';
-      const placeholder = await page.getAttribute('.quick-create-form textarea[name="directive"]', 'placeholder');
-      if (submitText === '回答并继续' || progressText === '需要补充信息') {
-        return { kind: 'clarification', submitText, progressText, placeholder: placeholder ?? null };
-      }
-      return null;
+      outcome = await waitForDom(page, 'single-submit acceptance or clarification', async () => {
+        const clarification = await page.$('#dashboard-create-clarification');
+        if (clarification) return { kind: 'clarification' };
+        const progressText = (await page.textContent('.quick-create-progress .progress-phase'))?.trim() ?? '';
+        if (progressText.includes('已入队')) return { kind: 'accepted', progressText };
+        if (progressText === '已处理') {
+          return {
+            kind: 'status-only',
+            progressText,
+            reply: (await page.textContent('.quick-create-progress .progress-detail'))?.trim() ?? '',
+          };
+        }
+        const errorText = (await page.textContent('#dashboard-create-error'))?.trim() ?? '';
+        if (errorText) return { kind: 'error', errorText };
+        return null;
       }, Number(options.draftTimeoutMs ?? 180_000));
     } catch (error) {
       const stage = await describeDraftStage(binding).catch(() => null);
-      throw new Error(`${error.message}; draft-stage runtime state=${JSON.stringify(stage).slice(0, 2400)}`);
+      binding.entryDiagnostics = stage;
+      throw new Error(`${error.message}; dashboard-submit runtime state=${JSON.stringify(stage).slice(0, 2400)}`);
     }
-    if (outcome.kind === 'draft') {
-      const metaRows = await page.$$eval('.draft-meta', (nodes) => nodes.map((node) => node.textContent?.trim() ?? ''));
-      draft = {
-        intent: (metaRows.find((row) => row.startsWith('意图：')) ?? '').replace('意图：', ''),
-        proposal: (await page.textContent('.draft-area .draft-proposal'))?.trim() ?? '',
-        metaRows,
-      };
+    if (outcome.kind === 'accepted') {
+      confirmationResponse = await confirmationResponsePromise;
+      if (confirmationResponse?.waitError) {
+        throw new Error(`Dashboard showed queue acceptance without its confirmation response: ${confirmationResponse.waitError.message}`);
+      }
+      if (confirmationResponse.status() < 200 || confirmationResponse.status() >= 300) {
+        throw new Error(`Dashboard confirmation POST returned non-2xx status=${confirmationResponse.status()}`);
+      }
+      // The exact authorization request is part of the evidence: its draftId and
+      // inputRevision must agree with the requirement identity the runtime
+      // returns, so a receipt can show which revision the human authorized.
+      const confirmationRequest = confirmationResponse.request?.() ?? null;
+      binding.confirmationRequest = confirmationRequest ? readRequestJson(confirmationRequest) : null;
+      binding.confirmationRequestUrl = confirmationResponse.url?.() ?? null;
+      binding.confirmationResponseStatus = confirmationResponse.status();
       break;
     }
-    if (!outcome.placeholder && !outcome.submitText) {
-      throw new Error('dashboard clarification state had no UI evidence');
+    if (outcome.kind === 'error') {
+      throw new Error(`Dashboard new-task submission was refused or failed visibly: ${outcome.errorText}`);
     }
-    clarificationLog.push(outcome);
-    if (!attempt || !clarificationAnswer) break;
-    await page.fill('.quick-create-form textarea[name="directive"]:not([readonly])', clarificationAnswer);
-    await page.click('.quick-create-form button[type="submit"]');
+    if (outcome.kind === 'status-only') {
+      binding.submissionDisposition = { kind: 'status-only', reply: outcome.reply };
+      binding.entryDiagnostics = await describeDraftStage(binding).catch((error) => ({ diagnosticError: error.message }));
+      throw new Error(`Dashboard explicit brain classified new-task input as status-only; no requirement was authorized: ${outcome.reply}`);
+    }
+    clarificationLog.push({ attempt: attempt + 1, kind: 'clarification' });
+    if (!clarificationAnswer || attempt >= maxClarifications) {
+      throw new Error(`Dashboard requested clarification before accepting the task: ${JSON.stringify(clarificationLog)}`);
+    }
   }
-  if (!draft) {
-    throw new Error(`no confirmable explicit draft after ${maxClarifications} attempts: ${JSON.stringify(clarificationLog).slice(0, 500)}`);
-  }
-
-  const tasksBeforeConfirm = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
-  const confirmResponsePromise = page.waitForResponse((response) =>
-    response.url().includes('/api/explicit/interactions/')
-    && response.url().endsWith('/confirmation')
-    && response.request().method() === 'POST');
-  await page.click('.draft-actions button.button--primary');
-  const confirmResponse = await confirmResponsePromise;
-  if (confirmResponse.status() < 200 || confirmResponse.status() >= 300) {
-    throw new Error(`confirmation POST returned non-2xx status=${confirmResponse.status()}`);
+  if (!confirmationResponse) {
+    throw new Error(`Dashboard did not accept one new-task submission: ${JSON.stringify(clarificationLog).slice(0, 500)}`);
   }
 
-  const taskId = await waitForDom(page, 'dispatched task id', async () => {
+  const confirmationBody = await confirmationResponse.text().then((text) => JSON.parse(text));
+  const requirement = confirmationBody?.requirement;
+  if (!requirement?.requirementId || !requirement?.draftId || !Number.isInteger(requirement?.inputRevision)) {
+    throw new Error(`Dashboard confirmation receipt did not identify one submitted requirement: ${JSON.stringify(confirmationBody).slice(0, 1000)}`);
+  }
+  binding.requirementReceipt = requirement;
+  binding.explicitInteractionId = decodeURIComponent(new URL(confirmationResponse.url()).pathname.split('/').at(-2));
+
+  const taskId = await waitForDom(page, 'unique task created by submitted requirement', async () => {
     const tasks = await jsonRequest(`${base}/api/tasks`, {}, binding.auth);
-    const candidates = []
-      .concat(tasks.running ?? [])
-      .concat(tasks.waiting ?? [])
-      .concat(tasks.draft ?? [])
-      .concat(tasks.completed ?? [])
-      .concat(tasks.failed ?? [])
-      .filter((task) => task?.taskId?.value && task.updatedAt);
-    if (candidates.length === 0) return null;
-    return candidates
-      .map((task) => ({ task, timestamp: new Date(task.updatedAt).getTime() }))
-      .sort((left, right) => right.timestamp - left.timestamp)[0]?.task?.taskId?.value ?? null;
+    const created = taskGroups(tasks).filter((task) => {
+      const id = task?.taskId?.value;
+      return typeof id === 'string' && !taskIdsBeforeSubmit.has(id);
+    });
+    if (created.length > 1) {
+      throw new Error(`one Dashboard submission created ${created.length} new tasks: ${created.map((task) => task.taskId.value).join(', ')}`);
+    }
+    return created.length === 1 ? created[0].taskId.value : null;
   }, Number(options.confirmTimeoutMs ?? 90_000));
-  if (!taskId) throw new Error('confirmation did not create a dispatched task');
+  const taskProbe = await jsonRequest(`${base}/api/tasks/${encodeURIComponent(taskId)}/dashboard`, {}, binding.auth);
+  if (!sameId(taskProbe.taskId, taskId)) {
+    throw new Error(`new-task Dashboard API identity mismatch: expected ${taskId}, received ${JSON.stringify(taskProbe.taskId ?? null)}`);
+  }
 
   binding.taskId = taskId;
-  binding.draft = draft;
-  binding.draftRowsBeforeConfirm = (tasksBeforeConfirm.draft ?? []).length;
-  binding.confirmStatus = confirmResponse.status();
+  binding.draft = { intent: 'create', proposal: '', metaRows: [], entry: 'dashboard', submittedOnce: true };
+  binding.draftRowsBeforeConfirm = (tasksBeforeSubmit.draft ?? []).length;
+  binding.confirmStatus = confirmationResponse.status();
   return binding;
+}
+
+function taskGroups(tasks) {
+  return ['running', 'waiting', 'draft', 'completed', 'failed']
+    .flatMap((group) => Array.isArray(tasks?.[group]) ? tasks[group] : []);
 }
 
 /** Open the per-task dashboard and wait for the task to be nonterminal-running. */
@@ -942,13 +1366,15 @@ export async function probeDashboardLiveSse(binding, options = {}) {
     const freshness = layers.find((cell) => cell.label === '连接新鲜度')?.value ?? '';
     const stateChip = text(document.querySelector('.state-chip'));
     const actionStatus = text(document.querySelector('[role="status"]'));
-    const pageStatus = text(document.querySelector('.status-banner'));
+    const pageStatusNode = document.querySelector('.status-banner');
+    const pageStatus = text(pageStatusNode);
     return {
       layers,
       freshness,
       stateChip,
       actionStatus,
       pageStatus,
+      pageStatusRole: pageStatusNode?.getAttribute('role') ?? null,
       dashboardReads: window.__humanagentDashboardReads ?? 0,
       sseRecorded: window.__humanagentSseRecorded ?? [],
     };
@@ -968,7 +1394,12 @@ export async function probeDashboardLiveSse(binding, options = {}) {
     const state = await readState();
     const disconnected = state.freshness.includes('实时连接已断开');
     const noFakeFailure = state.stateChip !== '失败' && !state.actionStatus.includes('执行失败');
-    return disconnected && noFakeFailure ? state : null;
+    const failedReadVisible = state.pageStatusRole === 'status'
+      && state.pageStatus.trim() !== ''
+      && state.pageStatus !== connected.pageStatus
+      && !state.pageStatus.includes('任务投影已同步');
+    const projectionReadAttempted = state.dashboardReads > connected.dashboardReads;
+    return disconnected && noFakeFailure && failedReadVisible && projectionReadAttempted ? state : null;
   }, options.brokenTimeoutMs ?? 60_000, 500);
 
   await page.unroute('**/api/tasks/**/dashboard', failProjectionReads);

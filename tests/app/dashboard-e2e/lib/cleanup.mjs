@@ -26,12 +26,13 @@
 
 import { access, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { jsonRequest, sleep } from './browser.mjs';
+import { jsonRequest, serveExitStatus, sleep } from './browser.mjs';
 import { taskIdValue } from './binding.mjs';
 import {
   assessSettlement,
   isLegalTerminalState,
   journalPathFor,
+  journalRootFor,
   resolveExecutionIdentity,
 } from './journal.mjs';
 
@@ -76,6 +77,32 @@ export function registerCleanupInventory(binding) {
     journalPath: binding.journalPath ?? null,
   };
   return binding.cleanupInventory;
+}
+
+/**
+ * The child startup observation this attempt recorded (stdout/stderr sidecars,
+ * byte counts, parser verdict, exit and stop result). Every cleanup branch
+ * carries it so a receipt never loses the evidence of why startup did or did not
+ * reach ready.
+ */
+function serveStartupEvidence(binding) {
+  const launch = binding.serveLaunch;
+  if (!launch) return null;
+  return {
+    branch: launch.readiness ?? null,
+    failureReason: launch.failureReason ?? null,
+    spawnError: launch.spawnError ?? null,
+    parser: launch.parser ?? null,
+    stdoutLog: launch.stdoutLog ?? null,
+    stderrLog: launch.stderrLog ?? null,
+    exit: launch.exit ?? null,
+    verifiedExit: launch.verifiedExit ?? null,
+    stop: launch.stop ?? null,
+    readyTimeoutMs: launch.readyTimeoutMs ?? null,
+    startedAt: launch.startedAt ?? null,
+    spawnedAt: launch.spawnedAt ?? null,
+    readinessAt: launch.readinessAt ?? null,
+  };
 }
 
 /**
@@ -327,15 +354,31 @@ async function ensureJournalPaths(binding) {
   return path ? (binding.journalPaths ?? [path]) : [];
 }
 
-/** Prove the serve process exited after an explicit SIGTERM. */
+/**
+ * Prove the serve process exited. The verdict comes from this attempt's real
+ * spawn/exit state when it exists (the child exit event or a verified stop), and
+ * only falls back to an explicit-PID probe for a PID this attempt did not spawn.
+ * A process that is still alive is never reported as stopped or as exited.
+ */
 async function stopServeProcess(binding) {
   const pid = binding.servePid;
+  const observed = serveExitStatus(binding);
+  if (observed.exited === true) {
+    return { stopped: true, reason: observed.reason ?? `already exited (exitCode=${observed.exitCode ?? 'null'} signal=${observed.signal ?? 'null'})` };
+  }
   if (!pid) return { stopped: false, reason: 'no serve pid registered' };
-  const aliveBefore = process.kill(pid, 0);
+  let aliveBefore = false;
+  try {
+    process.kill(pid, 0);
+    aliveBefore = true;
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
   if (!aliveBefore) return { stopped: true, reason: 'already exited' };
   try {
     process.kill(pid, 'SIGTERM');
   } catch (error) {
+    if (error?.code === 'ESRCH') return { stopped: true, reason: `pid ${pid} exited before SIGTERM` };
     return { stopped: false, reason: `SIGTERM failed: ${error.message}` };
   }
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -504,6 +547,7 @@ export async function closeSettledAttempt(binding, settleResult) {
     servePid: binding.servePid ?? null,
     serveExited: serveExit.stopped,
     serveExitReason: serveExit.reason,
+    serveStartup: serveStartupEvidence(binding),
     browserClosed: browser.closed,
     browserReason: browser.reason ?? null,
     portClosed: port.closed,
@@ -519,6 +563,80 @@ export async function closeSettledAttempt(binding, settleResult) {
   binding.cleaned = attached
     ? browser.closed && allRemoved
     : serveExit.stopped && browser.closed && allRemoved && port.closed;
+  return cleanup;
+}
+
+/** Close an owned attempt that provably created no task; the attempt remains INCOMPLETE. */
+export async function closeNoTaskAttempt(binding, proof) {
+  if (binding.serviceMode !== 'candidate') throw new Error('no-task cleanup only applies to an owned candidate service');
+  if (binding.taskId !== null && binding.taskId !== undefined) throw new Error('no-task cleanup refused because a task identity is present');
+  if (proof?.attemptId !== binding.attemptId || proof?.taskId !== null) throw new Error('no-task cleanup proof is not bound to this taskless attempt');
+  if (proof?.taskSnapshot?.status !== 200 || proof?.taskSnapshot?.total !== 0) {
+    throw new Error('no-task cleanup requires an authenticated task snapshot with status 200 and counts.total=0');
+  }
+  const journalRoot = journalRootFor(binding);
+  const expectedJournal = journalRoot ? join(journalRoot, 'ui-runtime-journal.jsonl') : null;
+  if (!expectedJournal || proof?.journal?.path !== expectedJournal || proof?.journal?.exists !== false) {
+    throw new Error('no-task cleanup proof does not identify the exact absent attempt journal');
+  }
+  try {
+    await access(expectedJournal);
+    throw new Error(`no-task cleanup refused because the attempt journal appeared: ${expectedJournal}`);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+
+  registerCleanupInventory(binding);
+  const browser = await (binding.browser?.close() ?? Promise.resolve()).then(
+    () => ({ closed: true }),
+    (error) => ({ closed: false, reason: `browser close failed: ${error.message}` }),
+  );
+  const serveExit = await stopServeProcess(binding);
+  let tempRemoved;
+  if (browser.closed && serveExit.stopped) {
+    tempRemoved = await removeTempRoots(binding, {
+      requireAttemptRoot: true,
+      protectedPaths: [binding.controlRoot, binding.runNotesRoot, binding.receiptDir, ...(binding.persistentRoots ?? [])].filter(Boolean),
+    });
+  } else {
+    tempRemoved = (binding.tempRoots ?? []).map((path) => ({
+      path,
+      removed: false,
+      owner: 'attempt',
+      reason: 'retained because browser closure or exact serve stop was not verified',
+    }));
+  }
+  const allRemoved = tempRemoved.every((entry) => entry.removed);
+  const port = await verifyPortClosed(binding);
+  const cleanup = {
+    branch: 'no-task-confirmed',
+    reason: 'task snapshot total=0; taskId=null; exact attempt journal absent; attempt remains INCOMPLETE',
+    noTaskProof: proof,
+    taskId: null,
+    taskStop: { stopped: false, settled: false, reason: 'no task id; no task exists to settle' },
+    servePid: binding.servePid ?? null,
+    serveExited: serveExit.stopped,
+    serveExitReason: serveExit.reason,
+    serveStartup: serveStartupEvidence(binding),
+    browserClosed: browser.closed,
+    browserReason: browser.reason ?? null,
+    portClosed: port.closed,
+    portReason: port.reason,
+    tempRoots: binding.tempRoots ?? [],
+    tempRootsRemoved: allRemoved,
+    tempRootResults: tempRemoved,
+    persistentRetained: binding.persistentRoots ?? [],
+    recoveryRetained: [],
+    released: [
+      ...(browser.closed ? [{ kind: 'browser-context', owner: 'attempt', closed: true }] : []),
+      ...(serveExit.stopped ? [{ kind: 'serve-pid', owner: 'attempt', pid: binding.servePid, exited: true }] : []),
+      ...(port.closed ? [{ kind: 'listener', owner: 'attempt', port: binding.servePort ?? null, closed: true }] : []),
+      ...tempRemoved.filter((entry) => entry.removed).map((entry) => ({ kind: 'attempt-root', owner: 'attempt', path: entry.path, removed: true })),
+    ],
+    settled: false,
+  };
+  binding.cleanup = cleanup;
+  binding.cleaned = browser.closed && serveExit.stopped && port.closed && allRemoved;
   return cleanup;
 }
 
@@ -564,6 +682,7 @@ export async function retainUnsettledRecovery(binding, reason, settleResult = nu
   let recoveryRetained;
   let tempRemoved = [];
   let released = [];
+  let serveObserved = null;
   if (attached) {
     // A verified attached owner is external: preserve its identity and formal
     // execution paths. A pre-verification refusal has no formal identity to
@@ -610,13 +729,21 @@ export async function retainUnsettledRecovery(binding, reason, settleResult = nu
     }
   } else {
     // Candidate recovery keeps the live service, persistent control/journal tree
-    // and the ephemeral attempt workspace/logs for the recovery owner.
+    // and the ephemeral attempt workspace/logs for the recovery owner. A service
+    // that is already verifiably gone is released, not retained: retention must
+    // describe the real live resources, not a receipt-time guess.
+    const observed = serveExitStatus(binding);
+    serveObserved = observed;
+    const serveStillRunning = observed.exited !== true;
     recoveryRetained = [
-      ...(binding.servePid ? [{ kind: 'serve-pid', pid: binding.servePid, port: binding.servePort ?? null }] : []),
+      ...(serveStillRunning && binding.servePid ? [{ kind: 'serve-pid', pid: binding.servePid, port: binding.servePort ?? null, state: observed.checked ? 'still running' : 'liveness unverified' }] : []),
       ...(binding.controlRoot ? [{ kind: 'control-root', path: binding.controlRoot }] : []),
       ...(binding.workspace ? [{ kind: 'workspace', path: binding.workspace }] : []),
       ...(binding.receiptDir ? [{ kind: 'evidence', path: binding.receiptDir }] : []),
     ];
+    if (!serveStillRunning && binding.servePid) {
+      released.push({ kind: 'serve-pid', owner: 'attempt', pid: binding.servePid, exited: true, reason: observed.reason ?? 'serve child already exited' });
+    }
   }
   // Recovery acceptance needs real receipt evidence from the accepting owner. A
   // bare owner name proves nothing, so without a receipt reference the handoff
@@ -641,10 +768,18 @@ export async function retainUnsettledRecovery(binding, reason, settleResult = nu
     taskId: binding.taskId ?? null,
     taskStop,
     servePid: binding.servePid ?? null,
-    serveExited: unverifiedAttachment ? null : false,
-    serveExitReason: unverifiedAttachment
-      ? 'no verified attached owner: no candidate or formal service was started or stopped'
-      : 'retained for recovery: the owned/attached service was intentionally not stopped',
+    serveExited: attached ? (unverifiedAttachment ? null : false) : serveObserved?.exited === true,
+    serveExitVerified: attached ? null : Boolean(serveObserved?.checked),
+    serveExitReason: attached
+      ? (unverifiedAttachment
+          ? 'no verified attached owner: no candidate or formal service was started or stopped'
+          : 'retained for recovery: the attached formal owner is intentionally not stopped')
+      : serveObserved?.exited === true
+        ? `serve child already exited before retention: ${serveObserved.reason ?? `exitCode=${serveObserved.exitCode ?? 'null'} signal=${serveObserved.signal ?? 'null'}`}`
+        : serveObserved?.checked
+          ? `retained for recovery: pid ${binding.servePid} is still running and was intentionally not stopped`
+          : 'retained for recovery: the attempt registered no serve child, so no candidate process was started or stopped',
+    serveStartup: serveStartupEvidence(binding),
     browserClosed: browser.closed,
     tempRoots: binding.tempRoots ?? [],
     tempRootsRemoved: attached ? tempRemoved.every((entry) => entry.removed) : false,

@@ -49,12 +49,14 @@ import {
 } from './runner.mjs';
 import {
   bindCandidate,
+  finalizeSourceIdentity,
   resolveAttemptPaths,
   resolveFormalAttachPaths,
 } from './lib/binding.mjs';
 import {
   assessSettlement,
   journalPathFor,
+  journalRootFor,
   manifestsIdentical,
   readToolOutputReports,
   workspaceManifest,
@@ -66,9 +68,11 @@ import {
   openTaskDashboard,
   readDashboardProbe,
   readObservationDom,
+  startServeForAttempt,
   submitDirectiveAndConfirmDraft,
 } from './lib/browser.mjs';
 import {
+  closeNoTaskAttempt,
   closeSettledAttempt,
   retainUnsettledRecovery,
   stopTaskAndSettle,
@@ -124,7 +128,7 @@ test.after(async () => {
 });
 
 test('option surface is reported and accepted combinations parse', () => {
-  assert.deepEqual([...SCENARIOS], ['web-search', 'local-file-search', 'aitest']);
+  assert.deepEqual([...SCENARIOS], ['web-search', 'local-file-search', 'aitest', 'existing-task-change']);
   assert.deepEqual([...ENTRIES], ['homepage', 'dashboard']);
   assert.deepEqual([...OUTCOMES], ['success', 'failure', 'cancel']);
   assert.deepEqual([...SERVICE_MODES], ['candidate', 'installed-attach']);
@@ -153,6 +157,10 @@ test('unsupported combinations are rejected, never downgraded', () => {
   // A scenario with no wired non-success path must refuse the request.
   assert.throws(() => parseOptions(['--scenario', 'web-search', '--outcome', 'failure']), /cannot exercise a real failure outcome/);
   assert.throws(() => parseOptions(['--scenario', 'aitest', '--outcome', 'cancel']), /cannot exercise a real cancel outcome/);
+  assert.throws(
+    () => parseOptions(['--scenario', 'existing-task-change', '--outcome', 'failure']),
+    /cannot exercise a real failure outcome/,
+  );
   // Attach cannot create a new task through the homepage.
   assert.throws(
     () => parseOptions(['--scenario', 'local-file-search', '--service-mode', 'installed-attach', '--entry', 'homepage']),
@@ -389,10 +397,9 @@ async function writeOutcomeFixture(dir, name, options = {}) {
 
 function cancelJournalPaths(binding) {
   const journalRoot = join(
-    binding.controlRoot,
-    'sessions',
-    binding.projectKey,
+    binding.runtimePaths.projectRoot,
     'checkpoints',
+    'ui-runtime',
     binding.journalMode ?? 'rcc',
   );
   return {
@@ -591,39 +598,38 @@ function fakeAuth(calls, options = {}) {
  */
 function fakeBrowserPage() {
   let url = 'about:blank';
-  const confirmButton = { textContent: async () => '确认并执行' };
-  const compactBox = { width: 14, height: 14 };
   return {
     url: () => url,
     async goto(next) { url = String(next); return { ok: () => true, status: () => 200 }; },
     async waitForSelector() {},
     locator(selector) {
+      assert.equal(String(selector).includes('autoConfirm'), false);
       return {
-        boundingBox: async () => (String(selector).includes('autoConfirm') ? compactBox : { width: 100, height: 20 }),
+        boundingBox: async () => ({ width: 100, height: 72 }),
       };
     },
     async fill() {},
-    async click(selector) {
-      if (String(selector).includes('.draft-actions')) {
-        this.confirmed = true;
-      }
-    },
+    async click() {},
     async $(selector) {
-      return String(selector).includes('.draft-actions') ? confirmButton : null;
+      assert.notEqual(String(selector), '.draft-actions button.button--primary');
+      return null;
     },
     async textContent(selector) {
-      if (String(selector).includes('.draft-proposal')) return 'fixture proposal';
-      if (String(selector).includes('.quick-create-form button')) return '确认并执行';
+      if (String(selector) === '.quick-create-progress .progress-phase') return '已入队 · 隐式大脑将消费';
       return '';
     },
-    async getAttribute() { return null; },
-    async $$eval(selector, callback) {
-      if (String(selector).includes('.draft-meta')) {
-        return callback([{ textContent: '意图：create' }]);
-      }
-      return callback([]);
+    async waitForResponse(predicate) {
+      const response = {
+        url: () => 'http://127.0.0.1:1/api/explicit/interactions/cancel-interaction/confirmation',
+        request: () => ({ method: () => 'POST' }),
+        status: () => 200,
+        text: async () => JSON.stringify({ requirement: {
+          requirementId: 'requirement-cancel', draftId: 'draft-cancel', inputRevision: 1,
+        } }),
+      };
+      assert.equal(predicate(response), true);
+      return response;
     },
-    async waitForResponse() { return { status: () => 200 }; },
     async reload() {},
     async screenshot() {},
   };
@@ -1115,43 +1121,89 @@ test('installed-attach resolves explicit formal paths and reads the formal lease
   assert.ok(calls.some((call) => call.target.endsWith('/dashboard.html')));
 });
 
-test('installed-attach journal lookup uses the formal project root', async () => {
+test('journal lookup uses config-derived project root and exact task scope', async () => {
+  assertResolverAvailable();
   const controlRoot = await makeTempRoot('attach-journal-control');
-  const formalProjectKey = 'formal-project';
-  const attemptProjectKey = 'attempt-project';
-  const formalJournal = join(
-    controlRoot,
-    'sessions',
-    formalProjectKey,
-    'checkpoints',
-    'rcc',
-    'ui-runtime-journal.jsonl',
-  );
-  const attemptJournal = join(
-    controlRoot,
-    'sessions',
-    attemptProjectKey,
-    'checkpoints',
-    'rcc',
-    'ui-runtime-journal.jsonl',
-  );
-  await writeOutcomeFixture(dirname(formalJournal), 'formal', {
+  const workspace = await makeTempRoot('journal-project-workspace');
+  const runtimePaths = await resolveRuntimePaths({ workspace, controlRoot });
+  const formalProjectKey = runtimePaths.projectKey;
+  const attemptProjectKey = 'decoy-project';
+  const expectedRoot = join(runtimePaths.projectRoot, 'checkpoints', 'ui-runtime', 'rcc');
+  const formalJournal = join(expectedRoot, 'ui-runtime-journal.jsonl');
+  const exactCheckpoint = join(expectedRoot, `task-${CONTRACT_TASK.value}-cycle-${CONTRACT_CYCLE.value}.jsonl`);
+  const otherCycleCheckpoint = join(expectedRoot, `task-${CONTRACT_TASK.value}-cycle-other-cycle.jsonl`);
+  const otherTaskCheckpoint = join(expectedRoot, `task-other-task-cycle-${CONTRACT_CYCLE.value}.jsonl`);
+  const sessionDecoyRoot = join(controlRoot, 'sessions', formalProjectKey, 'checkpoints', 'rcc');
+  const otherProjectRoot = join(controlRoot, 'project', attemptProjectKey, 'checkpoints', 'ui-runtime', 'rcc');
+  await writeOutcomeFixture(expectedRoot, 'formal', {
     uiFile: 'ui-runtime-journal.jsonl',
-    checkpointFile: 'task-contract-cycle-contract.jsonl',
+    checkpointFile: `task-${CONTRACT_TASK.value}-cycle-${CONTRACT_CYCLE.value}.jsonl`,
   });
-  await writeOutcomeFixture(dirname(attemptJournal), 'attempt', {
+  await writeOutcomeFixture(expectedRoot, 'other-task', {
+    uiFile: 'ignored-ui-journal.jsonl',
+    checkpointFile: `task-other-task-cycle-${CONTRACT_CYCLE.value}.jsonl`,
+  });
+  await writeOutcomeFixture(expectedRoot, 'other-cycle', {
+    uiFile: 'ignored-other-cycle-ui-journal.jsonl',
+    checkpointFile: `task-${CONTRACT_TASK.value}-cycle-other-cycle.jsonl`,
+  });
+  await writeOutcomeFixture(sessionDecoyRoot, 'session-decoy', {
     uiFile: 'ui-runtime-journal.jsonl',
-    checkpointFile: 'task-contract-cycle-contract.jsonl',
+    checkpointFile: `task-${CONTRACT_TASK.value}-cycle-${CONTRACT_CYCLE.value}.jsonl`,
+  });
+  await writeOutcomeFixture(otherProjectRoot, 'other-project', {
+    uiFile: 'ui-runtime-journal.jsonl',
+    checkpointFile: `task-${CONTRACT_TASK.value}-cycle-${CONTRACT_CYCLE.value}.jsonl`,
+  });
+
+  const binding = {
+    serviceMode: 'candidate',
+    taskId: CONTRACT_TASK,
+    cycleId: CONTRACT_CYCLE,
+    controlRoot,
+    projectKey: formalProjectKey,
+    runtimePaths,
+  };
+  const selected = await journalPathFor(binding);
+  assert.equal(selected, formalJournal);
+  assert.equal(journalRootFor(binding), expectedRoot);
+  assert.deepEqual(binding.journalPaths, [formalJournal, exactCheckpoint]);
+  assert.ok(existsSync(otherCycleCheckpoint));
+  assert.ok(existsSync(otherTaskCheckpoint));
+  assert.notEqual(selected, join(sessionDecoyRoot, 'ui-runtime-journal.jsonl'));
+  assert.notEqual(selected, join(otherProjectRoot, 'ui-runtime-journal.jsonl'));
+});
+
+test('installed-attach journal lookup uses the formal config-derived project root', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('attach-journal-control');
+  const formalWorkspace = await makeTempRoot('attach-journal-formal-workspace');
+  const attemptWorkspace = await makeTempRoot('attach-journal-attempt-workspace');
+  const formalPaths = await resolveRuntimePaths({ workspace: formalWorkspace, controlRoot });
+  const attemptPaths = await resolveRuntimePaths({ workspace: attemptWorkspace, controlRoot });
+  const formalRoot = join(formalPaths.projectRoot, 'checkpoints', 'ui-runtime', 'rcc');
+  const attemptRoot = join(attemptPaths.projectRoot, 'checkpoints', 'ui-runtime', 'rcc');
+  const formalJournal = join(formalRoot, 'ui-runtime-journal.jsonl');
+  const attemptJournal = join(attemptRoot, 'ui-runtime-journal.jsonl');
+  await writeOutcomeFixture(formalRoot, 'formal', {
+    uiFile: 'ui-runtime-journal.jsonl',
+    checkpointFile: `task-${CONTRACT_TASK.value}-cycle-${CONTRACT_CYCLE.value}.jsonl`,
+  });
+  await writeOutcomeFixture(attemptRoot, 'attempt', {
+    uiFile: 'ui-runtime-journal.jsonl',
+    checkpointFile: `task-${CONTRACT_TASK.value}-cycle-${CONTRACT_CYCLE.value}.jsonl`,
   });
 
   const binding = {
     serviceMode: 'installed-attach',
     taskId: CONTRACT_TASK,
-    controlRoot: controlRoot,
-    projectKey: attemptProjectKey,
+    cycleId: CONTRACT_CYCLE,
+    controlRoot,
+    projectKey: attemptPaths.projectKey,
+    runtimePaths: attemptPaths,
     journalControlRoot: controlRoot,
-    journalProjectKey: formalProjectKey,
-    formalPaths: { controlRoot, projectKey: formalProjectKey },
+    journalProjectKey: formalPaths.projectKey,
+    formalPaths,
   };
   const selected = await journalPathFor(binding);
   assert.equal(selected, formalJournal);
@@ -1329,6 +1381,270 @@ test('unsettled retention keeps the owned service and names a recovery owner', a
   }
 });
 
+/**
+ * Startup-readiness contract: the three real serve startup branches
+ * (readiness_timeout, early_exit, parsed banner), the raw child output evidence,
+ * and the exit/retention semantics after a failed startup.
+ *
+ * These tests drive the real `startServeForAttempt` spawn/readiness machinery
+ * with a controlled fake child instead of a real service. They never start the
+ * product CLI, a browser, a provider or a real port.
+ */
+function fakeServeBinding(extra = {}) {
+  return {
+    attemptId: 'contract-serve-startup',
+    scenario: 'local-file-search',
+    serviceMode: 'candidate',
+    repoPath: REPO,
+    servePid: null,
+    serveChild: null,
+    servePort: null,
+    serveBaseUrl: null,
+    tempRoots: [],
+    persistentRoots: [],
+    browser: { close: async () => {} },
+    taskId: null,
+    outcome: 'success',
+    ...extra,
+  };
+}
+
+async function writeFakeServeCli(label, body) {
+  const dir = await makeTempRoot(label);
+  const path = join(dir, 'fake-serve-cli.mjs');
+  await writeFile(path, body, 'utf8');
+  return path;
+}
+
+const FAKE_CLI_SILENT = 'setInterval(() => {}, 1000);\n';
+const FAKE_CLI_EARLY_EXIT = 'process.stderr.write("fake serve: config root is not writable\\n"); process.exit(3);\n';
+// A banner-shaped object that closes with a newline-brace but is not valid JSON:
+// it matches the parser's shape while JSON.parse still fails.
+const FAKE_CLI_MALFORMED_BANNER = 'process.stdout.write("{\\n  \\"url\\" \\"http://127.0.0.1:1\\"\\n}\\n"); setInterval(() => {}, 1000);\n';
+const FAKE_CLI_READY = 'process.stdout.write(JSON.stringify({ url: "http://127.0.0.1:45999" }, null, 2) + "\\n"); setInterval(() => {}, 1000);\n';
+
+test('serve startup readiness timeout records the branch, raw stdout/stderr sidecars and a verified exit', async () => {
+  const attemptRoot = await makeTempRoot('serve-timeout');
+  const receiptDir = await makeTempRoot('serve-timeout-receipt');
+  const cli = await writeFakeServeCli('serve-timeout-cli', FAKE_CLI_SILENT);
+  const binding = fakeServeBinding({ attemptRoot, workspace: join(attemptRoot, 'workspace'), controlRoot: join(attemptRoot, 'control'), receiptDir });
+  let error;
+  try {
+    await startServeForAttempt(binding, { cliPath: cli, readyTimeoutMs: 400 });
+  } catch (thrown) {
+    error = thrown;
+  }
+  assert.ok(error, 'a silent child must not be reported ready');
+  assert.match(error.message, /did not report a URL/);
+  assert.match(error.message, /branch=readiness_timeout/);
+  assert.equal(binding.serveBaseUrl, null, 'no URL may be claimed');
+  const launch = binding.serveLaunch;
+  assert.equal(launch.readiness, 'readiness_timeout');
+  assert.equal(launch.parser.matched, false);
+  assert.equal(launch.parser.parseFailed, false);
+  assert.equal(launch.stdoutBytes, 0);
+  assert.equal(launch.stderrBytes, 0);
+  // The raw child output is persisted even when it is empty: stderr empty must
+  // not mean stdout is dropped.
+  assert.equal(launch.stdoutLog.bytes, 0);
+  assert.equal(launch.stderrLog.bytes, 0);
+  assert.equal(await readFile(launch.stdoutLog.path, 'utf8'), '');
+  assert.equal(await readFile(launch.stderrLog.path, 'utf8'), '');
+  assert.ok(launch.stdoutLog.path.startsWith(receiptDir), 'startup evidence is execution-owned under the attempt receipt dir');
+  assert.equal(launch.spawnError, null);
+  assert.ok(launch.spawnedAt, 'the spawn event is recorded');
+  // The failed startup must actually verify the child exit, not assume it.
+  assert.equal(launch.stop.exited, true, JSON.stringify(launch.stop));
+  assert.equal(launch.verifiedExit.exited, true, JSON.stringify(launch.verifiedExit));
+  assert.equal(await isAlive(binding.servePid), false, 'the failed startup child must really be gone');
+});
+
+test('serve startup early exit records the branch, stderr bytes and the real exit code', async () => {
+  const attemptRoot = await makeTempRoot('serve-early-exit');
+  const receiptDir = await makeTempRoot('serve-early-exit-receipt');
+  const cli = await writeFakeServeCli('serve-early-exit-cli', FAKE_CLI_EARLY_EXIT);
+  const binding = fakeServeBinding({ attemptRoot, workspace: join(attemptRoot, 'workspace'), controlRoot: join(attemptRoot, 'control'), receiptDir });
+  let error;
+  try {
+    await startServeForAttempt(binding, { cliPath: cli, readyTimeoutMs: 5_000 });
+  } catch (thrown) {
+    error = thrown;
+  }
+  assert.ok(error, 'an early exit must not be reported ready');
+  assert.match(error.message, /serve exited early/);
+  assert.match(error.message, /branch=early_exit/);
+  const launch = binding.serveLaunch;
+  assert.equal(launch.readiness, 'early_exit');
+  assert.equal(launch.exit.code, 3);
+  assert.equal(launch.verifiedExit.exited, true);
+  assert.equal(launch.verifiedExit.exitCode, 3);
+  assert.equal(launch.stderrBytes > 0, true, 'the child stderr is captured');
+  assert.equal(await readFile(launch.stderrLog.path, 'utf8'), 'fake serve: config root is not writable\n');
+  assert.equal(await readFile(launch.stdoutLog.path, 'utf8'), '');
+  assert.match(launch.stderrLog.excerpt, /config root is not writable/);
+  // The child exited on its own; the attempt must not claim it sent a stop.
+  assert.equal(launch.stop.attempted, false, JSON.stringify(launch.stop));
+});
+
+test('serve startup with an unparsable banner keeps stdout bytes and names the parse failure', async () => {
+  const attemptRoot = await makeTempRoot('serve-parse-fail');
+  const receiptDir = await makeTempRoot('serve-parse-fail-receipt');
+  const cli = await writeFakeServeCli('serve-parse-fail-cli', FAKE_CLI_MALFORMED_BANNER);
+  const binding = fakeServeBinding({ attemptRoot, workspace: join(attemptRoot, 'workspace'), controlRoot: join(attemptRoot, 'control'), receiptDir });
+  let error;
+  try {
+    await startServeForAttempt(binding, { cliPath: cli, readyTimeoutMs: 500 });
+  } catch (thrown) {
+    error = thrown;
+  }
+  assert.ok(error, 'an unparsable banner must not be reported ready');
+  assert.match(error.message, /branch=banner_parse_failed/);
+  const launch = binding.serveLaunch;
+  assert.equal(launch.readiness, 'banner_parse_failed');
+  assert.equal(launch.parser.matched, true, 'a banner-shaped object was matched');
+  assert.equal(launch.parser.parseFailed, true, 'the parse failure is recorded, not swallowed');
+  assert.ok(launch.parser.lastParseError);
+  assert.equal(launch.stdoutBytes > 0, true);
+  assert.equal(await readFile(launch.stdoutLog.path, 'utf8'), '{\n  "url" "http://127.0.0.1:1"\n}\n');
+  assert.equal(launch.verifiedExit.exited, true);
+});
+
+test('serve startup reaches ready only through a parsed banner plus a live liveness probe', async () => {
+  const attemptRoot = await makeTempRoot('serve-ready');
+  const receiptDir = await makeTempRoot('serve-ready-receipt');
+  const cli = await writeFakeServeCli('serve-ready-cli', FAKE_CLI_READY);
+  const binding = fakeServeBinding({ attemptRoot, workspace: join(attemptRoot, 'workspace'), controlRoot: join(attemptRoot, 'control'), receiptDir });
+  try {
+    await startServeForAttempt(binding, {
+      cliPath: cli,
+      readyTimeoutMs: 5_000,
+      authFactory: () => ({ paired: false, pair: async () => {} }),
+      probeLiveness: async () => ({ status: 200, body: { status: 'alive' } }),
+    });
+    assert.equal(binding.serveBaseUrl, 'http://127.0.0.1:45999');
+    assert.equal(binding.servePort, 45999);
+    assert.equal(binding.serveLaunch.readiness, 'ready');
+    assert.equal(binding.readiness.status, 200);
+    // The accepted banner bytes are persisted as evidence on the ready path too.
+    const readyStdout = await readFile(binding.serveLaunch.stdoutLog.path, 'utf8');
+    assert.match(readyStdout, /"url": "http:\/\/127\.0\.0\.1:45999"/);
+    assert.equal(binding.serveLaunch.stdoutLog.bytes, Buffer.byteLength(readyStdout));
+    // A parsed banner is not retained-service proof: the recorded exit verdict
+    // must say the child is still running.
+    assert.equal(binding.serveChild.exitCode, null);
+    assert.equal(binding.serveChild.signalCode, null);
+  } finally {
+    if (binding.serveChild) await stopChild(binding.serveChild);
+  }
+  assert.equal(await isAlive(binding.servePid), false, 'the test cleans up its own controlled child');
+});
+
+test('a failed startup that really exits is released, not retained as a live recovery service', async () => {
+  const attemptRoot = await makeTempRoot('serve-exited-retain');
+  const controlRoot = await makeTempRoot('serve-exited-control');
+  const receiptDir = await makeTempRoot('serve-exited-receipt');
+  const child = spawn(process.execPath, ['-e', 'process.exit(1)']);
+  await new Promise((done) => child.once('exit', done));
+  const binding = fakeServeBinding({
+    servePid: child.pid,
+    serveChild: child,
+    attemptRoot,
+    workspace: join(attemptRoot, 'workspace'),
+    controlRoot,
+    receiptDir,
+    tempRoots: [attemptRoot],
+    persistentRoots: [controlRoot, receiptDir],
+    recoveryOwner: 'humanagent.runtime.task-recovery',
+  });
+  const cleanup = await retainUnsettledRecovery(binding, 'serve never reported a URL');
+  assert.equal(cleanup.serveExited, true, 'an exited child must not be reported as a retained service');
+  assert.equal(cleanup.serveExitVerified, true);
+  assert.equal(cleanup.recoveryRetained.some((entry) => entry.kind === 'serve-pid'), false, 'no live service may be listed as retained');
+  assert.ok(cleanup.released.some((entry) => entry.kind === 'serve-pid' && entry.exited === true));
+  assert.ok(cleanup.recoveryRetained.some((entry) => entry.kind === 'control-root'), 'persistent roots are still retained');
+});
+
+test('a failed startup that stays alive is handed to recovery, never reported stopped', async () => {
+  const attemptRoot = await makeTempRoot('serve-alive-retain');
+  const controlRoot = await makeTempRoot('serve-alive-control');
+  const receiptDir = await makeTempRoot('serve-alive-receipt');
+  const child = spawnIdle();
+  const binding = fakeServeBinding({
+    servePid: child.pid,
+    serveChild: child,
+    attemptRoot,
+    workspace: join(attemptRoot, 'workspace'),
+    controlRoot,
+    receiptDir,
+    tempRoots: [attemptRoot],
+    persistentRoots: [controlRoot, receiptDir],
+    recoveryOwner: 'humanagent.runtime.task-recovery',
+  });
+  try {
+    const cleanup = await retainUnsettledRecovery(binding, 'serve never reported a URL');
+    assert.equal(cleanup.serveExited, false);
+    assert.equal(cleanup.serveExitVerified, true);
+    assert.match(cleanup.serveExitReason, /still running/);
+    assert.ok(cleanup.recoveryRetained.some((entry) => entry.kind === 'serve-pid' && entry.pid === child.pid));
+    assert.equal(await isAlive(child.pid), true, 'the real live PID is handed to recovery, not killed here');
+  } finally {
+    await stopChild(child);
+  }
+});
+
+test('a serve startup failure produces a receipt with the startup branch and no retained live service', async () => {
+  // The persistent control root must not overlap the ephemeral attempt tmp, so
+  // the deterministic resolver roots it in its own temp tree.
+  const persistentRoot = await makeTempRoot('startup-failure-persistent');
+  const resolveToTemp = async () => ({
+    controlRoot: join(persistentRoot, 'control-root'),
+    runNotesRoot: join(persistentRoot, 'run-notes'),
+    projectRoot: join(persistentRoot, 'project'),
+  });
+  const child = spawn(process.execPath, ['-e', 'process.exit(1)']);
+  await new Promise((done) => child.once('exit', done));
+  const { runScenario } = await import('./runner.mjs');
+  const result = await runScenario('local-file-search', {
+    entry: 'dashboard',
+    outcome: 'success',
+    serviceMode: 'candidate',
+    attemptIdSuffix: 'startup-failure',
+    resolvePaths: resolveToTemp,
+    hooks: {
+      probeProvider: async () => {},
+      startServeForAttempt: async (binding) => {
+        binding.servePid = child.pid;
+        binding.serveChild = child;
+        binding.serviceMode = 'candidate';
+        binding.serveLaunch = {
+          readiness: 'early_exit',
+          readyTimeoutMs: 90_000,
+          failureReason: 'serve exited before reporting a URL (exitCode=1 signal=null)',
+          parser: { matched: false, parseFailed: false, matchedBytes: 0, lastParseError: null, attempts: 0 },
+          stdoutLog: { path: '/attempt/run-notes/serve-startup.stdout.log', bytes: 0, storedBytes: 0, truncated: false, excerpt: '' },
+          stderrLog: { path: '/attempt/run-notes/serve-startup.stderr.log', bytes: 21, storedBytes: 21, truncated: false, excerpt: 'fake serve: exit 1' },
+          exit: { code: 1, signal: null, at: new Date().toISOString() },
+          verifiedExit: { checked: true, exited: true, exitCode: 1, signal: null },
+          stop: { attempted: false, reason: 'child already exited before any stop signal' },
+          startedAt: new Date().toISOString(),
+          spawnedAt: new Date().toISOString(),
+          readinessAt: new Date().toISOString(),
+        };
+        throw new Error('serve startup failed: serve exited early (code=1 signal=null)');
+      },
+    },
+  });
+  assert.equal(result.receipt.result, 'INCOMPLETE');
+  assert.equal(result.receipt.cleanup.branch, 'unsettled-recovery-retained');
+  assert.equal(result.receipt.cleanup.serveExited, true, 'the receipt must report the verified exit, not an assumed retained service');
+  assert.equal(result.receipt.cleanup.serveExitVerified, true);
+  assert.equal(result.receipt.cleanup.serveStartup.branch, 'early_exit');
+  assert.equal(result.receipt.cleanup.serveStartup.exit.code, 1);
+  assert.equal(result.receipt.cleanup.serveStartup.stdoutLog.path.endsWith('serve-startup.stdout.log'), true);
+  assert.equal(result.receipt.resources.recoveryRetained.some((entry) => entry.kind === 'serve-pid'), false);
+  assert.equal(JSON.stringify(result.receipt).includes('serveExited'), true);
+});
+
 test('runScenario writes a config-rooted receipt and retains resources when it cannot settle', async () => {
   assertResolverAvailable();
   const controlRoot = await makeTempRoot('run-control');
@@ -1376,6 +1692,203 @@ test('runScenario writes a config-rooted receipt and retains resources when it c
   const written = JSON.parse(await readFile(result.receiptPaths.jsonPath, 'utf8'));
   assert.equal(written.result, 'INCOMPLETE');
   assert.equal(JSON.stringify(written).includes('HA_SESSION'), false);
+  // The unsettled branch records the finalized source identity too: the start
+  // capture, the end capture, the stability verdict and the paths that moved.
+  const unsettledIdentity = result.receipt.evidence.scenarioEvidence.sourceIdentity;
+  assert.ok(unsettledIdentity, 'an unsettled receipt must still carry the source identity');
+  assert.equal(typeof unsettledIdentity.stable, 'boolean');
+  assert.equal(unsettledIdentity.stable, true);
+  assert.ok(unsettledIdentity.start?.digest, 'the start capture is recorded');
+  assert.ok(unsettledIdentity.end?.digest, 'the end capture is recorded');
+});
+
+test('a provider probe failure before the scenario still records the start and end source identity', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('identity-probe-control');
+  const previousRcc = process.env.HUMANAGENT_RCC_BASE_URL;
+  // A closed loopback port fails the provider probe before any scenario runs.
+  // This is the branch that previously produced a receipt with a start identity
+  // only, so it is the regression the sink call must close.
+  process.env.HUMANAGENT_RCC_BASE_URL = 'http://127.0.0.1:9';
+  let result;
+  try {
+    const { runScenario } = await import('./runner.mjs');
+    result = await runScenario('local-file-search', {
+      entry: 'dashboard',
+      outcome: 'success',
+      serviceMode: 'candidate',
+      attemptIdSuffix: 'identity-probe',
+      resolvePaths: resolveRuntimePaths,
+      controlRoot,
+    });
+  } finally {
+    if (previousRcc === undefined) delete process.env.HUMANAGENT_RCC_BASE_URL;
+    else process.env.HUMANAGENT_RCC_BASE_URL = previousRcc;
+  }
+
+  assert.equal(result.receipt.result, 'INCOMPLETE');
+  assert.equal(result.receipt.deviation.stage, 'attempt');
+  const scenarioEvidence = result.receipt.evidence.scenarioEvidence;
+  assert.ok(scenarioEvidence, 'a failure before the scenario must still carry receipt evidence');
+  const identity = scenarioEvidence.sourceIdentity;
+  assert.ok(identity, 'a failure before the scenario must still record the source identity');
+  assert.equal(typeof identity.stable, 'boolean');
+  assert.equal(identity.stable, true);
+  assert.deepEqual(identity.changedPaths, []);
+  assert.ok(identity.start?.digest, 'the start capture is recorded');
+  assert.ok(identity.end?.digest, 'the end capture is recorded');
+  assert.equal(identity.end.digest, identity.start.digest);
+  assert.equal(identity.start.candidateSha, result.receipt.candidate.sha);
+  assert.equal(identity.start.digest, result.receipt.candidate.treeDigest);
+  // The end identity is persisted beside the receipt, so it can be checked
+  // without trusting the runner's own claim.
+  const sidecarPath = join(dirname(result.receiptPaths.jsonPath), 'source-identity.json');
+  const sidecar = JSON.parse(await readFile(sidecarPath, 'utf8'));
+  assert.equal(sidecar.schema, 'humanagent.dashboard-e2e.source-identity.v1');
+  assert.equal(sidecar.stable, true);
+  assert.equal(sidecar.candidateSha, result.receipt.candidate.sha);
+  assert.equal(sidecar.treeDigest, result.receipt.candidate.treeDigest);
+  assert.ok(sidecar.end?.digest, 'the sidecar carries the end capture');
+  // The persisted receipt carries the same identity, not only the in-memory one.
+  const persisted = JSON.parse(await readFile(result.receiptPaths.jsonPath, 'utf8'));
+  assert.equal(persisted.evidence.scenarioEvidence.sourceIdentity.stable, true);
+  assert.ok(persisted.evidence.scenarioEvidence.sourceIdentity.end.digest);
+});
+
+test('a scenario that throws still records the start and end source identity', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('identity-throw-control');
+  const owned = spawnIdle();
+  let bindingRef;
+  try {
+    const { runScenario } = await import('./runner.mjs');
+    const result = await runScenario('local-file-search', {
+      entry: 'dashboard',
+      outcome: 'success',
+      serviceMode: 'candidate',
+      attemptIdSuffix: 'identity-throw',
+      resolvePaths: resolveRuntimePaths,
+      controlRoot,
+      hooks: {
+        probeProvider: async () => {},
+        startServeForAttempt: async (binding) => {
+          bindingRef = binding;
+          binding.serveBaseUrl = 'http://127.0.0.1:1';
+          binding.servePort = null;
+          binding.servePid = owned.pid;
+        },
+        launchBrowserSession: async (binding) => { binding.browser = { close: async () => {} }; },
+        runScenario: async () => { throw new Error('scenario threw before any evidence'); },
+      },
+    });
+
+    assert.equal(result.receipt.result, 'INCOMPLETE');
+    assert.equal(result.receipt.deviation.stage, 'attempt');
+    assert.match(result.receipt.deviation.error, /scenario threw before any evidence/);
+    const scenarioEvidence = result.receipt.evidence.scenarioEvidence;
+    assert.ok(scenarioEvidence, 'a scenario error must still carry receipt evidence');
+    const identity = scenarioEvidence.sourceIdentity;
+    assert.ok(identity, 'a scenario error must still record the source identity');
+    assert.equal(typeof identity.stable, 'boolean');
+    assert.equal(identity.stable, true);
+    assert.deepEqual(identity.changedPaths, []);
+    assert.ok(identity.start?.digest, 'the start capture is recorded');
+    assert.ok(identity.end?.digest, 'the end capture is recorded');
+    assert.equal(identity.start.digest, result.receipt.candidate.treeDigest);
+  } finally {
+    await stopChild(owned);
+    if (bindingRef?.attemptRoot) await rm(bindingRef.attemptRoot, { recursive: true, force: true }).catch(() => {});
+    await rm(controlRoot, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('finalizeSourceIdentity is idempotent and never overwrites a recorded end identity', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('identity-idempotent-control');
+  const binding = bindCandidate(REPO, { scenario: 'local-file-search', attemptIdSuffix: 'identity-idempotent' });
+  await resolveAttemptPaths(binding, { resolvePaths: resolveRuntimePaths, controlRoot });
+  const first = await finalizeSourceIdentity(binding);
+  const sidecarPath = binding.sourceIdentityPath;
+  const firstSidecar = await readFile(sidecarPath, 'utf8');
+  // A scenario may already have finalized the end identity. The sink call must
+  // return that exact capture and must not rewrite the persisted sidecar.
+  const second = await finalizeSourceIdentity(binding);
+  assert.equal(second, first);
+  assert.equal(second.end.digest, first.end.digest);
+  assert.equal(second.stable, first.stable);
+  assert.deepEqual(second.changedPaths, first.changedPaths);
+  assert.equal(await readFile(sidecarPath, 'utf8'), firstSidecar);
+  // A binding that was never bound fails closed instead of inventing an identity.
+  await assert.rejects(
+    () => finalizeSourceIdentity({ repoPath: REPO }),
+    /requires a binding record from bindCandidate/,
+  );
+});
+
+test('AItest scenario evidence without an accepted visual observation stays INCOMPLETE', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('aitest-obs-control');
+  const dir = await makeTempRoot('aitest-obs-journal');
+  const journal = await writeOutcomeFixture(dir, 'aitest-obs');
+  const owned = spawnIdle();
+  try {
+    const { runScenario } = await import('./runner.mjs');
+    const result = await runScenario('aitest', {
+      attemptIdSuffix: 'aitest-obs',
+      resolvePaths: resolveRuntimePaths,
+      controlRoot,
+      scope: CONTRACT_SCOPE,
+      hooks: {
+        probeProvider: async () => {},
+        startServeForAttempt: async (binding) => {
+          binding.serveBaseUrl = 'http://127.0.0.1:1';
+          binding.servePort = null;
+          binding.servePid = owned.pid;
+        },
+        launchBrowserSession: async (binding) => { binding.browser = { close: async () => {} }; },
+        runScenario: async (binding) => {
+          binding.scope = CONTRACT_SCOPE;
+          binding.taskId = CONTRACT_SCOPE.taskId;
+          binding.operationId = CONTRACT_SCOPE.operationId;
+          binding.cycleId = CONTRACT_SCOPE.cycleId;
+          binding.executionEpoch = CONTRACT_SCOPE.executionEpoch;
+          binding.journalPath = journal.paths[0];
+          binding.journalPaths = journal.paths;
+          return {
+            terminalState: 'succeeded',
+            dashboardState: 'succeeded',
+            scenarioEvidence: {
+              taskId: CONTRACT_SCOPE.taskId,
+              operationId: CONTRACT_SCOPE.operationId,
+              cycleId: CONTRACT_SCOPE.cycleId,
+              executionEpoch: CONTRACT_SCOPE.executionEpoch,
+              visualObservationAccepted: false,
+            },
+            toolRounds: 1,
+            requestStartTurns: 1,
+            checkpointCommitted: 1,
+            terminalRecord: { kind: 'execution.terminal', state: 'succeeded' },
+            evidenceRefs: [],
+            screenshots: [],
+            missingEvidence: ['visual observation not accepted: no structured visual observation was supplied'],
+          };
+        },
+      },
+    });
+    // The real Dashboard terminal succeeded and cleanup settled, yet the AItest
+    // acceptance is still INCOMPLETE: a structural PASS plus a browser open is
+    // not semantic proof, and the receipt never rewrites the observed terminal.
+    assert.equal(result.receipt.result, 'INCOMPLETE');
+    assert.equal(result.receipt.task.terminalState, 'succeeded');
+    assert.equal(result.receipt.settlement.settled, true, result.receipt.settlement.reason);
+    assert.equal(result.receipt.cleaned, true);
+    assert.ok(result.receipt.missingEvidence.some((item) => /visual observation not accepted/.test(item)));
+    assert.equal(result.receipt.evidence.scenarioEvidence.visualObservationAccepted, false);
+    assert.equal(result.stageErrors.find((stage) => stage.stage === 'attempt_stop_settle').ok, true);
+    assert.equal(result.stageErrors.find((stage) => stage.stage === 'aitest_cleanup').ok, true);
+  } finally {
+    await stopChild(owned);
+  }
 });
 
 test('public main/CLI stays INCOMPLETE when scenario success has no strict Journal settlement', async () => {
@@ -1502,6 +2015,15 @@ test('public main/CLI keeps SUCCESS when strict settlement and cleanup both comp
     assert.equal(result.receipt.settlement.settled, true);
     assert.equal(result.receipt.cleaned, true);
     assert.equal(result.stageErrors.find((stage) => stage.stage === 'local-file-search_cleanup').ok, true);
+    // The success branch carries the same finalized source identity, so every
+    // branch of the single sink records one shape.
+    const successIdentity = result.receipt.evidence.scenarioEvidence.sourceIdentity;
+    assert.ok(successIdentity, 'a SUCCESS receipt must carry the source identity');
+    assert.equal(typeof successIdentity.stable, 'boolean');
+    assert.equal(successIdentity.stable, true);
+    assert.deepEqual(successIdentity.changedPaths, []);
+    assert.ok(successIdentity.start?.digest, 'the start capture is recorded');
+    assert.ok(successIdentity.end?.digest, 'the end capture is recorded');
   } finally {
     await stopChild(owned);
   }
@@ -1579,6 +2101,7 @@ test('real cancel scenario learns identity, stops once, and reassesses read-only
   let stopPosted = false;
   let dashboardAfterStopReads = 0;
   let finalAppended = false;
+  let taskListReads = 0;
   const response = (body, status = 200) => ({
     ok: status >= 200 && status < 300,
     status,
@@ -1595,16 +2118,13 @@ test('real cancel scenario learns identity, stops once, and reassesses read-only
         return response({ ok: true });
       }
       if (target.endsWith('/api/tasks')) {
-        return response({
-          running: [{
-            taskId: CONTRACT_TASK,
-            updatedAt: new Date().toISOString(),
-          }],
-        });
+        taskListReads += 1;
+        return response({ running: taskListReads === 1 ? [] : [{ taskId: CONTRACT_TASK, updatedAt: new Date().toISOString() }] });
       }
       if (target.includes('/dashboard')) {
         if (!stopPosted) {
           return response({
+            taskId: CONTRACT_TASK,
             state: 'running',
             operationId: CONTRACT_OPERATION.value,
             executionEpoch: CONTRACT_EPOCH,
@@ -1680,6 +2200,7 @@ test('cancel identity failures retain recovery and issue zero stop POSTs', async
       const calls = [];
       let bindingRef = null;
       let stopPosts = 0;
+      let taskListReads = 0;
       const dashboardBody = variant === 'dashboard-conflict'
         ? {
             state: 'running',
@@ -1706,14 +2227,10 @@ test('cancel identity failures retain recovery and issue zero stop POSTs', async
             return response({ ok: true });
           }
           if (target.endsWith('/api/tasks')) {
-            return response({
-              running: [{
-                taskId: CONTRACT_TASK,
-                updatedAt: new Date().toISOString(),
-              }],
-            });
+            taskListReads += 1;
+            return response({ running: taskListReads === 1 ? [] : [{ taskId: CONTRACT_TASK, updatedAt: new Date().toISOString() }] });
           }
-          if (target.includes('/dashboard')) return response(dashboardBody);
+          if (target.includes('/dashboard')) return response({ ...dashboardBody, taskId: CONTRACT_TASK });
           return response({});
         },
       };
@@ -1832,6 +2349,293 @@ test('homepage submission binds to its task-scoped navigation, not a newer task 
   assert.equal(calls.some((call) => call.target.includes('task-existing')), false);
 });
 
+test('Dashboard new-task submit uses one authorization click and binds its requirement to one task', async () => {
+  const clicks = [];
+  const layoutSelectors = [];
+  let taskReads = 0;
+  const auth = {
+    async fetch(url, init = {}) {
+      const target = String(url);
+      const method = String(init.method ?? 'GET').toUpperCase();
+      if (target.endsWith('/api/tasks') && method === 'GET') {
+        taskReads += 1;
+        const rows = taskReads === 1
+          ? [{ taskId: { scope: 'task', value: 'task-existing' }, updatedAt: '2999-01-01T00:00:00.000Z' }]
+          : [
+            { taskId: { scope: 'task', value: 'task-existing' }, updatedAt: '2999-01-01T00:00:00.000Z' },
+            { taskId: { scope: 'task', value: 'task-submitted' }, updatedAt: '2999-01-01T00:00:01.000Z' },
+          ];
+        return { ok: true, status: 200, text: async () => JSON.stringify({ running: rows }) };
+      }
+      if (target.endsWith('/api/tasks/task-submitted/dashboard')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            taskId: { scope: 'task', value: 'task-submitted' },
+            state: 'running',
+          }),
+        };
+      }
+      throw new Error(`unexpected Dashboard test API request: ${method} ${target}`);
+    },
+  };
+  let pageUrl = 'about:blank';
+  const page = {
+    url: () => pageUrl,
+    async goto(next) { pageUrl = String(next); return { ok: () => true, status: () => 200 }; },
+    async waitForSelector() {},
+    locator(selector) {
+      layoutSelectors.push(String(selector));
+      assert.equal(String(selector).includes('autoConfirm'), false, 'removed autoConfirm selector must not be queried');
+      return { boundingBox: async () => ({ x: 0, y: 0, width: 480, height: 72 }) };
+    },
+    async fill() {},
+    async click(selector) { clicks.push(String(selector)); },
+    async $(selector) {
+      assert.notEqual(String(selector), '.draft-actions button.button--primary', 'Dashboard must not wait for a second confirmation button');
+      return null;
+    },
+    async textContent(selector) {
+      if (String(selector) === '.quick-create-progress .progress-phase') return '已入队 · 隐式大脑将消费';
+      return '';
+    },
+    async getAttribute() { return null; },
+    async waitForResponse(predicate) {
+      const response = {
+        url: () => 'http://127.0.0.1:1/api/explicit/interactions/interaction-dashboard/confirmation',
+        request: () => ({ method: () => 'POST' }),
+        status: () => 200,
+        text: async () => JSON.stringify({ requirement: {
+          requirementId: 'requirement-submitted',
+          draftId: 'draft-submitted',
+          inputRevision: 1,
+        } }),
+      };
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async screenshot() {},
+  };
+  const binding = {
+    entry: 'dashboard',
+    serveBaseUrl: 'http://127.0.0.1:1',
+    browser: { page },
+    auth,
+  };
+
+  await submitDirectiveAndConfirmDraft(binding, 'submitted task', { confirmTimeoutMs: 1000 });
+
+  assert.equal(clicks.length, 1);
+  assert.deepEqual(clicks, ['#dashboard-create-submit']);
+  assert.deepEqual(layoutSelectors, ['.quick-create-form textarea[name="directive"]']);
+  assert.equal(binding.taskId, 'task-submitted');
+  assert.equal(binding.requirementReceipt.requirementId, 'requirement-submitted');
+  assert.equal(binding.explicitInteractionId, 'interaction-dashboard');
+  assert.equal(binding.submissionNavigation, undefined, 'Dashboard identity comes from the exact task API after the requirement receipt');
+  assert.equal(taskReads, 2);
+});
+
+test('Dashboard status-only is an immediate non-task result with exact zero-task diagnostics', async () => {
+  const clicks = [];
+  const taskCalls = [];
+  const response = {
+    ok: true,
+    status: 200,
+    async text() { return JSON.stringify({ counts: { total: 0 }, running: [], waiting: [], draft: [], completed: [], failed: [] }); },
+    async json() { return { counts: { total: 0 }, running: [], waiting: [], draft: [], completed: [], failed: [] }; },
+  };
+  let pageUrl = 'about:blank';
+  const binding = {
+    entry: 'dashboard',
+    serveBaseUrl: 'http://127.0.0.1:1',
+    auth: { async fetch(url) { taskCalls.push(String(url)); return response; } },
+    browser: {
+      page: {
+        url: () => pageUrl,
+        async goto(next) { pageUrl = String(next); return { ok: () => true, status: () => 200 }; },
+        async waitForSelector() {},
+        locator() { return { boundingBox: async () => ({ x: 0, y: 0, width: 480, height: 72 }) }; },
+        async fill() {},
+        async click(selector) { clicks.push(String(selector)); },
+        async $(selector) { return null; },
+        async textContent(selector) {
+          if (String(selector) === '.quick-create-progress .progress-phase') return '已处理';
+          if (String(selector) === '.quick-create-progress .progress-detail') return 'No task candidates are available.';
+          return '';
+        },
+        async waitForResponse() { throw new Error('status-only must not wait for confirmation'); },
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => submitDirectiveAndConfirmDraft(binding, 'Find a workspace file using file.search and file.read'),
+    /classified new-task input as status-only; no requirement was authorized/,
+  );
+
+  assert.deepEqual(clicks, ['#dashboard-create-submit']);
+  assert.equal(binding.taskId ?? null, null);
+  assert.deepEqual(binding.submissionDisposition, { kind: 'status-only', reply: 'No task candidates are available.' });
+  assert.equal(binding.entryDiagnostics.tasks.status, 200);
+  assert.equal(binding.entryDiagnostics.tasks.total, 0);
+  assert.equal(taskCalls.length, 2, 'initial and post-status task snapshots are observed through the authenticated API');
+});
+
+test('no-task cleanup requires exact zero snapshot, absent project journal and null task identity', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('no-task-cleanup-control');
+  const attemptRoot = await makeTempRoot('no-task-cleanup-attempt');
+  const runtimePaths = await resolveRuntimePaths({ workspace: attemptRoot, controlRoot });
+  const owned = spawnIdle();
+  let browserClosed = false;
+  const binding = {
+    attemptId: 'no-task-cleanup-contract',
+    serviceMode: 'candidate',
+    taskId: null,
+    attemptRoot,
+    tempRoots: [attemptRoot],
+    controlRoot,
+    projectKey: runtimePaths.projectKey,
+    runtimePaths,
+    journalMode: 'rcc',
+    servePid: owned.pid,
+    servePort: null,
+    serveBaseUrl: 'http://127.0.0.1:1',
+    persistentRoots: [controlRoot],
+    browser: { async close() { browserClosed = true; } },
+  };
+  const proof = {
+    attemptId: binding.attemptId,
+    taskId: null,
+    taskSnapshot: { status: 200, total: 0 },
+    journal: {
+      path: join(runtimePaths.projectRoot, 'checkpoints', 'ui-runtime', 'rcc', 'ui-runtime-journal.jsonl'),
+      exists: false,
+    },
+  };
+
+  try {
+    const result = await closeNoTaskAttempt(binding, proof);
+    assert.equal(result.branch, 'no-task-confirmed');
+    assert.equal(result.settled, false, 'no task is never represented as a successful settlement');
+    assert.equal(result.taskId, null);
+    assert.equal(result.recoveryOwner, undefined, 'no nonexistent task is assigned a recovery owner');
+    assert.equal(binding.cleaned, true);
+    assert.equal(browserClosed, true);
+    assert.equal(await isAlive(owned.pid), false, 'only the exact attempt serve PID is stopped');
+    assert.equal(existsSync(attemptRoot), false, 'only the registered attempt root is removed');
+    await assert.rejects(
+      () => closeNoTaskAttempt({ ...binding, taskId: CONTRACT_TASK }, proof),
+      /task identity is present/,
+    );
+  } finally {
+    await stopChild(owned);
+    await rm(attemptRoot, { recursive: true, force: true }).catch(() => {});
+    await rm(controlRoot, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('status-only Dashboard attempt stays INCOMPLETE but closes exact resources when no task and journal are proven', async () => {
+  assertResolverAvailable();
+  const controlRoot = await makeTempRoot('status-only-no-task-control');
+  const owned = spawnIdle();
+  const taskSnapshots = [];
+  let browserClosed = false;
+  const taskBody = { counts: { total: 0 }, running: [], waiting: [], completed: [], stopped: [], draft: [], failed: [] };
+  const auth = {
+    async fetch(url) {
+      taskSnapshots.push(String(url));
+      return {
+        ok: true,
+        status: 200,
+        async text() { return JSON.stringify(taskBody); },
+        async json() { return taskBody; },
+      };
+    },
+  };
+  let pageUrl = 'about:blank';
+  let directiveValue = null;
+  const page = {
+    url: () => pageUrl,
+    async goto(next) { pageUrl = String(next); return { ok: () => true, status: () => 200 }; },
+    async waitForSelector() {},
+    locator() { return { boundingBox: async () => ({ x: 0, y: 0, width: 480, height: 72 }) }; },
+    async fill(selector, value) { directiveValue = String(value); },
+    async click() {},
+    async $(selector) { return null; },
+    // The real input-stage read goes through `page.evaluate`. This fake reports
+    // the URL it really navigated to and the directive it really received, so the
+    // harness validates this page's own stage state instead of a hardcoded pass.
+    async evaluate() {
+      return {
+        url: pageUrl,
+        pathname: new URL(pageUrl).pathname,
+        value: directiveValue,
+        visible: true,
+        bbox: { x: 0, y: 0, width: 480, height: 72 },
+        readOnly: false,
+        required: true,
+        submitId: 'dashboard-create-submit',
+        submitLabel: '创建任务',
+        submitEnabled: true,
+        secondConfirmationControls: 0,
+      };
+    },
+    async textContent(selector) {
+      if (String(selector) === '.quick-create-progress .progress-phase') return '已处理';
+      if (String(selector) === '.quick-create-progress .progress-detail') return 'No task candidates are available.';
+      return '';
+    },
+    async waitForResponse() { throw new Error('status-only result has no confirmation request'); },
+    async screenshot() {},
+  };
+  let bindingRef;
+
+  try {
+    const result = await (await import('./runner.mjs')).runScenario('local-file-search', {
+      entry: 'dashboard',
+      outcome: 'success',
+      serviceMode: 'candidate',
+      attemptIdSuffix: 'status-only-no-task',
+      resolvePaths: resolveRuntimePaths,
+      controlRoot,
+      hooks: {
+        probeProvider: async () => {},
+        startServeForAttempt: async (binding) => {
+          bindingRef = binding;
+          binding.serveBaseUrl = 'http://127.0.0.1:1';
+          binding.servePort = null;
+          binding.servePid = owned.pid;
+          binding.auth = auth;
+        },
+        launchBrowserSession: async (binding) => {
+          binding.browser = { page, close: async () => { browserClosed = true; } };
+        },
+      },
+    });
+
+    assert.equal(result.receipt.result, 'INCOMPLETE');
+    assert.equal(result.receipt.task.taskId, null);
+    assert.equal(result.receipt.deviation.stage, 'attempt');
+    assert.match(result.receipt.deviation.error, /classified new-task input as status-only/);
+    assert.equal(result.receipt.cleanup.branch, 'no-task-confirmed');
+    assert.equal(result.receipt.cleanup.settled, false);
+    assert.equal(result.receipt.cleanup.noTaskProof.taskSnapshot.total, 0);
+    assert.equal(result.receipt.cleanup.noTaskProof.journal.exists, false);
+    assert.equal(result.receipt.recoveryOwner, null);
+    assert.equal(result.receipt.cleaned, true);
+    assert.equal(browserClosed, true);
+    assert.equal(await isAlive(owned.pid), false);
+    assert.equal(existsSync(bindingRef.attemptRoot), false);
+    assert.ok(taskSnapshots.filter((url) => url.endsWith('/api/tasks')).length >= 3);
+    assert.ok(result.stageErrors.some((stage) => stage.stage === 'no_task_proof' && stage.ok));
+  } finally {
+    await stopChild(owned);
+    await rm(controlRoot, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 test('homepage submission fails closed on missing or invalid task-scoped navigation', async () => {
   const cases = [
     ['missing navigation', null, {}],
@@ -1864,7 +2668,7 @@ test('public runScenario installed-attach reads the formal lease and releases th
   const controlRoot = await makeTempRoot('attach-public-control');
   const formalWorkspace = await makeTempRoot('attach-public-formal');
   const formalPaths = await resolveRuntimePaths({ workspace: formalWorkspace, controlRoot });
-  const journalDir = join(controlRoot, 'sessions', formalPaths.projectKey, 'checkpoints', 'rcc');
+  const journalDir = join(formalPaths.projectRoot, 'checkpoints', 'ui-runtime', 'rcc');
   await mkdir(journalDir, { recursive: true });
   const journal = await writeOutcomeFixture(journalDir, 'settled', {
     uiFile: 'ui-runtime-journal.jsonl',
@@ -2048,7 +2852,7 @@ test('public runScenario installed-attach retains formal recovery identity and r
       const formalWorkspace = await makeTempRoot(`attach-unsettled-${label}-formal`);
       createdRoots.push(formalWorkspace);
       const formalPaths = await resolveRuntimePaths({ workspace: formalWorkspace, controlRoot });
-      const journalDir = join(controlRoot, 'sessions', formalPaths.projectKey, 'checkpoints', 'rcc');
+      const journalDir = join(formalPaths.projectRoot, 'checkpoints', 'ui-runtime', 'rcc');
       await mkdir(journalDir, { recursive: true });
       const journal = await variant.fixture(journalDir);
       const leasePath = join(formalPaths.projectRoot, 'daemon', 'lease.json');

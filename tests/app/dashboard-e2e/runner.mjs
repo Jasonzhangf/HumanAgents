@@ -8,10 +8,11 @@
  *           docs/dagpipe/dashboard-e2e-local-file-search.graph.json
  *           docs/dagpipe/dashboard-e2e-aitest.graph.json
  *
- * Single entry for the three acceptance commands:
+ * Single entry for the acceptance commands:
  *   pnpm e2e:dashboard:web-search
  *   pnpm e2e:dashboard:local-file-search
  *   pnpm e2e:dashboard:aitest
+ *   node tests/app/dashboard-e2e/runner.mjs --scenario existing-task-change
  *
  * Follows the single chain each per-command graph declares:
  *   candidate_binding -> browser_session -> <cmd>_entry -> ... ->
@@ -19,7 +20,7 @@
  *   <cmd>_cleanup -> attempt_receipt   (the single sink, written last)
  *
  * Options (parsed by parseOptions):
- *   --scenario <web-search|local-file-search|aitest>
+ *   --scenario <web-search|local-file-search|aitest|existing-task-change>
  *   --entry <homepage|dashboard>                 default dashboard
  *   --outcome <success|failure|cancel>           default success
  *   --service-mode <candidate|installed-attach>  default candidate
@@ -36,6 +37,8 @@
  */
 
 import { pathToFileURL } from 'node:url';
+import { access } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import {
   attachToInstalledService,
@@ -45,24 +48,28 @@ import {
 } from './lib/browser.mjs';
 import {
   bindCandidate,
+  finalizeSourceIdentity,
   prepareAttemptRoots,
   registerAttemptResources,
   resolveAttemptPaths,
   resolveFormalAttachPaths,
+  sourceIdentityEvidence,
 } from './lib/binding.mjs';
 import {
   closeSettledAttempt,
+  closeNoTaskAttempt,
   registerCleanupInventory,
   retainUnsettledRecovery,
   stopTaskAndSettle,
 } from './lib/cleanup.mjs';
-import { countTurnEvidenceFor, journalPathFor } from './lib/journal.mjs';
+import { countTurnEvidenceFor, journalPathFor, journalRootFor } from './lib/journal.mjs';
 import { buildReceipt, writeReceipt } from './lib/receipt.mjs';
 import { runAitestScenario } from './scenarios/aitest.mjs';
+import { runExistingTaskChangeScenario } from './scenarios/existing-task-change.mjs';
 import { runLocalFileSearchScenario } from './scenarios/local-file-search.mjs';
 import { runWebSearchScenario } from './scenarios/web-search.mjs';
 
-export const SCENARIOS = Object.freeze(['web-search', 'local-file-search', 'aitest']);
+export const SCENARIOS = Object.freeze(['web-search', 'local-file-search', 'aitest', 'existing-task-change']);
 export const ENTRIES = Object.freeze(['homepage', 'dashboard']);
 export const OUTCOMES = Object.freeze(['success', 'failure', 'cancel']);
 export const SERVICE_MODES = Object.freeze(['candidate', 'installed-attach']);
@@ -76,23 +83,25 @@ const SCENARIO_OUTCOME_SUPPORT = Object.freeze({
   'web-search': Object.freeze(['success']),
   'local-file-search': Object.freeze(['success', 'failure', 'cancel']),
   aitest: Object.freeze(['success']),
+  'existing-task-change': Object.freeze(['success']),
 });
 
 export const USAGE = [
   'Usage: node tests/app/dashboard-e2e/runner.mjs --scenario <name> [options]',
   '',
   'Options:',
-  '  --scenario <web-search|local-file-search|aitest>  required',
-  '  --entry <homepage|dashboard>                      default dashboard',
-  '  --outcome <success|failure|cancel>                default success',
-  '  --service-mode <candidate|installed-attach>       default candidate',
-  '  --help                                            print this help',
+  '  --scenario <web-search|local-file-search|aitest|existing-task-change>  required',
+  '  --entry <homepage|dashboard>                                          default dashboard',
+  '  --outcome <success|failure|cancel>                                    default success',
+  '  --service-mode <candidate|installed-attach>                           default candidate',
+  '  --help                                                                print this help',
 ].join('\n');
 
 const RUNNERS = {
   'web-search': runWebSearchScenario,
   'local-file-search': runLocalFileSearchScenario,
   aitest: runAitestScenario,
+  'existing-task-change': runExistingTaskChangeScenario,
 };
 
 export function parseOptions(argv) {
@@ -208,6 +217,39 @@ function cleanupFailureReason(binding, settlement) {
     return failed?.reason ?? 'temporary attempt root was not removed';
   }
   return 'cleanup did not complete';
+}
+
+async function proveNoTaskAttempt(binding) {
+  const taskId = binding.taskId ?? null;
+  if (binding.serviceMode !== 'candidate' || binding.formalEntryStarted !== true || taskId !== null || !binding.serveBaseUrl || !binding.auth) {
+    return null;
+  }
+  let response;
+  let body;
+  try {
+    response = await (binding.auth.fetch ?? fetch)(`${binding.serveBaseUrl}/api/tasks`, { headers: { accept: 'application/json' } });
+    body = await response.json();
+  } catch {
+    return null;
+  }
+  const total = body?.counts?.total;
+  if (response.status !== 200 || total !== 0) return null;
+  const journalRoot = journalRootFor(binding);
+  if (!journalRoot || !binding.projectKey) return null;
+  const journalPath = join(journalRoot, 'ui-runtime-journal.jsonl');
+  try {
+    await access(journalPath);
+    return null;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return null;
+  }
+  return {
+    attemptId: binding.attemptId,
+    taskId: null,
+    taskSnapshot: { endpoint: '/api/tasks', status: response.status, total },
+    journal: { path: journalPath, exists: false, errorCode: 'ENOENT' },
+    observedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -384,6 +426,13 @@ export async function runScenario(scenario, options = {}) {
     reason: settlement.reason ?? null,
   });
 
+  const noTaskProof = await proveNoTaskAttempt(binding);
+  if (noTaskProof) {
+    binding.noTaskProof = noTaskProof;
+    binding.recoveryOwner = undefined;
+    stageErrors.push({ stage: 'no_task_proof', ok: true, proof: noTaskProof });
+  }
+
   // <cmd>_cleanup, before the receipt sink. An unsettled attempt retains its
   // service, workspace, control root and evidence instead of being torn down.
   let resources = null;
@@ -392,6 +441,8 @@ export async function runScenario(scenario, options = {}) {
   try {
     if (settlement.settled) {
       await closeSettledAttempt(binding, settleResult);
+    } else if (noTaskProof) {
+      await closeNoTaskAttempt(binding, noTaskProof);
     } else {
       await retainUnsettledRecovery(binding, settlement.reason ?? deviation?.error ?? 'attempt did not settle', settleResult);
     }
@@ -455,6 +506,11 @@ export async function runScenario(scenario, options = {}) {
   const status = !deviation && requestedOutcomeReached && settlement.settled && cleanupCompleted && outcome === 'success'
     ? 'SUCCESS'
     : 'INCOMPLETE';
+  // The end source identity is captured here, at the one place before the receipt
+  // sink, so every branch records it: success, a scenario error, a failure before
+  // the scenario ran, and an unsettled attempt. The call is idempotent and never
+  // overwrites an end identity a scenario already finalized.
+  await finalizeSourceIdentity(binding);
   const receipt = buildReceipt(binding, {
     // The final result is derived only after strict settlement and cleanup.
     result: status,
@@ -466,7 +522,14 @@ export async function runScenario(scenario, options = {}) {
     checkpointCommitted: evidence.checkpointCommitted ?? 0,
     terminalRecord,
     evidenceRefs,
-    scenarioEvidence: evidence.scenarioEvidence ?? null,
+    scenarioEvidence: {
+      ...(evidence.scenarioEvidence ?? {}),
+      // The receipt has no other owner for the end identity, so the sink records
+      // the finalized one for every branch. A scenario that already wrote its own
+      // end identity keeps it; finalizeSourceIdentity is idempotent, so both name
+      // the same capture.
+      sourceIdentity: evidence.scenarioEvidence?.sourceIdentity ?? sourceIdentityEvidence(binding),
+    },
     screenshots: evidence.screenshots ?? [],
     missingEvidence: visibleMissingEvidence,
     draft: evidence.draft ?? binding.draft ?? null,

@@ -23,6 +23,7 @@ import {
   planNextDueAt,
   renderPlanSection,
 } from './plan-control.js'
+import { createNewTaskSubmissionSession } from './requirement-submission.js'
 
 const REFRESH_MS = 4000
 const { main, status, interactionCardHosts } = makePageShell(
@@ -32,16 +33,10 @@ const { main, status, interactionCardHosts } = makePageShell(
   '在这里新建、跟踪、管理任务；所有数据来自 HumanAgent Runtime API。',
 )
 const interactionCardHost = interactionCardHosts[0]
-const interactionCard = interactionCardHost
-  ? mountInteractionWorkCard(interactionCardHost, {
-      onAction: async (action) => {
-        if (action.id === 'confirm-requirement') {
-          const confirmationButton = document.querySelector('#dashboard-confirm-button')
-          if (confirmationButton) void confirmationButton.click()
-        }
-      },
-    })
-  : null
+// The new-task form submit is the only authorization point on this page. The
+// work card is a read-only progress projection here, so it must not expose a
+// second confirmation action that would gate a new task behind another click.
+const interactionCard = interactionCardHost ? mountInteractionWorkCard(interactionCardHost, {}) : null
 interactionCard?.update(projectInteractionCardFromEntries([], 'received'))
 
 // ── DOM regions: input panel (stable, never rebuilt) + list panel (refreshed) ──
@@ -89,10 +84,19 @@ function appendCardError(error) {
   })
 }
 
+/**
+ * Show the interaction's current state on the read-only work card.
+ *
+ * `snapshot` must be the state the runtime reports *now*. The pre-confirmation
+ * snapshot the page organized from is history and must never be handed here as
+ * the current state.
+ */
 function updateCardFromSnapshot(snapshot) {
   interaction.id = interaction.id || 'pending-input'
   if (snapshot?.state) interaction.state = snapshot.state
-  interactionCard?.update(projectInteractionCardFromSnapshot(snapshot))
+  // The work card carries no confirmation action on this page: the form submit
+  // is the only authorization point for a new task.
+  interactionCard?.update({ ...projectInteractionCardFromSnapshot(snapshot), actions: [] })
 }
 
 function createInteractionProgressWidget() {
@@ -129,14 +133,6 @@ function createInteractionProgressWidget() {
       root.classList.add('progress--live')
       appendCardEvent('status', phaseText, 'progress')
     },
-    waiting(phaseText, detailText) {
-      if (handle) clearInterval(handle)
-      phase.textContent = phaseText || 'waiting'
-      detail.textContent = detailText || ''
-      timer.textContent = '0.0s'
-      root.classList.remove('progress--live')
-      appendCardEvent('status', phaseText || 'waiting', 'progress')
-    },
     done(phaseText, detailText) {
       if (handle) clearInterval(handle)
       tick()
@@ -168,9 +164,14 @@ function createInteractionProgressWidget() {
 }
 
 // ── Input panel ──
+// The form submit is the only authorization point for a new task on this page.
+// One submit organizes the input through the explicit brain and hands the exact
+// reviewable revision to the runtime's final-submit edge in the same handling.
+// There is no second confirmation panel, no auto-confirm and no local enqueue.
 function renderInputPanel() {
   clearNode(inputRegion)
   const form = element('form', undefined, 'quick-create-form')
+  form.id = 'dashboard-create-form'
   const label = element('label', '新建任务', 'quick-create-label')
   const textarea = element('textarea')
   textarea.name = 'directive'
@@ -179,30 +180,117 @@ function renderInputPanel() {
   textarea.placeholder = '一句话告诉显式大脑要做什么。'
   label.append(textarea)
 
-  const submit = element('button', '提交给显式大脑', 'button button--primary')
+  const submit = element('button', '创建并执行', 'button button--primary')
   submit.type = 'submit'
+  submit.id = 'dashboard-create-submit'
 
   const progress = createInteractionProgressWidget()
   progress.root.classList.add('quick-create-progress')
-  progress.idle('空闲', '输入任务后点击提交，显式大脑按 理解 → 匹配 → 确认 → 派发 处理')
+  progress.idle('空闲', '输入任务后点击创建并执行，提交即授权，显式大脑按 理解 → 匹配 → 整理 → 派发 处理')
 
-  const policyRow = element('label', undefined, 'quick-create-policy')
-  const autoConfirm = element('input')
-  autoConfirm.type = 'checkbox'
-  autoConfirm.name = 'autoConfirm'
-  autoConfirm.dataset.testid = 'auto-confirm'
-  policyRow.append(autoConfirm, element('span', '自动确认并派发（跳过手动确认步骤）'))
+  // Read-only organizing feedback. The submit is the confirmation, so this
+  // region never re-runs the submission and never offers a second authorize.
+  const feedback = element('div', undefined, 'quick-create-feedback')
+  feedback.id = 'dashboard-create-feedback'
+  feedback.hidden = true
+  feedback.setAttribute('role', 'status')
+  feedback.setAttribute('aria-live', 'polite')
 
-  // Interaction actions (shown after draft is produced)
-  const draftArea = element('div', undefined, 'draft-area')
-  draftArea.hidden = true
+  const errorPanel = element('section', undefined, 'panel')
+  errorPanel.id = 'dashboard-create-error'
+  errorPanel.hidden = true
+  errorPanel.setAttribute('role', 'alert')
 
   const actions = element('div', undefined, 'quick-create-actions')
   actions.append(submit)
-  form.append(label, actions, progress.root, policyRow, draftArea)
+  form.append(label, actions, errorPanel, progress.root, feedback)
 
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault()
+  // One session per page keeps the submission identity and the interaction
+  // identity stable across a clarification round; a fresh human intent gets a
+  // fresh identity inside the session.
+  const session = createNewTaskSubmissionSession({ api, sourceRef: 'ui:dashboard' })
+
+  function showError(error) {
+    clearNode(errorPanel)
+    errorPanel.hidden = false
+    errorPanel.append(
+      element('strong', error.code || 'request.failed'),
+      element('p', `${error.message || String(error)} · owner=${error.ownerId || 'unknown'} · next=${error.nextAction || 'inspect the runtime error'}`),
+    )
+    appendPairingEntry(errorPanel, error)
+    appendCardError(error)
+  }
+
+  function clearError() {
+    clearNode(errorPanel)
+    errorPanel.hidden = true
+  }
+
+  /**
+   * Render the read-only organizing result. `snapshot` is the organized draft
+   * shown as history; `cardSnapshot` is the state the work card must show. For
+   * an accepted submission that is the server's post-confirmation snapshot,
+   * never the organized draft the human reviewed before the submit authorized
+   * it.
+   */
+  function renderOrganized(snapshot, cardSnapshot = snapshot) {
+    clearNode(feedback)
+    feedback.hidden = false
+    feedback.append(element('p', '显式大脑整理结果（只读）', 'eyebrow'))
+    const draft = snapshot?.draft
+    if (draft) {
+      const grid = element('dl', undefined, 'detail-grid')
+      for (const [fieldLabel, fieldValue] of [
+        ['意图', draft.proposedIntent],
+        ['规范化输入', draft.normalizedInput],
+        ['建议', draft.proposal],
+      ]) {
+        const row = element('div', undefined, 'detail-cell')
+        row.append(element('dt', fieldLabel), element('dd', fieldValue || '—'))
+        grid.append(row)
+      }
+      feedback.append(grid)
+    } else if (snapshot?.reply || snapshot?.nextAction) {
+      feedback.append(element('p', snapshot.reply || snapshot.nextAction, 'muted'))
+    }
+    updateCardFromSnapshot(cardSnapshot)
+  }
+
+  function renderClarification(snapshot) {
+    clearNode(feedback)
+    feedback.hidden = false
+    const question = snapshot?.clarifications?.at(-1)?.question || snapshot?.reply || '显式大脑需要补充信息。'
+    feedback.append(
+      element('p', '显式大脑需要补充信息（只读）', 'eyebrow'),
+      element('p', question, 'draft-proposal'),
+    )
+    const answerForm = element('form', undefined, 'form-grid')
+    answerForm.id = 'dashboard-create-clarification'
+    const answerLabel = element('label')
+    const answer = element('input')
+    answer.name = 'answer'
+    answer.required = true
+    answerLabel.append('补充信息', answer)
+    const answerActions = element('div', undefined, 'actions')
+    const answerButton = element('button', '回答并继续', 'button button--primary')
+    answerButton.type = 'submit'
+    answerActions.append(answerButton)
+    answerForm.append(answerLabel, answerActions)
+    answerForm.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const value = answer.value.trim()
+      if (!value) {
+        progress.error('请填写补充信息', '')
+        answer.focus()
+        return
+      }
+      void runSubmission({ clarificationAnswer: value })
+    })
+    feedback.append(answerForm)
+    updateCardFromSnapshot(snapshot)
+  }
+
+  async function runSubmission({ clarificationAnswer } = {}) {
     if (interaction.inFlight) return
     const rawInput = textarea.value.trim()
     if (!rawInput) {
@@ -214,471 +302,84 @@ function renderInputPanel() {
     submit.disabled = true
     textarea.readOnly = true
     submit.textContent = '正在处理…'
-    progress.set('显式大脑正在理解输入', '正在接收并解析你的输入')
+    clearError()
+    progress.set('显式大脑正在整理并提交', '一次提交即授权创建并执行')
     try {
-      if (!interaction.id) {
-        // First turn: send raw input to explicit brain intake. The interaction
-        // must declare its typed request kind, otherwise the intake refuses to
-        // mint the reviewable draft revision and the 修改 / 重新整理 / 放弃
-        // closure has no revision identity to act on.
-        const received = await api.receiveExplicitInput({
-          sourceRef: 'ui:dashboard',
-          rawInput,
-          inputRevision: 1,
-          requestKind: 'new-task-preview',
-        })
-        interaction.id = received.interactionId
-        appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.raw-input' })
-      }
-      // Check current interaction state
-      let snap = await api.inspectExplicitInteraction(interaction.id)
-      updateCardFromSnapshot(snap)
-      if (snap.state === 'awaiting-clarification') {
-        // Second turn: user answered the clarification question
-        progress.set('显式大脑正在理解你的回答', '正在将补充信息交给显式大脑')
-        snap = await api.answerExplicitClarification(interaction.id, rawInput)
-        appendCardEvent('user', rawInput, 'user', { eventKey: 'explicit.clarification-answer' })
-        // After answering, re-interpret to produce a draft
-        progress.set('显式大脑正在重新整理意图', '显式大脑正在生成任务草案')
-        snap = await api.interpretExplicitInput(interaction.id)
-        updateCardFromSnapshot(snap)
-      } else if (snap.state === 'received' || snap.state === 'matching') {
-        // First turn: drive interpretation + matching
-        progress.set('显式大脑正在匹配任务', '显式大脑正在整理意图')
-        snap = await api.interpretExplicitInput(interaction.id)
-        updateCardFromSnapshot(snap)
-      }
-      if (snap.state === 'awaiting-clarification') {
-        progress.done('需要补充信息', snap.reply || '请回答显式大脑的问题')
-        textarea.value = ''
-        textarea.readOnly = false
-        textarea.placeholder = snap.reply || '请补充显式大脑需要的信息。'
+      const result = await session.submit(
+        rawInput,
+        clarificationAnswer === undefined ? {} : { clarificationAnswer },
+      )
+      interaction.id = result.interactionId || interaction.id
+      if (result.outcome === 'clarification') {
+        renderClarification(result.snapshot)
+        progress.done('需要补充信息', result.snapshot?.reply || '请回答显式大脑的问题')
         submit.textContent = '回答并继续'
         submit.disabled = false
+        textarea.readOnly = false
         interaction.inFlight = false
+        return
+      }
+      if (result.outcome === 'refused') {
+        // An existing-task material change is a separate authorization; the
+        // new-task form refuses it and the queue stays unchanged.
+        renderOrganized(result.snapshot)
+        showError(result.refusal)
+        progress.error('未作为新任务提交', result.refusal.message)
+        submit.textContent = '重新提交'
+        submit.disabled = false
+        textarea.readOnly = false
+        interaction.inFlight = false
+        return
+      }
+      if (result.outcome === 'status-only') {
+        renderOrganized(result.snapshot)
+        progress.done('已处理', result.snapshot?.reply || result.snapshot?.nextAction || '')
+        submit.textContent = '创建并执行'
+        submit.disabled = false
+        textarea.readOnly = false
+        interaction.id = null
+        interaction.inFlight = false
+        session.reset()
         textarea.focus()
         return
       }
-      if (snap.state === 'awaiting-confirmation' && snap.draft) {
-        progress.waiting('等待你确认任务草案', '查看下方显式大脑整理结果')
-        interaction.draft = snap.draft
-        // Reset inFlight so the confirm/cancel buttons inside the draft panel
-        // are not blocked by the submit guard.
-        interaction.inFlight = false
-        draftNotice = ''
-        renderDraftConfirmation(draftArea, snap, textarea, submit, progress, autoConfirm.checked)
-        return
-      }
-      // status-only or other terminal
-      progress.done('已处理', snap.reply || snap.nextAction || '')
-      textarea.readOnly = false
+      // The runtime accepted the exact revision and FIFO-enqueued it. Nothing is
+      // enqueued here; the page reports the runtime's own acceptance, keeps the
+      // organized draft as history and takes the card's current state from the
+      // post-confirmation server snapshot, so the card never keeps waiting for a
+      // second confirmation.
+      renderOrganized(result.organizedSnapshot ?? result.snapshot, result.snapshot)
+      appendCardEvent('decision', '任务已提交，正在等待隐式大脑派发', 'decision', { eventKey: 'explicit.confirmation-submitted' })
+      progress.done('已入队 · 隐式大脑将消费', '任务需求已进入隐式大脑 FIFO 队列')
       textarea.value = ''
-      submit.textContent = '提交给显式大脑'
+      textarea.readOnly = false
+      textarea.placeholder = '一句话告诉显式大脑要做什么。'
+      submit.textContent = '创建并执行'
       submit.disabled = false
       interaction.id = null
       interaction.inFlight = false
+      session.reset()
       textarea.focus()
+      void refreshLists()
     } catch (error) {
+      // A refused or failed submission is never retried automatically and the
+      // input stays visible so the human can correct it.
+      showError(error)
       progress.error('请求失败', error.message || String(error))
-      appendCardError(error)
-      submit.textContent = '重试'
+      submit.textContent = '重试本次提交'
       submit.disabled = false
       textarea.readOnly = false
       interaction.inFlight = false
       textarea.focus()
     }
+  }
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault()
+    void runSubmission()
   })
 
   inputRegion.append(form)
-}
-
-// The draft panel reports only what the runtime returned. The confirm edge binds
-// the displayed revision identity so the runtime can refuse an outdated
-// confirmation, the refine edge names the displayed base revision version and
-// hash, and the abandon edge renders the closure receipt the reject route
-// returned instead of claiming a local "已取消".
-let draftNotice = ''
-
-function draftRevisionIdentity(revision) {
-  return {
-    version: revision?.revisionVersion === undefined ? '' : String(revision.revisionVersion),
-    hash: revision?.revisionHash ?? '',
-  }
-}
-
-function typedErrorText(error) {
-  return `${error.code || 'runtime.request.failed'} · owner=${error.ownerId || 'unknown'} · ${error.message || String(error)} · next=${error.nextAction || 'inspect the runtime error'}`
-}
-
-function draftField(labelText, control) {
-  const row = element('label', undefined, 'draft-field')
-  row.append(element('span', labelText, 'draft-field-label'), control)
-  return row
-}
-
-function draftLines(value) {
-  return String(value || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-function showDraftEditor(area, kind) {
-  for (const node of area.querySelectorAll('[data-draft-editor]')) {
-    node.hidden = node.dataset.draftEditor !== kind
-  }
-}
-
-/**
- * Replace the confirmable panel with the abandon closure the reject route
- * returned. Every row is a field of that receipt; nothing is inferred.
- */
-function renderDraftClosure(area, closure, state) {
-  area.hidden = false
-  clearNode(area)
-  area.append(
-    element('p', '显式大脑整理结果', 'eyebrow'),
-    element('p', '草案已放弃，交互已关闭。', 'draft-proposal'),
-  )
-  const receipt = element('dl', undefined, 'draft-receipt')
-  receipt.dataset.draftReceipt = 'true'
-  for (const [label, value] of [
-    ['交互状态', state],
-    ['rejectionId', closure.rejectionId],
-    ['closedAt', closure.closedAt],
-    ['reason', closure.reason],
-    ['durable', closure.durable === true ? 'true' : '未提供'],
-    ['draftRevisionVersion', closure.draftRevisionVersion],
-    ['draftRevisionHash', closure.draftRevisionHash],
-  ]) {
-    const row = element('div')
-    row.append(
-      element('dt', label),
-      element('dd', value === undefined || value === null || value === '' ? '未提供' : String(value)),
-    )
-    receipt.append(row)
-  }
-  area.append(receipt)
-  const status = element('p', `放弃回执：${closure.rejectionId ?? '未提供'} · ${closure.closedAt ?? '未提供'}`, 'muted')
-  status.dataset.draftStatus = 'true'
-  status.setAttribute('role', 'status')
-  status.setAttribute('aria-live', 'polite')
-  area.append(status)
-}
-
-/** Re-read the interaction and re-render the panel from the runtime's answer. */
-async function reloadDraftConfirmation(area, textarea, submit, progress) {
-  const current = await api.inspectExplicitInteraction(interaction.id)
-  interaction.draft = current.draft ?? null
-  if (current.state === 'awaiting-confirmation' && current.draft) {
-    renderDraftConfirmation(area, current, textarea, submit, progress, false)
-    return current
-  }
-  area.hidden = true
-  clearNode(area)
-  interaction.id = null
-  interaction.draft = null
-  interaction.inFlight = false
-  textarea.readOnly = false
-  textarea.placeholder = '一句话告诉显式大脑要做什么。'
-  submit.textContent = '提交给显式大脑'
-  submit.disabled = false
-  progress.idle(`交互状态：${current.state}`, current.nextAction || '')
-  textarea.focus()
-  return current
-}
-
-function renderDraftConfirmation(area, snap, textarea, submit, progress, autoConfirm) {
-  area.hidden = false
-  clearNode(area)
-  const proposal = snap.draft?.proposal || snap.rawInput || ''
-  const normalized = snap.draft?.normalizedInput || ''
-  const intent = snap.draft?.proposedIntent || ''
-  const revision = snap.revision
-  const identity = draftRevisionIdentity(revision)
-  area.append(
-    element('p', '显式大脑整理结果', 'eyebrow'),
-    element('p', proposal, 'draft-proposal'),
-  )
-  if (normalized) area.append(element('p', `标准化输入：${normalized}`, 'draft-meta'))
-  if (intent) area.append(element('p', `意图：${intent}`, 'draft-meta'))
-  const revisionNode = element(
-    'p',
-    `修订 ${identity.version ? `v${identity.version}` : '未提供'} · ${identity.hash || '未提供'}`,
-    'draft-meta draft-revision',
-  )
-  revisionNode.dataset.draftRevision = 'true'
-  revisionNode.dataset.draftRevisionVersion = identity.version
-  revisionNode.dataset.draftRevisionHash = identity.hash
-  area.append(revisionNode)
-
-  const confirmBtn = element('button', '确认并执行', 'button button--primary')
-  confirmBtn.type = 'button'
-  confirmBtn.id = 'dashboard-confirm-button'
-  confirmBtn.dataset.draftAction = 'confirm'
-  const regenerateBtn = element('button', '重新整理', 'button button--quiet')
-  regenerateBtn.type = 'button'
-  regenerateBtn.dataset.draftAction = 'regenerate'
-  const rejectBtn = element('button', '放弃', 'button button--danger')
-  rejectBtn.type = 'button'
-  rejectBtn.dataset.draftAction = 'reject'
-  // 修改 names the exact revision the human is looking at, so it exists only
-  // when the runtime reported a typed revision to refine against.
-  const refineBtn = revision === undefined ? null : element('button', '修改', 'button button--quiet')
-  if (refineBtn) {
-    refineBtn.type = 'button'
-    refineBtn.dataset.draftAction = 'refine'
-  }
-  const draftActions = element('div', undefined, 'draft-actions')
-  draftActions.append(confirmBtn)
-  if (refineBtn) draftActions.append(refineBtn)
-  draftActions.append(regenerateBtn, rejectBtn)
-
-  const editors = element('div', undefined, 'draft-editors')
-  const refineEditor = element('div', undefined, 'draft-editor')
-  refineEditor.dataset.draftEditor = 'refine'
-  refineEditor.hidden = true
-  const refineGoal = element('input')
-  refineGoal.name = 'goal'
-  refineGoal.value = revision?.goal ?? ''
-  const refineScope = element('input')
-  refineScope.name = 'scope'
-  refineScope.value = revision?.scope ?? ''
-  const refineConstraints = element('textarea')
-  refineConstraints.name = 'constraints'
-  refineConstraints.value = (revision?.constraints ?? []).join('\n')
-  const refineDeliverables = element('textarea')
-  refineDeliverables.name = 'deliverables'
-  refineDeliverables.value = (revision?.deliverables ?? []).join('\n')
-  const refineSubmit = element('button', '保存修改', 'button button--primary')
-  refineSubmit.type = 'button'
-  refineSubmit.dataset.draftSubmit = 'refine'
-  refineEditor.append(
-    draftField('目标', refineGoal),
-    draftField('范围', refineScope),
-    draftField('约束（每行一条）', refineConstraints),
-    draftField('交付物（每行一条）', refineDeliverables),
-    refineSubmit,
-  )
-
-  const regenerateEditor = element('div', undefined, 'draft-editor')
-  regenerateEditor.dataset.draftEditor = 'regenerate'
-  regenerateEditor.hidden = true
-  const regenerateInstruction = element('textarea')
-  regenerateInstruction.name = 'instruction'
-  regenerateInstruction.placeholder = '可选的修正说明；留空则按原始输入重新整理。'
-  const regenerateSubmit = element('button', '重新整理草案', 'button button--quiet')
-  regenerateSubmit.type = 'button'
-  regenerateSubmit.dataset.draftSubmit = 'regenerate'
-  regenerateEditor.append(draftField('修正说明（可选）', regenerateInstruction), regenerateSubmit)
-
-  const rejectEditor = element('div', undefined, 'draft-editor')
-  rejectEditor.dataset.draftEditor = 'reject'
-  rejectEditor.hidden = true
-  const rejectReason = element('textarea')
-  rejectReason.name = 'reason'
-  rejectReason.placeholder = '放弃原因（必填，会写入放弃回执）'
-  const rejectSubmit = element('button', '确认放弃', 'button button--danger')
-  rejectSubmit.type = 'button'
-  rejectSubmit.dataset.draftSubmit = 'reject'
-  rejectEditor.append(draftField('放弃原因', rejectReason), rejectSubmit)
-
-  editors.append(refineEditor, regenerateEditor, rejectEditor)
-
-  const confirmStatus = element(
-    'p',
-    draftNotice || `当前修订 ${identity.version ? `v${identity.version}` : '未提供'}；确认后进入隐式队列。`,
-    'muted',
-  )
-  confirmStatus.dataset.draftStatus = 'true'
-  confirmStatus.setAttribute('role', 'status')
-  confirmStatus.setAttribute('aria-live', 'polite')
-
-  area.append(draftActions, editors, confirmStatus)
-
-  const disableControls = () => {
-    confirmBtn.disabled = true
-    regenerateBtn.disabled = true
-    rejectBtn.disabled = true
-    if (refineBtn) refineBtn.disabled = true
-  }
-  const failDraftEdge = async (label, error) => {
-    interaction.inFlight = false
-    draftNotice = typedErrorText(error)
-    progress.error(label, error.message || error)
-    appendCardError(error)
-    await reloadDraftConfirmation(area, textarea, submit, progress).catch(() => disableControls())
-  }
-
-  confirmBtn.addEventListener('click', async (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    if (interaction.inFlight) return
-    interaction.inFlight = true
-    disableControls()
-    progress.set('显式大脑正在提交任务', '正在写入任务需求并进入执行队列')
-    try {
-      const confirmed = await api.confirmExplicitRequirement(interaction.id, {
-        draftId: snap.draft.draftId,
-        inputRevision: snap.draft.inputRevision || 1,
-        // Bind the revision the human is looking at. Without this the runtime
-        // cannot tell an outdated confirmation from a current one.
-        ...(identity.version ? { draftRevisionVersion: Number(identity.version) } : {}),
-        ...(identity.hash ? { draftRevisionHash: identity.hash } : {}),
-        confirmationRef: `confirmation:dashboard-${Date.now()}`,
-        confirmedBy: 'human:operator',
-        confirmedAt: new Date().toISOString(),
-        payloadRef: `asset://requirements/dashboard-${Date.now()}`,
-      })
-      draftNotice = ''
-      appendCardEvent('decision', '任务已确认，等待队列消费', 'decision', { eventKey: 'explicit.confirmation-submitted' })
-      progress.done('已入队 · 隐式大脑将消费', '任务需求已进入隐式大脑队列')
-      // Implicit dispatch is async — wait for the task to appear in the list
-      // and jump straight to its dashboard so the user sees live turns instead
-      // of a stale "已入队" message on the input panel.
-      const dispatchedTaskId = await findDispatchedTaskId()
-      if (dispatchedTaskId) {
-        window.location.href = taskDashboardHref(dispatchedTaskId)
-        return
-      }
-      area.hidden = true
-      clearNode(area)
-      // Reset input for next task
-      textarea.value = ''
-      textarea.readOnly = false
-      textarea.placeholder = '一句话告诉显式大脑要做什么。'
-      submit.textContent = '提交给显式大脑'
-      submit.disabled = false
-      interaction.id = null
-      interaction.draft = null
-      interaction.inFlight = false
-      textarea.focus()
-      void refreshLists()
-    } catch (error) {
-      // A refused confirmation is never retried automatically: the panel is
-      // re-read so the human sees the revision the runtime actually holds.
-      await failDraftEdge('确认失败', error)
-    }
-  })
-
-  // Auto-confirm uses the same confirmation edge as the manual button.
-  if (autoConfirm) {
-    progress.set('显式大脑正在自动确认', '已开启跳过手动确认')
-    setTimeout(() => confirmBtn.click(), 0)
-  }
-
-  if (refineBtn) {
-    refineBtn.addEventListener('click', (event) => {
-      event.preventDefault()
-      event.stopPropagation()
-      showDraftEditor(area, 'refine')
-    })
-    refineSubmit.addEventListener('click', async (event) => {
-      event.preventDefault()
-      event.stopPropagation()
-      if (interaction.inFlight) return
-      const fields = {
-        goal: refineGoal.value.trim(),
-        scope: refineScope.value.trim(),
-        constraints: draftLines(refineConstraints.value),
-        deliverables: draftLines(refineDeliverables.value),
-      }
-      if (!fields.goal || !fields.scope) {
-        draftNotice = 'request.invalid-field · owner=humanagent.app.ui · 修改需要目标与范围 · next=补齐修改内容后再提交'
-        renderDraftConfirmation(area, snap, textarea, submit, progress, false)
-        return
-      }
-      interaction.inFlight = true
-      disableControls()
-      progress.set('显式大脑正在修改草案', '正在按当前修订提交 typed 修改')
-      try {
-        const next = await api.refineExplicitDraft(interaction.id, {
-          draftId: revision.draftId,
-          baseRevisionVersion: revision.revisionVersion,
-          requestedRevisionHash: revision.revisionHash,
-          fields,
-          instructionRef: 'user-edit',
-        })
-        interaction.inFlight = false
-        interaction.draft = next.draft ?? null
-        const nextIdentity = draftRevisionIdentity(next.revision)
-        draftNotice = `修改已应用 · 修订 ${nextIdentity.version ? `v${nextIdentity.version}` : '未提供'} · ${nextIdentity.hash || '未提供'}`
-        progress.done('草案已修改', `当前修订 ${nextIdentity.version ? `v${nextIdentity.version}` : '未提供'}`)
-        appendCardEvent('decision', '草案已按 typed 修改更新', 'decision', { eventKey: 'explicit.draft-refined' })
-        renderDraftConfirmation(area, next, textarea, submit, progress, false)
-      } catch (error) {
-        await failDraftEdge('修改失败', error)
-      }
-    })
-  }
-
-  regenerateBtn.addEventListener('click', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    showDraftEditor(area, 'regenerate')
-  })
-  regenerateSubmit.addEventListener('click', async (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    if (interaction.inFlight) return
-    const instruction = regenerateInstruction.value.trim()
-    interaction.inFlight = true
-    disableControls()
-    progress.set('显式大脑正在重新整理草案', '正在按原始输入重新整理')
-    try {
-      const next = await api.regenerateExplicitDraft(interaction.id, instruction ? { instruction } : {})
-      interaction.inFlight = false
-      interaction.draft = next.draft ?? null
-      const nextIdentity = draftRevisionIdentity(next.revision)
-      const minted = nextIdentity.version !== '' && nextIdentity.version !== identity.version
-      draftNotice = minted
-        ? `重新整理已产生新修订 v${nextIdentity.version} · ${nextIdentity.hash || '未提供'}`
-        : `重新整理后仍是修订 ${nextIdentity.version ? `v${nextIdentity.version}` : '未提供'}：解释器返回了相同的执行输入，当前修订保持有效。`
-      progress.done('草案已重新整理', minted ? `新修订 v${nextIdentity.version}` : '修订未变化')
-      appendCardEvent('decision', '草案已重新整理', 'decision', { eventKey: 'explicit.draft-regenerated' })
-      renderDraftConfirmation(area, next, textarea, submit, progress, false)
-    } catch (error) {
-      await failDraftEdge('重新整理失败', error)
-    }
-  })
-
-  rejectBtn.addEventListener('click', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    showDraftEditor(area, 'reject')
-  })
-  rejectSubmit.addEventListener('click', async (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    if (interaction.inFlight) return
-    const reason = rejectReason.value.trim()
-    if (!reason) {
-      draftNotice = 'request.invalid-field · owner=humanagent.app.ui · 放弃原因必填 · next=填写放弃原因后再提交'
-      renderDraftConfirmation(area, snap, textarea, submit, progress, false)
-      return
-    }
-    interaction.inFlight = true
-    disableControls()
-    progress.set('显式大脑正在放弃草案', '正在写入放弃回执')
-    try {
-      const result = await api.rejectExplicitDraft(interaction.id, { reason })
-      interaction.inFlight = false
-      interaction.draft = null
-      interaction.id = null
-      const closure = result.closure ?? {}
-      progress.done('草案已放弃', `放弃回执 ${closure.rejectionId ?? '未提供'}`)
-      appendCardEvent('decision', '草案已放弃并写入回执', 'decision', { eventKey: 'explicit.draft-abandoned' })
-      renderDraftClosure(area, closure, result.state)
-      textarea.readOnly = false
-      textarea.placeholder = '一句话告诉显式大脑要做什么。'
-      submit.textContent = '提交给显式大脑'
-      submit.disabled = false
-      void refreshLists()
-    } catch (error) {
-      await failDraftEdge('放弃失败', error)
-    }
-  })
-
 }
 
 // ── List panel (refreshed by polling) ──
@@ -936,31 +637,6 @@ function renderTaskLists(dashboard, tasks) {
 
 function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild)
-}
-
-// Poll listTasks until implicit dispatch creates a task for the just-confirmed
-// requirement, then return its id. Returns null if dispatch never shows up.
-async function findDispatchedTaskId() {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      const tasks = await api.listTasks()
-      const candidates = []
-        .concat(tasks.running || [])
-        .concat(tasks.waiting || [])
-        .concat(tasks.draft || [])
-        .filter((task) => task && task.updatedAt)
-      if (candidates.length > 0) {
-        const latest = candidates
-          .map((task) => ({ task, ts: new Date(task.updatedAt).getTime() }))
-          .sort((left, right) => right.ts - left.ts)[0]
-        if (latest?.task?.taskId?.value) return latest.task.taskId.value
-      }
-    } catch (_) {
-      // keep polling
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200))
-  }
-  return null
 }
 
 // ── Init ──

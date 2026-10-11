@@ -864,11 +864,14 @@ test('task dashboard status copy keeps stopped conditional on a collected checkp
   assert.equal(source.includes("['succeeded', 'failed'].includes(dashboard.state)"), true);
 });
 
-test('dashboard confirmation waits on user without continuing a provider timer', async () => {
+test('dashboard submission never waits on a second confirmation', async () => {
   const source = await readFile('docs/ui/dashboard.js', 'utf8');
-  assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), true);
-  assert.equal(source.includes('await api.confirmExplicitRequirement(interaction.id'), true);
+  // The new-task form submit is the only authorization point on this page, so
+  // the second-confirmation wait that used to gate the draft here is deleted.
+  // None of its copy and none of its direct confirmation call may come back.
+  assert.equal(source.includes("progress.waiting('等待你确认任务草案'"), false);
   assert.equal(source.includes("progress.set('等待你确认任务草案'"), false);
+  assert.equal(source.includes('await api.confirmExplicitRequirement(interaction.id'), false);
   assert.equal(source.includes("timer.hidden = true"), false);
   assert.equal(source.includes("root.dataset.tone = 'waiting'"), false);
 });
@@ -947,6 +950,27 @@ test('observation page reads only typed pipeline fields and owns no node-order t
   // Attribution comes from the typed field only, and the row comes from the projection.
   assert.equal(page.includes("const role = node.ownerAgentRole"), true);
   assert.equal(page.includes('node.row'), true);
+});
+
+test('observation page reads node state and drawer refs from the projection that carries them', async () => {
+  const page = await readFile('docs/ui/observation.js', 'utf8');
+
+  // The top-level pipeline node projection carries `stateDisplay` but no `state`, so the machine
+  // state the chip tone and edge tone read comes from the projection's scope node view. A node the
+  // projection does not classify must keep the explicit `unknown` negative.
+  assert.equal(page.includes('currentNodeStates.get(node.nodeId)'), true);
+  assert.equal(page.includes("return typeof state === 'string' && state.length > 0 ? state : 'unknown'"), true);
+  assert.equal(page.includes('node.stateDisplay || state'), true);
+  assert.equal(page.includes('Array.isArray(projection.scope?.nodes)'), true);
+
+  // The refs sheet renders the typed drawer detail (`projection.selectedNode`), never the node card.
+  // An empty projection stays the explicit empty list via `unresolvedList`.
+  assert.equal(page.includes('detail?.inputs'), true);
+  assert.equal(page.includes('detail?.outputs'), true);
+  assert.equal(page.includes('detail?.evidenceRefs'), true);
+  assert.equal(page.includes("'无输入引用'"), true);
+  assert.equal(page.includes("'无输出引用'"), true);
+  assert.equal(page.includes("'无 evidence'"), true);
 });
 
 test('observation work-card adapter pairs tool calls with results and marks unprojected turns', async () => {
@@ -1666,13 +1690,15 @@ test('runtime task dashboard is observational and has no second execution-input 
 type InteractionCardPageAdapter = {
   readonly projectInteractionCardFromEntries: (entries: readonly unknown[], state?: string) => {
     readonly surface: string;
+    readonly taskState: string;
+    readonly actions: readonly unknown[];
     readonly conversation: {
       readonly summary: { readonly missing?: true; readonly goal?: { readonly text: string } };
       readonly turns: readonly { readonly markdown?: string }[];
     };
     readonly trace: { readonly items: readonly { readonly requestId: string }[] };
     readonly history: { readonly result: string };
-    readonly cardMetadata: { readonly nextAction?: string };
+    readonly cardMetadata: { readonly nextAction?: string; readonly waitingOn?: string };
   };
   readonly projectInteractionCardFromSnapshot: (snapshot: unknown) => {
     readonly conversation: {
@@ -1745,4 +1771,261 @@ test('interaction card page adapter preserves draft facts without leaking decisi
 
 test('interaction card page adapter scoped ids are explicit and deterministic', () => {
   assert.deepEqual(interactionCardPage.scopedId('task', 'task-1'), { scope: 'task', value: 'task-1' });
+});
+
+// The confirmation flow the entry page and the dashboard share. The runtime
+// records `confirmed` when it accepts the exact revision, and `dispatched` once
+// the coordinator consumed the requirement. Both are declared
+// `ExplicitInteractionState` values, so the card must project them onto a
+// declared `LifecycleState` instead of falling through to `unknown`.
+const confirmedCardEntries = [
+  {
+    sequence: 1,
+    interactionId: 'interaction-confirmed',
+    kind: 'user',
+    sourceKind: 'user',
+    eventKey: 'explicit.raw-input',
+    text: '读取 README 并汇报',
+  },
+  {
+    sequence: 2,
+    interactionId: 'interaction-confirmed',
+    kind: 'decision',
+    sourceKind: 'decision',
+    eventKey: 'explicit.confirmation-submitted',
+    text: '任务已提交，正在等待隐式大脑派发',
+  },
+];
+
+test('interaction card projects the confirmed and dispatched lifecycle onto a declared card state', () => {
+  for (const state of ['confirmed', 'dispatched']) {
+    const projection = interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, state);
+    // A declared `LifecycleState`, never the `unknown` fallback whose label is
+    // the empty "未知".
+    assert.equal(projection.taskState, 'running');
+    // The runtime owns the next step once the human authorization is recorded,
+    // so the card must not fall back to the human-waiting projection or its
+    // second-confirmation copy.
+    assert.equal(projection.cardMetadata.waitingOn, 'runtime');
+    assert.deepEqual(projection.actions, []);
+    const serialized = JSON.stringify(projection);
+    assert.equal(serialized.includes('等待决策'), false);
+    assert.equal(serialized.includes('等待你确认任务草案'), false);
+    assert.equal(serialized.includes('确认并进入队列'), false);
+  }
+  // The fix must not move the pre-confirmation draft out of the human-waiting
+  // projection: the pre-confirmation state stays read-only draft history.
+  const waiting = interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, 'awaiting-confirmation');
+  assert.equal(waiting.taskState, 'waiting');
+  assert.equal(waiting.cardMetadata.waitingOn, 'human');
+});
+
+type InteractionWorkCardAdapter = {
+  readonly mountInteractionWorkCard: (target: unknown, options?: unknown) => {
+    readonly update: (projection: unknown) => void;
+  };
+};
+
+test('interaction card DOM shows a declared lifecycle label after the requirement is confirmed', async () => {
+  const { mountInteractionWorkCard } = await import(new URL(
+    `file://${join(process.cwd(), 'docs/ui/interaction-work-card.js')}`,
+  ).href) as InteractionWorkCardAdapter;
+
+  class FakeClassList {
+    private readonly names = new Set<string>();
+    add(...names: string[]): void { for (const name of names) this.names.add(name); }
+    remove(...names: string[]): void { for (const name of names) this.names.delete(name); }
+    contains(name: string): boolean { return this.names.has(name); }
+  }
+
+  class FakeNode {
+    readonly nodeType = 1;
+    textContent = '';
+    className = '';
+    hidden = false;
+    href = '';
+    name = '';
+    value = '';
+    disabled = false;
+    type = '';
+    readonly dataset: Record<string, string> = {};
+    readonly classList = new FakeClassList();
+    readonly children: FakeNode[] = [];
+    private readonly attributes = new Map<string, string>();
+
+    constructor(readonly tagName: string) {}
+
+    get firstChild(): FakeNode | undefined { return this.children[0]; }
+    append(...nodes: FakeNode[]): void { this.children.push(...nodes); }
+    replaceChildren(...nodes: FakeNode[]): void {
+      this.children.length = 0;
+      this.children.push(...nodes);
+    }
+    removeChild(node: FakeNode): void {
+      const index = this.children.indexOf(node);
+      if (index >= 0) this.children.splice(index, 1);
+    }
+    remove(): void {}
+    focus(): void {}
+    setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+    getAttribute(name: string): string | undefined { return this.attributes.get(name); }
+    removeAttribute(name: string): void { this.attributes.delete(name); }
+    addEventListener(): void {}
+    removeEventListener(): void {}
+    contains(node: FakeNode): boolean {
+      return this.children.some((child) => child === node || child.contains(node));
+    }
+    querySelector(selector: string): FakeNode | null {
+      for (const child of this.children) {
+        if (matchesFakeSelector(child, selector)) return child;
+        const found = child.querySelector(selector);
+        if (found) return found;
+      }
+      return null;
+    }
+  }
+
+  const matchesFakeSelector = (node: FakeNode, selector: string): boolean => {
+    const attribute = /^\[([a-zA-Z-]+)(?:="([^"]*)")?\]$/.exec(selector);
+    if (attribute) {
+      const name = attribute[1]!;
+      const expected = attribute[2];
+      const datasetKey = name.startsWith('data-')
+        ? name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())
+        : undefined;
+      const actual = node.getAttribute(name) ?? (datasetKey === undefined ? undefined : node.dataset[datasetKey]);
+      return expected === undefined ? actual !== undefined : actual === expected;
+    }
+    if (selector.startsWith('.')) return node.className.split(/\s+/).includes(selector.slice(1));
+    return node.tagName === selector;
+  };
+
+  const fakeText = (node: FakeNode): string => node.textContent + node.children.map(fakeText).join('');
+
+  const scope = globalThis as unknown as { document?: unknown };
+  const previousDocument = scope.document;
+  scope.document = {
+    activeElement: null,
+    createElement: (tag: string) => new FakeNode(tag),
+    createTextNode: (text: string) => {
+      const node = new FakeNode('#text');
+      node.textContent = text;
+      return node;
+    },
+  };
+  try {
+    const host = new FakeNode('div');
+    const card = mountInteractionWorkCard(host);
+    card.update({ ...interactionCardPage.projectInteractionCardFromEntries(confirmedCardEntries, 'confirmed'), actions: [] });
+    assert.equal(host.querySelector('.iwc-lifecycle-label')?.textContent, '运行中');
+    const text = fakeText(host);
+    assert.equal(text.includes('未知'), false);
+    assert.equal(text.includes('等待决策'), false);
+    assert.equal(text.includes('等待你确认任务草案'), false);
+    assert.equal(text.includes('确认并进入队列'), false);
+    // The card carries no second authorization control after the confirmed
+    // projection.
+    assert.equal(host.querySelector('.iwc-button--primary'), null);
+  } finally {
+    scope.document = previousDocument;
+  }
+});
+
+test('entry page projects the post-confirmation state instead of the pre-confirmation snapshot', async () => {
+  const source = await readFile('docs/ui/entry.js', 'utf8');
+  const start = source.indexOf('const POST_CONFIRMATION_STATES');
+  const end = source.indexOf('function handleSubmissionError');
+  assert.ok(start >= 0, 'entry.js must name the post-confirmation states');
+  assert.ok(end > start, 'entry.js must keep the confirmation flow before its error handler');
+  const block = source.slice(start, end);
+  const confirmIndex = block.indexOf('await api.confirmExplicitRequirement(interactionId');
+  const refreshIndex = block.indexOf('latestState = await postConfirmationState()');
+  const decisionIndex = block.indexOf("appendCardEvent('decision'");
+  assert.ok(confirmIndex >= 0 && refreshIndex >= 0 && decisionIndex >= 0);
+  // The card state is refreshed from the runtime after the confirmation request
+  // and before the decision event is projected.
+  assert.equal(confirmIndex < refreshIndex && refreshIndex < decisionIndex, true);
+
+  const harnessSource = [
+    block,
+    'let interactionId;',
+    'let latestState = "received";',
+    'let confirmation;',
+    'let api = apiRef.current;',
+    'const cardStates = [];',
+    'const draftedStates = [];',
+    'const status = { dataset: {}, textContent: "" };',
+    'const window = { location: { assign() {} } };',
+    'function appendCardEvent(kind, text, sourceKind) { cardStates.push({ kind, state: latestState, text }); }',
+    'function appendCardError() {}',
+    'function renderDraft(snapshot) { draftedStates.push(snapshot.state); }',
+    'async function waitForTask() { return "task-1"; }',
+    'function observationHref(taskId) { return "./task.html?task=" + taskId; }',
+    'async function refreshQueue() {}',
+    'return {',
+    '  async run(submission, nextApi) {',
+    '    api = nextApi;',
+    '    interactionId = "interaction-entry";',
+    '    latestState = "received";',
+    '    cardStates.length = 0;',
+    '    draftedStates.length = 0;',
+    '    return await executeSubmission(submission);',
+    '  },',
+    '  cardStates,',
+    '  draftedStates,',
+    '  state: () => latestState,',
+    '};',
+  ].join('\n');
+  type EntryHarness = {
+    readonly run: (submission: unknown, api: unknown) => Promise<unknown>;
+    readonly cardStates: readonly { readonly kind: string; readonly state: string }[];
+    readonly draftedStates: readonly string[];
+    readonly state: () => string;
+  };
+  const buildHarness = (): EntryHarness => new Function('apiRef', harnessSource)({ current: undefined }) as EntryHarness;
+
+  const preConfirmation = {
+    state: 'awaiting-confirmation',
+    rawInput: '读取 README',
+    nextAction: 'confirm-or-revise',
+    draft: {
+      draftId: 'draft-1',
+      inputRevision: 1,
+      normalizedInput: '读取 README',
+      proposal: '读取 README 并汇报',
+    },
+  };
+  const submission = { rawInput: '读取 README', executionPolicy: { executionMode: 'once' } };
+  const entryApi = (postConfirmation: unknown, failRead = false) => {
+    let reads = 0;
+    return {
+      async inspectExplicitInteraction() {
+        reads += 1;
+        if (reads === 1) return preConfirmation;
+        if (failRead) throw Object.assign(new Error('interaction read unavailable'), { code: 'read.failed' });
+        return postConfirmation;
+      },
+      async confirmExplicitRequirement() {
+        return { requirement: { requirementId: 'requirement:draft-1:1', fifoSeq: 1 } };
+      },
+    };
+  };
+
+  for (const [postConfirmation, expected] of [
+    [{ state: 'dispatched' }, 'dispatched'],
+    [{ state: 'confirmed' }, 'confirmed'],
+    // A read that still reports the pre-confirmation state must never drive the
+    // post-confirmation projection.
+    [preConfirmation, 'confirmed'],
+    [undefined, 'confirmed'],
+  ] as readonly [unknown, string][]) {
+    const harness = buildHarness();
+    await harness.run(submission, entryApi(postConfirmation, postConfirmation === undefined));
+    assert.equal(harness.state(), expected);
+    assert.deepEqual(harness.draftedStates, ['awaiting-confirmation']);
+    assert.equal(harness.cardStates.length, 1);
+    assert.equal(harness.cardStates[0]!.kind, 'decision');
+    assert.equal(harness.cardStates[0]!.state, expected);
+    assert.equal(harness.cardStates[0]!.state === 'awaiting-confirmation', false);
+  }
 });

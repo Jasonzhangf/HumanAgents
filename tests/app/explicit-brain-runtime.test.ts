@@ -10,7 +10,7 @@ import {
 } from '../../packages/app/src/explicit-brain-runtime.js';
 import { DecisionTraceJournal, DecisionTraceStore } from '../../packages/runtime/src/explicit-brain/index.js';
 import { FakeReplayExecutionRuntimePort } from '../../packages/app/src/ui-runtime/fake-port.js';
-import type { ProviderBinding } from '../../packages/contracts/src/index.js';
+import type { ProviderBinding, ProviderStartInput } from '../../packages/contracts/src/index.js';
 
 function digest(args: Readonly<Record<string, unknown>>): string {
   const stable = JSON.stringify(Object.entries(args).sort(([left], [right]) => left.localeCompare(right)));
@@ -272,58 +272,80 @@ test('provider explicit brain interpreter loads the interaction template and val
     configDigest: 'sha256:explicit-interpret-config',
     capabilityDigest: 'sha256:explicit-interpret-capability',
   };
+  const port = new class extends FakeReplayExecutionRuntimePort {
+    submittedPrompt?: string;
+
+    override async start(request: ProviderStartInput) {
+      const prompt = request.payload?.prompt;
+      if (typeof prompt !== 'string') throw new Error('provider start did not receive an intake prompt');
+      this.submittedPrompt = prompt;
+      return super.start(request);
+    }
+  }({
+    binding,
+    stepDelayMs: 0,
+    replay: [
+      {
+        kind: 'output',
+        state: 'output',
+        summary: JSON.stringify({
+          kind: 'requirement',
+          normalizedInput: '搜索工作区并报告匹配文件路径和行，同时保持只读',
+          knownFacts: ['请求需要在任务执行阶段使用文件工具'],
+          proposal: {
+            revision: 1,
+            intent: 'create',
+            title: '在工作区查找匹配内容',
+            objective: '使用 file.search 和 file.read 在工作区查找指定内容',
+            deliverable: '精确文件路径和匹配行',
+            owner: null,
+            ownerNote: '运行时在需求确认后决定执行 owner。',
+            deliveryConditions: ['提供实际命中的文件路径和行号', '不得创建、修改、移动或删除文件'],
+            evidenceRefs: ['interaction-provider-test#inputRevision=1'],
+            blockingGaps: [],
+            lifecycle: 'draft-awaiting-user-confirmation',
+            requiresUserConfirmation: true,
+            confirmationPrompt: '请确认 revision 1 的需求草案。',
+          },
+          decisionRefs: ['interaction-provider-test#sourceRef=ui:new-task'],
+        }),
+      },
+      { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
+    ],
+  });
   const interpreter = createProviderExplicitBrainInterpreter({
     binding,
     templateRoot: join(process.cwd(), 'packages', 'agent-templates', 'templates'),
-    port: new FakeReplayExecutionRuntimePort({
-      binding,
-      stepDelayMs: 0,
-      replay: [
-        {
-          kind: 'output',
-          state: 'output',
-          summary: JSON.stringify({
-            kind: 'requirement',
-            normalizedInput: '整理启动步骤',
-            knownFacts: ['README exists'],
-            proposal: {
-              revision: 1,
-              intent: 'create',
-              title: '整理启动步骤',
-              objective: '整理项目启动步骤',
-              deliverable: '可执行的启动步骤清单',
-              owner: null,
-              ownerNote: '运行时将在确认后决定执行 owner。',
-              deliveryConditions: ['启动步骤完整并有证据'],
-              evidenceRefs: ['README'],
-              blockingGaps: [],
-              lifecycle: 'draft -> awaiting-user-confirmation -> requirement.submit',
-              requiresUserConfirmation: true,
-              confirmationPrompt: '是否确认并提交该需求？',
-            },
-            decisionRefs: ['decision:provider-test'],
-          }),
-        },
-        { kind: 'terminal', state: 'succeeded', summary: 'done', terminalState: 'succeeded' },
-      ],
-    }),
+    port,
   });
 
+  const rawInput = 'Find the workspace file containing "needle" by using file.search and file.read, then report the exact file path and matching line. Do not create, modify, move, or delete any file.';
   const result = await interpreter.interpret({
     interactionId: 'interaction-provider-test',
     inputRevision: 1,
     sourceRef: 'ui:new-task',
-    rawInput: '帮我整理启动步骤',
+    rawInput,
     clarifications: [],
     taskCandidates: [],
   });
 
   assert.equal(result.kind, 'requirement');
   if (result.kind !== 'requirement') throw new Error('expected requirement interpretation');
-  assert.equal(result.normalizedInput, '整理启动步骤');
+  assert.equal(result.normalizedInput, '搜索工作区并报告匹配文件路径和行，同时保持只读');
   assert.equal(result.intent, 'create');
-  assert.match(result.proposal, /可执行的启动步骤清单/);
+  assert.match(result.proposal, /file\.search/);
+  assert.match(result.proposal, /file\.read/);
+  assert.match(result.proposal, /精确文件路径和匹配行/);
+  assert.match(result.proposal, /不得创建、修改、移动或删除文件/);
   assert.equal(result.proposal.includes('awaiting-user-confirmation'), false);
+  const submittedPrompt = port.submittedPrompt ?? '';
+  assert.ok(submittedPrompt);
+  assert.match(submittedPrompt, /A concrete request to perform work and deliver a result is a requirement/);
+  assert.match(submittedPrompt, /proposal\.intent=create even if taskCandidates is empty/);
+  assert.match(submittedPrompt, /Do not turn a request to perform read-only work into status-query/);
+  assert.match(submittedPrompt, /Use status-query only when the user asks about the current state or progress of an existing task/);
+  assert.ok(submittedPrompt.includes(JSON.stringify(rawInput)));
+  assert.match(submittedPrompt, /"taskCandidates":\[\]/);
 
   const arbitraryProposal = createProviderExplicitBrainInterpreter({
     binding,

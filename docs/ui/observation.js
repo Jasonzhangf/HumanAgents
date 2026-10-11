@@ -4,6 +4,7 @@ import {
   element,
   loadRuntimeStatus,
   makePageShell,
+  mountSemanticObservationPanel,
   renderPageError,
   renderRuntimeStatus,
   stateTone,
@@ -28,12 +29,25 @@ const EDGE_GAP = 1.5
 const EDGE_STUB = 24
 
 const taskId = taskIdFromQuery()
+// The shared semantic observation panel is mounted once and re-attached into
+// `main` after every pipeline re-render, so its live subscription survives the
+// node-flow reloads instead of being torn down and re-created each time.
+const semanticHost = element('section', undefined, 'semantic-observation-section')
+semanticHost.setAttribute('aria-label', '语义观测')
+let semanticPanel
+
 const { main, status } = makePageShell(
   'Task List',
   'Pipeline Observation',
   '任务观测',
   '从输入到任务输出的只读节点流转；节点详情只呈现工具调用、工具返回和 agent 写入的结论。',
 )
+main.append(semanticHost)
+
+function ensureSemanticPanel() {
+  if (semanticPanel) return
+  semanticPanel = mountSemanticObservationPanel(semanticHost, { taskId })
+}
 
 let drawer
 let drawerCard
@@ -49,6 +63,10 @@ let currentScopeRef
 // projection facts, not page-owned tables: the page only groups and displays them.
 let currentFrames = []
 let currentHandoffs = []
+// Raw lifecycle state per node id of the projection the page is currently rendering. The typed
+// top-level `nodes[]` carries only the human `stateDisplay`; the same projection's scope node view
+// (`scope.nodes[]`) carries the machine `state` that drives the chip tone and the edge tone.
+let currentNodeStates = new Map()
 let runtimeMode = ''
 
 // Only `ownerAgentRole` (typed contract field) attributes a node. Anything else, including an
@@ -79,8 +97,13 @@ function pipelineRow(node) {
   return typeof node.row === 'number' ? node.row : Number.MAX_SAFE_INTEGER
 }
 
+// Node state is a typed projection fact. The top-level pipeline node projection carries the
+// `stateDisplay` label the chip shows; the raw `state` comes from the projection's scope node view
+// for the same node id. A node the projection does not classify keeps the explicit `unknown`
+// negative instead of defaulting to a settled tone.
 function nodeState(node) {
-  return typeof node.state === 'string' && node.state.length > 0 ? node.state : 'unknown'
+  const state = currentNodeStates.get(node.nodeId)
+  return typeof state === 'string' && state.length > 0 ? state : 'unknown'
 }
 
 function isRunningState(state) {
@@ -552,12 +575,12 @@ function renderNodeDrawer(node, handoffs, detail) {
   close.focus()
 }
 
-function renderReferences(node) {
+function renderReferences(_node, _handoffs, detail) {
   const facts = element('dl', undefined, 'drawer-facts')
   // Refs come from the typed drawer detail (`projection.selectedNode`), never from the node card.
-  const inputs = unresolvedList((node?.inputs || []).map((entry) => entry.ref), '无输入引用')
-  const outputs = unresolvedList((node?.outputs || []).map((entry) => entry.ref), '无输出引用')
-  const evidence = unresolvedList((node?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
+  const inputs = unresolvedList((detail?.inputs || []).map((entry) => entry.ref), '无输入引用')
+  const outputs = unresolvedList((detail?.outputs || []).map((entry) => entry.ref), '无输出引用')
+  const evidence = unresolvedList((detail?.evidenceRefs || []).map((ref) => ref.locator), '无 evidence')
   for (const [label, group] of [['输入引用', inputs], ['输出引用', outputs], ['Evidence', evidence]]) {
     const cell = element('div')
     const dd = element('dd', group.items.join(', '))
@@ -573,6 +596,11 @@ function renderObservation(projection) {
 
   currentFrames = laneDefinitions(Array.isArray(projection.agentFrames) ? projection.agentFrames : [])
   currentHandoffs = Array.isArray(projection.handoffs) ? projection.handoffs : []
+  currentNodeStates = new Map(
+    (Array.isArray(projection.scope?.nodes) ? projection.scope.nodes : [])
+      .filter((node) => typeof node?.state === 'string' && node.state.length > 0)
+      .map((node) => [node.nodeId, node.state]),
+  )
 
   const heading = element('section', undefined, 'page-heading')
   const copy = element('div')
@@ -592,6 +620,8 @@ function renderObservation(projection) {
   meta.append(element('span', projection.data?.label || '未投影状态', 'state-chip'))
   heading.append(copy, meta)
   main.append(heading)
+  ensureSemanticPanel()
+  main.append(semanticHost)
 
   const breadcrumbs = element('nav', undefined, 'breadcrumbs')
   breadcrumbs.setAttribute('aria-label', '当前观测路径')
@@ -676,6 +706,7 @@ async function load(scopeRef) {
   }
 }
 
+ensureSemanticPanel()
 buildDrawer()
 void (async () => {
   const { status: runtimeStatus, error } = await loadRuntimeStatus()
