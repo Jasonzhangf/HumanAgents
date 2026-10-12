@@ -7,6 +7,7 @@ import {
   type EvidenceRef,
   type ProviderBinding,
   type ProviderEvent,
+  type ProviderRawFact,
   type ProviderSettlement,
   type ProviderStartReceipt,
   type ProviderStopReceipt,
@@ -296,4 +297,45 @@ test('recorded stop receipt stays distinct from settle result', async () => {
   assert.equal(settled.state, 'stopped');
   assert.equal(settled.resourceRelease.state, 'released');
   assert.equal(settled.persistence.state, 'committed');
+});
+
+test('recorded Responses success and error replay expose typed raw facts and request terminals', async () => {
+  const successCodec = new ResponsesProviderCodec();
+  const successContext = codecContext();
+  const successFacts: ProviderRawFact[] = [];
+  for (const raw of await readJsonl('responses-success.jsonl')) {
+    successFacts.push(...(await successCodec.decodeEvent(raw, successContext)).rawFacts);
+  }
+  const textFact = successFacts.find((fact): fact is Extract<ProviderRawFact, { kind: 'content' }> => fact.kind === 'content');
+  assert.ok(textFact, 'expected the recorded output text as a raw fact');
+  assert.equal(textFact.channel, 'assistant-text');
+  assert.equal(textFact.update, 'delta');
+  assert.equal(textFact.complete, false);
+  assert.equal(new TextDecoder().decode(await successContext.sink.read(textFact.content.ref)), 'hello');
+  const successTerminal = successFacts.find((fact): fact is Extract<ProviderRawFact, { kind: 'request-complete' }> => fact.kind === 'request-complete');
+  assert.equal(successTerminal?.terminal, 'completed');
+
+  const errorCodec = new ResponsesProviderCodec();
+  const errorContext = codecContext();
+  const errorFacts: ProviderRawFact[] = [];
+  for (const raw of await readJsonl('responses-error.jsonl')) {
+    errorFacts.push(...(await errorCodec.decodeEvent(raw, errorContext)).rawFacts);
+  }
+  const partial = errorFacts.find((fact): fact is Extract<ProviderRawFact, { kind: 'content' }> => fact.kind === 'content');
+  assert.equal(partial?.complete, false);
+  const errorTerminal = errorFacts.find((fact): fact is Extract<ProviderRawFact, { kind: 'request-complete' }> => fact.kind === 'request-complete');
+  assert.equal(errorTerminal?.terminal, 'failed');
+  assert.equal(errorTerminal?.error?.code, 'server_error');
+});
+
+test('recorded Anthropic error replay exposes a failed request terminal with the provider error', async () => {
+  const codec = new AnthropicProviderCodec(4096);
+  const context = codecContext();
+  const facts: ProviderRawFact[] = [];
+  for (const raw of await readJsonl('anthropic-error.jsonl')) {
+    facts.push(...(await codec.decodeEvent(raw, context)).rawFacts);
+  }
+  const terminal = facts.find((fact): fact is Extract<ProviderRawFact, { kind: 'request-complete' }> => fact.kind === 'request-complete');
+  assert.equal(terminal?.terminal, 'failed');
+  assert.equal(terminal?.error?.code, 'overloaded_error');
 });

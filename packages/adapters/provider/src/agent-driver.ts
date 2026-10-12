@@ -71,6 +71,7 @@ export interface ProviderToolExecutionPort {
   execute(input: {
     readonly execution: ProviderExecutionIdentityRef;
     readonly scope: ScopeRef;
+    readonly requestId?: string;
     readonly call: ProviderToolCall;
     readonly signal: AbortSignal;
   }): Promise<ProviderToolExecutionResult>;
@@ -278,6 +279,7 @@ export class ProviderAgentDriver implements AgentDriver {
           result = await this.options.executeTool.execute({
             execution: identity(this.options),
             scope: this.options.scope,
+            ...(this.activeRequest === undefined ? {} : { requestId: this.activeRequest.requestId }),
             call,
             signal: toolController.signal,
           });

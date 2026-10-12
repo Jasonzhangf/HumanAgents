@@ -19,6 +19,7 @@ import { HarnessNodeRuntime } from '../../runtime/src/nodes/node-runtime.js';
 import { createDefaultNodeStrategyRegistry } from '../../runtime/src/nodes/node-strategies.js';
 import {
   AgentRuntimePoolManager,
+  type ChildCallPort,
   type ExecutionAgentPort,
   type MergeCoordinatorPort,
   type OrchestrationRuntimeFactoryPort,
@@ -74,6 +75,7 @@ export interface ServeRuntimeComposition {
     readonly checkpointJournal: CheckpointJournalPort;
     readonly executionAgent?: ExecutionAgentPort;
     readonly maxAttempts?: number;
+    readonly childCallPort?: ChildCallPort;
   }): M3Assembly;
   dispose(): Promise<void>;
 }
@@ -179,7 +181,7 @@ export function createServeRuntimeComposition(
     agentIo,
     eventBus,
     runtimePool,
-    createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts }) {
+    createTaskAssembly({ task, scope, checkpointJournal, executionAgent, maxAttempts, childCallPort }) {
       if (!input.reviewAgent || !input.mergeCoordinator) {
         throw new AppLifecycleError(
           'serve.m3.ports-missing',
@@ -202,6 +204,7 @@ export function createServeRuntimeComposition(
         },
         feedbackPublisherId: input.feedbackPublisherId,
         checkpointJournal,
+        ...(childCallPort === undefined ? {} : { childCallPort }),
         ...(maxAttempts === undefined ? {} : { maxAttempts }),
         ...(input.now === undefined ? {} : { now: input.now }),
       });

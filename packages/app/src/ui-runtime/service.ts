@@ -339,8 +339,26 @@ export interface UiRuntimeServiceOptions {
       readonly checkpointJournal: TaskCheckpointStore;
       readonly executionAgent?: ExecutionAgentPort;
       readonly maxAttempts?: number;
+      readonly childCallPort?: import('../../../runtime/src/orchestration/types.js').ChildCallPort;
     }) => RuntimeTaskAssembly;
   };
+  /**
+   * Narrow durable boundary for the Runtime-owned active turn. The App
+   * assembles the port; the Runtime owns the facts. When absent the prior
+   * behaviour is unchanged.
+   */
+  readonly activeTurnJournal?: import('../../../runtime/src/context/active-turn-journal.js').ActiveTurnJournalPort;
+  /**
+   * Real Runtime permission/binding snapshot used to open the active turn.
+   * Required whenever `activeTurnJournal` is bound; a missing snapshot stops
+   * the active turn open instead of fabricating a permission revision.
+   */
+  readonly permissionSnapshot?: import('../../../runtime/src/admission/admitted-turn.js').RuntimeBindingSnapshot;
+  /**
+   * Durable store for refined child delivery assets. Required when the active
+   * turn journal is bound so a cold read can resolve a child delivery.
+   */
+  readonly refinedDeliveryStore?: import('../../../runtime/src/ui-runtime/coordinator.js').RefinedDeliveryStore;
 }
 
 export interface ExplicitBrainReceipt {
@@ -1174,7 +1192,14 @@ export class UiRuntimeService {
           }),
       ...(options.runtimeComposition === undefined ? {} : {
         ...(options.runtimeComposition.createTaskAssembly === undefined ? {} : {
-          createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!(input),
+          createTaskAssembly: (input) => options.runtimeComposition!.createTaskAssembly!({
+            task: input.task,
+            scope: input.scope,
+            checkpointJournal: input.checkpointJournal,
+            ...(input.executionAgent === undefined ? {} : { executionAgent: input.executionAgent }),
+            ...(input.maxAttempts === undefined ? {} : { maxAttempts: input.maxAttempts }),
+            ...(input.childCallPort === undefined ? {} : { childCallPort: input.childCallPort }),
+          }),
         }),
       }),
       ...(options.workspaceRoot === undefined ? {} : {
@@ -1183,6 +1208,9 @@ export class UiRuntimeService {
         },
       }),
       ...(this.memory.checkpointBoundary === undefined ? {} : { checkpointBoundary: this.memory.checkpointBoundary }),
+      ...(options.activeTurnJournal === undefined ? {} : { activeTurnJournal: options.activeTurnJournal }),
+      ...(options.permissionSnapshot === undefined ? {} : { permissionSnapshot: options.permissionSnapshot }),
+      ...(options.refinedDeliveryStore === undefined ? {} : { refinedDeliveryStore: options.refinedDeliveryStore }),
     });
     this.implicitBrain = new ImplicitBrainFifo({
       inbox: this.requirementInbox,
@@ -1878,6 +1906,22 @@ export class UiRuntimeService {
 
   taskAssembly(taskId: TaskId): RuntimeTaskAssembly {
     return this.coordinator.taskAssembly(taskId);
+  }
+
+  /** The Runtime-owned active-turn id for a task, once the turn is opened. */
+  activeTurnId(taskId: TaskId): string | undefined {
+    return this.coordinator.activeTurnId(taskId);
+  }
+
+  /**
+   * Read-only capture of the Runtime-owned active turn from durable facts. It
+   * never dispatches a child or replays a side effect.
+   */
+  activeTurnCapture(
+    taskId: TaskId,
+    pauseId: string,
+  ): import('../../../contracts/src/index.js').ActiveTurnCaptureBody | undefined {
+    return this.coordinator.activeTurnCapture(taskId, pauseId);
   }
 
   private withRequirementAdmission(task: RuntimeTaskSnapshot): RuntimeTaskSnapshotInput {

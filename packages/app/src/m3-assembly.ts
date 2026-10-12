@@ -18,6 +18,7 @@ import {
   type OrchestrationFeedbackEvent,
   type OrchestrationFeedbackPort,
   type ReviewAgentPort,
+  type ChildCallPort,
 } from '../../runtime/src/index.js';
 
 export interface M3AssemblyOptions {
@@ -31,6 +32,12 @@ export interface M3AssemblyOptions {
   readonly feedbackPorts: FeedbackHubPorts;
   readonly feedbackPublisherId: string;
   readonly checkpointJournal: CheckpointJournalPort;
+  /**
+   * Narrow Runtime child-call port. When bound, the manager persists the call
+   * checkpoint and invocation/checkpoint association before each real child
+   * execution/review call.
+   */
+  readonly childCallPort?: ChildCallPort;
   readonly maxAttempts?: number;
   readonly now?: () => Date;
 }
@@ -145,6 +152,7 @@ export function createM3Assembly(options: M3AssemblyOptions): M3Assembly {
     reviewAgent: options.reviewAgent,
     mergeCoordinator: options.mergeCoordinator,
     feedback: feedbackPort,
+    ...(options.childCallPort === undefined ? {} : { childCallPort: options.childCallPort }),
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
   });
   return {

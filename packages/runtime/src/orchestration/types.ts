@@ -110,6 +110,106 @@ export interface ExecutionAgentPort {
   }): Promise<void>;
 }
 
+/**
+ * One prepared child call. The Runtime persists the call checkpoint and the
+ * invocation/checkpoint association before the external port is invoked.
+ */
+export interface PreparedChildCall {
+  readonly invocationId: string;
+  readonly checkpointReceiptRef: string;
+}
+
+export interface ChildCallPrepareExecutionInput {
+  readonly kind: 'execution';
+  readonly invocationId: string;
+  readonly assignment: WorkAssignment;
+  readonly agentId: string;
+  readonly attempt: number;
+  readonly executionEpoch: number;
+  readonly scope: ScopeRef;
+  /** Present for execution calls; absent for review calls, which hold no pool lease. */
+  readonly lease?: RuntimePoolLease;
+}
+
+export interface ChildCallPrepareReviewInput {
+  readonly kind: 'review';
+  readonly invocationId: string;
+  readonly assignment: ReviewAssignment;
+  readonly agentId: string;
+  readonly attempt: number;
+  readonly executionEpoch: number;
+  readonly scope: ScopeRef;
+}
+
+export type ChildCallPrepareInput = ChildCallPrepareExecutionInput | ChildCallPrepareReviewInput;
+
+export interface ChildCallReturnExecutionInput {
+  readonly kind: 'execution';
+  readonly invocationId: string;
+  readonly assignment: WorkAssignment;
+  readonly agentId: string;
+  readonly attempt: number;
+  readonly executionEpoch: number;
+  readonly scope: ScopeRef;
+  readonly result: WorkResult;
+}
+
+export interface ChildCallReturnReviewInput {
+  readonly kind: 'review';
+  readonly invocationId: string;
+  readonly assignment: ReviewAssignment;
+  readonly agentId: string;
+  readonly attempt: number;
+  readonly executionEpoch: number;
+  readonly scope: ScopeRef;
+  readonly result: ReviewResult;
+}
+
+export type ChildCallReturnInput = ChildCallReturnExecutionInput | ChildCallReturnReviewInput;
+
+export interface ChildCallAdoptionExecutionInput {
+  readonly kind: 'execution';
+  readonly invocationId: string;
+  readonly assignment: WorkAssignment;
+  readonly result: WorkResult;
+  readonly scope: ScopeRef;
+}
+
+export interface ChildCallAdoptionReviewInput {
+  readonly kind: 'review';
+  readonly invocationId: string;
+  readonly assignment: ReviewAssignment;
+  readonly result: ReviewResult;
+  readonly scope: ScopeRef;
+}
+
+export type ChildCallAdoptionInput = ChildCallAdoptionExecutionInput | ChildCallAdoptionReviewInput;
+
+export interface ChildCallReviewCheckpointInput {
+  readonly kind: 'review';
+  readonly invocationId: string;
+  readonly assignment: ReviewAssignment;
+  readonly result: ReviewResult;
+  readonly scope: ScopeRef;
+}
+
+export interface ChildCallReviewCheckpointReceipt {
+  readonly checkpointReceiptRef: string;
+}
+
+/**
+ * Narrow Runtime child-call port. The orchestration manager only asks the
+ * Runtime to establish the recovery anchor before a real child call, record the
+ * returned refined delivery, and record owner adoption. It never writes the
+ * Journal, assembles raw context, or mints a Provider identity itself.
+ */
+export interface ChildCallPort {
+  prepare(input: ChildCallPrepareInput): Promise<PreparedChildCall>;
+  recordReturn(input: ChildCallReturnInput): Promise<void>;
+  recordAdoption(input: ChildCallAdoptionInput): Promise<void>;
+  recordReviewCheckpoint(input: ChildCallReviewCheckpointInput): Promise<ChildCallReviewCheckpointReceipt>;
+}
+
 export interface ReviewAgentInput {
   readonly reviewAssignment: ReviewAssignment;
   readonly workerAssignment: WorkAssignment;

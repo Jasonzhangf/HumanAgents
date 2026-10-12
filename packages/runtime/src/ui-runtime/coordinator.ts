@@ -6,6 +6,7 @@ import {
   type AgentHandle,
   type Attention,
   type AgentOutput,
+  type AdmittedTurn,
   type Checkpoint,
   type CycleId,
   type DecisionTraceRecord,
@@ -14,6 +15,8 @@ import {
   type NextAction,
   type OperationId,
   type OrganId,
+  type RawAsset,
+  type RawFactEnvelope,
   type ProviderCloseResult,
   type ProviderError,
   type ProviderEvent,
@@ -32,6 +35,18 @@ import { completeCheckpoint, recallCheckpoint } from '../checkpoints/coordinator
 import { computeReentryDecision, type CheckpointReentryDecision } from '../checkpoints/closure.js';
 import type { CheckpointJournalPort } from '../checkpoints/ports.js';
 import type { InteractionClosureRecord } from '../checkpoints/closure.js';
+import { produceAdmittedTurn, newActiveTurnId, type RuntimeBindingSnapshot } from '../admission/admitted-turn.js';
+import { ActiveTurnContext, RuntimeActiveTurnError } from '../context/active-turn-context.js';
+import type { ActiveTurnJournalPort } from '../context/active-turn-journal.js';
+import type {
+  ChildCallAdoptionInput,
+  ChildCallPort,
+  ChildCallPrepareInput,
+  ChildCallReturnInput,
+  ChildCallReviewCheckpointInput,
+  ChildCallReviewCheckpointReceipt,
+  PreparedChildCall,
+} from '../orchestration/types.js';
 import { publishRequiredAttention, type AttentionPort } from '../control/attention.js';
 import type { RequestStopCommand } from '../control/control-command.js';
 import { executeStopControl } from '../control/runtime-stop.js';
@@ -380,13 +395,46 @@ export interface RuntimeTaskCoordinatorOptions {
   readonly taskIdPrefix?: string;
   readonly now?: () => Date;
   readonly checkpointBoundary?: RuntimeCheckpointBoundaryPort;
+  /**
+   * Narrow durable boundary for the Runtime-owned active turn. When bound, the
+   * coordinator opens a durable admitted turn at admission, registers the real
+   * Provider request chain, and records child invocation/delivery facts. When
+   * absent the prior behaviour is unchanged.
+   */
+  readonly activeTurnJournal?: ActiveTurnJournalPort;
+  /**
+   * Runtime permission/binding snapshot used to open the active turn. It must
+   * come from real assembled Runtime inputs. It is required whenever an
+   * orchestrated execution is admitted; a missing snapshot stops the active
+   * turn open instead of fabricating a permission revision.
+   */
+  readonly permissionSnapshot?: RuntimeBindingSnapshot;
+  /**
+   * Stores the refined child delivery asset so a cold read can resolve it. The
+   * App assembles the durable store; the Runtime only references it.
+   */
+  readonly refinedDeliveryStore?: RefinedDeliveryStore;
   readonly createTaskAssembly?: (input: {
     readonly task: Task;
     readonly scope: ScopeRef;
     readonly checkpointJournal: TaskCheckpointStore;
     readonly executionAgent?: ExecutionAgentPort;
     readonly maxAttempts?: number;
+    readonly childCallPort?: ChildCallPort;
   }) => RuntimeTaskAssembly;
+}
+
+/**
+ * Durable store for refined child delivery assets. `store` returns a read
+ * descriptor; `read` resolves the stored bytes by that descriptor.
+ */
+export interface RefinedDeliveryStore {
+  store(input: {
+    readonly scope: ScopeRef;
+    readonly invocationId: string;
+    readonly bytes: Uint8Array;
+  }): Promise<RawAsset>;
+  read(asset: RawAsset): Promise<Uint8Array>;
 }
 
 /** One file an execution wrote, as the reviewer must see it. */
@@ -453,6 +501,10 @@ interface TaskRecord {
   composition?: RuntimeExecutionComposition;
   checkpointBoundary?: ContextCheckpointBoundary;
   taskAssembly?: RuntimeTaskAssembly;
+  /** Live Runtime-owned active turn for the current orchestrated execution. */
+  activeTurn?: ActiveTurnContext;
+  /** The single Runtime-built assignment for the current orchestrated execution. */
+  assignment?: WorkAssignment;
   implicitRequirement?: {
     readonly envelope: RequirementEnvelope;
     readonly admission: RequirementAdmissionReceipt;
@@ -489,6 +541,15 @@ function sameScope(left: ScopeRef, right: ScopeRef): boolean {
     && sameId(left.taskId, right.taskId)
     && sameId(left.cycleId, right.cycleId)
     && sameId(left.operationId, right.operationId);
+}
+
+/**
+ * Sanitizes a locator or invocation identity into the id charset, so a validated
+ * Runtime id can be minted from a human-readable reference that carries slashes
+ * or colons. The locator itself is preserved verbatim on the evidence ref.
+ */
+function activeTurnSlug(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
 function sameCheckpointBusinessScope(requested: ScopeRef, checkpoint: ScopeRef): boolean {
@@ -994,7 +1055,7 @@ export class RuntimeTaskCoordinator {
    * a task this coordinator does not track is out of scope and is ignored; no
    * identity is ever minted here.
    */
-  recordProviderRequestIdentity(event: ProviderRequestLifecycleEvent): void {
+  async recordProviderRequestIdentity(event: ProviderRequestLifecycleEvent): Promise<void> {
     const record = this.tasks.get(event.taskId.value);
     if (!record) return;
     record.requestIdentity = {
@@ -1004,6 +1065,24 @@ export class RuntimeTaskCoordinator {
       phase: event.phase,
       occurredAt: event.occurredAt,
     };
+    const context = record.activeTurn;
+    if (!context) return;
+    const scope = context.scope();
+    if (event.taskId.value !== record.taskId.value
+      || event.executionEpoch !== context.executionIdentity().executionEpoch
+      || event.runtimeId !== context.executionIdentity().runtimeId) {
+      return;
+    }
+    await context.registerRequest({
+      request: {
+        turnId: event.turnId,
+        requestId: event.requestId,
+        ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+      },
+      ...(event.parentRequestId === undefined ? {} : { parentRequestId: event.parentRequestId }),
+      scope,
+      phase: event.phase,
+    });
   }
 
   startExecution(taskId: TaskId, input: {
@@ -1461,6 +1540,32 @@ export class RuntimeTaskCoordinator {
     return assembly;
   }
 
+  /** The durable active-turn id for a task, once the turn has been opened. */
+  activeTurnId(taskId: TaskId): string | undefined {
+    return this.tasks.get(taskId.value)?.activeTurn?.admittedTurn.turnId;
+  }
+
+  /**
+   * Reads the Runtime-owned capture body for a task from durable facts only.
+   * This never dispatches a child or replays a side effect.
+   */
+  activeTurnCapture(taskId: TaskId, pauseId: string): import('../../../contracts/src/index.js').ActiveTurnCaptureBody | undefined {
+    const context = this.tasks.get(taskId.value)?.activeTurn;
+    if (!context) return undefined;
+    const scope = context.scope();
+    const initialInput: RawAsset = {
+      ref: this.operationScopeEvidence(scope, `operation/${context.admittedTurn.turnId}/input`),
+      view: { kind: 'utf8-text' },
+    };
+    return context.capture({
+      pauseId,
+      frozenAt: this.now().toISOString(),
+      initialInput,
+      checkpointPath: [],
+      completionRefs: [],
+    });
+  }
+
   attentionAudit(): { readonly published: readonly Attention[]; readonly resolved: readonly Attention[] } {
     return { published: this.publishedAttentions, resolved: this.resolvedAttentions };
   }
@@ -1710,6 +1815,289 @@ export class RuntimeTaskCoordinator {
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly listeners = new OperationListeners();
 
+  private operationScopeEvidence(scope: ScopeRef, locator: string): EvidenceRef {
+    return {
+      evidenceId: id('evidence', `active-turn-${activeTurnSlug(locator)}`),
+      kind: 'operation',
+      source: RUNTIME_OWNER,
+      locator,
+      scope,
+    };
+  }
+
+  /**
+   * Opens the Runtime-owned durable active turn at admission. The Runtime
+   * producer derives every identity from the real assignment, scope and binding
+   * snapshot. A missing permission snapshot stops the open; it is never
+   * defaulted to a placeholder string.
+   */
+  private async openActiveTurn(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+  ): Promise<ActiveTurnContext | undefined> {
+    if (!this.options.activeTurnJournal) return undefined;
+    const snapshot = this.options.permissionSnapshot;
+    if (!snapshot) {
+      throw new RuntimeTaskControlError(
+        'active-turn.permission-snapshot.missing',
+        'humanagent.runtime.binding',
+        'no real Runtime permission/binding snapshot was assembled for this execution',
+        'assemble the Runtime binding snapshot before admitting an orchestrated execution',
+      );
+    }
+    if (!scope.cycleId) {
+      throw new RuntimeTaskControlError(
+        'active-turn.scope.incomplete',
+        RUNTIME_OWNER,
+        'active turn scope has no cycle identity',
+        'start the execution through the standard operation/cycle owner',
+      );
+    }
+    const assignment = this.buildWorkAssignment(record, operation, scope);
+    const currentTurnRef = `active-turn://${operation.operationId.value}/binding`;
+    const admittedTurn = produceAdmittedTurn({
+      runtime: { ...snapshot, executionEpoch: operation.executionEpoch },
+      taskId: record.taskId,
+      scope,
+      assignment,
+      directiveRevision: record.directiveRevision,
+      turnId: newActiveTurnId(operation.operationId.value),
+      currentTurnRef,
+      admissionEvidence: [this.operationScopeEvidence(scope, `operation/${operation.operationId.value}/scope`)],
+      recoveryStateRef: this.operationScopeEvidence(scope, `recovery/${operation.operationId.value}`),
+    });
+    const binding: import('../../../contracts/src/index.js').ActiveTurnBinding = {
+      admittedTurn,
+      assignment,
+      execution: { runtimeId: snapshot.runtimeId, executionEpoch: operation.executionEpoch },
+      scope,
+    };
+    const context = await ActiveTurnContext.open({
+      journal: this.options.activeTurnJournal,
+      binding,
+      currentTurnRef,
+    });
+    record.activeTurn = context;
+    record.assignment = assignment;
+    return context;
+  }
+
+  private buildWorkAssignment(
+    record: TaskRecord,
+    operation: OperationRecord,
+    scope: ScopeRef,
+  ): WorkAssignment {
+    if (record.assignment) return record.assignment;
+    const outputRef = `operation://${operation.operationId.value}/output`;
+    const acceptanceCriteria = acceptanceCriteriaContent({
+      objective: operation.input,
+      successCriteria: ['provider execution settles successfully'],
+      failureCriteria: ['provider execution fails'],
+      incompleteCriteria: ['provider execution requires waiting or recovery'],
+    });
+    return {
+      assignmentId: `assignment-${operation.operationId.value}`,
+      taskId: record.taskId,
+      pipelineNodeId: `stage-${operation.operationId.value}`,
+      attempt: 1,
+      executionEpoch: operation.executionEpoch,
+      inputRevision: record.directiveRevision,
+      objective: operation.input,
+      targetRefs: [outputRef],
+      expectedOutputRefs: [outputRef],
+      acceptanceCriteriaDigest: digestOf(acceptanceCriteria),
+      successCriteria: ['provider execution settles successfully'],
+      failureCriteria: ['provider execution fails'],
+      incompleteCriteria: ['provider execution requires waiting or recovery'],
+      requiredCapabilities: ['provider.execution'],
+      mergeGate: 'required',
+    };
+  }
+
+  private createChildCallPort(
+    record: TaskRecord,
+    context: ActiveTurnContext,
+    scope: ScopeRef,
+  ): ChildCallPort {
+    const coordinator = this;
+    const store = this.options.checkpointStoreFor(record.taskId, scope.cycleId!);
+    return {
+      async prepare(input: ChildCallPrepareInput): Promise<PreparedChildCall> {
+        const committed = await coordinator.commitChildCallCheckpoint(context, store, input);
+        await context.openChildInvocation({
+          invocationId: input.invocationId,
+          childTurnId: input.invocationId,
+          checkpointReceiptRef: committed.receipt.checkpointId.value,
+          binding: input.kind === 'execution'
+            ? { kind: 'execution', assignment: input.assignment }
+            : { kind: 'review', assignment: input.assignment },
+        });
+        return { invocationId: input.invocationId, checkpointReceiptRef: committed.receipt.checkpointId.value };
+      },
+      async recordReturn(input: ChildCallReturnInput): Promise<void> {
+        const refinedDelivery = await coordinator.storeRefinedDelivery(context, input);
+        if (input.kind === 'execution') {
+          await context.recordChildReturn({
+            kind: 'execution',
+            invocationId: input.invocationId,
+            refinedDelivery,
+            assignment: input.assignment,
+            result: input.result,
+          });
+        } else {
+          await context.recordChildReturn({
+            kind: 'review',
+            invocationId: input.invocationId,
+            refinedDelivery,
+            assignment: input.assignment,
+            result: input.result,
+          });
+        }
+      },
+      async recordAdoption(input: ChildCallAdoptionInput): Promise<void> {
+        const delivery = context.entries().find((entry) => (
+          !('envelope' in entry) && entry.invocationId === input.invocationId && entry.kind === input.kind
+        ));
+        if (!delivery || 'envelope' in delivery) {
+          throw new RuntimeActiveTurnError(
+            'active-turn.adoption.unreturned',
+            `child invocation ${input.invocationId} has no durable refined delivery to adopt`,
+          );
+        }
+        await context.recordChildAdoption(input.invocationId, delivery);
+      },
+      async recordReviewCheckpoint(input: ChildCallReviewCheckpointInput): Promise<ChildCallReviewCheckpointReceipt> {
+        const committed = await coordinator.commitReviewResultCheckpoint(context, store, input);
+        await context.recordReviewCheckpoint(input.invocationId, committed.receipt.checkpointId.value);
+        return { checkpointReceiptRef: committed.receipt.checkpointId.value };
+      },
+    };
+  }
+
+  private async commitChildCallCheckpoint(
+    context: ActiveTurnContext,
+    store: TaskCheckpointStore,
+    input: ChildCallPrepareInput,
+  ) {
+    const latest = await recallCheckpoint(store, { ownerId: RUNTIME_OWNER, scope: context.scope() });
+    const previous = latest?.checkpoint ?? null;
+    const recoveryStateRef = this.operationScopeEvidence(context.scope(), `recovery/${input.invocationId}`);
+    const checkpoint: Checkpoint = {
+      id: id('checkpoint', `child-call-${activeTurnSlug(input.invocationId)}`),
+      scope: context.scope(),
+      cycleId: context.admittedTurn.cycleRef,
+      seq: (previous?.seq ?? 0) + 1,
+      previousCheckpointId: previous?.id ?? null,
+      directiveRevision: context.admittedTurn.directiveRevision,
+      executionEpoch: context.admittedTurn.executionEpoch,
+      outcome: 'waiting',
+      summary: `${input.kind} child call ${input.invocationId} dispatched after a durable recovery anchor`,
+      recoveryStateRef,
+      evidenceRefs: [
+        this.operationScopeEvidence(context.scope(), `child-call/${input.invocationId}/intent`),
+        this.operationScopeEvidence(context.scope(), `assignment/${input.assignment.assignmentId}`),
+      ],
+      next: { kind: 'wait', ref: `child-invocation:${input.invocationId}` },
+    };
+    return completeCheckpoint(store, {
+      ownerId: RUNTIME_OWNER,
+      context: {
+        scope: context.scope(),
+        cycleId: context.admittedTurn.cycleRef,
+        executionEpoch: context.admittedTurn.executionEpoch,
+        directiveRevision: context.admittedTurn.directiveRevision,
+      },
+      previous,
+      checkpoint,
+    });
+  }
+
+  private async commitReviewResultCheckpoint(
+    context: ActiveTurnContext,
+    store: TaskCheckpointStore,
+    input: ChildCallReviewCheckpointInput,
+  ) {
+    const latest = await recallCheckpoint(store, { ownerId: RUNTIME_OWNER, scope: context.scope() });
+    const previous = latest?.checkpoint ?? null;
+    const recoveryStateRef = this.operationScopeEvidence(
+      context.scope(),
+      `recovery/${input.invocationId}/review-result`,
+    );
+    const checkpoint: Checkpoint = {
+      id: id('checkpoint', `review-result-${activeTurnSlug(input.invocationId)}`),
+      scope: context.scope(),
+      cycleId: context.admittedTurn.cycleRef,
+      seq: (previous?.seq ?? 0) + 1,
+      previousCheckpointId: previous?.id ?? null,
+      directiveRevision: context.admittedTurn.directiveRevision,
+      executionEpoch: context.admittedTurn.executionEpoch,
+      outcome: 'waiting',
+      summary: `review result ${input.result.resultId} adopted for invocation ${input.invocationId}`,
+      recoveryStateRef,
+      evidenceRefs: [
+        this.operationScopeEvidence(context.scope(), `review-result/${input.invocationId}/result`),
+        this.operationScopeEvidence(context.scope(), `assignment/${input.assignment.assignmentId}`),
+      ],
+      next: { kind: 'wait', ref: `review-result:${input.result.resultId}` },
+    };
+    return completeCheckpoint(store, {
+      ownerId: RUNTIME_OWNER,
+      context: {
+        scope: context.scope(),
+        cycleId: context.admittedTurn.cycleRef,
+        executionEpoch: context.admittedTurn.executionEpoch,
+        directiveRevision: context.admittedTurn.directiveRevision,
+      },
+      previous,
+      checkpoint,
+    });
+  }
+
+  private async storeRefinedDelivery(
+    context: ActiveTurnContext,
+    input: ChildCallReturnInput,
+  ): Promise<RawAsset> {
+    const store = this.options.refinedDeliveryStore;
+    if (!store) {
+      throw new RuntimeActiveTurnError(
+        'active-turn.delivery-store.missing',
+        'no durable refined delivery store is assembled for child returns',
+      );
+    }
+    const payload = input.kind === 'execution'
+      ? {
+          assignmentId: input.result.assignmentId,
+          attempt: input.result.attempt,
+          executionEpoch: input.result.executionEpoch,
+          status: input.result.status,
+          summary: input.result.summary,
+          producedArtifactBodies: input.result.producedArtifactBodies ?? [],
+        }
+      : {
+          resultId: input.result.resultId,
+          assignmentId: input.result.assignmentId,
+          taskId: input.result.taskId,
+          workerAgentId: input.result.workerAgentId,
+          reviewKind: input.result.reviewKind,
+          attempt: input.result.attempt,
+          executionEpoch: input.result.executionEpoch,
+          inputRevision: input.result.inputRevision,
+          acceptanceCriteriaDigest: input.result.acceptanceCriteriaDigest,
+          subjectRefs: input.result.subjectRefs,
+          subjectDigests: input.result.subjectDigests,
+          status: input.result.status,
+          findings: input.result.findings,
+          evidenceRefs: input.result.evidenceRefs,
+        };
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    return store.store({
+      scope: context.scope(),
+      invocationId: input.invocationId,
+      bytes,
+    });
+  }
+
   private async runExecution(record: TaskRecord, operation: OperationRecord, scope: ScopeRef, prompt: string): Promise<void> {
     this.scopes.set(operation.operationId.value, scope);
     const runtimeId = this.runtimeId(operation.operationId);
@@ -1786,6 +2174,10 @@ export class RuntimeTaskCoordinator {
       if (record.orchestrated && this.options.createTaskAssembly) {
         const outputRef = `operation://${operation.operationId.value}/output`;
         const coordinator = this;
+        const activeTurn = await this.openActiveTurn(record, operation, scope);
+        const childCallPort = activeTurn === undefined
+          ? undefined
+          : this.createChildCallPort(record, activeTurn, scope);
         const providerExecutionAgent: ExecutionAgentPort = {
           async execute(input): Promise<WorkResult> {
             const assignmentId = `assignment-${operation.operationId.value}`;
@@ -1974,34 +2366,15 @@ export class RuntimeTaskCoordinator {
           checkpointJournal: this.options.checkpointStoreFor(record.taskId, scope.cycleId!),
           executionAgent: providerExecutionAgent,
           maxAttempts: 1,
+          ...(childCallPort === undefined ? {} : { childCallPort }),
         });
         const stageNodeId = `stage-${operation.operationId.value}`;
         // The acceptance criteria digest is derived from the criteria content
         // itself, so the review gate can re-verify the content it receives
         // instead of trusting a label.
-        const acceptanceCriteria = acceptanceCriteriaContent({
-          objective: prompt,
-          successCriteria: ['provider execution settles successfully'],
-          failureCriteria: ['provider execution fails'],
-          incompleteCriteria: ['provider execution requires waiting or recovery'],
-        });
-        const assignment: WorkAssignment = {
-          assignmentId: `assignment-${operation.operationId.value}`,
-          taskId: record.taskId,
-          pipelineNodeId: stageNodeId,
-          attempt: 1,
-          executionEpoch: operation.executionEpoch,
-          inputRevision: record.directiveRevision,
-          objective: prompt,
-          targetRefs: [outputRef],
-          expectedOutputRefs: [outputRef],
-          acceptanceCriteriaDigest: digestOf(acceptanceCriteria),
-          successCriteria: ['provider execution settles successfully'],
-          failureCriteria: ['provider execution fails'],
-          incompleteCriteria: ['provider execution requires waiting or recovery'],
-          requiredCapabilities: ['provider.execution'],
-          mergeGate: 'required',
-        };
+        // Single Runtime assignment construction (shared with the admitted-turn
+        // producer); never rebuilt per admission/composition/dispatch.
+        const assignment: WorkAssignment = record.assignment ?? this.buildWorkAssignment(record, operation, scope);
         record.currentNode = RUNTIME_NODE_MARKERS.orchestrationPlan;
         record.nextStep = '编排执行、审查并合并';
         record.taskAssembly.orchestration.planStage({ nodeId: stageNodeId, taskId: record.taskId });

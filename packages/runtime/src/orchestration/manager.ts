@@ -22,6 +22,8 @@ import { AgentRuntimePoolManager } from './runtime-pool.js';
 import { scopeContains } from '../events/acl.js';
 import type {
   AssignmentRecord,
+  ChildCallPort,
+  PreparedChildCall,
   DispatchInput,
   ExecutionAgentPort,
   ExecutionDelivery,
@@ -43,6 +45,13 @@ export interface OrchestrationManagerOptions {
   readonly feedback?: OrchestrationFeedbackPort;
   readonly graph?: AssignmentGraph;
   readonly maxAttempts?: number;
+  /**
+   * Runtime child-call port. When bound, the manager persists the call
+   * checkpoint and invocation/checkpoint association before every real
+   * execution/review port call, and records return/adoption separately. When
+   * absent the manager keeps the prior behaviour unchanged.
+   */
+  readonly childCallPort?: ChildCallPort;
 }
 
 function safeId(value: string): string {
@@ -188,6 +197,7 @@ export class OrchestrationManager {
   private readonly reviewAgent?: ReviewAgentPort;
   private readonly mergeCoordinator?: MergeCoordinatorPort;
   private readonly feedback?: OrchestrationFeedbackPort;
+  private readonly childCallPort?: ChildCallPort;
   private readonly maxAttempts: number;
   private readonly inFlightDispatches = new Map<string, Promise<OrchestrationDispatchResult>>();
 
@@ -212,6 +222,7 @@ export class OrchestrationManager {
     this.reviewAgent = options.reviewAgent;
     this.mergeCoordinator = options.mergeCoordinator;
     this.feedback = options.feedback;
+    this.childCallPort = options.childCallPort;
     if (options.graph && options.graph.ownerId !== this.ownerId) {
       throw new OrchestrationError('assignment graph owner does not match orchestration owner', {
         ownerId: this.ownerId,
@@ -372,10 +383,39 @@ export class OrchestrationManager {
     lease: RuntimePoolLease,
   ): Promise<OrchestrationDispatchResult> {
     this.graph.assign(input.assignment, input.agentId, leaseBinding(lease));
-    this.graph.start(input.assignment, input.agentId, leaseBinding(lease));
+    const planned = this.graph.start(input.assignment, input.agentId, leaseBinding(lease));
+    const executionAgent = input.executionAgentOverride ?? this.executionAgent!;
+    let preparedCall: PreparedChildCall | undefined;
+    if (this.childCallPort) {
+      try {
+        preparedCall = await this.childCallPort.prepare({
+          kind: 'execution',
+          invocationId: `invocation:${input.assignment.assignmentId}:${input.assignment.attempt}:${input.assignment.executionEpoch}`,
+          assignment: input.assignment,
+          agentId: input.agentId,
+          attempt: input.assignment.attempt,
+          executionEpoch: input.assignment.executionEpoch,
+          scope: input.scope,
+          lease,
+        });
+      } catch (error) {
+        // A failed call checkpoint must stop dispatch: the child port is never
+        // invoked without a durable recovery anchor.
+        return this.blockedResult(
+          planned,
+          issueFromUnknown(error, {
+            code: 'orchestration.child-checkpoint-failed',
+            ownerId: this.ownerId,
+            scope: input.scope,
+            conditionRef: 'orchestration.child.checkpoint',
+          }),
+          input.scope,
+        );
+      }
+    }
     let rawDelivery: WorkResult | ExecutionDelivery;
     try {
-      rawDelivery = await (input.executionAgentOverride ?? this.executionAgent!).execute({
+      rawDelivery = await executionAgent.execute({
         assignment: input.assignment,
         agentId: input.agentId,
         executionEpoch: input.assignment.executionEpoch,
@@ -437,6 +477,18 @@ export class OrchestrationManager {
       ...delivery.result,
       evidenceRefs: scopedEvidenceRefs(input.scope, delivery.result.evidenceRefs),
     };
+    if (this.childCallPort && preparedCall) {
+      await this.childCallPort.recordReturn({
+        kind: 'execution',
+        invocationId: preparedCall.invocationId,
+        assignment: input.assignment,
+        agentId: input.agentId,
+        attempt: input.assignment.attempt,
+        executionEpoch: input.assignment.executionEpoch,
+        scope: input.scope,
+        result,
+      });
+    }
     const accepted = this.graph.acceptResult(input.assignment, {
       result,
       expectedAgentId: input.agentId,
@@ -463,6 +515,17 @@ export class OrchestrationManager {
       evidenceRefs: result.evidenceRefs,
     });
     if (resultIssue) return this.blockedResult(accepted.record, resultIssue, input.scope);
+
+    if (this.childCallPort && preparedCall) {
+      // Owner adoption is a separate fact from the returned refined delivery.
+      await this.childCallPort.recordAdoption({
+        kind: 'execution',
+        invocationId: preparedCall.invocationId,
+        assignment: input.assignment,
+        result,
+        scope: input.scope,
+      });
+    }
 
     if (accepted.record.status === 'retryable' || accepted.record.status === 'escalated' || accepted.record.status === 'blocked') {
       const agent = input.executionAgentOverride ?? this.executionAgent;
@@ -627,6 +690,34 @@ export class OrchestrationManager {
 
     const reviewResults: ReviewResult[] = [];
     for (const reviewAssignment of reviewAssignments) {
+      const reviewInvocationId = `invocation:review:${reviewAssignment.assignmentId}:${reviewAssignment.attempt}`;
+      if (this.childCallPort) {
+        try {
+          // Persist the pre-call checkpoint and invocation association before the
+          // real review port call. The invocation records the real review
+          // assignment, never the parent WorkAssignment.
+          await this.childCallPort.prepare({
+            kind: 'review',
+            invocationId: reviewInvocationId,
+            assignment: reviewAssignment,
+            agentId: reviewAssignment.workerAgentId,
+            attempt: reviewAssignment.attempt,
+            executionEpoch: reviewAssignment.executionEpoch,
+            scope: input.scope,
+          });
+        } catch (error) {
+          return this.blockedResult(
+            record,
+            issueFromUnknown(error, {
+              code: 'orchestration.child-checkpoint-failed',
+              ownerId: this.ownerId,
+              scope: input.scope,
+              conditionRef: 'orchestration.child.checkpoint',
+            }),
+            input.scope,
+          );
+        }
+      }
       let reviewResult: ReviewResult;
       try {
         reviewResult = await this.reviewAgent.review({
@@ -662,6 +753,74 @@ export class OrchestrationManager {
           }),
           input.scope,
         );
+      }
+      if (this.childCallPort) {
+        try {
+          await this.childCallPort.recordReturn({
+            kind: 'review',
+            invocationId: reviewInvocationId,
+            assignment: reviewAssignment,
+            agentId: reviewAssignment.workerAgentId,
+            attempt: reviewAssignment.attempt,
+            executionEpoch: reviewAssignment.executionEpoch,
+            scope: input.scope,
+            result: reviewResult,
+          });
+        } catch (error) {
+          return this.blockedResult(
+            record,
+            issueFromUnknown(error, {
+              code: 'review-return-failed',
+              ownerId: this.ownerId,
+              scope: input.scope,
+              conditionRef: 'orchestration.review.return',
+              evidenceRefs: reviewResult.evidenceRefs,
+            }),
+            input.scope,
+          );
+        }
+        try {
+          await this.childCallPort.recordAdoption({
+            kind: 'review',
+            invocationId: reviewInvocationId,
+            assignment: reviewAssignment,
+            result: reviewResult,
+            scope: input.scope,
+          });
+        } catch (error) {
+          return this.blockedResult(
+            record,
+            issueFromUnknown(error, {
+              code: 'review-adoption-failed',
+              ownerId: this.ownerId,
+              scope: input.scope,
+              conditionRef: 'orchestration.review.adoption',
+              evidenceRefs: reviewResult.evidenceRefs,
+            }),
+            input.scope,
+          );
+        }
+        try {
+          await this.childCallPort.recordReviewCheckpoint({
+            kind: 'review',
+            invocationId: reviewInvocationId,
+            assignment: reviewAssignment,
+            result: reviewResult,
+            scope: input.scope,
+          });
+        } catch (error) {
+          return this.blockedResult(
+            record,
+            issueFromUnknown(error, {
+              code: 'review-checkpoint-failed',
+              ownerId: this.ownerId,
+              scope: input.scope,
+              conditionRef: 'orchestration.review.checkpoint',
+              evidenceRefs: reviewResult.evidenceRefs,
+            }),
+            input.scope,
+          );
+        }
       }
       let recorded: AssignmentRecord;
       try {

@@ -14,6 +14,11 @@ import type {
 import type { CheckpointClosurePort } from '../../../runtime/src/checkpoints/ports.js';
 import type { ClosureRecord, InteractionClosureRecord } from '../../../runtime/src/checkpoints/closure.js';
 import type { CheckpointCommitPort } from '../../../runtime/src/control/steering.js';
+import type {
+  ActiveTurnJournalAppendRequest,
+  ActiveTurnJournalPort,
+  ActiveTurnJournalRecord,
+} from '../../../runtime/src/context/active-turn-journal.js';
 import { JsonlOrganJournal } from '../../../adapters/jsonl/src/index.js';
 import type { RuntimeTaskJournalPort, RuntimeTaskJournalRecord } from '../../../runtime/src/ui-runtime/coordinator.js';
 import { checkpointCommitId } from '../../../runtime/src/checkpoints/coordinator.js';
@@ -451,7 +456,9 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
     });
     return {
       checkpointId: input.checkpoint.id,
-      seq: record.seq,
+      // The append receipt carries the committed checkpoint's chain sequence,
+      // never the journal-global record sequence (`record.seq`).
+      seq: input.checkpoint.seq,
       recordDigest: record.recordDigest,
     };
   }
@@ -478,5 +485,61 @@ export class FileCheckpointStore implements CheckpointJournalPort, CheckpointCom
 
   private journal(): JsonlOrganJournal {
     return new JsonlOrganJournal(this.filePath);
+  }
+}
+
+interface ActiveTurnJournalLine {
+  readonly commitId: string;
+  readonly record: ActiveTurnJournalRecord;
+}
+
+/**
+ * File-backed durable port for the Runtime-owned active turn. It appends typed
+ * records as JSON lines and dedupes by `commitId`. It stores control facts
+ * verbatim; it never mirrors a business payload, summary or log, and it never
+ * reconstructs a record from a projection.
+ */
+export class FileActiveTurnJournal implements ActiveTurnJournalPort {
+  constructor(private readonly filePath: string) {}
+
+  async append(input: ActiveTurnJournalAppendRequest): Promise<void> {
+    const lines = this.lines();
+    const existing = lines.find((line) => line.commitId === input.commitId);
+    if (existing) {
+      if (JSON.stringify(existing.record) !== JSON.stringify(input.record)) {
+        throw new Error(`active turn journal conflict: ${input.commitId}`);
+      }
+      return;
+    }
+    mkdirSync(dirname(this.filePath), { recursive: true });
+    appendFileSync(this.filePath, `${JSON.stringify({ commitId: input.commitId, record: input.record })}\n`, 'utf8');
+  }
+
+  async replay(): Promise<readonly ActiveTurnJournalRecord[]> {
+    return this.lines().map((line) => line.record);
+  }
+
+  private lines(): readonly ActiveTurnJournalLine[] {
+    if (!existsSync(this.filePath)) return [];
+    const text = readFileSync(this.filePath, 'utf8');
+    const lines: ActiveTurnJournalLine[] = [];
+    const rows = text.split('\n');
+    for (let index = 0; index < rows.length; index += 1) {
+      const trimmed = rows[index]!.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as ActiveTurnJournalLine;
+        if (typeof parsed.commitId !== 'string' || !parsed.record || typeof parsed.record !== 'object') {
+          throw new Error('record shape is invalid');
+        }
+        lines.push(parsed);
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw new Error(`corrupt active turn journal ${this.filePath}:${index + 1}: invalid JSON`);
+        }
+        throw error;
+      }
+    }
+    return lines;
   }
 }
