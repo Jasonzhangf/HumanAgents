@@ -121,6 +121,16 @@ function requireUnique(values: readonly string[], label: string): void {
   if (new Set(values).size !== values.length) throw new ContractError(`${label} must not contain duplicates`);
 }
 
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== null && prototype !== Object.prototype) return false;
+  for (const property of Reflect.ownKeys(value)) {
+    if (!Object.prototype.propertyIsEnumerable.call(value, property)) return false;
+  }
+  return true;
+}
+
 function validateJsonValue(value: unknown, label: string): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number' && Number.isFinite(value)) return;
@@ -129,7 +139,10 @@ function validateJsonValue(value: unknown, label: string): void {
     return;
   }
   if (typeof value === 'object') {
-    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (!isPlainJsonObject(value)) {
+      throw new ContractError(`${label} must contain only plain JSON objects`);
+    }
+    for (const [key, nested] of Object.entries(value)) {
       requireText(key, `${label} key`);
       validateJsonValue(nested, label);
     }

@@ -63,6 +63,8 @@ test('published revision contract rejects undeclared phase membership, relation 
   assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, snapshot: twoNodes }), ContractError);
   const invalidDefinition = { ...base.snapshot, nodes: [{ ...base.snapshot.nodes[0]!, definition: { callback: () => undefined } }] } as unknown as typeof base.snapshot;
   assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, snapshot: invalidDefinition }), ContractError);
+  const dateDefinition = { ...base.snapshot, nodes: [{ ...base.snapshot.nodes[0]!, definition: { when: new Date('2026-10-11T12:00:00.000Z') } }] } as unknown as typeof base.snapshot;
+  assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, snapshot: dateDefinition }), ContractError);
 });
 
 test('initial, adjustment, and legacy boundary meanings are explicit', () => {
