@@ -246,7 +246,7 @@ test('fresh replay allows the same revisionId on another task', async () => {
   }
 });
 
-test('append rejects a Date-shaped snapshot before durable bytes or records change', async () => {
+test('append rejects a Date on a non-definition snapshot field before durable bytes or records change', async () => {
   const { file, cleanup } = await fixture();
   try {
     const store = new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file));
@@ -254,11 +254,33 @@ test('append rejects a Date-shaped snapshot before durable bytes or records chan
     const count = await recordCount(file);
     const datedSnapshot = {
       ...snapshot,
-      nodes: snapshot.nodes.map((node) => ({ ...node, definition: { owner: 'orchestration', dueAt: new Date('2026-10-11T12:00:00.000Z') } })),
+      capturedAt: new Date('2026-10-11T12:00:00.000Z'),
     };
 
     // Failure mode: a non-JSON Date reaches the durable journal instead of being rejected at the contract boundary.
     await assert.rejects(() => store.append(input({ snapshot: datedSnapshot as unknown as typeof snapshot })), ContractError);
+    assert.equal(await readFile(file, 'utf8').catch(() => ''), bytes);
+    assert.equal(await recordCount(file), count);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('append rejects a definition array with custom toJSON before durable bytes or records change', async () => {
+  const { file, cleanup } = await fixture();
+  try {
+    const store = new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file));
+    const bytes = await readFile(file, 'utf8').catch(() => '');
+    const count = await recordCount(file);
+    const steps = ['build'];
+    Object.assign(steps, { toJSON: () => ['changed'] });
+    const toJsonSnapshot = {
+      ...snapshot,
+      nodes: snapshot.nodes.map((node) => ({ ...node, definition: { owner: 'orchestration', steps } })),
+    };
+
+    // Failure mode: a custom array toJSON changes persistence semantics after the contract accepts the snapshot.
+    await assert.rejects(() => store.append(input({ snapshot: toJsonSnapshot as unknown as typeof snapshot })), ContractError);
     assert.equal(await readFile(file, 'utf8').catch(() => ''), bytes);
     assert.equal(await recordCount(file), count);
   } finally {

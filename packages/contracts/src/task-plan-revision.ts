@@ -131,10 +131,17 @@ function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
   return true;
 }
 
+function rejectCustomToJson(value: object, label: string): void {
+  if (typeof (value as { toJSON?: unknown }).toJSON === 'function') {
+    throw new ContractError(`${label} must not contain custom toJSON`);
+  }
+}
+
 function validateJsonValue(value: unknown, label: string): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number' && Number.isFinite(value)) return;
   if (Array.isArray(value)) {
+    rejectCustomToJson(value, label);
     for (const item of value) validateJsonValue(item, label);
     return;
   }
@@ -142,6 +149,7 @@ function validateJsonValue(value: unknown, label: string): void {
     if (!isPlainJsonObject(value)) {
       throw new ContractError(`${label} must contain only plain JSON objects`);
     }
+    rejectCustomToJson(value, label);
     for (const [key, nested] of Object.entries(value)) {
       requireText(key, `${label} key`);
       validateJsonValue(nested, label);
@@ -153,6 +161,7 @@ function validateJsonValue(value: unknown, label: string): void {
 
 export function validateTaskPlanSnapshot(snapshot: TaskPlanSnapshot): void {
   if (!snapshot || typeof snapshot !== 'object') throw new ContractError('task plan snapshot must be an object');
+  validateJsonValue(snapshot, 'task plan snapshot');
   requireText(snapshot.title, 'task plan title');
   requireText(snapshot.summary, 'task plan summary');
   if (!snapshot.completeness || snapshot.completeness.scope !== 'whole-task' || snapshot.completeness.status !== 'complete') {
@@ -180,7 +189,6 @@ export function validateTaskPlanSnapshot(snapshot: TaskPlanSnapshot): void {
     if (!node.definition || typeof node.definition !== 'object' || Array.isArray(node.definition)) {
       throw new ContractError(`task plan node ${node.nodeId} definition must be an object`);
     }
-    validateJsonValue(node.definition, `task plan node ${node.nodeId} definition`);
     if (node.phaseId !== undefined) requireText(node.phaseId, `task plan node ${node.nodeId} phaseId`);
   }
   requireUnique(nodeIds, 'task plan node ids');

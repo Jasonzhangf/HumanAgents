@@ -67,6 +67,26 @@ test('published revision contract rejects undeclared phase membership, relation 
   assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, snapshot: dateDefinition }), ContractError);
 });
 
+test('published revision contract rejects a Date on a non-definition snapshot field', () => {
+  const datedSnapshot = {
+    ...base.snapshot,
+    capturedAt: new Date('2026-10-11T12:00:00.000Z'),
+  } as unknown as typeof base.snapshot;
+
+  assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, snapshot: datedSnapshot }), ContractError);
+});
+
+test('published revision contract rejects a definition array with custom toJSON', () => {
+  const steps = ['implement'];
+  Object.assign(steps, { toJSON: () => ['changed'] });
+  const snapshotWithToJson = {
+    ...base.snapshot,
+    nodes: [{ ...base.snapshot.nodes[0]!, definition: { owner: 'runtime', steps } }],
+  } as unknown as typeof base.snapshot;
+
+  assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, snapshot: snapshotWithToJson }), ContractError);
+});
+
 test('initial, adjustment, and legacy boundary meanings are explicit', () => {
   assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, sequence: 2, reason: { kind: 'initial', basisRefs: [] }, predecessor: { revisionId: 'plan-revision-1', sequence: 1, contentDigest: digest } }), ContractError);
   assert.throws(() => validateTaskPlanRevisionMetadata({ ...base, historyCoverage: 'unknown' as PublishedTaskPlanRevision['historyCoverage'] }), ContractError);
