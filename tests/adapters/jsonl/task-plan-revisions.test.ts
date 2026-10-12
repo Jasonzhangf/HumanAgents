@@ -12,8 +12,10 @@ import {
 import type { TaskPlanRevisionAppendInput } from '../../../packages/adapters/jsonl/src/task-plan-revisions.js';
 import {
   createPublishedTaskPlanRevision,
+  validatePublishedTaskPlanRevision,
   validateTaskPlanRevisionTransition,
 } from '../../../packages/core/src/task-plan-revision.js';
+import { ContractError } from '../../../packages/contracts/src/errors.js';
 
 const scope = { organId: { scope: 'organ' as const, value: 'organ-plan-test' }, taskId: { scope: 'task' as const, value: 'task-plan-test' } };
 const source = { requirementId: 'req-1', inputRevision: 1, draftId: 'draft-1', draftRevisionVersion: 1, draftRevisionHash: 'draft-hash-1', confirmationRef: 'confirm-1', evidenceRefs: [] } as const;
@@ -167,6 +169,98 @@ test('fresh replay rejects a well-formed record whose typed revision skips a seq
 
     // Failure mode: a valid outer Journal record carrying an out-of-order typed revision is trusted on replay.
     await assert.rejects(() => new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file)).replay(), JournalIntegrityError);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('fresh replay rejects a non-adjacent duplicate publication identity within one task', async () => {
+  const { file, cleanup } = await fixture();
+  try {
+    const rawJournal = new JsonlOrganJournal(file);
+    const first = createPublishedTaskPlanRevision({
+      ...input(),
+      journalCommitRef: 'jsonl:typed-replay-duplicate-a1',
+    });
+    const second = createPublishedTaskPlanRevision({
+      ...input({
+        revisionId: 'plan-v2', sequence: 2,
+        predecessor: { revisionId: first.revisionId, sequence: first.sequence, contentDigest: first.contentDigest },
+        reason: { kind: 'adjustment', text: 'Intermediate revision', basisRefs: [] },
+      }),
+      journalCommitRef: 'jsonl:typed-replay-duplicate-b',
+    });
+    const duplicate = createPublishedTaskPlanRevision({
+      ...input({
+        sequence: 3,
+        predecessor: { revisionId: second.revisionId, sequence: second.sequence, contentDigest: second.contentDigest },
+        snapshot: { ...snapshot, summary: 'Republished under a previously used identity.' },
+        reason: { kind: 'adjustment', text: 'Reused identity', basisRefs: [] },
+      }),
+      journalCommitRef: 'jsonl:typed-replay-duplicate-a2',
+    });
+    await rawJournal.append({
+      commitId: 'typed-replay-duplicate-a1', kind: 'event', scope,
+      payload: { type: 'task-plan-revision.published', revision: first as unknown as Record<string, unknown> },
+    });
+    await rawJournal.append({
+      commitId: 'typed-replay-duplicate-b', kind: 'event', scope,
+      payload: { type: 'task-plan-revision.published', revision: second as unknown as Record<string, unknown> },
+    });
+    await rawJournal.append({
+      commitId: 'typed-replay-duplicate-a2', kind: 'event', scope,
+      payload: { type: 'task-plan-revision.published', revision: duplicate as unknown as Record<string, unknown> },
+    });
+
+    // Failure mode: replay accepts A -> B -> A as a valid history even though publication identity repeats.
+    await assert.rejects(
+      async () => {
+        await new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file)).replay();
+        throw new Error('replay unexpectedly accepted a duplicate revision identity');
+      },
+      JournalIntegrityError,
+    );
+
+  } finally {
+    await cleanup();
+  }
+});
+
+test('fresh replay allows the same revisionId on another task', async () => {
+  const { file, cleanup } = await fixture();
+  try {
+    const store = new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file));
+    const otherTask = { ...scope, taskId: { scope: 'task' as const, value: 'other-task' } };
+    const first = await store.append(input());
+    const otherFirst = await store.append(input({ scope: otherTask }));
+    validatePublishedTaskPlanRevision(first);
+    validatePublishedTaskPlanRevision(otherFirst);
+
+    // Failure mode: duplicate identity tracking is global instead of scoped to one task.
+    const restarted = new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file));
+    assert.deepEqual(await restarted.replay(), [first, otherFirst]);
+    assert.deepEqual(await restarted.replay(scope), [first]);
+    assert.deepEqual(await restarted.replay(otherTask), [otherFirst]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('append rejects a Date-shaped snapshot before durable bytes or records change', async () => {
+  const { file, cleanup } = await fixture();
+  try {
+    const store = new JsonlTaskPlanRevisionJournal(new JsonlOrganJournal(file));
+    const bytes = await readFile(file, 'utf8').catch(() => '');
+    const count = await recordCount(file);
+    const datedSnapshot = {
+      ...snapshot,
+      nodes: snapshot.nodes.map((node) => ({ ...node, definition: { owner: 'orchestration', dueAt: new Date('2026-10-11T12:00:00.000Z') } })),
+    };
+
+    // Failure mode: a non-JSON Date reaches the durable journal instead of being rejected at the contract boundary.
+    await assert.rejects(() => store.append(input({ snapshot: datedSnapshot as unknown as typeof snapshot })), ContractError);
+    assert.equal(await readFile(file, 'utf8').catch(() => ''), bytes);
+    assert.equal(await recordCount(file), count);
   } finally {
     await cleanup();
   }

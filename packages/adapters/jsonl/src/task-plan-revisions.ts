@@ -56,10 +56,16 @@ function revisionFromRecord(record: JournalRecord): PublishedTaskPlanRevision | 
 function typedReplay(records: readonly JournalRecord[]): PublishedTaskPlanRevision[] {
   const revisions: PublishedTaskPlanRevision[] = [];
   const previousByTask = new Map<string, PublishedTaskPlanRevision>();
+  const seenIdentities = new Set<string>();
   for (const record of records) {
     const revision = revisionFromRecord(record);
     if (!revision) continue;
     const key = taskKey(revision.scope);
+    const identity = `${key}\0${revision.revisionId}`;
+    if (seenIdentities.has(identity)) {
+      throw new JournalIntegrityError('task plan revision identity must be unique within its task history');
+    }
+    seenIdentities.add(identity);
     try {
       validateTaskPlanRevisionTransition(previousByTask.get(key) ?? null, revision);
     } catch (error) {
