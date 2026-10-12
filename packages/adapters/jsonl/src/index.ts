@@ -612,3 +612,6 @@ export function createJsonlEventPublicationJournal(input: {
     },
   };
 }
+
+export { JsonlTaskPlanRevisionJournal } from './task-plan-revisions.js';
+export type { TaskPlanRevisionAppendInput } from './task-plan-revisions.js';
