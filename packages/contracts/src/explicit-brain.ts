@@ -6,9 +6,10 @@ import type {
   OperationId,
   RequirementIntent,
   ScopeRef,
+  TaskFlowBinding,
   TaskId,
 } from './index.js';
-import { assertEvidenceRef } from './index.js';
+import { assertEvidenceRef, validateTaskFlowBinding } from './index.js';
 import { ContractError } from './errors.js';
 import { isCanonicalInstant } from './time.js';
 import { MEMORY_KINDS, MEMORY_NAMESPACES } from './framework.js';
@@ -406,6 +407,7 @@ export interface DraftRevision {
   readonly matchedTasks: readonly string[];
   readonly knownFacts: readonly string[];
   readonly executionPolicy?: ExecutionPolicyDefinition;
+  readonly taskFlow?: TaskFlowBinding;
   readonly executionControlRef?: string;
   readonly decisionRefs: readonly string[];
   readonly supersededBy?: string;
@@ -958,6 +960,7 @@ export function validateDraftRevision(input: DraftRevision): void {
   stringArray(input.matchedTasks, 'draft matchedTasks');
   stringArray(input.knownFacts, 'draft knownFacts');
   if (input.executionPolicy !== undefined) validateExecutionPolicyDefinition(input.executionPolicy);
+  if (input.taskFlow !== undefined) validateTaskFlowBinding(input.taskFlow);
   if (input.executionControlRef !== undefined) nonEmpty(input.executionControlRef, 'draft executionControlRef');
   stringArray(input.decisionRefs, 'draft decisionRefs');
   if (input.supersededBy !== undefined) nonEmpty(input.supersededBy, 'draft supersededBy');

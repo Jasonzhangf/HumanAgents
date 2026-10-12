@@ -2,6 +2,9 @@ export type ScopeKind = 'organ' | 'task' | 'cycle' | 'operation' | 'checkpoint' 
 
 export * from './hand-services.js';
 export * from './web-search.js';
+export * from './task-flow.js';
+export * from './task-plan-revision.js';
+import { validateTaskFlowBinding, type TaskFlowBinding } from './task-flow.js';
 
 export interface ScopedId<K extends ScopeKind = ScopeKind> {
   readonly scope: K;
@@ -101,6 +104,8 @@ export interface RequirementEnvelope {
   readonly inputRevision: number;
   readonly intent: RequirementIntent;
   readonly taskRef?: TaskId;
+  /** Confirmed task-flow identity. Absent on legacy requirements; independent of trigger policy. */
+  readonly taskFlow?: TaskFlowBinding;
   readonly normalizedInput: string;
   readonly confirmedBy: string;
   readonly confirmedAt: string;
@@ -843,6 +848,7 @@ export function validateRequirementEnvelope(input: RequirementEnvelope): void {
   assertPositiveSafeInteger(input.inputRevision, 'requirement inputRevision');
   assertPositiveSafeInteger(input.fifoSeq, 'requirement fifoSeq');
   assertValidTime(input.confirmedAt, 'requirement confirmedAt');
+  if (input.taskFlow !== undefined) validateTaskFlowBinding(input.taskFlow);
   if (input.intent === 'append' || input.intent === 'change') { if (!input.taskRef) throw new ContractError('task reference required'); assertScope(input.taskRef, 'task'); }
   assertNonEmptyReference(input.payloadRef, 'requirement payloadRef');
 }
