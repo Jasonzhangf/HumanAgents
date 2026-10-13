@@ -1667,6 +1667,8 @@ export * from './operation-completion.js';
 export * from './semantic-observation.js';
 export * from './active-turn-context.js';
 export * from './review-data.js';
+export * from './inspection.js';
+export * from './i2-history.js';
 
 /**
  * Requirement pipeline node identity. Single source of truth for the thirteen nodes of

@@ -56,6 +56,20 @@ export interface RuntimeBinding {
   readonly bindingDigest: string;
 }
 
+/**
+ * Actual bounded execution instance identity. Display labels, Provider
+ * sessions, PIDs, and worker identity are not instance identity.
+ */
+export interface TaskRuntimeIncarnation {
+  readonly runtimeId: string;
+  readonly generation: number;
+  readonly agentInstanceId: string;
+  readonly roleId: string;
+  readonly taskId: TaskId;
+  readonly assignmentId: string;
+  readonly executionEpoch: number;
+}
+
 export interface AgentProviderBinding {
   readonly bindingId: string;
   readonly providerId: string;
