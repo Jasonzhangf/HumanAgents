@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, ensureControlLayout, listConfiguredProjects, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, saveUiDisplayPreference, validateInternalConfig, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type RuntimePaths } from '../../packages/config/src/index.js';
+import { ConfigurationError, DEFAULT_UI_DISPLAY_PREFERENCE, applyManualDisplaySelection, compileAgentProviderBindings, ensureControlLayout, listConfiguredProjects, loadConfiguration, parseToml, resolveProjectSourceManifest, resolveRuntimePaths, resolveUiDisplayMode, resolveWebSearchBackendConfig, resolveProviderCredential, saveUiDisplayPreference, validateInternalConfig, validateUiDisplayPreference, validateUserConfig, type EffectiveAgentProviderBinding, type ProviderCredentialRef, type RuntimePaths } from '../../packages/config/src/index.js';
 
 const minimalInteractionAgent = () => ({
   agentId: 'interaction-default',
@@ -696,6 +696,80 @@ test('validates a global provider separately from the agent driver and rejects u
     agents,
     provider: { provider: 'rcc', binding: 'rcc', protocol: 'custom', model: 'x', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
   }), /unsupported provider protocol: custom/);
+
+  const credentialRef: ProviderCredentialRef = 'env:HUMANAGENT_CONFIG_TEST_CREDENTIAL';
+  const credential = validateUserConfig({
+    schemaVersion: 1,
+    agents,
+    provider: {
+      provider: 'http',
+      source: 'http',
+      binding: 'credential-entry',
+      protocol: 'responses',
+      model: 'model-a',
+      route: 'route-a',
+      baseUrl: 'http://127.0.0.1:4444',
+      credentialRef,
+    },
+  });
+  assert.equal(credential.provider?.credentialRef, credentialRef);
+  const reads: string[] = [];
+  const env = {
+    get HUMANAGENT_CONFIG_TEST_CREDENTIAL() {
+      reads.push('declared');
+      return '  fake-secret  ';
+    },
+    get UNDECLARED(): string {
+      throw new Error('undeclared environment key read');
+    },
+  };
+  assert.equal(resolveProviderCredential(undefined, env), undefined);
+  assert.deepEqual(reads, []);
+  assert.equal(resolveProviderCredential(credentialRef, env), '  fake-secret  ');
+  assert.deepEqual(reads, ['declared']);
+  const credentialError = (ref: ProviderCredentialRef, injected: Readonly<Record<string, string | undefined>>): ConfigurationError => {
+    try {
+      resolveProviderCredential(ref, injected);
+    } catch (error) {
+      if (error instanceof ConfigurationError) return error;
+      throw error;
+    }
+    throw new Error('expected ConfigurationError');
+  };
+  for (const injected of [{}, { HUMANAGENT_CONFIG_TEST_CREDENTIAL: '' }, { HUMANAGENT_CONFIG_TEST_CREDENTIAL: '   ' }]) {
+    const error = credentialError(credentialRef, injected);
+    assert.equal(error.code, 'config-credential-unavailable');
+    for (const text of [error.message, error.nextAction]) {
+      assert.equal(text.includes(credentialRef), false);
+      assert.equal(text.includes('HUMANAGENT_CONFIG_TEST_CREDENTIAL'), false);
+    }
+  }
+  for (const invalid of ['literal-secret', 'file:credential', 'env:bad-name', 'env:1BAD', 'env:', 'env:BAD\n']) {
+    try {
+      validateUserConfig({
+        schemaVersion: 1,
+        agents,
+        provider: { ...credential.provider, credentialRef: invalid },
+      });
+      throw new Error('expected invalid credentialRef');
+    } catch (error) {
+      if (!(error instanceof ConfigurationError)) throw error;
+      assert.equal(error.code, 'config-invalid');
+      assert.equal(error.message.includes(invalid), false);
+      assert.equal(error.nextAction.includes(invalid), false);
+    }
+  }
+  const invalidResolver = credentialError('env:bad-name', {});
+  assert.equal(invalidResolver.code, 'config-invalid');
+  assert.equal(invalidResolver.message.includes('env:bad-name'), false);
+  assert.equal(invalidResolver.nextAction.includes('env:bad-name'), false);
+  for (const source of [undefined, 'rcc']) {
+    assert.throws(() => validateUserConfig({
+      schemaVersion: 1,
+      agents,
+      provider: { ...credential.provider, source, credentialRef },
+    }), /credentialRef requires source = "http"/);
+  }
 });
 
 test('preserves an explicit provider source through TOML while an omitted source keeps the legacy RCC shape', async () => {
@@ -708,6 +782,7 @@ test('preserves an explicit provider source through TOML while an omitted source
   const legacy = await loadConfiguration(paths);
   assert.equal(legacy.effective.provider?.provider, 'rcc');
   assert.equal(Object.prototype.hasOwnProperty.call(legacy.effective.provider, 'source'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(legacy.effective.provider, 'credentialRef'), false);
 
   const configPath = join(paths.controlRoot, 'config.toml');
   const base = await readFile(configPath, 'utf8');
@@ -715,6 +790,11 @@ test('preserves an explicit provider source through TOML while an omitted source
   const explicit = await loadConfiguration(paths);
   assert.equal(explicit.effective.provider?.provider, 'http');
   assert.equal(explicit.effective.provider?.source, 'http');
+
+  await writeFile(configPath, base.replace('provider = "rcc"', 'provider = "http"\nsource = "http"\ncredentialRef = "env:HUMANAGENT_CONFIG_TEST_CREDENTIAL"'), 'utf8');
+  const withRef = await loadConfiguration(paths);
+  assert.equal(withRef.effective.provider?.source, 'http');
+  assert.equal(withRef.effective.provider?.credentialRef, 'env:HUMANAGENT_CONFIG_TEST_CREDENTIAL');
 
   // `provider` is a local label, not the source strategy: rcc + http stays legal.
   await writeFile(configPath, base.replace('provider = "rcc"', 'provider = "rcc"\nsource = "http"'), 'utf8');
@@ -963,11 +1043,13 @@ test('agent provider binding compiles independent per-agent selections from a co
     'memoryScopes = ["task"]',
     'resourceClass = "foreground"',
     'provider.provider = "rcc"',
+    'provider.source = "http"',
     'provider.binding = "binding-a"',
     'provider.protocol = "responses"',
     'provider.model = "model-a"',
     'provider.route = "route-a"',
     'provider.baseUrl = "http://127.0.0.1:4444"',
+    'provider.credentialRef = "env:HUMANAGENT_CONFIG_TEST_CREDENTIAL"',
     '',
     '[[agents]]',
     'agentId = "execution-b"',
@@ -997,7 +1079,7 @@ test('agent provider binding compiles independent per-agent selections from a co
     agentId: 'interaction-a',
     roleId: 'interaction',
     source: 'agent',
-    provider: { provider: 'rcc', binding: 'binding-a', protocol: 'responses', model: 'model-a', route: 'route-a', baseUrl: 'http://127.0.0.1:4444' },
+    provider: { provider: 'rcc', source: 'http', binding: 'binding-a', protocol: 'responses', model: 'model-a', route: 'route-a', baseUrl: 'http://127.0.0.1:4444', credentialRef: 'env:HUMANAGENT_CONFIG_TEST_CREDENTIAL' },
   });
   assert.deepEqual(b, {
     agentId: 'execution-b',
@@ -1074,12 +1156,13 @@ test('agent provider binding applies the agent model override over the binding m
     provider: { provider: 'rcc', binding: 'shared', protocol: 'responses', model: 'shared-model', route: 'default', baseUrl: 'http://127.0.0.1:4444' },
     agents: [
       { ...base, agentId: 'explicit-default', provider: { provider: 'rcc', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555' } },
-      { ...base, agentId: 'explicit-override', model: 'override-model', provider: { provider: 'rcc', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555' } },
+      { ...base, agentId: 'explicit-override', model: 'override-model', provider: { provider: 'rcc', source: 'http', binding: 'b', protocol: 'anthropic', model: 'binding-model', route: 'r', baseUrl: 'http://127.0.0.1:5555', credentialRef: 'env:HUMANAGENT_CONFIG_TEST_CREDENTIAL' } },
       { ...base, agentId: 'inherited-override', model: 'inherited-override-model' },
     ],
   }));
   assert.equal(compiled.find((binding) => binding.agentId === 'explicit-default')?.provider?.model, 'binding-model');
   assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.model, 'override-model');
+  assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.credentialRef, 'env:HUMANAGENT_CONFIG_TEST_CREDENTIAL');
   assert.equal(compiled.find((binding) => binding.agentId === 'inherited-override')?.provider?.model, 'inherited-override-model');
   // Overriding the model does not change the selected protocol/endpoint.
   assert.equal(compiled.find((binding) => binding.agentId === 'explicit-override')?.provider?.protocol, 'anthropic');

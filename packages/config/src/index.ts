@@ -86,11 +86,14 @@ export interface AcpExecutionConfig {
 }
 
 
+export type ProviderCredentialRef = `env:${string}`;
+
 export interface ProviderConfig {
   /** Local binding label; it does not select a source strategy or upstream provider. */
   readonly provider: ProviderId;
   /** Source strategy. Omitting it preserves the legacy RCC meaning. */
   readonly source?: ProviderSource;
+  readonly credentialRef?: ProviderCredentialRef;
   readonly binding: string;
   readonly protocol: ProviderProtocol;
   readonly model: string;
@@ -685,9 +688,29 @@ function validateAcpExecution(value: unknown, label: string): AcpExecutionConfig
   };
 }
 
+function validateProviderCredentialRef(value: unknown): ProviderCredentialRef {
+  if (typeof value !== 'string' || !/^env:[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/.test(value)) {
+    fail('config-invalid', 'credentialRef has invalid syntax');
+  }
+  return value as ProviderCredentialRef;
+}
+
+export function resolveProviderCredential(
+  credentialRef: ProviderCredentialRef | undefined,
+  env?: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  if (credentialRef === undefined) return undefined;
+  const ref = validateProviderCredentialRef(credentialRef);
+  const value = (env ?? process.env)[ref.slice(4)];
+  if (value === undefined || value.trim().length === 0) {
+    fail('config-credential-unavailable', 'provider credential is unavailable', 'provide a non-empty value for the declared credential variable');
+  }
+  return value;
+}
+
 function validateProviderConfig(value: unknown, label = 'provider'): ProviderConfig {
   const provider = asRecord(value, label);
-  rejectUnknownKeys(provider, ['provider', 'source', 'binding', 'protocol', 'model', 'route', 'baseUrl'], label);
+  rejectUnknownKeys(provider, ['provider', 'source', 'credentialRef', 'binding', 'protocol', 'model', 'route', 'baseUrl'], label);
   const providerId = asString(provider.provider, `${label}.provider`);
   if (!(PROVIDERS as readonly string[]).includes(providerId)) {
     fail('config-capability', `unknown provider: ${providerId}`, 'choose a supported provider');
@@ -696,6 +719,10 @@ function validateProviderConfig(value: unknown, label = 'provider'): ProviderCon
   if (source !== undefined && !(PROVIDER_SOURCES as readonly string[]).includes(source)) {
     fail('config-invalid', `unsupported provider source: ${source}`, 'choose rcc or http');
   }
+  const credentialRef = provider.credentialRef === undefined ? undefined : validateProviderCredentialRef(provider.credentialRef);
+  if (credentialRef !== undefined && source !== 'http') {
+    fail('config-invalid', 'credentialRef requires source = "http"');
+  }
   const protocol = asString(provider.protocol, `${label}.protocol`);
   if (!(PROVIDER_PROTOCOLS as readonly string[]).includes(protocol)) {
     fail('config-invalid', `unsupported provider protocol: ${protocol}`, 'choose responses, openai, or anthropic');
@@ -703,6 +730,7 @@ function validateProviderConfig(value: unknown, label = 'provider'): ProviderCon
   return {
     provider: providerId as ProviderId,
     ...(source === undefined ? {} : { source: source as ProviderSource }),
+    ...(credentialRef === undefined ? {} : { credentialRef }),
     binding: asString(provider.binding, `${label}.binding`),
     protocol: protocol as ProviderProtocol,
     model: asString(provider.model, `${label}.model`),
