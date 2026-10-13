@@ -33,10 +33,19 @@ import type {
 } from './wire.js';
 import type { ProviderProbeResult, ProviderTransport } from './adapter.js';
 
-const OWNER = 'humanagent.provider-adapter.rcc-v3';
+const RCC_OWNER = 'humanagent.provider-adapter.rcc-v3';
+const HTTP_OWNER = 'humanagent.provider-adapter.http';
 const DEFAULT_MAX_EVENT_BYTES = 1024 * 1024;
 const DEFAULT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const DEFAULT_PROBE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Source strategy for the provider HTTP transport. `rcc` keeps the RCC
+ * discovery probe and servertool normalization. `http` speaks the configured
+ * protocol endpoint directly and never runs RCC-only behavior. Omitting the
+ * source preserves the legacy RCC meaning.
+ */
+export type ProviderTransportSource = 'rcc' | 'http';
 
 export interface RccV3FetchInit {
   readonly method: 'GET' | 'POST';
@@ -63,6 +72,7 @@ export interface RccV3ProviderTransportOptions {
   readonly maxBufferBytes?: number;
   readonly probeTtlMs?: number;
   readonly now?: () => Date;
+  readonly source?: ProviderTransportSource;
 }
 
 interface ActiveExecution {
@@ -165,12 +175,12 @@ function requestRoute(request: ProviderWireRequest): string {
   return route;
 }
 
-function errorEvidence(scope: ScopeRef, label: string): EvidenceRef {
+function errorEvidence(scope: ScopeRef, label: string, owner: string, scheme: string): EvidenceRef {
   return {
-    evidenceId: id('evidence', `rcc-v3-${label.replace(/[^A-Za-z0-9._-]/g, '-')}`),
+    evidenceId: id('evidence', `${scheme}-${label.replace(/[^A-Za-z0-9._-]/g, '-')}`),
     kind: 'external',
-    source: OWNER,
-    locator: `rcc-v3://${label}`,
+    source: owner,
+    locator: `${scheme}://${label}`,
     scope,
   };
 }
@@ -180,8 +190,10 @@ function providerError(
   phase: ProviderError['phase'],
   code: string,
   message: string,
+  owner: string,
+  scheme: string,
   category: ProviderError['category'] = 'transport',
-  nextAction: ProviderError['nextAction'] = { kind: 'recover', ref: OWNER },
+  nextAction: ProviderError['nextAction'] = { kind: 'recover', ref: owner },
 ): ProviderError {
   return {
     errorId: `provider.${phase}.${code}`,
@@ -189,10 +201,10 @@ function providerError(
     category,
     phase,
     message,
-    ownerId: OWNER,
+    ownerId: owner,
     retryable: category === 'transport' || category === 'timeout' ? 'retryable' : 'manual',
     attention: 'foreground',
-    evidenceRefs: [errorEvidence(scope, `${phase}-${code}`)],
+    evidenceRefs: [errorEvidence(scope, `${phase}-${code}`, owner, scheme)],
     nextAction,
   };
 }
@@ -398,6 +410,9 @@ export class RccV3ProviderTransport implements ProviderTransport {
   private readonly maxBufferBytes: number;
   private readonly probeTtlMs: number;
   private readonly now: () => Date;
+  private readonly source: ProviderTransportSource;
+  private readonly owner: string;
+  private readonly scheme: string;
   private readonly executions = new Map<string, ActiveExecution>();
   private readonly stopReasons = new Map<ProviderExecutionIdentityRef, string>();
 
@@ -437,20 +452,43 @@ export class RccV3ProviderTransport implements ProviderTransport {
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
     this.now = options.now ?? (() => new Date());
+    this.source = options.source ?? 'rcc';
+    this.owner = this.source === 'http' ? HTTP_OWNER : RCC_OWNER;
+    this.scheme = this.source === 'http' ? 'http' : 'rcc-v3';
   }
 
   async probe(binding: ProviderBinding): Promise<ProviderProbeResult> {
     this.assertBinding(binding);
     const checkedAt = this.now().toISOString();
     const expiresAt = new Date(this.now().getTime() + this.probeTtlMs).toISOString();
+    // A direct HTTP source has no RCC discovery contract. It reports an honest
+    // `unknown` readiness with owner and next action instead of fabricating a
+    // remote `ready` or falling back to the RCC probe.
+    if (this.source === 'http') {
+      const scope = scopeForBinding(binding);
+      const ref = await this.writeEvidence(scope, 'probe-unknown', {
+        source: this.source,
+        endpoint: this.options.baseUrl,
+        reason: 'direct HTTP source has no RCC discovery probe; an explicit request supplies the real state',
+      });
+      const failure = this.providerError(
+        scope,
+        'probe',
+        'probe.readiness-unknown',
+        'direct HTTP source has no discovery probe; start an explicit request to learn the remote state',
+        'capability',
+        { kind: 'continue', ref: 'http.start' },
+      );
+      return { readiness: readiness(binding, 'unknown', checkedAt, expiresAt, [ref], this.owner, { ...failure, evidenceRefs: [ref] }) };
+    }
     const health = await this.probeHealth(binding);
     if (!health.ok) {
-      return { readiness: readiness(binding, health.state, checkedAt, expiresAt, [health.evidence], health.error, health.version) };
+      return { readiness: readiness(binding, health.state, checkedAt, expiresAt, [health.evidence], this.owner, health.error, health.version) };
     }
 
     const models = await this.probeModels(binding);
     if (!models.ok) {
-      return { readiness: readiness(binding, models.state, checkedAt, expiresAt, [health.evidence, models.evidence], models.error, health.version) };
+      return { readiness: readiness(binding, models.state, checkedAt, expiresAt, [health.evidence, models.evidence], this.owner, models.error, health.version) };
     }
     let evidenceRefs = [health.evidence, models.evidence];
     if (!models.models.includes(binding.modelRef)) {
@@ -458,7 +496,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       evidenceRefs = [...evidenceRefs, ref];
     }
 
-    return { readiness: readiness(binding, 'ready', checkedAt, expiresAt, evidenceRefs, undefined, health.version) };
+    return { readiness: readiness(binding, 'ready', checkedAt, expiresAt, evidenceRefs, this.owner, undefined, health.version) };
   }
 
   async start(input: ProviderStartInput, request: ProviderWireRequest): Promise<ProviderStartReceipt> {
@@ -510,7 +548,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
 
   async resume(input: ProviderResumeInput, _request: ProviderWireRequest): Promise<ProviderRecoveryResult> {
     const scope = scopeFor(input, input.evidenceRefs[0]?.scope);
-    const error = providerError(scope, 'resume', 'resume.unsupported', 'RCC v3 HTTP transport cannot resume a provider stream from a HumanAgent checkpoint', 'capability', { kind: 'recover', ref: OWNER });
+    const error = this.providerError(scope, 'resume', 'resume.unsupported', 'RCC v3 HTTP transport cannot resume a provider stream from a HumanAgent checkpoint', 'capability', { kind: 'recover', ref: this.owner });
     const ref = await this.writeEvidence(scope, 'resume-unsupported', error);
     return {
       ...input,
@@ -520,8 +558,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
       recoveryStateRef: ref,
       evidenceRefs: [ref],
       error: { ...error, evidenceRefs: [ref] },
-      ownerId: OWNER,
-      nextAction: { kind: 'recover', ref: OWNER },
+      ownerId: this.owner,
+      nextAction: { kind: 'recover', ref: this.owner },
     };
   }
 
@@ -529,19 +567,19 @@ export class RccV3ProviderTransport implements ProviderTransport {
     const active = this.active(input);
     const scope = active.evidenceScope;
     if (request.protocol !== 'responses' || input.toolContinuations === undefined) {
-      const error = providerError(scope, 'submit', 'submit.unsupported', 'RCC v3 transport supports submit only for typed Responses tool continuation', 'capability');
+      const error = this.providerError(scope, 'submit', 'submit.unsupported', 'RCC v3 transport supports submit only for typed Responses tool continuation', 'capability');
       const ref = await this.writeEvidence(scope, 'submit-unsupported', error);
-      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } };
+      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: this.owner, nextAction: { kind: 'recover', ref: this.owner } };
     }
     if (!active.streamDone || !active.resourceReleased) {
-      const error = providerError(scope, 'submit', 'submit.previous-stream-active', 'RCC v3 tool continuation requires the previous stream to release first', 'runtime');
+      const error = this.providerError(scope, 'submit', 'submit.previous-stream-active', 'RCC v3 tool continuation requires the previous stream to release first', 'runtime');
       const ref = await this.writeEvidence(scope, 'submit-previous-stream-active', error);
-      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'wait', ref: 'rcc-v3.observe' } };
+      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: this.owner, nextAction: { kind: 'wait', ref: 'rcc-v3.observe' } };
     }
     if (active.stopRequested) {
-      const error = providerError(scope, 'submit', 'submit.stopped', 'RCC v3 execution was stopped before tool continuation', 'runtime');
+      const error = this.providerError(scope, 'submit', 'submit.stopped', 'RCC v3 execution was stopped before tool continuation', 'runtime');
       const ref = await this.writeEvidence(scope, 'submit-stopped', error);
-      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'recover', ref: OWNER } };
+      return { ...input, status: 'blocked', outputRefs: [], evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: this.owner, nextAction: { kind: 'recover', ref: this.owner } };
     }
     const controller = new AbortController();
     active.controller = controller;
@@ -561,7 +599,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       if (active.stopRequested || controller.signal.aborted) active.terminalState = 'stopped';
       else {
         active.terminalState = 'failed';
-        active.terminalError = providerError(scope, 'submit', 'submit.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 continuation failed', 'transport');
+        active.terminalError = this.providerError(scope, 'submit', 'submit.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 continuation failed', 'transport');
       }
       throw cause;
     }
@@ -579,7 +617,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       callIds: input.toolContinuations.map((continuation) => continuation.callId),
       continuationRef: input.toolContinuations[0].continuationRef,
     });
-    return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'continue', ref: 'rcc-v3.observe' } };
+    return { ...input, status: 'accepted', outputRefs: [], evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'continue', ref: 'rcc-v3.observe' } };
   }
 
   async *observe(input: ProviderObserveInput): AsyncIterable<ProviderWireEvent> {
@@ -609,7 +647,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         try {
           record = readRecord(JSON.parse(frame.data));
         } catch (cause) {
-          const error = providerError(active.evidenceScope, 'observe', 'protocol.invalid-sse-json', cause instanceof Error ? cause.message : 'RCC v3 returned invalid SSE JSON', 'protocol');
+          const error = this.providerError(active.evidenceScope, 'observe', 'protocol.invalid-sse-json', cause instanceof Error ? cause.message : 'RCC v3 returned invalid SSE JSON', 'protocol');
           active.terminalError = error;
           active.terminalState = 'failed';
           throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input, cause });
@@ -625,7 +663,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         if (active.protocol === 'responses' && type === 'response.done') continue;
         if (active.protocol === 'openai' && type !== 'openai.chat.completion' && type !== 'error') continue;
         const normalized = active.protocol === 'responses' && type === 'response.output_item.done'
-          ? normalizeServertoolCall(record)
+          ? (this.source === 'http' ? record : normalizeServertoolCall(record))
           : record;
         const raw = { protocol: active.protocol, ...normalized, type } as unknown as ProviderWireEvent;
         if (active.protocol === 'responses' && type === 'response.output_item.done') {
@@ -646,7 +684,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
             const providerMessage = typeof errorRecord === 'object' && errorRecord && typeof (errorRecord as Record<string, unknown>).message === 'string'
               ? (errorRecord as Record<string, unknown>).message as string
               : 'RCC v3 provider reported a failure';
-            active.terminalError = providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
+            active.terminalError = this.providerError(active.evidenceScope, 'observe', providerCode, providerMessage, 'provider');
             active.terminalState = 'failed';
           } else if (active.protocol === 'responses' && type === 'response.completed' && active.responsesToolCallsPending) {
             active.terminalState = 'waiting';
@@ -668,7 +706,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
             active.terminalState = mapping.terminalState;
             observedTerminal = true;
             if (mapping.errorCode) {
-              active.terminalError = providerError(
+              active.terminalError = this.providerError(
                 active.evidenceScope,
                 'observe',
                 mapping.errorCode,
@@ -685,7 +723,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         yield raw;
       }
       if (!active.terminalState) {
-        const error = providerError(active.evidenceScope, 'observe', 'stream.missing-terminal', 'RCC v3 SSE stream ended without a terminal event', 'protocol');
+        const error = this.providerError(active.evidenceScope, 'observe', 'stream.missing-terminal', 'RCC v3 SSE stream ended without a terminal event', 'protocol');
         active.terminalError = error;
         active.terminalState = 'failed';
         throw new ProviderAdapterError({ code: error.code, category: 'protocol', phase: 'observe', message: error.message, scope: input });
@@ -706,7 +744,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       if (observedTerminal && !active.terminalError) return;
       if (!active.terminalError) {
         const errorMessage = cause instanceof Error ? cause.message : 'RCC v3 stream failed';
-        active.terminalError = providerError(active.evidenceScope, 'observe', 'transport.failure', errorMessage, 'transport');
+        active.terminalError = this.providerError(active.evidenceScope, 'observe', 'transport.failure', errorMessage, 'transport');
         active.terminalState = 'failed';
       }
       failed = true;
@@ -723,7 +761,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         active.streamDone = true;
         if (!active.terminalState && !active.terminalError) {
           active.terminalState = 'blocked';
-          active.terminalError = providerError(
+          active.terminalError = this.providerError(
             active.evidenceScope,
             'observe',
             'observe.consumer-returned-early',
@@ -747,11 +785,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
           route: active.route,
           model: active.model,
         });
-        return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'continue', ref: 'rcc-v3.settle' } };
+        return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'continue', ref: 'rcc-v3.settle' } };
       }
-      const error = providerError(scope, 'stop', 'stop.after-terminal', 'RCC v3 stream is already settled', 'runtime');
+      const error = this.providerError(scope, 'stop', 'stop.after-terminal', 'RCC v3 stream is already settled', 'runtime');
       const ref = await this.writeEvidence(scope, 'stop-rejected', error);
-      return { ...input, status: 'rejected', receivedAt: new Date().toISOString(), evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: OWNER, nextAction: { kind: 'continue' } };
+      return { ...input, status: 'rejected', receivedAt: new Date().toISOString(), evidenceRefs: [ref], error: { ...error, evidenceRefs: [ref] }, ownerId: this.owner, nextAction: { kind: 'continue' } };
     }
     active.stopRequested = true;
     active.stopCause = new DOMException(input.reason, 'AbortError');
@@ -768,7 +806,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       route: active.route,
       model: active.model,
     });
-    return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'wait', ref: 'rcc-v3.settle' } };
+    return { ...input, status: 'accepted', receivedAt: new Date().toISOString(), evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'wait', ref: 'rcc-v3.settle' } };
   }
 
   async settle(input: ProviderSettleInput): Promise<ProviderSettlement> {
@@ -786,13 +824,13 @@ export class RccV3ProviderTransport implements ProviderTransport {
       model: active.model,
     });
     if (state === 'waiting' && active.streamDone) {
-      const error = await this.persistError(scope, providerError(
+      const error = await this.persistError(scope, this.providerError(
         scope,
         'settle',
         'capability.continuation-unavailable',
         'RCC v3 cannot continue a fully observed waiting execution: resume and submit are unsupported',
         'capability',
-        { kind: 'recover', ref: OWNER },
+        { kind: 'recover', ref: this.owner },
       ));
       // The stream is fully observed and RCC v3 cannot continue it, so the
       // execution record is finished: release it exactly like the other
@@ -807,8 +845,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
         resourceRelease: { state: 'released', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
         error,
-        ownerId: OWNER,
-        nextAction: { kind: 'recover' as const, ref: OWNER },
+        ownerId: this.owner,
+        nextAction: { kind: 'recover' as const, ref: this.owner },
       };
     }
     if (state === 'waiting') {
@@ -818,12 +856,12 @@ export class RccV3ProviderTransport implements ProviderTransport {
         evidenceRefs: [evidenceRef],
         resourceRelease: { state: active.resourceReleased ? 'released' : 'pending', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
-        ownerId: OWNER,
+        ownerId: this.owner,
         nextAction: { kind: 'continue', ref: 'rcc-v3.observe' },
       };
     }
     if (state === 'blocked' || state === 'failed' || state === 'unknown') {
-      const error = await this.persistError(scope, active.terminalError ?? providerError(
+      const error = await this.persistError(scope, active.terminalError ?? this.providerError(
         scope,
         'settle',
         'settle.requires-recovery',
@@ -839,8 +877,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
         resourceRelease: { state: 'released', evidenceRefs: [evidenceRef] },
         persistence: { state: 'pending', evidenceRefs: [evidenceRef] },
         error,
-        ownerId: OWNER,
-        nextAction: { kind: 'recover' as const, ref: OWNER },
+        ownerId: this.owner,
+        nextAction: { kind: 'recover' as const, ref: this.owner },
       };
     }
     const settlement: ProviderSettlement = {
@@ -856,8 +894,8 @@ export class RccV3ProviderTransport implements ProviderTransport {
 
   async close(binding: ProviderBinding): Promise<ProviderCloseResult> {
     if (this.executions.size > 0) {
-      const ref = errorEvidence({ organId: id('organ', 'provider-adapter') }, 'close-pending');
-      return { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'pending', evidenceRefs: [ref], ownerId: OWNER, nextAction: { kind: 'continue', ref: 'rcc-v3.settle' } };
+      const ref = this.errorEvidence({ organId: id('organ', 'provider-adapter') }, 'close-pending');
+      return { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'pending', evidenceRefs: [ref], ownerId: this.owner, nextAction: { kind: 'continue', ref: 'rcc-v3.settle' } };
     }
     const scope = { organId: id('organ', 'provider-adapter') };
     const ref = await this.writeEvidence(scope, 'close', { endpoint: this.options.baseUrl, bindingId: binding.bindingId });
@@ -894,8 +932,23 @@ export class RccV3ProviderTransport implements ProviderTransport {
     return response;
   }
 
+  private errorEvidence(scope: ScopeRef, label: string): EvidenceRef {
+    return errorEvidence(scope, label, this.owner, this.scheme);
+  }
+
+  private providerError(
+    scope: ScopeRef,
+    phase: ProviderError['phase'],
+    code: string,
+    message: string,
+    category: ProviderError['category'] = 'transport',
+    nextAction?: ProviderError['nextAction'],
+  ): ProviderError {
+    return providerError(scope, phase, code, message, this.owner, this.scheme, category, nextAction);
+  }
+
   private async writeEvidence(scope: ScopeRef, type: string, content: unknown): Promise<EvidenceRef> {
-    return this.options.evidence.write({ scope, kind: 'external', type, locator: `rcc-v3://${type}`, content });
+    return this.options.evidence.write({ scope, kind: 'external', type, locator: `${this.scheme}://${type}`, content });
   }
 
   private async persistError(scope: ScopeRef, error: ProviderError): Promise<ProviderError> {
@@ -931,7 +984,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       const raw = (await response.text()).slice(0, this.maxEventBytes);
       if (response.status < 200 || response.status >= 300) {
         const ref = await this.writeEvidence(scope, 'probe-health', { status: response.status, body: raw });
-        const error = providerError(scope, 'probe', `health.http.${response.status}`, `RCC v3 health returned HTTP ${response.status}`, 'provider');
+        const error = this.providerError(scope, 'probe', `health.http.${response.status}`, `RCC v3 health returned HTTP ${response.status}`, 'provider');
         return { ok: false, state: 'not-ready', evidence: ref, error: { ...error, evidenceRefs: [ref] }, version: 'rcc-v3' };
       }
       let value: Record<string, unknown>;
@@ -939,19 +992,19 @@ export class RccV3ProviderTransport implements ProviderTransport {
         value = readRecord(JSON.parse(raw));
       } catch (cause) {
         const ref = await this.writeEvidence(scope, 'probe-health', { status: response.status, body: raw });
-        const error = providerError(scope, 'probe', 'health.invalid-json', cause instanceof Error ? cause.message : 'RCC v3 health response is not valid JSON', 'protocol');
+        const error = this.providerError(scope, 'probe', 'health.invalid-json', cause instanceof Error ? cause.message : 'RCC v3 health response is not valid JSON', 'protocol');
         return { ok: false, state: 'not-ready', evidence: ref, error: { ...error, evidenceRefs: [ref] }, version: 'rcc-v3' };
       }
       const version = typeof value.version === 'string' && value.version.trim() ? value.version : 'rcc-v3';
       const ref = await this.writeEvidence(scope, 'probe-health', { status: response.status, body: value });
       if (value.status !== 'ok') {
-        const error = providerError(scope, 'probe', 'health.not-ready', 'RCC v3 health endpoint did not report status ok', 'provider');
+        const error = this.providerError(scope, 'probe', 'health.not-ready', 'RCC v3 health endpoint did not report status ok', 'provider');
         return { ok: false, state: 'not-ready', evidence: ref, error: { ...error, evidenceRefs: [ref] }, version };
       }
       return { ok: true, state: 'ready', evidence: ref, version };
     } catch (cause) {
       const ref = await this.writeEvidence(scope, 'probe-health', { error: cause instanceof Error ? cause.message : 'RCC v3 health probe failed' });
-      const error = providerError(scope, 'probe', 'health.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 health probe failed', 'transport');
+      const error = this.providerError(scope, 'probe', 'health.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 health probe failed', 'transport');
       return { ok: false, state: 'dependency-missing', evidence: ref, error: { ...error, evidenceRefs: [ref] }, version: 'rcc-v3' };
     }
   }
@@ -966,7 +1019,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       const raw = (await response.text()).slice(0, this.maxEventBytes);
       if (response.status < 200 || response.status >= 300) {
         const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status });
-        const error = providerError(scope, 'probe', `models.http.${response.status}`, `RCC v3 model discovery returned HTTP ${response.status}`, 'provider');
+        const error = this.providerError(scope, 'probe', `models.http.${response.status}`, `RCC v3 model discovery returned HTTP ${response.status}`, 'provider');
         return { ok: false, state: 'degraded', evidence: ref, models: [], error: { ...error, evidenceRefs: [ref] } };
       }
       let value: Record<string, unknown>;
@@ -974,7 +1027,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
         value = readRecord(JSON.parse(raw));
       } catch (cause) {
         const ref = await this.writeEvidence(scope, 'probe-models', { status: response.status, invalid: 'json' });
-        const error = providerError(scope, 'probe', 'models.invalid-json', cause instanceof Error ? cause.message : 'RCC v3 model discovery response is not valid JSON', 'protocol');
+        const error = this.providerError(scope, 'probe', 'models.invalid-json', cause instanceof Error ? cause.message : 'RCC v3 model discovery response is not valid JSON', 'protocol');
         return { ok: false, state: 'degraded', evidence: ref, models: [], error: { ...error, evidenceRefs: [ref] } };
       }
       const candidates = Array.isArray(value.data) ? value.data : Array.isArray(value.models) ? value.models : [];
@@ -987,7 +1040,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
       return { ok: true, state: 'ready', evidence: ref, models };
     } catch (cause) {
       const ref = await this.writeEvidence(scope, 'probe-models', { error: cause instanceof Error ? cause.message : 'transport-failure' });
-      const error = providerError(scope, 'probe', 'models.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 model discovery transport failed', 'transport');
+      const error = this.providerError(scope, 'probe', 'models.transport-failure', cause instanceof Error ? cause.message : 'RCC v3 model discovery transport failed', 'transport');
       return { ok: false, state: 'degraded', evidence: ref, models: [], error: { ...error, evidenceRefs: [ref] } };
     }
   }
@@ -1019,6 +1072,7 @@ function readiness(
   checkedAt: string,
   expiresAt: string,
   evidenceRefs: readonly EvidenceRef[],
+  owner: string,
   failure?: ProviderError,
   version?: string,
 ): ProviderReadiness {
@@ -1032,7 +1086,7 @@ function readiness(
     checkedAt,
     expiresAt,
     evidenceRefs,
-    ...(failure ? { failure: { ...failure, evidenceRefs }, ownerId: OWNER, nextAction: failure.nextAction } : {}),
+    ...(failure ? { failure: { ...failure, evidenceRefs }, ownerId: owner, nextAction: failure.nextAction } : {}),
   };
 }
 

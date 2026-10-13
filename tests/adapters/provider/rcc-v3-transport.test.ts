@@ -19,6 +19,7 @@ import {
   type V3ProviderFetch,
   type V3ProviderFetchInit,
   type V3ProviderFetchResponse,
+  type ProviderTransportSource,
   createV3ProviderHttpTransport,
 } from '../../../packages/adapters/provider/src/index.js';
 
@@ -89,6 +90,42 @@ test('RCC v3 transport recovers a harness servertool shell call as the owned web
   assert.equal(toolCall?.toolId, 'web.search');
   assert.deepEqual(toolCall?.arguments, { maxResults: 10, query: 'Rust async runtime tokio' });
   assert.equal(events.at(-1)?.terminalState, 'waiting');
+});
+
+test('G HTTP source preserves protocol calls without RCC normalization', async () => {
+  const record = {
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'function_call',
+      call_id: 'call-http-source',
+      name: 'exec_command',
+      arguments: JSON.stringify({ cmd: "routecodex servertool run web_search --input-json '{\"maxResults\":5,\"query\":\"http source\"}'" }),
+    },
+  };
+  const stream = () => chunks([
+    `data: ${JSON.stringify({ type: 'response.created', response: { id: 'response-http-source' } })}\n\n`,
+    `data: ${JSON.stringify(record)}\n\n`,
+    `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'response-http-source' } })}\n\n`,
+  ]);
+  const tools = [{ toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } }];
+
+  const http = adapter(async () => response(stream()), binding, new ResponsesProviderCodec(), 'http');
+  await http.adapter.start({ ...startInput(), tools });
+  const httpEvents = [];
+  for await (const event of http.adapter.observe(execution)) httpEvents.push(event);
+  const httpToolCall = httpEvents.find((event) => event.kind === 'tool')?.toolCall;
+  assert.equal(httpToolCall?.callId, 'call-http-source');
+  // The direct HTTP source keeps the provider's real function-call semantics.
+  assert.equal(httpToolCall?.toolId, 'exec_command');
+  assert.deepEqual(httpToolCall?.arguments, { cmd: "routecodex servertool run web_search --input-json '{\"maxResults\":5,\"query\":\"http source\"}'" });
+
+  const rcc = adapter(async () => response(stream()));
+  await rcc.adapter.start({ ...startInput(), tools });
+  const rccEvents = [];
+  for await (const event of rcc.adapter.observe(execution)) rccEvents.push(event);
+  // The RCC source keeps the existing servertool normalization.
+  assert.equal(rccEvents.find((event) => event.kind === 'tool')?.toolCall?.toolId, 'web.search');
 });
 
 test('RCC v3 Responses submit opens a second stream bound to the completed tool call', async () => {
@@ -227,7 +264,7 @@ function anthropicAdapter(fetch: V3ProviderFetch) {
   return adapter(fetch, provider, new AnthropicProviderCodec(4096));
 }
 
-function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec()) {
+function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec(), source: ProviderTransportSource = 'rcc') {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const writes: ProviderEvidenceWrite[] = [];
   const contentByRef = new Map<EvidenceRef, Uint8Array>();
@@ -255,6 +292,7 @@ function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCode
     baseUrl: 'http://127.0.0.1:4444',
     evidence: transportEvidence,
     fetch: async (url, init) => fetch(url, init),
+    source,
   });
   return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes, evidence: transportEvidence };
 }
