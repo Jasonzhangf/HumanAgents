@@ -11,33 +11,56 @@ import {
   type CheckpointReceiptRelationshipV1,
   type CheckpointTimeAuthorityMetadata,
   type EvidenceRef,
+  type JournalCommitRef,
   type RawAsset,
   type ScopeRef,
+  type TaskRuntimeIncarnation,
+  type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
+import type {
+  NativeSegmentSaveSourceV2,
+  OriginalBusinessTurnRef,
+  ResumedTurnSegmentOpened,
+} from '../../../packages/contracts/src/active-turn-segments.js';
 import {
   adoptedChildAdoptionCommitIdV1,
   adoptedChildDeliveryCommitIdV1,
+  assertSegmentCheckpointRelationshipV2,
+  buildSemanticContextViewBodyV2,
   buildSemanticContextViewBodyV1,
+  buildSemanticHistoryPublicationBodyV2,
   buildSemanticHistoryPublicationBodyV1,
   contextViewIdentityV1,
+  contextViewIntentDigestV2,
   contextViewIntentDigestV1,
   historyPublicationIdentityV1,
+  historyPublicationIntentDigestV2,
   historyPublicationIntentDigestV1,
   projectAdmittedTurnIdentityV1,
+  projectCommittedSemanticCheckpointV2,
   projectCommittedSemanticCheckpointV1,
   projectSemanticAssetBodyV1,
   SemanticHistoryError,
   semanticAssetDigestV1,
   semanticAssetIdV1,
   validateAcceptedSemanticViewInputV1,
+  validateAcceptedSemanticViewInputV2,
+  validateSemanticContextViewBody,
   validateSemanticContextViewBodyV1,
+  validateSemanticContextViewBodyV2,
   validateSemanticHistoryExactLookupV1,
+  validateSemanticHistoryPublicationBody,
   validateSemanticHistoryPublicationBodyV1,
+  validateSemanticHistoryPublicationBodyV2,
   validateSemanticPhaseReceiptV1,
+  type AcceptedSemanticViewInputV2,
   type AcceptedSemanticViewInputV1,
   type AdoptedChildSourceV1,
+  type AdoptedChildSourceV2,
   type SemanticPhaseReceiptV1,
 } from '../../../packages/runtime/src/context/semantic-history.js';
+import { commitSemanticContextViewV2 } from '../../../packages/runtime/src/checkpoints/semantic-history.js';
+import type { SemanticHistoryPersistencePort } from '../../../packages/runtime/src/checkpoints/ports.js';
 
 const scope: ScopeRef = {
   organId: id('organ', 'organ-1'),
@@ -179,6 +202,139 @@ async function acceptedInput(
       recoveryStateRef: 'recovery-state-1',
       recoveryResponsibilityRef: 'recovery-owner-1',
       unresolvedOperationRefs: ['operation-1'],
+      laterErrorRefs: [],
+    },
+  };
+}
+
+const segmentAssignment: WorkAssignment = {
+  assignmentId: 'assignment-1',
+  taskId: scope.taskId!,
+  pipelineNodeId: 'node-1',
+  attempt: 1,
+  executionEpoch: 3,
+  inputRevision: 1,
+  objective: 'continue the original business turn',
+  targetRefs: [],
+  expectedOutputRefs: [],
+  acceptanceCriteriaDigest: 'sha256:segment-acceptance',
+  successCriteria: ['segment work is accepted'],
+  failureCriteria: [],
+  incompleteCriteria: [],
+  requiredCapabilities: [],
+  mergeGate: 'not-required',
+};
+
+const segmentIncarnation: TaskRuntimeIncarnation = {
+  runtimeId: 'runtime-2',
+  generation: 2,
+  agentInstanceId: 'agent-2',
+  roleId: 'execution',
+  taskId: scope.taskId!,
+  assignmentId: 'assignment-1',
+  executionEpoch: 4,
+};
+
+const bindingCommitRef: JournalCommitRef = {
+  commitId: 'active-turn:turn-1:binding',
+  journalSeq: 1,
+  recordDigest: `sha256:${'1'.repeat(64)}`,
+};
+
+const openedCommitRef: JournalCommitRef = {
+  commitId: 'active-turn-segment:segment-1:segment-opened',
+  journalSeq: 2,
+  recordDigest: `sha256:${'2'.repeat(64)}`,
+};
+
+function originalBusinessTurnRef(): OriginalBusinessTurnRef {
+  return {
+    businessTurnId: 'turn-1',
+    bindingCommitRef,
+    execution: { runtimeId: 'runtime-1', executionEpoch: 3 },
+  };
+}
+
+function resumedSegmentOpened(overrides: Partial<ResumedTurnSegmentOpened> = {}): ResumedTurnSegmentOpened {
+  const businessTurnRef = originalBusinessTurnRef();
+  return {
+    kind: 'segment-opened',
+    segmentId: 'segment-1',
+    businessTurnRef,
+    predecessor: {
+      segmentId: 'turn-1',
+      recoveryAssetsReceiptRef: 'humanagent://recovery-assets/v2/predecessor',
+    },
+    binding: {
+      businessTurnRef,
+      assignment: segmentAssignment,
+      execution: { runtimeId: 'runtime-2', executionEpoch: 4 },
+      incarnation: segmentIncarnation,
+      scope,
+    },
+    authorityCommitRef: { commitId: 'authority:segment-1', journalSeq: 3, recordDigest: `sha256:${'3'.repeat(64)}` },
+    businessRegistrationCommitRef: { commitId: 'registration:segment-1', journalSeq: 4, recordDigest: `sha256:${'4'.repeat(64)}` },
+    requestRef: 'segment-request-1',
+    inputIdentity: { requestRef: 'segment-request-1', digest: `sha256:${'5'.repeat(64)}` },
+    ...overrides,
+  };
+}
+
+function segmentSource(overrides: Partial<NativeSegmentSaveSourceV2> = {}): NativeSegmentSaveSourceV2 {
+  return {
+    originalAdmittedTurn: admittedTurn(),
+    originalBusinessTurnRef: originalBusinessTurnRef(),
+    opened: resumedSegmentOpened(),
+    openedCommitRef,
+    ...overrides,
+  };
+}
+
+async function segmentCheckpointRelationship(
+  journalSeq = 8,
+  recordDigest: `sha256:${string}` = `sha256:${'b'.repeat(64)}`,
+): Promise<CheckpointReceiptRelationshipV1> {
+  const value = checkpoint({
+    id: id('checkpoint', 'checkpoint-segment-1'),
+    seq: 2,
+    previousCheckpointId: id('checkpoint', 'checkpoint-1'),
+    executionEpoch: 4,
+  });
+  return await checkpointRelationship(value, journalSeq, recordDigest);
+}
+
+function adoptedChildV2(overrides: Partial<AdoptedChildSourceV2> = {}): AdoptedChildSourceV2 {
+  return {
+    ...adoptedChild(),
+    segmentId: 'segment-1',
+    ...overrides,
+  };
+}
+
+async function acceptedInputV2(
+  relationship: CheckpointReceiptRelationshipV1,
+  children: readonly AdoptedChildSourceV2[] = [],
+): Promise<AcceptedSemanticViewInputV2> {
+  return {
+    version: 2,
+    segment: segmentSource(),
+    checkpoint: relationship,
+    acceptance: {
+      ownerId: 'runtime-context-owner',
+      acceptanceRef: 'acceptance-segment-1',
+      sourceEvidenceRefs: [evidence('segment-source-1')],
+    },
+    semantics: {
+      goal: 'Continue the resumed segment.',
+      actions: 'Bound the current segment checkpoint.',
+      result: 'The v2 accepted input is defined.',
+      nextStep: 'Commit the exact v2 view and publication records.',
+    },
+    adoptedChildren: children,
+    recovery: {
+      recoveryStateRef: 'segment-recovery-state-1',
+      recoveryResponsibilityRef: 'segment-recovery-owner-1',
+      unresolvedOperationRefs: ['segment-operation-1'],
       laterErrorRefs: [],
     },
   };
@@ -566,5 +722,241 @@ test('phase receipt and exact lookup validation reject wrong scope, sequence, di
       publicationReceiptRef: 'humanagent://journal-record/v1/not-a-receipt',
     }),
     'semantic-history.lookup.receipt-invalid',
+  );
+});
+
+test('v2 accepted input binds the current segment epoch and separates recovery from the original admission', async () => {
+  const relationship = await segmentCheckpointRelationship();
+  const accepted = await acceptedInputV2(relationship, [adoptedChildV2()]);
+  await validateAcceptedSemanticViewInputV2(accepted);
+
+  // The v2 branch never rewrites the original immutable admission bytes.
+  assert.deepEqual(accepted.segment.originalAdmittedTurn, admittedTurn());
+  assert.deepEqual(
+    projectAdmittedTurnIdentityV1(accepted.segment.originalAdmittedTurn),
+    projectAdmittedTurnIdentityV1(admittedTurn()),
+  );
+
+  // The v1 gate still rejects the E2 checkpoint against the E1 admission.
+  const v1Accepted = await acceptedInput(relationship, []);
+  await rejectsCode(
+    () => validateAcceptedSemanticViewInputV1(v1Accepted),
+    'semantic-history.relationship.epoch-mismatch',
+  );
+
+  // A checkpoint at the original epoch is not a current-segment checkpoint.
+  const originalEpochCheckpoint = await checkpointRelationship(checkpoint({
+    id: id('checkpoint', 'checkpoint-segment-original-epoch'),
+    seq: 2,
+    previousCheckpointId: id('checkpoint', 'checkpoint-1'),
+    executionEpoch: 3,
+  }));
+  await rejectsCode(
+    () => validateAcceptedSemanticViewInputV2({ ...accepted, checkpoint: originalEpochCheckpoint }),
+    'semantic-history.relationship.epoch-mismatch',
+  );
+
+  // A foreign segment scope is rejected before any phase write.
+  const foreignScope: ScopeRef = { ...scope, cycleId: id('cycle', 'cycle-2') };
+  const foreignOpened = resumedSegmentOpened({
+    binding: { ...resumedSegmentOpened().binding, scope: foreignScope },
+  });
+  await rejectsCode(
+    () => validateAcceptedSemanticViewInputV2({
+      ...accepted,
+      segment: segmentSource({ opened: foreignOpened }),
+    }),
+    'semantic-history.segment.scope-mismatch',
+  );
+
+  // A child adopted in a different segment is rejected by the exact selector.
+  await rejectsCode(
+    () => validateAcceptedSemanticViewInputV2({
+      ...accepted,
+      adoptedChildren: [adoptedChildV2({ segmentId: 'segment-2' })],
+    }),
+    'semantic-history.adoption.segment-mismatch',
+  );
+
+  // The current recovery facts are read from the segment source, not the admission.
+  assert.notEqual(accepted.recovery.recoveryStateRef, accepted.segment.originalAdmittedTurn.recoveryStateRef);
+});
+
+test('v2 view body uses the v2 domain, binds the segment source, and is rejected by the v1 decoder', async () => {
+  const relationship = await segmentCheckpointRelationship();
+  const accepted = await acceptedInputV2(relationship, [adoptedChildV2()]);
+  const semanticDigest = await semanticAssetDigestV1(accepted.semantics);
+  const semanticAsset = {
+    assetId: semanticAssetIdV1(semanticDigest),
+    digest: semanticDigest,
+    locator: 'humanagent://asset/semantic-view-v2',
+    size: 128,
+  };
+  const body = await buildSemanticContextViewBodyV2({ accepted, semanticAsset, committedAt, timeAuthority });
+  assert.equal(body.version, 2);
+  assert.deepEqual(body.segment, accepted.segment);
+  await validateSemanticContextViewBodyV2(body);
+  await validateSemanticContextViewBody(body);
+
+  const turn = projectAdmittedTurnIdentityV1(accepted.segment.originalAdmittedTurn);
+  assert.equal(body.identity, await contextViewIdentityV1({ turn, checkpoint: relationship.checkpoint }));
+
+  await rejectsCode(() => validateSemanticContextViewBodyV1(body), 'semantic-history.input.invalid');
+
+  const intent = await contextViewIntentDigestV2({
+    segment: accepted.segment,
+    checkpoint: relationship,
+    acceptance: accepted.acceptance,
+    semanticAsset,
+    adoptedChildren: accepted.adoptedChildren,
+    evidenceRefs: accepted.acceptance.sourceEvidenceRefs,
+    recovery: accepted.recovery,
+  });
+  const repeat = await contextViewIntentDigestV2({
+    segment: accepted.segment,
+    checkpoint: relationship,
+    acceptance: accepted.acceptance,
+    semanticAsset,
+    adoptedChildren: accepted.adoptedChildren,
+    evidenceRefs: accepted.acceptance.sourceEvidenceRefs,
+    recovery: accepted.recovery,
+  });
+  assert.equal(intent, repeat);
+  const changedSource = await contextViewIntentDigestV2({
+    segment: segmentSource({ openedCommitRef: { ...openedCommitRef, journalSeq: 9 } }),
+    checkpoint: relationship,
+    acceptance: accepted.acceptance,
+    semanticAsset,
+    adoptedChildren: accepted.adoptedChildren,
+    evidenceRefs: accepted.acceptance.sourceEvidenceRefs,
+    recovery: accepted.recovery,
+  });
+  assert.notEqual(intent, changedSource);
+
+  // A v1 body must not be accepted by the v2 decoder.
+  const v1Relationship = await checkpointRelationship(checkpoint());
+  const v1Accepted = await acceptedInput(v1Relationship, []);
+  const v1Body = await buildSemanticContextViewBodyV1({ accepted: v1Accepted, semanticAsset, committedAt, timeAuthority });
+  await rejectsCode(() => validateSemanticContextViewBodyV2(v1Body), 'semantic-history.input.invalid');
+});
+
+test('v2 publication body binds the exact context-view receipt and the segment source', async () => {
+  const relationship = await segmentCheckpointRelationship();
+  const accepted = await acceptedInputV2(relationship, []);
+  const turn = projectAdmittedTurnIdentityV1(accepted.segment.originalAdmittedTurn);
+  const viewIdentity = await contextViewIdentityV1({ turn, checkpoint: relationship.checkpoint });
+  const viewReceipt = await phaseReceipt('context-view', viewIdentity, 11, `sha256:${'d'.repeat(64)}`);
+  const publication = await buildSemanticHistoryPublicationBodyV2({
+    turn,
+    segment: accepted.segment,
+    checkpoint: relationship,
+    contextView: { identity: viewIdentity, receipt: viewReceipt },
+    committedAt,
+    timeAuthority,
+  });
+  assert.equal(publication.version, 2);
+  await validateSemanticHistoryPublicationBodyV2(publication);
+  await validateSemanticHistoryPublicationBody(publication);
+  await rejectsCode(() => validateSemanticHistoryPublicationBodyV1(publication), 'semantic-history.input.invalid');
+
+  const wrongReceipt = { ...viewReceipt, phase: 'history-publication' as const };
+  await rejectsCode(
+    () => buildSemanticHistoryPublicationBodyV2({
+      turn,
+      segment: accepted.segment,
+      checkpoint: relationship,
+      contextView: { identity: viewIdentity, receipt: wrongReceipt },
+      committedAt,
+      timeAuthority,
+    }),
+    'semantic-history.phase.mismatch',
+  );
+});
+
+test('v2 committed projection carries the segment source and keeps phase receipts distinct', async () => {
+  const relationship = await segmentCheckpointRelationship();
+  const accepted = await acceptedInputV2(relationship, [adoptedChildV2()]);
+  const turn = projectAdmittedTurnIdentityV1(accepted.segment.originalAdmittedTurn);
+  const viewIdentity = await contextViewIdentityV1({ turn, checkpoint: relationship.checkpoint });
+  const publicationIdentity = await historyPublicationIdentityV1({ turn, checkpoint: relationship.checkpoint });
+  const viewReceipt = await phaseReceipt('context-view', viewIdentity, 11, `sha256:${'d'.repeat(64)}`);
+  const publicationReceipt = await phaseReceipt('history-publication', publicationIdentity, 12, `sha256:${'e'.repeat(64)}`);
+  const committed = await projectCommittedSemanticCheckpointV2({
+    turn,
+    segment: accepted.segment,
+    checkpoint: relationship,
+    contextView: viewReceipt,
+    historyPublication: publicationReceipt,
+    semantics: accepted.semantics,
+    evidenceRefs: accepted.acceptance.sourceEvidenceRefs,
+    adoptedChildren: accepted.adoptedChildren,
+    recovery: accepted.recovery,
+  });
+  assert.equal(committed.version, 2);
+  assert.deepEqual(committed.segment, accepted.segment);
+  assert.equal(committed.description, relationship.checkpoint.summary);
+  assert.equal(committed.time, relationship.envelope.committedAt);
+  assert.notEqual(committed.save.contextView.journalReceiptRef, committed.save.historyPublication.journalReceiptRef);
+
+  await rejectsCode(
+    () => projectCommittedSemanticCheckpointV2({
+      turn,
+      segment: accepted.segment,
+      checkpoint: relationship,
+      contextView: viewReceipt,
+      historyPublication: {
+        ...publicationReceipt,
+        journalSeq: viewReceipt.journalSeq,
+        journalReceiptRef: viewReceipt.journalReceiptRef,
+        recordDigest: viewReceipt.recordDigest,
+      },
+      semantics: accepted.semantics,
+      evidenceRefs: accepted.acceptance.sourceEvidenceRefs,
+      adoptedChildren: accepted.adoptedChildren,
+      recovery: accepted.recovery,
+    }),
+    'semantic-history.phase.shared-receipt',
+  );
+});
+
+test('v2 commit consumer accepts the E1 admission with an E2 segment checkpoint and rejects missing or wrong sources', async () => {
+  const relationship = await segmentCheckpointRelationship();
+  const accepted = await acceptedInputV2(relationship, [adoptedChildV2()]);
+  const turn = projectAdmittedTurnIdentityV1(accepted.segment.originalAdmittedTurn);
+  const viewIdentity = await contextViewIdentityV1({ turn, checkpoint: relationship.checkpoint });
+  const receipt = await phaseReceipt('context-view', viewIdentity, 11, `sha256:${'d'.repeat(64)}`);
+  let captured: AcceptedSemanticViewInputV2 | undefined;
+  const port: SemanticHistoryPersistencePort = {
+    commitContextView: async () => { throw new Error('v1 commit must not run'); },
+    commitContextViewV2: async (input) => { captured = input.accepted; return receipt; },
+    commitHistoryPublication: async () => { throw new Error('v1 commit must not run'); },
+    readContextView: async () => null,
+    readCommittedSemanticCheckpoint: async () => null,
+  };
+  const committed = await commitSemanticContextViewV2({ port, accepted });
+  assert.equal(committed.journalReceiptRef, receipt.journalReceiptRef);
+  assert.deepEqual(captured, accepted);
+  assert.deepEqual(captured!.segment.originalAdmittedTurn, admittedTurn());
+
+  const originalEpochCheckpoint = await checkpointRelationship(checkpoint({
+    id: id('checkpoint', 'checkpoint-segment-original-epoch'),
+    seq: 2,
+    previousCheckpointId: id('checkpoint', 'checkpoint-1'),
+    executionEpoch: 3,
+  }));
+  await rejectsCode(
+    () => commitSemanticContextViewV2({ port, accepted: { ...accepted, checkpoint: originalEpochCheckpoint } }),
+    'semantic-history.relationship.epoch-mismatch',
+  );
+
+  const missingV2Port: SemanticHistoryPersistencePort = {
+    commitContextView: async () => receipt,
+    commitHistoryPublication: async () => receipt,
+    readContextView: async () => null,
+    readCommittedSemanticCheckpoint: async () => null,
+  };
+  await rejectsCode(
+    () => commitSemanticContextViewV2({ port: missingV2Port, accepted }),
+    'semantic-history.port.v2-unavailable',
   );
 });

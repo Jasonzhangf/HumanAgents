@@ -13,10 +13,15 @@ import {
   type CheckpointReceiptRelationshipV1,
   type CheckpointTimeAuthorityMetadata,
   type EvidenceRef,
+  type JournalCommitRef,
   type RawAsset,
   type RecoveryHoldFacts,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
+import {
+  validateNativeSegmentSaveSourceV2,
+  type NativeSegmentSaveSourceV2,
+} from '../../../contracts/src/active-turn-segments.js';
 import { isCanonicalInstant } from '../../../contracts/src/time.js';
 import { activeTurnCommitId } from './active-turn-journal.js';
 
@@ -227,6 +232,14 @@ function assertAdmittedTurnIdentityV1(value: unknown, label = 'turn'): asserts v
   assertNonEmptyString(value.permissionRevision, `${label}.permissionRevision`);
 }
 
+function assertNativeSegmentSaveSourceV2(input: unknown, label: string): asserts input is NativeSegmentSaveSourceV2 {
+  try {
+    validateNativeSegmentSaveSourceV2(input);
+  } catch (error) {
+    fail('semantic-history.segment.invalid', error instanceof Error ? error.message : `${label} is invalid`);
+  }
+}
+
 function assertSemanticPhaseReceiptV1(
   value: unknown,
   expected?: { readonly phase?: SemanticPhase; readonly identity?: string },
@@ -292,6 +305,22 @@ function assertAdoptedChildSourceV1(value: unknown, label = 'adoptedChildren ent
   }
 }
 
+function assertAdoptedChildSourceV2(value: unknown, label = 'adoptedChildren entry'): asserts value is AdoptedChildSourceV2 {
+  assertPlainObject(value, label);
+  assertExactKeys(
+    value,
+    [
+      'parentTurn', 'invocationId', 'childTurnId', 'deliverySeq', 'adoptionCommitId',
+      'deliveryCommitId', 'kind', 'refinedDelivery', 'preCallCheckpointRef', 'segmentId',
+    ],
+    ['postReviewCheckpointRef'],
+    label,
+  );
+  const { segmentId, ...v1 } = value;
+  assertNonEmptyString(segmentId, `${label}.segmentId`);
+  assertAdoptedChildSourceV1(v1, label);
+}
+
 function sameAdmittedTurnIdentity(left: AdmittedTurnIdentity, right: AdmittedTurnIdentity): boolean {
   return left.turnId === right.turnId
     && left.workAssignmentRef === right.workAssignmentRef
@@ -342,6 +371,19 @@ function admittedTurnIdentityTuple(turn: AdmittedTurnIdentity): readonly unknown
     turn.executionEpoch,
     turn.runtimeBindingRef,
     turn.permissionRevision,
+  ];
+}
+
+function journalCommitRefTuple(ref: JournalCommitRef): readonly unknown[] {
+  return [ref.commitId, ref.journalSeq, ref.recordDigest];
+}
+
+function nativeSegmentSaveSourceTuple(source: NativeSegmentSaveSourceV2): readonly unknown[] {
+  return [
+    admittedTurnIdentityTuple(projectAdmittedTurnIdentityV1(source.originalAdmittedTurn)),
+    canonicalJsonStringify(source.originalBusinessTurnRef),
+    canonicalJsonStringify(source.opened),
+    journalCommitRefTuple(source.openedCommitRef),
   ];
 }
 
@@ -413,6 +455,10 @@ function adoptedChildTuple(child: AdoptedChildSourceV1): readonly unknown[] {
     child.preCallCheckpointRef,
     child.postReviewCheckpointRef ?? null,
   ];
+}
+
+function adoptedChildTupleV2(child: AdoptedChildSourceV2): readonly unknown[] {
+  return [child.segmentId, ...adoptedChildTuple(child)];
 }
 
 function recoveryTuple(recovery: SemanticHistoryRecoveryV1): readonly unknown[] {
@@ -493,6 +539,15 @@ export interface AdoptedChildSourceV1 {
   readonly postReviewCheckpointRef?: string;
 }
 
+/**
+ * Resumed-segment child adoption. It reuses the v1 durable delivery/adoption
+ * selectors and adds the exact segment selector the child record lives in. It
+ * never copies the child raw or creates a second adoption store.
+ */
+export interface AdoptedChildSourceV2 extends AdoptedChildSourceV1 {
+  readonly segmentId: string;
+}
+
 export interface AcceptedSemanticViewInputV1 {
   readonly version: 1;
   readonly admittedTurn: AdmittedTurn;
@@ -502,6 +557,24 @@ export interface AcceptedSemanticViewInputV1 {
   readonly adoptedChildren: readonly AdoptedChildSourceV1[];
   readonly recovery: SemanticHistoryRecoveryV1;
 }
+
+/**
+ * Accepted view for a resumed execution segment. It keeps the original
+ * immutable admission inside the segment source and binds the current
+ * segment's checkpoint. The current recovery facts are read from the segment
+ * source; they are not required to equal the original admission recovery state.
+ */
+export interface AcceptedSemanticViewInputV2 {
+  readonly version: 2;
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly acceptance: SemanticViewAcceptanceV1;
+  readonly semantics: FourPartSemanticViewV1;
+  readonly adoptedChildren: readonly AdoptedChildSourceV2[];
+  readonly recovery: SemanticHistoryRecoveryV1;
+}
+
+export type AcceptedSemanticViewInput = AcceptedSemanticViewInputV1 | AcceptedSemanticViewInputV2;
 
 export interface SemanticHistoryKeyInputV1 {
   readonly turn: AdmittedTurnIdentity;
@@ -524,6 +597,16 @@ export interface SemanticContextViewIntentInputV1 {
   readonly recovery: SemanticHistoryRecoveryV1;
 }
 
+export interface SemanticContextViewIntentInputV2 {
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly acceptance: SemanticViewAcceptanceV1;
+  readonly semanticAsset: SemanticAssetDescriptorV1;
+  readonly adoptedChildren: readonly AdoptedChildSourceV2[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly recovery: SemanticHistoryRecoveryV1;
+}
+
 export interface SemanticContextViewBodyV1 {
   readonly kind: 'native-semantic-context-view';
   readonly version: 1;
@@ -540,8 +623,34 @@ export interface SemanticContextViewBodyV1 {
   readonly recovery: SemanticHistoryRecoveryV1;
 }
 
+export interface SemanticContextViewBodyV2 {
+  readonly kind: 'native-semantic-context-view';
+  readonly version: 2;
+  readonly identity: SemanticContextViewIdentityV1;
+  readonly intentDigest: SemanticHistoryDigestV1;
+  readonly committedAt: CanonicalUtcInstant;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly acceptance: SemanticViewAcceptanceV1;
+  readonly semanticAsset: SemanticAssetDescriptorV1;
+  readonly adoptedChildren: readonly AdoptedChildSourceV2[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly recovery: SemanticHistoryRecoveryV1;
+}
+
+export type SemanticContextViewBody = SemanticContextViewBodyV1 | SemanticContextViewBodyV2;
+
 export interface SemanticContextViewBodyInputV1 {
   readonly accepted: AcceptedSemanticViewInputV1;
+  readonly semanticAsset: SemanticAssetDescriptorV1;
+  readonly committedAt: CanonicalUtcInstant;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+}
+
+export interface SemanticContextViewBodyInputV2 {
+  readonly accepted: AcceptedSemanticViewInputV2;
   readonly semanticAsset: SemanticAssetDescriptorV1;
   readonly committedAt: CanonicalUtcInstant;
   readonly timeAuthority: CheckpointTimeAuthorityMetadata;
@@ -566,6 +675,16 @@ export interface SemanticHistoryPublicationIntentInputV1 {
   };
 }
 
+export interface SemanticHistoryPublicationIntentInputV2 {
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly contextView: {
+    readonly identity: SemanticContextViewIdentityV1;
+    readonly receipt: SemanticPhaseReceiptV1;
+  };
+}
+
 export interface SemanticHistoryPublicationBodyV1 {
   readonly kind: 'native-semantic-history-publication';
   readonly version: 1;
@@ -581,8 +700,38 @@ export interface SemanticHistoryPublicationBodyV1 {
   };
 }
 
+export interface SemanticHistoryPublicationBodyV2 {
+  readonly kind: 'native-semantic-history-publication';
+  readonly version: 2;
+  readonly identity: SemanticHistoryPublicationIdentityV1;
+  readonly intentDigest: SemanticHistoryDigestV1;
+  readonly committedAt: CanonicalUtcInstant;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly contextView: {
+    readonly identity: SemanticContextViewIdentityV1;
+    readonly receipt: SemanticPhaseReceiptV1;
+  };
+}
+
+export type SemanticHistoryPublicationBody = SemanticHistoryPublicationBodyV1 | SemanticHistoryPublicationBodyV2;
+
 export interface SemanticHistoryPublicationBodyInputV1 {
   readonly turn: AdmittedTurnIdentity;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly contextView: {
+    readonly identity: SemanticContextViewIdentityV1;
+    readonly receipt: SemanticPhaseReceiptV1;
+  };
+  readonly committedAt: CanonicalUtcInstant;
+  readonly timeAuthority: CheckpointTimeAuthorityMetadata;
+}
+
+export interface SemanticHistoryPublicationBodyInputV2 {
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
   readonly checkpoint: CheckpointReceiptRelationshipV1;
   readonly contextView: {
     readonly identity: SemanticContextViewIdentityV1;
@@ -616,6 +765,27 @@ export interface CommittedSemanticCheckpointV1 {
   readonly recovery: SemanticHistoryRecoveryV1;
 }
 
+export interface CommittedSemanticCheckpointV2 {
+  readonly version: 2;
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly scope: ScopeRef;
+  readonly nativeCommitIdentity: CheckpointCommitIdentityV2;
+  readonly time: CanonicalUtcInstant;
+  readonly description: string;
+  readonly semantics: FourPartSemanticViewV1;
+  readonly save: {
+    readonly checkpoint: CheckpointReceiptRelationshipV1;
+    readonly contextView: SemanticPhaseReceiptV1;
+    readonly historyPublication: SemanticPhaseReceiptV1;
+  };
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly adoptedChildren: readonly AdoptedChildSourceV2[];
+  readonly recovery: SemanticHistoryRecoveryV1;
+}
+
+export type CommittedSemanticCheckpoint = CommittedSemanticCheckpointV1 | CommittedSemanticCheckpointV2;
+
 export interface CommittedSemanticCheckpointInputV1 {
   readonly turn: AdmittedTurnIdentity;
   readonly checkpoint: CheckpointReceiptRelationshipV1;
@@ -624,6 +794,18 @@ export interface CommittedSemanticCheckpointInputV1 {
   readonly semantics: FourPartSemanticViewV1;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly adoptedChildren: readonly AdoptedChildSourceV1[];
+  readonly recovery: SemanticHistoryRecoveryV1;
+}
+
+export interface CommittedSemanticCheckpointInputV2 {
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly contextView: SemanticPhaseReceiptV1;
+  readonly historyPublication: SemanticPhaseReceiptV1;
+  readonly semantics: FourPartSemanticViewV1;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly adoptedChildren: readonly AdoptedChildSourceV2[];
   readonly recovery: SemanticHistoryRecoveryV1;
 }
 
@@ -763,6 +945,61 @@ export async function historyPublicationIntentDigestV1(
   return await sha256Digest(canonicalJsonStringify(tuple));
 }
 
+export async function contextViewIntentDigestV2(
+  input: SemanticContextViewIntentInputV2,
+): Promise<SemanticHistoryDigestV1> {
+  assertNativeSegmentSaveSourceV2(input.segment, 'viewIntent.segment');
+  await assertSegmentCheckpointRelationshipV2(input.segment, input.checkpoint);
+  assertSemanticViewAcceptanceV1(input.acceptance, 'viewIntent.acceptance');
+  assertSemanticAssetDescriptorV1(input.semanticAsset, 'viewIntent.semanticAsset');
+  assertEvidenceRefsV1(input.evidenceRefs, 'viewIntent.evidenceRefs');
+  assertSemanticHistoryRecoveryV1(input.recovery, 'viewIntent.recovery');
+  if (!Array.isArray(input.adoptedChildren)) fail('semantic-history.input.invalid', 'viewIntent.adoptedChildren must be an array');
+  for (const child of input.adoptedChildren) assertAdoptedChildSourceV2(child, 'viewIntent.adoptedChildren entry');
+  const turn = projectAdmittedTurnIdentityV1(input.segment.originalAdmittedTurn);
+  const key = await semanticHistoryKeyV1({ turn, checkpoint: input.checkpoint.checkpoint });
+  const tuple = [
+    'humanagent.semantic-context-view-intent.v2',
+    semanticHistoryKeyTupleV1(key),
+    nativeSegmentSaveSourceTuple(input.segment),
+    acceptanceTuple(input.acceptance),
+    assetDescriptorTuple(input.semanticAsset),
+    checkpointBindingTuple(input.checkpoint),
+    input.adoptedChildren.map(adoptedChildTupleV2),
+    input.evidenceRefs.map(evidenceRefTuple),
+    recoveryTuple(input.recovery),
+  ];
+  return await sha256Digest(canonicalJsonStringify(tuple));
+}
+
+export async function historyPublicationIntentDigestV2(
+  input: SemanticHistoryPublicationIntentInputV2,
+): Promise<SemanticHistoryDigestV1> {
+  assertAdmittedTurnIdentityV1(input.turn, 'publicationIntent.turn');
+  assertNativeSegmentSaveSourceV2(input.segment, 'publicationIntent.segment');
+  const originalTurn = projectAdmittedTurnIdentityV1(input.segment.originalAdmittedTurn);
+  if (!sameAdmittedTurnIdentity(input.turn, originalTurn)) {
+    fail('semantic-history.segment.turn-mismatch', 'publication intent turn does not match the segment original admission');
+  }
+  await assertSegmentCheckpointRelationshipV2(input.segment, input.checkpoint);
+  assertPlainObject(input.contextView, 'publicationIntent.contextView');
+  assertExactKeys(input.contextView, ['identity', 'receipt'], [], 'publicationIntent.contextView');
+  assertNonEmptyString(input.contextView.identity, 'publicationIntent.contextView.identity');
+  assertSemanticPhaseReceiptV1(input.contextView.receipt, { phase: 'context-view' });
+  if (input.contextView.receipt.commitIdentity !== input.contextView.identity) {
+    fail('semantic-history.phase.identity-mismatch', 'publicationIntent contextView receipt identity does not match its identity');
+  }
+  const key = await semanticHistoryKeyV1({ turn: input.turn, checkpoint: input.checkpoint.checkpoint });
+  const tuple = [
+    'humanagent.semantic-history-publication-intent.v2',
+    semanticHistoryKeyTupleV1(key),
+    nativeSegmentSaveSourceTuple(input.segment),
+    checkpointBindingTuple(input.checkpoint),
+    contextViewReceiptTuple(input.contextView),
+  ];
+  return await sha256Digest(canonicalJsonStringify(tuple));
+}
+
 export async function buildSemanticContextViewBodyV1(
   input: SemanticContextViewBodyInputV1,
 ): Promise<SemanticContextViewBodyV1> {
@@ -844,9 +1081,101 @@ export async function buildSemanticHistoryPublicationBodyV1(
   };
 }
 
-export async function assertTurnCheckpointRelationshipV1(
+export async function buildSemanticContextViewBodyV2(
+  input: SemanticContextViewBodyInputV2,
+): Promise<SemanticContextViewBodyV2> {
+  await validateAcceptedSemanticViewInputV2(input.accepted);
+  assertSemanticAssetDescriptorV1(input.semanticAsset, 'viewBody.semanticAsset');
+  assertCanonicalInstantV1(input.committedAt, 'viewBody.committedAt');
+  assertTimeAuthorityV1(input.timeAuthority, 'viewBody.timeAuthority');
+  const turn = projectAdmittedTurnIdentityV1(input.accepted.segment.originalAdmittedTurn);
+  const identity = await contextViewIdentityV1({ turn, checkpoint: input.accepted.checkpoint.checkpoint });
+  const evidenceRefs = input.accepted.acceptance.sourceEvidenceRefs;
+  const intentDigest = await contextViewIntentDigestV2({
+    segment: input.accepted.segment,
+    checkpoint: input.accepted.checkpoint,
+    acceptance: input.accepted.acceptance,
+    semanticAsset: input.semanticAsset,
+    adoptedChildren: input.accepted.adoptedChildren,
+    evidenceRefs,
+    recovery: input.accepted.recovery,
+  });
+  return {
+    kind: 'native-semantic-context-view',
+    version: 2,
+    identity,
+    intentDigest,
+    committedAt: input.committedAt,
+    timeAuthority: {
+      source: input.timeAuthority.source,
+      owner: input.timeAuthority.owner,
+      authorityRef: input.timeAuthority.authorityRef,
+    },
+    turn,
+    segment: input.accepted.segment,
+    checkpoint: input.accepted.checkpoint,
+    acceptance: {
+      ownerId: input.accepted.acceptance.ownerId,
+      acceptanceRef: input.accepted.acceptance.acceptanceRef,
+      sourceEvidenceRefs: [...input.accepted.acceptance.sourceEvidenceRefs],
+    },
+    semanticAsset: { ...input.semanticAsset },
+    adoptedChildren: [...input.accepted.adoptedChildren],
+    evidenceRefs: [...evidenceRefs],
+    recovery: {
+      recoveryStateRef: input.accepted.recovery.recoveryStateRef,
+      recoveryResponsibilityRef: input.accepted.recovery.recoveryResponsibilityRef,
+      unresolvedOperationRefs: [...input.accepted.recovery.unresolvedOperationRefs],
+      ...(input.accepted.recovery.firstErrorRef === undefined ? {} : { firstErrorRef: input.accepted.recovery.firstErrorRef }),
+      laterErrorRefs: [...input.accepted.recovery.laterErrorRefs],
+    },
+  };
+}
+
+export async function buildSemanticHistoryPublicationBodyV2(
+  input: SemanticHistoryPublicationBodyInputV2,
+): Promise<SemanticHistoryPublicationBodyV2> {
+  assertAdmittedTurnIdentityV1(input.turn, 'publicationBody.turn');
+  assertNativeSegmentSaveSourceV2(input.segment, 'publicationBody.segment');
+  const originalTurn = projectAdmittedTurnIdentityV1(input.segment.originalAdmittedTurn);
+  if (!sameAdmittedTurnIdentity(input.turn, originalTurn)) {
+    fail('semantic-history.segment.turn-mismatch', 'publication body turn does not match the segment original admission');
+  }
+  await assertSegmentCheckpointRelationshipV2(input.segment, input.checkpoint);
+  assertCanonicalInstantV1(input.committedAt, 'publicationBody.committedAt');
+  assertTimeAuthorityV1(input.timeAuthority, 'publicationBody.timeAuthority');
+  const identity = await historyPublicationIdentityV1({ turn: input.turn, checkpoint: input.checkpoint.checkpoint });
+  const intentDigest = await historyPublicationIntentDigestV2({
+    turn: input.turn,
+    segment: input.segment,
+    checkpoint: input.checkpoint,
+    contextView: input.contextView,
+  });
+  return {
+    kind: 'native-semantic-history-publication',
+    version: 2,
+    identity,
+    intentDigest,
+    committedAt: input.committedAt,
+    timeAuthority: {
+      source: input.timeAuthority.source,
+      owner: input.timeAuthority.owner,
+      authorityRef: input.timeAuthority.authorityRef,
+    },
+    turn: input.turn,
+    segment: input.segment,
+    checkpoint: input.checkpoint,
+    contextView: {
+      identity: input.contextView.identity,
+      receipt: { ...input.contextView.receipt, timeAuthority: { ...input.contextView.receipt.timeAuthority } },
+    },
+  };
+}
+
+async function assertCheckpointRelationshipAgainstEpoch(
   turn: AdmittedTurnIdentity,
   relationship: CheckpointReceiptRelationshipV1,
+  expectedExecutionEpoch: number,
 ): Promise<void> {
   assertAdmittedTurnIdentityV1(turn, 'turn');
   assertPlainObject(relationship, 'checkpoint relationship');
@@ -873,8 +1202,8 @@ export async function assertTurnCheckpointRelationshipV1(
     || checkpoint.cycleId.value !== turn.cycleRef.value) {
     fail('semantic-history.relationship.cycle-mismatch', 'checkpoint cycle does not match the admitted turn cycle');
   }
-  if (checkpoint.executionEpoch !== turn.executionEpoch) {
-    fail('semantic-history.relationship.epoch-mismatch', 'checkpoint execution epoch does not match the admitted turn');
+  if (checkpoint.executionEpoch !== expectedExecutionEpoch) {
+    fail('semantic-history.relationship.epoch-mismatch', 'checkpoint execution epoch does not match the expected execution epoch');
   }
   if (checkpoint.directiveRevision !== turn.directiveRevision) {
     fail('semantic-history.relationship.directive-mismatch', 'checkpoint directive revision does not match the admitted turn');
@@ -882,6 +1211,56 @@ export async function assertTurnCheckpointRelationshipV1(
   const recomputed = await checkpointCommitIdentityV2({ checkpoint });
   if (relationship.envelope.identity !== recomputed) {
     fail('semantic-history.relationship.identity-mismatch', 'checkpoint identity cannot be recomputed from its id and scope');
+  }
+}
+
+export async function assertTurnCheckpointRelationshipV1(
+  turn: AdmittedTurnIdentity,
+  relationship: CheckpointReceiptRelationshipV1,
+): Promise<void> {
+  await assertCheckpointRelationshipAgainstEpoch(turn, relationship, turn.executionEpoch);
+}
+
+/**
+ * Current-segment checkpoint relationship. Scope, task, cycle and directive
+ * reuse the neutral v1 checks. The execution epoch is the opened segment
+ * binding epoch, not the original admission epoch.
+ */
+export async function assertSegmentCheckpointRelationshipV2(
+  segment: NativeSegmentSaveSourceV2,
+  relationship: CheckpointReceiptRelationshipV1,
+): Promise<void> {
+  assertNativeSegmentSaveSourceV2(segment, 'segment source');
+  const original = segment.originalAdmittedTurn;
+  const opened = segment.opened;
+  const turn = projectAdmittedTurnIdentityV1(original);
+  if (opened.businessTurnRef.businessTurnId !== segment.originalBusinessTurnRef.businessTurnId) {
+    fail('semantic-history.segment.business-turn-mismatch', 'opened segment does not reference the original business turn');
+  }
+  if (!sameScopeRef(opened.binding.scope, original.scopeRef)) {
+    fail('semantic-history.segment.scope-mismatch', 'opened segment scope does not match the original admission scope');
+  }
+  if (opened.binding.assignment.taskId.value !== original.taskRef.value) {
+    fail('semantic-history.segment.task-mismatch', 'opened segment assignment task does not match the original admission task');
+  }
+  if (opened.binding.assignment.executionEpoch !== original.executionEpoch) {
+    fail('semantic-history.segment.assignment-epoch-mismatch', 'opened segment assignment must keep the original admission execution epoch');
+  }
+  if (opened.binding.execution.executionEpoch <= original.executionEpoch) {
+    fail('semantic-history.segment.epoch-not-advanced', 'opened segment execution epoch must advance past the original admission');
+  }
+  await assertCheckpointRelationshipAgainstEpoch(turn, relationship, opened.binding.execution.executionEpoch);
+}
+
+export function assertSegmentOriginalTurnIdentityV2(
+  segment: NativeSegmentSaveSourceV2,
+  turn: AdmittedTurnIdentity,
+): void {
+  assertAdmittedTurnIdentityV1(turn, 'turn');
+  assertNativeSegmentSaveSourceV2(segment, 'segment source');
+  const originalTurn = projectAdmittedTurnIdentityV1(segment.originalAdmittedTurn);
+  if (!sameAdmittedTurnIdentity(turn, originalTurn)) {
+    fail('semantic-history.segment.turn-mismatch', 'turn does not match the segment original admission');
   }
 }
 
@@ -914,6 +1293,33 @@ export async function validateAcceptedSemanticViewInputV1(input: AcceptedSemanti
   if (input.recovery.recoveryStateRef !== input.admittedTurn.recoveryStateRef) {
     fail('semantic-history.recovery.state-mismatch', 'recovery state reference does not match the admitted turn');
   }
+}
+
+export async function validateAcceptedSemanticViewInputV2(input: AcceptedSemanticViewInputV2): Promise<void> {
+  assertPlainObject(input, 'accepted semantic view input v2');
+  assertExactKeys(
+    input,
+    ['version', 'segment', 'checkpoint', 'acceptance', 'semantics', 'adoptedChildren', 'recovery'],
+    [],
+    'accepted semantic view input v2',
+  );
+  if (input.version !== 2) fail('semantic-history.input.version', 'accepted semantic view input version must be 2');
+  assertNativeSegmentSaveSourceV2(input.segment, 'accepted semantic view input segment');
+  await assertSegmentCheckpointRelationshipV2(input.segment, input.checkpoint);
+  assertSemanticViewAcceptanceV1(input.acceptance);
+  assertFourPartSemanticViewV1(input.semantics);
+  if (!Array.isArray(input.adoptedChildren)) fail('semantic-history.input.invalid', 'adoptedChildren must be an array');
+  const turn = projectAdmittedTurnIdentityV1(input.segment.originalAdmittedTurn);
+  for (const child of input.adoptedChildren) {
+    assertAdoptedChildSourceV2(child);
+    if (!sameAdmittedTurnIdentity(child.parentTurn, turn)) {
+      fail('semantic-history.adoption.parent-mismatch', 'adopted child parent turn does not match the original admission');
+    }
+    if (child.segmentId !== input.segment.opened.segmentId) {
+      fail('semantic-history.adoption.segment-mismatch', 'adopted child segment selector does not match the opened segment');
+    }
+  }
+  assertSemanticHistoryRecoveryV1(input.recovery);
 }
 
 export function validateSemanticHistoryExactLookupV1(input: SemanticHistoryExactLookupV1): void {
@@ -984,6 +1390,67 @@ export async function validateSemanticContextViewBodyV1(value: unknown): Promise
   if (value.intentDigest !== intentDigest) fail('semantic-history.body.intent-mismatch', 'context view body intent digest does not match its facts');
 }
 
+export async function validateSemanticContextViewBodyV2(value: unknown): Promise<void> {
+  assertPlainObject(value, 'context view body');
+  assertExactKeys(
+    value,
+    ['kind', 'version', 'identity', 'intentDigest', 'committedAt', 'timeAuthority', 'turn', 'segment', 'checkpoint',
+      'acceptance', 'semanticAsset', 'adoptedChildren', 'evidenceRefs', 'recovery'],
+    [],
+    'context view body',
+  );
+  if (value.kind !== 'native-semantic-context-view') fail('semantic-history.body.kind', 'context view body kind is invalid');
+  if (value.version !== 2) fail('semantic-history.body.version', 'context view body version must be 2');
+  assertAdmittedTurnIdentityV1(value.turn, 'context view body turn');
+  assertNativeSegmentSaveSourceV2(value.segment, 'context view body segment');
+  const originalTurn = projectAdmittedTurnIdentityV1(value.segment.originalAdmittedTurn);
+  if (!sameAdmittedTurnIdentity(value.turn, originalTurn)) {
+    fail('semantic-history.segment.turn-mismatch', 'context view body turn does not match the segment original admission');
+  }
+  assertSemanticViewAcceptanceV1(value.acceptance, 'context view body acceptance');
+  assertSemanticAssetDescriptorV1(value.semanticAsset, 'context view body semanticAsset');
+  assertEvidenceRefsV1(value.evidenceRefs, 'context view body evidenceRefs');
+  assertSemanticHistoryRecoveryV1(value.recovery, 'context view body recovery');
+  assertCanonicalInstantV1(value.committedAt, 'context view body committedAt');
+  assertTimeAuthorityV1(value.timeAuthority, 'context view body timeAuthority');
+  assertSha256DigestV1(value.intentDigest, 'context view body intentDigest');
+  if (!Array.isArray(value.adoptedChildren)) fail('semantic-history.input.invalid', 'context view body adoptedChildren must be an array');
+  for (const child of value.adoptedChildren) {
+    assertAdoptedChildSourceV2(child, 'context view body adoptedChildren entry');
+    if (child.segmentId !== value.segment.opened.segmentId) {
+      fail('semantic-history.adoption.segment-mismatch', 'context view body adopted child segment selector does not match the opened segment');
+    }
+  }
+  const turn = value.turn as AdmittedTurnIdentity;
+  const relationship = value.checkpoint as CheckpointReceiptRelationshipV1;
+  await assertSegmentCheckpointRelationshipV2(value.segment, relationship);
+  const identity = await contextViewIdentityV1({ turn, checkpoint: relationship.checkpoint });
+  if (value.identity !== identity) fail('semantic-history.body.identity-mismatch', 'context view body identity does not match its turn and checkpoint');
+  const intentDigest = await contextViewIntentDigestV2({
+    segment: value.segment,
+    checkpoint: relationship,
+    acceptance: value.acceptance as SemanticViewAcceptanceV1,
+    semanticAsset: value.semanticAsset as SemanticAssetDescriptorV1,
+    adoptedChildren: value.adoptedChildren as readonly AdoptedChildSourceV2[],
+    evidenceRefs: value.evidenceRefs as readonly EvidenceRef[],
+    recovery: value.recovery as SemanticHistoryRecoveryV1,
+  });
+  if (value.intentDigest !== intentDigest) fail('semantic-history.body.intent-mismatch', 'context view body intent digest does not match its facts');
+}
+
+export async function validateSemanticContextViewBody(value: unknown): Promise<void> {
+  assertPlainObject(value, 'context view body');
+  if (value.version === 1) {
+    await validateSemanticContextViewBodyV1(value);
+    return;
+  }
+  if (value.version === 2) {
+    await validateSemanticContextViewBodyV2(value);
+    return;
+  }
+  fail('semantic-history.body.version', 'context view body version must be 1 or 2');
+}
+
 export async function validateSemanticHistoryPublicationBodyV1(value: unknown): Promise<void> {
   assertPlainObject(value, 'history publication body');
   assertExactKeys(
@@ -1015,6 +1482,62 @@ export async function validateSemanticHistoryPublicationBodyV1(value: unknown): 
   const contextView = value.contextView as SemanticHistoryPublicationBodyV1['contextView'];
   const intentDigest = await historyPublicationIntentDigestV1({ turn, checkpoint: relationship, contextView });
   if (value.intentDigest !== intentDigest) fail('semantic-history.body.intent-mismatch', 'history publication body intent digest does not match its facts');
+}
+
+export async function validateSemanticHistoryPublicationBodyV2(value: unknown): Promise<void> {
+  assertPlainObject(value, 'history publication body');
+  assertExactKeys(
+    value,
+    ['kind', 'version', 'identity', 'intentDigest', 'committedAt', 'timeAuthority', 'turn', 'segment', 'checkpoint', 'contextView'],
+    [],
+    'history publication body',
+  );
+  if (value.kind !== 'native-semantic-history-publication') {
+    fail('semantic-history.body.kind', 'history publication body kind is invalid');
+  }
+  if (value.version !== 2) fail('semantic-history.body.version', 'history publication body version must be 2');
+  assertAdmittedTurnIdentityV1(value.turn, 'history publication body turn');
+  assertNativeSegmentSaveSourceV2(value.segment, 'history publication body segment');
+  const originalTurn = projectAdmittedTurnIdentityV1(value.segment.originalAdmittedTurn);
+  if (!sameAdmittedTurnIdentity(value.turn, originalTurn)) {
+    fail('semantic-history.segment.turn-mismatch', 'history publication body turn does not match the segment original admission');
+  }
+  assertCanonicalInstantV1(value.committedAt, 'history publication body committedAt');
+  assertTimeAuthorityV1(value.timeAuthority, 'history publication body timeAuthority');
+  assertSha256DigestV1(value.intentDigest, 'history publication body intentDigest');
+  assertPlainObject(value.contextView, 'history publication body contextView');
+  assertExactKeys(value.contextView, ['identity', 'receipt'], [], 'history publication body contextView');
+  assertNonEmptyString(value.contextView.identity, 'history publication body contextView.identity');
+  assertSemanticPhaseReceiptV1(value.contextView.receipt, { phase: 'context-view' });
+  if (value.contextView.receipt.commitIdentity !== value.contextView.identity) {
+    fail('semantic-history.phase.identity-mismatch', 'history publication body contextView receipt identity does not match its identity');
+  }
+  const turn = value.turn as AdmittedTurnIdentity;
+  const relationship = value.checkpoint as CheckpointReceiptRelationshipV1;
+  await assertSegmentCheckpointRelationshipV2(value.segment, relationship);
+  const identity = await historyPublicationIdentityV1({ turn, checkpoint: relationship.checkpoint });
+  if (value.identity !== identity) fail('semantic-history.body.identity-mismatch', 'history publication body identity does not match its turn and checkpoint');
+  const contextView = value.contextView as SemanticHistoryPublicationBodyV2['contextView'];
+  const intentDigest = await historyPublicationIntentDigestV2({
+    turn,
+    segment: value.segment,
+    checkpoint: relationship,
+    contextView,
+  });
+  if (value.intentDigest !== intentDigest) fail('semantic-history.body.intent-mismatch', 'history publication body intent digest does not match its facts');
+}
+
+export async function validateSemanticHistoryPublicationBody(value: unknown): Promise<void> {
+  assertPlainObject(value, 'history publication body');
+  if (value.version === 1) {
+    await validateSemanticHistoryPublicationBodyV1(value);
+    return;
+  }
+  if (value.version === 2) {
+    await validateSemanticHistoryPublicationBodyV2(value);
+    return;
+  }
+  fail('semantic-history.body.version', 'history publication body version must be 1 or 2');
 }
 
 export async function projectCommittedSemanticCheckpointV1(
@@ -1053,6 +1576,80 @@ export async function projectCommittedSemanticCheckpointV1(
   return {
     version: 1,
     turn: input.turn,
+    scope: input.checkpoint.checkpoint.scope,
+    nativeCommitIdentity: input.checkpoint.envelope.identity,
+    time: input.checkpoint.envelope.committedAt,
+    description: input.checkpoint.checkpoint.summary,
+    semantics: {
+      goal: input.semantics.goal,
+      actions: input.semantics.actions,
+      result: input.semantics.result,
+      nextStep: input.semantics.nextStep,
+    },
+    save: {
+      checkpoint: input.checkpoint,
+      contextView: input.contextView,
+      historyPublication: input.historyPublication,
+    },
+    evidenceRefs: [...input.evidenceRefs],
+    adoptedChildren: [...input.adoptedChildren],
+    recovery: {
+      recoveryStateRef: input.recovery.recoveryStateRef,
+      recoveryResponsibilityRef: input.recovery.recoveryResponsibilityRef,
+      unresolvedOperationRefs: [...input.recovery.unresolvedOperationRefs],
+      ...(input.recovery.firstErrorRef === undefined ? {} : { firstErrorRef: input.recovery.firstErrorRef }),
+      laterErrorRefs: [...input.recovery.laterErrorRefs],
+    },
+  };
+}
+
+export async function projectCommittedSemanticCheckpointV2(
+  input: CommittedSemanticCheckpointInputV2,
+): Promise<CommittedSemanticCheckpointV2> {
+  assertPlainObject(input, 'committed semantic checkpoint input v2');
+  assertAdmittedTurnIdentityV1(input.turn, 'committed checkpoint turn');
+  assertNativeSegmentSaveSourceV2(input.segment, 'committed checkpoint segment');
+  const originalTurn = projectAdmittedTurnIdentityV1(input.segment.originalAdmittedTurn);
+  if (!sameAdmittedTurnIdentity(input.turn, originalTurn)) {
+    fail('semantic-history.segment.turn-mismatch', 'committed checkpoint turn does not match the segment original admission');
+  }
+  assertFourPartSemanticViewV1(input.semantics, 'committed checkpoint semantics');
+  assertEvidenceRefsV1(input.evidenceRefs, 'committed checkpoint evidenceRefs');
+  assertSemanticHistoryRecoveryV1(input.recovery, 'committed checkpoint recovery');
+  if (!Array.isArray(input.adoptedChildren)) fail('semantic-history.input.invalid', 'committed checkpoint adoptedChildren must be an array');
+  for (const child of input.adoptedChildren) {
+    assertAdoptedChildSourceV2(child, 'committed checkpoint adoptedChildren entry');
+    if (child.segmentId !== input.segment.opened.segmentId) {
+      fail('semantic-history.adoption.segment-mismatch', 'committed checkpoint adopted child segment selector does not match the opened segment');
+    }
+  }
+  await assertSegmentCheckpointRelationshipV2(input.segment, input.checkpoint);
+  const expectedViewIdentity = await contextViewIdentityV1({
+    turn: input.turn,
+    checkpoint: input.checkpoint.checkpoint,
+  });
+  const expectedPublicationIdentity = await historyPublicationIdentityV1({
+    turn: input.turn,
+    checkpoint: input.checkpoint.checkpoint,
+  });
+  await validateSemanticPhaseReceiptV1(input.contextView, {
+    phase: 'context-view',
+    identity: expectedViewIdentity,
+    scope: input.checkpoint.checkpoint.scope,
+  });
+  await validateSemanticPhaseReceiptV1(input.historyPublication, {
+    phase: 'history-publication',
+    identity: expectedPublicationIdentity,
+    scope: input.checkpoint.checkpoint.scope,
+  });
+  if (input.contextView.journalReceiptRef === input.historyPublication.journalReceiptRef
+    || input.contextView.journalSeq === input.historyPublication.journalSeq) {
+    fail('semantic-history.phase.shared-receipt', 'context-view and history-publication must be different durable records');
+  }
+  return {
+    version: 2,
+    turn: input.turn,
+    segment: input.segment,
     scope: input.checkpoint.checkpoint.scope,
     nativeCommitIdentity: input.checkpoint.envelope.identity,
     time: input.checkpoint.envelope.committedAt,

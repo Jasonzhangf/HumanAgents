@@ -6,12 +6,18 @@ import type {
   EvidenceRef,
   ScopeRef,
 } from '../../../contracts/src/index.js';
+import type { NativeSegmentSaveSourceV2 } from '../../../contracts/src/active-turn-segments.js';
 import type {
+  AcceptedSemanticViewInputV2,
   AcceptedSemanticViewInputV1,
-  CommittedSemanticCheckpointV1,
+  CommittedSemanticCheckpoint,
   SemanticContextViewBodyV1,
+  SemanticContextViewBodyV2,
   SemanticContextViewIdentityV1,
   SemanticHistoryExactLookupV1,
+  SemanticHistoryPublicationBodyV1,
+  SemanticHistoryPublicationBodyV2,
+  SemanticHistoryPublicationIdentityV1,
   SemanticPhaseReceiptV1,
 } from '../context/semantic-history.js';
 import type { CheckpointClosureRecord, ClosureRecord } from './closure.js';
@@ -88,9 +94,25 @@ export interface SemanticContextViewCommitRequest {
   readonly accepted: AcceptedSemanticViewInputV1;
 }
 
+export interface SemanticContextViewCommitRequestV2 {
+  readonly ownerId: string;
+  readonly accepted: AcceptedSemanticViewInputV2;
+}
+
 export interface SemanticHistoryPublicationCommitRequest {
   readonly ownerId: string;
   readonly turn: AdmittedTurnIdentity;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly contextView: {
+    readonly identity: SemanticContextViewIdentityV1;
+    readonly receipt: SemanticPhaseReceiptV1;
+  };
+}
+
+export interface SemanticHistoryPublicationCommitRequestV2 {
+  readonly ownerId: string;
+  readonly turn: AdmittedTurnIdentity;
+  readonly segment: NativeSegmentSaveSourceV2;
   readonly checkpoint: CheckpointReceiptRelationshipV1;
   readonly contextView: {
     readonly identity: SemanticContextViewIdentityV1;
@@ -107,12 +129,30 @@ export interface SemanticHistoryPublicationCommitRequest {
  */
 export interface SemanticHistoryPersistencePort {
   commitContextView(input: SemanticContextViewCommitRequest): Promise<SemanticPhaseReceiptV1>;
+  /** Resumed-segment context-view commit. A supplies the actual segment source. */
+  commitContextViewV2?(input: SemanticContextViewCommitRequestV2): Promise<SemanticPhaseReceiptV1>;
   commitHistoryPublication(input: SemanticHistoryPublicationCommitRequest): Promise<SemanticPhaseReceiptV1>;
+  /** Resumed-segment history-publication commit. A supplies the actual segment source. */
+  commitHistoryPublicationV2?(input: SemanticHistoryPublicationCommitRequestV2): Promise<SemanticPhaseReceiptV1>;
   readContextView(input: {
     readonly scope: ScopeRef;
     readonly contextViewReceiptRef: string;
-  }): Promise<SemanticContextViewBodyV1 | null>;
+  }): Promise<SemanticContextViewBodyV1 | SemanticContextViewBodyV2 | null>;
+  /**
+   * Exact-by-identity context-view read used before the history publication
+   * receipt exists. It must use the Journal exact commit lookup and never the
+   * latest record.
+   */
+  readContextViewByIdentity?(input: {
+    readonly scope: ScopeRef;
+    readonly identity: SemanticContextViewIdentityV1;
+  }): Promise<SemanticContextViewBodyV1 | SemanticContextViewBodyV2 | null>;
+  /** Exact-by-identity history-publication read; never the latest record. */
+  readHistoryPublicationByIdentity?(input: {
+    readonly scope: ScopeRef;
+    readonly identity: SemanticHistoryPublicationIdentityV1;
+  }): Promise<SemanticHistoryPublicationBodyV1 | SemanticHistoryPublicationBodyV2 | null>;
   readCommittedSemanticCheckpoint(
     input: SemanticHistoryExactLookupV1,
-  ): Promise<CommittedSemanticCheckpointV1 | null>;
+  ): Promise<CommittedSemanticCheckpoint | null>;
 }
