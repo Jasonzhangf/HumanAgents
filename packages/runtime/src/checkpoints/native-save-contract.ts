@@ -14,7 +14,7 @@ import type {
 import {
   projectAdmittedTurnIdentityV1,
   type AcceptedSemanticViewInputV1,
-  type AdoptedChildSourceV1,
+  type AdoptedChildSourceV2,
   type FourPartSemanticViewV1,
   type SemanticHistoryExactLookupV1,
   type SemanticHistoryKeyInputV1,
@@ -137,7 +137,7 @@ export interface NativeSegmentContextViewSelectorsV2 {
   readonly source: NativeSegmentSaveSourceV2;
   readonly acceptance: SemanticViewAcceptanceV1;
   readonly semantics: FourPartSemanticViewV1;
-  readonly adoptedChildren: readonly AdoptedChildSourceV1[];
+  readonly adoptedChildren: readonly AdoptedChildSourceV2[];
   readonly recovery: SemanticHistoryRecoveryV1;
 }
 
