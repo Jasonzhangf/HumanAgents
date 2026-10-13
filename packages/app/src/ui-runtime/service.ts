@@ -2815,6 +2815,12 @@ export class UiRuntimeService {
         this.persistExplicitBrainState();
         return await this.explicitIntake.inspect(snapshot.interactionId);
       }
+      // A general answer ends before task matching or requirement recording.
+      if (interpreted.kind === 'answer') {
+        await this.explicitIntake.completeAnswer(snapshot.interactionId, interpreted.answer);
+        this.persistExplicitBrainState();
+        return await this.explicitIntake.inspect(snapshot.interactionId);
+      }
       const matched = interpreted.matchedTaskId === undefined
         ? undefined
         : this.coordinator.taskSnapshots().find((task) => task.taskId.value === interpreted.matchedTaskId);
