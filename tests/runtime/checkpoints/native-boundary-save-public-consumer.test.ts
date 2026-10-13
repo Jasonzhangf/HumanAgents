@@ -4,18 +4,31 @@ import test from 'node:test';
 
 import {
   id,
+  type AdmittedTurn,
   type AdmittedTurnIdentity,
   type Checkpoint,
   type DurablePhaseOutcome,
   type ScopeRef,
+  type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
+import type { JournalCommitRef } from '../../../packages/contracts/src/i2-history.js';
+import type { TaskRuntimeIncarnation } from '../../../packages/contracts/src/framework.js';
+import type {
+  NativeSegmentSaveSourceV2,
+  OriginalBusinessTurnRef,
+  ResumedTurnSegmentOpened,
+} from '../../../packages/contracts/src/active-turn-segments.js';
 import {
   createNativeBoundarySaveController,
 } from '../../../packages/runtime/src/checkpoints/boundary-save.js';
 import {
   NATIVE_SAVE_PHASES,
+  nativeSegmentSaveIntentDigestV2,
+  nativeSegmentSaveKeyDigestV2,
   type NativeSaveIntent,
+  type NativeSaveIntentV1,
   type NativeSaveKey,
+  type NativeSaveKeyV1,
   type NativeSavePhase,
   type NativeSavePhaseReceipt,
   type NativeSavePorts,
@@ -23,6 +36,8 @@ import {
   type NativeSaveProgressPort,
   type NativeSaveProgressReadback,
   type NativeSaveStagePort,
+  type NativeSegmentSaveIntentV2,
+  type NativeSegmentSaveKeyV2,
 } from '../../../packages/runtime/src/checkpoints/native-save-contract.js';
 
 const organ = id('organ', 'organ-a');
@@ -68,12 +83,12 @@ function checkpoint(index: 'a' | 'b'): Checkpoint {
   };
 }
 
-function key(index: 'a' | 'b'): NativeSaveKey {
+function key(index: 'a' | 'b'): NativeSaveKeyV1 {
   const checkpointRecord = checkpoint(index);
   return { turn: turnIdentity(index), boundaryId: `boundary-${index}`, checkpoint: { id: checkpointRecord.id, scope: checkpointRecord.scope } };
 }
 
-function intent(index: 'a' | 'b', inputIntentDigest = digest(index), firstErrorRef?: string): NativeSaveIntent {
+function intent(index: 'a' | 'b', inputIntentDigest = digest(index), firstErrorRef?: string): NativeSaveIntentV1 {
   const saveKey = key(index);
   return {
     key: saveKey,
@@ -87,8 +102,8 @@ function intent(index: 'a' | 'b', inputIntentDigest = digest(index), firstErrorR
     recoveryAssets: { turnId: saveKey.turn.turnId, boundaryId: saveKey.boundaryId, captureRef: `capture:${saveKey.boundaryId}` },
     checkpoint: { checkpoint: checkpoint(index), timeAuthority: TIME_AUTHORITY, previousCheckpointId: null, acceptedAt: COMMITTED_AT },
     closure: { closureId: `closure:${saveKey.boundaryId}`, checkpoint: saveKey.checkpoint, source: 'agent-tool', closureSummary: `closure:${saveKey.boundaryId}`, closureEvidenceRefs: [] },
-    contextView: { key: { turn: saveKey.turn, checkpoint: saveKey.checkpoint }, accepted: null as unknown as NativeSaveIntent['contextView']['accepted'] },
-    historyPublication: { key: { turn: saveKey.turn, checkpoint: saveKey.checkpoint }, exactLookup: null as unknown as NativeSaveIntent['historyPublication']['exactLookup'] },
+    contextView: { key: { turn: saveKey.turn, checkpoint: saveKey.checkpoint }, accepted: null as unknown as NativeSaveIntentV1['contextView']['accepted'] },
+    historyPublication: { key: { turn: saveKey.turn, checkpoint: saveKey.checkpoint }, exactLookup: null as unknown as NativeSaveIntentV1['historyPublication']['exactLookup'] },
   };
 }
 
@@ -332,6 +347,219 @@ test('S3: exact A recovery ignores a later B, rejects a conflicting intent, and 
   if (unknown.state !== 'hold') return;
   assert.equal(unknown.reason, 'progress-unknown');
   assert.equal(unknown.progress.firstErrorRef, 'error-original');
+});
+
+const segmentAdmittedTurn: AdmittedTurn = {
+  turnId: 'turn-segment',
+  workAssignmentRef: 'assignment-segment',
+  taskRef: task,
+  scopeRef: scope,
+  cycleRef: cycle,
+  inputRevision: 1,
+  directiveRevision: 1,
+  executionEpoch: 1,
+  runtimeBindingRef: 'runtime-binding-segment',
+  permissionRevision: 'permission-1',
+  admissionEvidenceRefs: [],
+  currentTurnRef: 'current-segment',
+  recoveryStateRef: 'recovery-segment',
+};
+
+const segmentAssignment: WorkAssignment = {
+  assignmentId: 'assignment-segment',
+  taskId: task,
+  pipelineNodeId: 'node-segment',
+  attempt: 1,
+  executionEpoch: 1,
+  inputRevision: 1,
+  objective: 'resume the same business turn on a new epoch',
+  targetRefs: [],
+  expectedOutputRefs: [],
+  acceptanceCriteriaDigest: digest('segment-criteria'),
+  successCriteria: ['resumed'],
+  failureCriteria: ['lost'],
+  incompleteCriteria: ['pending'],
+  requiredCapabilities: [],
+  mergeGate: 'not-required',
+};
+
+const segmentOriginalRef: OriginalBusinessTurnRef = {
+  businessTurnId: 'turn-segment',
+  bindingCommitRef: { commitId: 'binding-segment', journalSeq: 3, recordDigest: digest('binding-segment') },
+  execution: { runtimeId: 'runtime-segment', executionEpoch: 1 },
+};
+
+function segmentCheckpoint(epoch: number): Checkpoint {
+  return {
+    id: id('checkpoint', `segment-checkpoint-e${epoch}`),
+    scope,
+    cycleId: cycle,
+    seq: epoch,
+    previousCheckpointId: null,
+    directiveRevision: 1,
+    executionEpoch: epoch,
+    outcome: 'succeeded',
+    summary: `segment-save-e${epoch}`,
+    recoveryStateRef: { evidenceId: id('evidence', `segment-recovery-e${epoch}`), kind: 'execution', source: 'native-save-test', locator: `recovery://segment-e${epoch}`, scope },
+    evidenceRefs: [],
+    next: { kind: 'continue' },
+  };
+}
+
+function segmentOpened(segmentId: string, epoch: number): {
+  readonly opened: ResumedTurnSegmentOpened;
+  readonly openedCommitRef: JournalCommitRef;
+} {
+  const openedCommitRef: JournalCommitRef = { commitId: `opened-${segmentId}`, journalSeq: 10 + epoch, recordDigest: digest(`opened-${segmentId}`) };
+  const incarnation: TaskRuntimeIncarnation = {
+    runtimeId: 'runtime-segment',
+    generation: epoch,
+    agentInstanceId: `agent-instance-${epoch}`,
+    roleId: 'role-executor',
+    taskId: task,
+    assignmentId: 'assignment-segment',
+    executionEpoch: epoch,
+  };
+  const opened: ResumedTurnSegmentOpened = {
+    kind: 'segment-opened',
+    segmentId,
+    businessTurnRef: segmentOriginalRef,
+    predecessor: { segmentId: 'turn-segment', recoveryAssetsReceiptRef: 'receipt-initial' },
+    binding: {
+      businessTurnRef: segmentOriginalRef,
+      assignment: segmentAssignment,
+      execution: { runtimeId: 'runtime-segment', executionEpoch: epoch },
+      incarnation,
+      scope,
+    },
+    authorityCommitRef: { commitId: `grant-${segmentId}`, journalSeq: 5, recordDigest: digest(`grant-${segmentId}`) },
+    businessRegistrationCommitRef: { commitId: `registration-${segmentId}`, journalSeq: 6, recordDigest: digest(`registration-${segmentId}`) },
+    requestRef: `request-${segmentId}`,
+    inputIdentity: { requestRef: `request-${segmentId}`, digest: digest(`identity-${segmentId}`) },
+  };
+  return { opened, openedCommitRef };
+}
+
+function segmentSaveKey(
+  segment: { readonly opened: ResumedTurnSegmentOpened; readonly openedCommitRef: JournalCommitRef },
+  boundaryId: string,
+  checkpointRecord: Checkpoint,
+): NativeSegmentSaveKeyV2 {
+  const turn = segmentAdmittedTurn;
+  return {
+    version: 2,
+    turn: {
+      turnId: turn.turnId,
+      workAssignmentRef: turn.workAssignmentRef,
+      taskRef: turn.taskRef,
+      scopeRef: turn.scopeRef,
+      cycleRef: turn.cycleRef,
+      inputRevision: turn.inputRevision,
+      directiveRevision: turn.directiveRevision,
+      executionEpoch: turn.executionEpoch,
+      runtimeBindingRef: turn.runtimeBindingRef,
+      permissionRevision: turn.permissionRevision,
+    },
+    segment: { segmentId: segment.opened.segmentId, openedCommitRef: segment.openedCommitRef },
+    boundaryId,
+    checkpoint: { id: checkpointRecord.id, scope: checkpointRecord.scope },
+  };
+}
+
+function segmentIntentDraft(
+  segment: { readonly opened: ResumedTurnSegmentOpened; readonly openedCommitRef: JournalCommitRef },
+  boundaryId: string,
+  captureRef: string,
+): NativeSegmentSaveIntentV2 {
+  const checkpointRecord = segmentCheckpoint(segment.opened.binding.execution.executionEpoch);
+  const source: NativeSegmentSaveSourceV2 = {
+    originalAdmittedTurn: segmentAdmittedTurn,
+    originalBusinessTurnRef: segmentOriginalRef,
+    opened: segment.opened,
+    openedCommitRef: segment.openedCommitRef,
+  };
+  const saveKey = segmentSaveKey(segment, boundaryId, checkpointRecord);
+  return {
+    key: saveKey,
+    source,
+    ownerId: 'owner-segment',
+    recoveryResponsibilityRef: `recovery-responsibility:${boundaryId}`,
+    inputIntentDigest: '',
+    unresolvedOperationRefs: [],
+    rawTurnRefs: [`raw-turn:${segment.opened.segmentId}`],
+    laterErrorRefs: [],
+    recoveryAssets: { source, boundaryId, captureRef },
+    checkpoint: { checkpoint: checkpointRecord, timeAuthority: TIME_AUTHORITY, previousCheckpointId: null, acceptedAt: COMMITTED_AT },
+    closure: { closureId: `closure:${boundaryId}`, checkpoint: saveKey.checkpoint, source: 'agent-tool', closureSummary: `closure:${boundaryId}`, closureEvidenceRefs: [] },
+    contextView: {
+      source,
+      acceptance: { ownerId: 'owner-segment', acceptanceRef: `acceptance:${boundaryId}`, sourceEvidenceRefs: [] },
+      semantics: { goal: 'goal', actions: 'actions', result: 'result', nextStep: 'next' },
+      adoptedChildren: [],
+      recovery: { recoveryStateRef: 'recovery-segment', recoveryResponsibilityRef: `recovery-responsibility:${boundaryId}`, unresolvedOperationRefs: [], laterErrorRefs: [] },
+    },
+  };
+}
+
+async function signedSegmentIntent(
+  segment: { readonly opened: ResumedTurnSegmentOpened; readonly openedCommitRef: JournalCommitRef },
+  boundaryId: string,
+  captureRef: string,
+): Promise<NativeSegmentSaveIntentV2> {
+  const draft = segmentIntentDraft(segment, boundaryId, captureRef);
+  return { ...draft, inputIntentDigest: await nativeSegmentSaveIntentDigestV2(draft) };
+}
+
+test('P1: two current segments on one boundary keep distinct v2 keys, and a changed intent conflicts with zero phase writes', async () => {
+  const boundary = 'boundary-shared';
+  const s1 = segmentOpened('segment-e2', 2);
+  const s2 = segmentOpened('segment-e3', 3);
+
+  // Hold the checkpoint constant so only the segment identity can keep the two
+  // v2 keys distinct; a per-epoch checkpoint id would confound this assertion.
+  const sharedCheckpoint = segmentCheckpoint(2);
+  const k1 = segmentSaveKey(s1, boundary, sharedCheckpoint);
+  const k2 = segmentSaveKey(s2, boundary, sharedCheckpoint);
+  assert.equal(k1.boundaryId, k2.boundaryId, 'both segments share the same boundary string');
+  const k1Digest = await nativeSegmentSaveKeyDigestV2(k1);
+  const k2Digest = await nativeSegmentSaveKeyDigestV2(k2);
+  assert.equal(k1Digest === k2Digest, false, 'the segment id and opened commit keep the two v2 keys distinct');
+
+  const first = await signedSegmentIntent(s1, boundary, 'capture-1');
+  const changed = await signedSegmentIntent(s1, boundary, 'capture-changed');
+  assert.equal(first.key.segment.segmentId, changed.key.segment.segmentId);
+  assert.equal(first.inputIntentDigest === changed.inputIntentDigest, false, 'a changed pre-save input changes the intent digest');
+
+  const progress = new MemoryProgressPort();
+  const completed = await createNativeBoundarySaveController(progress, new StageStore().ports()).run(first);
+  assert.equal(completed.state, 'complete');
+
+  const conflictStore = new StageStore();
+  const conflict = await rejectionOf(() => createNativeBoundarySaveController(progress, conflictStore.ports()).run(changed));
+  assert.equal(conflict instanceof Error && conflict.message.includes('intent conflict'), true);
+  assert.equal(conflictStore.commitCalls.size, 0, 'the conflicting retry commits no phase record');
+});
+
+test('P2: a wrong source or a stale checkpoint epoch is rejected before any progress or phase write', async () => {
+  const boundary = 'boundary-shared';
+  const s1 = segmentOpened('segment-e2', 2);
+  const s2 = segmentOpened('segment-e3', 3);
+  const valid = await signedSegmentIntent(s1, boundary, 'capture-1');
+
+  const tripwire: NativeSaveProgressPort = {
+    async begin() { throw new Error('begin must not be called for an invalid segment intent'); },
+    async readExact() { throw new Error('readExact must not be called for an invalid segment intent'); },
+    async recordProgress() { throw new Error('recordProgress must not be called for an invalid segment intent'); },
+  };
+
+  const wrongSource = { ...valid, source: { ...valid.source, opened: s2.opened, openedCommitRef: s2.openedCommitRef } } as NativeSegmentSaveIntentV2;
+  const wrongSourceError = await rejectionOf(() => createNativeBoundarySaveController(tripwire, new StageStore().ports()).run(wrongSource));
+  assert.equal(wrongSourceError instanceof Error && wrongSourceError.message.includes('segment does not match the source opened record'), true);
+
+  const staleCheckpoint: Checkpoint = { ...segmentCheckpoint(2), executionEpoch: 3 };
+  const staleEpoch = { ...valid, checkpoint: { ...valid.checkpoint, checkpoint: staleCheckpoint } } as NativeSegmentSaveIntentV2;
+  const staleError = await rejectionOf(() => createNativeBoundarySaveController(tripwire, new StageStore().ports()).run(staleEpoch));
+  assert.equal(staleError instanceof Error && staleError.message.includes('checkpoint epoch does not match the current segment epoch'), true);
 });
 
 async function rejectionOf(action: () => Promise<unknown>): Promise<unknown> {

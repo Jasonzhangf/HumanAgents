@@ -9,6 +9,7 @@ import {
 import type { JournalCommitRef } from '../../../contracts/src/i2-history.js';
 
 import {
+  assertNativeSaveIntent,
   NATIVE_SAVE_PHASES,
   type NativeSaveIntent,
   type NativeSaveKey,
@@ -79,6 +80,9 @@ async function runNativeBoundarySave(
   ports: NativeSavePorts,
   intent: NativeSaveIntent,
 ): Promise<NativeBoundarySaveResult> {
+  // Reject a malformed segment key/source or a stale checkpoint epoch before
+  // any progress or phase record is written.
+  assertNativeSaveIntent(intent);
   const begin = await progressPort.begin(intent);
   const readback = await progressPort.readExact(intent.key);
 
