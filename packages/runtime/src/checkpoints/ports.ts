@@ -1,10 +1,19 @@
 import type {
+  AdmittedTurnIdentity,
   Checkpoint,
   CheckpointReceiptRelationshipV1,
   CheckpointTimeAuthority,
   EvidenceRef,
   ScopeRef,
 } from '../../../contracts/src/index.js';
+import type {
+  AcceptedSemanticViewInputV1,
+  CommittedSemanticCheckpointV1,
+  SemanticContextViewBodyV1,
+  SemanticContextViewIdentityV1,
+  SemanticHistoryExactLookupV1,
+  SemanticPhaseReceiptV1,
+} from '../context/semantic-history.js';
 import type { CheckpointClosureRecord, ClosureRecord } from './closure.js';
 
 export type CheckpointChainVerification =
@@ -72,4 +81,38 @@ export interface CheckpointReentryAdmissionDecision {
 
 export interface CheckpointReentryAdmissionPort {
   admit(input: CheckpointReentryAdmissionInput): Promise<CheckpointReentryAdmissionDecision>;
+}
+
+export interface SemanticContextViewCommitRequest {
+  readonly ownerId: string;
+  readonly accepted: AcceptedSemanticViewInputV1;
+}
+
+export interface SemanticHistoryPublicationCommitRequest {
+  readonly ownerId: string;
+  readonly turn: AdmittedTurnIdentity;
+  readonly checkpoint: CheckpointReceiptRelationshipV1;
+  readonly contextView: {
+    readonly identity: SemanticContextViewIdentityV1;
+    readonly receipt: SemanticPhaseReceiptV1;
+  };
+}
+
+/**
+ * Durable persistence seam for the two semantic-history phases. The Runtime
+ * owns the accepted-view gate and the phase relationship checks. The App owns
+ * the immutable asset store, the Organ Journal append and the actual receipt
+ * reconstruction. `readCommittedSemanticCheckpoint` is the exact cold-read
+ * entry D consumes; `null` means the exact publication does not exist.
+ */
+export interface SemanticHistoryPersistencePort {
+  commitContextView(input: SemanticContextViewCommitRequest): Promise<SemanticPhaseReceiptV1>;
+  commitHistoryPublication(input: SemanticHistoryPublicationCommitRequest): Promise<SemanticPhaseReceiptV1>;
+  readContextView(input: {
+    readonly scope: ScopeRef;
+    readonly contextViewReceiptRef: string;
+  }): Promise<SemanticContextViewBodyV1 | null>;
+  readCommittedSemanticCheckpoint(
+    input: SemanticHistoryExactLookupV1,
+  ): Promise<CommittedSemanticCheckpointV1 | null>;
 }
