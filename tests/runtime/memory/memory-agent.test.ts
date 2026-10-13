@@ -1421,6 +1421,8 @@ test('memory agent uses the framework driver in start submit settle order and bi
 
 test('memory agent assembles a driver for each admitted operation', async () => {
   const events: string[] = [];
+  const preparedEvents: string[] = [];
+  let releases = 0;
   const ports = makeOperations();
   const assignments: string[] = [];
   const agent = bind(new MemoryAgent({
@@ -1431,7 +1433,31 @@ test('memory agent assembles a driver for each admitted operation', async () => 
       assignments.push(input.assignmentId);
       assert.equal(input.taskId.value, task.value);
       assert.equal(input.executionEpoch, 2);
-      return providerDriver({ events });
+      if (input.operationId.value === 'analysis-a') {
+        return (async () => {
+          await Promise.resolve();
+          preparedEvents.push('factory:resolved');
+          const driver = providerDriver({ events: preparedEvents });
+          return {
+            driver: {
+              ...driver,
+              settle: async (request) => {
+                const closure = await driver.settle(request);
+                preparedEvents.push('settle:resolved');
+                return closure;
+              },
+            },
+            release: async () => {
+              releases += 1;
+              preparedEvents.push('release:analysis-a');
+            },
+          };
+        })();
+      }
+      return {
+        ...providerDriver({ events }),
+        driver: providerDriver({ events: [], outcome: 'attention' }),
+      };
     },
     sessions: { readSession: async () => sessionEvidence },
     projectSources: { readProject: async () => projectSource(), list: async () => [projectSource()] },
@@ -1446,11 +1472,20 @@ test('memory agent assembles a driver for each admitted operation', async () => 
 
   assert.equal(first.status, 'ready');
   assert.equal(second.status, 'ready');
+  if (first.status !== 'ready' || second.status !== 'ready') throw new Error('expected factory analysis');
+  assert.equal(first.value.curation.outcome, 'candidate');
+  assert.equal(second.value.curation.outcome, 'candidate');
   assert.deepEqual(assignments, ['memory-analysis:analysis-a', 'memory-analysis:analysis-b']);
-  assert.deepEqual(events, [
+  assert.deepEqual(preparedEvents, [
+    'factory:resolved',
     `start:${task.value}:2`,
     `submit:${task.value}:2`,
     'settle',
+    'settle:resolved',
+    'release:analysis-a',
+  ]);
+  assert.equal(releases, 1);
+  assert.deepEqual(events, [
     `start:${task.value}:2`,
     `submit:${task.value}:2`,
     'settle',
