@@ -10,6 +10,7 @@ import {
   type ProviderTransportSource,
 } from '../../adapters/provider/src/index.js';
 import { ImmutableAssetStore } from '../../adapters/filesystem/src/index.js';
+import { resolveProviderCredential, type ProviderCredentialRef } from '../../config/src/index.js';
 
 const DEFAULT_MAX_TOKENS = 4096;
 
@@ -24,6 +25,7 @@ export interface ProviderAssemblyInput {
   readonly routeRef: string;
   readonly baseUrl: string;
   readonly source: ProviderTransportSource;
+  readonly credentialRef?: ProviderCredentialRef;
   readonly maxTokens?: number;
 }
 
@@ -34,9 +36,10 @@ export interface ProviderAssemblyInput {
  * are each constructed exactly once.
  */
 export function assembleProviderExecutionPort(input: ProviderAssemblyInput, evidenceRoot: string): ExecutionRuntimePort {
+  const credential = resolveProviderCredential(input.credentialRef);
   const evidence = filesystemProviderEvidenceSink(new ImmutableAssetStore(evidenceRoot));
   const transport = input.source === 'http'
-    ? createHttpProviderTransport({ binding: input.binding, baseUrl: input.baseUrl, evidence })
+    ? createHttpProviderTransport({ binding: input.binding, baseUrl: input.baseUrl, evidence, credential })
     : new V3ProviderHttpTransport({ binding: input.binding, baseUrl: input.baseUrl, evidence, source: 'rcc' });
   const codec = input.binding.protocol === 'anthropic'
     ? new AnthropicProviderCodec(input.maxTokens ?? DEFAULT_MAX_TOKENS)

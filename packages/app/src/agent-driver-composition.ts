@@ -398,6 +398,7 @@ export function createAgentProviderPort(
     routeRef: input.provider.route,
     baseUrl: input.provider.baseUrl,
     source: input.provider.source ?? 'rcc',
+    credentialRef: input.provider.credentialRef,
     maxTokens,
   }, evidenceRoot);
 }
