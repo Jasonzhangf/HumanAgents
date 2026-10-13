@@ -1,4 +1,10 @@
-import type { Checkpoint, EvidenceRef, ScopeRef } from '../../../contracts/src/index.js';
+import type {
+  Checkpoint,
+  CheckpointReceiptRelationshipV1,
+  CheckpointTimeAuthority,
+  EvidenceRef,
+  ScopeRef,
+} from '../../../contracts/src/index.js';
 import type { CheckpointClosureRecord, ClosureRecord } from './closure.js';
 
 export type CheckpointChainVerification =
@@ -27,6 +33,22 @@ export interface CheckpointJournalPort {
   verify(scope: ScopeRef): Promise<CheckpointChainVerification>;
   readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null>;
   append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt>;
+}
+
+export interface NativeCheckpointCommitRequest {
+  readonly ownerId: string;
+  readonly checkpoint: Checkpoint;
+  readonly timeAuthority: CheckpointTimeAuthority;
+}
+
+export interface NativeCheckpointJournalPort extends CheckpointJournalPort {
+  commitNativeCheckpoint(
+    input: NativeCheckpointCommitRequest,
+  ): Promise<CheckpointReceiptRelationshipV1>;
+
+  readNativeCheckpoint(input: {
+    readonly checkpoint: Pick<Checkpoint, 'id' | 'scope'>;
+  }): Promise<CheckpointReceiptRelationshipV1 | null>;
 }
 
 export interface CheckpointClosurePort {

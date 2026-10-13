@@ -2,6 +2,8 @@ import {
   assertEvidenceRef,
   assertSameScope,
   type Checkpoint,
+  type CheckpointReceiptRelationshipV1,
+  type CheckpointTimeAuthority,
   type CycleId,
   type EvidenceRef,
   type ScopeRef,
@@ -12,6 +14,7 @@ import type {
   CheckpointAppendReceipt,
   CheckpointJournalPort,
   LatestCheckpointRecord,
+  NativeCheckpointJournalPort,
 } from './ports.js';
 import {
   assembleCheckpointWindows,
@@ -45,6 +48,10 @@ export interface CompleteCheckpointInput {
   readonly checkpoint: Checkpoint;
   readonly windowLimits?: Partial<CheckpointWindowLimits>;
 }
+
+export type CompleteNativeCheckpointInput = Omit<CompleteCheckpointInput, 'windowLimits'> & {
+  readonly timeAuthority: CheckpointTimeAuthority;
+};
 
 export interface CompletedCheckpoint {
   readonly checkpoint: Checkpoint;
@@ -208,6 +215,49 @@ export async function completeCheckpoint(
       receipt,
       windows: assembleCheckpointWindows(input.checkpoint, input.windowLimits),
     };
+  } catch (error) {
+    throw asCompletionError(error);
+  }
+}
+
+export async function completeNativeCheckpoint(
+  journal: NativeCheckpointJournalPort,
+  input: CompleteNativeCheckpointInput,
+): Promise<CheckpointReceiptRelationshipV1> {
+  try {
+    assertNonEmpty(input.ownerId, 'checkpoint owner');
+    if (!input.context.scope.cycleId || !sameId(input.context.scope.cycleId, input.context.cycleId)) {
+      throw new CheckpointCompletionError('completion context scope must match its cycle');
+    }
+    if (!sameId(input.context.cycleId, input.checkpoint.cycleId)) {
+      throw new CheckpointCompletionError('completion context cycle does not match checkpoint');
+    }
+    if (!Number.isSafeInteger(input.context.executionEpoch) || input.context.executionEpoch < 1) {
+      throw new CheckpointCompletionError('completion execution epoch must be a positive safe integer');
+    }
+    if (input.context.executionEpoch !== input.checkpoint.executionEpoch) {
+      throw new CheckpointCompletionError('completion execution epoch does not match checkpoint');
+    }
+    if (
+      input.context.directiveRevision !== undefined &&
+      input.context.directiveRevision !== input.checkpoint.directiveRevision
+    ) {
+      throw new CheckpointCompletionError('completion directive revision does not match checkpoint');
+    }
+    if (!Number.isSafeInteger(input.checkpoint.directiveRevision) || input.checkpoint.directiveRevision < 1) {
+      throw new CheckpointCompletionError('checkpoint directive revision must be a positive safe integer');
+    }
+
+    assertSameScope(input.context.scope, input.checkpoint.scope);
+    assertCheckpointCycle(input.checkpoint);
+    assertEvidenceRefs(input.checkpoint);
+    assertCheckpointRecoveryResponsibility({
+      checkpoint: input.checkpoint,
+      previous: input.previous,
+      ownerId: input.ownerId,
+    });
+
+    return await journal.commitNativeCheckpoint(input);
   } catch (error) {
     throw asCompletionError(error);
   }

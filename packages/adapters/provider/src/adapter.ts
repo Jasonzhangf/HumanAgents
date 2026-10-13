@@ -38,6 +38,7 @@ import {
   type ProviderSubmitInput,
   type ProviderSubmitResult,
   type ProviderErrorPhase,
+  type ProviderRawFact,
   type ScopeRef,
 } from '../../../contracts/src/index.js';
 import { type ProviderCodec, type ProviderDecodedEvent } from './codecs.js';
@@ -61,6 +62,17 @@ export interface ProviderTransport {
 export interface ProviderProbeResult {
   readonly readiness: ProviderReadiness;
   readonly capabilities?: ProviderCapabilities;
+}
+
+/**
+ * Provider-local raw-fact seam. The native raw path supplies this receiver on
+ * the observe call so codec facts reach the driver's Runtime acceptance edge.
+ * Callers that omit it keep the previous event-only projection.
+ */
+export type ProviderRawFactReceiver = (rawFacts: readonly ProviderRawFact[]) => Promise<void>;
+
+export interface ProviderObserveInputWithRawFacts extends ProviderObserveInput {
+  readonly onRawFacts?: ProviderRawFactReceiver;
 }
 
 export interface ProviderAdapterOptions {
@@ -378,7 +390,7 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     });
   }
 
-  async *observe(input: ProviderObserveInput): AsyncIterable<ProviderEvent> {
+  async *observe(input: ProviderObserveInputWithRawFacts): AsyncIterable<ProviderEvent> {
     this.guardSync('observe', input, () => validateProviderObserveInput(input));
     const active = this.requireActive(input, 'observe');
     if (!this.options.transport.observe) {
@@ -404,6 +416,9 @@ export class ProviderAdapter implements ExecutionRuntimePort {
     try {
       for await (const raw of this.options.transport.observe(input)) {
         const decoded: ProviderDecodedEvent = await this.guard('observe', active.identity, async () => this.options.codec.decodeEvent(raw, context));
+        if (input.onRawFacts !== undefined && decoded.rawFacts.length > 0) {
+          await input.onRawFacts(decoded.rawFacts);
+        }
         for (const event of decoded.events) {
           const stamped = this.guardSync('observe', active.identity, () => {
             const scoped = this.stampObservedEvent(event, input);

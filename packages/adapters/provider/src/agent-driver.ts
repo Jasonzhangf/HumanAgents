@@ -2,6 +2,7 @@ import {
   id,
   validateProviderToolResult,
   validateProviderRequestLifecycleEvent,
+  type AcceptedRawFact,
   type AgentCapabilities,
   type AgentClosure,
   type AgentDriver,
@@ -28,6 +29,9 @@ import {
   type ProviderToolCall,
   type ProviderToolResult,
   type ProviderToolStatus,
+  type ProviderRawFact,
+  type RawAsset,
+  type RawFactEnvelope,
   type ScopeRef,
   type StopRequestReceipt,
   type TaskId,
@@ -35,7 +39,20 @@ import {
   type ToolIdentity,
 } from '../../../contracts/src/index.js';
 import { randomUUID } from 'node:crypto';
+import type { ProviderObserveInputWithRawFacts, ProviderRawFactReceiver } from './adapter.js';
+import type { ProviderEvidenceSink } from './evidence.js';
 import { ProviderAdapterError } from './errors.js';
+
+interface ToolBarrier {
+  readonly promise: Promise<void>;
+  readonly release: () => void;
+}
+
+function createToolBarrier(): ToolBarrier {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
 
 export interface ProviderAgentDriverOptions {
   readonly port: ExecutionRuntimePort;
@@ -52,6 +69,13 @@ export interface ProviderAgentDriverOptions {
   readonly executeTool?: ProviderToolExecutionPort;
   readonly maxToolRounds?: number;
   readonly onRequestLifecycle?: (event: ProviderRequestLifecycleEvent) => void;
+  /**
+   * Native raw path. `rawEvidence` saves the exact executor output and
+   * `acceptRawFact` durably accepts each request-local raw fact. Both must be
+   * bound together; older callers omit both and keep the event-only path.
+   */
+  readonly rawEvidence?: ProviderEvidenceSink;
+  readonly acceptRawFact?: (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
   readonly now?: () => Date;
 }
 
@@ -130,6 +154,7 @@ interface RequestAttempt {
   readonly turnId: string;
   readonly requestId: string;
   readonly parentRequestId?: string;
+  producerSeq: number;
   externalResponseId?: string;
   terminalPhase?: ProviderRequestLifecycleEvent['phase'];
 }
@@ -147,14 +172,23 @@ export class ProviderAgentDriver implements AgentDriver {
   private readonly evidenceRef: EvidenceRef;
   private stopping = false;
   private toolController?: AbortController;
-  private toolCompletion?: Promise<void>;
+  private toolBarrier?: ToolBarrier;
   private continuationCompletion?: Promise<void>;
   private initialPayload?: AgentInput['payload'];
   private turnId?: string;
   private activeRequest?: RequestAttempt;
+  private producerFailure?: unknown;
   private readonly now: () => Date;
 
   constructor(private readonly options: ProviderAgentDriverOptions) {
+    if ((options.rawEvidence === undefined) !== (options.acceptRawFact === undefined)) {
+      throw this.error(
+        'raw.persistence.incomplete',
+        'native raw persistence requires both an evidence sink and a raw-fact acceptance port',
+        'start',
+        'runtime',
+      );
+    }
     this.evidenceRef = operationEvidence(options.scope, options.operationId);
     this.now = options.now ?? (() => new Date());
   }
@@ -234,21 +268,28 @@ export class ProviderAgentDriver implements AgentDriver {
     while (true) {
       const toolCalls: ProviderToolCall[] = [];
       let terminal: ProviderEvent | undefined;
-      for await (const providerEvent of this.options.port.observe({
-          ...identity(this.options),
-          ...this.currentRequestIdentity(),
-      })) {
+      const request = this.activeRequest;
+      const onRawFacts = this.rawFactReceiver(request);
+      const observeInput: ProviderObserveInputWithRawFacts = {
+        ...identity(this.options),
+        ...this.currentRequestIdentity(),
+        ...(onRawFacts === undefined ? {} : { onRawFacts }),
+      };
+      for await (const providerEvent of this.options.port.observe(observeInput)) {
         this.assertProviderIdentity(providerEvent, 'provider event', 'observe');
         if (providerEvent.toolCall !== undefined) toolCalls.push(providerEvent.toolCall);
         if (providerEvent.terminalState !== undefined) terminal = providerEvent;
         this.publishObservedLifecycle(providerEvent);
         if (providerEvent.terminalState === 'waiting' && providerEvent.nextAction?.ref === 'responses-tool-call') continue;
-        yield this.agentEvent(providerEvent);
+        yield this.agentEvent(providerEvent, request);
       }
       if (this.stopping) return;
       if (toolCalls.length === 0) return;
       if (terminal?.terminalState !== 'waiting' || terminal.nextAction?.ref !== 'responses-tool-call') {
         throw this.error('tool.terminal.missing', 'provider emitted a tool call without a tool-waiting terminal', 'observe', 'runtime');
+      }
+      if (request === undefined) {
+        throw this.error('runtime.request.missing', 'provider emitted a tool call outside a request scope', 'observe', 'runtime');
       }
       if (this.options.executeTool === undefined || this.options.tools === undefined) {
         throw this.error('tool.executor.missing', 'provider requested a tool but no execution port is bound', 'observe', 'capability');
@@ -265,15 +306,19 @@ export class ProviderAgentDriver implements AgentDriver {
         // correct, not as a fatal error that strands the execution.
         if (!(this.options.tools ?? []).some((tool) => tool.toolId === call.toolId)) {
           const unowned = this.unownedToolResult(call);
-          yield* this.toolResultEvents(call, this.toolResult(call, unowned, 'failed'), `${call.toolId} unavailable`);
+          yield* this.toolResultEvents(request, call, this.toolResult(request, call, unowned, 'failed'), `${call.toolId} unavailable`);
           toolHistory.push({ call, result: unowned });
           continue;
         }
         this.toolController = new AbortController();
         const toolController = this.toolController;
-        let completeTool!: () => void;
-        const toolCompletion = new Promise<void>((resolve) => { completeTool = resolve; });
-        this.toolCompletion = toolCompletion;
+        const toolBarrier = createToolBarrier();
+        this.toolBarrier = toolBarrier;
+        const releaseBarrier = (): void => {
+          this.toolController = undefined;
+          toolBarrier.release();
+          if (this.toolBarrier === toolBarrier) this.toolBarrier = undefined;
+        };
         let result: ProviderToolExecutionResult;
         try {
           result = await this.options.executeTool.execute({
@@ -288,30 +333,39 @@ export class ProviderAgentDriver implements AgentDriver {
           // that abort or with its own failure, the outcome is evidence: it must
           // emit a typed result bound to the same callId instead of only
           // returning or throwing, so a cancelled tool never disappears from
-          // the journal.
+          // the journal. No output was returned, so no raw asset is fabricated.
           if (this.stopping) {
-            yield* this.toolFailedEvents(call, cause, 'cancelled');
+            yield* this.toolFailedEvents(request, call, cause, 'cancelled');
+            releaseBarrier();
             return;
           }
-          yield* this.toolFailedEvents(call, cause, 'failed');
+          yield* this.toolFailedEvents(request, call, cause, 'failed');
+          releaseBarrier();
           throw cause;
-        } finally {
-          this.toolController = undefined;
-          completeTool();
-          if (this.toolCompletion === toolCompletion) this.toolCompletion = undefined;
         }
-        if (this.stopping) return;
         const status: ProviderToolStatus = result.error !== undefined
           ? result.status === 'cancelled' ? 'cancelled' : 'failed'
           : result.status === 'cancelled'
             ? 'cancelled'
             : result.status ?? 'succeeded';
-        const toolResult: ProviderToolResult = this.toolResult(call, result, status);
+        const toolResult: ProviderToolResult = this.toolResult(request, call, result, status);
+        // Save and durably accept the exact output before any projection, early
+        // stop return or continuation: a late result must still reach the
+        // Runtime, and a failing acceptance must not read as a normal stop.
+        try {
+          await this.persistToolResult(request, call, result, toolResult);
+        } catch (cause) {
+          this.producerFailure = cause;
+          throw cause;
+        } finally {
+          releaseBarrier();
+        }
+        if (this.stopping) return;
         if (status !== 'succeeded') {
-          yield* this.toolResultEvents(call, toolResult, `${call.toolId} ${status}`);
+          yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} ${status}`);
           throw this.toolResultFailure(toolResult);
         }
-        yield* this.toolResultEvents(call, toolResult, `${call.toolId} succeeded`);
+        yield* this.toolResultEvents(request, call, toolResult, `${call.toolId} succeeded`);
         toolHistory.push({ call, result });
       }
       if (this.stopping) return;
@@ -382,8 +436,12 @@ export class ProviderAgentDriver implements AgentDriver {
     if (input.runtimeId !== this.options.runtimeId || input.executionEpoch !== this.options.executionEpoch) {
       throw this.error('runtime.identity.mismatch', 'provider settle is not bound to the current execution', 'settle', 'runtime');
     }
-    if (this.toolCompletion) await this.toolCompletion;
+    if (this.toolBarrier) await this.toolBarrier.promise;
     if (this.continuationCompletion) await this.continuationCompletion;
+    // A failed exact-output save or durable acceptance must surface on settle;
+    // the released barrier must never turn a producer failure into a normal
+    // stopped result.
+    if (this.producerFailure !== undefined) throw this.producerFailure;
     let settlement: ProviderSettlement;
     try {
       settlement = await this.options.port.settle({
@@ -417,8 +475,8 @@ export class ProviderAgentDriver implements AgentDriver {
     return this.providerSettlement ? structuredClone(this.providerSettlement) : undefined;
   }
 
-  private agentEvent(providerEvent: ProviderEvent): ProviderAgentEvent {
-    const scoped = this.scopeProviderEvent(providerEvent);
+  private agentEvent(providerEvent: ProviderEvent, request: RequestAttempt | undefined): ProviderAgentEvent {
+    const scoped = this.scopeProviderEvent(providerEvent, request);
     return {
       taskId: providerEvent.taskId,
       executionEpoch: providerEvent.executionEpoch,
@@ -432,34 +490,128 @@ export class ProviderAgentDriver implements AgentDriver {
     };
   }
 
-  private scopeProviderEvent(providerEvent: ProviderEvent): ProviderRequestScopedEvent {
-    if (this.activeRequest === undefined) {
+  private scopeProviderEvent(providerEvent: ProviderEvent, request: RequestAttempt | undefined): ProviderRequestScopedEvent {
+    if (request === undefined) {
       throw this.error('runtime.request.missing', 'provider event arrived outside a request scope', 'observe', 'runtime');
     }
-    if (providerEvent.turnId !== undefined && providerEvent.turnId !== this.activeRequest.turnId) {
+    if (providerEvent.turnId !== undefined && providerEvent.turnId !== request.turnId) {
       throw this.error('runtime.identity.mismatch', 'provider event turn id does not match the active driver attempt', 'observe', 'runtime');
     }
-    if (providerEvent.requestId !== undefined && providerEvent.requestId !== this.activeRequest.requestId) {
+    if (providerEvent.requestId !== undefined && providerEvent.requestId !== request.requestId) {
       throw this.error('runtime.identity.mismatch', 'provider event request id does not match the active request', 'observe', 'runtime');
     }
-    if (providerEvent.parentRequestId !== undefined && providerEvent.parentRequestId !== this.activeRequest.parentRequestId) {
+    if (providerEvent.parentRequestId !== undefined && providerEvent.parentRequestId !== request.parentRequestId) {
       throw this.error('runtime.identity.mismatch', 'provider event parent request id does not match the active request', 'observe', 'runtime');
     }
     return {
       ...providerEvent,
-      turnId: this.activeRequest.turnId,
-      requestId: this.activeRequest.requestId,
-      ...(this.activeRequest.parentRequestId === undefined ? {} : { parentRequestId: this.activeRequest.parentRequestId }),
+      turnId: request.turnId,
+      requestId: request.requestId,
+      ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
       occurredAt: providerEvent.occurredAt ?? this.now().toISOString(),
       ...(providerEvent.externalResponseId === undefined ? {} : { externalResponseId: providerEvent.externalResponseId }),
     } as ProviderRequestScopedEvent;
   }
 
+  private rawFactReceiver(request: RequestAttempt | undefined): ProviderRawFactReceiver | undefined {
+    if (this.options.acceptRawFact === undefined) return undefined;
+    return async (rawFacts) => {
+      for (const fact of rawFacts) {
+        await this.acceptRawFact(request, fact);
+      }
+    };
+  }
+
+  private async acceptRawFact(request: RequestAttempt | undefined, fact: ProviderRawFact): Promise<void> {
+    const accept = this.options.acceptRawFact;
+    if (accept === undefined) return;
+    if (request === undefined) {
+      throw this.error('runtime.request.missing', 'provider raw fact arrived outside a request scope', 'observe', 'runtime');
+    }
+    const envelope: RawFactEnvelope = {
+      execution: { runtimeId: this.options.runtimeId, executionEpoch: this.options.executionEpoch },
+      scope: this.options.scope,
+      request: {
+        turnId: request.turnId,
+        requestId: request.requestId,
+        ...(request.parentRequestId === undefined ? {} : { parentRequestId: request.parentRequestId }),
+      },
+      producerSeq: this.nextProducerSeq(request),
+      fact,
+    };
+    let accepted: AcceptedRawFact;
+    try {
+      accepted = await accept(envelope);
+    } catch (cause) {
+      const failure = this.error('raw.fact.accept.failed', 'provider raw fact was rejected by durable acceptance', 'observe', 'runtime', cause);
+      this.producerFailure = failure;
+      throw failure;
+    }
+    if (JSON.stringify(accepted.envelope) !== JSON.stringify(envelope)) {
+      const failure = this.error('raw.fact.ack.mismatch', 'durable acceptance ack does not match the submitted raw fact envelope', 'observe', 'runtime');
+      this.producerFailure = failure;
+      throw failure;
+    }
+  }
+
+  private nextProducerSeq(request: RequestAttempt): number {
+    request.producerSeq += 1;
+    return request.producerSeq;
+  }
+
+  /**
+   * Saves the exact executor output string as an immutable raw asset, then
+   * durably accepts the tool-result raw fact bound to the frozen request, call
+   * and continuation. Both steps run before any projection or continuation, so
+   * a late result still reaches the Runtime and a failed save or acceptance is
+   * visible instead of reading as a normal stop. A legacy caller that binds no
+   * raw sink keeps the previous event-only behavior.
+   */
+  private async persistToolResult(
+    request: RequestAttempt,
+    call: ProviderToolCall,
+    result: ProviderToolExecutionResult,
+    toolResult: ProviderToolResult,
+  ): Promise<void> {
+    const sink = this.options.rawEvidence;
+    if (sink === undefined) return;
+    let ref: EvidenceRef;
+    try {
+      ref = await sink.write({
+        scope: this.options.scope,
+        kind: 'tool',
+        type: 'tool-result-output',
+        locator: `provider/tool-result/${call.callId}`,
+        content: result.output,
+      });
+    } catch (cause) {
+      throw this.error(
+        'raw.output.save.failed',
+        `provider exact tool output could not be saved for ${call.callId}`,
+        'observe',
+        'runtime',
+        cause,
+      );
+    }
+    const rawOutput: RawAsset = { ref, view: { kind: 'utf8-text' } };
+    const fact: ProviderRawFact = {
+      kind: 'tool-result',
+      contentUnitId: `provider:tool-result:${call.callId}`,
+      callId: call.callId,
+      continuationRef: call.continuationRef,
+      result: toolResult,
+      rawOutput,
+      complete: true,
+    };
+    await this.acceptRawFact(request, fact);
+  }
+
   private nextRequest(): RequestAttempt {
     const parentRequestId = this.activeRequest?.requestId;
-    const request = {
+    const request: RequestAttempt = {
       turnId: this.turnId ?? requestIdentity('turn'),
       requestId: requestIdentity('request'),
+      producerSeq: 0,
       ...(parentRequestId === undefined ? {} : { parentRequestId }),
     };
     this.turnId = request.turnId;
@@ -538,6 +690,7 @@ export class ProviderAgentDriver implements AgentDriver {
   }
 
   private toolResultEvents(
+    request: RequestAttempt,
     call: ProviderToolCall,
     result: ProviderToolResult,
     summary: string,
@@ -553,18 +706,19 @@ export class ProviderAgentDriver implements AgentDriver {
       ownerId: this.options.ownerId ?? 'humanagent.provider-agent-driver',
       nextAction: { kind: 'continue', ref: call.continuationRef },
       toolResult: result,
-    })];
+    }, request)];
   }
 
   private toolFailedEvents(
+    request: RequestAttempt,
     call: ProviderToolCall,
     cause: unknown,
     status: 'failed' | 'cancelled',
   ): Iterable<ProviderAgentEvent> {
-    return this.toolResultEvents(call, this.toolFailureResult(call, cause, status), `${call.toolId} ${status}`);
+    return this.toolResultEvents(request, call, this.toolFailureResult(call, cause, status), `${call.toolId} ${status}`);
   }
 
-  private toolResult(call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult {
+  private toolResult(request: RequestAttempt, call: ProviderToolCall, result: ProviderToolExecutionResult, status: ProviderToolStatus): ProviderToolResult {
     const error = result.error ?? (status === 'succeeded'
       ? undefined
       : this.error('tool.result.failed', `${call.toolId} executor reported ${status} without an error`, 'observe').providerError);
@@ -579,7 +733,7 @@ export class ProviderAgentDriver implements AgentDriver {
       ...(result.outputDigest === undefined ? {} : { outputDigest: result.outputDigest }),
       ...(error === undefined ? {} : { error }),
     };
-    const requestRef = this.activeRequest?.requestId;
+    const requestRef = request.requestId;
     const outputRef = result.outputRef;
     const outputDigest = result.outputDigest;
     const executorRoute = result.executorRoute;
@@ -587,7 +741,6 @@ export class ProviderAgentDriver implements AgentDriver {
       || this.options.binding.protocol !== 'responses'
       || typeof executorRoute !== 'string'
       || executorRoute.trim() === ''
-      || requestRef === undefined
       || typeof outputRef !== 'string'
       || outputRef.trim() === ''
       || typeof outputDigest !== 'string'
@@ -691,6 +844,7 @@ export class ProviderAgentDriver implements AgentDriver {
     message: string,
     phase: 'start' | 'resume' | 'submit' | 'observe' | 'stop' | 'settle',
     category: 'runtime' | 'capability' = 'runtime',
+    cause?: unknown,
   ): ProviderAdapterError {
     return new ProviderAdapterError({
       code,
@@ -698,6 +852,7 @@ export class ProviderAgentDriver implements AgentDriver {
       phase,
       message,
       scope: this.options.scope,
+      cause,
     });
   }
 }

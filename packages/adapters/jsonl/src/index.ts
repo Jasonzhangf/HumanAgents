@@ -12,6 +12,7 @@ import {
   validateEpisodicMemorySource,
   type CanonicalMemoryScope,
   type Checkpoint,
+  type CheckpointCommitEnvelopeV1,
   type EpisodicMemorySource,
   type ScopeRef,
 } from '@humanagent/contracts';
@@ -39,6 +40,7 @@ export interface JournalRecord {
   readonly commitId?: string;
   readonly commitFactDigest?: string;
   readonly checkpoint?: Checkpoint;
+  readonly nativeCheckpointEnvelope?: CheckpointCommitEnvelopeV1;
   readonly payload?: Record<string, unknown>;
   readonly previousRecordDigest: string | null;
   readonly recordDigest: string;
@@ -51,6 +53,7 @@ export interface JournalAppendInput {
   readonly memoryScope?: CanonicalMemoryScope;
   readonly memorySource?: EpisodicMemorySource;
   readonly checkpoint?: Checkpoint;
+  readonly nativeCheckpointEnvelope?: CheckpointCommitEnvelopeV1;
   readonly payload?: Record<string, unknown>;
 }
 
@@ -105,7 +108,12 @@ function digestRecord(record: Omit<JournalRecord, 'recordDigest'>): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(record)).digest('hex')}`;
 }
 
-function digestCommitFact(input: Pick<JournalAppendInput, 'kind' | 'scope' | 'memoryScope' | 'memorySource' | 'checkpoint' | 'payload'>): string {
+function digestCommitFact(
+  input: Pick<
+    JournalAppendInput,
+    'kind' | 'scope' | 'memoryScope' | 'memorySource' | 'checkpoint' | 'nativeCheckpointEnvelope' | 'payload'
+  >,
+): string {
   const fact: Record<string, unknown> = {
     kind: input.kind,
     scope: input.scope,
@@ -115,6 +123,7 @@ function digestCommitFact(input: Pick<JournalAppendInput, 'kind' | 'scope' | 'me
   // Preserve the original v1 digest for records without a memory envelope.
   if (input.memoryScope !== undefined) fact.memoryScope = input.memoryScope;
   if (input.memorySource !== undefined) fact.memorySource = input.memorySource;
+  if (input.nativeCheckpointEnvelope !== undefined) fact.nativeCheckpointEnvelope = input.nativeCheckpointEnvelope;
   return `sha256:${createHash('sha256').update(JSON.stringify(fact)).digest('hex')}`;
 }
 
@@ -161,7 +170,14 @@ function validateRecord(record: JournalRecord, previous: JournalRecord | null, c
       }
       assertCheckpointLink(record.checkpoint!, resolveCheckpointPredecessor(record.checkpoint!, checkpoints));
     });
+    if (record.nativeCheckpointEnvelope !== undefined) {
+      if (record.commitId === undefined) throw new JournalIntegrityError('native checkpoint envelope requires a commit id');
+      if (record.commitId !== record.nativeCheckpointEnvelope.identity) {
+        throw new JournalIntegrityError('native checkpoint envelope identity does not match commit id');
+      }
+    }
   } else if (record.checkpoint) throw new JournalIntegrityError('event record cannot contain checkpoint');
+  else if (record.nativeCheckpointEnvelope) throw new JournalIntegrityError('event record cannot contain checkpoint envelope');
   else if (record.payload === undefined) throw new JournalIntegrityError('event record missing payload');
 }
 
@@ -448,6 +464,7 @@ export class JsonlOrganJournal {
     if (commitId !== undefined) validateCommitId(commitId);
     if (input.kind === 'checkpoint' && input.payload !== undefined) throw new JournalIntegrityError('checkpoint record cannot contain payload');
     if (input.kind === 'event' && input.checkpoint !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint');
+    if (input.kind === 'event' && input.nativeCheckpointEnvelope !== undefined) throw new JournalIntegrityError('event record cannot contain checkpoint envelope');
     const verification = await readVerifiedJournal(this.filePath);
     if (!verification.valid) throw new JournalIntegrityError(verification.error ?? 'journal is invalid');
     if (commitId !== undefined) {
@@ -458,7 +475,7 @@ export class JsonlOrganJournal {
       }
     }
     const previous = verification.records.at(-1) ?? null;
-    const { kind, scope, memoryScope, memorySource, checkpoint, payload } = input;
+    const { kind, scope, memoryScope, memorySource, checkpoint, nativeCheckpointEnvelope, payload } = input;
     assertScopeRef(scope);
     validateMemoryEnvelope({ scope, memoryScope, memorySource });
     const recordWithoutDigest = {
@@ -471,6 +488,7 @@ export class JsonlOrganJournal {
       commitId,
       commitFactDigest: commitId === undefined ? undefined : digestCommitFact(input),
       checkpoint,
+      nativeCheckpointEnvelope,
       payload,
       previousRecordDigest: previous?.recordDigest ?? null,
     };
@@ -615,3 +633,4 @@ export function createJsonlEventPublicationJournal(input: {
 
 export { JsonlTaskPlanRevisionJournal } from './task-plan-revisions.js';
 export type { TaskPlanRevisionAppendInput } from './task-plan-revisions.js';
+export { JsonlOperationCompletionJournal } from './operation-completion.js';

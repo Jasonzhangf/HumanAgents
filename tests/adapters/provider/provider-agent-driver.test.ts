@@ -3,6 +3,9 @@ import test from 'node:test';
 import {
   id,
   validateProviderEvent,
+  type AcceptedRawFact,
+  type ActiveTurnBinding,
+  type AdmittedTurn,
   type EvidenceRef,
   type ExecutionRuntimePort,
   type ProviderBinding,
@@ -19,7 +22,10 @@ import {
   type ProviderStopReceipt,
   type ProviderSubmitResult,
   type ProviderSubmitInput,
+  type ProviderToolStatus,
+  type RawFactEnvelope,
   type ScopeRef,
+  type WorkAssignment,
 } from '../../../packages/contracts/src/index.js';
 import {
   ResponsesProviderCodec,
@@ -27,13 +33,25 @@ import {
   ProviderAgentDriver,
   ProviderAdapterError,
   createV3ProviderHttpTransport,
+  filesystemProviderEvidenceSink,
   type ProviderAgentEvent,
   type ProviderEvidenceSink,
   type ProviderEvidenceWrite,
+  type ProviderToolExecutionPort,
   type V3ProviderFetch,
   type V3ProviderFetchInit,
   type V3ProviderFetchResponse,
 } from '../../../packages/adapters/provider/src/index.js';
+import { providerRawContentReader } from '../../../packages/adapters/provider/src/evidence.js';
+import { ImmutableAssetStore } from '../../../packages/adapters/filesystem/src/index.js';
+import { ActiveTurnContext } from '../../../packages/runtime/src/context/active-turn-context.js';
+import type {
+  ActiveTurnJournalPort,
+  ActiveTurnJournalRecord,
+} from '../../../packages/runtime/src/context/active-turn-journal.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const organ = id('organ', 'organ-a');
 const taskId = id('task', 'task-a');
@@ -1524,4 +1542,464 @@ test('provider agent driver publishes a failed lifecycle endpoint when the initi
   assert.equal(lifecycle.every((event) => event.turnId === lifecycle[0]?.turnId), true);
   assert.equal(lifecycle[1]?.requestId, lifecycle[0]?.requestId);
   assert.equal(lifecycle.some((event) => event.phase === 'dispatched'), false);
+});
+
+class MemoryActiveTurnJournal implements ActiveTurnJournalPort {
+  private readonly records: ActiveTurnJournalRecord[] = [];
+
+  async append(input: { readonly commitId: string; readonly record: ActiveTurnJournalRecord }): Promise<void> {
+    this.records.push(input.record);
+  }
+
+  async replay(): Promise<readonly ActiveTurnJournalRecord[]> {
+    return [...this.records];
+  }
+}
+
+function r1ActiveBinding(): ActiveTurnBinding {
+  const assignment: WorkAssignment = {
+    assignmentId: 'assignment-r1',
+    taskId,
+    pipelineNodeId: 'node-r1',
+    attempt: 1,
+    executionEpoch: identity.executionEpoch,
+    inputRevision: 1,
+    objective: 'R1 raw persistence fixture',
+    targetRefs: [],
+    expectedOutputRefs: [],
+    acceptanceCriteriaDigest: 'sha256:r1',
+    successCriteria: [],
+    failureCriteria: [],
+    incompleteCriteria: [],
+    requiredCapabilities: [],
+    mergeGate: 'not-required',
+  };
+  const admittedTurn: AdmittedTurn = {
+    turnId: 'turn-r1',
+    workAssignmentRef: assignment.assignmentId,
+    taskRef: taskId,
+    scopeRef: scope,
+    cycleRef: id('cycle', 'cycle-r1'),
+    inputRevision: 1,
+    directiveRevision: 1,
+    executionEpoch: identity.executionEpoch,
+    runtimeBindingRef: 'runtime-binding-r1',
+    permissionRevision: 'permission-r1',
+    admissionEvidenceRefs: ['evidence-admission-r1'],
+    currentTurnRef: 'active-turn://r1/binding',
+    recoveryStateRef: 'evidence-recovery-r1',
+  };
+  return {
+    admittedTurn,
+    assignment,
+    execution: { runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch },
+    scope,
+  };
+}
+
+function providerAdapterWithSink(fetch: V3ProviderFetch, sink: ProviderEvidenceSink): ProviderAdapter {
+  const transport = createV3ProviderHttpTransport({
+    binding,
+    baseUrl: 'http://127.0.0.1:4444',
+    evidence: sink,
+    fetch,
+  });
+  return new ProviderAdapter({
+    binding,
+    routeRef: 'test-route',
+    codec: new ResponsesProviderCodec(),
+    transport,
+    evidence: sink,
+  });
+}
+
+function sseResponse(events: readonly unknown[]): V3ProviderFetchResponse {
+  return delayedResponse(chunks(events.map((event) => `data: ${JSON.stringify(event)}\n\n`)));
+}
+
+function singleToolRoundFetch(callId: string, responseId: string): V3ProviderFetch {
+  return async () => sseResponse([
+    { type: 'response.created', response: { id: responseId } },
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: callId, name: 'file_read', arguments: '' } },
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: callId, name: 'file_read', arguments: '{"path":"README.md"}' } },
+    { type: 'response.completed', response: { id: responseId } },
+  ]);
+}
+
+interface RawPersistenceHarnessInput {
+  readonly root: string;
+  readonly fetch: V3ProviderFetch;
+  readonly executeTool: ProviderToolExecutionPort;
+  readonly sink?: ProviderEvidenceSink;
+  readonly accept?: (
+    inner: (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>,
+  ) => (envelope: RawFactEnvelope) => Promise<AcceptedRawFact>;
+}
+
+interface RawPersistenceHarness {
+  readonly instance: ProviderAgentDriver;
+  readonly context: ActiveTurnContext;
+  readonly store: ImmutableAssetStore;
+  readonly baseSink: ProviderEvidenceSink;
+  readonly submissions: ProviderSubmitInput[];
+  readonly settleCalls: () => number;
+}
+
+async function rawPersistenceHarness(input: RawPersistenceHarnessInput): Promise<RawPersistenceHarness> {
+  const store = new ImmutableAssetStore(input.root);
+  const baseSink = filesystemProviderEvidenceSink(store, 'provider-r1-test');
+  const context = await ActiveTurnContext.open({
+    journal: new MemoryActiveTurnJournal(),
+    binding: r1ActiveBinding(),
+    currentTurnRef: 'active-turn://r1/binding',
+  });
+  const submissions: ProviderSubmitInput[] = [];
+  const adapter = providerAdapterWithSink(input.fetch, baseSink);
+  let settleCalls = 0;
+  const port: ExecutionRuntimePort = {
+    kind: adapter.kind,
+    probe: (target) => adapter.probe(target),
+    capabilities: (target) => adapter.capabilities(target),
+    start: (startInput) => adapter.start(startInput),
+    resume: (resumeInput) => adapter.resume(resumeInput),
+    submit: (submitInput) => {
+      submissions.push(submitInput);
+      return adapter.submit(submitInput);
+    },
+    observe: (observeInput) => adapter.observe(observeInput),
+    requestStop: (stopInput) => adapter.requestStop(stopInput),
+    settle: (settleInput) => {
+      settleCalls += 1;
+      return adapter.settle(settleInput);
+    },
+    close: (target) => adapter.close(target),
+  };
+  const acceptBase = (envelope: RawFactEnvelope): Promise<AcceptedRawFact> => context.acceptRawFact(envelope);
+  const acceptRawFact = input.accept === undefined ? acceptBase : input.accept(acceptBase);
+  const instance = new ProviderAgentDriver({
+    port,
+    binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-r1',
+    scope,
+    inputRefs: ['input-1'],
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    rawEvidence: input.sink ?? baseSink,
+    acceptRawFact,
+    executeTool: input.executeTool,
+  });
+  return { instance, context, store, baseSink, submissions, settleCalls: () => settleCalls };
+}
+
+async function startHarnessTool(harness: RawPersistenceHarness): Promise<{
+  readonly iterator: AsyncIterator<ProviderAgentEvent>;
+  readonly pendingObservation: Promise<IteratorResult<ProviderAgentEvent>>;
+}> {
+  await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-r1', payload: { prompt: 'read README.md' } });
+  const iterator = harness.instance.observe({ runtimeId: identity.runtimeId })[Symbol.asyncIterator]();
+  // The real codec emits model events (for example response.created) before the
+  // function-call event. Advance to the first tool event, which is where the
+  // driver is about to run the executor and enter the save/accept barrier.
+  let toolEvent = await iterator.next();
+  while (!toolEvent.done && toolEvent.value?.kind !== 'provider.tool') {
+    toolEvent = await iterator.next();
+  }
+  assert.equal(toolEvent.value?.kind, 'provider.tool');
+  return { iterator, pendingObservation: iterator.next() };
+}
+
+function acceptedRawFacts(context: ActiveTurnContext): readonly AcceptedRawFact[] {
+  return context.entries().filter((entry): entry is AcceptedRawFact => 'envelope' in entry);
+}
+
+function durableToolResultFact(context: ActiveTurnContext) {
+  const entry = acceptedRawFacts(context).find((candidate) => candidate.envelope.fact.kind === 'tool-result');
+  assert.ok(entry, 'expected a durable tool-result raw fact');
+  const fact = entry.envelope.fact;
+  if (fact.kind !== 'tool-result') throw new Error('expected tool-result raw fact');
+  return fact;
+}
+
+async function coldRead(harness: RawPersistenceHarness, fact: ReturnType<typeof durableToolResultFact>): Promise<string> {
+  const reader = providerRawContentReader(harness.baseSink);
+  return new TextDecoder().decode(await reader.read({ scope, content: fact.rawOutput }));
+}
+
+test('R1-A: provider driver forwards codec raw facts and persists the exact executor output in request order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-r1-a-'));
+  try {
+    const rawOutput = 'RAW_TOOL_OUTPUT\n{"token":"A_ONLY"}';
+    let round = 0;
+    const fetch: V3ProviderFetch = async () => {
+      round += 1;
+      if (round === 1) {
+        return sseResponse([
+          { type: 'response.created', response: { id: 'resp-r1' } },
+          { type: 'response.output_text.delta', item_id: 'msg-r1', delta: 'reasoning about the read' },
+          { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call-r1', name: 'file_read', arguments: '' } },
+          { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'call-r1', name: 'file_read', arguments: '{"path":"README.md"}' } },
+          { type: 'response.completed', response: { id: 'resp-r1' } },
+        ]);
+      }
+      return sseResponse([
+        { type: 'response.created', response: { id: 'resp-r2' } },
+        { type: 'response.output_text.done', item_id: 'msg-r2', text: 'read complete' },
+        { type: 'response.completed', response: { id: 'resp-r2' } },
+      ]);
+    };
+    const harness = await rawPersistenceHarness({
+      root,
+      fetch,
+      executeTool: {
+        async execute() {
+          return { output: rawOutput, outputRefs: [], evidenceRefs: [evidence] };
+        },
+      },
+    });
+    await harness.instance.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+    await harness.instance.submit({ taskId, executionEpoch: identity.executionEpoch, assignmentId: 'assignment-r1', payload: { prompt: 'read README.md' } });
+    for await (const _event of harness.instance.observe({ runtimeId: identity.runtimeId })) {
+      // Drain to the provider terminal so the whole request chain is accepted.
+    }
+    await harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch });
+
+    const accepted = acceptedRawFacts(harness.context);
+    const firstRequestId = accepted[0]!.envelope.request.requestId;
+    const continuation = accepted.find((entry) => entry.envelope.request.parentRequestId !== undefined);
+    assert.ok(continuation, 'expected a continuation request identity');
+    assert.equal(continuation.envelope.request.parentRequestId, firstRequestId);
+    assert.notEqual(continuation.envelope.request.requestId, firstRequestId);
+
+    assert.deepEqual(
+      accepted.map((entry) => [
+        entry.envelope.request.requestId === firstRequestId ? 'R1' : 'R2',
+        entry.envelope.producerSeq,
+        entry.envelope.fact.kind,
+      ]),
+      [
+        ['R1', 1, 'content'],
+        ['R1', 2, 'tool-call'],
+        ['R1', 3, 'request-complete'],
+        ['R1', 4, 'tool-result'],
+        ['R2', 1, 'content'],
+        ['R2', 2, 'request-complete'],
+      ],
+    );
+    assert.deepEqual(accepted.map((entry) => entry.seq), [1, 2, 3, 4, 5, 6]);
+
+    const fact = durableToolResultFact(harness.context);
+    const factEnvelope = accepted.find((entry) => entry.envelope.fact.kind === 'tool-result')!.envelope;
+    assert.equal(factEnvelope.request.requestId, firstRequestId);
+    assert.equal(fact.callId, 'call-r1');
+    assert.equal(fact.continuationRef, 'resp-r1');
+    assert.equal(fact.result.callId, 'call-r1');
+    assert.equal(fact.result.status, 'succeeded');
+    assert.equal(await coldRead(harness, fact), rawOutput);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('R1-B: stop signals immediately but settlement waits for the exact-output save and durable ack', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-r1-b-'));
+  try {
+    const rawOutput = 'LATE_EXACT_OUTPUT\n{"token":"B_ONLY"}';
+    const toolEntered = deferred<void>();
+    const releaseTool = deferred<void>();
+    const writeEntered = deferred<void>();
+    const releaseWrite = deferred<void>();
+    const acceptEntered = deferred<void>();
+    const releaseAccept = deferred<void>();
+    let toolSignal: AbortSignal | undefined;
+    let executions = 0;
+    const gateStore = new ImmutableAssetStore(root);
+    const gateSink = filesystemProviderEvidenceSink(gateStore, 'provider-r1-test');
+    const gatedSink: ProviderEvidenceSink = {
+      async write(writeInput) {
+        writeEntered.resolve();
+        await releaseWrite.promise;
+        return gateSink.write(writeInput);
+      },
+      read: (ref) => gateSink.read(ref),
+    };
+    const harness = await rawPersistenceHarness({
+      root,
+      fetch: singleToolRoundFetch('call-stop', 'resp-r1'),
+      sink: gatedSink,
+      accept: (inner) => async (envelope) => {
+        if (envelope.fact.kind === 'tool-result') {
+          acceptEntered.resolve();
+          await releaseAccept.promise;
+        }
+        return inner(envelope);
+      },
+      executeTool: {
+        async execute(executeInput) {
+          executions += 1;
+          toolSignal = executeInput.signal;
+          toolEntered.resolve();
+          await releaseTool.promise;
+          return { output: rawOutput, outputRefs: [], evidenceRefs: [evidence] };
+        },
+      },
+    });
+
+    const { pendingObservation } = await startHarnessTool(harness);
+    await toolEntered.promise;
+    await harness.instance.requestStop({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch, operationId });
+    assert.equal(toolSignal?.aborted, true);
+    const pendingSettlement = harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch });
+    releaseTool.resolve();
+    await writeEntered.promise;
+    assert.equal(harness.settleCalls(), 0, 'settlement started before the exact output was saved');
+    assert.equal(harness.submissions.length, 0, 'a continuation was submitted after stop');
+    releaseWrite.resolve();
+    await acceptEntered.promise;
+    assert.equal(harness.settleCalls(), 0, 'settlement started before durable acceptance returned');
+    assert.equal(harness.submissions.length, 0, 'a continuation was submitted before durable acceptance returned');
+    releaseAccept.resolve();
+    assert.equal((await pendingObservation).done, true, 'the stopped tool result was projected before the barrier');
+    assert.equal((await pendingSettlement).state, 'stopped');
+    assert.equal(harness.settleCalls(), 1);
+    assert.equal(harness.submissions.length, 0);
+    assert.equal(executions, 1, 'stop did not prevent new tool work');
+
+    const fact = durableToolResultFact(harness.context);
+    assert.equal(await coldRead(harness, fact), rawOutput);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('R1-C: non-success output stays evidence and save, accept and ack failures surface without a normal stop', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'humanagent-provider-r1-c-'));
+  try {
+    {
+      const failure: ProviderError = {
+        errorId: 'provider.tool.c-failed',
+        code: 'tool.c-failed',
+        category: 'provider',
+        phase: 'tool',
+        message: 'executor reported a real failure',
+        ownerId: 'humanagent.provider-agent-driver',
+        retryable: 'manual',
+        attention: 'foreground',
+        evidenceRefs: [evidence],
+        nextAction: { kind: 'recover', ref: 'provider.tool.c-failed' },
+      };
+      const harness = await rawPersistenceHarness({
+        root: join(root, 'non-success'),
+        fetch: singleToolRoundFetch('call-c-failed', 'resp-c-failed'),
+        executeTool: {
+          async execute() {
+            return { output: 'NON_SUCCESS_EXACT_OUTPUT', outputRefs: [], evidenceRefs: [evidence], status: 'failed', error: failure };
+          },
+        },
+      });
+      const { iterator, pendingObservation } = await startHarnessTool(harness);
+      const resultEvent = await pendingObservation;
+      assert.equal(resultEvent.value?.kind, 'provider.tool-result');
+      assert.equal(resultEvent.value?.providerEvent.toolResult?.status, 'failed');
+      assert.equal(resultEvent.value?.providerEvent.toolResult?.error?.code, failure.code);
+      await assert.rejects(
+        () => iterator.next(),
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === failure.code,
+      );
+      assert.equal(harness.submissions.length, 0);
+      const fact = durableToolResultFact(harness.context);
+      assert.equal(fact.result.status, 'failed');
+      assert.equal(fact.result.error?.code, failure.code);
+      assert.equal(await coldRead(harness, fact), 'NON_SUCCESS_EXACT_OUTPUT');
+    }
+
+    {
+      const harness = await rawPersistenceHarness({
+        root: join(root, 'write-reject'),
+        fetch: singleToolRoundFetch('call-c-write', 'resp-c-write'),
+        sink: {
+          async write() {
+            throw new Error('immutable store unavailable');
+          },
+          async read() {
+            throw new Error('unused');
+          },
+        },
+        executeTool: {
+          async execute() {
+            return { output: 'WRITE_REJECT_OUTPUT', outputRefs: [], evidenceRefs: [evidence] };
+          },
+        },
+      });
+      const { pendingObservation } = await startHarnessTool(harness);
+      await assert.rejects(
+        () => pendingObservation,
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.output.save.failed',
+      );
+      assert.equal(harness.submissions.length, 0);
+      assert.equal(acceptedRawFacts(harness.context).some((entry) => entry.envelope.fact.kind === 'tool-result'), false);
+      await assert.rejects(
+        () => harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch }),
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.output.save.failed',
+      );
+    }
+
+    {
+      const harness = await rawPersistenceHarness({
+        root: join(root, 'accept-reject'),
+        fetch: singleToolRoundFetch('call-c-accept', 'resp-c-accept'),
+        accept: (inner) => async (envelope) => {
+          if (envelope.fact.kind === 'tool-result') throw new Error('runtime journal append failed');
+          return inner(envelope);
+        },
+        executeTool: {
+          async execute() {
+            return { output: 'ACCEPT_REJECT_OUTPUT', outputRefs: [], evidenceRefs: [evidence] };
+          },
+        },
+      });
+      const { pendingObservation } = await startHarnessTool(harness);
+      await assert.rejects(
+        () => pendingObservation,
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.accept.failed',
+      );
+      assert.equal(harness.submissions.length, 0);
+      await assert.rejects(
+        () => harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch }),
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.accept.failed',
+      );
+    }
+
+    {
+      const harness = await rawPersistenceHarness({
+        root: join(root, 'ack-mismatch'),
+        fetch: singleToolRoundFetch('call-c-ack', 'resp-c-ack'),
+        accept: (inner) => async (envelope) => {
+          const accepted = await inner(envelope);
+          if (envelope.fact.kind !== 'tool-result') return accepted;
+          return { ...accepted, envelope: { ...envelope, producerSeq: envelope.producerSeq + 1_000 } };
+        },
+        executeTool: {
+          async execute() {
+            return { output: 'ACK_MISMATCH_OUTPUT', outputRefs: [], evidenceRefs: [evidence] };
+          },
+        },
+      });
+      const { pendingObservation } = await startHarnessTool(harness);
+      await assert.rejects(
+        () => pendingObservation,
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.ack.mismatch',
+      );
+      assert.equal(harness.submissions.length, 0);
+      await assert.rejects(
+        () => harness.instance.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch }),
+        (error: unknown) => error instanceof ProviderAdapterError && error.providerError.code === 'raw.fact.ack.mismatch',
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

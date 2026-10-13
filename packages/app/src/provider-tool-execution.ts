@@ -6,14 +6,19 @@ import { dirname, join, resolve, sep, relative } from 'node:path';
 import {
   CODE_SEARCH_CONTRACT_VERSION,
   CODE_SEARCH_SERVICE_ID,
+  fileWriteEffectId,
   id,
   validateCodeSearchReport,
+  type CycleId,
   type EvidenceRef,
+  type FileWriteEffect,
+  type FileWriteCompletionResult,
   type OperationEvent,
   type OperationId,
   type OperationIntent,
   type ProviderToolDefinition,
   type Scope,
+  type TaskId,
   type WebSearchRequest,
   type WebSearchRecency,
   WEB_SEARCH_SERVICE_ID,
@@ -31,6 +36,10 @@ import {
 } from '../../adapters/operations/src/index.js';
 import { CodeSearchService, WebSearchService, type WebSearchProvider } from '../../runtime/src/hand/index.js';
 import type { ProviderToolExecutionPort } from '../../adapters/provider/src/index.js';
+import {
+  OperationCompletionOwner,
+  type OperationCompletionCommitPort,
+} from '../../runtime/src/gateway/operation-completion.js';
 import type { OperationJournalPort } from '../../runtime/src/gateway/index.js';
 import { createHandOperationRuntime } from './tool-execution-gateway.js';
 
@@ -241,8 +250,12 @@ export interface UiRuntimeToolOutputStore {
   readReport(input: { readonly outputRef: string; readonly outputDigest: string }): Promise<unknown>;
 }
 
-function digest(value: string): string {
+function digest(value: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function contentDigest(value: string): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(new TextEncoder().encode(value)).digest('hex')}`;
 }
 
 function safeId(value: string): string {
@@ -286,6 +299,16 @@ function taskEvidence(request: ToolExecRequest, label: string): EvidenceRef {
     taskId: request.execution.taskId,
     cycleId,
     operationId: request.execution.operationId,
+  }, `${request.call.callId}-${label}`);
+}
+
+function toolOperationEvidence(request: ToolExecRequest, operationId: OperationId, label: string): EvidenceRef {
+  const cycleId = request.scope.cycleId ?? id('cycle', safeId(`provider-tool-${request.execution.taskId.value}`));
+  return evidence({
+    organId: request.scope.organId,
+    taskId: request.execution.taskId,
+    cycleId,
+    operationId,
   }, `${request.call.callId}-${label}`);
 }
 
@@ -503,7 +526,16 @@ class FileOperationJournal implements OperationJournalPort {
   }
 }
 
-type ToolExecRequest = Parameters<ProviderToolExecutionPort['execute']>[0];
+/**
+ * The driver freezes the originating provider request identity before it runs a
+ * tool, so `file.write` can bind its durable completion to that request. The
+ * port supplies the identity once the driver passes `activeRequest.requestId`
+ * through; the optional field keeps this slice compilable against the current
+ * port and fails closed when the identity is missing.
+ */
+type ToolExecRequest = Parameters<ProviderToolExecutionPort['execute']>[0] & {
+  readonly requestId?: string;
+};
 type ToolExecResult = ProviderToolExecutionPort['execute'] extends (input: infer _I) => Promise<infer R> ? R : never;
 
 /** Tool ids this executor owns; surfaced to the provider when it calls a tool
@@ -528,6 +560,7 @@ export function createResponsesFileToolExecutor(input: {
   readonly workspaceRoot: string;
   readonly projectKey: string;
   readonly artifactRoot: string;
+  readonly operationCompletionPortFor?: (taskId: TaskId, cycleId: CycleId) => OperationCompletionCommitPort;
   readonly webSearchProviderConfig?: WebSearchProviderBackendConfig;
 }): { readonly executor: ResponsesFileToolExecutor; readonly toolOutputs: UiRuntimeToolOutputStore } {
   const workspaceRef = `workspace:${input.projectKey}`;
@@ -570,7 +603,12 @@ export function createResponsesFileToolExecutor(input: {
           case RESPONSES_FILE_SEARCH_TOOL.toolId:
             return await executeFileSearch(request, { service: codeSearchService, workspaceRef, assets: toolOutputs });
           case RESPONSES_FILE_WRITE_TOOL.toolId:
-            return await executeFileWrite(request, { workspaceRoot: input.workspaceRoot });
+            return await executeFileWrite(request, {
+              workspaceRoot: input.workspaceRoot,
+              workspaceRef,
+              output: toolOutputs,
+              ...(input.operationCompletionPortFor === undefined ? {} : { operationCompletionPortFor: input.operationCompletionPortFor }),
+            });
           case RESPONSES_FILE_EDIT_TOOL.toolId:
             return await executeFileEdit(request, { workspaceRoot: input.workspaceRoot });
           case RESPONSES_BASH_TOOL.toolId:
@@ -734,19 +772,82 @@ async function executeFileSearch(
   };
 }
 
-async function executeFileWrite(request: ToolExecRequest, params: { readonly workspaceRoot: string }): Promise<ToolExecResult> {
+async function executeFileWrite(
+  request: ToolExecRequest,
+  params: {
+    readonly workspaceRoot: string;
+    readonly workspaceRef: string;
+    readonly output: ToolOutputAssets;
+    readonly operationCompletionPortFor?: (taskId: TaskId, cycleId: CycleId) => OperationCompletionCommitPort;
+  },
+): Promise<ToolExecResult> {
   if (request.signal.aborted) throw Object.assign(new Error('file.write was stopped before admission'), { name: 'AbortError' });
   const args = request.call.arguments;
   const path = args.file_path;
   const content = args.content;
   if (typeof path !== 'string' || path.trim() === '') throw new Error('file.write requires a non-empty file_path');
   if (typeof content !== 'string') throw new Error('file.write requires string content');
+  if (request.requestId === undefined || request.requestId.trim() === '') {
+    throw new Error('file.write requires the current provider requestId');
+  }
+  if (params.operationCompletionPortFor === undefined) {
+    throw new Error('file.write requires the durable operation completion port');
+  }
   const target = await resolveWorkspacePath(params.workspaceRoot, path);
+  const relativePath = workspaceRelative(params.workspaceRoot, target);
+  const cycleId = request.scope.cycleId ?? id('cycle', safeId(`provider-tool-${request.execution.taskId.value}`));
+  const toolOperationId = id('operation', safeId(`provider-tool-${request.execution.operationId.value}-${request.call.callId}`));
+  const binding = {
+    execution: request.execution,
+    scope: {
+      organId: request.scope.organId,
+      taskId: request.execution.taskId,
+      cycleId,
+      operationId: toolOperationId,
+    },
+    toolOperationId,
+    requestId: request.requestId,
+    callId: request.call.callId,
+    continuationRef: request.call.continuationRef,
+  };
+  const effectId = await fileWriteEffectId(binding);
+  const effect: FileWriteEffect = {
+    kind: 'file.write',
+    effectId,
+    workspaceRef: params.workspaceRef,
+    relativePath,
+    inputDigest: digest(JSON.stringify({ file_path: path, content })),
+    expectedContentDigest: contentDigest(content),
+  };
+  const completion = new OperationCompletionOwner(params.operationCompletionPortFor(request.execution.taskId, cycleId));
+  await completion.begin(binding, effect);
   const before = await readOptionalWorkspaceFile(target);
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, content, 'utf8');
-  const result = { path: workspaceRelative(params.workspaceRoot, target), operation: before === null ? 'create' : 'update', before, after: content };
-  return { output: JSON.stringify(result), outputRefs: [], evidenceRefs: [taskEvidence(request, 'file-write')] };
+  const observedContentDigest = contentDigest(await readFile(target, 'utf8'));
+  const toolResult = { path: relativePath, operation: before === null ? 'create' : 'update', before, after: content };
+  const report = await params.output.writeReport({ outputId: toolOperationId.value, report: toolResult });
+  const result: FileWriteCompletionResult = {
+    operationId: toolOperationId,
+    status: 'succeeded',
+    outputRef: report.outputRef,
+    outputDigest: report.outputDigest,
+    evidenceRefs: [toolOperationEvidence(request, toolOperationId, 'file-write')],
+    verifier: {
+      name: 'file-write-readback-digest',
+      version: '1',
+      decision: `observed ${observedContentDigest}`,
+    },
+    completedAt: new Date().toISOString(),
+  };
+  await completion.commit(binding, effect, observedContentDigest, result);
+  return {
+    output: JSON.stringify(toolResult),
+    outputRefs: [report.outputRef],
+    outputRef: report.outputRef,
+    outputDigest: report.outputDigest,
+    evidenceRefs: result.evidenceRefs,
+  };
 }
 
 async function executeFileEdit(request: ToolExecRequest, params: { readonly workspaceRoot: string }): Promise<ToolExecResult> {

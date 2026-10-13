@@ -1,18 +1,31 @@
 import { createHash } from 'node:crypto';
 import { JsonlOrganJournal, type JournalRecord } from '../../adapters/jsonl/src/index.js';
 import type {
+  CheckpointCommitIdentityV2,
+  CheckpointCommitEnvelopeV1,
+  CheckpointReceiptRelationshipV1,
+  CheckpointTimeAuthorityMetadata,
   Checkpoint,
   EvidenceRef,
   ScopeRef,
+} from '../../contracts/src/index.js';
+import {
+  checkpointCommitIdentityV2,
+  checkpointIntentDigestV1,
+  checkpointRefV2,
+  scopeDigest,
+  validateCheckpointCommitEnvelopeV1,
+  validateCheckpointReceiptRelationship,
 } from '../../contracts/src/index.js';
 import type {
   CheckpointAppendRequest,
   CheckpointAppendReceipt,
   CheckpointChainVerification,
   CheckpointClosurePort,
-  CheckpointJournalPort,
   CheckpointReentryAdmissionPort,
   LatestCheckpointRecord,
+  NativeCheckpointCommitRequest,
+  NativeCheckpointJournalPort,
 } from '../../runtime/src/checkpoints/ports.js';
 import {
   assertDeadEndRecord,
@@ -133,7 +146,7 @@ export async function readCheckpointEvidence(input: {
  */
 export function createJsonlCheckpointJournal(input: {
   readonly filePath: string;
-}): CheckpointJournalPort {
+}): NativeCheckpointJournalPort {
   if (!input.filePath.trim()) {
     throw new AppLifecycleError(
       'checkpoint-journal-invalid',
@@ -143,6 +156,67 @@ export function createJsonlCheckpointJournal(input: {
     );
   }
   const journal = new JsonlOrganJournal(input.filePath);
+
+  async function verifyJournal(): Promise<readonly JournalRecord[]> {
+    const verification = await journal.verify();
+    if (!verification.valid) {
+      throw new AppLifecycleError(
+        'checkpoint-journal-corrupt',
+        verification.error ?? 'checkpoint journal is invalid',
+        'preserve the checkpoint journal and repair its committed history before committing or reading a checkpoint',
+        'app-checkpoint-journal',
+      );
+    }
+    return verification.records;
+  }
+
+  function nativeRecord(records: readonly JournalRecord[], commitIdentity: string): JournalRecord | undefined {
+    return records.find((record) => record.commitId === commitIdentity);
+  }
+
+  function sameCheckpointIdentity(
+    record: JournalRecord,
+    checkpoint: Pick<Checkpoint, 'id' | 'scope'>,
+  ): boolean {
+    return record.kind === 'checkpoint'
+      && record.checkpoint !== undefined
+      && record.checkpoint.id.scope === checkpoint.id.scope
+      && record.checkpoint.id.value === checkpoint.id.value
+      && sameScope(record.checkpoint.scope, checkpoint.scope);
+  }
+
+  async function committedNativeRelationship(
+    record: JournalRecord,
+    expectedIdentity: CheckpointCommitIdentityV2,
+  ): Promise<CheckpointReceiptRelationshipV1> {
+    const checkpoint = record.checkpoint;
+    const envelope = record.nativeCheckpointEnvelope;
+    if (!checkpoint || !envelope) {
+      throw new AppLifecycleError(
+        'checkpoint-native-envelope-missing',
+        `checkpoint record is not a native checkpoint-v2 commit: ${expectedIdentity}`,
+        'preserve the committed record; do not upgrade legacy checkpoint evidence in place',
+        'app-checkpoint-journal',
+      );
+    }
+    await validateCheckpointCommitEnvelopeV1(envelope, { checkpoint, identity: expectedIdentity });
+    const relationship: CheckpointReceiptRelationshipV1 = {
+      checkpoint,
+      envelope,
+      receipt: {
+        commitIdentity: expectedIdentity,
+        checkpointRef: checkpointRefV2(expectedIdentity),
+        journalReceiptRef: `humanagent://journal-record/v1/${await scopeDigest(checkpoint.scope)}/${record.seq}/${record.recordDigest.slice('sha256:'.length)}`,
+        committedAt: envelope.committedAt,
+        timeAuthority: envelope.timeAuthority,
+      },
+      checkpointSeq: checkpoint.seq,
+      journalSeq: record.seq,
+      recordDigest: record.recordDigest as CheckpointReceiptRelationshipV1['recordDigest'],
+    };
+    await validateCheckpointReceiptRelationship(relationship);
+    return relationship;
+  }
 
   function latestCheckpoint(records: readonly JournalRecord[], scope: ScopeRef): LatestCheckpointRecord | null {
     const checkpoints = records.filter((record) =>
@@ -163,14 +237,7 @@ export function createJsonlCheckpointJournal(input: {
 
   return {
     async verify(scope: ScopeRef): Promise<CheckpointChainVerification> {
-      const verification = await journal.verify();
-      if (!verification.valid) {
-        return {
-          valid: false,
-          reason: verification.error ?? 'journal verification failed',
-        };
-      }
-      const records = verification.records.filter((record) =>
+      const records = (await verifyJournal()).filter((record) =>
         record.scope.organId.value === scope.organId.value
         && record.scope.taskId?.value === scope.taskId?.value
         && record.scope.cycleId?.value === scope.cycleId?.value
@@ -186,16 +253,7 @@ export function createJsonlCheckpointJournal(input: {
     },
 
     async readLatest(scope: ScopeRef): Promise<LatestCheckpointRecord | null> {
-      const verification = await journal.verify();
-      if (!verification.valid) {
-        throw new AppLifecycleError(
-          'checkpoint-journal-corrupt',
-          verification.error ?? 'checkpoint journal is invalid',
-          'preserve the journal and repair its committed tail before recovery',
-          'app-checkpoint-journal',
-        );
-      }
-      return latestCheckpoint(verification.records, scope);
+      return latestCheckpoint(await verifyJournal(), scope);
     },
 
     async append(input: CheckpointAppendRequest): Promise<CheckpointAppendReceipt> {
@@ -226,6 +284,98 @@ export function createJsonlCheckpointJournal(input: {
         seq: record.checkpoint.seq,
         recordDigest: record.recordDigest,
       };
+    },
+
+    async commitNativeCheckpoint(input: NativeCheckpointCommitRequest): Promise<CheckpointReceiptRelationshipV1> {
+      if (!input.ownerId.trim()) {
+        throw new AppLifecycleError(
+          'checkpoint-owner-missing',
+          'native checkpoint commit requires an owner',
+          'provide the runtime checkpoint owner',
+          'app-checkpoint-journal',
+        );
+      }
+      const identity = await checkpointCommitIdentityV2({ checkpoint: input.checkpoint });
+      const timeAuthority: CheckpointTimeAuthorityMetadata = {
+        source: input.timeAuthority.source,
+        owner: input.timeAuthority.owner,
+        authorityRef: input.timeAuthority.authorityRef,
+      };
+      const intentDigest = await checkpointIntentDigestV1({
+        checkpoint: input.checkpoint,
+        timeAuthority,
+      });
+
+      return await journal.transaction<
+        { readonly native?: JournalRecord; readonly legacy?: JournalRecord },
+        CheckpointReceiptRelationshipV1
+      >(
+        ({ records }) => {
+          const native = nativeRecord(records, identity);
+          return {
+            native,
+            legacy: native === undefined
+              ? records.find((record) => sameCheckpointIdentity(record, input.checkpoint))
+              : undefined,
+          };
+        },
+        async ({ native, legacy }, append) => {
+          if (native) {
+            if (native.nativeCheckpointEnvelope?.intentDigest !== intentDigest) {
+              throw new AppLifecycleError(
+                'checkpoint-native-conflict',
+                `checkpoint identity is already committed with a different intent: ${identity}`,
+                'preserve the committed native checkpoint and use the original intent or a new checkpoint identity',
+                'app-checkpoint-journal',
+              );
+            }
+            return await committedNativeRelationship(native, identity);
+          }
+          if (legacy) {
+            throw new AppLifecycleError(
+              'checkpoint-native-envelope-missing',
+              `legacy checkpoint record occupies native identity: ${identity}`,
+              'preserve the legacy record and choose a new checkpoint identity',
+              'app-checkpoint-journal',
+            );
+          }
+
+          const committedAt = await input.timeAuthority.sampleCommittedAt();
+          const envelope: CheckpointCommitEnvelopeV1 = {
+            version: 1,
+            identity,
+            committedAt,
+            timeAuthority,
+            intentDigest,
+          };
+          const appended = await append({
+            commitId: identity,
+            kind: 'checkpoint',
+            scope: input.checkpoint.scope,
+            checkpoint: input.checkpoint,
+            nativeCheckpointEnvelope: envelope,
+          });
+          return await committedNativeRelationship(appended, identity);
+        },
+      );
+    },
+
+    async readNativeCheckpoint(input: {
+      readonly checkpoint: Pick<Checkpoint, 'id' | 'scope'>;
+    }): Promise<CheckpointReceiptRelationshipV1 | null> {
+      const identity = await checkpointCommitIdentityV2({ checkpoint: input.checkpoint });
+      const records = await verifyJournal();
+      const existing = nativeRecord(records, identity);
+      if (existing) return await committedNativeRelationship(existing, identity);
+      if (records.some((record) => sameCheckpointIdentity(record, input.checkpoint))) {
+        throw new AppLifecycleError(
+          'checkpoint-native-envelope-missing',
+          `checkpoint record has no native envelope: ${identity}`,
+          'preserve the legacy record and do not treat it as a native checkpoint-v2 commit',
+          'app-checkpoint-journal',
+        );
+      }
+      return null;
     },
   };
 }

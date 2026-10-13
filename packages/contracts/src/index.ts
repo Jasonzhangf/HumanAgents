@@ -1663,6 +1663,7 @@ export * from './explicit-brain.js';
 export * from './agent-loop.js';
 export * from './tool-execution.js';
 export * from './native-reasoning.js';
+export * from './operation-completion.js';
 export * from './semantic-observation.js';
 export * from './active-turn-context.js';
 export * from './review-data.js';
