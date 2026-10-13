@@ -1,4 +1,6 @@
 import { ProviderAgentDriver } from '../../adapters/provider/src/index.js';
+import type { AgentRole } from '../../config/src/index.js';
+import type { AgentProviderComposition } from './agent-driver-composition.js';
 import {
   id,
   type AgentEvent,
@@ -26,6 +28,10 @@ export interface ServeOrchestrationPorts {
 export interface ProviderServeOrchestrationOptions {
   readonly port: ExecutionRuntimePort;
   readonly binding: ProviderBinding;
+  readonly prepareAgentProvider?: (input: {
+    readonly roleId: AgentRole;
+    readonly configuredAgentId?: string;
+  }) => Promise<AgentProviderComposition>;
   readonly promptSegments: { readonly review: readonly string[] };
 }
 
@@ -272,10 +278,13 @@ export function createRccServeOrchestrationPorts(input: ProviderServeOrchestrati
       let provider!: Awaited<ReturnType<typeof runProviderAgent>>;
       let marker: ReturnType<typeof reviewMarker>;
       for (let attemptIndex = 0; attemptIndex < REVIEW_ATTEMPTS; attemptIndex += 1) {
+        const composition = input.prepareAgentProvider === undefined
+          ? undefined
+          : await input.prepareAgentProvider({ roleId: 'review' });
         provider = await runProviderAgent({
           role: 'review',
-          port: input.port,
-          binding: input.binding,
+          port: composition?.port ?? input.port,
+          binding: composition?.binding ?? input.binding,
           taskId: id('task', request.reviewAssignment.taskId),
           assignmentId: request.reviewAssignment.assignmentId,
           attempt: request.reviewAssignment.attempt + attemptIndex,

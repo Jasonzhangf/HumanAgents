@@ -44,6 +44,7 @@ import {
   type TaskId,
 } from '../../contracts/src/index.js';
 import { AppLifecycleError } from './errors.js';
+import { admitAgentProvider } from './agent-provider-admission.js';
 
 const DSH_OWNER = 'humanagent.app.dsh-composition';
 const AGENT_PROVIDER_OWNER = 'humanagent.app.agent-provider-binding';
@@ -393,6 +394,25 @@ export function createAgentProviderPort(
     baseUrl: input.provider.baseUrl,
     source: input.provider.source ?? 'rcc',
   }, evidenceRoot);
+}
+
+/** Prepare one fresh execution instance and admit only its own provider. */
+export async function prepareAgentProvider(input: {
+  readonly roleId: AgentRole;
+  readonly configuredAgentId?: string;
+  readonly agentProviderBindings: readonly EffectiveAgentProviderBinding[];
+  readonly legacyProvider?: ProviderConfig;
+  readonly evidenceRoot: string;
+}): Promise<AgentProviderComposition> {
+  const composition = selectAgentProvider({
+    roleId: input.roleId,
+    ...(input.configuredAgentId === undefined ? {} : { agentId: input.configuredAgentId }),
+    agentProviderBindings: input.agentProviderBindings,
+    ...(input.legacyProvider === undefined ? {} : { legacyProvider: input.legacyProvider }),
+    createPort: (selected) => createAgentProviderPort(selected, input.evidenceRoot),
+  });
+  await admitAgentProvider(composition);
+  return composition;
 }
 
 function providerBinding(
