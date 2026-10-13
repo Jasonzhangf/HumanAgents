@@ -73,6 +73,7 @@ export interface RccV3ProviderTransportOptions {
   readonly probeTtlMs?: number;
   readonly now?: () => Date;
   readonly source?: ProviderTransportSource;
+  readonly credential?: string;
 }
 
 interface ActiveExecution {
@@ -415,8 +416,11 @@ export class RccV3ProviderTransport implements ProviderTransport {
   private readonly scheme: string;
   private readonly executions = new Map<string, ActiveExecution>();
   private readonly stopReasons = new Map<ProviderExecutionIdentityRef, string>();
+  private readonly options: Omit<RccV3ProviderTransportOptions, 'credential'>;
+  private credential: string | undefined;
 
-  constructor(private readonly options: RccV3ProviderTransportOptions) {
+  constructor({ credential, ...options }: RccV3ProviderTransportOptions) {
+    this.options = options;
     if (options.binding.protocol !== 'responses' && options.binding.protocol !== 'anthropic' && options.binding.protocol !== 'openai') {
       throw new ProviderAdapterError({
         code: 'capability.unavailable',
@@ -453,6 +457,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     this.probeTtlMs = options.probeTtlMs ?? DEFAULT_PROBE_TTL_MS;
     this.now = options.now ?? (() => new Date());
     this.source = options.source ?? 'rcc';
+    this.credential = this.source === 'http' ? credential : undefined;
     this.owner = this.source === 'http' ? HTTP_OWNER : RCC_OWNER;
     this.scheme = this.source === 'http' ? 'http' : 'rcc-v3';
   }
@@ -901,6 +906,7 @@ export class RccV3ProviderTransport implements ProviderTransport {
     }
     const scope = { organId: id('organ', 'provider-adapter') };
     const ref = await this.writeEvidence(scope, 'close', { endpoint: this.options.baseUrl, bindingId: binding.bindingId });
+    this.credential = undefined;
     return { bindingId: binding.bindingId, providerId: binding.providerId, protocol: binding.protocol, state: 'closed', evidenceRefs: [ref] };
   }
 
@@ -921,9 +927,18 @@ export class RccV3ProviderTransport implements ProviderTransport {
   }
 
   private async send(protocol: 'responses' | 'anthropic' | 'openai', request: ProviderWireRequest, controller: AbortController): Promise<RccV3FetchResponse> {
+    const headers: Record<string, string> = { accept: 'text/event-stream', 'content-type': 'application/json' };
+    if (this.source === 'http') {
+      if (protocol === 'anthropic') {
+        headers['anthropic-version'] = '2023-06-01';
+        if (this.credential !== undefined) headers['x-api-key'] = this.credential;
+      } else if (this.credential !== undefined) {
+        headers.authorization = `Bearer ${this.credential}`;
+      }
+    }
     const response = await this.fetcher(urlFor(this.options.baseUrl, endpointPath(protocol)), {
       method: 'POST',
-      headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify(requestPayload(request)),
       signal: controller.signal,
     });

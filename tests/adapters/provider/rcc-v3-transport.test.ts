@@ -21,6 +21,7 @@ import {
   type V3ProviderFetchInit,
   type V3ProviderFetchResponse,
   type ProviderTransportSource,
+  type V3ProviderHttpTransportOptions,
   createV3ProviderHttpTransport,
 } from '../../../packages/adapters/provider/src/index.js';
 
@@ -111,7 +112,11 @@ test('G HTTP source preserves protocol calls without RCC normalization', async (
   ]);
   const tools = [{ toolId: 'web.search', description: 'search the web', inputSchema: { type: 'object' } }];
 
-  const http = adapter(async () => response(stream()), binding, new ResponsesProviderCodec(), 'http');
+  const httpCalls: V3ProviderFetchInit[] = [];
+  const http = adapter(async (_url, init) => {
+    httpCalls.push(init);
+    return response(stream());
+  }, binding, new ResponsesProviderCodec(), 'http', { credential: 'fixture-http-credential' });
   await http.adapter.start({ ...startInput(), tools });
   const httpEvents = [];
   for await (const event of http.adapter.observe(execution)) httpEvents.push(event);
@@ -121,12 +126,38 @@ test('G HTTP source preserves protocol calls without RCC normalization', async (
   assert.equal(httpToolCall?.toolId, 'exec_command');
   assert.deepEqual(httpToolCall?.arguments, { cmd: "routecodex servertool run web_search --input-json '{\"maxResults\":5,\"query\":\"http source\"}'" });
 
-  const rcc = adapter(async () => response(stream()));
+  const anthropicCalls: V3ProviderFetchInit[] = [];
+  const anthropicBinding: ProviderBinding = { ...binding, protocol: 'anthropic' };
+  const anthropic = adapter(async (_url, init) => {
+    anthropicCalls.push(init);
+    return response(chunks([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"message-http-source"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]));
+  }, anthropicBinding, new AnthropicProviderCodec(4096), 'http', { credential: 'fixture-http-credential' });
+  await anthropic.adapter.start(startInput());
+  for await (const event of anthropic.adapter.observe(execution)) {
+    if (event.kind === 'terminal') assert.equal(event.terminalState, 'succeeded');
+  }
+
+  const rccCalls: V3ProviderFetchInit[] = [];
+  const rcc = adapter(async (_url, init) => {
+    rccCalls.push(init);
+    return response(stream());
+  }, binding, new ResponsesProviderCodec(), 'rcc', { credential: 'fixture-http-credential' });
   await rcc.adapter.start({ ...startInput(), tools });
   const rccEvents = [];
   for await (const event of rcc.adapter.observe(execution)) rccEvents.push(event);
   // The RCC source keeps the existing servertool normalization.
   assert.equal(rccEvents.find((event) => event.kind === 'tool')?.toolCall?.toolId, 'web.search');
+  assert.deepEqual({ responses: httpCalls[0]?.headers, anthropic: anthropicCalls[0]?.headers, rcc: rccCalls[0]?.headers }, {
+    responses: { accept: 'text/event-stream', 'content-type': 'application/json', authorization: 'Bearer fixture-http-credential' },
+    anthropic: { accept: 'text/event-stream', 'content-type': 'application/json', 'x-api-key': 'fixture-http-credential', 'anthropic-version': '2023-06-01' },
+    rcc: { accept: 'text/event-stream', 'content-type': 'application/json' },
+  });
+  assert.equal(JSON.stringify({ http: http.writes, anthropic: anthropic.writes, rcc: rcc.writes }).includes('fixture-http-credential'), false);
+  assert.equal([...httpCalls, ...anthropicCalls, ...rccCalls].some((call) => call.body?.includes('fixture-http-credential')), false);
 });
 
 test('RCC v3 Responses submit opens a second stream bound to the completed tool call', async () => {
@@ -443,7 +474,7 @@ function anthropicAdapter(fetch: V3ProviderFetch) {
   return adapter(fetch, provider, new AnthropicProviderCodec(4096));
 }
 
-function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec(), source: ProviderTransportSource = 'rcc') {
+function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCodec = new ResponsesProviderCodec(), source: ProviderTransportSource = 'rcc', extra: { readonly credential?: string } = {}) {
   const calls: Array<{ url: string; init: V3ProviderFetchInit }> = [];
   const writes: ProviderEvidenceWrite[] = [];
   const contentByRef = new Map<EvidenceRef, Uint8Array>();
@@ -466,13 +497,15 @@ function adapter(fetch: V3ProviderFetch, provider = binding, codec: ProviderCode
       return content;
     },
   };
-  const transport = createV3ProviderHttpTransport({
+  const options: V3ProviderHttpTransportOptions & { readonly credential?: string } = {
     binding: provider,
     baseUrl: 'http://127.0.0.1:4444',
     evidence: transportEvidence,
     fetch: async (url, init) => fetch(url, init),
     source,
-  });
+    ...extra,
+  };
+  const transport = createV3ProviderHttpTransport(options);
   return { adapter: new ProviderAdapter({ binding: provider, routeRef: 'test-route', codec, transport, evidence: sink() }), calls, writes, evidence: transportEvidence };
 }
 
