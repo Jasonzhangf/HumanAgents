@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
 import {
   assertNotExpired,
   ContractError,
@@ -297,6 +298,7 @@ export interface UiRuntimeServiceOptions {
   readonly checkpointStoreFor: (taskId: TaskId, cycleId: CycleId) => TaskCheckpointStore;
   readonly attentionPort: AttentionPort;
   readonly providerState: string;
+  readonly providerSource?: ProviderTransportSource;
   readonly providerError?: RuntimeTaskErrorProjection;
   readonly hookRegistry?: AgentHookRegistry;
   readonly journal?: UiRuntimeJournal;

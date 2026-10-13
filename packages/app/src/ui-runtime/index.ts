@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import type { ProviderTransportSource } from '../../../adapters/provider/src/index.js';
 import type {
   Attention,
   CycleId,
@@ -75,6 +76,8 @@ export interface UiRuntimeLaunchOptions {
   readonly organId: OrganId;
   readonly binding: ProviderBinding;
   readonly port: ExecutionRuntimePort;
+  /** Validated source for this exact binding and port; omission retains legacy RCC. */
+  readonly providerSource?: ProviderTransportSource;
   readonly checkpointRoot: string;
   readonly interactionRoot?: string;
   readonly evidenceRoot: string;
@@ -317,6 +320,7 @@ export async function startUiRuntime(options: UiRuntimeLaunchOptions): Promise<U
     attentionPort,
     providerState,
     providerError,
+    ...(options.providerSource === undefined ? {} : { providerSource: options.providerSource }),
     journal,
     closurePort: interactionJournal ?? journal,
     ...(options.projectKey ? { projectKey: options.projectKey } : {}),
