@@ -35,6 +35,7 @@ import {
 import { SessionStore } from './session-store.js';
 import { startUiRuntime } from './ui-runtime/index.js';
 import { assembleProviderExecutionPort } from './provider-assembly.js';
+import { prepareAgentProvider, providerBindingFromConfig } from './agent-driver-composition.js';
 import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
 import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
@@ -538,25 +539,40 @@ function providerBindingFromOptions(
 ): ProviderBinding & { readonly protocol: UiProviderProtocol } {
   const fake = provider === 'fake';
   const defaults = configured ?? DEFAULT_RCC_PROVIDER;
-  // The endpoint scheme carries the source origin so an HTTP binding is never
-  // labelled with the RCC-only `rcc-v3:` provenance. The transport still reads
-  // the actual endpoint from `baseUrl`; this only keeps binding/error evidence
-  // accurate.
-  const endpointScheme = source === 'http' ? 'http' : 'rcc-v3';
+  if (!fake) {
+    const providerId = providerIdOverride === undefined
+      ? defaults.provider
+      : PROVIDERS.find((candidate) => candidate === providerIdOverride);
+    if (providerId === undefined) {
+      throw new AppLifecycleError('provider.invalid', `unknown provider: ${providerIdOverride}`,
+        'choose a configured provider such as rcc or http', 'humanagent.config');
+    }
+    const binding = providerBindingFromConfig({
+      ...defaults,
+      source,
+      binding: option(args, '--binding') ?? defaults.binding,
+      provider: providerId,
+      protocol,
+      model: option(args, '--model') ?? defaults.model,
+      route: option(args, '--route') ?? defaults.route,
+      baseUrl,
+    });
+    return {
+      ...binding,
+      protocol,
+      endpointRef: option(args, '--endpoint') ?? binding.endpointRef,
+      configDigest: option(args, '--config-digest') ?? binding.configDigest,
+      capabilityDigest: option(args, '--capability-digest') ?? binding.capabilityDigest,
+    };
+  }
   return {
-    bindingId: option(args, '--binding') ?? (fake ? 'fake-default' : defaults.binding),
-    providerId: providerIdOverride ?? (fake ? 'fake-provider' : defaults.provider),
+    bindingId: option(args, '--binding') ?? 'fake-default',
+    providerId: providerIdOverride ?? 'fake-provider',
     protocol,
-    endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : `${endpointScheme}:${baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`),
-    modelRef: option(args, '--model') ?? (fake ? 'fake.model' : defaults.model),
-    // Identity labels for this locally composed in-process serve binding. Nothing hashes
-    // real config or capability content, and no consumer verifies these against content,
-    // so the RCC defaults are plain labels instead of digest-shaped values. An operator
-    // that holds a real content digest passes --config-digest / --capability-digest. The
-    // fake defaults stay sha256-prefixed because they are the shared fake-binding labels
-    // of fakeExecutionBinding() in fake-execution.ts, which is owned elsewhere.
-    configDigest: option(args, '--config-digest') ?? (fake ? 'sha256:fake-ui-config' : 'ui-runtime-config'),
-    capabilityDigest: option(args, '--capability-digest') ?? (fake ? 'sha256:fake-ui-capability' : 'ui-runtime-capability'),
+    endpointRef: option(args, '--endpoint') ?? 'fake:replay',
+    modelRef: option(args, '--model') ?? 'fake.model',
+    configDigest: option(args, '--config-digest') ?? 'sha256:fake-ui-config',
+    capabilityDigest: option(args, '--capability-digest') ?? 'sha256:fake-ui-capability',
   };
 }
 
@@ -920,6 +936,26 @@ export async function main(args: readonly string[]): Promise<void> {
     const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
+    const effectiveLegacyProvider: ProviderConfig = {
+      ...configuredProvider,
+      source: resolvedSource,
+      binding: binding.bindingId,
+      provider: binding.providerId === 'rcc' || binding.providerId === 'http'
+        ? binding.providerId : configuredProvider.provider,
+      protocol,
+      model: binding.modelRef,
+      route: option(args, '--route') ?? configuredProvider.route,
+      baseUrl,
+    };
+    const prepareSelectedAgentProvider = (input: {
+      readonly roleId: import('../../config/src/index.js').AgentRole;
+      readonly configuredAgentId?: string;
+    }) => prepareAgentProvider({
+      ...input,
+      agentProviderBindings: configuration.agentProviderBindings,
+      legacyProvider: effectiveLegacyProvider,
+      evidenceRoot,
+    });
     const portNumber = option(args, '--port') ? Number(required(option(args, '--port'), '--port')) : 10086;
     let boundPortNumber = portNumber;
     const host = serveHost(option(args, '--host') ?? '127.0.0.1');
@@ -945,21 +981,6 @@ export async function main(args: readonly string[]): Promise<void> {
       paths,
       configuration,
       workspace: paths.workspaceCwd,
-      rcc: {
-        // A memory-role rcc agent must use its own provider transport even when
-        // the serve UI runs the fake provider for the main execution path.
-        port: mode === 'rcc'
-          ? port
-          : assembleProviderExecutionPort({
-              binding: providerBindingFromOptions(args, configuredProvider, protocol, 'rcc', baseUrl, resolvedSource, selected.providerIdOverride),
-              routeRef: option(args, '--route') ?? configuredProvider.route,
-              baseUrl,
-              source: resolvedSource,
-              maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
-            }, evidenceRoot),
-        binding,
-        inputRefs: [`humanagent://memory/project/${paths.projectKey}`],
-      },
     });
     const memoryRuntime = await composeMemoryRuntime({
       paths,
@@ -1082,6 +1103,7 @@ export async function main(args: readonly string[]): Promise<void> {
       : createRccServeOrchestrationPorts({
             port,
             binding,
+            prepareAgentProvider: prepareSelectedAgentProvider,
             promptSegments: {
               review: servePromptSegments(configuration, 'review'),
             },
@@ -1133,6 +1155,7 @@ export async function main(args: readonly string[]): Promise<void> {
             accessControl,
             organId: id('organ', 'humanagent-ui'),
             binding,
+            providerSource: resolvedSource,
             port: cordisHost.getExecutionRuntimePort(),
             checkpointRoot,
             interactionRoot: paths.mainRoot,
@@ -1181,6 +1204,7 @@ export async function main(args: readonly string[]): Promise<void> {
               },
             },
             runtimeComposition: {
+              ...(mode === 'fake' ? {} : { prepareAgentProvider: prepareSelectedAgentProvider }),
               ...(orchestrationPorts === undefined ? {} : {
                 createTaskAssembly: serveRuntime!.createTaskAssembly,
               }),
