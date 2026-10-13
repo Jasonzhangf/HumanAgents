@@ -141,6 +141,51 @@ function anthropicContextMessages(context: ProviderRequestContext): readonly Ant
 }
 
 /**
+ * Maps canonical units to OpenAI Chat messages. Consecutive tool-call units
+ * fold into one assistant `tool_calls` group so the wire never emits an invalid
+ * assistant-call / assistant-call / tool-result ordering; a message or
+ * tool-result unit closes the open group. Tool result output is preserved
+ * exactly, with no status wrapper or non-standard field.
+ */
+function openaiChatContextMessages(context: ProviderRequestContext): readonly OpenAIChatWireMessage[] {
+  const messages: OpenAIChatWireMessage[] = [];
+  let pendingToolCalls: {
+    readonly id: string;
+    readonly type: 'function';
+    readonly function: { readonly name: string; readonly arguments: string };
+  }[] | undefined;
+  const flushToolCalls = (): void => {
+    if (pendingToolCalls === undefined) return;
+    messages.push({ role: 'assistant', content: '', tool_calls: pendingToolCalls });
+    pendingToolCalls = undefined;
+  };
+  for (const unit of context.units) {
+    switch (unit.kind) {
+      case 'message':
+        flushToolCalls();
+        messages.push(unit.role === 'user'
+          ? { role: 'user', content: unit.text }
+          : { role: 'assistant', content: unit.text });
+        break;
+      case 'tool-call':
+        if (pendingToolCalls === undefined) pendingToolCalls = [];
+        pendingToolCalls.push({
+          id: unit.callId,
+          type: 'function',
+          function: { name: responsesWireToolName(unit.toolId), arguments: JSON.stringify(unit.arguments) },
+        });
+        break;
+      case 'tool-result':
+        flushToolCalls();
+        messages.push({ role: 'tool', tool_call_id: unit.callId, content: unit.output });
+        break;
+    }
+  }
+  flushToolCalls();
+  return messages;
+}
+
+/**
  * The wire `execution` field is identity only. The request input, business
  * payload and request-scoped context never belong on it, so the codec emits a
  * plain identity ref instead of the whole execution input object.
@@ -1283,15 +1328,15 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
   readonly protocol = 'openai' as const;
 
   encodeStart(input: ProviderStartInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.payload, undefined, 'start');
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeResume(input: ProviderResumeInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId, 'resume');
+    return this.encodeRequest(binding, routeRef, input, input.payload, input.checkpointId);
   }
 
   encodeSubmit(input: ProviderSubmitInput, binding: ProviderBinding, routeRef: string): OpenAIChatWireRequest {
-    return this.encodeRequest(binding, routeRef, input, input.payload, undefined, 'submit');
+    return this.encodeRequest(binding, routeRef, input, input.payload);
   }
 
   encodeStop(input: ProviderStopRequest, binding: ProviderBinding, routeRef: string): OpenAIChatCancelRequest {
@@ -1539,25 +1584,28 @@ export class OpenAIChatProviderCodec implements ProviderCodec<OpenAIChatWireRequ
     execution: ProviderStartInput | ProviderResumeInput | ProviderSubmitInput,
     payload: ProviderStartInput['payload'],
     checkpointId?: { readonly scope: 'checkpoint'; readonly value: string },
-    phase: 'start' | 'resume' | 'submit' = 'start',
   ): OpenAIChatWireRequest {
-    // The OpenAI chat wire only carries user/assistant/system text messages.
-    // It cannot express the typed tool-call/tool-result units of a canonical
-    // request context, so consuming one here would silently drop it and
-    // stringify the legacy payload. Reject before the request is dispatched.
-    if (execution.requestContext !== undefined || execution.instructions !== undefined) {
-      throw new ProviderAdapterError({
-        code: 'request.context.unsupported',
-        category: 'capability',
-        phase,
-        message: 'openai chat protocol cannot encode typed request context; use a responses or anthropic codec',
-        scope: execution,
-      });
+    // The transient orientation (with the harness tool-surface guidance) is a
+    // request-local system message, never part of the canonical units. When a
+    // typed context is bound, its units replace the legacy payload string.
+    const messages: OpenAIChatWireMessage[] = [];
+    if (execution.requestContext !== undefined) {
+      const systemText = requestInstructions(execution.tools, execution.instructions);
+      if (systemText.length > 0) messages.push({ role: 'system', content: systemText });
+      messages.push(...openaiChatContextMessages(execution.requestContext));
+    } else if (execution.instructions !== undefined) {
+      const systemText = requestInstructions(execution.tools, execution.instructions);
+      if (systemText.length > 0) messages.push({ role: 'system', content: systemText });
+      messages.push({ role: 'user', content: businessText(execution, payload) });
+    } else {
+      messages.push({ role: 'user', content: businessText(execution, payload) });
     }
-    const messages: OpenAIChatWireMessage[] = [
-      { role: 'user', content: businessText(execution, payload) },
-    ];
-    const tools: OpenAIChatWireTool[] = [];
+    const tools: OpenAIChatWireTool[] = execution.requestContext === undefined
+      ? []
+      : (execution.tools ?? []).map((tool) => ({
+          type: 'function',
+          function: { name: responsesWireToolName(tool.toolId), description: tool.description, parameters: tool.inputSchema },
+        }));
     return {
       protocol: 'openai',
       type: 'openai.chat.request',

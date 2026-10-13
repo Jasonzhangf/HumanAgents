@@ -274,10 +274,36 @@ test('provider driver materializes fresh typed context and encodes each protocol
   assert.deepEqual(blocks.filter((block) => block.type === 'tool_result'), [{ type: 'tool_result', tool_use_id: 'call-1', content: 'TOOL_OUTPUT' }]);
   assert.equal(blocks.some((block) => block.type === 'thinking'), false);
 
+  const chatCodec = new OpenAIChatProviderCodec();
+  const chatInitial = chatCodec.encodeStart(startInputs[0]!, openaiBinding, 'route-p');
+  assert.equal(chatInitial.protocol, 'openai');
+  // The transient orientation is a request-local system message; canonical text stays in units.
+  assert.equal(chatInitial.messages[0]!.role, 'system');
+  assert.match(chatInitial.messages[0]!.content, /ORIENTATION_ONE/);
+  assert.equal(chatInitial.messages[0]!.content.includes('CURRENT_TURN_INPUT'), false);
+  assert.deepEqual(chatInitial.messages.slice(1), [{ role: 'user', content: 'CURRENT_TURN_INPUT' }]);
+  assert.deepEqual(chatInitial.tools, [{ type: 'function', function: { name: 'file_read', description: 'read file', parameters: { type: 'object' } } }]);
+  assert.equal(JSON.stringify(chatInitial).includes('PRIOR_TURN_RAW_MARKER'), false);
+
+  const chatContinuation = chatCodec.encodeSubmit(submitInputs[0]!, openaiBinding, 'route-p');
+  assert.match(chatContinuation.messages[0]!.content, /ORIENTATION_TWO/);
+  assert.equal(chatContinuation.messages[0]!.content.includes('ORIENTATION_ONE'), false);
+  // Canonical user/assistant text, one contiguous assistant tool_calls group, exact tool result.
+  assert.deepEqual(chatContinuation.messages.slice(1), [
+    { role: 'user', content: 'CURRENT_TURN_INPUT' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'file_read', arguments: '{"path":"README.md"}' } }],
+    },
+    { role: 'tool', tool_call_id: 'call-1', content: 'TOOL_OUTPUT' },
+  ]);
+  assert.equal(JSON.stringify(chatContinuation).includes('PRIOR_TURN_RAW_MARKER'), false);
+
   assert.equal(events.at(-1)?.providerEvent.terminalState, 'succeeded');
 });
 
-test('openai chat rejects typed request context before dispatch and keeps legacy payload encoding', async () => {
+test('openai chat driver encodes typed request context to the captured transport', async () => {
   const captured: Captured = { order: [], starts: [], submits: [] };
   const adapter = new ProviderAdapter({
     binding: openaiBinding,
@@ -312,25 +338,98 @@ test('openai chat rejects typed request context before dispatch and keeps legacy
   });
 
   await driver.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
-  await assert.rejects(
-    () => driver.submit({
-      taskId,
-      executionEpoch: identity.executionEpoch,
-      assignmentId: 'assignment-p',
-      payload: { prompt: 'LEGACY_CHAT_PAYLOAD' },
-    }),
-    (error: unknown) => (error as { providerError?: { code?: string } }).providerError?.code === 'request.context.unsupported',
-  );
-  // The rejected request must not reach the transport.
-  assert.equal(captured.starts.length, 0);
-  assert.equal(captured.order.includes('start'), false);
+  await driver.submit({
+    taskId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: 'assignment-p',
+    payload: { prompt: 'LEGACY_CHAT_PAYLOAD' },
+  });
+  // The typed-context request must reach the captured transport, not be rejected.
+  assert.equal(captured.starts.length, 1);
+  const wire = captured.starts[0] as OpenAIChatWireRequest;
+  assert.equal(wire.protocol, 'openai');
+  assert.equal(wire.messages[0]!.role, 'system');
+  assert.match(wire.messages[0]!.content, /ORIENTATION_ONE/);
+  assert.deepEqual(wire.messages.slice(1), [{ role: 'user', content: 'CURRENT_TURN_INPUT' }]);
+  // The wire execution field is identity only.
+  assert.deepEqual(wire.execution, { runtimeId: identity.runtimeId, taskId, operationId, executionEpoch: identity.executionEpoch });
+  assert.equal(JSON.stringify(wire.execution).includes('LEGACY_CHAT_PAYLOAD'), false);
 
-  // Legacy openai chat still stringifies the business payload when no typed context is bound.
+  // Legacy openai chat (no typed context, no instructions) still stringifies the business payload.
   const legacy = new OpenAIChatProviderCodec().encodeStart(
     { ...identity, inputRefs: ['input-p'], evidenceRefs: [evidence('legacy-chat')], payload: { prompt: 'LEGACY_CHAT_PAYLOAD' } },
     openaiBinding,
     'route-p',
   ) as OpenAIChatWireRequest;
-  assert.equal(legacy.messages.length, 1);
-  assert.match(legacy.messages[0]!.content, /LEGACY_CHAT_PAYLOAD/);
+  assert.deepEqual(legacy.messages, [{ role: 'user', content: '{"prompt":"LEGACY_CHAT_PAYLOAD"}' }]);
+  assert.equal(legacy.tools, undefined);
+
+  // Instructions-only: an independent system message plus the legacy user payload.
+  const instructionsOnly = new OpenAIChatProviderCodec().encodeStart(
+    { ...identity, inputRefs: ['input-p'], evidenceRefs: [evidence('instructions-only')], payload: { prompt: 'LEGACY_CHAT_PAYLOAD' }, instructions: { text: 'ORIENTATION_ONLY' } },
+    openaiBinding,
+    'route-p',
+  ) as OpenAIChatWireRequest;
+  assert.equal(instructionsOnly.messages[0]!.role, 'system');
+  assert.match(instructionsOnly.messages[0]!.content, /ORIENTATION_ONLY/);
+  assert.deepEqual(instructionsOnly.messages.slice(1), [{ role: 'user', content: '{"prompt":"LEGACY_CHAT_PAYLOAD"}' }]);
+});
+
+test('openai chat groups contiguous tool calls and preserves exact tool result output', () => {
+  const codec = new OpenAIChatProviderCodec();
+  const wire = codec.encodeStart(
+    {
+      ...identity,
+      inputRefs: ['input-p'],
+      evidenceRefs: [evidence('chat-two-calls')],
+      payload: { prompt: 'IGNORED_LEGACY_PAYLOAD' },
+      requestContext: {
+        units: [
+          { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
+          { kind: 'message', role: 'assistant', text: 'READING' },
+          { kind: 'tool-call', callId: 'call-1', toolId: 'file.read', arguments: { path: 'README.md' } },
+          { kind: 'tool-call', callId: 'call-2', toolId: 'file.list', arguments: { dir: '.' } },
+          { kind: 'tool-result', callId: 'call-1', toolId: 'file.read', output: 'TOOL_OUTPUT\n', status: 'succeeded' },
+          { kind: 'tool-result', callId: 'call-2', toolId: 'file.list', output: 'boom: not found\n', status: 'failed' },
+        ],
+      },
+      instructions: { text: 'ORIENTATION_X' },
+    },
+    openaiBinding,
+    'route-p',
+  );
+  // Two contiguous calls fold into one assistant message; a failed result keeps its exact output
+  // and is not rewritten to success (no status wrapper, no non-standard is_error field).
+  assert.deepEqual(wire.messages.slice(1), [
+    { role: 'user', content: 'CURRENT_TURN_INPUT' },
+    { role: 'assistant', content: 'READING' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-1', type: 'function', function: { name: 'file_read', arguments: '{"path":"README.md"}' } },
+        { id: 'call-2', type: 'function', function: { name: 'file_list', arguments: '{"dir":"."}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-1', content: 'TOOL_OUTPUT\n' },
+    { role: 'tool', tool_call_id: 'call-2', content: 'boom: not found\n' },
+  ]);
+  assert.equal(JSON.stringify(wire).includes('IGNORED_LEGACY_PAYLOAD'), false);
+  assert.equal(JSON.stringify(wire).includes('"failed"'), false);
+
+  // An unregistered/invalid tool id still fails through the existing mapper error channel.
+  assert.throws(
+    () => codec.encodeStart(
+      {
+        ...identity,
+        inputRefs: ['input-p'],
+        evidenceRefs: [evidence('chat-bad-tool')],
+        payload: { prompt: 'x' },
+        requestContext: { units: [{ kind: 'tool-call', callId: 'call-x', toolId: 'file read', arguments: {} }] },
+      },
+      openaiBinding,
+      'route-p',
+    ),
+    (error: unknown) => (error as { providerError?: { code?: string } }).providerError?.code === 'tool.name.unsupported',
+  );
 });
