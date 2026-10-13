@@ -33,7 +33,8 @@ import {
   settleSessionOutcome,
 } from './index.js';
 import { SessionStore } from './session-store.js';
-import { buildRccExecutionPort, startUiRuntime } from './ui-runtime/index.js';
+import { startUiRuntime } from './ui-runtime/index.js';
+import { assembleProviderExecutionPort } from './provider-assembly.js';
 import { AccessControlService, deriveSupervisorToken } from './ui-runtime/access-control.js';
 import { providerRetryConfigFromEffective } from './retry-config.js';
 import {
@@ -60,7 +61,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServeRuntimeComposition, type ServeRuntimeComposition } from './serve-runtime.js';
 import { createDeterministicServeOrchestrationPorts, createRccServeOrchestrationPorts } from './serve-orchestration.js';
-import type { ProviderConfig } from '../../config/src/index.js';
+import { PROVIDERS, type ProviderConfig, type ProviderSource } from '../../config/src/index.js';
 
 // Options that consume the following argument as their value. `--help`/`-h`
 // appearing in such a value position is payload (for example
@@ -508,15 +509,22 @@ function resolveServeProvider(
       ...(requested === undefined ? {} : { providerIdOverride: requested }),
     };
   }
-  if (requested !== undefined) {
+  // The configured/selected `provider` is a finite local binding label
+  // (`rcc`/`http`); it never selects the serve backend. Any real label keeps
+  // the finite serve mode `rcc` and only reaches the provider binding, which
+  // preserves the source/label separation. Unknown labels stay invalid.
+  if (requested !== undefined && !(PROVIDERS as readonly string[]).includes(requested)) {
     throw new AppLifecycleError(
       'provider.invalid',
       `unknown provider: ${requested}`,
-      'choose a configured provider such as rcc, or use fake only for internal tests',
+      'choose a configured provider such as rcc or http, or use fake only for internal tests',
       'humanagent.config',
     );
   }
-  return { provider: configured?.provider ?? 'rcc' };
+  return {
+    provider: 'rcc',
+    ...(requested === undefined ? {} : { providerIdOverride: requested }),
+  };
 }
 
 function providerBindingFromOptions(
@@ -525,15 +533,21 @@ function providerBindingFromOptions(
   protocol: UiProviderProtocol,
   provider: ServeProvider,
   baseUrl: string,
+  source: ProviderSource,
   providerIdOverride?: string,
 ): ProviderBinding & { readonly protocol: UiProviderProtocol } {
   const fake = provider === 'fake';
   const defaults = configured ?? DEFAULT_RCC_PROVIDER;
+  // The endpoint scheme carries the source origin so an HTTP binding is never
+  // labelled with the RCC-only `rcc-v3:` provenance. The transport still reads
+  // the actual endpoint from `baseUrl`; this only keeps binding/error evidence
+  // accurate.
+  const endpointScheme = source === 'http' ? 'http' : 'rcc-v3';
   return {
     bindingId: option(args, '--binding') ?? (fake ? 'fake-default' : defaults.binding),
     providerId: providerIdOverride ?? (fake ? 'fake-provider' : defaults.provider),
     protocol,
-    endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : `rcc-v3:${baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`),
+    endpointRef: option(args, '--endpoint') ?? (fake ? 'fake:replay' : `${endpointScheme}:${baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}`),
     modelRef: option(args, '--model') ?? (fake ? 'fake.model' : defaults.model),
     // Identity labels for this locally composed in-process serve binding. Nothing hashes
     // real config or capability content, and no consumer verifies these against content,
@@ -894,6 +908,7 @@ export async function main(args: readonly string[]): Promise<void> {
     await ensureControlLayout(paths);
     const configuration = await loadConfiguration(paths);
     const configuredProvider = configuration.effective.provider ?? DEFAULT_RCC_PROVIDER;
+    const resolvedSource = configuredProvider.source ?? 'rcc';
     const selected = resolveServeProvider(args, configuration.effective.provider);
     const mode = selected.provider;
     const protocol = (option(args, '--protocol') ?? configuredProvider.protocol) as UiProviderProtocol;
@@ -901,7 +916,7 @@ export async function main(args: readonly string[]): Promise<void> {
       throw new Error('serve --protocol must be responses, openai, or anthropic');
     }
     const baseUrl = option(args, '--rcc-base-url') ?? configuredProvider.baseUrl;
-    const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, baseUrl, selected.providerIdOverride);
+    const binding = providerBindingFromOptions(args, configuredProvider, protocol, mode, baseUrl, resolvedSource, selected.providerIdOverride);
     const uiRoot = option(args, '--ui-root') ?? defaultUiRoot();
     const checkpointRoot = join(paths.checkpointsRoot, 'ui-runtime');
     const evidenceRoot = join(paths.artifactsRoot, 'ui-provider-evidence');
@@ -914,10 +929,11 @@ export async function main(args: readonly string[]): Promise<void> {
     });
     const memoryRoot = paths.memoryRoot;
     const port = mode === 'rcc'
-      ? buildRccExecutionPort({
+      ? assembleProviderExecutionPort({
           binding,
           routeRef: option(args, '--route') ?? configuredProvider.route,
           baseUrl,
+          source: resolvedSource,
           maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
         }, evidenceRoot)
       : createFakeExecutionPort(
@@ -934,10 +950,11 @@ export async function main(args: readonly string[]): Promise<void> {
         // the serve UI runs the fake provider for the main execution path.
         port: mode === 'rcc'
           ? port
-          : buildRccExecutionPort({
-              binding: providerBindingFromOptions(args, configuredProvider, protocol, 'rcc', baseUrl, selected.providerIdOverride),
+          : assembleProviderExecutionPort({
+              binding: providerBindingFromOptions(args, configuredProvider, protocol, 'rcc', baseUrl, resolvedSource, selected.providerIdOverride),
               routeRef: option(args, '--route') ?? configuredProvider.route,
               baseUrl,
+              source: resolvedSource,
               maxTokens: option(args, '--max-tokens') ? Number(option(args, '--max-tokens')) : undefined,
             }, evidenceRoot),
         binding,
