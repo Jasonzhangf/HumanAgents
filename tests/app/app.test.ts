@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ensureControlLayout, loadConfiguration, resolveRuntimePaths } from '../../packages/config/src/index.js';
+import { ensureControlLayout, loadConfiguration, resolveRuntimePaths, type AgentRole } from '../../packages/config/src/index.js';
 import { loadBuiltinPromptSegments } from '../../packages/agent-templates/src/index.js';
-import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
+import { AppLifecycleError, assertDshSourceMatchesLock, checkpointEvidenceDigest, closeRuntime, composeAgentDriver, composeMemory, composeMemoryRuntime, composeRuntimeMemory, createJsonlCheckpointClosurePort, createJsonlCheckpointJournal, createJsonlEventJournal, createProjectSourceUpdateOwner, ensureDshSettings, entryCompositionInventory, FakeProviderAgentDriver, fakeExecutionBinding, filesystemTaskEvidence, memoryDriverFactory, openAgentOperation, openRuntime, prepareAgentProvider, probeExecutionRuntime, readCheckpointEvidence, readRunManifest, resolveDshHome, resumeAgentOperation, resumeRuntime, runAgentOperation, serveCompositionComplete, serveCompositionManifestMatches, settleSessionOutcome, verifyDshPatches, type RuntimeExecutionBinding } from '../../packages/app/src/index.js';
 import { id, type AgentClosure, type AgentDriver, type AgentEvent, type AgentInput, type AgentOutput, type AgentStartRequest, type Checkpoint, type EvidenceRef, type ExecutionRuntimePort, type ProviderBinding, type ProviderCloseResult, type ProviderEvent, type ProviderReadiness, type ProviderRecoveryResult, type ProviderSettlement, type ProviderStartReceipt, type ProviderStopReceipt, type ProviderSubmitResult, type OperationId, type StopRequestReceipt } from '../../packages/contracts/src/index.js';
 import { SessionStore } from '../../packages/app/src/session-store.js';
 import { FakeAgentDriver } from '../../packages/adapters/testing/src/index.js';
@@ -72,6 +74,88 @@ async function createConfiguredWorkspace(prefix: string): Promise<{ root: string
   const paths = await resolveRuntimePaths({ controlRoot, workspace });
   await ensureControlLayout(paths);
   return { root, controlRoot, workspace };
+}
+
+interface MemoryUpstreamWire {
+  readonly method: string;
+  readonly path: string;
+  readonly body: string;
+}
+
+/**
+ * Bounded local upstream for the real memory composition producer. It answers
+ * the RCC readiness/model probes and returns one SSE curation stream per POST.
+ * The curation echoes the business source refs and prompt from the request so
+ * the memory owner can validate the admitted operation without a second network
+ * fixture.
+ */
+async function memoryUpstream(model: string): Promise<{
+  readonly wires: MemoryUpstreamWire[];
+  readonly baseUrl: string;
+  deny(): void;
+  allow(): void;
+  close(): Promise<void>;
+}> {
+  const wires: MemoryUpstreamWire[] = [];
+  let ready = true;
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const path = request.url ?? '';
+      const body = Buffer.concat(chunks).toString('utf8');
+      wires.push({ method: request.method ?? '', path, body });
+      if (path === '/health' || path === '/v1/models') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(path === '/health'
+          ? { status: ready ? 'ok' : 'not-ready', version: 'memory-local' }
+          : { data: [{ id: model }] }));
+        return;
+      }
+      const sent = JSON.parse(body) as { readonly input?: readonly { readonly content?: readonly { readonly text?: string }[] | string }[] };
+      const content = sent.input?.[0]?.content;
+      const business = JSON.parse(typeof content === 'string' ? content : (content?.[0]?.text ?? '{}')) as {
+        readonly sourceRefs?: readonly string[];
+        readonly prompt?: unknown;
+      };
+      const curation = {
+        auditPrompt: business.prompt,
+        sourceRefs: business.sourceRefs,
+        outcome: 'candidate',
+        candidateId: 'rcc-memory-candidate',
+        matchedMemoryIds: [],
+        conflictRefs: [],
+        explanation: 'memory local upstream curation',
+        nextAction: 'review',
+      };
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end([
+        { type: 'response.created', response: { id: `response-${model}` } },
+        { type: 'response.output_text.done', item_id: 'message-final', text: JSON.stringify(curation) },
+        { type: 'response.completed', response: { id: `response-${model}` } },
+      ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''));
+    })().catch((error: unknown) => {
+      response.writeHead(500);
+      response.end(String(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('missing memory upstream socket address');
+  return {
+    wires,
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    deny: () => { ready = false; },
+    allow: () => { ready = true; },
+    close: async () => {
+      server.closeIdleConnections?.();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      assert.equal(server.address(), null);
+    },
+  };
 }
 
 interface ServeAuth {
@@ -4855,7 +4939,7 @@ test('CLI memory driver factory selects the configured memory-role agent and dri
   const factory = memoryDriverFactory({ paths, configuration, workspace });
   assert.ok(factory, 'a configured memory-role agent must yield a driver factory');
 
-  const driver = factory!({
+  const value = await factory!({
     taskId: id('task', 'memory-driver-factory-task'),
     operationId: id('operation', 'memory-driver-factory-operation'),
     executionEpoch: 3,
@@ -4867,6 +4951,7 @@ test('CLI memory driver factory selects the configured memory-role agent and dri
       taskId: id('task', 'memory-driver-factory-task'),
     },
   });
+  const driver = 'start' in value ? value : value.driver;
   const events: string[] = [];
   const wrapped: typeof driver = {
     ...driver,
@@ -4930,6 +5015,12 @@ test('memory driver factory requires a bound serve RCC port for an explicitly co
     'roleId = "memory"',
     'templateRef = "builtin/memory@1.0.0"',
     'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "memory-rcc-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "memory.rcc.model"',
+    'provider.route = "memory-rcc-route"',
+    'provider.baseUrl = "http://rcc.invalid:4444"',
     'skills = ["history-search", "novelty-review", "recurrence-review"]',
     'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
     'permissions = ["memory.read", "memory.propose"]',
@@ -4965,7 +5056,7 @@ test('memory driver factory requires a bound serve RCC port for an explicitly co
     rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/test'] },
   });
   assert.ok(bound);
-  const driver = bound!({
+  const value = await bound!({
     taskId: id('task', 'memory-rcc-bound-task'),
     operationId: id('operation', 'memory-rcc-bound-operation'),
     executionEpoch: 4,
@@ -4977,6 +5068,7 @@ test('memory driver factory requires a bound serve RCC port for an explicitly co
       taskId: id('task', 'memory-rcc-bound-task'),
     },
   });
+  const driver = 'start' in value ? value : value.driver;
   assert.equal(driver.kind, 'humanagent.provider-agent-driver');
   await rm(root, { recursive: true, force: true });
 });
@@ -5025,13 +5117,14 @@ test('rcc memory-role driver parses provider output as a MemoryCurationResult an
   };
   // The composed rcc driver runs an analysis round on the admitted operation
   // identity and its provider output is the curation the memory owner parses.
-  const driver = driverFor!({
+  const value = await driverFor!({
     taskId,
     operationId,
     executionEpoch: 1,
     assignmentId: `memory-analysis:${operationId.value}`,
     scope,
   });
+  const driver = 'start' in value ? value : value.driver;
   assert.equal(driver.kind, 'humanagent.provider-agent-driver');
   await driver.start({
     runtimeId: `memory-analysis:${operationId.value}`,
@@ -5074,8 +5167,19 @@ test('rcc memory-role driver parses provider output as a MemoryCurationResult an
 test('rcc memory-role driver consumes a real curation end to end and exposes model analysis', async () => {
   const { root, controlRoot, workspace } = await createConfiguredWorkspace('humanagent-app-memory-rcc-consume-');
   await writeFile(join(workspace, 'AGENTS.md'), '# RCC memory consume\n', 'utf8');
+  const upstream = await memoryUpstream('memory.rcc.model');
+  const fixtureRoot = join(homedir(), '.humanagent', 'test-fixtures', 'provider-g-memory-consumer-m4-20261013');
+  await mkdir(fixtureRoot, { recursive: true });
+  const evidenceRoot = await mkdtemp(join(fixtureRoot, 'memory-evidence-'));
   const runtime = await openRuntime({ controlRoot, workspace, plan: 'default', sessionId: 'session-memory-rcc-consume' });
   const { paths } = runtime;
+  let primaryError: unknown;
+  const admittedPorts: ExecutionRuntimePort[] = [];
+  const closeReceipts: ProviderCloseResult[] = [];
+  const compositions: Awaited<ReturnType<typeof prepareAgentProvider>>[] = [];
+  const settlements: ProviderSettlement[] = [];
+  const lifecycle: string[] = [];
+  try {
   await appendFile(join(controlRoot, 'config.toml'), [
     '',
     '[[agents]]',
@@ -5083,6 +5187,12 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
     'roleId = "memory"',
     'templateRef = "builtin/memory@1.0.0"',
     'driverRef = "rcc"',
+    'provider.provider = "rcc"',
+    'provider.binding = "memory-rcc-binding"',
+    'provider.protocol = "responses"',
+    'provider.model = "memory.rcc.model"',
+    'provider.route = "memory-rcc-route"',
+    `provider.baseUrl = "${upstream.baseUrl}"`,
     'skills = ["history-search", "novelty-review", "recurrence-review"]',
     'tools = ["memory.search", "memory.ask", "task.history", "session.history"]',
     'permissions = ["memory.read", "memory.propose"]',
@@ -5091,12 +5201,47 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
     '',
   ].join('\n'), 'utf8');
   const reloaded = await loadConfiguration(paths);
-  const port = new MemoryCurationReplayPort(fakeExecutionBinding());
+  // Each NEW memory analysis is prepared through the actual production factory
+  // callback and admitted on its own composition, so no port is shared between
+  // two different analysis operations. The real producer probes the local
+  // upstream and the release closes the real adapter port.
+  const prepare = async (input: { readonly roleId: AgentRole; readonly configuredAgentId?: string }) => {
+    assert.equal(input.roleId, 'memory');
+    // The actual memory agent id, not a role-only guess, reaches preparation.
+    assert.equal(input.configuredAgentId, 'memory-rcc');
+    const composition = await prepareAgentProvider({
+      roleId: input.roleId,
+      configuredAgentId: input.configuredAgentId,
+      agentProviderBindings: reloaded.agentProviderBindings,
+      evidenceRoot,
+    });
+    admittedPorts.push(composition.port);
+    compositions.push(composition);
+    assert.equal(composition.source, 'rcc');
+    assert.equal(composition.binding.modelRef, 'memory.rcc.model');
+    const originalSettle = composition.port.settle.bind(composition.port);
+    composition.port.settle = async (request) => {
+      const receipt = await originalSettle(request);
+      settlements.push(receipt);
+      lifecycle.push('settle');
+      return receipt;
+    };
+    const originalClose = composition.port.close.bind(composition.port);
+    composition.port.close = async (binding: ProviderBinding) => {
+      assert.ok(settlements.some((receipt) => receipt.state === 'succeeded'), 'release follows actual settlement');
+      const receipt = await originalClose(binding);
+      closeReceipts.push(receipt);
+      lifecycle.push('close');
+      return receipt;
+    };
+    return composition;
+  };
   const driverFor = memoryDriverFactory({
     paths,
     configuration: reloaded,
     workspace: paths.workspaceCwd,
-    rcc: { port, binding: fakeExecutionBinding(), inputRefs: ['humanagent://memory/project/rcc-consume'] },
+    inputRefs: ['humanagent://memory/project/rcc-consume'],
+    prepareAgentProvider: prepare,
   })!;
   const taskId = id('task', 'session-memory-rcc-consume');
   const memory = await composeMemoryRuntime({
@@ -5124,7 +5269,6 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       actor: { actorId: 'memory-agent', roleId: 'memory', permissions: ['memory.read', 'memory.propose'], projectKey: paths.projectKey },
     },
   });
-  try {
     await mkdir(join(paths.controlRoot, 'memory-audit'), { recursive: true });
     await writeFile(join(paths.controlRoot, 'memory-audit', 'project-memory-audit.md'), '# Audit\n', 'utf8');
     await new SessionStore(paths).append(
@@ -5132,7 +5276,7 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       { type: 'session.state', state: 'running' },
       runtime.lock,
     );
-    const result = await runAgentOperation({
+    const resultOne = await runAgentOperation({
       paths,
       configuration: reloaded,
       workspace,
@@ -5141,36 +5285,137 @@ test('rcc memory-role driver consumes a real curation end to end and exposes mod
       prompt: 'consume rcc memory curation',
       memoryBoundaryPublisher: memory.publisher,
     });
+    const resultTwo = await runAgentOperation({
+      paths,
+      configuration: reloaded,
+      workspace,
+      sessionId: 'session-memory-rcc-consume',
+      plan: 'default',
+      prompt: 'consume a second rcc memory curation',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    assert.ok(resultTwo.checkpoint.id.value !== resultOne.checkpoint.id.value);
+    const posts = () => upstream.wires.filter((wire) => wire.method === 'POST').length;
+    const postsBeforeConsume = posts();
     const consumed = await memory.consume();
-    if (consumed.retries.length !== 0) {
-      throw new Error(`DEBUG retry=${consumed.retries[0]?.failureRef ?? 'none'}`);
+    assert.equal(consumed.retries.length, 0, JSON.stringify(consumed.retries));
+    assert.equal(consumed.committed.length, 2);
+    assert.ok(consumed.committed.every((receipt) => receipt.disposition === 'applied'));
+    assert.equal(posts(), postsBeforeConsume + 2);
+    // Both NEW analysis operations were admitted on their own real ports; the
+    // prepare callback received the actual memory agent id, and each later
+    // closes its own resource.
+    assert.equal(admittedPorts.length, 2);
+    assert.ok(admittedPorts[0] !== admittedPorts[1]);
+    assert.equal(closeReceipts.length, 2);
+    assert.ok(closeReceipts.every((receipt) => receipt.state === 'closed'));
+    assert.equal(settlements.length, 2);
+    assert.deepEqual(lifecycle, ['settle', 'close', 'settle', 'close']);
+    assert.ok(settlements.every((receipt) => receipt.state === 'succeeded'));
+    assert.ok(settlements.every((receipt) => receipt.resourceRelease.state === 'released' && receipt.persistence.state === 'committed'));
+    for (const receipt of settlements) assert.match(receipt.runtimeId, /^memory-analysis:memory-analysis-/);
+    assert.ok(settlements[0]!.operationId.value !== settlements[1]!.operationId.value);
+    assert.ok(settlements[0]!.runtimeId !== settlements[1]!.runtimeId);
+    assert.ok(settlements.every((receipt) => receipt.taskId.value === taskId.value));
+    assert.deepEqual(upstream.wires.filter((wire) => wire.method === 'GET').map((wire) => wire.path),
+      ['/health', '/v1/models', '/health', '/v1/models']);
+    const modelPosts = upstream.wires.filter((wire) => wire.method === 'POST');
+    for (const wire of modelPosts) {
+      assert.equal(wire.path, '/v1/responses');
+      const sent: { model: string; input: { content: { text: string }[] }[] } = JSON.parse(wire.body);
+      assert.equal(sent.model, 'memory.rcc.model');
+      const business: { sourceRefs: string[] } = JSON.parse(sent.input[0]!.content[0]!.text);
+      assert.ok(business.sourceRefs.length > 0);
     }
-    assert.equal(consumed.committed.length, 1);
-    assert.equal(consumed.committed[0]?.disposition, 'applied');
+    // Provider terminal is not task success: the session is still running until
+    // the checkpoint owner settles it explicitly.
+    assert.equal((await new SessionStore(paths).open('session-memory-rcc-consume')).state, 'running');
     const state = await memory.reviewState();
     assert.equal(state.analysis.mode, 'model');
     assert.equal(state.analysis.state, 'succeeded');
-    assert.equal(state.analysis.operationRef, `memory-analysis:memory-binding:rcc-consume:checkpoint-${result.checkpoint.id.value}`);
+    assert.equal(state.analysis.operationRef, `memory-analysis:memory-binding:rcc-consume:checkpoint-${resultTwo.checkpoint.id.value}`);
     assert.equal(state.autoUpdate, false);
-    assert.equal(state.candidates.length, 1);
-    // The memory owner assigns the durable candidate identity; the provider's
-    // candidateId is not authoritative for the report.
-    assert.match(state.candidates[0]?.candidateId ?? '', /^memory-analysis:/);
-    assert.equal(state.candidates[0]?.state, 'candidate');
-    assert.equal(state.candidates[0]?.namespace, 'project');
-    assert.equal(state.candidates[0]?.projectKey, paths.projectKey);
-    // The model round ran on the admitted memory-analysis identity, never on the
-    // main operation's runtime/operation identity.
-    assert.equal(port.startedRounds.length, 1);
-    assert.match(port.startedRounds[0]!, /^memory-analysis:memory-analysis-/);
-    await settleSessionOutcome(runtime, result.checkpoint.outcome, result.checkpoint.id.value);
+    assert.equal(state.candidates.length, 2);
+    for (const candidate of state.candidates) {
+      // The memory owner assigns the durable candidate identity; the provider's
+      // candidateId is never authoritative for the report.
+      assert.match(candidate.candidateId ?? '', /^memory-analysis:/);
+      assert.equal(candidate.state, 'candidate');
+      assert.equal(candidate.namespace, 'project');
+      assert.equal(candidate.projectKey, paths.projectKey);
+      assert.equal(candidate.taskId, taskId.value);
+    }
+    // A local readiness refusal keeps the accepted candidates and retries the
+    // unstarted analysis without dispatching it to the model.
+    upstream.deny();
+    const resultThree = await runAgentOperation({
+      paths,
+      configuration: reloaded,
+      workspace,
+      sessionId: 'session-memory-rcc-consume',
+      plan: 'default',
+      prompt: 'consume a refused rcc memory curation',
+      memoryBoundaryPublisher: memory.publisher,
+    });
+    const postsBeforeRefusal = posts();
+    const refused = await memory.consume();
+    assert.equal(refused.committed.length, 0);
+    assert.equal(refused.retries.length, 1);
+    assert.equal(posts(), postsBeforeRefusal);
+    const waiting = await memory.reviewState();
+    assert.equal(waiting.analysis.state, 'waiting');
+    assert.equal(waiting.candidates.length, 2);
+    upstream.allow();
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0,
+      Date.parse(refused.retries[0]!.nextAttemptAt) - Date.now() + 1)));
+    const retried = await memory.consume();
+    assert.equal(retried.retries.length, 0, JSON.stringify({ retries: retried.retries, analysis: (await memory.reviewState()).analysis }));
+    assert.equal(retried.committed.length, 1);
+    assert.equal(posts(), postsBeforeConsume + 3);
+    assert.equal(closeReceipts.length, 3);
+    assert.ok(closeReceipts.every((receipt) => receipt.state === 'closed'));
+    const after = await memory.reviewState();
+    assert.equal(after.analysis.state, 'succeeded');
+    assert.equal(after.candidates.length, 3);
+    console.log(JSON.stringify({ admittedPorts: admittedPorts.length, settlements, closeReceipts,
+      probes: upstream.wires.filter((wire) => wire.method === 'GET'), modelPosts: posts(),
+      refusal: refused.retries, candidates: after.candidates }));
+    await settleSessionOutcome(runtime, resultThree.checkpoint.outcome, resultThree.checkpoint.id.value);
+  } catch (error: unknown) {
+    primaryError = error;
+    throw error;
   } finally {
+    let cleanupError: unknown;
+    for (const composition of compositions) {
+      try {
+        assert.equal((await composition.port.close(composition.binding)).state, 'closed');
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    try {
+      await upstream.close();
+    } catch (error) {
+      cleanupError = error;
+    }
     try {
       await runtime.lock.release();
     } catch {
       // The successful settlement path already released the session lock.
     }
-    await rm(root, { recursive: true, force: true });
+    if (cleanupError === undefined) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        await rm(evidenceRoot, { recursive: true, force: true });
+        console.log('Memory cleanup: owned ports closed; listener closed; owned fixture roots removed');
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    if (cleanupError !== undefined) {
+      if (primaryError !== undefined) console.error('Memory cleanup failure; original failure preserved', cleanupError);
+      else throw cleanupError;
+    }
   }
 });
 
