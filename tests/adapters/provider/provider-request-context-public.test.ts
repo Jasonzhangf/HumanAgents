@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  type AgentClosure,
   id,
   type EvidenceRef,
   type ExecutionRuntimePort,
@@ -8,6 +9,8 @@ import {
   type ProviderBinding,
   type ProviderCloseResult,
   type ProviderEvent,
+  type ProviderProducerDrainResult,
+  type ProviderRequestLifecycleEvent,
   type ProviderSettlement,
   type ProviderStartInput,
   type ProviderStartReceipt,
@@ -15,9 +18,12 @@ import {
   type ProviderStopRequest,
   type ProviderSubmitInput,
   type ProviderSubmitResult,
+  type ProviderToolCall,
+  type RawFactEnvelope,
   type ScopeRef,
 } from '../../../packages/contracts/src/index.js';
 import {
+  type MaterializedRequestInput,
   type ProviderRequestContextHook,
   type ProviderRequestContextHookInput,
 } from '../../../packages/contracts/src/provider-request-context.js';
@@ -27,13 +33,17 @@ import {
   ProviderAdapter,
   ProviderAgentDriver,
   ResponsesProviderCodec,
+  createHttpProviderTransport,
   type AnthropicWireRequest,
   type OpenAIChatWireRequest,
   type ProviderAgentEvent,
+  type ProviderCodec,
   type ProviderEvidenceSink,
+  type ProviderEvidenceWrite,
   type ProviderTransport,
   type ProviderWireRequest,
   type ResponsesWireRequest,
+  type V3ProviderFetch,
 } from '../../../packages/adapters/provider/src/index.js';
 
 const organ = id('organ', 'organ-p');
@@ -432,4 +442,514 @@ test('openai chat groups contiguous tool calls and preserves exact tool result o
     ),
     (error: unknown) => (error as { providerError?: { code?: string } }).providerError?.code === 'tool.name.unsupported',
   );
+});
+
+// --- J: native protocol round trips over the real HTTP source transport ---
+//
+// These three fixtures drive the real ProviderAgentDriver + ProviderAdapter + the
+// protocol codec over the real createHttpProviderTransport with an injected
+// recorded fetch. The Runtime seams (registerRequest / acceptRawFact / the
+// evidence sink) are injected via the existing public driver options and are
+// labeled as such: this proves the send/decode/execute/continue chain, not the
+// full App/Journal/cold/live path.
+
+const NATIVE_LOOP_BASE_URL = 'http://127.0.0.1:4444';
+const NATIVE_LOOP_ROUTE = 'route-native-loop';
+const NATIVE_LOOP_LEGACY_SENTINEL = 'PRIOR_TURN_RAW_MARKER';
+const NATIVE_LOOP_ASSIGNMENT = 'assignment-native-loop';
+
+/** The codec puts the provider binding id in front of the local route label. */
+function nativeRoute(providerId: string): string {
+  return `${providerId}:${NATIVE_LOOP_ROUTE}`;
+}
+
+interface RecordedFetchCall {
+  readonly url: string;
+  readonly body: Record<string, unknown>;
+}
+
+interface NativeLoopHarnessInput {
+  readonly binding: ProviderBinding;
+  readonly codec: ProviderCodec;
+  readonly rounds: readonly (readonly unknown[])[];
+  readonly context: ProviderRequestContextHook;
+  readonly tools: NonNullable<ProviderStartInput['tools']>;
+  readonly execute: (call: ProviderToolCall) => string;
+}
+
+interface NativeLoopHarness {
+  readonly driver: ProviderAgentDriver;
+  readonly calls: RecordedFetchCall[];
+  readonly order: string[];
+  readonly registrations: NativeRequestRegistration[];
+  readonly accepted: RawFactEnvelope[];
+  readonly executed: ProviderToolCall[];
+  readonly lifecycle: ProviderRequestLifecycleEvent[];
+  readonly evidence: ProviderEvidenceWrite[];
+  readonly consumed: boolean[];
+  readonly read: (ref: EvidenceRef) => Promise<Uint8Array>;
+}
+
+function nativeLoopHarness(input: NativeLoopHarnessInput): NativeLoopHarness {
+  const order: string[] = [];
+  const calls: RecordedFetchCall[] = [];
+  const registrations: NativeRequestRegistration[] = [];
+  const accepted: RawFactEnvelope[] = [];
+  const executed: ProviderToolCall[] = [];
+  const lifecycle: ProviderRequestLifecycleEvent[] = [];
+  const evidenceWrites: ProviderEvidenceWrite[] = [];
+  const consumed: boolean[] = [];
+  const assets = new Map<string, Uint8Array>();
+  const sink: ProviderEvidenceSink = {
+    async write(write) {
+      evidenceWrites.push(write);
+      if (write.type === 'tool-result-output') order.push(`store:${write.type}`);
+      const locator = `${write.type}-${write.locator}`.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 128);
+      const ref: EvidenceRef = {
+        evidenceId: id('evidence', locator),
+        kind: write.kind,
+        source: 'provider-native-loop-consumer-test',
+        locator: write.locator,
+        scope: write.scope,
+      };
+      const text = typeof write.content === 'string' ? write.content : JSON.stringify(write.content);
+      assets.set(ref.evidenceId.value, new TextEncoder().encode(text));
+      return ref;
+    },
+    async read(ref) {
+      return assets.get(ref.evidenceId.value) ?? new Uint8Array();
+    },
+  };
+  let round = 0;
+  const fetch: V3ProviderFetch = async (url, init) => {
+    const index = round;
+    round += 1;
+    const events = input.rounds[index];
+    if (events === undefined) throw new Error(`unexpected provider fetch #${index + 1}`);
+    calls.push({ url, body: JSON.parse(init.body ?? '{}') as Record<string, unknown> });
+    order.push(`fetch:${index + 1}`);
+    return {
+      status: 200,
+      body: (async function* (): AsyncIterable<Uint8Array> {
+        for (const event of events) yield new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+        consumed[index] = true;
+      })(),
+      text: async () => '',
+    };
+  };
+  const transport = createHttpProviderTransport({ binding: input.binding, baseUrl: NATIVE_LOOP_BASE_URL, evidence: sink, fetch });
+  const adapter = new ProviderAdapter({ binding: input.binding, routeRef: NATIVE_LOOP_ROUTE, codec: input.codec, transport, evidence: sink });
+  const port: ExecutionRuntimePort = {
+    kind: adapter.kind,
+    probe: (target) => adapter.probe(target),
+    capabilities: (target) => adapter.capabilities(target),
+    start: (startInput) => adapter.start(startInput),
+    resume: (resumeInput) => adapter.resume(resumeInput),
+    submit: (submitInput) => adapter.submit(submitInput),
+    observe: (observeInput) => adapter.observe(observeInput),
+    requestStop: (stopInput) => adapter.requestStop(stopInput),
+    settle: (settleInput) => adapter.settle(settleInput),
+    close: (target) => adapter.close(target),
+  };
+  const tag = (parent: string | undefined): 'root' | 'child' => (parent === undefined ? 'root' : 'child');
+  const driver = new ProviderAgentDriver({
+    port,
+    binding: input.binding,
+    runtimeId: identity.runtimeId,
+    taskId,
+    operationId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: NATIVE_LOOP_ASSIGNMENT,
+    scope,
+    inputRefs: ['input-native-loop'],
+    tools: input.tools,
+    rawEvidence: sink,
+    acceptRawFact: async (envelope) => {
+      accepted.push(envelope);
+      order.push(`accept:${envelope.fact.kind}:${tag(envelope.request.parentRequestId)}`);
+      return { seq: accepted.length, envelope };
+    },
+    registerRequest: async (registration) => {
+      registrations.push(registration);
+      order.push(`register:${registration.record.phase}:${tag(registration.record.parentRequestId)}`);
+      return registration.record;
+    },
+    requestContext: async (hookInput) => {
+      order.push(`hook:${hookInput.phase}`);
+      return input.context(hookInput);
+    },
+    executeTool: {
+      async execute({ call }) {
+        order.push(`execute:${call.callId}`);
+        executed.push(call);
+        return { output: input.execute(call), outputRefs: [], evidenceRefs: [evidence('tool-result')] };
+      },
+    },
+    onRequestLifecycle: (event) => lifecycle.push(event),
+  });
+  return {
+    driver,
+    calls,
+    order,
+    registrations,
+    accepted,
+    executed,
+    lifecycle,
+    evidence: evidenceWrites,
+    consumed,
+    read: (ref) => sink.read(ref),
+  };
+}
+
+async function runNativeLoop(harness: NativeLoopHarness): Promise<{
+  readonly closure: AgentClosure;
+  readonly settlement: ProviderSettlement;
+  readonly drain: ProviderProducerDrainResult;
+  readonly events: ProviderAgentEvent[];
+}> {
+  await harness.driver.start({ runtimeId: identity.runtimeId, taskId, executionEpoch: identity.executionEpoch });
+  await harness.driver.submit({
+    taskId,
+    executionEpoch: identity.executionEpoch,
+    assignmentId: NATIVE_LOOP_ASSIGNMENT,
+    payload: { prompt: NATIVE_LOOP_LEGACY_SENTINEL },
+  });
+  const events: ProviderAgentEvent[] = [];
+  for await (const event of harness.driver.observe({ runtimeId: identity.runtimeId })) events.push(event);
+  const closure = await harness.driver.settle({ runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch });
+  const settlement = harness.driver.settlement();
+  assert.ok(settlement, 'expected a provider settlement after settle');
+  const drain = await harness.driver.closeProductionAndDrain({
+    execution: { runtimeId: identity.runtimeId, executionEpoch: identity.executionEpoch },
+    boundaryId: 'boundary-native-loop',
+  });
+  return { closure, settlement, drain, events };
+}
+
+function position(order: readonly string[], entry: string): number {
+  const index = order.indexOf(entry);
+  assert.notEqual(index, -1, `expected order entry ${entry} in ${order.join(',')}`);
+  return index;
+}
+
+function assertBefore(order: readonly string[], first: string, second: string): void {
+  assert.ok(position(order, first) < position(order, second), `expected ${first} before ${second} in ${order.join(',')}`);
+}
+
+function factsFor(harness: NativeLoopHarness, tagName: 'root' | 'child'): readonly RawFactEnvelope[] {
+  return harness.accepted.filter((entry) => (entry.request.parentRequestId === undefined ? 'root' : 'child') === tagName);
+}
+
+function assertRealSettlement(settlement: ProviderSettlement): void {
+  assert.equal(settlement.state, 'succeeded');
+  assert.equal(settlement.resourceRelease.state, 'released');
+  assert.equal(settlement.persistence.state, 'committed');
+}
+
+test('J: typed Responses tool loop runs one real transport round trip with fresh continuation context', async () => {
+  const output = 'RESPONSES_TOOL_OUTPUT\n{"token":"R_ONLY"}';
+  const harness = nativeLoopHarness({
+    binding: responsesBinding,
+    codec: new ResponsesProviderCodec(),
+    rounds: [
+      [
+        { type: 'response.created', response: { id: 'resp-loop-1' } },
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call-resp', name: 'file_read', arguments: '' } },
+        { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'call-resp', name: 'file_read', arguments: '{"path":"README.md"}' } },
+        { type: 'response.completed', response: { id: 'resp-loop-1' } },
+      ],
+      [
+        { type: 'response.created', response: { id: 'resp-loop-2' } },
+        { type: 'response.output_text.done', item_id: 'msg-loop-2', text: 'read complete' },
+        { type: 'response.completed', response: { id: 'resp-loop-2' } },
+      ],
+    ],
+    context: async (input): Promise<MaterializedRequestInput> => input.phase === 'initial'
+      ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' }] }, instructions: { text: 'ORIENTATION_ONE' } }
+      : {
+          canonical: {
+            units: [
+              { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
+              { kind: 'tool-call', callId: 'call-resp', toolId: 'file.read', arguments: { path: 'README.md' } },
+              { kind: 'tool-result', callId: 'call-resp', toolId: 'file.read', output, status: 'succeeded' },
+            ],
+          },
+          instructions: { text: 'ORIENTATION_TWO' },
+        },
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    execute: () => output,
+  });
+
+  const { settlement, drain, events } = await runNativeLoop(harness);
+
+  assertBefore(harness.order, 'register:dispatching:root', 'hook:initial');
+  assertBefore(harness.order, 'hook:initial', 'fetch:1');
+  assertBefore(harness.order, 'accept:tool-call:root', 'execute:call-resp');
+  assertBefore(harness.order, 'execute:call-resp', 'store:tool-result-output');
+  assertBefore(harness.order, 'store:tool-result-output', 'accept:tool-result:root');
+  assertBefore(harness.order, 'accept:tool-result:root', 'register:dispatching:child');
+  assertBefore(harness.order, 'register:dispatching:child', 'hook:continuation');
+  assertBefore(harness.order, 'hook:continuation', 'fetch:2');
+
+  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  const rootRequestId = harness.registrations[0]!.record.request.requestId;
+  const childDispatch = harness.registrations.find((entry) => entry.record.phase === 'dispatching' && entry.record.parentRequestId === rootRequestId);
+  assert.ok(childDispatch, 'expected a continuation dispatching registration bound to the root request');
+  assert.notEqual(childDispatch!.record.request.requestId, rootRequestId);
+  assert.equal(harness.registrations.every((entry) => entry.execution.runtimeId === identity.runtimeId), true);
+  assert.equal(harness.registrations.every((entry) => entry.record.scope.organId.value === organ.value), true);
+  assert.deepEqual(harness.lifecycle.map((event) => event.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  assert.equal(harness.lifecycle.every((event) => event.turnId === harness.lifecycle[0]!.turnId), true);
+  assert.equal(harness.lifecycle[2]!.externalResponseId, 'resp-loop-1');
+  assert.equal(harness.lifecycle.at(-1)!.externalResponseId, 'resp-loop-2');
+  assert.equal(harness.lifecycle.filter((event) => event.phase === 'dispatching')[1]!.parentRequestId, rootRequestId);
+
+  const rootFacts = factsFor(harness, 'root');
+  assert.deepEqual(rootFacts.map((entry) => [entry.fact.kind, entry.producerSeq]), [['tool-call', 1], ['request-complete', 2], ['tool-result', 3]]);
+  const toolResultFact = rootFacts.find((entry) => entry.fact.kind === 'tool-result')!.fact;
+  if (toolResultFact.kind !== 'tool-result') throw new Error('unreachable');
+  assert.equal(toolResultFact.callId, 'call-resp');
+  assert.equal(toolResultFact.continuationRef, 'resp-loop-1');
+  assert.equal(new TextDecoder().decode(await harness.read(toolResultFact.rawOutput.ref)), output);
+  assert.equal(harness.evidence.find((write) => write.type === 'tool-result-output')?.content, output);
+  assert.deepEqual(harness.executed, [{ callId: 'call-resp', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'resp-loop-1' }]);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'tool-call').length, 1);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'tool-result').length, 1);
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/responses`);
+  assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/responses`);
+  const startEvidence = harness.evidence.find((write) => write.type === 'start');
+  assert.deepEqual(startEvidence?.content, { status: 200, endpoint: '/v1/responses', protocol: 'responses', model: 'model-p', route: nativeRoute('cc') });
+  assert.equal(startEvidence?.locator, 'http://start');
+  assert.deepEqual(
+    harness.evidence.find((write) => write.type === 'submit')?.content,
+    { status: 200, endpoint: '/v1/responses', protocol: 'responses', model: 'model-p', route: nativeRoute('cc') },
+  );
+
+  // The Responses wire carries the stable harness tool-surface guidance plus the
+  // transient request-scoped orientation.
+  assert.match(String(harness.calls[0]!.body.instructions), /ORIENTATION_ONE/);
+  assert.deepEqual(harness.calls[0]!.body.input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'CURRENT_TURN_INPUT' }] }]);
+  assert.match(String(harness.calls[1]!.body.instructions), /ORIENTATION_TWO/);
+  assert.equal(String(harness.calls[1]!.body.instructions).includes('ORIENTATION_ONE'), false);
+  assert.equal(JSON.stringify(harness.calls[1]!.body).includes(NATIVE_LOOP_LEGACY_SENTINEL), false);
+  const continuationInput = harness.calls[1]!.body.input as readonly Record<string, unknown>[];
+  assert.deepEqual(continuationInput.filter((item) => item.type === 'function_call'), [
+    { type: 'function_call', call_id: 'call-resp', name: 'file_read', arguments: '{"path":"README.md"}' },
+  ]);
+  assert.deepEqual(continuationInput.filter((item) => item.type === 'function_call_output'), [
+    { type: 'function_call_output', call_id: 'call-resp', output },
+  ]);
+  assert.equal(continuationInput.filter((item) => item.type === 'message').length, 1);
+
+  assert.equal(harness.consumed[1], true);
+  assertRealSettlement(settlement);
+  assert.equal(drain.boundaryId, 'boundary-native-loop');
+  assert.deepEqual(drain.requests.map((entry) => entry.request.requestId), [rootRequestId, childDispatch!.record.request.requestId]);
+  assert.deepEqual(drain.requests.map((entry) => entry.lastProducerSeq), [3, 2]);
+  assert.equal(events.at(-1)?.providerEvent.terminalState, 'succeeded');
+});
+
+test('J: typed Anthropic tool loop runs one real transport round trip with fresh continuation context', async () => {
+  const output = 'ANTHROPIC_TOOL_OUTPUT\n{"token":"A_ONLY"}';
+  const harness = nativeLoopHarness({
+    binding: anthropicBinding,
+    codec: new AnthropicProviderCodec(1024),
+    rounds: [
+      [
+        { type: 'message_start', message: { id: 'msg-loop-a', model: 'model-p', role: 'assistant' } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-anthropic', name: 'file_read', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"READ' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'ME.md"}' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+        { type: 'message_stop' },
+      ],
+      [
+        { type: 'message_start', message: { id: 'msg-loop-a2', model: 'model-p', role: 'assistant' } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'read complete' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        { type: 'message_stop' },
+      ],
+    ],
+    context: async (input): Promise<MaterializedRequestInput> => input.phase === 'initial'
+      ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' }] }, instructions: { text: 'ORIENTATION_ONE' } }
+      : {
+          canonical: {
+            units: [
+              { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
+              { kind: 'tool-call', callId: 'call-anthropic', toolId: 'file.read', arguments: { path: 'README.md' } },
+              { kind: 'tool-result', callId: 'call-anthropic', toolId: 'file.read', output, status: 'succeeded' },
+            ],
+          },
+          instructions: { text: 'ORIENTATION_TWO' },
+        },
+    tools: [{ toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } }],
+    execute: () => output,
+  });
+
+  const { settlement, drain, events } = await runNativeLoop(harness);
+
+  assertBefore(harness.order, 'register:dispatching:root', 'hook:initial');
+  assertBefore(harness.order, 'hook:initial', 'fetch:1');
+  assertBefore(harness.order, 'accept:tool-call:root', 'execute:call-anthropic');
+  assertBefore(harness.order, 'execute:call-anthropic', 'store:tool-result-output');
+  assertBefore(harness.order, 'store:tool-result-output', 'accept:tool-result:root');
+  assertBefore(harness.order, 'accept:tool-result:root', 'register:dispatching:child');
+  assertBefore(harness.order, 'register:dispatching:child', 'hook:continuation');
+  assertBefore(harness.order, 'hook:continuation', 'fetch:2');
+
+  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  const rootRequestId = harness.registrations[0]!.record.request.requestId;
+  const childDispatch = harness.registrations.find((entry) => entry.record.phase === 'dispatching' && entry.record.parentRequestId === rootRequestId);
+  assert.ok(childDispatch, 'expected a continuation dispatching registration bound to the root request');
+  assert.equal(harness.lifecycle.filter((event) => event.phase === 'dispatching')[1]!.parentRequestId, rootRequestId);
+  assert.equal(harness.lifecycle.every((event) => event.turnId === harness.lifecycle[0]!.turnId), true);
+
+  assert.deepEqual(harness.executed, [{ callId: 'call-anthropic', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'msg-loop-a' }]);
+  const rootFacts = factsFor(harness, 'root');
+  const toolCallIndex = rootFacts.findIndex((entry) => entry.fact.kind === 'tool-call');
+  const toolResultEntry = rootFacts.find((entry) => entry.fact.kind === 'tool-result');
+  assert.ok(toolCallIndex !== -1 && toolResultEntry !== undefined);
+  assert.ok(toolResultEntry!.producerSeq > rootFacts[toolCallIndex]!.producerSeq);
+  if (toolResultEntry!.fact.kind !== 'tool-result') throw new Error('unreachable');
+  assert.equal(toolResultEntry!.fact.callId, 'call-anthropic');
+  assert.equal(new TextDecoder().decode(await harness.read(toolResultEntry!.fact.rawOutput.ref)), output);
+  assert.equal(harness.evidence.find((write) => write.type === 'tool-result-output')?.content, output);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'tool-call').length, 1);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'tool-result').length, 1);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'request-complete').length, 2);
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/messages`);
+  assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/messages`);
+  const startEvidence = harness.evidence.find((write) => write.type === 'start');
+  assert.deepEqual(startEvidence?.content, { status: 200, endpoint: '/v1/messages', protocol: 'anthropic', model: 'model-p', route: nativeRoute('goaichat') });
+  assert.equal(startEvidence?.locator, 'http://start');
+
+  assert.equal(harness.calls[0]!.body.system, 'ORIENTATION_ONE');
+  assert.equal(harness.calls[0]!.body.max_tokens, 1024);
+  assert.deepEqual(harness.calls[0]!.body.messages, [{ role: 'user', content: [{ type: 'text', text: 'CURRENT_TURN_INPUT' }] }]);
+  assert.match(String(harness.calls[1]!.body.system), /ORIENTATION_TWO/);
+  assert.equal(String(harness.calls[1]!.body.system).includes('ORIENTATION_ONE'), false);
+  assert.equal(JSON.stringify(harness.calls[1]!.body).includes(NATIVE_LOOP_LEGACY_SENTINEL), false);
+  const blocks = (harness.calls[1]!.body.messages as readonly { content: readonly Record<string, unknown>[] }[]).flatMap((message) => message.content);
+  assert.deepEqual(blocks.filter((block) => block.type === 'text'), [{ type: 'text', text: 'CURRENT_TURN_INPUT' }]);
+  assert.deepEqual(blocks.filter((block) => block.type === 'tool_use'), [{ type: 'tool_use', id: 'call-anthropic', name: 'file.read', input: { path: 'README.md' } }]);
+  assert.deepEqual(blocks.filter((block) => block.type === 'tool_result'), [{ type: 'tool_result', tool_use_id: 'call-anthropic', content: output }]);
+
+  assert.equal(harness.consumed[1], true);
+  assertRealSettlement(settlement);
+  assert.deepEqual(drain.requests.map((entry) => entry.request.requestId), [rootRequestId, childDispatch!.record.request.requestId]);
+  assert.equal(events.at(-1)?.providerEvent.terminalState, 'succeeded');
+});
+
+test('J: typed Chat tool loop runs one real transport round trip with two tools in one assistant group', async () => {
+  const readOutput = 'CHAT_READ_OUTPUT\n{"token":"C_READ"}';
+  const listOutput = 'CHAT_LIST_OUTPUT\n{"token":"C_LIST"}';
+  const outputs = new Map([['call-chat-read', readOutput], ['call-chat-list', listOutput]]);
+  const harness = nativeLoopHarness({
+    binding: openaiBinding,
+    codec: new OpenAIChatProviderCodec(),
+    rounds: [
+      [
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-loop-1', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [
+          { index: 0, id: 'call-chat-read', type: 'function', function: { name: 'file_read', arguments: '{"path":' } },
+          { index: 1, id: 'call-chat-list', type: 'function', function: { name: 'file_list', arguments: '{"dir":' } },
+        ] }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-loop-1', choices: [{ index: 0, delta: { tool_calls: [
+          { index: 0, function: { arguments: '"README.md"}' } },
+          { index: 1, function: { arguments: '"."}' } },
+        ] }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-loop-1', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+      ],
+      [
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-loop-2', choices: [{ index: 0, delta: { content: 'done' }, finish_reason: null }] },
+        { protocol: 'openai', type: 'openai.chat.completion', id: 'chat-loop-2', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ],
+    ],
+    context: async (input): Promise<MaterializedRequestInput> => input.phase === 'initial'
+      ? { canonical: { units: [{ kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' }] }, instructions: { text: 'ORIENTATION_ONE' } }
+      : {
+          canonical: {
+            units: [
+              { kind: 'message', role: 'user', text: 'CURRENT_TURN_INPUT' },
+              { kind: 'tool-call', callId: 'call-chat-read', toolId: 'file.read', arguments: { path: 'README.md' } },
+              { kind: 'tool-call', callId: 'call-chat-list', toolId: 'file.list', arguments: { dir: '.' } },
+              { kind: 'tool-result', callId: 'call-chat-read', toolId: 'file.read', output: readOutput, status: 'succeeded' },
+              { kind: 'tool-result', callId: 'call-chat-list', toolId: 'file.list', output: listOutput, status: 'succeeded' },
+            ],
+          },
+          instructions: { text: 'ORIENTATION_TWO' },
+        },
+    tools: [
+      { toolId: 'file.read', description: 'read file', inputSchema: { type: 'object' } },
+      { toolId: 'file.list', description: 'list dir', inputSchema: { type: 'object' } },
+    ],
+    execute: (call) => outputs.get(call.callId) ?? '',
+  });
+
+  const { settlement, drain, events } = await runNativeLoop(harness);
+
+  assertBefore(harness.order, 'register:dispatching:root', 'hook:initial');
+  assertBefore(harness.order, 'hook:initial', 'fetch:1');
+  assertBefore(harness.order, 'accept:tool-call:root', 'execute:call-chat-read');
+  assertBefore(harness.order, 'execute:call-chat-read', 'execute:call-chat-list');
+  assert.ok(harness.order.lastIndexOf('accept:tool-result:root') < position(harness.order, 'register:dispatching:child'));
+  assertBefore(harness.order, 'register:dispatching:child', 'hook:continuation');
+  assertBefore(harness.order, 'hook:continuation', 'fetch:2');
+
+  assert.deepEqual(harness.registrations.map((entry) => entry.record.phase), ['dispatching', 'dispatched', 'waiting', 'dispatching', 'dispatched', 'settled']);
+  const rootRequestId = harness.registrations[0]!.record.request.requestId;
+  const childDispatch = harness.registrations.find((entry) => entry.record.phase === 'dispatching' && entry.record.parentRequestId === rootRequestId);
+  assert.ok(childDispatch, 'expected a continuation dispatching registration bound to the root request');
+  assert.equal(harness.lifecycle.filter((event) => event.phase === 'dispatching')[1]!.parentRequestId, rootRequestId);
+  assert.equal(harness.lifecycle.every((event) => event.turnId === harness.lifecycle[0]!.turnId), true);
+
+  assert.deepEqual(harness.executed, [
+    { callId: 'call-chat-read', toolId: 'file.read', arguments: { path: 'README.md' }, continuationRef: 'chat-loop-1' },
+    { callId: 'call-chat-list', toolId: 'file.list', arguments: { dir: '.' }, continuationRef: 'chat-loop-1' },
+  ]);
+  const rootFacts = factsFor(harness, 'root');
+  assert.equal(rootFacts.filter((entry) => entry.fact.kind === 'tool-call').length, 2);
+  assert.equal(rootFacts.filter((entry) => entry.fact.kind === 'tool-result').length, 2);
+  const readResult = rootFacts.find((entry) => entry.fact.kind === 'tool-result' && entry.fact.callId === 'call-chat-read')!.fact;
+  const listResult = rootFacts.find((entry) => entry.fact.kind === 'tool-result' && entry.fact.callId === 'call-chat-list')!.fact;
+  if (readResult.kind !== 'tool-result' || listResult.kind !== 'tool-result') throw new Error('unreachable');
+  assert.equal(new TextDecoder().decode(await harness.read(readResult.rawOutput.ref)), readOutput);
+  assert.equal(new TextDecoder().decode(await harness.read(listResult.rawOutput.ref)), listOutput);
+  const storedOutputs = harness.evidence.filter((write) => write.type === 'tool-result-output').map((write) => write.content);
+  assert.deepEqual(storedOutputs, [readOutput, listOutput]);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'tool-call').length, 2);
+  assert.equal(harness.accepted.filter((entry) => entry.fact.kind === 'tool-result').length, 2);
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0]!.url, `${NATIVE_LOOP_BASE_URL}/v1/chat/completions`);
+  assert.equal(harness.calls[1]!.url, `${NATIVE_LOOP_BASE_URL}/v1/chat/completions`);
+  const startEvidence = harness.evidence.find((write) => write.type === 'start');
+  assert.deepEqual(startEvidence?.content, { status: 200, endpoint: '/v1/chat/completions', protocol: 'openai', model: 'model-p', route: nativeRoute('openai-chat') });
+  assert.equal(startEvidence?.locator, 'http://start');
+
+  const continuationMessages = harness.calls[1]!.body.messages as readonly Record<string, unknown>[];
+  assert.equal(continuationMessages[0]!.role, 'system');
+  assert.match(String(continuationMessages[0]!.content), /ORIENTATION_TWO/);
+  assert.equal(String(continuationMessages[0]!.content).includes('ORIENTATION_ONE'), false);
+  assert.deepEqual(continuationMessages.slice(1), [
+    { role: 'user', content: 'CURRENT_TURN_INPUT' },
+    { role: 'assistant', content: '', tool_calls: [
+      { id: 'call-chat-read', type: 'function', function: { name: 'file_read', arguments: '{"path":"README.md"}' } },
+      { id: 'call-chat-list', type: 'function', function: { name: 'file_list', arguments: '{"dir":"."}' } },
+    ] },
+    { role: 'tool', tool_call_id: 'call-chat-read', content: readOutput },
+    { role: 'tool', tool_call_id: 'call-chat-list', content: listOutput },
+  ]);
+  assert.equal(continuationMessages.filter((message) => message.role === 'assistant' && Array.isArray(message.tool_calls)).length, 1);
+  assert.equal(JSON.stringify(harness.calls[1]!.body).includes(NATIVE_LOOP_LEGACY_SENTINEL), false);
+
+  assert.equal(harness.consumed[1], true);
+  assertRealSettlement(settlement);
+  assert.deepEqual(drain.requests.map((entry) => entry.request.requestId), [rootRequestId, childDispatch!.record.request.requestId]);
+  assert.equal(events.at(-1)?.providerEvent.terminalState, 'succeeded');
 });
