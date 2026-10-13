@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { assembleProviderExecutionPort } from '../../packages/app/src/provider-assembly.js';
+import { canStartProviderRequest } from '../../packages/app/src/provider-admission.js';
 import { ProviderAgentDriver } from '../../packages/adapters/provider/src/index.js';
 import { id, type ProviderBinding, type ScopeRef } from '../../packages/contracts/src/index.js';
 
@@ -123,6 +124,13 @@ test('G source-aware assembly uses the HTTP source without RCC discovery', async
     assert.equal(readiness.nextAction?.ref, 'http.start');
     assert.deepEqual(capture.requests, []);
 
+    // The expected no-discovery HTTP `unknown` is requestable. An arbitrary
+    // `unknown` without that typed next action is not, and the same readiness
+    // is not requestable under the RCC source.
+    assert.equal(canStartProviderRequest('http', readiness), true);
+    assert.equal(canStartProviderRequest('http', { ...readiness, nextAction: undefined }), false);
+    assert.equal(canStartProviderRequest('rcc', readiness), false);
+
     // The resolved binding identity is preserved, not re-derived here.
     await assert.rejects(() => port.probe({ ...httpBinding, bindingId: 'g-other-binding' }));
 
@@ -183,6 +191,7 @@ test('G source-aware assembly keeps the RCC source discovery contract', async ()
     const readiness = await port.probe(rccBinding);
     assert.equal(readiness.state, 'ready');
     assert.equal(readiness.failure, undefined);
+    assert.equal(canStartProviderRequest('rcc', readiness), true);
     // The RCC source performs the existing discovery probe; the HTTP branch
     // above proves the selector is meaningful in both directions.
     assert.deepEqual(capture.requests.map((request) => request.url), [
